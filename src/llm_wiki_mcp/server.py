@@ -2,7 +2,7 @@
 
 import json
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -426,7 +426,7 @@ def wiki_provenance(page: str) -> str:
     for raw_path in sorted(RAW_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
         raw_mtime = datetime.fromtimestamp(raw_path.stat().st_mtime)
         # Raw file should be older than or close to page creation
-        if raw_mtime <= page_mtime + __import__("datetime").timedelta(minutes=30):
+        if raw_mtime <= page_mtime + timedelta(minutes=30):
             # Check if raw content mentions anything related to the page
             raw_content = raw_path.read_text()[:500]
             page_content = page_path.read_text()
@@ -456,6 +456,52 @@ def wiki_provenance(page: str) -> str:
         "raw_sources": raw_candidates[:5],
         "log_entries": log_entries,
     }, ensure_ascii=False)
+
+
+@mcp.tool()
+def wiki_save_raw(content: str, session_id: str | None = None) -> str:
+    """Save raw session data to raw/ for later ingest.
+
+    This is the entry point for hooks to dump session logs.
+
+    Args:
+        content: Raw session content to save
+        session_id: Optional session identifier. Auto-generated if not provided.
+    """
+    if not session_id:
+        session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    filename = f"{session_id}.md"
+    path = RAW_DIR / filename
+    path.write_text(content)
+
+    # Check if orchestrator should trigger ingest
+    from llm_wiki_mcp.orchestrator import should_ingest, run_pending_ingest
+    should, reason = should_ingest()
+
+    result = {
+        "saved": filename,
+        "path": str(path),
+        "ingest_pending": should,
+        "ingest_reason": reason,
+    }
+
+    if should:
+        ingest_result = run_pending_ingest()
+        result["ingest_triggered"] = ingest_result
+
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def wiki_tick() -> str:
+    """Run orchestration tick. Checks and triggers ingest/lint if needed.
+
+    Call this periodically or at session boundaries.
+    """
+    from llm_wiki_mcp.orchestrator import tick
+    result = tick()
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 def main():
