@@ -142,11 +142,25 @@ Raw session data to ingest:
 
 Extract wiki-worthy knowledge from the above and produce structured pages."""
 
-        # Choose processor
-        if is_available():
-            processor = "ollama"
-            output = generate(prompt, system=INGEST_SYSTEM_PROMPT)
-        else:
+        # Choose processor with retry
+        processor = "ollama" if is_available() else "sonnet"
+        output = None
+
+        if processor == "ollama":
+            for attempt in range(2):
+                try:
+                    output = generate(prompt, system=INGEST_SYSTEM_PROMPT)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        _append_log(f"ingest | ollama attempt 1 failed: {e}, retrying...")
+                        import time
+                        time.sleep(5)
+                    else:
+                        _append_log(f"ingest | ollama failed after 2 attempts, falling back to sonnet")
+                        processor = "sonnet"
+
+        if processor == "sonnet" or output is None:
             processor = "sonnet"
             # TODO: Sonnet fallback implementation
             raise NotImplementedError("Sonnet fallback not yet implemented")

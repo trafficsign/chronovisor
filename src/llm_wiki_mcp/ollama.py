@@ -33,12 +33,17 @@ def is_available() -> bool:
 
 
 def generate(prompt: str, system: str | None = None) -> str:
-    """Call Ollama generate API with keep_alive=0 (unload after use)."""
+    """Call Ollama generate API.
+
+    Uses keep_alive="5m" to keep model loaded for 5 minutes after use.
+    This avoids cold-start on consecutive calls (e.g. Ingest then Lint)
+    while still freeing memory after a reasonable idle period.
+    """
     payload = {
         "model": MODEL,
         "prompt": prompt,
         "stream": False,
-        "keep_alive": 0,
+        "keep_alive": "5m",
         "options": {
             "temperature": 0.3,
             "num_predict": 8192,
@@ -47,13 +52,26 @@ def generate(prompt: str, system: str | None = None) -> str:
     if system:
         payload["system"] = system
 
+    # Timeout: 60s for model load + 600s for generation
     resp = httpx.post(
         f"{OLLAMA_URL}/api/generate",
         json=payload,
-        timeout=300,
+        timeout=httpx.Timeout(connect=10.0, read=660.0, write=10.0, pool=10.0),
     )
     resp.raise_for_status()
     return resp.json()["response"]
+
+
+def unload_model() -> None:
+    """Explicitly unload model to free memory."""
+    try:
+        httpx.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": MODEL, "keep_alive": 0, "prompt": ""},
+            timeout=10,
+        )
+    except Exception:
+        pass
 
 
 INGEST_SYSTEM_PROMPT = """\
