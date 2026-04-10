@@ -21,7 +21,7 @@ def _extract_keywords_from_raw(content: str) -> list[str]:
     return keywords
 
 
-def _search_related_pages(keywords: list[str], max_pages: int = 50, min_score: float = 0.3) -> list[Path]:
+def _search_related_pages(keywords: list[str], min_score: float = 0.3) -> list[Path]:
     """Search for related pages using keywords."""
     if not keywords:
         return []
@@ -50,7 +50,7 @@ def _search_related_pages(keywords: list[str], max_pages: int = 50, min_score: f
             scored.append((score, path))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [path for _, path in scored[:max_pages]]
+    return [path for _, path in scored]
 
 
 def _build_context(raw_content: str) -> str:
