@@ -109,7 +109,11 @@ def run_pending_ingest() -> dict:
 
     pending = get_pending_raw_files()
 
-    # Concatenate all pending raw content
+    # Limit batch size to avoid overwhelming LLM
+    MAX_BATCH = 10
+    pending = pending[:MAX_BATCH]
+
+    # Concatenate pending raw content
     contents = []
     filenames = []
     for f in pending:
