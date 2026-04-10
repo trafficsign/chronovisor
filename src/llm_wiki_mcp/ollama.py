@@ -91,7 +91,7 @@ Rules:
 Folder guidelines:
 - Choose the folder based on the page content and topic
 - Use short, broad category names in English kebab-case
-- Examples: career/, project/, tool/, auto-industry/, hardware/, ai/
+- Examples: career/, project/, ai/, auto-industry/, hardware/, cad/, car-spec/, engineering/
 - Create new folders as needed for new topics
 - Keep folder depth to 1 level (no nested subfolders)
 - If existing related pages are in a specific folder, prefer the same folder for consistency
