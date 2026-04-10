@@ -66,10 +66,15 @@ def _build_context(raw_content: str) -> str:
     if not related_pages:
         return "No existing pages in wiki."
 
-    lines = ["Existing related wiki pages (use [[page-id]] to cross-reference):"]
+    # Show existing folder structure
+    existing_folders = sorted({p.parent.name for p in all_pages() if p.parent != PAGES_DIR})
+    lines = [f"Existing folders: {', '.join(f'{f}/' for f in existing_folders)}"]
+    lines.append("")
+    lines.append("Existing related wiki pages (use [[page-id]] to cross-reference):")
     for p in related_pages:
         content = p.read_text()
-        lines.append(f"\n--- [[{p.stem}]] ---")
+        folder = p.parent.name if p.parent != PAGES_DIR else "(root)"
+        lines.append(f"\n--- [[{p.stem}]] (in {folder}/) ---")
         lines.append(content)
     return "\n".join(lines)
 
