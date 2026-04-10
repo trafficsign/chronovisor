@@ -135,8 +135,10 @@ def wiki_log(limit: int = 20) -> str:
 @mcp.tool()
 def wiki_status() -> str:
     """Return wiki health, Ollama status, and basic statistics."""
+    from llm_wiki_mcp.orchestrator import get_pending_raw_files
     page_count = len(list(PAGES_DIR.glob("*.md")))
-    raw_count = len(list(RAW_DIR.glob("*.md")))
+    raw_total = len(list(RAW_DIR.glob("*.md")))
+    raw_pending = len(get_pending_raw_files())
 
     # Check Ollama
     ollama_status = "unknown"
@@ -167,7 +169,8 @@ def wiki_status() -> str:
 
     return json.dumps({
         "page_count": page_count,
-        "raw_pending": raw_count,
+        "raw_total": raw_total,
+        "raw_pending": raw_pending,
         "orphan_count": orphan_count,
         "ollama_status": ollama_status,
         "oldest_page": oldest,
