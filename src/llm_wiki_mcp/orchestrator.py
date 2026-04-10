@@ -113,14 +113,33 @@ def run_pending_ingest() -> dict:
     MAX_BATCH = 10
     pending = pending[:MAX_BATCH]
 
-    # Concatenate pending raw content
+    # Collect keywords and content from pending raw files
     contents = []
     filenames = []
+    all_keywords = []
     for f in pending:
-        contents.append(f"--- Source: {f.name} ---\n{f.read_text()}")
+        raw_text = f.read_text()
+        contents.append(f"--- Source: {f.name} ---\n{raw_text}")
         filenames.append(f.name)
+        # Extract keywords from individual file frontmatter
+        from llm_wiki_mcp.ingest import _extract_keywords_from_raw
+        all_keywords.extend(_extract_keywords_from_raw(raw_text))
 
-    combined = "\n\n".join(contents)
+    # Deduplicate keywords preserving order
+    seen = set()
+    unique_keywords = []
+    for kw in all_keywords:
+        if kw not in seen:
+            seen.add(kw)
+            unique_keywords.append(kw)
+
+    # Prepend aggregated keywords as frontmatter for the combined content
+    combined_body = "\n\n".join(contents)
+    if unique_keywords:
+        kw_line = ", ".join(unique_keywords)
+        combined = f"---\nkeywords: [{kw_line}]\n---\n\n{combined_body}"
+    else:
+        combined = combined_body
 
     # Start ingest
     from llm_wiki_mcp.ingest import start_ingest
