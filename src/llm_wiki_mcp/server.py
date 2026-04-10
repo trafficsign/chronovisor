@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from llm_wiki_mcp.wiki import (
     WIKI_ROOT, RAW_DIR, PAGES_DIR, SYSTEM_DIR, INDEX_FILE, LOG_FILE, SCHEMA_FILE,
-    init_wiki,
+    init_wiki, all_pages, find_page, page_id_from_path,
 )
 
 mcp = FastMCP(
@@ -45,7 +45,7 @@ def _extract_wiki_links(text: str) -> list[str]:
 def _find_backlinks(page_id: str) -> list[str]:
     """Find pages that link to the given page."""
     backlinks = []
-    for p in PAGES_DIR.glob("*.md"):
+    for p in all_pages():
         content = p.read_text()
         if f"[[{page_id}]]" in content:
             backlinks.append(p.stem)
@@ -72,11 +72,11 @@ def wiki_read(page: str) -> str:
     Args:
         page: Page ID (filename without .md extension)
     """
-    path = PAGES_DIR / f"{page}.md"
-    if not path.exists():
+    path = find_page(page)
+    if not path:
         # Check system/ directory
         path = SYSTEM_DIR / f"{page}.md"
-    if not path.exists():
+    if not path or not path.exists():
         return json.dumps({"error": f"Page '{page}' not found"})
 
     content = path.read_text()
@@ -99,7 +99,7 @@ def wiki_index(limit: int = 50, cursor: int = 0) -> str:
         limit: Max number of entries to return (default 50)
         cursor: Offset for pagination (default 0)
     """
-    pages = sorted(PAGES_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    pages = sorted(all_pages(), key=lambda p: p.stat().st_mtime, reverse=True)
     total = len(pages)
     sliced = pages[cursor:cursor + limit]
 
@@ -136,7 +136,7 @@ def wiki_log(limit: int = 20) -> str:
 def wiki_status() -> str:
     """Return wiki health, Ollama status, and basic statistics."""
     from llm_wiki_mcp.orchestrator import get_pending_raw_files
-    page_count = len(list(PAGES_DIR.glob("*.md")))
+    page_count = len(list(all_pages()))
     raw_total = len(list(RAW_DIR.glob("*.md")))
     raw_pending = len(get_pending_raw_files())
 
@@ -153,7 +153,7 @@ def wiki_status() -> str:
         ollama_status = "stopped"
 
     # Find oldest/newest page
-    pages = list(PAGES_DIR.glob("*.md"))
+    pages = list(all_pages())
     oldest = None
     newest = None
     if pages:
@@ -207,7 +207,7 @@ def wiki_search(query: str, depth: int = 1) -> str:
 
     # Score all pages
     scored = []
-    for path in PAGES_DIR.glob("*.md"):
+    for path in all_pages():
         content = path.read_text()
         content_lower = content.lower()
         fm = _parse_frontmatter(content)
@@ -261,15 +261,15 @@ def wiki_search(query: str, depth: int = 1) -> str:
     if depth > 0 and direct_hits:
         seen = {h["page_id"] for h in direct_hits}
         for hit in direct_hits:
-            path = PAGES_DIR / f"{hit['page_id']}.md"
-            if not path.exists():
+            path = find_page(hit['page_id'])
+            if not path:
                 continue
             outlinks = _extract_wiki_links(path.read_text())
             for link in outlinks:
                 if link in seen:
                     continue
-                link_path = PAGES_DIR / f"{link}.md"
-                if not link_path.exists():
+                link_path = find_page(link)
+                if not link_path:
                     continue
                 seen.add(link)
                 fm = _parse_frontmatter(link_path.read_text())
@@ -422,8 +422,8 @@ def wiki_provenance(page: str) -> str:
     Args:
         page: Page ID to trace
     """
-    page_path = PAGES_DIR / f"{page}.md"
-    if not page_path.exists():
+    page_path = find_page(page)
+    if not page_path:
         return json.dumps({"error": f"Page '{page}' not found"})
 
     page_mtime = datetime.fromtimestamp(page_path.stat().st_mtime)

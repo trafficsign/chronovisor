@@ -4,7 +4,7 @@ import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from llm_wiki_mcp.wiki import PAGES_DIR
+from llm_wiki_mcp.wiki import PAGES_DIR, all_pages, find_page
 from llm_wiki_mcp.server import _parse_frontmatter, _extract_wiki_links, _find_backlinks
 
 
@@ -14,7 +14,7 @@ STALE_DAYS = 90  # Pages not updated in this many days are flagged
 def check() -> list[dict]:
     """Run all lint checks and return a list of issues."""
     issues = []
-    pages = list(PAGES_DIR.glob("*.md"))
+    pages = all_pages()
 
     all_page_ids = {p.stem for p in pages}
 
@@ -96,8 +96,8 @@ def apply_safe_fixes(issues: list[dict]) -> list[str]:
 
         if issue["type"] == "broken_link":
             page_id = issue["page"]
-            path = PAGES_DIR / f"{page_id}.md"
-            if not path.exists():
+            path = find_page(page_id)
+            if not path:
                 continue
 
             content = path.read_text()

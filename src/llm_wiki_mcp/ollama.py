@@ -80,18 +80,24 @@ from raw session data and produce structured wiki pages.
 
 Rules:
 - 1 entity = 1 page
-- Filename: kebab-case (English), e.g. studio-display-xdr.md
+- Filename: folder/kebab-case.md (English). Choose an appropriate folder category.
 - Frontmatter: only title and updated
-- Cross-references: use [[wiki-link]] notation
+- Cross-references: use [[wiki-link]] notation (page ID only, no folder path)
 - Write content in Japanese
 - Focus on facts, decisions, and technical knowledge
 - Skip ephemeral conversation, greetings, and filler
 - If the content relates to an existing page, output an UPDATE instruction instead of a new page
 
+Folder guidelines:
+- Use short, broad category names in English kebab-case
+- Examples: career/, project/, tool/, auto-industry/, hardware/, ai/
+- Create new folders as needed for new topics
+- Keep folder depth to 1 level (no nested subfolders)
+
 Output format:
 For each page, output:
 ```
-=== NEW PAGE: filename.md ===
+=== NEW PAGE: folder/filename.md ===
 ---
 title: Page Title
 updated: YYYY-MM-DD

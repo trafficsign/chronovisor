@@ -5,7 +5,7 @@ import threading
 from datetime import date
 from pathlib import Path
 
-from llm_wiki_mcp.wiki import PAGES_DIR, INDEX_FILE, LOG_FILE
+from llm_wiki_mcp.wiki import PAGES_DIR, INDEX_FILE, LOG_FILE, all_pages, find_page, page_id_from_path
 from llm_wiki_mcp.jobs import job_store, JobStatus
 from llm_wiki_mcp.ollama import generate, is_available, INGEST_SYSTEM_PROMPT
 
@@ -29,7 +29,7 @@ def _search_related_pages(keywords: list[str], min_score: float = 0.5) -> list[P
     query_terms = [k.lower() for k in keywords]
     scored = []
 
-    for path in PAGES_DIR.glob("*.md"):
+    for path in all_pages():
         content = path.read_text()
         content_lower = content.lower()
         fm_match = re.search(r"title:\s*(.+)", content)
@@ -60,7 +60,7 @@ def _build_context(raw_content: str) -> str:
 
     if not related_pages:
         # Fallback: most recently updated pages
-        all_pages = sorted(PAGES_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        all_pages = sorted(all_pages(), key=lambda p: p.stat().st_mtime, reverse=True)
         related_pages = all_pages[:50]
 
     if not related_pages:
@@ -122,11 +122,17 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         page_id = path.stem
 
         if op["type"] == "create":
+            # Create subdirectory if needed
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(op["content"] + "\n")
             created.append(page_id)
             _append_log(f"ingest | created {page_id}")
 
         elif op["type"] == "update":
+            # Find existing page (may be in a subdirectory)
+            existing_path = find_page(page_id)
+            if existing_path:
+                path = existing_path
             if path.exists():
                 existing = path.read_text()
                 # Update the 'updated' field in frontmatter
@@ -147,7 +153,7 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
 
 def _rebuild_index() -> None:
     """Rebuild index.md from all pages."""
-    pages = sorted(PAGES_DIR.glob("*.md"))
+    pages = sorted(all_pages())
     lines = [
         "---",
         f"title: Index",

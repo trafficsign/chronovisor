@@ -11,6 +11,27 @@ LOG_FILE = WIKI_ROOT / "log.md"
 SCHEMA_FILE = WIKI_ROOT / "schema.md"
 
 
+def all_pages() -> list[Path]:
+    """Return all wiki pages (supports subdirectories)."""
+    return list(PAGES_DIR.rglob("*.md"))
+
+
+def find_page(page_id: str) -> Path | None:
+    """Find a page by ID (filename without extension). Searches subdirectories."""
+    # Direct flat path (most common case)
+    flat = PAGES_DIR / f"{page_id}.md"
+    if flat.exists():
+        return flat
+    # Search subdirectories
+    matches = list(PAGES_DIR.rglob(f"{page_id}.md"))
+    return matches[0] if matches else None
+
+
+def page_id_from_path(path: Path) -> str:
+    """Extract page ID from a path (just the stem, no folder)."""
+    return path.stem
+
+
 def init_wiki() -> None:
     """Initialize wiki directory structure."""
     RAW_DIR.mkdir(parents=True, exist_ok=True)
