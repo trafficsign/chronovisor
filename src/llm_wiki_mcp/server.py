@@ -8,7 +8,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from llm_wiki_mcp.wiki import (
-    WIKI_ROOT, RAW_DIR, PAGES_DIR, INDEX_FILE, LOG_FILE, SCHEMA_FILE,
+    WIKI_ROOT, RAW_DIR, PAGES_DIR, SYSTEM_DIR, INDEX_FILE, LOG_FILE, SCHEMA_FILE,
     init_wiki,
 )
 
@@ -67,10 +67,15 @@ def _page_metadata(path: Path) -> dict:
 def wiki_read(page: str) -> str:
     """Read a wiki page with outlinks and backlinks.
 
+    Searches pages/ first, then system/ for system files.
+
     Args:
         page: Page ID (filename without .md extension)
     """
     path = PAGES_DIR / f"{page}.md"
+    if not path.exists():
+        # Check system/ directory
+        path = SYSTEM_DIR / f"{page}.md"
     if not path.exists():
         return json.dumps({"error": f"Page '{page}' not found"})
 

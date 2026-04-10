@@ -5,6 +5,7 @@ from pathlib import Path
 WIKI_ROOT = Path.home() / ".wiki"
 RAW_DIR = WIKI_ROOT / "raw"
 PAGES_DIR = WIKI_ROOT / "pages"
+SYSTEM_DIR = WIKI_ROOT / "system"
 INDEX_FILE = WIKI_ROOT / "index.md"
 LOG_FILE = WIKI_ROOT / "log.md"
 SCHEMA_FILE = WIKI_ROOT / "schema.md"
@@ -14,6 +15,7 @@ def init_wiki() -> None:
     """Initialize wiki directory structure."""
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     PAGES_DIR.mkdir(parents=True, exist_ok=True)
+    SYSTEM_DIR.mkdir(parents=True, exist_ok=True)
 
     if not INDEX_FILE.exists():
         INDEX_FILE.write_text(
