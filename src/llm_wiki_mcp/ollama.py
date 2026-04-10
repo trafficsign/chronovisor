@@ -89,10 +89,12 @@ Rules:
 - If the content relates to an existing page, output an UPDATE instruction instead of a new page
 
 Folder guidelines:
+- Choose the folder based on the page content and topic
 - Use short, broad category names in English kebab-case
 - Examples: career/, project/, tool/, auto-industry/, hardware/, ai/
 - Create new folders as needed for new topics
 - Keep folder depth to 1 level (no nested subfolders)
+- If existing related pages are in a specific folder, prefer the same folder for consistency
 
 Output format:
 For each page, output:
