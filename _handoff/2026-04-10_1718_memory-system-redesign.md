@@ -276,10 +276,10 @@ updated: 2026-04-10
 - [ ] 3-3. CLAUDE.md / rules/ 更新
 - [x] 3-4. claude_desktop_config.json に MCP サーバー登録済み
 
-### Phase 4: 移行・廃止
-- [ ] 4-1. 既存データ移行（Vestige → raw/、Basic Memory → pages/）
-- [ ] 4-2. 旧システム廃止（Vestige MCP 削除、Basic Memory MCP 削除、auto memory 無効化）
-- [ ] 4-3. 動作検証（3セッション以上で実運用テスト）
+### Phase 4: 移行・廃止 ✅
+- [x] 4-1. 既存データ移行: Basic Memory 1369ファイル → pages/、Vestige 356ノード → raw/
+- [x] 4-2. 旧システム廃止: Vestige/Basic Memory を claude_desktop_config.json から削除、CLAUDE.md/rules/ 更新、permissions 整理
+- [ ] 4-3. 動作検証（3セッション以上で実運用テスト）— 次のセッションから開始
 
 ## 実行中更新ルール
 - 実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。
@@ -327,3 +327,7 @@ updated: 2026-04-10
 - 2026-04-10 21:00 Phase 1 完了: MCP サーバー全12エンドポイント実装・テスト済み。初回コミット
 - 2026-04-10 21:15 Phase 2 完了: オーケストレーター（閾値ベース Ingest + 24h Lint）実装・テスト済み
 - 2026-04-10 21:30 Phase 3 進行中: claude_desktop_config.json に llm-wiki MCP 登録済み。hooks 書き換え・CLAUDE.md 更新は残
+- 2026-04-10 21:45 Phase 3 完了: wiki-save.py hook 作成、CLAUDE.md/rules/memory.md 更新、settings.json 更新
+- 2026-04-10 22:00 Phase 4-1 完了: Basic Memory 1369ファイル→pages/、Vestige 356ノード→raw/ 移行。index 再構築（1373ページ）
+- 2026-04-10 22:10 Phase 4-2 完了: Vestige/Basic Memory を MCP 設定から削除。データは保持（ロールバック可能）
+- 2026-04-10 22:15 全Phase実装完了。残りは 4-3 動作検証（3セッション以上）のみ
