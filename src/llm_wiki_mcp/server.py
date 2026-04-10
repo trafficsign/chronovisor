@@ -467,7 +467,7 @@ def wiki_provenance(page: str) -> str:
 
 
 @mcp.tool()
-def wiki_save_raw(content: str, session_id: str | None = None) -> str:
+def wiki_save_raw(content: str, session_id: str | None = None, keywords: list[str] | None = None) -> str:
     """Save raw session data to raw/ for later ingest.
 
     This is the entry point for hooks to dump session logs.
@@ -475,13 +475,21 @@ def wiki_save_raw(content: str, session_id: str | None = None) -> str:
     Args:
         content: Raw session content to save
         session_id: Optional session identifier. Auto-generated if not provided.
+        keywords: Optional list of keywords for ingest context search.
     """
     if not session_id:
         session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
 
+    # Prepend keywords as YAML frontmatter if provided
+    if keywords:
+        kw_line = ", ".join(keywords)
+        body = f"---\nkeywords: [{kw_line}]\n---\n\n{content}"
+    else:
+        body = content
+
     filename = f"{session_id}.md"
     path = RAW_DIR / filename
-    path.write_text(content)
+    path.write_text(body)
 
     # Check if orchestrator should trigger ingest
     from llm_wiki_mcp.orchestrator import should_ingest, run_pending_ingest

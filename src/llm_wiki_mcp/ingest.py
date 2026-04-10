@@ -10,17 +10,67 @@ from llm_wiki_mcp.jobs import job_store, JobStatus
 from llm_wiki_mcp.ollama import generate, is_available, INGEST_SYSTEM_PROMPT
 
 
-def _build_context(existing_pages: list[Path]) -> str:
-    """Build context of existing pages for the LLM."""
-    if not existing_pages:
+def _extract_keywords_from_raw(content: str) -> list[str]:
+    """Extract keywords from raw content frontmatter."""
+    keywords = []
+    fm_match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    if fm_match:
+        kw_match = re.search(r"keywords:\s*\[([^\]]*)\]", fm_match.group(1))
+        if kw_match:
+            keywords = [k.strip() for k in kw_match.group(1).split(",") if k.strip()]
+    return keywords
+
+
+def _search_related_pages(keywords: list[str], max_pages: int = 50) -> list[Path]:
+    """Search for related pages using keywords."""
+    if not keywords:
+        return []
+
+    query_terms = [k.lower() for k in keywords]
+    scored = []
+
+    for path in PAGES_DIR.glob("*.md"):
+        content = path.read_text()
+        content_lower = content.lower()
+        fm_match = re.search(r"title:\s*(.+)", content)
+        title = fm_match.group(1) if fm_match else path.stem
+        title_lower = title.lower()
+
+        score = 0.0
+        for term in query_terms:
+            if term in title_lower:
+                score += 0.5
+            if term in path.stem.lower().replace("-", " "):
+                score += 0.3
+            count = content_lower.count(term)
+            if count > 0:
+                score += min(0.1 * count, 0.4)
+
+        if score > 0:
+            scored.append((score, path))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [path for _, path in scored[:max_pages]]
+
+
+def _build_context(raw_content: str) -> str:
+    """Build context by searching for related pages using keywords from raw content."""
+    keywords = _extract_keywords_from_raw(raw_content)
+    related_pages = _search_related_pages(keywords)
+
+    if not related_pages:
+        # Fallback: most recently updated pages
+        all_pages = sorted(PAGES_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        related_pages = all_pages[:50]
+
+    if not related_pages:
         return "No existing pages in wiki."
 
-    lines = ["Existing wiki pages:"]
-    for p in existing_pages[:50]:  # Limit to avoid context overflow
+    lines = ["Existing related wiki pages (use [[page-id]] to cross-reference):"]
+    for p in related_pages:
         content = p.read_text()
-        title_match = re.search(r"title:\s*(.+)", content)
-        title = title_match.group(1) if title_match else p.stem
-        lines.append(f"- [[{p.stem}]]: {title}")
+        lines.append(f"\n--- [[{p.stem}]] ---")
+        lines.append(content)
     return "\n".join(lines)
 
 
@@ -129,8 +179,7 @@ def run_ingest(content: str, job_id: str) -> None:
     job_store.update(job_id, status=JobStatus.RUNNING)
 
     try:
-        existing_pages = list(PAGES_DIR.glob("*.md"))
-        context = _build_context(existing_pages)
+        context = _build_context(content)
 
         prompt = f"""{context}
 
