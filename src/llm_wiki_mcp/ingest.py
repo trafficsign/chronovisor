@@ -21,7 +21,7 @@ def _extract_keywords_from_raw(content: str) -> list[str]:
     return keywords
 
 
-def _search_related_pages(keywords: list[str]) -> list[Path]:
+def _search_related_pages(keywords: list[str], min_score: float = 0.5) -> list[Path]:
     """Search for related pages using keywords."""
     if not keywords:
         return []
@@ -46,7 +46,7 @@ def _search_related_pages(keywords: list[str]) -> list[Path]:
             if count > 0:
                 score += min(0.1 * count, 0.4)
 
-        if score > 0:
+        if score >= min_score:
             scored.append((score, path))
 
     scored.sort(key=lambda x: x[0], reverse=True)
