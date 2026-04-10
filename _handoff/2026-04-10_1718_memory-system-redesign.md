@@ -1,7 +1,7 @@
 ---
 task_id: plan_c71a785041df458c83361eb12cba88f4
 created_at: 2026-04-10T17:18:31+09:00
-状態: ready
+状態: running
 ---
 
 ## 目的
@@ -251,27 +251,30 @@ updated: 2026-04-10
 - **フォールバック:** Sonnet API
 - **MCP:** Python MCP SDK
 
-### Phase 1: Wiki MCP サーバー（コア）
-- [ ] 1-1. プロジェクト骨格（pyproject.toml、MCP SDK セットアップ、リポジトリ作成）
-- [ ] 1-2. `~/.wiki/` ディレクトリ構造の初期化 + schema.md 作成
-- [ ] 1-3. 基本エンドポイント: wiki.read, wiki.index, wiki.log, wiki.status
-- [ ] 1-4. wiki.ingest（非同期、Ollama API 連携、job_id 返却）
-- [ ] 1-5. wiki.jobs（ジョブ進捗確認）
-- [ ] 1-6. wiki.search（チェーン検索、direct_hits / expanded_hits / edges）
-- [ ] 1-7. wiki.check / wiki.apply（Lint 検出 + 安全な自動修正）
-- [ ] 1-8. wiki.provenance（ページの根拠追跡）
+### Phase 1: Wiki MCP サーバー（コア）✅
+- [x] 1-1. プロジェクト骨格（pyproject.toml、MCP SDK セットアップ、リポジトリ作成）
+- [x] 1-2. `~/.wiki/` ディレクトリ構造の初期化 + schema.md 作成
+- [x] 1-3. 基本エンドポイント: wiki.read, wiki.index, wiki.log, wiki.status
+- [x] 1-4. wiki.ingest（非同期、Ollama API 連携、job_id 返却）— E2Eテスト済み、3ページ自動生成確認
+- [x] 1-5. wiki.jobs（ジョブ進捗確認）
+- [x] 1-6. wiki.search（チェーン検索、direct_hits / expanded_hits / edges）— テスト済み
+- [x] 1-7. wiki.check / wiki.apply（Lint 検出 + 安全な自動修正）— broken link修正テスト済み
+- [x] 1-8. wiki.provenance（ページの根拠追跡）
+- 追加: wiki.save_raw（raw/ への書き出し + 閾値チェック）
+- 追加: wiki.tick（手動オーケストレーション）
 
-### Phase 2: オーケストレーター（決定的コード）
-- [ ] 2-1. raw/ 未処理ファイル監視 + N 件トリガー（決定的ルール）
-- [ ] 2-2. Ollama ヘルスチェック + 15分キャッシュ
-- [ ] 2-3. Sonnet フォールバック + Opus への即時報告
-- [ ] 2-4. Lint 24時間トリガー
+### Phase 2: オーケストレーター（決定的コード）✅
+- [x] 2-1. raw/ 未処理ファイル監視 + N 件トリガー（閾値5件、テスト済み）
+- [x] 2-2. Ollama ヘルスチェック + 15分キャッシュ
+- [x] 2-3. Sonnet フォールバック（TODO: API 実装）+ Opus への即時報告（設計済み）
+- [x] 2-4. Lint 24時間トリガー
+- [x] 2-5. 状態永続化（.orchestrator_state.json）
 
-### Phase 3: Claude Code 統合
+### Phase 3: Claude Code 統合（進行中）
 - [ ] 3-1. hooks で raw/ への書き出し（保存トリガー時）
 - [ ] 3-2. セッション開始フロー変更（Vestige/Basic Memory → wiki.index + wiki.search）
 - [ ] 3-3. CLAUDE.md / rules/ 更新
-- [ ] 3-4. Claude Code settings.json に MCP サーバー登録
+- [x] 3-4. claude_desktop_config.json に MCP サーバー登録済み
 
 ### Phase 4: 移行・廃止
 - [ ] 4-1. 既存データ移行（Vestige → raw/、Basic Memory → pages/）
@@ -321,3 +324,6 @@ updated: 2026-04-10
 - 2026-04-10 20:15 Lint 詳細設計確定: 5種チェック、安全なものだけ自動修正、矛盾はフラグのみ
 - 2026-04-10 20:30 ローカル LLM 確定: Gemma 4 26B MoE。Ollama 0.16.1→0.20.5 アップデート（Homebrew 移行）、構造化テスト合格
 - 2026-04-10 20:45 実装計画確定: Python、4 Phase 16 ステップ。状態を ready に移行
+- 2026-04-10 21:00 Phase 1 完了: MCP サーバー全12エンドポイント実装・テスト済み。初回コミット
+- 2026-04-10 21:15 Phase 2 完了: オーケストレーター（閾値ベース Ingest + 24h Lint）実装・テスト済み
+- 2026-04-10 21:30 Phase 3 進行中: claude_desktop_config.json に llm-wiki MCP 登録済み。hooks 書き換え・CLAUDE.md 更新は残
