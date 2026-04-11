@@ -11,6 +11,7 @@ from llm_wiki_mcp.wiki import (
     WIKI_ROOT, RAW_DIR, PAGES_DIR, SYSTEM_DIR, INDEX_FILE, LOG_FILE, SCHEMA_FILE,
     init_wiki, all_pages, find_page, page_id_from_path,
 )
+from llm_wiki_mcp.link_fix import extract_targets as _extract_targets
 
 mcp = FastMCP(
     "llm-wiki",
@@ -38,17 +39,37 @@ def _parse_frontmatter(text: str) -> dict:
 
 
 def _extract_wiki_links(text: str) -> list[str]:
-    """Extract [[wiki-link]] references from text."""
-    return re.findall(r"\[\[([^\]]+)\]\]", text)
+    """Extract [[wiki-link]] references from text, normalized to page_id.
+
+    Code fence / frontmatter / inline code 内のリンクは除外される。
+    ``[[foo|label]]`` / ``[[foo#sec]]`` は ``foo`` に normalize される。
+    """
+    return _extract_targets(text, strip=True)
 
 
 def _find_backlinks(page_id: str) -> list[str]:
-    """Find pages that link to the given page."""
+    """Find pages that link to the given page.
+
+    pages/ と system/ の両方を走査し、``[[id]]`` / ``[[id|label]]`` / ``[[id#sec]]``
+    のいずれの形式でも検出する。
+    """
     backlinks = []
-    for p in all_pages():
-        content = p.read_text()
-        if f"[[{page_id}]]" in content:
+    seen: set[str] = set()
+
+    def _scan(p: Path) -> None:
+        try:
+            targets = _extract_targets(p.read_text(), strip=True)
+        except (OSError, UnicodeDecodeError):
+            return
+        if page_id in targets and p.stem not in seen:
             backlinks.append(p.stem)
+            seen.add(p.stem)
+
+    for p in all_pages():
+        _scan(p)
+    if SYSTEM_DIR.exists():
+        for p in SYSTEM_DIR.rglob("*.md"):
+            _scan(p)
     return backlinks
 
 
@@ -360,20 +381,27 @@ def wiki_check() -> str:
 
 
 @mcp.tool()
-def wiki_apply() -> str:
+def wiki_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
     """Apply safe auto-fixes to the wiki.
 
-    Only fixes safe issues (broken links, formatting).
-    Contradictions and ambiguous issues are left as flags.
+    broken_link は fuzzy match で近い page_id に置換し、見つからなければ
+    plaintext 化する。system/ 配下に実在する target は false positive と見なして
+    書き換えない。Contradictions / orphans / stale などは flag のまま残す。
     Run wiki.check() first to see what will be fixed.
+
+    Args:
+        dry_run: True なら実際には書き込まず actions のプレビューだけ返す。
+        fuzzy: False にすると broken_link の自動書き換えを無効化する (より保守的)。
     """
     from llm_wiki_mcp.lint import check, apply_safe_fixes
     issues = check()
-    actions = apply_safe_fixes(issues)
+    actions = apply_safe_fixes(issues, dry_run=dry_run, fuzzy=fuzzy)
     remaining = [i for i in issues if not i.get("auto_fixable")]
     return json.dumps({
         "actions_taken": actions,
         "remaining_issues": remaining,
+        "dry_run": dry_run,
+        "fuzzy": fuzzy,
     }, ensure_ascii=False)
 
 
