@@ -214,6 +214,40 @@ def _append_log(message: str) -> None:
 
 
 @mcp.tool()
+def wiki_init() -> str:
+    """Initialize session: returns system pages + status in a single call.
+
+    Replaces the need for separate wiki_status + 3x wiki_read at session start.
+    Returns user-profile, current-state, lessons-learned, and basic wiki stats.
+    """
+    from llm_wiki_mcp.ollama import is_available
+
+    result = {"pages": {}, "status": {}}
+
+    # Read system pages
+    for page_id in ("user-profile", "current-state", "lessons-learned"):
+        path = SYSTEM_DIR / f"{page_id}.md"
+        if path.exists():
+            result["pages"][page_id] = path.read_text()
+        else:
+            result["pages"][page_id] = None
+
+    # Lightweight status (skip orphan count — it's O(n²) on 1500 pages)
+    page_count = len(list(all_pages()))
+    raw_total = len(list(RAW_DIR.glob("*.md")))
+    ollama_status = "running" if is_available() else "stopped"
+
+    result["status"] = {
+        "page_count": page_count,
+        "raw_total": raw_total,
+        "ollama_status": ollama_status,
+        "wiki_root": str(WIKI_ROOT),
+    }
+
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
 def wiki_search(
     query: str,
     depth: int = 1,
