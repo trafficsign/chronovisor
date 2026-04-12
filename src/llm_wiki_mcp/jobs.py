@@ -25,6 +25,9 @@ class Job:
     error: str | None = None
     pages_created: list[str] = field(default_factory=list)
     pages_updated: list[str] = field(default_factory=list)
+    stage: str | None = None  # "triage" | "generate" | None
+    total_ops: int = 0
+    completed_ops: int = 0
 
 
 class JobStore:

@@ -1,5 +1,6 @@
-"""Ingest engine - structures raw data into wiki pages."""
+"""Ingest engine - structures raw data into wiki pages (two-stage pipeline)."""
 
+import json
 import re
 import threading
 from datetime import date
@@ -7,28 +8,117 @@ from pathlib import Path
 
 from llm_wiki_mcp.wiki import PAGES_DIR, INDEX_FILE, LOG_FILE, all_pages, find_page, page_id_from_path
 from llm_wiki_mcp.jobs import job_store, JobStatus
-from llm_wiki_mcp.ollama import generate, is_available, INGEST_SYSTEM_PROMPT
+from llm_wiki_mcp.ollama import (
+    generate, is_available,
+    INGEST_SYSTEM_PROMPT, TRIAGE_SYSTEM_PROMPT, GENERATE_SYSTEM_PROMPT,
+)
 
 
-def _extract_keywords_from_raw(content: str) -> list[str]:
-    """Extract keywords from raw content frontmatter."""
-    keywords = []
-    fm_match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-    if fm_match:
-        kw_match = re.search(r"keywords:\s*\[([^\]]*)\]", fm_match.group(1))
-        if kw_match:
-            keywords = [k.strip() for k in kw_match.group(1).split(",") if k.strip()]
-    return keywords
+# ---------------------------------------------------------------------------
+# Stage 1: Triage — analyze raw content and produce a structured plan
+# ---------------------------------------------------------------------------
 
+def _triage(content: str) -> list[dict]:
+    """Stage 1: Analyze raw content and return a list of page operations as JSON."""
+    # Build lightweight context: existing folders + page catalog (no full text)
+    existing_folders = sorted({p.parent.name for p in all_pages() if p.parent != PAGES_DIR})
+    catalog_lines = [f"Existing folders: {', '.join(f'{f}/' for f in existing_folders)}", ""]
+    catalog_lines.append("Existing wiki pages (page_id — title):")
+    for path in all_pages():
+        content_text = path.read_text()
+        fm_match = re.search(r"title:\s*(.+)", content_text)
+        title = fm_match.group(1).strip() if fm_match else path.stem
+        catalog_lines.append(f"  [[{page_id_from_path(path)}]] — {title}")
 
-def _search_related_pages(keywords: list[str], min_score: float = 0.5) -> list[Path]:
-    """Search for related pages using keywords."""
-    if not keywords:
+    catalog = "\n".join(catalog_lines)
+
+    prompt = f"""{catalog}
+
+---
+Raw session data to triage:
+---
+{content}
+---
+
+Analyze the raw data above. Output a JSON array of page operations (create/update)."""
+
+    output = generate(prompt, system=TRIAGE_SYSTEM_PROMPT)
+
+    # Parse JSON from output (strip markdown fences if present)
+    output = output.strip()
+    if output.startswith("```"):
+        output = re.sub(r"^```\w*\n?", "", output)
+        output = re.sub(r"\n?```$", "", output)
+    output = output.strip()
+
+    try:
+        plan = json.loads(output)
+        if not isinstance(plan, list):
+            _append_log(f"ingest | triage returned non-list: {type(plan)}")
+            return []
+        return plan
+    except json.JSONDecodeError as e:
+        _append_log(f"ingest | triage JSON parse failed: {e}")
         return []
 
+
+# ---------------------------------------------------------------------------
+# Stage 2: Generate — produce each page with focused context
+# ---------------------------------------------------------------------------
+
+def _build_focused_context(op: dict, raw_content: str) -> str:
+    """Build context focused on a single page operation."""
+    lines = []
+
+    # For updates, include the current page content
+    if op.get("type") == "update":
+        filename = op.get("filename", "")
+        page_id = filename.replace(".md", "").split("/")[-1]
+        existing_path = find_page(page_id)
+        if existing_path:
+            lines.append(f"--- Current content of [[{page_id}]] ---")
+            lines.append(existing_path.read_text())
+            lines.append("--- End current content ---\n")
+
+    # Search for related pages using keywords from the triage plan
+    keywords = op.get("keywords", [])
+    if keywords:
+        related = _search_related_pages(keywords, top_n=5)
+        if related:
+            lines.append("Related existing pages for cross-referencing:")
+            for path in related:
+                content = path.read_text()
+                lines.append(f"\n--- [[{page_id_from_path(path)}]] ---")
+                lines.append(content)
+    elif op.get("type") == "create":
+        # For creates without keywords, use title words as fallback
+        title = op.get("title", "")
+        if title:
+            title_keywords = [w for w in title.split() if len(w) >= 2]
+            related = _search_related_pages(title_keywords, top_n=3)
+            if related:
+                lines.append("Related existing pages:")
+                for path in related:
+                    lines.append(f"\n--- [[{page_id_from_path(path)}]] ---")
+                    lines.append(path.read_text())
+
+    return "\n".join(lines)
+
+
+def _search_related_pages(keywords: list[str], min_score: float = 0.5, top_n: int = 8) -> list[Path]:
+    """Search for related pages using keywords. Uses BM25 if available, falls back to simple matching."""
+    try:
+        from llm_wiki_mcp.search import BM25Index
+        bm25 = BM25Index()
+        bm25.build()
+        results = bm25.query(" ".join(keywords), top_n=top_n)
+        return [find_page(r.page_id) for r in results if find_page(r.page_id)]
+    except Exception:
+        pass
+
+    # Fallback: simple keyword matching
     query_terms = [k.lower() for k in keywords]
     scored = []
-
     for path in all_pages():
         content = path.read_text()
         content_lower = content.lower()
@@ -50,40 +140,48 @@ def _search_related_pages(keywords: list[str], min_score: float = 0.5) -> list[P
             scored.append((score, path))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [path for _, path in scored]
+    return [path for _, path in scored[:top_n]]
 
 
-def _build_context(raw_content: str) -> str:
-    """Build context by searching for related pages using keywords from raw content."""
-    keywords = _extract_keywords_from_raw(raw_content)
-    related_pages = _search_related_pages(keywords)
+def _generate_one(op: dict, raw_content: str) -> str | None:
+    """Stage 2: Generate a single page using focused context."""
+    context = _build_focused_context(op, raw_content)
 
-    if not related_pages:
-        # Fallback: most recently updated pages
-        all_pages = sorted(all_pages(), key=lambda p: p.stat().st_mtime, reverse=True)
-        related_pages = all_pages[:50]
+    op_type = op.get("type", "create").upper()
+    filename = op.get("filename", "unknown.md")
+    summary = op.get("summary", "")
+    title = op.get("title", "")
 
-    if not related_pages:
-        return "No existing pages in wiki."
+    prompt = f"""{context}
 
-    # Show existing folder structure
-    existing_folders = sorted({p.parent.name for p in all_pages() if p.parent != PAGES_DIR})
-    lines = [f"Existing folders: {', '.join(f'{f}/' for f in existing_folders)}"]
-    lines.append("")
-    lines.append("Existing related wiki pages (use [[page-id]] to cross-reference):")
-    for p in related_pages:
-        content = p.read_text()
-        folder = p.parent.name if p.parent != PAGES_DIR else "(root)"
-        lines.append(f"\n--- [[{p.stem}]] (in {folder}/) ---")
-        lines.append(content)
-    return "\n".join(lines)
+---
+Raw session data (source material):
+---
+{raw_content}
+---
 
+Task: {op_type} page "{filename}"
+Title: {title}
+Summary: {summary}
+
+Generate the page content based on the raw data and context above."""
+
+    try:
+        output = generate(prompt, system=GENERATE_SYSTEM_PROMPT)
+        return output
+    except Exception as e:
+        _append_log(f"ingest | generate failed for {filename}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Parse & Apply (unchanged from original)
+# ---------------------------------------------------------------------------
 
 def _parse_output(output: str) -> list[dict]:
     """Parse LLM output into page operations."""
     operations = []
 
-    # Match NEW PAGE blocks
     for match in re.finditer(
         r"=== NEW PAGE:\s*(\S+)\s*===\n(.*?)\n=== END PAGE ===",
         output,
@@ -97,7 +195,6 @@ def _parse_output(output: str) -> list[dict]:
             "content": content,
         })
 
-    # Match UPDATE PAGE blocks
     for match in re.finditer(
         r"=== UPDATE PAGE:\s*(\S+)\s*===\n(.*?)\n=== END PAGE ===",
         output,
@@ -127,20 +224,17 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         page_id = path.stem
 
         if op["type"] == "create":
-            # Create subdirectory if needed
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(op["content"] + "\n")
             created.append(page_id)
             _append_log(f"ingest | created {page_id}")
 
         elif op["type"] == "update":
-            # Find existing page (may be in a subdirectory)
             existing_path = find_page(page_id)
             if existing_path:
                 path = existing_path
             if path.exists():
                 existing = path.read_text()
-                # Update the 'updated' field in frontmatter
                 today = date.today().isoformat()
                 existing = re.sub(
                     r"updated:\s*.+",
@@ -148,7 +242,6 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                     existing,
                     count=1,
                 )
-                # Append new content
                 path.write_text(existing.rstrip() + "\n\n" + op["content"] + "\n")
                 updated.append(page_id)
                 _append_log(f"ingest | updated {page_id}")
@@ -185,51 +278,26 @@ def _append_log(message: str) -> None:
         f.write(f"\n- [{timestamp}] {message}")
 
 
+# ---------------------------------------------------------------------------
+# Main entry point — two-stage pipeline
+# ---------------------------------------------------------------------------
+
 def run_ingest(content: str, job_id: str) -> None:
-    """Run ingest in background thread."""
+    """Run two-stage ingest in background thread."""
     job_store.update(job_id, status=JobStatus.RUNNING)
 
     try:
-        context = _build_context(content)
-
-        prompt = f"""{context}
-
----
-Raw session data to ingest:
----
-{content}
----
-
-Extract wiki-worthy knowledge from the above and produce structured pages."""
-
-        # Choose processor with retry
         processor = "ollama" if is_available() else "sonnet"
-        output = None
-
-        if processor == "ollama":
-            for attempt in range(2):
-                try:
-                    output = generate(prompt, system=INGEST_SYSTEM_PROMPT)
-                    break
-                except Exception as e:
-                    if attempt == 0:
-                        _append_log(f"ingest | ollama attempt 1 failed: {e}, retrying...")
-                        import time
-                        time.sleep(5)
-                    else:
-                        _append_log(f"ingest | ollama failed after 2 attempts, falling back to sonnet")
-                        processor = "sonnet"
-
-        if processor == "sonnet" or output is None:
-            processor = "sonnet"
-            # TODO: Sonnet fallback implementation
+        if processor == "sonnet":
             raise NotImplementedError("Sonnet fallback not yet implemented")
-
         job_store.update(job_id, processor=processor)
 
-        # Parse and apply
-        operations = _parse_output(output)
-        if not operations:
+        # Stage 1: Triage
+        job_store.update(job_id, stage="triage")
+        _append_log("ingest | stage 1: triage started")
+        plan = _triage(content)
+
+        if not plan:
             job_store.update(
                 job_id,
                 status=JobStatus.COMPLETED,
@@ -238,19 +306,37 @@ Extract wiki-worthy knowledge from the above and produce structured pages."""
                 pages_created=[],
                 pages_updated=[],
             )
+            _append_log("ingest | triage: no operations planned")
             return
 
-        created, updated = _apply_operations(operations)
-        _rebuild_index()
+        _append_log(f"ingest | triage: {len(plan)} operations planned")
+        job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
 
-        # Update search embeddings for new/updated pages
-        changed_pages = created + updated
-        if changed_pages:
-            try:
-                from llm_wiki_mcp.search import update_embeddings
-                update_embeddings(page_ids=changed_pages)
-            except Exception:
-                pass  # Non-critical: embeddings will be built on next reindex
+        # Stage 2: Generate each page
+        all_operations = []
+        for i, op in enumerate(plan):
+            _append_log(f"ingest | generating {i+1}/{len(plan)}: {op.get('filename', '?')}")
+            output = _generate_one(op, content)
+            if output:
+                operations = _parse_output(output)
+                all_operations.extend(operations)
+            job_store.update(job_id, completed_ops=i + 1)
+
+        # Apply all operations
+        if all_operations:
+            created, updated = _apply_operations(all_operations)
+            _rebuild_index()
+
+            # Update search embeddings
+            changed_pages = created + updated
+            if changed_pages:
+                try:
+                    from llm_wiki_mcp.search import update_embeddings
+                    update_embeddings(page_ids=changed_pages)
+                except Exception:
+                    pass
+        else:
+            created, updated = [], []
 
         job_store.update(
             job_id,
@@ -259,6 +345,7 @@ Extract wiki-worthy knowledge from the above and produce structured pages."""
             pages_created=created,
             pages_updated=updated,
         )
+        _append_log(f"ingest | completed: {len(created)} created, {len(updated)} updated")
 
     except Exception as e:
         job_store.update(
@@ -267,6 +354,7 @@ Extract wiki-worthy knowledge from the above and produce structured pages."""
             completed_at=_now(),
             error=str(e),
         )
+        _append_log(f"ingest | failed: {e}")
 
 
 def start_ingest(content: str) -> str:
