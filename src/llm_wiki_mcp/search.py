@@ -46,7 +46,7 @@ def _is_cjk(ch: str) -> bool:
 
 
 def tokenize(text: str) -> list[str]:
-    """Tokenize text: ASCII words + CJK character bigrams."""
+    """Tokenize text: ASCII words + CJK character bigrams (boundary-aware)."""
     # Strip frontmatter
     text = _FRONTMATTER_RE.sub("", text)
     text_lower = text.lower()
@@ -58,10 +58,15 @@ def tokenize(text: str) -> list[str]:
         if len(word) >= 2:
             tokens.append(word)
 
-    # CJK bigrams
-    cjk_chars = [ch for ch in text if _is_cjk(ch)]
-    for i in range(len(cjk_chars) - 1):
-        tokens.append(cjk_chars[i] + cjk_chars[i + 1])
+    # CJK bigrams — boundary-aware (don't cross non-CJK gaps)
+    cjk_runs = re.findall(r"[" + "".join(f"{lo}-{hi}" for lo, hi in _CJK_RANGES) + r"]+", text)
+    for run in cjk_runs:
+        # Single CJK character: include as unigram
+        if len(run) == 1:
+            tokens.append(run)
+        # Bigrams within each contiguous CJK run
+        for i in range(len(run) - 1):
+            tokens.append(run[i] + run[i + 1])
 
     return tokens
 
@@ -313,9 +318,9 @@ def apply_filters(
     if folder:
         filtered = [r for r in filtered if r.folder.startswith(folder)]
     if updated_after:
-        filtered = [r for r in filtered if r.updated >= updated_after]
+        filtered = [r for r in filtered if r.updated >= updated_after and r.updated != "unknown"]
     if updated_before:
-        filtered = [r for r in filtered if r.updated <= updated_before]
+        filtered = [r for r in filtered if r.updated <= updated_before and r.updated != "unknown"]
     return filtered
 
 
@@ -342,13 +347,16 @@ def search(
     semantic: bool = True,
 ) -> tuple[list[ScoredPage], str]:
     """Run search and return (results, search_mode)."""
+    # Fetch more results before filtering to avoid truncation-before-filter bug
+    fetch_n = max(top_n * 5, 100)
+
     bm25 = BM25Index()
     bm25.build()
-    bm25_results = bm25.query(query, top_n=top_n * 2)
+    bm25_results = bm25.query(query, top_n=fetch_n)
 
     search_mode = "bm25"
     if semantic:
-        sem_results = semantic_search(query, top_n=top_n * 2)
+        sem_results = semantic_search(query, top_n=fetch_n)
         if sem_results:
             results = fuse_results(bm25_results, sem_results)
             search_mode = "hybrid"
@@ -357,6 +365,7 @@ def search(
     else:
         results = bm25_results
 
+    # Filter THEN truncate (not the other way around)
     results = apply_filters(results, folder, updated_after, updated_before)
     results = apply_sort(results, sort_by)
     return results[:top_n], search_mode
