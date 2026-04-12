@@ -222,15 +222,7 @@ def wiki_init() -> str:
     """
     from llm_wiki_mcp.ollama import is_available
 
-    result = {"pages": {}, "status": {}}
-
-    # Read system pages (user-profile & lessons-learned merged into CLAUDE.md/rules)
-    for page_id in ("current-state",):
-        path = SYSTEM_DIR / f"{page_id}.md"
-        if path.exists():
-            result["pages"][page_id] = path.read_text()
-        else:
-            result["pages"][page_id] = None
+    result = {"status": {}}
 
     # Lightweight status (skip orphan count — it's O(n²) on 1500 pages)
     page_count = len(list(all_pages()))
