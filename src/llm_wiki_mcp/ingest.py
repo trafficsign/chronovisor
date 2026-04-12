@@ -282,7 +282,7 @@ def _append_log(message: str) -> None:
 # Main entry point — two-stage pipeline
 # ---------------------------------------------------------------------------
 
-def run_ingest(content: str, job_id: str) -> None:
+def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None) -> None:
     """Run two-stage ingest in background thread."""
     job_store.update(job_id, status=JobStatus.RUNNING)
 
@@ -347,6 +347,12 @@ def run_ingest(content: str, job_id: str) -> None:
         )
         _append_log(f"ingest | completed: {len(created)} created, {len(updated)} updated")
 
+        if on_complete:
+            try:
+                on_complete()
+            except Exception as cb_err:
+                _append_log(f"ingest | on_complete callback failed: {cb_err}")
+
     except Exception as e:
         job_store.update(
             job_id,
@@ -357,14 +363,14 @@ def run_ingest(content: str, job_id: str) -> None:
         _append_log(f"ingest | failed: {e}")
 
 
-def start_ingest(content: str) -> str:
+def start_ingest(content: str, on_complete: "callable | None" = None) -> str:
     """Start an async ingest job. Returns job_id."""
     processor = "ollama" if is_available() else "sonnet"
     job = job_store.create(processor=processor)
 
     thread = threading.Thread(
         target=run_ingest,
-        args=(content, job.job_id),
+        args=(content, job.job_id, on_complete),
         daemon=True,
     )
     thread.start()
