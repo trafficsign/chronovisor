@@ -224,8 +224,8 @@ def wiki_init() -> str:
 
     result = {"pages": {}, "status": {}}
 
-    # Read system pages (user-profile is now in CLAUDE.md, no need to load)
-    for page_id in ("current-state", "lessons-learned"):
+    # Read system pages (user-profile & lessons-learned merged into CLAUDE.md/rules)
+    for page_id in ("current-state",):
         path = SYSTEM_DIR / f"{page_id}.md"
         if path.exists():
             result["pages"][page_id] = path.read_text()
