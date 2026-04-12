@@ -62,6 +62,20 @@ def generate(prompt: str, system: str | None = None) -> str:
     return resp.json()["response"]
 
 
+EMBED_MODEL = "nomic-embed-text"
+
+
+def embed(texts: list[str]) -> list[list[float]]:
+    """Get embedding vectors via Ollama /api/embed."""
+    resp = httpx.post(
+        f"{OLLAMA_URL}/api/embed",
+        json={"model": EMBED_MODEL, "input": texts},
+        timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
+    )
+    resp.raise_for_status()
+    return resp.json()["embeddings"]
+
+
 def unload_model() -> None:
     """Explicitly unload model to free memory."""
     try:

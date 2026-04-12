@@ -243,6 +243,15 @@ Extract wiki-worthy knowledge from the above and produce structured pages."""
         created, updated = _apply_operations(operations)
         _rebuild_index()
 
+        # Update search embeddings for new/updated pages
+        changed_pages = created + updated
+        if changed_pages:
+            try:
+                from llm_wiki_mcp.search import update_embeddings
+                update_embeddings(page_ids=changed_pages)
+            except Exception:
+                pass  # Non-critical: embeddings will be built on next reindex
+
         job_store.update(
             job_id,
             status=JobStatus.COMPLETED,

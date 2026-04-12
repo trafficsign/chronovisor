@@ -214,67 +214,49 @@ def _append_log(message: str) -> None:
 
 
 @mcp.tool()
-def wiki_search(query: str, depth: int = 1) -> str:
-    """Search wiki pages with chain expansion via [[wiki-links]].
+def wiki_search(
+    query: str,
+    depth: int = 1,
+    folder: str | None = None,
+    updated_after: str | None = None,
+    updated_before: str | None = None,
+    sort_by: str = "relevance",
+    semantic: bool = True,
+) -> str:
+    """Search wiki pages with BM25 + semantic search and link expansion.
 
     Returns direct_hits (pages matching query) and expanded_hits (linked pages).
 
     Args:
         query: Search query string
         depth: How many link-hops to follow (0=direct only, 1=one hop, default 1)
+        folder: Filter by folder prefix (e.g. "career", "project")
+        updated_after: Filter pages updated after this date (ISO format)
+        updated_before: Filter pages updated before this date (ISO format)
+        sort_by: Sort order - "relevance" (default), "date", or "title"
+        semantic: Use semantic search when Ollama is available (default True)
     """
-    query_lower = query.lower()
-    query_terms = query_lower.split()
+    from llm_wiki_mcp.search import search as run_search
 
-    # Score all pages
-    scored = []
-    for path in all_pages():
-        content = path.read_text()
-        content_lower = content.lower()
-        fm = _parse_frontmatter(content)
-        title = fm.get("title", path.stem)
-        title_lower = title.lower()
+    results, search_mode = run_search(
+        query=query, top_n=10,
+        folder=folder, updated_after=updated_after,
+        updated_before=updated_before, sort_by=sort_by,
+        semantic=semantic,
+    )
 
-        score = 0.0
-        match_reasons = []
-
-        # Title match (high weight)
-        for term in query_terms:
-            if term in title_lower:
-                score += 0.5
-                if "title" not in match_reasons:
-                    match_reasons.append("title")
-
-        # Filename match
-        for term in query_terms:
-            if term in path.stem.lower().replace("-", " "):
-                score += 0.3
-                if "filename" not in match_reasons:
-                    match_reasons.append("filename")
-
-        # Content match
-        for term in query_terms:
-            count = content_lower.count(term)
-            if count > 0:
-                score += min(0.1 * count, 0.4)
-                if "content" not in match_reasons:
-                    match_reasons.append("content")
-
-        if score > 0:
-            # Extract snippet
-            snippet = _extract_snippet(content, query_terms)
-            scored.append({
-                "page_id": path.stem,
-                "title": title,
-                "updated": fm.get("updated", "unknown"),
-                "score": round(score, 2),
-                "match_reasons": match_reasons,
-                "snippets": [snippet] if snippet else [],
-            })
-
-    # Sort by score
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    direct_hits = scored[:10]
+    query_terms = query.lower().split()
+    direct_hits = []
+    for r in results:
+        path = find_page(r.page_id)
+        snippet = _extract_snippet(path.read_text(), query_terms) if path else None
+        direct_hits.append({
+            "page_id": r.page_id,
+            "title": r.title,
+            "updated": r.updated,
+            "score": round(r.score, 4),
+            "snippets": [snippet] if snippet else [],
+        })
 
     # Expand via links
     expanded_hits = []
@@ -300,7 +282,7 @@ def wiki_search(query: str, depth: int = 1) -> str:
                     "updated": fm.get("updated", "unknown"),
                     "distance": 1,
                     "via": [hit["page_id"]],
-                    "score": round(hit["score"] * 0.5, 2),
+                    "score": round(hit["score"] * 0.5, 4),
                     "reason": "linked from direct hit",
                 })
                 edges.append({
@@ -309,14 +291,36 @@ def wiki_search(query: str, depth: int = 1) -> str:
                     "type": "wikilink",
                 })
 
+    filters_applied = {}
+    if folder:
+        filters_applied["folder"] = folder
+    if updated_after:
+        filters_applied["updated_after"] = updated_after
+    if updated_before:
+        filters_applied["updated_before"] = updated_before
+
     return json.dumps({
         "query": query,
         "depth": depth,
+        "search_mode": search_mode,
+        "filters_applied": filters_applied,
         "direct_hits": direct_hits,
         "expanded_hits": expanded_hits,
         "edges": edges,
-        "truncated": len(scored) > 10,
     }, ensure_ascii=False)
+
+
+@mcp.tool()
+def wiki_reindex() -> str:
+    """Rebuild search embeddings for all wiki pages.
+
+    Call this after bulk changes or to initialize semantic search.
+    """
+    from llm_wiki_mcp.search import update_embeddings
+    count = update_embeddings()
+    if count == 0:
+        return json.dumps({"status": "skipped", "message": "Ollama not available or no pages to update"})
+    return json.dumps({"status": "ok", "pages_updated": count})
 
 
 def _extract_snippet(content: str, terms: list[str], max_len: int = 150) -> str | None:
