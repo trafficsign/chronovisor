@@ -105,6 +105,13 @@ class BM25Index:
         # query view — query iterates `_cache.items()` directly.
         self._cache: dict[str, dict] = {}
         self._cache_loaded: bool = False
+        # Reentrant lock so the BM25 singleton can be safely shared between
+        # the FastMCP main thread and ingest's background thread. `build`
+        # mutates internal state; `query` iterates `_cache.items()`. Without
+        # this lock a concurrent build during a query raises
+        # "dictionary changed size during iteration" and `_df` can drift
+        # via interleaved subtract/add pairs.
+        self._lock = threading.RLock()
 
     # -- persistence ------------------------------------------------------
 
@@ -122,17 +129,37 @@ class BM25Index:
         # rebuild defensively if k1/b were tweaked between runs).
         if doc.get("k1") != self.k1 or doc.get("b") != self.b:
             return
+
+        # Validate shape before adopting any of the loaded state — a
+        # malformed-but-JSON-valid cache file would otherwise poison the
+        # singleton until the next manual rebuild.
         try:
-            self._cache = doc.get("docs", {})
+            raw_docs = doc.get("docs", {})
+            if not isinstance(raw_docs, dict):
+                raise ValueError("docs must be a dict")
+            for pid, entry in raw_docs.items():
+                if not isinstance(entry, dict):
+                    raise ValueError(f"entry {pid!r} not a dict")
+                tf_map = entry.get("tf_map")
+                if not isinstance(tf_map, dict):
+                    raise ValueError(f"entry {pid!r} missing tf_map dict")
+                if not isinstance(entry.get("doc_len"), int):
+                    raise ValueError(f"entry {pid!r} missing int doc_len")
+                if not isinstance(entry.get("mtime_ns"), int):
+                    raise ValueError(f"entry {pid!r} missing int mtime_ns")
+                if not isinstance(entry.get("size"), int):
+                    raise ValueError(f"entry {pid!r} missing int size")
             global_state = doc.get("global", {})
-            self._df = dict(global_state.get("df", {}))
-            self._n = int(global_state.get("n", 0))
-            self._avgdl = float(global_state.get("avgdl", 0.0))
+            df = dict(global_state.get("df", {}))
+            n = int(global_state.get("n", 0))
+            avgdl = float(global_state.get("avgdl", 0.0))
         except (KeyError, TypeError, ValueError):
-            self._cache = {}
-            self._df = {}
-            self._n = 0
-            self._avgdl = 0.0
+            return  # Leave the singleton in its empty state and rebuild fresh.
+
+        self._cache = raw_docs
+        self._df = df
+        self._n = n
+        self._avgdl = avgdl
 
     def _persist_cache(self) -> None:
         _BM25_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +185,10 @@ class BM25Index:
         changed. Mutated pages are re-tokenized and the `df` table is
         updated incrementally (subtract old contributions, add new).
         """
+        with self._lock:
+            self._build_locked()
+
+    def _build_locked(self) -> None:
         if not self._cache_loaded:
             self._load_cache()
             self._cache_loaded = True
@@ -251,45 +282,46 @@ class BM25Index:
 
     def query(self, query_text: str, top_n: int = 20) -> list[ScoredPage]:
         """Search the index."""
-        if not self._cache:
-            self.build()
+        with self._lock:
+            if not self._cache:
+                self._build_locked()
 
-        q_tokens = tokenize(query_text)
-        if not q_tokens:
-            return []
+            q_tokens = tokenize(query_text)
+            if not q_tokens:
+                return []
 
-        # Hoist hot constants out of the inner loop.
-        n = self._n
-        avgdl = self._avgdl
-        k1 = self.k1
-        b = self.b
-        df = self._df
+            # Hoist hot constants out of the inner loop.
+            n = self._n
+            avgdl = self._avgdl
+            k1 = self.k1
+            b = self.b
+            df = self._df
 
-        results = []
-        for pid, doc in self._cache.items():
-            tf_map = doc["tf_map"]
-            dl = doc["doc_len"]
-            score = 0.0
-            for qt in q_tokens:
-                tf = tf_map.get(qt, 0)
-                if tf == 0:
-                    continue
-                d = df.get(qt, 0)
-                idf = math.log((n - d + 0.5) / (d + 0.5) + 1)
-                tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl))
-                score += idf * tf_norm
+            results = []
+            for pid, doc in self._cache.items():
+                tf_map = doc["tf_map"]
+                dl = doc["doc_len"]
+                score = 0.0
+                for qt in q_tokens:
+                    tf = tf_map.get(qt, 0)
+                    if tf == 0:
+                        continue
+                    d = df.get(qt, 0)
+                    idf = math.log((n - d + 0.5) / (d + 0.5) + 1)
+                    tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl))
+                    score += idf * tf_norm
 
-            if score > 0:
-                results.append(ScoredPage(
-                    page_id=pid,
-                    title=doc["title"],
-                    folder=doc["folder"],
-                    updated=doc["updated"],
-                    score=score,
-                ))
+                if score > 0:
+                    results.append(ScoredPage(
+                        page_id=pid,
+                        title=doc["title"],
+                        folder=doc["folder"],
+                        updated=doc["updated"],
+                        score=score,
+                    ))
 
-        results.sort(key=lambda x: x.score, reverse=True)
-        return results[:top_n]
+            results.sort(key=lambda x: x.score, reverse=True)
+            return results[:top_n]
 
 
 # ---------------------------------------------------------------------------

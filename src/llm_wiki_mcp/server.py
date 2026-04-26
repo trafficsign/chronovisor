@@ -158,11 +158,14 @@ def wiki_status() -> str:
     raw_total = len(list(RAW_DIR.glob("*.md")))
     raw_pending = len(get_pending_raw_files())
 
-    # Check Ollama
+    # Check Ollama via the shared httpx client used by every other Ollama
+    # call in the process. The status string preserves the original
+    # vocabulary ("running" / "error" / "stopped") so callers see no
+    # behaviour change.
     ollama_status = "unknown"
     try:
-        import httpx
-        resp = httpx.get("http://localhost:11434/api/tags", timeout=3)
+        from llm_wiki_mcp.ollama import _client
+        resp = _client().get("/api/tags", timeout=3)
         if resp.status_code == 200:
             ollama_status = "running"
         else:

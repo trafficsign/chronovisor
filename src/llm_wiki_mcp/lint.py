@@ -39,7 +39,11 @@ def check() -> list[dict]:
 
     store = get_store()
     store.refresh()
-    version = store.corpus_version()
+    # Cache key mixes the corpus fingerprint with `date.today()` because
+    # the stale-page check both classifies and labels by today's date —
+    # without the date component a long-lived server crossing midnight
+    # would keep returning yesterday's classifications.
+    version = f"{store.corpus_version()}:{date.today().isoformat()}"
 
     with _CHECK_CACHE_LOCK:
         if _CHECK_CACHE_VERSION == version and _CHECK_CACHE_RESULT is not None:
