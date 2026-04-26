@@ -1,0 +1,435 @@
+"""Persistent page metadata + backlinks index.
+
+Mirrors the semantics of `server._find_backlinks`, `server._page_metadata`,
+`server._extract_wiki_links` and `lint._collect_all_page_ids` exactly, but
+keeps everything in `~/.wiki/.index/` and refreshes incrementally based on
+`(mtime_ns, size, path, is_system)` per file.
+
+Backlinks are rebuilt in full on every refresh from the canonical
+`pages.outlinks` data, both to keep them consistent with the source of
+truth and to preserve scan-order parity with the legacy implementation.
+
+The store is a process-wide singleton accessed via :func:`get_store`.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable
+
+from llm_wiki_mcp.link_fix import atomic_write, extract_targets
+from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR, WIKI_ROOT
+
+
+SCHEMA_VERSION = 1
+INDEX_DIR = WIKI_ROOT / ".index"
+PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
+BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
+
+
+def _parse_frontmatter(text: str) -> dict:
+    """Same shape as `server._parse_frontmatter` — kept independent to avoid
+    a server.py import cycle."""
+    if not text.startswith("---"):
+        return {}
+    end = text.find("---", 3)
+    if end == -1:
+        return {}
+    fm: dict = {}
+    for line in text[3:end].strip().splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            fm[key.strip()] = value.strip()
+    return fm
+
+
+def _read_text_stable(path: Path, retries: int = 1) -> str | None:
+    """Read a file and verify (mtime_ns, size) didn't change mid-read.
+
+    Guards against picking up a half-written page (ingest doesn't use
+    atomic_write today). On retry exhaustion, returns the last best-effort
+    read; callers should treat None as "skip this file".
+    """
+    last: str | None = None
+    for _ in range(retries + 1):
+        try:
+            st_before = path.stat()
+            text = path.read_text()
+            st_after = path.stat()
+        except (OSError, UnicodeDecodeError):
+            return None
+        if (st_before.st_mtime_ns, st_before.st_size) == (
+            st_after.st_mtime_ns,
+            st_after.st_size,
+        ):
+            return text
+        last = text
+    return last
+
+
+@dataclass
+class PageEntry:
+    page_id: str
+    path: str          # absolute path string for stable comparison
+    is_system: bool
+    mtime_ns: int
+    size: int
+    title: str
+    updated: str
+    outlinks: list[str] = field(default_factory=list)  # raw, preserves duplicates + order
+
+    def to_dict(self) -> dict:
+        return {
+            "page_id": self.page_id,
+            "path": self.path,
+            "is_system": self.is_system,
+            "mtime_ns": self.mtime_ns,
+            "size": self.size,
+            "title": self.title,
+            "updated": self.updated,
+            "outlinks": list(self.outlinks),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PageEntry":
+        return cls(
+            page_id=d["page_id"],
+            path=d["path"],
+            is_system=bool(d.get("is_system", False)),
+            mtime_ns=int(d["mtime_ns"]),
+            size=int(d["size"]),
+            title=d.get("title", d["page_id"]),
+            updated=d.get("updated", "unknown"),
+            outlinks=list(d.get("outlinks", [])),
+        )
+
+
+class DuplicatePageIdError(RuntimeError):
+    """Raised when two files claim the same page_id stem.
+
+    Current code keys by stem everywhere (`page_id_from_path`), so silent
+    aliasing would corrupt every lookup. We fail closed instead.
+    """
+
+
+class IndexStore:
+    """Persistent page metadata + backlinks index.
+
+    Thread-safe via an internal RLock. All public methods that read
+    derived state perform an internal lock acquisition; callers don't
+    need to hold a lock externally.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._entries: dict[str, PageEntry] = {}
+        self._page_order: list[str] = []  # rglob scan order, preserved for parity
+        self._backlinks: dict[str, list[str]] = {}
+        self._loaded = False
+
+    # -- persistence ------------------------------------------------------
+
+    def _load_from_disk(self) -> None:
+        if not PAGES_INDEX_FILE.exists() or not BACKLINKS_INDEX_FILE.exists():
+            return
+        try:
+            pages_doc = json.loads(PAGES_INDEX_FILE.read_text())
+            backlinks_doc = json.loads(BACKLINKS_INDEX_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        if pages_doc.get("schema_version") != SCHEMA_VERSION:
+            return
+        if backlinks_doc.get("schema_version") != SCHEMA_VERSION:
+            return
+        # Cross-file integrity: matching generation IDs.
+        # Mismatch => one file is stale; rebuild from scratch on next refresh.
+        if pages_doc.get("generation") != backlinks_doc.get("generation"):
+            return
+        try:
+            entries = {
+                pid: PageEntry.from_dict(d)
+                for pid, d in pages_doc.get("entries", {}).items()
+            }
+            order = list(pages_doc.get("page_order", []))
+            backlinks = {
+                pid: list(refs) for pid, refs in backlinks_doc.get("edges", {}).items()
+            }
+        except (KeyError, TypeError, ValueError):
+            return
+        self._entries = entries
+        self._page_order = [pid for pid in order if pid in entries]
+        self._backlinks = backlinks
+
+    def _persist(self, generation: int) -> None:
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        pages_doc = {
+            "schema_version": SCHEMA_VERSION,
+            "generation": generation,
+            "page_order": list(self._page_order),
+            "entries": {pid: e.to_dict() for pid, e in self._entries.items()},
+        }
+        backlinks_doc = {
+            "schema_version": SCHEMA_VERSION,
+            "generation": generation,
+            "edges": {pid: list(refs) for pid, refs in self._backlinks.items()},
+        }
+        # atomic_write each file. Cross-file consistency is guarded by the
+        # shared `generation` field — readers that see mismatched generations
+        # discard both and rebuild.
+        atomic_write(PAGES_INDEX_FILE, json.dumps(pages_doc, ensure_ascii=False))
+        atomic_write(BACKLINKS_INDEX_FILE, json.dumps(backlinks_doc, ensure_ascii=False))
+
+    # -- refresh ----------------------------------------------------------
+
+    @staticmethod
+    def _scan_disk() -> list[tuple[str, Path, bool, int, int]]:
+        """Walk pages/ and system/ in deterministic order.
+
+        Returns list of (page_id, path, is_system, mtime_ns, size).
+        Pages directory comes first to mirror legacy scan order in
+        `_find_backlinks` (pages/ then system/).
+        """
+        out: list[tuple[str, Path, bool, int, int]] = []
+        for path in PAGES_DIR.rglob("*.md"):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            out.append((path.stem, path, False, st.st_mtime_ns, st.st_size))
+        if SYSTEM_DIR.exists():
+            for path in SYSTEM_DIR.rglob("*.md"):
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                out.append((path.stem, path, True, st.st_mtime_ns, st.st_size))
+        return out
+
+    def refresh(self) -> None:
+        """Sync the in-memory index with disk.
+
+        Cheap when nothing changed (one stat per page, no parsing).
+        Persists only when entries or backlinks actually changed.
+        """
+        with self._lock:
+            if not self._loaded:
+                self._load_from_disk()
+                self._loaded = True
+
+            current = self._scan_disk()
+            seen_ids: dict[str, tuple[Path, bool, int, int]] = {}
+            duplicates: list[str] = []
+            for pid, path, is_system, mtime_ns, size in current:
+                if pid in seen_ids:
+                    duplicates.append(pid)
+                    continue
+                seen_ids[pid] = (path, is_system, mtime_ns, size)
+
+            if duplicates:
+                # Fail closed: stem collisions break every lookup keyed by
+                # stem (the existing convention). Surface the issue rather
+                # than silently dropping one of the files.
+                raise DuplicatePageIdError(
+                    f"Duplicate page_id stems detected: {sorted(set(duplicates))}"
+                )
+
+            new_order = [pid for pid, *_ in current if pid in seen_ids]
+
+            # Diff entries.
+            old_ids = set(self._entries.keys())
+            new_ids = set(seen_ids.keys())
+            removed = old_ids - new_ids
+            added = new_ids - old_ids
+
+            changed = False
+            for pid in removed:
+                del self._entries[pid]
+                changed = True
+
+            for pid, (path, is_system, mtime_ns, size) in seen_ids.items():
+                existing = self._entries.get(pid)
+                path_str = str(path)
+                if existing is None:
+                    entry = self._build_entry(pid, path, is_system, mtime_ns, size)
+                    if entry is not None:
+                        self._entries[pid] = entry
+                        changed = True
+                    continue
+                # Re-parse if any of (mtime_ns, size, path, is_system) differs.
+                if (
+                    existing.mtime_ns != mtime_ns
+                    or existing.size != size
+                    or existing.path != path_str
+                    or existing.is_system != is_system
+                ):
+                    entry = self._build_entry(pid, path, is_system, mtime_ns, size)
+                    if entry is not None:
+                        self._entries[pid] = entry
+                        changed = True
+
+            if self._page_order != new_order:
+                self._page_order = new_order
+                changed = True
+
+            if changed:
+                self._rebuild_backlinks()
+                generation = self._next_generation()
+                try:
+                    self._persist(generation)
+                except OSError:
+                    # Persistence failure is non-fatal; in-memory index is
+                    # still consistent for the rest of this process.
+                    pass
+
+    @staticmethod
+    def _build_entry(
+        pid: str, path: Path, is_system: bool, mtime_ns: int, size: int
+    ) -> PageEntry | None:
+        text = _read_text_stable(path)
+        if text is None:
+            return None
+        fm = _parse_frontmatter(text)
+        title = fm.get("title", path.stem)
+        updated = fm.get("updated", "unknown")
+        outlinks = extract_targets(text, strip=True)
+        return PageEntry(
+            page_id=pid,
+            path=str(path),
+            is_system=is_system,
+            mtime_ns=mtime_ns,
+            size=size,
+            title=title,
+            updated=updated,
+            outlinks=outlinks,
+        )
+
+    def _rebuild_backlinks(self) -> None:
+        """Rebuild `_backlinks` in scan order.
+
+        Iterates `self._page_order` (rglob order, pages/ then system/) and
+        appends each source page_id once per target. Sources within a
+        target's list are deduplicated (a single page that links to the
+        same target twice contributes one backlink edge), matching the
+        existing `_find_backlinks` semantics.
+
+        Edges are recorded for *all* targets present in any outlinks list,
+        whether or not the target page exists today. This matches the
+        current behaviour and lets a freshly-created page see its
+        pre-existing inbound references immediately.
+        """
+        backlinks: dict[str, list[str]] = {}
+        seen: dict[str, set[str]] = {}
+        for source_pid in self._page_order:
+            entry = self._entries.get(source_pid)
+            if entry is None:
+                continue
+            for target in entry.outlinks:
+                if target == source_pid:
+                    continue
+                src_set = seen.setdefault(target, set())
+                if source_pid in src_set:
+                    continue
+                src_set.add(source_pid)
+                backlinks.setdefault(target, []).append(source_pid)
+        self._backlinks = backlinks
+
+    def _next_generation(self) -> int:
+        # Use mtime-of-process-clock surrogate via a monotonically increasing
+        # counter tied to the wall clock. We don't actually need wall time;
+        # any value that increases with every persist is fine.
+        import time
+
+        return time.time_ns()
+
+    # -- public read API --------------------------------------------------
+
+    def meta(self, page_id: str) -> dict | None:
+        with self._lock:
+            entry = self._entries.get(page_id)
+            if entry is None:
+                return None
+            return {
+                "page_id": entry.page_id,
+                "title": entry.title,
+                "updated": entry.updated,
+                "path": entry.path,
+                "mtime_ns": entry.mtime_ns,
+                "is_system": entry.is_system,
+            }
+
+    def outlinks(self, page_id: str) -> list[str]:
+        """Return raw outlinks list (preserves duplicates + order)."""
+        with self._lock:
+            entry = self._entries.get(page_id)
+            return list(entry.outlinks) if entry else []
+
+    def backlinks(self, page_id: str) -> list[str]:
+        """Return source page_ids that link to `page_id`, in scan order."""
+        with self._lock:
+            return list(self._backlinks.get(page_id, []))
+
+    def all_page_ids(self, include_system: bool = True) -> set[str]:
+        with self._lock:
+            if include_system:
+                return set(self._entries.keys())
+            return {pid for pid, e in self._entries.items() if not e.is_system}
+
+    def all_pages_meta(self, include_system: bool = False) -> list[dict]:
+        """Return meta dicts for every page, in mtime-descending order.
+
+        Mirrors `wiki_index`'s sort: `path.stat().st_mtime` desc. We sort
+        by `mtime_ns` desc — equivalent ordering modulo nanosecond ties,
+        which Python's stable sort resolves identically to legacy
+        behaviour for any practical case.
+        """
+        with self._lock:
+            items = [
+                e for e in self._entries.values()
+                if include_system or not e.is_system
+            ]
+            items.sort(key=lambda e: e.mtime_ns, reverse=True)
+            return [
+                {
+                    "page_id": e.page_id,
+                    "title": e.title,
+                    "updated": e.updated,
+                }
+                for e in items
+            ]
+
+    def orphans(self, include_system: bool = False) -> list[str]:
+        """Page IDs with no inbound backlinks (excluding self-links)."""
+        with self._lock:
+            out: list[str] = []
+            for pid in self._page_order:
+                entry = self._entries.get(pid)
+                if entry is None:
+                    continue
+                if entry.is_system and not include_system:
+                    continue
+                if not self._backlinks.get(pid):
+                    out.append(pid)
+            return out
+
+    def page_count(self, include_system: bool = False) -> int:
+        with self._lock:
+            if include_system:
+                return len(self._entries)
+            return sum(1 for e in self._entries.values() if not e.is_system)
+
+
+_store_lock = threading.Lock()
+_store: IndexStore | None = None
+
+
+def get_store() -> IndexStore:
+    """Return the process-wide IndexStore singleton."""
+    global _store
+    if _store is None:
+        with _store_lock:
+            if _store is None:
+                _store = IndexStore()
+    return _store

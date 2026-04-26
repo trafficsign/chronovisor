@@ -327,6 +327,16 @@ def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None)
             created, updated = _apply_operations(all_operations)
             _rebuild_index()
 
+            # Refresh the IndexStore so subsequent reads see fresh
+            # backlinks/outlinks. Do this *before* embedding updates so
+            # that any code path that consults the index during embedding
+            # gets the new state.
+            try:
+                from llm_wiki_mcp.index_store import get_store
+                get_store().refresh()
+            except Exception as e:
+                _append_log(f"ingest | index_store refresh failed: {e}")
+
             # Update search embeddings
             changed_pages = created + updated
             if changed_pages:

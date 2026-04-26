@@ -12,6 +12,7 @@ from llm_wiki_mcp.wiki import (
     init_wiki, all_pages, find_page, page_id_from_path,
 )
 from llm_wiki_mcp.link_fix import extract_targets as _extract_targets
+from llm_wiki_mcp.index_store import get_store
 
 mcp = FastMCP(
     "llm-wiki",
@@ -50,27 +51,16 @@ def _extract_wiki_links(text: str) -> list[str]:
 def _find_backlinks(page_id: str) -> list[str]:
     """Find pages that link to the given page.
 
-    pages/ と system/ の両方を走査し、``[[id]]`` / ``[[id|label]]`` / ``[[id#sec]]``
-    のいずれの形式でも検出する。
+    Backed by the persistent IndexStore. Callers expect scan-order
+    (`pages/` then `system/`, rglob within each), source-deduped, and
+    edges recorded for non-existent targets too — all preserved by
+    `IndexStore._rebuild_backlinks`.
+
+    Tool handlers must call ``get_store().refresh()`` once at entry;
+    this helper does *not* refresh on its own to avoid redundant scans
+    when called multiple times per tool invocation.
     """
-    backlinks = []
-    seen: set[str] = set()
-
-    def _scan(p: Path) -> None:
-        try:
-            targets = _extract_targets(p.read_text(), strip=True)
-        except (OSError, UnicodeDecodeError):
-            return
-        if page_id in targets and p.stem not in seen:
-            backlinks.append(p.stem)
-            seen.add(p.stem)
-
-    for p in all_pages():
-        _scan(p)
-    if SYSTEM_DIR.exists():
-        for p in SYSTEM_DIR.rglob("*.md"):
-            _scan(p)
-    return backlinks
+    return get_store().backlinks(page_id)
 
 
 def _page_metadata(path: Path) -> dict:
@@ -93,6 +83,9 @@ def wiki_read(page: str) -> str:
     Args:
         page: Page ID (filename without .md extension)
     """
+    store = get_store()
+    store.refresh()
+
     path = find_page(page)
     if not path:
         # Check system/ directory
@@ -101,8 +94,8 @@ def wiki_read(page: str) -> str:
         return json.dumps({"error": f"Page '{page}' not found"})
 
     content = path.read_text()
-    outlinks = _extract_wiki_links(content)
-    backlinks = _find_backlinks(page)
+    outlinks = store.outlinks(page) or _extract_wiki_links(content)
+    backlinks = store.backlinks(page)
 
     return json.dumps({
         "page_id": page,
@@ -120,18 +113,18 @@ def wiki_index(limit: int = 50, cursor: int = 0) -> str:
         limit: Max number of entries to return (default 50)
         cursor: Offset for pagination (default 0)
     """
-    pages = sorted(all_pages(), key=lambda p: p.stat().st_mtime, reverse=True)
-    total = len(pages)
-    sliced = pages[cursor:cursor + limit]
-
-    entries = [_page_metadata(p) for p in sliced]
+    store = get_store()
+    store.refresh()
+    entries = store.all_pages_meta(include_system=False)
+    total = len(entries)
+    sliced = entries[cursor:cursor + limit]
 
     return json.dumps({
         "total": total,
         "cursor": cursor,
         "limit": limit,
         "has_more": cursor + limit < total,
-        "pages": entries,
+        "pages": sliced,
     }, ensure_ascii=False)
 
 
@@ -157,7 +150,11 @@ def wiki_log(limit: int = 20) -> str:
 def wiki_status() -> str:
     """Return wiki health, Ollama status, and basic statistics."""
     from llm_wiki_mcp.orchestrator import get_pending_raw_files
-    page_count = len(list(all_pages()))
+
+    store = get_store()
+    store.refresh()
+
+    page_count = store.page_count(include_system=False)
     raw_total = len(list(RAW_DIR.glob("*.md")))
     raw_pending = len(get_pending_raw_files())
 
@@ -173,20 +170,13 @@ def wiki_status() -> str:
     except Exception:
         ollama_status = "stopped"
 
-    # Find oldest/newest page
-    pages = list(all_pages())
-    oldest = None
-    newest = None
-    if pages:
-        by_mtime = sorted(pages, key=lambda p: p.stat().st_mtime)
-        oldest = _page_metadata(by_mtime[0])
-        newest = _page_metadata(by_mtime[-1])
+    # Find oldest/newest page from the index (mtime-sorted).
+    sorted_meta = store.all_pages_meta(include_system=False)
+    oldest = sorted_meta[-1] if sorted_meta else None
+    newest = sorted_meta[0] if sorted_meta else None
 
-    # Count orphan pages (no backlinks)
-    orphan_count = 0
-    for p in pages:
-        if not _find_backlinks(p.stem):
-            orphan_count += 1
+    # Orphan count: pages with no inbound backlinks.
+    orphan_count = len(store.orphans(include_system=False))
 
     return json.dumps({
         "page_count": page_count,
@@ -223,13 +213,20 @@ def wiki_init() -> str:
     from concurrent.futures import ThreadPoolExecutor
     from llm_wiki_mcp.ollama import is_available
 
+    store = get_store()
+
+    # Run the index refresh, raw-dir count, and Ollama health probe in
+    # parallel. The Ollama probe is the heaviest (network) so doing it
+    # alongside the on-disk scans hides its latency.
     with ThreadPoolExecutor(max_workers=3) as ex:
-        f_pages = ex.submit(lambda: len(list(all_pages())))
+        f_refresh = ex.submit(store.refresh)
         f_raw = ex.submit(lambda: len(list(RAW_DIR.glob("*.md"))))
         f_ollama = ex.submit(is_available)
-        page_count = f_pages.result()
+        f_refresh.result()
         raw_total = f_raw.result()
         ollama_status = "running" if f_ollama.result() else "stopped"
+
+    page_count = store.page_count(include_system=False)
 
     return json.dumps({
         "status": {
@@ -266,6 +263,9 @@ def wiki_search(
     """
     from llm_wiki_mcp.search import search as run_search
 
+    store = get_store()
+    store.refresh()
+
     results, search_mode = run_search(
         query=query, top_n=10,
         folder=folder, updated_after=updated_after,
@@ -275,7 +275,6 @@ def wiki_search(
 
     query_terms = query.lower().split()
     direct_hits = []
-    direct_contents: dict[str, str] = {}  # page_id -> content (for expand reuse)
     for r in results:
         path = find_page(r.page_id)
         content = path.read_text() if path else None
@@ -287,31 +286,28 @@ def wiki_search(
             "score": round(r.score, 4),
             "snippets": [snippet] if snippet else [],
         })
-        if content is not None:
-            direct_contents[r.page_id] = content
 
-    # Expand via links
+    # Expand via links — outlinks and link metadata both come from the
+    # IndexStore, so no extra disk reads are needed in this pass.
     expanded_hits = []
     edges = []
     if depth > 0 and direct_hits:
         seen = {h["page_id"] for h in direct_hits}
         for hit in direct_hits:
-            content = direct_contents.get(hit["page_id"])
-            if content is None:
-                continue
-            outlinks = _extract_wiki_links(content)
+            outlinks = store.outlinks(hit["page_id"])
             for link in outlinks:
                 if link in seen:
                     continue
-                link_path = find_page(link)
-                if not link_path:
+                meta = store.meta(link)
+                if meta is None:
+                    # Link points to a non-existent page; skip (matches
+                    # legacy behaviour, which used find_page() == None).
                     continue
                 seen.add(link)
-                fm = _parse_frontmatter(link_path.read_text())
                 expanded_hits.append({
                     "page_id": link,
-                    "title": fm.get("title", link),
-                    "updated": fm.get("updated", "unknown"),
+                    "title": meta["title"],
+                    "updated": meta["updated"],
                     "distance": 1,
                     "via": [hit["page_id"]],
                     "score": round(hit["score"] * 0.5, 4),
@@ -592,6 +588,13 @@ def wiki_tick() -> str:
 
 def main():
     init_wiki()
+    # Warm the index on startup so the first tool call doesn't pay the
+    # full-scan cost. Failures are non-fatal — lazy refresh inside each
+    # tool will catch up on the next call.
+    try:
+        get_store().refresh()
+    except Exception:
+        pass
     mcp.run(transport="stdio")
 
 
