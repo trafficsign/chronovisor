@@ -108,8 +108,8 @@ def _build_focused_context(op: dict, raw_content: str) -> str:
 def _search_related_pages(keywords: list[str], min_score: float = 0.5, top_n: int = 8) -> list[Path]:
     """Search for related pages using keywords. Uses BM25 if available, falls back to simple matching."""
     try:
-        from llm_wiki_mcp.search import BM25Index
-        bm25 = BM25Index()
+        from llm_wiki_mcp.search import get_bm25
+        bm25 = get_bm25()
         bm25.build()
         results = bm25.query(" ".join(keywords), top_n=top_n)
         return [find_page(r.page_id) for r in results if find_page(r.page_id)]

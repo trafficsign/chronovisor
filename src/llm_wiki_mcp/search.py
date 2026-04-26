@@ -3,10 +3,12 @@
 import json
 import math
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, all_pages, page_id_from_path
+from llm_wiki_mcp.link_fix import atomic_write
 
 
 # ---------------------------------------------------------------------------
@@ -75,82 +77,242 @@ def tokenize(text: str) -> list[str]:
 # BM25
 # ---------------------------------------------------------------------------
 
+_BM25_CACHE_FILE = WIKI_ROOT / ".index" / "bm25.json"
+_BM25_CACHE_SCHEMA = 1
+
+
 class BM25Index:
-    """In-memory BM25 index built on-the-fly."""
+    """BM25 index with persistent per-page caching.
+
+    Per-page tokenization output (`tf_map`, `doc_len`, frontmatter
+    fields) is cached on disk keyed by `(mtime_ns, size)`. On subsequent
+    builds, only added/changed/removed pages touch the tokenizer; the
+    global `df` table is maintained incrementally and `avgdl` is
+    recomputed in O(N) over cached `doc_len` values.
+
+    Query-time scoring reads `tf_map` directly instead of recounting
+    tokens from a stored token list, eliminating the per-query
+    O(total_tokens) scan that the previous in-memory build incurred.
+    """
 
     def __init__(self, k1: float = 1.5, b: float = 0.75):
         self.k1 = k1
         self.b = b
-        self._docs: list[tuple[str, str, str, str, list[str]]] = []  # (page_id, title, folder, updated, tokens)
         self._df: dict[str, int] = {}
         self._avgdl: float = 0.0
         self._n: int = 0
+        # `_cache` doubles as the on-disk persistent state and the in-memory
+        # query view — query iterates `_cache.items()` directly.
+        self._cache: dict[str, dict] = {}
+        self._cache_loaded: bool = False
+
+    # -- persistence ------------------------------------------------------
+
+    def _load_cache(self) -> None:
+        if not _BM25_CACHE_FILE.exists():
+            return
+        try:
+            doc = json.loads(_BM25_CACHE_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        if doc.get("schema_version") != _BM25_CACHE_SCHEMA:
+            return
+        # Parameter change invalidates the cache (`tf` weights stay the
+        # same but `df`/`avgdl` are tied to the corpus, and we want to
+        # rebuild defensively if k1/b were tweaked between runs).
+        if doc.get("k1") != self.k1 or doc.get("b") != self.b:
+            return
+        try:
+            self._cache = doc.get("docs", {})
+            global_state = doc.get("global", {})
+            self._df = dict(global_state.get("df", {}))
+            self._n = int(global_state.get("n", 0))
+            self._avgdl = float(global_state.get("avgdl", 0.0))
+        except (KeyError, TypeError, ValueError):
+            self._cache = {}
+            self._df = {}
+            self._n = 0
+            self._avgdl = 0.0
+
+    def _persist_cache(self) -> None:
+        _BM25_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        doc = {
+            "schema_version": _BM25_CACHE_SCHEMA,
+            "k1": self.k1,
+            "b": self.b,
+            "global": {
+                "n": self._n,
+                "avgdl": self._avgdl,
+                "df": self._df,
+            },
+            "docs": self._cache,
+        }
+        atomic_write(_BM25_CACHE_FILE, json.dumps(doc, ensure_ascii=False))
+
+    # -- build ------------------------------------------------------------
 
     def build(self) -> None:
-        """Build index from all wiki pages."""
-        self._docs = []
-        self._df = {}
-        total_len = 0
+        """Sync cache with disk and rebuild the in-memory query view.
 
+        Cheap on warm runs: O(N) stat calls + zero parsing if nothing
+        changed. Mutated pages are re-tokenized and the `df` table is
+        updated incrementally (subtract old contributions, add new).
+        """
+        if not self._cache_loaded:
+            self._load_cache()
+            self._cache_loaded = True
+
+        # Snapshot disk state.
+        current: dict[str, tuple[Path, int, int]] = {}
         for path in all_pages():
-            content = path.read_text()
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            pid = page_id_from_path(path)
+            current[pid] = (path, st.st_mtime_ns, st.st_size)
+
+        old_ids = set(self._cache.keys())
+        new_ids = set(current.keys())
+        removed = old_ids - new_ids
+        changed = False
+
+        # Removed pages: subtract from df
+        for pid in removed:
+            old = self._cache.pop(pid)
+            self._subtract_from_df(old.get("tf_map", {}))
+            changed = True
+
+        # New / modified pages
+        for pid, (path, mtime_ns, size) in current.items():
+            old = self._cache.get(pid)
+            if old and old.get("mtime_ns") == mtime_ns and old.get("size") == size:
+                continue  # unchanged
+            if old:
+                self._subtract_from_df(old.get("tf_map", {}))
+            try:
+                content = path.read_text()
+            except (OSError, UnicodeDecodeError):
+                # Drop the cache entry entirely so we don't keep stale stats.
+                self._cache.pop(pid, None)
+                changed = True
+                continue
             fm_match = re.search(r"title:\s*(.+)", content)
-            title = fm_match.group(1).strip() if fm_match else path.stem
+            title = fm_match.group(1).strip() if fm_match else pid
             updated_match = re.search(r"updated:\s*(.+)", content)
             updated = updated_match.group(1).strip() if updated_match else ""
             folder = path.parent.name if path.parent != PAGES_DIR else ""
 
-            # Tokenize with title boost (repeat title tokens)
             title_tokens = tokenize(title) * 3
             body_tokens = tokenize(content)
-            all_tokens = title_tokens + body_tokens
+            tokens = title_tokens + body_tokens
+            tf_map: dict[str, int] = {}
+            for tok in tokens:
+                tf_map[tok] = tf_map.get(tok, 0) + 1
+            doc_len = len(tokens)
 
-            self._docs.append((page_id_from_path(path), title, folder, updated, all_tokens))
-            total_len += len(all_tokens)
+            self._add_to_df(tf_map)
 
-            seen = set(all_tokens)
-            for tok in seen:
-                self._df[tok] = self._df.get(tok, 0) + 1
+            self._cache[pid] = {
+                "mtime_ns": mtime_ns,
+                "size": size,
+                "title": title,
+                "folder": folder,
+                "updated": updated,
+                "doc_len": doc_len,
+                "tf_map": tf_map,
+            }
+            changed = True
 
-        self._n = len(self._docs)
-        self._avgdl = total_len / self._n if self._n else 1.0
+        # Recompute globals only if the corpus changed; otherwise the
+        # n/avgdl loaded from the cache are still authoritative.
+        if changed:
+            self._n = len(self._cache)
+            total_len = sum(d.get("doc_len", 0) for d in self._cache.values())
+            self._avgdl = total_len / self._n if self._n else 1.0
+            try:
+                self._persist_cache()
+            except OSError:
+                pass
+
+    def _subtract_from_df(self, tf_map: dict) -> None:
+        for tok in tf_map.keys():
+            current = self._df.get(tok, 0)
+            if current <= 1:
+                self._df.pop(tok, None)
+            else:
+                self._df[tok] = current - 1
+
+    def _add_to_df(self, tf_map: dict) -> None:
+        for tok in tf_map.keys():
+            self._df[tok] = self._df.get(tok, 0) + 1
+
+    # -- query ------------------------------------------------------------
 
     def query(self, query_text: str, top_n: int = 20) -> list[ScoredPage]:
         """Search the index."""
-        if not self._docs:
+        if not self._cache:
             self.build()
 
         q_tokens = tokenize(query_text)
         if not q_tokens:
             return []
 
+        # Hoist hot constants out of the inner loop.
+        n = self._n
+        avgdl = self._avgdl
+        k1 = self.k1
+        b = self.b
+        df = self._df
+
         results = []
-        for page_id, title, folder, updated, doc_tokens in self._docs:
+        for pid, doc in self._cache.items():
+            tf_map = doc["tf_map"]
+            dl = doc["doc_len"]
             score = 0.0
-            dl = len(doc_tokens)
-
-            # Count term frequencies
-            tf_map: dict[str, int] = {}
-            for tok in doc_tokens:
-                tf_map[tok] = tf_map.get(tok, 0) + 1
-
             for qt in q_tokens:
                 tf = tf_map.get(qt, 0)
                 if tf == 0:
                     continue
-                df = self._df.get(qt, 0)
-                idf = math.log((self._n - df + 0.5) / (df + 0.5) + 1)
-                tf_norm = (tf * (self.k1 + 1)) / (tf + self.k1 * (1 - self.b + self.b * dl / self._avgdl))
+                d = df.get(qt, 0)
+                idf = math.log((n - d + 0.5) / (d + 0.5) + 1)
+                tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl))
                 score += idf * tf_norm
 
             if score > 0:
                 results.append(ScoredPage(
-                    page_id=page_id, title=title, folder=folder,
-                    updated=updated, score=score,
+                    page_id=pid,
+                    title=doc["title"],
+                    folder=doc["folder"],
+                    updated=doc["updated"],
+                    score=score,
                 ))
 
         results.sort(key=lambda x: x.score, reverse=True)
         return results[:top_n]
+
+
+# ---------------------------------------------------------------------------
+# BM25 singleton — shared across `search()` and `ingest._search_related_pages`
+# ---------------------------------------------------------------------------
+
+_BM25_LOCK = threading.Lock()
+_BM25_SINGLETON: BM25Index | None = None
+
+
+def get_bm25() -> BM25Index:
+    """Return the process-wide BM25Index instance.
+
+    All callers go through this so that the disk-cache load + persisted
+    state are paid at most once per process; subsequent `build()` calls
+    are O(stat) when nothing changed.
+    """
+    global _BM25_SINGLETON
+    if _BM25_SINGLETON is None:
+        with _BM25_LOCK:
+            if _BM25_SINGLETON is None:
+                _BM25_SINGLETON = BM25Index()
+    return _BM25_SINGLETON
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +512,7 @@ def search(
     # Fetch more results before filtering to avoid truncation-before-filter bug
     fetch_n = max(top_n * 5, 100)
 
-    bm25 = BM25Index()
+    bm25 = get_bm25()
     bm25.build()
     bm25_results = bm25.query(query, top_n=fetch_n)
 

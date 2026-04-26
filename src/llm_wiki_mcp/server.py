@@ -588,11 +588,16 @@ def wiki_tick() -> str:
 
 def main():
     init_wiki()
-    # Warm the index on startup so the first tool call doesn't pay the
-    # full-scan cost. Failures are non-fatal — lazy refresh inside each
-    # tool will catch up on the next call.
+    # Warm both the page index and the BM25 cache on startup so the first
+    # tool call doesn't pay the full-scan cost. Failures are non-fatal —
+    # lazy refresh inside each tool will catch up on the next call.
     try:
         get_store().refresh()
+    except Exception:
+        pass
+    try:
+        from llm_wiki_mcp.search import get_bm25
+        get_bm25().build()
     except Exception:
         pass
     mcp.run(transport="stdio")
