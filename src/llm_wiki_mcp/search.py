@@ -316,62 +316,244 @@ def get_bm25() -> BM25Index:
 
 
 # ---------------------------------------------------------------------------
-# Semantic search (Ollama embeddings)
+# Semantic search (Ollama embeddings) — SQLite-backed, incremental writes
 # ---------------------------------------------------------------------------
+#
+# Storage model:
+#   ~/.wiki/.index/embeddings.sqlite has one table:
+#     embeddings(page_id PK, vector BLOB, mtime REAL, norm REAL, dim INT)
+#   `vector` is a packed float32 array (4 bytes per dim → ~3KB per 768-dim
+#   vector). `norm` is precomputed at write time so semantic_search never
+#   recomputes per-row norms at query time.
+#
+# Migration: a one-shot import from the legacy ~/.wiki/.embeddings.json runs
+# on first connect when the SQLite file does not yet exist.
 
-EMBEDDINGS_FILE = WIKI_ROOT / ".embeddings.json"
+import sqlite3
+import struct
+
 EMBED_MODEL = "nomic-embed-text"
 
+EMBEDDINGS_DB = WIKI_ROOT / ".index" / "embeddings.sqlite"
+LEGACY_EMBEDDINGS_FILE = WIKI_ROOT / ".embeddings.json"
+EMBEDDINGS_FILE = LEGACY_EMBEDDINGS_FILE  # back-compat alias for any external imports
 
-def _load_embeddings() -> dict:
-    if EMBEDDINGS_FILE.exists():
-        return json.loads(EMBEDDINGS_FILE.read_text())
-    return {}
+_EMBED_DB_LOCK = threading.Lock()
 
 
-def _save_embeddings(data: dict) -> None:
-    EMBEDDINGS_FILE.write_text(json.dumps(data, ensure_ascii=False))
+def _pack_vector(vec: list[float]) -> bytes:
+    # Use 8-byte doubles to preserve full Python-float precision; the
+    # original JSON store kept doubles, so cosine math must round-trip
+    # bit-for-bit to keep semantic_search results identical.
+    return struct.pack(f"<{len(vec)}d", *vec)
+
+
+def _unpack_vector(blob: bytes, dim: int) -> list[float]:
+    return list(struct.unpack(f"<{dim}d", blob))
+
+
+def _vec_norm(vec: list[float]) -> float:
+    return math.sqrt(sum(x * x for x in vec))
+
+
+def _connect_embeddings() -> sqlite3.Connection:
+    EMBEDDINGS_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(EMBEDDINGS_DB)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS embeddings (
+            page_id TEXT PRIMARY KEY,
+            vector BLOB NOT NULL,
+            mtime REAL NOT NULL,
+            norm REAL NOT NULL,
+            dim INTEGER NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+_legacy_migration_done = False
+
+
+def _maybe_migrate_legacy_json() -> None:
+    """One-shot import of ~/.wiki/.embeddings.json into SQLite.
+
+    Runs at most once per process. The legacy file is left in place so a
+    rollback to the old code path remains possible; subsequent runs are
+    no-ops because the SQLite table is already populated.
+    """
+    global _legacy_migration_done
+    if _legacy_migration_done:
+        return
+    with _EMBED_DB_LOCK:
+        if _legacy_migration_done:
+            return
+        if not LEGACY_EMBEDDINGS_FILE.exists():
+            _legacy_migration_done = True
+            return
+        try:
+            payload = json.loads(LEGACY_EMBEDDINGS_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            _legacy_migration_done = True
+            return
+        if not isinstance(payload, dict) or not payload:
+            _legacy_migration_done = True
+            return
+        conn = _connect_embeddings()
+        try:
+            existing = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            if existing > 0:
+                _legacy_migration_done = True
+                return
+            rows = []
+            for pid, data in payload.items():
+                vec = data.get("vector") if isinstance(data, dict) else None
+                if not vec:
+                    continue
+                mtime = float(data.get("mtime", 0.0))
+                norm = _vec_norm(vec)
+                rows.append((pid, _pack_vector(vec), mtime, norm, len(vec)))
+            if rows:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO embeddings VALUES (?, ?, ?, ?, ?)",
+                    rows,
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        _legacy_migration_done = True
+
+
+def _load_embedding(pid: str) -> tuple[list[float], float, float] | None:
+    """Return (vector, mtime, norm) for a single page, or None."""
+    _maybe_migrate_legacy_json()
+    conn = _connect_embeddings()
+    try:
+        row = conn.execute(
+            "SELECT vector, mtime, norm, dim FROM embeddings WHERE page_id = ?",
+            (pid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    blob, mtime, norm, dim = row
+    return _unpack_vector(blob, int(dim)), float(mtime), float(norm)
+
+
+def _store_embeddings_batch(rows: list[tuple[str, list[float], float]]) -> None:
+    """Insert/replace a batch of (page_id, vector, mtime) rows."""
+    if not rows:
+        return
+    packed = [
+        (pid, _pack_vector(vec), float(mtime), _vec_norm(vec), len(vec))
+        for pid, vec, mtime in rows
+    ]
+    with _EMBED_DB_LOCK:
+        conn = _connect_embeddings()
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO embeddings VALUES (?, ?, ?, ?, ?)",
+                packed,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
+    """Snapshot all rows as (page_id, vector, mtime, norm)."""
+    _maybe_migrate_legacy_json()
+    conn = _connect_embeddings()
+    try:
+        rows = conn.execute(
+            "SELECT page_id, vector, mtime, norm, dim FROM embeddings"
+        ).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for pid, blob, mtime, norm, dim in rows:
+        out.append((pid, _unpack_vector(blob, int(dim)), float(mtime), float(norm)))
+    return out
+
+
+def _embedding_count() -> int:
+    _maybe_migrate_legacy_json()
+    conn = _connect_embeddings()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+    finally:
+        conn.close()
 
 
 def _cosine_sim(a: list[float], b: list[float]) -> float:
+    """Public-style helper kept for test/debug use; semantic_search uses
+    a faster path with precomputed norms.
+    """
     dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
+    na = _vec_norm(a)
+    nb = _vec_norm(b)
+    if na == 0 or nb == 0:
         return 0.0
-    return dot / (norm_a * norm_b)
+    return dot / (na * nb)
 
 
 def update_embeddings(page_ids: list[str] | None = None) -> int:
-    """Update embeddings for pages. Returns count of updated pages."""
+    """Update embeddings for pages. Returns count of updated pages.
+
+    Writes are scoped to the rows that actually changed (or the rows
+    explicitly requested via `page_ids`). Unchanged pages are not
+    re-encoded and the SQLite table is not rewritten in full.
+    """
     from llm_wiki_mcp.ollama import embed, is_available
 
     if not is_available():
         return 0
 
-    store = _load_embeddings()
-    updated_count = 0
+    _maybe_migrate_legacy_json()
 
-    pages_to_process = []
+    # Pull existing mtimes for the candidate page set in one query so
+    # we don't pay per-row SELECTs inside the loop.
+    conn = _connect_embeddings()
+    try:
+        existing_mtimes: dict[str, float] = {
+            row[0]: float(row[1])
+            for row in conn.execute("SELECT page_id, mtime FROM embeddings").fetchall()
+        }
+    finally:
+        conn.close()
+
+    pages_to_process: list[tuple[str, str, float]] = []
     for path in all_pages():
         pid = page_id_from_path(path)
         if page_ids and pid not in page_ids:
             continue
 
-        content = path.read_text()
-        mtime = path.stat().st_mtime
-
-        existing = store.get(pid)
-        if existing and existing.get("mtime", 0) >= mtime and not page_ids:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
             continue
 
-        # Truncate content for embedding (first ~2000 chars)
+        existing_mtime = existing_mtimes.get(pid)
+        if (
+            existing_mtime is not None
+            and existing_mtime >= mtime
+            and not page_ids
+        ):
+            continue
+
+        try:
+            content = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+
         fm_match = re.search(r"title:\s*(.+)", content)
         title = fm_match.group(1).strip() if fm_match else pid
         embed_text = f"{title}\n\n{_FRONTMATTER_RE.sub('', content)[:2000]}"
         pages_to_process.append((pid, embed_text, mtime))
 
-    # Batch embed
+    updated_count = 0
     if pages_to_process:
         batch_size = 32
         for i in range(0, len(pages_to_process), batch_size):
@@ -379,25 +561,33 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
             texts = [t[1] for t in batch]
             try:
                 vectors = embed(texts)
-                for (pid, _, mtime), vec in zip(batch, vectors):
-                    store[pid] = {"vector": vec, "mtime": mtime}
-                    updated_count += 1
             except Exception:
                 continue
+            rows: list[tuple[str, list[float], float]] = []
+            for (pid, _, mtime), vec in zip(batch, vectors):
+                rows.append((pid, vec, mtime))
+            _store_embeddings_batch(rows)
+            updated_count += len(rows)
 
-    _save_embeddings(store)
     return updated_count
 
 
 def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
-    """Search using embedding similarity."""
+    """Search using embedding similarity.
+
+    Page metadata is read from the IndexStore (no per-page disk reads),
+    each stored vector carries a precomputed `norm`, and the query norm
+    is computed once. Inner loop is therefore one dot product per page.
+    """
     from llm_wiki_mcp.ollama import embed, is_available
+    from llm_wiki_mcp.index_store import get_store
 
     if not is_available():
         return []
 
-    store = _load_embeddings()
-    if not store:
+    _maybe_migrate_legacy_json()
+
+    if _embedding_count() == 0:
         return []
 
     try:
@@ -405,30 +595,40 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
     except Exception:
         return []
 
-    # Build page metadata map
-    page_meta = {}
-    for path in all_pages():
-        pid = page_id_from_path(path)
-        content = path.read_text()
-        fm_match = re.search(r"title:\s*(.+)", content)
-        title = fm_match.group(1).strip() if fm_match else pid
-        updated_match = re.search(r"updated:\s*(.+)", content)
-        updated = updated_match.group(1).strip() if updated_match else ""
-        folder = path.parent.name if path.parent != PAGES_DIR else ""
-        page_meta[pid] = (title, folder, updated)
+    q_norm = _vec_norm(q_vec)
+    if q_norm == 0:
+        return []
+
+    store = get_store()
+    store.refresh()
 
     results = []
-    for pid, data in store.items():
-        if pid not in page_meta:
+    for pid, vec, _mtime, norm in _iter_all_embeddings():
+        if norm == 0:
             continue
-        vec = data.get("vector")
-        if not vec:
+        meta = store.meta(pid)
+        if meta is None:
             continue
-        sim = _cosine_sim(q_vec, vec)
-        title, folder, updated = page_meta[pid]
+        # Recover folder from the stored path (parent dir name relative
+        # to PAGES_DIR), preserving legacy ScoredPage semantics.
+        folder = ""
+        try:
+            parent = Path(meta["path"]).parent
+            if parent != PAGES_DIR:
+                folder = parent.name
+        except (KeyError, TypeError):
+            folder = ""
+
+        dot = 0.0
+        for x, y in zip(q_vec, vec):
+            dot += x * y
+        sim = dot / (q_norm * norm)
         results.append(ScoredPage(
-            page_id=pid, title=title, folder=folder,
-            updated=updated, score=sim,
+            page_id=pid,
+            title=meta["title"],
+            folder=folder,
+            updated=meta["updated"],
+            score=sim,
         ))
 
     results.sort(key=lambda x: x.score, reverse=True)
