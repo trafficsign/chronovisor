@@ -1,6 +1,7 @@
 """Lint engine - detect and fix wiki quality issues."""
 
 import re
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +16,14 @@ from llm_wiki_mcp.link_fix import (
 
 STALE_DAYS = 90  # Pages not updated in this many days are flagged
 
+# `wiki_apply` runs `check()` and then re-runs it inside `apply_safe_fixes`,
+# so the same issue list is computed twice for an unchanged corpus. Cache
+# by corpus version to short-circuit the second call. Cleared whenever the
+# fingerprint changes.
+_CHECK_CACHE_LOCK = threading.Lock()
+_CHECK_CACHE_VERSION: str | None = None
+_CHECK_CACHE_RESULT: list[dict] | None = None
+
 
 def _collect_all_page_ids() -> set[str]:
     """pages/ + system/ の全 page_id を返す。broken_link 判定の母集合。
@@ -26,8 +35,17 @@ def _collect_all_page_ids() -> set[str]:
 
 def check() -> list[dict]:
     """Run all lint checks and return a list of issues."""
+    global _CHECK_CACHE_VERSION, _CHECK_CACHE_RESULT
+
     store = get_store()
     store.refresh()
+    version = store.corpus_version()
+
+    with _CHECK_CACHE_LOCK:
+        if _CHECK_CACHE_VERSION == version and _CHECK_CACHE_RESULT is not None:
+            # Defensive copy so callers that mutate the list (e.g. filter
+            # auto-fixable issues) don't poison the cache for the next call.
+            return [dict(i) for i in _CHECK_CACHE_RESULT]
 
     issues = []
 
@@ -101,6 +119,10 @@ def check() -> list[dict]:
     # Full contradiction detection requires LLM; we check for simple cases
     # like same entity with conflicting facts across linked pages
     # TODO: LLM-based contradiction detection in future iteration
+
+    with _CHECK_CACHE_LOCK:
+        _CHECK_CACHE_VERSION = version
+        _CHECK_CACHE_RESULT = [dict(i) for i in issues]
 
     return issues
 

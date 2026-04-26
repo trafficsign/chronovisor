@@ -420,6 +420,29 @@ class IndexStore:
                 return len(self._entries)
             return sum(1 for e in self._entries.values() if not e.is_system)
 
+    def corpus_version(self) -> str:
+        """Stable fingerprint of the current corpus state.
+
+        Hash inputs are `(page_id, mtime_ns)` for every entry, sorted by
+        page_id. Two refreshes that produced identical entries return
+        identical fingerprints; any add / remove / mtime change flips
+        the hash. Suitable as a memoization key for derived results
+        (e.g. lint).
+        """
+        import hashlib
+
+        with self._lock:
+            items = sorted(
+                (pid, e.mtime_ns) for pid, e in self._entries.items()
+            )
+        h = hashlib.sha256()
+        for pid, mt in items:
+            h.update(pid.encode("utf-8"))
+            h.update(b"\x00")
+            h.update(str(mt).encode("ascii"))
+            h.update(b"\x01")
+        return h.hexdigest()
+
 
 _store_lock = threading.Lock()
 _store: IndexStore | None = None

@@ -1,7 +1,9 @@
 """Ollama API client for Ingest/Lint operations."""
 
-import httpx
+import threading
 import time
+
+import httpx
 
 OLLAMA_URL = "http://localhost:11434"
 MODEL = "gemma4:26b"
@@ -9,6 +11,23 @@ MODEL = "gemma4:26b"
 # Health check cache
 _health_cache: dict = {"status": None, "checked_at": 0.0}
 HEALTH_CACHE_TTL = 900  # 15 minutes on failure
+
+# Shared httpx.Client — one per process, reused across is_available /
+# generate / embed / unload. Connection pooling avoids paying TCP setup
+# and DNS lookup cost on every call. Per-call timeouts are still passed
+# explicitly so the long-running /api/generate doesn't inherit the short
+# health-check default.
+_CLIENT_LOCK = threading.Lock()
+_CLIENT: httpx.Client | None = None
+
+
+def _client() -> httpx.Client:
+    global _CLIENT
+    if _CLIENT is None:
+        with _CLIENT_LOCK:
+            if _CLIENT is None:
+                _CLIENT = httpx.Client(base_url=OLLAMA_URL)
+    return _CLIENT
 
 
 def is_available() -> bool:
@@ -21,7 +40,7 @@ def is_available() -> bool:
             return False
 
     try:
-        resp = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=3)
+        resp = _client().get("/api/tags", timeout=3)
         available = resp.status_code == 200
         _health_cache["status"] = available
         _health_cache["checked_at"] = now
@@ -53,8 +72,8 @@ def generate(prompt: str, system: str | None = None) -> str:
         payload["system"] = system
 
     # Timeout: 60s for model load + 600s for generation
-    resp = httpx.post(
-        f"{OLLAMA_URL}/api/generate",
+    resp = _client().post(
+        "/api/generate",
         json=payload,
         timeout=httpx.Timeout(connect=10.0, read=660.0, write=10.0, pool=10.0),
     )
@@ -67,8 +86,8 @@ EMBED_MODEL = "nomic-embed-text"
 
 def embed(texts: list[str]) -> list[list[float]]:
     """Get embedding vectors via Ollama /api/embed."""
-    resp = httpx.post(
-        f"{OLLAMA_URL}/api/embed",
+    resp = _client().post(
+        "/api/embed",
         json={"model": EMBED_MODEL, "input": texts},
         timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
     )
@@ -79,8 +98,8 @@ def embed(texts: list[str]) -> list[list[float]]:
 def unload_model() -> None:
     """Explicitly unload model to free memory."""
     try:
-        httpx.post(
-            f"{OLLAMA_URL}/api/generate",
+        _client().post(
+            "/api/generate",
             json={"model": MODEL, "keep_alive": 0, "prompt": ""},
             timeout=10,
         )
