@@ -220,23 +220,25 @@ def wiki_init() -> str:
     Replaces the need for separate wiki_status + 3x wiki_read at session start.
     Returns user-profile, current-state, lessons-learned, and basic wiki stats.
     """
+    from concurrent.futures import ThreadPoolExecutor
     from llm_wiki_mcp.ollama import is_available
 
-    result = {"status": {}}
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_pages = ex.submit(lambda: len(list(all_pages())))
+        f_raw = ex.submit(lambda: len(list(RAW_DIR.glob("*.md"))))
+        f_ollama = ex.submit(is_available)
+        page_count = f_pages.result()
+        raw_total = f_raw.result()
+        ollama_status = "running" if f_ollama.result() else "stopped"
 
-    # Lightweight status (skip orphan count — it's O(n²) on 1500 pages)
-    page_count = len(list(all_pages()))
-    raw_total = len(list(RAW_DIR.glob("*.md")))
-    ollama_status = "running" if is_available() else "stopped"
-
-    result["status"] = {
-        "page_count": page_count,
-        "raw_total": raw_total,
-        "ollama_status": ollama_status,
-        "wiki_root": str(WIKI_ROOT),
-    }
-
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps({
+        "status": {
+            "page_count": page_count,
+            "raw_total": raw_total,
+            "ollama_status": ollama_status,
+            "wiki_root": str(WIKI_ROOT),
+        }
+    }, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -273,9 +275,11 @@ def wiki_search(
 
     query_terms = query.lower().split()
     direct_hits = []
+    direct_contents: dict[str, str] = {}  # page_id -> content (for expand reuse)
     for r in results:
         path = find_page(r.page_id)
-        snippet = _extract_snippet(path.read_text(), query_terms) if path else None
+        content = path.read_text() if path else None
+        snippet = _extract_snippet(content, query_terms) if content is not None else None
         direct_hits.append({
             "page_id": r.page_id,
             "title": r.title,
@@ -283,6 +287,8 @@ def wiki_search(
             "score": round(r.score, 4),
             "snippets": [snippet] if snippet else [],
         })
+        if content is not None:
+            direct_contents[r.page_id] = content
 
     # Expand via links
     expanded_hits = []
@@ -290,10 +296,10 @@ def wiki_search(
     if depth > 0 and direct_hits:
         seen = {h["page_id"] for h in direct_hits}
         for hit in direct_hits:
-            path = find_page(hit['page_id'])
-            if not path:
+            content = direct_contents.get(hit["page_id"])
+            if content is None:
                 continue
-            outlinks = _extract_wiki_links(path.read_text())
+            outlinks = _extract_wiki_links(content)
             for link in outlinks:
                 if link in seen:
                     continue
@@ -489,27 +495,30 @@ def wiki_provenance(page: str) -> str:
 
     page_mtime = datetime.fromtimestamp(page_path.stat().st_mtime)
 
-    # Find raw files that might be the source
-    # Match by checking raw files created before or around the page creation time
+    # Read target page metadata once (was reread inside loop and again at return)
+    page_content = page_path.read_text()
+    page_fm = _parse_frontmatter(page_content)
+    page_title_lower = page_fm.get("title", page).lower()
+    page_dehyphen = page.replace("-", " ")
+    page_updated = page_fm.get("updated", "unknown")
+    threshold = page_mtime + timedelta(minutes=30)
+
+    # Find raw files that might be the source.
+    # raw files are walked in mtime-descending order; once a file exceeds the
+    # threshold, every subsequent file also exceeds it, so we can break.
     raw_candidates = []
     for raw_path in sorted(RAW_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
         raw_mtime = datetime.fromtimestamp(raw_path.stat().st_mtime)
-        # Raw file should be older than or close to page creation
-        if raw_mtime <= page_mtime + timedelta(minutes=30):
-            # Check if raw content mentions anything related to the page
-            raw_content = raw_path.read_text()[:500]
-            page_content = page_path.read_text()
-            fm = _parse_frontmatter(page_content)
-            title = fm.get("title", page)
-
-            # Simple relevance check
-            if (page.replace("-", " ") in raw_content.lower()
-                    or title.lower() in raw_content.lower()):
-                raw_candidates.append({
-                    "raw_file": raw_path.name,
-                    "created": raw_mtime.isoformat(),
-                    "preview": raw_content[:200].strip(),
-                })
+        if raw_mtime > threshold:
+            break
+        raw_content = raw_path.read_text()[:500]
+        raw_lower = raw_content.lower()
+        if page_dehyphen in raw_lower or page_title_lower in raw_lower:
+            raw_candidates.append({
+                "raw_file": raw_path.name,
+                "created": raw_mtime.isoformat(),
+                "preview": raw_content[:200].strip(),
+            })
 
     # Check log for ingest records
     log_entries = []
@@ -520,7 +529,7 @@ def wiki_provenance(page: str) -> str:
 
     return json.dumps({
         "page_id": page,
-        "page_updated": _parse_frontmatter(page_path.read_text()).get("updated", "unknown"),
+        "page_updated": page_updated,
         "page_mtime": page_mtime.isoformat(),
         "raw_sources": raw_candidates[:5],
         "log_entries": log_entries,
