@@ -18,8 +18,44 @@ from llm_wiki_mcp.ollama import (
 # Stage 1: Triage — analyze raw content and produce a structured plan
 # ---------------------------------------------------------------------------
 
-def _triage(content: str) -> list[dict]:
-    """Stage 1: Analyze raw content and return a list of page operations as JSON."""
+def _extract_json_array(output: str) -> list[dict] | None:
+    """Best-effort extraction of a JSON array from an LLM response.
+
+    Handles preamble/postamble (e.g. leading ``---``), markdown fences, and
+    trailing prose. Returns ``None`` on parse failure so the caller can
+    distinguish failure from a legitimate empty plan ``[]``.
+    """
+    text = output.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+        text = text.strip()
+
+    # Locate the JSON array even when the model wraps it in fluff.
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return None
+    candidate = text[start : end + 1]
+
+    try:
+        plan = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(plan, list):
+        return None
+    return plan
+
+
+def _triage(content: str) -> list[dict] | None:
+    """Stage 1: Analyze raw content and return a plan, or None on parse failure.
+
+    Distinguishing ``None`` (parser/model failure) from ``[]`` (model said
+    "nothing wiki-worthy") matters for the caller: failures should leave
+    raw files un-marked so the next tick retries them, while a legitimate
+    empty plan should mark the raws processed to avoid forever-retry.
+    """
     # Build lightweight context: existing folders + page catalog (no full text)
     existing_folders = sorted({p.parent.name for p in all_pages() if p.parent != PAGES_DIR})
     catalog_lines = [f"Existing folders: {', '.join(f'{f}/' for f in existing_folders)}", ""]
@@ -43,23 +79,13 @@ Raw session data to triage:
 Analyze the raw data above. Output a JSON array of page operations (create/update)."""
 
     output = generate(prompt, system=TRIAGE_SYSTEM_PROMPT)
-
-    # Parse JSON from output (strip markdown fences if present)
-    output = output.strip()
-    if output.startswith("```"):
-        output = re.sub(r"^```\w*\n?", "", output)
-        output = re.sub(r"\n?```$", "", output)
-    output = output.strip()
-
-    try:
-        plan = json.loads(output)
-        if not isinstance(plan, list):
-            _append_log(f"ingest | triage returned non-list: {type(plan)}")
-            return []
-        return plan
-    except json.JSONDecodeError as e:
-        _append_log(f"ingest | triage JSON parse failed: {e}")
-        return []
+    plan = _extract_json_array(output)
+    if plan is None:
+        _append_log(
+            f"ingest | triage parse failed (output preview: {output[:120]!r})"
+        )
+        return None
+    return plan
 
 
 # ---------------------------------------------------------------------------
@@ -143,11 +169,59 @@ def _search_related_pages(keywords: list[str], min_score: float = 0.5, top_n: in
     return [path for _, path in scored[:top_n]]
 
 
-def _generate_one(op: dict, raw_content: str) -> str | None:
-    """Stage 2: Generate a single page using focused context."""
+def _extract_page_body(output: str) -> str | None:
+    """Pull a page body out of generate-stage LLM output.
+
+    The system prompt asks for ``=== NEW PAGE: filename === ... === END PAGE ===``,
+    but local models drift: gemma drops the ``NEW PAGE:`` keyword and emits
+    ``=== filename === ... === END PAGE ===``, others omit the wrapper entirely
+    and just return the page body. We try strict, then lenient, then "looks like
+    a page anyway".
+    """
+    if not output:
+        return None
+
+    text = output.strip()
+    # Strip surrounding code fences if the model added them.
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+        text = text.strip()
+
+    # 1. Strict: === NEW/UPDATE PAGE: filename === ... === END PAGE ===
+    m = re.search(
+        r"===\s*(?:NEW|UPDATE)\s+PAGE:\s*\S+\s*===\n(.*?)\n===\s*END\s+PAGE\s*===",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip() or None
+
+    # 2. Lenient: === <anything> === ... === END PAGE === (NEW PAGE: keyword dropped)
+    m = re.search(
+        r"===[^\n]*===\n(.*?)\n===\s*END\s+PAGE\s*===",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip() or None
+
+    # 3. Fallback: the model returned the page body without any wrapper.
+    #    Accept it only if it looks like a frontmatter-led page so we don't
+    #    persist refusals or chatter.
+    if text.startswith("---\n") and re.search(r"^title:\s*", text, re.MULTILINE):
+        # Drop a stray trailing "=== END ===" or similar if present.
+        text = re.sub(r"\n=+\s*END[^\n]*\s*=+\s*$", "", text, flags=re.IGNORECASE).strip()
+        return text or None
+
+    return None
+
+
+def _generate_one(op: dict, raw_content: str) -> dict | None:
+    """Stage 2: generate one page; return an operation dict ready for apply."""
     context = _build_focused_context(op, raw_content)
 
-    op_type = op.get("type", "create").upper()
+    op_type = op.get("type", "create").lower()
     filename = op.get("filename", "unknown.md")
     summary = op.get("summary", "")
     title = op.get("title", "")
@@ -160,7 +234,7 @@ Raw session data (source material):
 {raw_content}
 ---
 
-Task: {op_type} page "{filename}"
+Task: {op_type.upper()} page "{filename}"
 Title: {title}
 Summary: {summary}
 
@@ -168,10 +242,22 @@ Generate the page content based on the raw data and context above."""
 
     try:
         output = generate(prompt, system=GENERATE_SYSTEM_PROMPT)
-        return output
     except Exception as e:
         _append_log(f"ingest | generate failed for {filename}: {e}")
         return None
+
+    body = _extract_page_body(output)
+    if not body:
+        _append_log(
+            f"ingest | generate parse failed for {filename} (preview: {output[:120]!r})"
+        )
+        return None
+
+    return {
+        "type": op_type if op_type in ("create", "update") else "create",
+        "filename": filename,
+        "content": body,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +383,20 @@ def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None)
         _append_log("ingest | stage 1: triage started")
         plan = _triage(content)
 
+        # None = parser/model failure → leave raws un-marked so the next
+        # tick can retry. [] = model legitimately said "nothing here" →
+        # mark the raws processed (via on_complete) so we don't loop on
+        # them forever.
+        if plan is None:
+            job_store.update(
+                job_id,
+                status=JobStatus.FAILED,
+                completed_at=_now(),
+                error="triage parse failed",
+            )
+            _append_log("ingest | triage: parse failed (raws left pending for retry)")
+            return
+
         if not plan:
             job_store.update(
                 job_id,
@@ -306,7 +406,12 @@ def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None)
                 pages_created=[],
                 pages_updated=[],
             )
-            _append_log("ingest | triage: no operations planned")
+            _append_log("ingest | triage: no operations planned (raws marked processed)")
+            if on_complete:
+                try:
+                    on_complete()
+                except Exception as cb_err:
+                    _append_log(f"ingest | on_complete callback failed: {cb_err}")
             return
 
         _append_log(f"ingest | triage: {len(plan)} operations planned")
@@ -316,10 +421,9 @@ def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None)
         all_operations = []
         for i, op in enumerate(plan):
             _append_log(f"ingest | generating {i+1}/{len(plan)}: {op.get('filename', '?')}")
-            output = _generate_one(op, content)
-            if output:
-                operations = _parse_output(output)
-                all_operations.extend(operations)
+            generated = _generate_one(op, content)
+            if generated:
+                all_operations.append(generated)
             job_store.update(job_id, completed_ops=i + 1)
 
         # Apply all operations
