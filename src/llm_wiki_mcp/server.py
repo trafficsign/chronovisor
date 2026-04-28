@@ -215,29 +215,47 @@ def wiki_init() -> str:
     """
     from concurrent.futures import ThreadPoolExecutor
     from llm_wiki_mcp.ollama import is_available
+    from llm_wiki_mcp.orchestrator import get_pending_raw_files
 
     store = get_store()
 
     # Run the index refresh, raw-dir count, and Ollama health probe in
     # parallel. The Ollama probe is the heaviest (network) so doing it
     # alongside the on-disk scans hides its latency.
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         f_refresh = ex.submit(store.refresh)
         f_raw = ex.submit(lambda: len(list(RAW_DIR.glob("*.md"))))
+        f_pending = ex.submit(lambda: len(get_pending_raw_files()))
         f_ollama = ex.submit(is_available)
         f_refresh.result()
         raw_total = f_raw.result()
+        raw_pending = f_pending.result()
         ollama_status = "running" if f_ollama.result() else "stopped"
 
     page_count = store.page_count(include_system=False)
+    system_pages = {}
+    for page_id in ("user-profile", "current-state", "lessons-learned"):
+        path = SYSTEM_DIR / f"{page_id}.md"
+        if not path.exists():
+            system_pages[page_id] = {"error": f"Page '{page_id}' not found"}
+            continue
+        content = path.read_text()
+        system_pages[page_id] = {
+            "page_id": page_id,
+            "content": content,
+            "outlinks": store.outlinks(page_id) or _extract_wiki_links(content),
+            "backlinks": store.backlinks(page_id),
+        }
 
     return json.dumps({
         "status": {
             "page_count": page_count,
             "raw_total": raw_total,
+            "raw_pending": raw_pending,
             "ollama_status": ollama_status,
             "wiki_root": str(WIKI_ROOT),
-        }
+        },
+        "system_pages": system_pages,
     }, ensure_ascii=False)
 
 

@@ -1385,3 +1385,85 @@ class TestFilenameSchemaUpdateLeniency:
                 )
                 is None
             ), op_type
+
+
+# ---------------------------------------------------------------------------
+# R6: session bootstrap contract
+# ---------------------------------------------------------------------------
+
+
+class TestWikiInit:
+    def test_returns_system_pages_with_status(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ollama, server
+
+        for page_id in ("user-profile", "current-state", "lessons-learned"):
+            (isolated_wiki / "system" / f"{page_id}.md").write_text(
+                f"---\ntitle: {page_id}\nupdated: 2026-04-28\n---\n"
+                f"body for [[{page_id}]]\n"
+            )
+        (isolated_wiki / "raw" / "pending.md").write_text("raw")
+
+        monkeypatch.setattr(server, "WIKI_ROOT", isolated_wiki)
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(server, "SYSTEM_DIR", isolated_wiki / "system")
+        monkeypatch.setattr(ollama, "is_available", lambda: False)
+
+        payload = json.loads(server.wiki_init())
+
+        assert payload["status"]["page_count"] == 0
+        assert payload["status"]["raw_total"] == 1
+        assert payload["status"]["raw_pending"] == 1
+        assert payload["status"]["ollama_status"] == "stopped"
+        assert set(payload["system_pages"]) == {
+            "user-profile",
+            "current-state",
+            "lessons-learned",
+        }
+        assert "body for [[user-profile]]" in payload["system_pages"]["user-profile"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# R6: protected regions in link extraction and auto-fix
+# ---------------------------------------------------------------------------
+
+
+class TestLinkFixProtectedRegions:
+    def test_unclosed_fence_links_are_ignored_by_extractor(self) -> None:
+        from llm_wiki_mcp.link_fix import extract_targets
+
+        text = "before [[real]]\n```python\nx = data[[1]]\ny = [[not-a-link]]\n"
+        assert extract_targets(text, strip=True) == ["real"]
+
+    def test_lint_replace_leaves_code_frontmatter_and_inline_code(self) -> None:
+        from llm_wiki_mcp.lint import _replace_link_in_content
+
+        content = (
+            "---\ntitle: [[ghost]]\n---\n"
+            "body [[ghost#sec|Ghost Page]] and [[other]]\n"
+            "`[[ghost]]`\n"
+            "```python\nx = data[[ghost]]\n```\n"
+        )
+        new_content, count = _replace_link_in_content(
+            content, "ghost", "real-page"
+        )
+
+        assert count == 1
+        assert "title: [[ghost]]" in new_content
+        assert "`[[ghost]]`" in new_content
+        assert "x = data[[ghost]]" in new_content
+        assert "[[real-page#sec|Ghost Page]]" in new_content
+        assert "[[other]]" in new_content
+
+    def test_lint_plaintext_fallback_uses_alias(self) -> None:
+        from llm_wiki_mcp.lint import _replace_link_in_content
+
+        new_content, count = _replace_link_in_content(
+            "See [[ghost|visible name]] and [[ghost#old]].",
+            "ghost",
+            None,
+        )
+
+        assert count == 2
+        assert new_content == "See visible name and ghost."

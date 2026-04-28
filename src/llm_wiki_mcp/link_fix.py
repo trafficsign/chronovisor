@@ -16,7 +16,8 @@ WIKI_LINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
 
 # frontmatter delimiter
 _FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
-# fenced code block (``` ... ```)
+# fenced code block (``` ... ```), closed blocks only. Use
+# fenced_code_spans() when unclosed/truncated fences must be protected too.
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 # inline code (`...`)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
@@ -40,9 +41,55 @@ def strip_fences_and_frontmatter(text: str) -> str:
     auto-fix で code 内のリンクを誤って書き換えないために必須。
     """
     text = _FRONTMATTER_RE.sub("", text, count=1)
-    text = _FENCED_CODE_RE.sub("", text)
+    for start, end in reversed(fenced_code_spans(text)):
+        text = text[:start] + text[end:]
     text = _INLINE_CODE_RE.sub("", text)
     return text
+
+
+def fenced_code_spans(text: str) -> list[tuple[int, int]]:
+    """Return spans for fenced code blocks, including an unclosed EOF fence.
+
+    LLM output is often truncated. Treating a dangling opening fence as prose
+    makes link extraction / auto-fix corrupt examples like ``data[[1]]``.
+    """
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    open_at: int | None = None
+    n = len(text)
+    while pos < n:
+        idx = text.find("```", pos)
+        if idx == -1:
+            break
+        if open_at is None:
+            open_at = idx
+        else:
+            spans.append((open_at, idx + 3))
+            open_at = None
+        pos = idx + 3
+    if open_at is not None:
+        spans.append((open_at, n))
+    return spans
+
+
+def protected_spans(text: str) -> list[tuple[int, int]]:
+    """Return frontmatter / fenced-code / inline-code spans to leave untouched."""
+    spans: list[tuple[int, int]] = []
+    spans.extend(m.span() for m in _FRONTMATTER_RE.finditer(text))
+    spans.extend(fenced_code_spans(text))
+    spans.extend(m.span() for m in _INLINE_CODE_RE.finditer(text))
+    spans.sort()
+    return spans
+
+
+def position_in_spans(pos: int, spans: list[tuple[int, int]]) -> bool:
+    """True if ``pos`` lies within one of the sorted spans."""
+    for start, end in spans:
+        if pos < start:
+            return False
+        if pos < end:
+            return True
+    return False
 
 
 def extract_wiki_links(text: str, strip: bool = True) -> list[str]:

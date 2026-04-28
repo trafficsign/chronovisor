@@ -418,24 +418,8 @@ def _fenced_code_spans(text: str) -> list[tuple[int, int]]:
     toggling on every ```````: if we end inside a fence, treat
     the trailing region as a fence too.
     """
-    spans: list[tuple[int, int]] = []
-    pos = 0
-    open_at: int | None = None
-    n = len(text)
-    while pos < n:
-        idx = text.find("```", pos)
-        if idx == -1:
-            break
-        if open_at is None:
-            open_at = idx
-            pos = idx + 3
-        else:
-            spans.append((open_at, idx + 3))
-            open_at = None
-            pos = idx + 3
-    if open_at is not None:
-        spans.append((open_at, n))
-    return spans
+    from llm_wiki_mcp.link_fix import fenced_code_spans
+    return fenced_code_spans(text)
 
 
 def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
@@ -460,32 +444,17 @@ def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
     """
     from llm_wiki_mcp.link_fix import (
         WIKI_LINK_RE,
-        _FRONTMATTER_RE,
-        _INLINE_CODE_RE,
+        position_in_spans,
+        protected_spans,
     )
 
     stats = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
 
     # Pre-compute byte spans we must NOT touch.
-    skip_ranges: list[tuple[int, int]] = []
-    for sm in _FRONTMATTER_RE.finditer(content):
-        skip_ranges.append(sm.span())
-    skip_ranges.extend(_fenced_code_spans(content))
-    for sm in _INLINE_CODE_RE.finditer(content):
-        skip_ranges.append(sm.span())
-    skip_ranges.sort()
-
-    def in_skip(pos: int) -> bool:
-        # Linear scan is fine — N is small per page.
-        for start, end in skip_ranges:
-            if pos < start:
-                return False
-            if pos < end:
-                return True
-        return False
+    skip_ranges = protected_spans(content)
 
     def replace(m: re.Match) -> str:
-        if in_skip(m.start()):
+        if position_in_spans(m.start(), skip_ranges):
             return m.group(0)  # inside code/frontmatter — never rewrite
 
         inside = m.group(1)

@@ -8,9 +8,13 @@ from pathlib import Path
 from llm_wiki_mcp.wiki import SYSTEM_DIR, all_pages, find_page
 from llm_wiki_mcp.index_store import get_store
 from llm_wiki_mcp.link_fix import (
+    WIKI_LINK_RE,
     atomic_write,
     extract_targets,
     find_fuzzy_match,
+    normalize_link_target,
+    position_in_spans,
+    protected_spans,
 )
 
 
@@ -150,26 +154,46 @@ def _replace_link_in_content(content: str, target: str, replacement: str | None)
     Returns:
         (new_content, count) — count は置換された箇所数
     """
-    # frontmatter / code fence / inline code を壊さないため、本文だけ置換する。
-    # ここでは全文で regex を走らせるが、pattern が [[...]] 限定なので
-    # code 内の同パターン文字列だけは副次的に書き換わるリスクが残る。
-    # lint.check() は strip した body で検出するが、apply はファイル全体を触る。
-    # そのため pattern を保守的に定義する。
-    pattern = re.compile(
-        r"\[\[" + re.escape(target) + r"(?P<tail>\|[^\]\n]*|#[^\]\n]*)?\]\]"
-    )
+    skip_ranges = protected_spans(content)
+    changed = 0
 
     def _repl(m: re.Match) -> str:
-        tail = m.group("tail") or ""
-        if replacement and replacement != target:
-            return f"[[{replacement}{tail}]]"
-        # plaintext fallback
-        if tail.startswith("|"):
-            return tail[1:]
-        return target
+        nonlocal changed
+        if position_in_spans(m.start(), skip_ranges):
+            return m.group(0)
 
-    new_content, count = pattern.subn(_repl, content)
-    return new_content, count
+        inside = m.group(1)
+        if normalize_link_target(inside) != target:
+            return m.group(0)
+
+        if replacement and replacement != target:
+            changed += 1
+            return f"[[{replacement}{_retarget_tail(inside)}]]"
+        # plaintext fallback
+        changed += 1
+        return _display_text_for_unwrap(inside, target)
+
+    new_content = WIKI_LINK_RE.sub(_repl, content)
+    return new_content, changed
+
+
+def _retarget_tail(link_inside: str) -> str:
+    """Return the anchor/alias suffix after the normalized target."""
+    target_part, sep, alias = link_inside.partition("|")
+    if "#" in target_part:
+        _target, anchor_body = target_part.split("#", 1)
+        anchor = "#" + anchor_body
+    else:
+        anchor = ""
+    return anchor + (sep + alias if sep else "")
+
+
+def _display_text_for_unwrap(link_inside: str, target: str) -> str:
+    """Plaintext replacement for an unresolvable wiki link."""
+    _target_part, sep, alias = link_inside.partition("|")
+    if sep:
+        return alias
+    return target
 
 
 def apply_safe_fixes(
