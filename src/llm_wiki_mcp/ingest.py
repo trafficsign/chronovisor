@@ -297,10 +297,80 @@ def _parse_output(output: str) -> list[dict]:
     return operations
 
 
+_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+
+def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
+    """Repair or unwrap [[wiki-links]] so the wiki has no 404s.
+
+    For each ``[[target|alias#anchor]]`` (Obsidian-flavored):
+      - target resolves → leave intact.
+      - target has folder/.md prefix that strips to a known id → rewrite.
+      - target unresolvable → unwrap to plain text (alias if given, else target),
+        so the body keeps the entity name without polluting the link graph.
+
+    Returns ``(rewritten_content, stats)``.
+    """
+    stats = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
+
+    def replace(m: re.Match) -> str:
+        inside = m.group(1)
+        target_part, alias = (inside.split("|", 1) + [None])[:2]
+        if "#" in target_part:
+            target, anchor_body = target_part.split("#", 1)
+            anchor = "#" + anchor_body
+        else:
+            target, anchor = target_part, ""
+        target = target.strip()
+
+        if target in allowed_ids:
+            stats["resolved"] += 1
+            return m.group(0)
+
+        # Try common rewrites: folder/page.md → page, foo.md → foo, foo/bar → bar
+        candidate = target
+        if "/" in candidate:
+            candidate = candidate.rsplit("/", 1)[-1]
+        if candidate.endswith(".md"):
+            candidate = candidate[:-3]
+        candidate = candidate.strip()
+        if candidate and candidate != target and candidate in allowed_ids:
+            stats["rewritten"] += 1
+            tail = anchor + (f"|{alias}" if alias is not None else "")
+            return f"[[{candidate}{tail}]]"
+
+        # Unresolvable → unwrap to plain text. Keep alias as display, else target.
+        stats["unwrapped"] += 1
+        return alias if alias is not None else target
+
+    new_content = _LINK_RE.sub(replace, content)
+    return new_content, stats
+
+
 def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     """Apply page operations and return (created, updated) lists."""
     created = []
     updated = []
+
+    # Build the universe of valid link targets: every existing page plus every
+    # page about to be created in this batch (so siblings can cross-reference).
+    try:
+        from llm_wiki_mcp.index_store import get_store
+        store = get_store()
+        store.refresh()
+        allowed_ids: set[str] = {
+            m["page_id"] for m in store.all_pages_meta(include_system=True)
+        }
+    except Exception as e:
+        _append_log(f"ingest | reconcile: index_store unavailable ({e})")
+        allowed_ids = set()
+    for op in operations:
+        fn = op["filename"]
+        if not fn.endswith(".md"):
+            fn += ".md"
+        allowed_ids.add(Path(fn).stem)
+
+    totals = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
 
     for op in operations:
         filename = op["filename"]
@@ -309,9 +379,13 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         path = PAGES_DIR / filename
         page_id = path.stem
 
+        body, stats = _reconcile_links(op["content"], allowed_ids)
+        for k in totals:
+            totals[k] += stats[k]
+
         if op["type"] == "create":
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(op["content"] + "\n")
+            path.write_text(body + "\n")
             created.append(page_id)
             _append_log(f"ingest | created {page_id}")
 
@@ -328,9 +402,15 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                     existing,
                     count=1,
                 )
-                path.write_text(existing.rstrip() + "\n\n" + op["content"] + "\n")
+                path.write_text(existing.rstrip() + "\n\n" + body + "\n")
                 updated.append(page_id)
                 _append_log(f"ingest | updated {page_id}")
+
+    if any(totals.values()):
+        _append_log(
+            f"ingest | link reconcile: resolved={totals['resolved']} "
+            f"rewritten={totals['rewritten']} unwrapped={totals['unwrapped']}"
+        )
 
     return created, updated
 
