@@ -604,6 +604,38 @@ class TestOrchestrator:
             # Cleanup so other tests aren't polluted.
             jobs.job_store._jobs.pop(job.job_id, None)
 
+    def test_run_pending_ingest_refuses_double_trigger(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two run_pending_ingest calls back-to-back must not both spawn a
+        worker. The second sees the in-flight marker and refuses."""
+        from llm_wiki_mcp import orchestrator
+
+        # Make 5 fake raws so should_ingest() fires.
+        for i in range(5):
+            (isolated_wiki / "raw" / f"r{i}.md").write_text("body")
+
+        # Stub start_ingest so it doesn't actually try to run anything.
+        captured = {"calls": 0}
+
+        def fake_start(content: str, on_complete=None, on_finally=None) -> str:
+            captured["calls"] += 1
+            return "stub-job-id-1"
+
+        from llm_wiki_mcp import ingest as ingest_mod
+
+        monkeypatch.setattr(ingest_mod, "start_ingest", fake_start)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        first = orchestrator.run_pending_ingest()
+        second = orchestrator.run_pending_ingest()
+
+        assert first["triggered"] is True
+        assert first["job_id"] == "stub-job-id-1"
+        assert second["triggered"] is False
+        assert "already in flight" in second["reason"]
+        assert captured["calls"] == 1
+
     def test_release_lock_only_counts_triage_failures(
         self, isolated_wiki: Path
     ) -> None:
@@ -622,3 +654,225 @@ class TestOrchestrator:
         # Success resets.
         orchestrator._release_lock(failed=False)
         assert orchestrator._load_state()["triage_failure_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Triage plan schema validation (R3-High)
+# ---------------------------------------------------------------------------
+
+
+class TestTriagePlanSchema:
+    def test_valid_plan_passes_through(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        plan = [
+            {"type": "create", "filename": "ai/foo.md", "title": "Foo"},
+            {"type": "update", "filename": "bar.md"},
+        ]
+        assert _validate_triage_plan(plan) == plan
+
+    def test_empty_plan_passes(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        assert _validate_triage_plan([]) == []
+
+    def test_string_entry_rejected(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        assert _validate_triage_plan(["not a dict"]) is None
+
+    def test_unknown_type_rejected(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        assert (
+            _validate_triage_plan(
+                [{"type": "delete", "filename": "x.md"}]
+            )
+            is None
+        )
+
+    def test_missing_filename_rejected(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        assert _validate_triage_plan([{"type": "create"}]) is None
+        assert _validate_triage_plan([{"type": "create", "filename": ""}]) is None
+        assert (
+            _validate_triage_plan([{"type": "create", "filename": "   "}]) is None
+        )
+
+    def test_non_string_filename_rejected(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        assert (
+            _validate_triage_plan([{"type": "create", "filename": 123}]) is None
+        )
+
+
+# ---------------------------------------------------------------------------
+# Apply prepare phase: all-or-nothing collision (R3-Critical)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyPreparePhase:
+    def test_collision_rejects_whole_batch_before_writing(
+        self, isolated_wiki: Path
+    ) -> None:
+        """The previous flow wrote op[0] before the prepare-phase check
+        on op[1] failed. After the fix, every op is validated before any
+        disk write so a single collision aborts the entire batch."""
+        # Seed an existing page so op[1] collides.
+        existing = isolated_wiki / "pages" / "a" / "blocking.md"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text(
+            "---\ntitle: existing\nupdated: 2026-01-01\n---\noriginal\n"
+        )
+
+        ops = [
+            {
+                "type": "create",
+                "filename": "fresh/safe-page.md",
+                "content": "---\ntitle: Fresh\nupdated: 2026-04-28\n---\nbody",
+            },
+            {
+                "type": "create",
+                "filename": "other/blocking.md",  # different folder, same stem
+                "content": "---\ntitle: Dup\nupdated: 2026-04-28\n---\nx",
+            },
+        ]
+        with pytest.raises(IngestApplyError, match="overwrite existing"):
+            _apply_operations(ops)
+
+        # The first (would-have-succeeded) op must NOT be on disk.
+        assert not (isolated_wiki / "pages" / "fresh" / "safe-page.md").exists()
+        # The blocking page is untouched.
+        assert (
+            existing.read_text()
+            == "---\ntitle: existing\nupdated: 2026-01-01\n---\noriginal\n"
+        )
+
+    def test_duplicate_page_id_within_batch_rejected(
+        self, isolated_wiki: Path
+    ) -> None:
+        ops = [
+            {
+                "type": "create",
+                "filename": "a/dup.md",
+                "content": "---\ntitle: A\nupdated: 2026-04-28\n---\nbody1",
+            },
+            {
+                "type": "create",
+                "filename": "b/dup.md",
+                "content": "---\ntitle: B\nupdated: 2026-04-28\n---\nbody2",
+            },
+        ]
+        with pytest.raises(IngestApplyError, match="duplicate page_id"):
+            _apply_operations(ops)
+        # Neither file written.
+        assert not (isolated_wiki / "pages" / "a" / "dup.md").exists()
+        assert not (isolated_wiki / "pages" / "b" / "dup.md").exists()
+
+    def test_rollback_on_write_failure_restores_previous_state(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Force atomic_write to fail on the second op and verify the first
+        op's effect is rolled back."""
+        from llm_wiki_mcp import ingest as ingest_mod
+
+        # Seed a page so op[0] is a real update we can roll back.
+        target = isolated_wiki / "pages" / "x" / "page.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "---\ntitle: X\nupdated: 2026-01-01\n---\noriginal body\n"
+        )
+        original = target.read_text()
+
+        # First call: real write (the update succeeds). Second call: explode
+        # (the create's write fails). Subsequent calls succeed so the
+        # rollback path can actually run.
+        from llm_wiki_mcp import link_fix
+        real_write = link_fix.atomic_write
+        call_count = {"n": 0}
+
+        def flaky_write(path, content):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("simulated disk full")
+            real_write(path, content)
+
+        monkeypatch.setattr(link_fix, "atomic_write", flaky_write)
+
+        ops = [
+            {
+                "type": "update",
+                "filename": "page.md",
+                "content": "addendum block 1",
+            },
+            {
+                "type": "create",
+                "filename": "y/new.md",
+                "content": "---\ntitle: Y\nupdated: 2026-04-28\n---\nbody",
+            },
+        ]
+        with pytest.raises(IngestApplyError, match="apply write failed"):
+            _apply_operations(ops)
+
+        # Update was rolled back to the original text.
+        assert target.read_text() == original
+        # Create never wrote (write failed before append).
+        assert not (isolated_wiki / "pages" / "y" / "new.md").exists()
+
+    def test_casefold_collision_detected(self, isolated_wiki: Path) -> None:
+        """``Foo.md`` and ``foo.md`` resolve to the same inode on
+        case-insensitive macOS filesystems. We catch that even when
+        ``find_page`` (strict-case) wouldn't."""
+        existing = isolated_wiki / "pages" / "a" / "Foo.md"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text(
+            "---\ntitle: cased\nupdated: 2026-01-01\n---\nbody\n"
+        )
+        ops = [
+            {
+                "type": "create",
+                "filename": "b/foo.md",  # lowercase variant
+                "content": "---\ntitle: dup\nupdated: 2026-04-28\n---\nx",
+            }
+        ]
+        with pytest.raises(IngestApplyError, match="overwrite existing"):
+            _apply_operations(ops)
+
+
+# ---------------------------------------------------------------------------
+# wiki_ingest now persists raw + uses orchestrator (R3-Medium)
+# ---------------------------------------------------------------------------
+
+
+class TestWikiIngestRouting:
+    def test_wiki_ingest_writes_raw_and_consults_orchestrator(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import server, orchestrator
+        # The MCP tool object wraps the function; call .fn.
+        tool_fn = server.wiki_ingest.fn if hasattr(server.wiki_ingest, "fn") else server.wiki_ingest
+
+        # Patch RAW_DIR in server (it grabbed the path at import time).
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+
+        # Stub the orchestrator path so we don't actually start ingest.
+        captured = {"called": False}
+
+        def fake_run() -> dict:
+            captured["called"] = True
+            return {"triggered": False, "reason": "test stub"}
+
+        monkeypatch.setattr(orchestrator, "run_pending_ingest", fake_run)
+
+        result = tool_fn("hello world content")
+        # Must have written exactly one new raw file with the supplied content.
+        raws = list((isolated_wiki / "raw").glob("*.md"))
+        assert len(raws) == 1
+        assert raws[0].read_text() == "hello world content"
+        # Must have consulted the orchestrator.
+        assert captured["called"] is True
+        assert "test stub" in result

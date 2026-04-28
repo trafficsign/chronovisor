@@ -107,50 +107,6 @@ def unload_model() -> None:
         pass
 
 
-INGEST_SYSTEM_PROMPT = """\
-You are a knowledge wiki structuring engine. Your job is to extract knowledge \
-from raw session data and produce structured wiki pages.
-
-Rules:
-- 1 entity = 1 page
-- Filename: folder/kebab-case.md (English). Choose an appropriate folder category.
-- Frontmatter: only title and updated
-- Cross-references: use [[wiki-link]] notation (page ID only, no folder path)
-- Write content in Japanese
-- Focus on facts, decisions, and technical knowledge
-- Skip ephemeral conversation, greetings, and filler
-- If the content relates to an existing page, output an UPDATE instruction instead of a new page
-
-Folder guidelines:
-- Choose the folder based on the page content and topic
-- Use short, broad category names in English kebab-case
-- Examples: career/, project/, ai/, auto-industry/, hardware/, cad/, car-spec/, engineering/
-- Create new folders as needed for new topics
-- Keep folder depth to 1 level (no nested subfolders)
-- If existing related pages are in a specific folder, prefer the same folder for consistency
-
-Output format:
-For each page, output:
-```
-=== NEW PAGE: folder/filename.md ===
----
-title: Page Title
-updated: YYYY-MM-DD
----
-
-Page content here with [[wiki-links]] to related topics.
-
-=== END PAGE ===
-```
-
-For updates to existing pages:
-```
-=== UPDATE PAGE: existing-filename.md ===
-Section or content to add/modify.
-=== END PAGE ===
-```
-"""
-
 TRIAGE_SYSTEM_PROMPT = """\
 You are a knowledge wiki triage engine. Analyze raw session data and decide \
 what wiki pages to create or update. Do NOT generate page content — only output a structured plan.

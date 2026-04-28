@@ -3,6 +3,7 @@
 import json
 import re
 import threading
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from llm_wiki_mcp.wiki import PAGES_DIR, INDEX_FILE, LOG_FILE, all_pages, find_p
 from llm_wiki_mcp.jobs import job_store, JobStatus
 from llm_wiki_mcp.ollama import (
     generate, is_available,
-    INGEST_SYSTEM_PROMPT, TRIAGE_SYSTEM_PROMPT,
+    TRIAGE_SYSTEM_PROMPT,
     GENERATE_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT,
 )
 
@@ -100,13 +101,47 @@ Raw session data to triage:
 Analyze the raw data above. Output a JSON array of page operations (create/update)."""
 
     output = generate(prompt, system=TRIAGE_SYSTEM_PROMPT)
-    plan = _extract_json_array(output)
-    if plan is None:
+    raw_plan = _extract_json_array(output)
+    if raw_plan is None:
         _append_log(
             f"ingest | triage parse failed (output preview: {output[:120]!r})"
         )
         return None
-    return plan
+    validated = _validate_triage_plan(raw_plan)
+    if validated is None:
+        _append_log(
+            f"ingest | triage schema invalid (preview: {str(raw_plan)[:120]!r})"
+        )
+        return None
+    return validated
+
+
+def _validate_triage_plan(plan: list) -> list[dict] | None:
+    """Reject any plan that doesn't match the documented operation schema.
+
+    Each entry must be a dict with:
+      * ``type`` ∈ {"create", "update"}
+      * ``filename``: non-empty string
+
+    Empty plan ([]) is valid and means "nothing wiki-worthy". Anything that
+    would crash later (string entries, nonsense types, missing filenames)
+    is treated as a triage failure here so it counts toward dead-letter
+    quarantine instead of poisoning the pipeline downstream.
+    """
+    if not isinstance(plan, list):
+        return None
+    cleaned: list[dict] = []
+    for entry in plan:
+        if not isinstance(entry, dict):
+            return None
+        op_type = entry.get("type")
+        if op_type not in ("create", "update"):
+            return None
+        filename = entry.get("filename")
+        if not isinstance(filename, str) or not filename.strip():
+            return None
+        cleaned.append(entry)
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -333,40 +368,8 @@ Generate the page content based on the raw data and context above."""
 
 
 # ---------------------------------------------------------------------------
-# Parse & Apply (unchanged from original)
+# Apply (link reconciliation, write phase, rollback)
 # ---------------------------------------------------------------------------
-
-def _parse_output(output: str) -> list[dict]:
-    """Parse LLM output into page operations."""
-    operations = []
-
-    for match in re.finditer(
-        r"=== NEW PAGE:\s*(\S+)\s*===\n(.*?)\n=== END PAGE ===",
-        output,
-        re.DOTALL,
-    ):
-        filename = match.group(1)
-        content = match.group(2).strip()
-        operations.append({
-            "type": "create",
-            "filename": filename,
-            "content": content,
-        })
-
-    for match in re.finditer(
-        r"=== UPDATE PAGE:\s*(\S+)\s*===\n(.*?)\n=== END PAGE ===",
-        output,
-        re.DOTALL,
-    ):
-        filename = match.group(1)
-        content = match.group(2).strip()
-        operations.append({
-            "type": "update",
-            "filename": filename,
-            "content": content,
-        })
-
-    return operations
 
 
 def _fenced_code_spans(text: str) -> list[tuple[int, int]]:
@@ -528,23 +531,40 @@ def _safe_resolve_page_path(filename: str) -> Path:
     return full
 
 
+def _find_page_casefold(page_id: str) -> Path | None:
+    """find_page with macOS-case-insensitive semantics.
+
+    macOS's default APFS is case-insensitive but case-preserving: ``foo.md``
+    and ``Foo.md`` resolve to the same inode, and ``find_page`` (which does
+    a strict stem match) won't notice the collision until ``open()`` time.
+    """
+    direct = find_page(page_id)
+    if direct is not None:
+        return direct
+    target = page_id.casefold()
+    for p in PAGES_DIR.rglob("*.md"):
+        if p.stem.casefold() == target:
+            return p
+    return None
+
+
 def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     """Apply page operations and return (created, updated) lists.
 
-    Fail-closed: any unrecoverable problem (index_store unavailable, missing
-    update target, write failure) raises ``IngestApplyError``. The caller
-    surfaces that as ``JobStatus.FAILED`` *without* invoking ``on_complete``,
-    so the source raws stay pending for retry.
+    Two-phase contract: a **prepare phase** validates every op and stages
+    the final on-disk content; only after every op passes does the **write
+    phase** mutate disk. If a write fails midway, we attempt a best-effort
+    rollback (delete created files, restore updated bodies) so the wiki
+    never stays in a partially-applied state.
+
+    Fail-closed: any unrecoverable problem raises :class:`IngestApplyError`.
+    The caller marks the job FAILED without invoking ``on_complete``.
     """
     from llm_wiki_mcp.link_fix import atomic_write
 
-    created: list[str] = []
-    updated: list[str] = []
-
     # Build the universe of valid link targets: every existing page plus every
     # page about to be created in this batch (so siblings can cross-reference).
-    # We fail closed here — a stale or missing index would otherwise cause
-    # _reconcile_links to silently unwrap every link in the corpus.
+    # Fail closed — stale or missing index would silently unwrap every link.
     try:
         from llm_wiki_mcp.index_store import get_store
         store = get_store()
@@ -555,57 +575,140 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     except Exception as e:
         raise IngestApplyError(f"index_store unavailable: {e}") from e
 
-    # Pre-resolve every filename. Doing this up-front means a path-traversal
-    # attempt rejects the whole batch *before* any disk write, preserving
-    # the all-or-nothing apply contract.
-    resolved: list[tuple[dict, Path, str]] = []
+    # ---- Prepare phase -----------------------------------------------------
+    # Resolve every filename, validate every op, build the final write plan.
+    # Nothing here touches disk except for read-only stat/read calls.
+
+    @dataclass
+    class _Plan:
+        op_type: str  # "create" | "update"
+        path: Path
+        page_id: str
+        new_body: str  # bytes-equivalent; what we'll write
+        previous_text: str | None  # for rollback on update; None for create
+
+    planned: list[_Plan] = []
+    seen_page_ids: set[str] = set()
+    seen_paths: set[Path] = set()
+
     for op in operations:
+        op_type = op.get("type")
+        if op_type not in ("create", "update"):
+            raise IngestApplyError(f"unknown op type: {op_type!r}")
+
         full_path = _safe_resolve_page_path(op["filename"])
         page_id = full_path.stem
-        resolved.append((op, full_path, page_id))
+
+        if page_id in seen_page_ids:
+            raise IngestApplyError(
+                f"duplicate page_id within batch: {page_id!r}"
+            )
+        if full_path in seen_paths:
+            raise IngestApplyError(
+                f"duplicate target path within batch: {full_path}"
+            )
+        seen_page_ids.add(page_id)
+        seen_paths.add(full_path)
+
         allowed_ids.add(page_id)
 
     totals = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
 
-    for op, path, page_id in resolved:
+    for op in operations:
+        op_type = op["type"]
+        full_path = _safe_resolve_page_path(op["filename"])
+        page_id = full_path.stem
+
         body, stats = _reconcile_links(op["content"], allowed_ids)
         for k in totals:
             totals[k] += stats[k]
 
-        if op["type"] == "create":
-            existing = find_page(page_id)
+        if op_type == "create":
+            existing = _find_page_casefold(page_id)
             if existing is not None:
-                # Stem collision: a page with the same id already exists in a
-                # different folder. Refuse silent overwrite.
                 raise IngestApplyError(
                     f"create op would overwrite existing page_id {page_id!r} "
-                    f"(existing: {existing}, target: {path})"
+                    f"(existing: {existing}, target: {full_path})"
                 )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(path, body + "\n")
-            created.append(page_id)
-            _append_log(f"ingest | created {page_id}")
+            planned.append(
+                _Plan(
+                    op_type="create",
+                    path=full_path,
+                    page_id=page_id,
+                    new_body=body + "\n",
+                    previous_text=None,
+                )
+            )
 
-        elif op["type"] == "update":
+        else:  # update
             existing_path = find_page(page_id)
             if existing_path is None or not existing_path.exists():
                 raise IngestApplyError(
                     f"update target not found for page_id {page_id!r}"
                 )
-            existing_text = existing_path.read_text()
+            previous = existing_path.read_text()
             today = date.today().isoformat()
-            existing_text = re.sub(
+            stamped = re.sub(
                 r"updated:\s*.+",
                 f"updated: {today}",
-                existing_text,
+                previous,
                 count=1,
             )
-            atomic_write(existing_path, existing_text.rstrip() + "\n\n" + body + "\n")
-            updated.append(page_id)
-            _append_log(f"ingest | updated {page_id}")
+            new_body = stamped.rstrip() + "\n\n" + body + "\n"
+            planned.append(
+                _Plan(
+                    op_type="update",
+                    path=existing_path,
+                    page_id=page_id,
+                    new_body=new_body,
+                    previous_text=previous,
+                )
+            )
 
+    # ---- Write phase -------------------------------------------------------
+    # Each atomic_write is itself crash-safe (tempfile + os.replace + fsync).
+    # If any write raises (disk full, permissions, etc.) we best-effort
+    # rollback every page we already touched in this batch.
+
+    written: list[_Plan] = []
+    created: list[str] = []
+    updated: list[str] = []
+
+    try:
+        for entry in planned:
+            if entry.op_type == "create":
+                entry.path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write(entry.path, entry.new_body)
+                created.append(entry.page_id)
+                _append_log(f"ingest | created {entry.page_id}")
+            else:
+                atomic_write(entry.path, entry.new_body)
+                updated.append(entry.page_id)
+                _append_log(f"ingest | updated {entry.page_id}")
+            written.append(entry)
+    except Exception as write_err:
+        # Best-effort rollback: revert every page we successfully wrote so the
+        # wiki returns to its pre-batch state. Errors during rollback are
+        # logged and swallowed so we always surface the original error.
+        rollback_errors: list[str] = []
+        for entry in reversed(written):
+            try:
+                if entry.op_type == "create":
+                    entry.path.unlink(missing_ok=True)
+                else:
+                    atomic_write(entry.path, entry.previous_text or "")
+            except Exception as rb_err:
+                rollback_errors.append(f"{entry.page_id}: {rb_err}")
+        if rollback_errors:
+            _append_log(
+                "ingest | rollback errors (wiki may be partially mutated): "
+                + "; ".join(rollback_errors)
+            )
         else:
-            raise IngestApplyError(f"unknown op type: {op.get('type')!r}")
+            _append_log(
+                f"ingest | rolled back {len(written)} writes after error: {write_err}"
+            )
+        raise IngestApplyError(f"apply write failed: {write_err}") from write_err
 
     if any(totals.values()):
         _append_log(

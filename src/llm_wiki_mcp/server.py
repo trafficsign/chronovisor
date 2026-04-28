@@ -380,24 +380,30 @@ def _extract_snippet(content: str, terms: list[str], max_len: int = 150) -> str 
 
 @mcp.tool()
 def wiki_ingest(content: str) -> str:
-    """Ingest raw content into the wiki asynchronously.
+    """Persist raw content and let the orchestrator schedule ingest.
 
-    Returns a job_id for tracking progress.
+    The previous implementation called ``start_ingest`` directly, which
+    bypassed the orchestrator's in-flight lock and (worse) never wrote
+    the content to ``raw/`` first — so a partial failure threw the
+    source bytes away. We now persist via the same path
+    ``wiki_save_raw`` uses and return the orchestrator's verdict.
 
     Args:
         content: Raw session data to structure into wiki pages
     """
-    from llm_wiki_mcp.ingest import start_ingest
-    from llm_wiki_mcp.ollama import is_available
+    from datetime import datetime
+    from llm_wiki_mcp.orchestrator import run_pending_ingest
 
-    job_id = start_ingest(content)
-    processor = "ollama" if is_available() else "sonnet"
+    session_id = datetime.now().strftime("%Y%m%d-%H%M%S-ingest")
+    filename = f"{session_id}.md"
+    (RAW_DIR / filename).write_text(content)
 
-    return json.dumps({
-        "job_id": job_id,
-        "accepted": True,
-        "processor": processor,
-    }, ensure_ascii=False)
+    result = run_pending_ingest()
+    payload = {
+        "saved": filename,
+        "ingest": result,
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @mcp.tool()
