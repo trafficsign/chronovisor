@@ -1165,3 +1165,204 @@ class TestRebuildIndexNonFatal:
         assert on_complete_calls == [True]
         # Page is on disk despite rebuild failure.
         assert (isolated_wiki / "pages" / "ai" / "foo.md").exists()
+
+    def test_real_rebuild_index_io_failure_still_completes(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stronger version: don't mock _rebuild_index — let it actually run,
+        but make INDEX_FILE be a directory so the real write_text raises
+        IsADirectoryError. We still expect COMPLETED + on_complete."""
+        from llm_wiki_mcp import ingest as ingest_mod, jobs
+
+        # Replace INDEX_FILE with a directory (cannot write_text).
+        idx_path = isolated_wiki / "index.md"
+        idx_path.mkdir(parents=True, exist_ok=False)
+        monkeypatch.setattr(ingest_mod, "INDEX_FILE", idx_path)
+
+        monkeypatch.setattr(ingest_mod, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest_mod,
+            "_triage",
+            lambda _content: [
+                {"type": "create", "filename": "ai/bar.md", "title": "Bar"}
+            ],
+        )
+        monkeypatch.setattr(
+            ingest_mod,
+            "_generate_one",
+            lambda _op, _raw: {
+                "type": "create",
+                "filename": "ai/bar.md",
+                "content": (
+                    "---\ntitle: Bar\nupdated: 2026-04-28\n---\nbody"
+                ),
+            },
+        )
+
+        on_complete_calls = []
+        job = jobs.job_store.create(processor="ollama")
+        ingest_mod.run_ingest(
+            "raw",
+            job.job_id,
+            on_complete=lambda: on_complete_calls.append(True),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED, finished.error
+        assert on_complete_calls == [True]
+
+
+# ---------------------------------------------------------------------------
+# R5: parallel raw allocation
+# ---------------------------------------------------------------------------
+
+
+class TestRawAllocationParallel:
+    def test_concurrent_threads_get_unique_paths(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Real concurrency test: 50 threads racing into _allocate_raw_path
+        must each receive a distinct path. The sequential test in R4 only
+        proved the single-thread case."""
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        from llm_wiki_mcp import server
+
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+
+        N = 50
+        barrier = threading.Barrier(N)
+
+        def worker() -> Path:
+            barrier.wait()  # all threads release at once → maximize collision
+            return server._allocate_raw_path()
+
+        with ThreadPoolExecutor(max_workers=N) as ex:
+            paths = list(ex.map(lambda _i: worker(), range(N)))
+
+        assert len(set(paths)) == N
+        for p in paths:
+            assert p.exists()
+
+    def test_session_id_with_traversal_chars_sanitized(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malicious or malformed session_id ('../escape') must NOT let
+        the raw file land outside RAW_DIR."""
+        from llm_wiki_mcp import server
+
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+
+        path = server._allocate_raw_path(prefix="../../etc/passwd")
+        assert path.parent == (isolated_wiki / "raw")
+        # Sanitizer collapses path-traversal chars to dashes.
+        assert "../" not in path.name
+        assert "/" not in path.name
+
+
+# ---------------------------------------------------------------------------
+# R5-Critical: post-apply _append_log failures don't override COMPLETED
+# ---------------------------------------------------------------------------
+
+
+class TestPostApplyLogSafety:
+    def test_log_failure_after_apply_still_completes_and_calls_on_complete(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The R5-Critical regression: after _apply_operations + COMPLETED
+        was set, a raising _append_log used to fall through to the outer
+        except, override status with FAILED, and skip on_complete. Pages
+        persist but raws stay pending → next tick collides on every page.
+
+        With _safe_log wrapping every post-apply log call, this can't
+        happen. Verify by patching _append_log to raise on every call."""
+        from llm_wiki_mcp import ingest as ingest_mod, jobs
+
+        monkeypatch.setattr(ingest_mod, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest_mod,
+            "_triage",
+            lambda _content: [
+                {"type": "create", "filename": "ai/baz.md", "title": "Baz"}
+            ],
+        )
+        monkeypatch.setattr(
+            ingest_mod,
+            "_generate_one",
+            lambda _op, _raw: {
+                "type": "create",
+                "filename": "ai/baz.md",
+                "content": (
+                    "---\ntitle: Baz\nupdated: 2026-04-28\n---\nbody"
+                ),
+            },
+        )
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("simulated log disk failure")
+
+        monkeypatch.setattr(ingest_mod, "_append_log", boom)
+
+        on_complete_calls = []
+        job = jobs.job_store.create(processor="ollama")
+        ingest_mod.run_ingest(
+            "raw",
+            job.job_id,
+            on_complete=lambda: on_complete_calls.append(True),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED, finished.error
+        assert finished.pages_created == ["baz"]
+        assert on_complete_calls == [True]
+
+
+# ---------------------------------------------------------------------------
+# R5-Medium: filename schema split — legacy update should still work
+# ---------------------------------------------------------------------------
+
+
+class TestFilenameSchemaUpdateLeniency:
+    def test_legacy_filename_accepted_for_update(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        # These would never pass the create regex, but for update we let
+        # them through so legacy corpus pages remain updatable. The actual
+        # existence check happens in _apply_operations.
+        for legacy in (
+            "Foo.md",
+            "snake_case_page.md",
+            "MixedCase/foo.md",
+            "ai/UPPERCASE.md",
+        ):
+            out = _validate_triage_plan([{"type": "update", "filename": legacy}])
+            assert out is not None, legacy
+
+    def test_create_still_strict(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        # Same names rejected for create.
+        for bad in ("Foo.md", "snake_case.md", "MixedCase/foo.md"):
+            out = _validate_triage_plan([{"type": "create", "filename": bad}])
+            assert out is None, bad
+
+    def test_control_char_still_rejected_for_update(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        assert (
+            _validate_triage_plan(
+                [{"type": "update", "filename": "foo\x00.md"}]
+            )
+            is None
+        )
+
+    def test_traversal_rejected_for_both_op_types(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        for op_type in ("create", "update"):
+            assert (
+                _validate_triage_plan(
+                    [{"type": op_type, "filename": "../../etc/passwd.md"}]
+                )
+                is None
+            ), op_type

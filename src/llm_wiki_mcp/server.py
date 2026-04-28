@@ -378,31 +378,58 @@ def _extract_snippet(content: str, terms: list[str], max_len: int = 150) -> str 
     return None
 
 
+_RAW_PREFIX_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+
+
+def _sanitize_raw_prefix(prefix: str) -> str:
+    """Sanitize a caller-supplied prefix so it can't break out of RAW_DIR.
+
+    Slashes, ``..``, control chars, etc. would let a malicious or
+    malformed ``session_id`` (passed straight from an MCP client) place
+    the raw file outside ``RAW_DIR``. Strip everything but ASCII
+    alphanumerics, dash, and underscore; clamp length to 64 chars.
+    """
+    if not prefix:
+        return ""
+    cleaned = _RAW_PREFIX_RE.sub("-", prefix.strip())[:64]
+    cleaned = cleaned.strip("-_")
+    return f"-{cleaned}" if cleaned else ""
+
+
+_RAW_ALLOC_MAX_RETRIES = 32
+
+
 def _allocate_raw_path(prefix: str = "") -> Path:
     """Reserve a unique raw/*.md path even under sub-millisecond contention.
 
-    Filename = ``YYYYMMDD-HHMMSS{prefix}-{4hex}.md``. The 4-hex suffix from
-    ``time.time_ns()`` plus exclusive O_CREAT|O_EXCL create makes accidental
-    overwrite from concurrent callers (the previous second-precision name
-    silently overwrote a sibling raw on the same second) effectively
-    impossible. The empty file is created here so subsequent writers must
-    use a different name.
+    Filename = ``YYYYMMDD-HHMMSS{sanitized-prefix}-{8hex}.md``. The 8-hex
+    suffix is from :func:`secrets.token_hex` (32 bits of OS entropy, far
+    less collision-prone than ``time.time_ns() & 0xFFFF``). Combined with
+    ``O_CREAT|O_EXCL`` exclusive create this makes accidental overwrite
+    from concurrent callers effectively impossible. We bound retries so
+    a misconfigured filesystem doesn't spin forever.
     """
     import os
-    import time
+    import secrets
     from datetime import datetime
 
-    while True:
-        suffix = f"{time.time_ns() & 0xFFFF:04x}"
+    safe_prefix = _sanitize_raw_prefix(prefix)
+    last_err: Exception | None = None
+    for _ in range(_RAW_ALLOC_MAX_RETRIES):
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        name = f"{ts}{prefix}-{suffix}.md"
-        path = RAW_DIR / name
+        suffix = secrets.token_hex(4)  # 8 hex chars / 32 bits
+        path = RAW_DIR / f"{ts}{safe_prefix}-{suffix}.md"
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             os.close(fd)
             return path
-        except FileExistsError:
+        except FileExistsError as e:
+            last_err = e
             continue
+    raise RuntimeError(
+        f"could not allocate unique raw path after "
+        f"{_RAW_ALLOC_MAX_RETRIES} retries: {last_err}"
+    )
 
 
 @mcp.tool()

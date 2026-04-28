@@ -103,13 +103,13 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
     output = generate(prompt, system=TRIAGE_SYSTEM_PROMPT)
     raw_plan = _extract_json_array(output)
     if raw_plan is None:
-        _append_log(
+        _safe_log(
             f"ingest | triage parse failed (output preview: {output[:120]!r})"
         )
         return None
     validated = _validate_triage_plan(raw_plan)
     if validated is None:
-        _append_log(
+        _safe_log(
             f"ingest | triage schema invalid (preview: {str(raw_plan)[:120]!r})"
         )
         return None
@@ -130,16 +130,23 @@ _MAX_FILENAME_LEN = 200
 def _validate_triage_plan(plan: list) -> list[dict] | None:
     """Reject any plan that doesn't match the documented operation schema.
 
-    Each entry must be a dict with:
-      * ``type`` ∈ {"create", "update"}
-      * ``filename``: non-empty string, ASCII kebab-case, ≤ 200 chars,
-        no control chars / newlines / NUL, optional single ``folder/``
-        segment, optional ``.md`` suffix.
+    Validation is **op-type aware**:
 
-    Empty plan ([]) is valid and means "nothing wiki-worthy". Anything that
-    would crash later (string entries, nonsense types, control chars in
-    filenames) is treated as a triage failure here so it counts toward
-    dead-letter quarantine instead of poisoning the pipeline downstream.
+    * ``create``: filename must be ASCII kebab-case (``[a-z0-9-]``,
+      ≤200 chars, optional single folder segment, optional ``.md``).
+      We're choosing the canonical id for a brand-new page, so strict
+      hygiene is appropriate.
+    * ``update``: filename must resolve to an existing page in the
+      corpus. Legacy pages predating the kebab rule (e.g. ``Foo.md``,
+      ``snake_case.md``, non-ASCII titles) must remain updatable; the
+      strict regex would block them forever. We only reject control
+      characters and length blowups here.
+
+    Anything else (string entries, nonsense types, missing filenames,
+    control chars) returns ``None`` so the caller treats it as a triage
+    failure and counts it toward dead-letter quarantine.
+
+    Empty plan ([]) is valid and means "nothing wiki-worthy".
     """
     if not isinstance(plan, list):
         return None
@@ -156,11 +163,20 @@ def _validate_triage_plan(plan: list) -> list[dict] | None:
         fn = filename.strip()
         if not fn or len(fn) > _MAX_FILENAME_LEN:
             return None
-        # Reject any control char (NUL, newline, tab, etc.) outright.
+        # Reject any control char (NUL, newline, tab, etc.) for any op type.
         if any(ord(c) < 0x20 or c == "\x7f" for c in fn):
             return None
-        if not _FILENAME_PATTERN.fullmatch(fn):
+        # Reject path-traversal markers up front for both op types — the
+        # apply layer would catch these but we want them to count as a
+        # triage failure (LLM produced garbage), not an apply failure.
+        if ".." in fn.split("/"):
             return None
+        if op_type == "create":
+            if not _FILENAME_PATTERN.fullmatch(fn):
+                return None
+        # For update we don't enforce kebab — apply will look the page up
+        # via find_page() (case-insensitive on macOS APFS) and reject if
+        # the target doesn't exist. That way legacy corpus stays updatable.
         cleaned.append(entry)
     return cleaned
 
@@ -371,12 +387,12 @@ Generate the page content based on the raw data and context above."""
     try:
         output = generate(prompt, system=system_prompt)
     except Exception as e:
-        _append_log(f"ingest | generate failed for {filename}: {e}")
+        _safe_log(f"ingest | generate failed for {filename}: {e}")
         return None
 
     body = _extract_page_body(output, op_type=op_type)
     if not body:
-        _append_log(
+        _safe_log(
             f"ingest | generate parse failed for {filename} ({op_type}, preview: {output[:120]!r})"
         )
         return None
@@ -708,23 +724,16 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     created: list[str] = []
     updated: list[str] = []
 
-    def _safe_log(msg: str) -> None:
-        # _append_log writes to disk; if that fails we MUST NOT abort the
-        # write/rollback flow — losing a log line is recoverable, leaving
-        # disk in a half-applied state is not.
-        try:
-            _append_log(msg)
-        except Exception:
-            pass
-
     try:
         for entry in planned:
             if entry.op_type == "create":
                 entry.path.parent.mkdir(parents=True, exist_ok=True)
                 atomic_write(entry.path, entry.new_body)
-                # Append BEFORE logging so a log failure can't drop this
-                # entry from the rollback set. Log failures are non-fatal
-                # via _safe_log.
+                # Append BEFORE logging so a log failure could never drop
+                # an entry from the rollback set. _safe_log additionally
+                # ensures a logging exception (which atomic_write success
+                # already proves is irrelevant to data) never triggers
+                # rollback of a write that succeeded.
                 written.append(entry)
                 created.append(entry.page_id)
                 _safe_log(f"ingest | created {entry.page_id}")
@@ -737,8 +746,7 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         # Best-effort rollback. Each revert is gated by a CAS check: only
         # restore if the file still contains exactly what we wrote. If
         # another writer (e.g. wiki_apply) has modified it since, we leave
-        # their change intact and just log. _safe_log keeps log failures
-        # from masking the original error.
+        # their change intact and surface that fact in the raised error.
         rollback_errors: list[str] = []
         for entry in reversed(written):
             try:
@@ -759,14 +767,18 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
             except Exception as rb_err:
                 rollback_errors.append(f"{entry.page_id}: {rb_err}")
         if rollback_errors:
+            partial_summary = "; ".join(rollback_errors)
             _safe_log(
                 "ingest | rollback partial (other writers or IO failures): "
-                + "; ".join(rollback_errors)
+                + partial_summary
             )
-        else:
-            _safe_log(
-                f"ingest | rolled back {len(written)} writes after error: {write_err}"
-            )
+            raise IngestApplyError(
+                f"apply write failed: {write_err}; partial rollback: "
+                f"{partial_summary}"
+            ) from write_err
+        _safe_log(
+            f"ingest | rolled back {len(written)} writes after error: {write_err}"
+        )
         raise IngestApplyError(f"apply write failed: {write_err}") from write_err
 
     if any(totals.values()):
@@ -800,11 +812,39 @@ def _rebuild_index() -> None:
 
 
 def _append_log(message: str) -> None:
-    """Append to log.md."""
+    """Append to log.md. Failures are intentionally swallowed.
+
+    A dropped log line is recoverable; an exception escaping into the
+    ingest pipeline is not. Letting an IO error here propagate would,
+    for example, override a freshly-set ``COMPLETED`` job status with
+    ``FAILED`` from the outer except block and skip ``on_complete`` —
+    leaving disk pages persisted but raws marked pending, so the next
+    tick collides on every page we just created.
+    """
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    with open(LOG_FILE, "a") as f:
-        f.write(f"\n- [{timestamp}] {message}")
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(f"\n- [{timestamp}] {message}")
+    except Exception:
+        pass
+
+
+def _safe_log(message: str) -> None:
+    """Defense-in-depth wrapper used by atomicity-critical call sites.
+
+    ``_append_log`` is already internally crash-safe, but a test (or a
+    monkeypatch in some future caller) can replace it with something
+    that raises. The rollback path and the post-apply success path
+    cannot afford to propagate such exceptions: doing so would either
+    break atomicity (rollback aborts mid-loop) or override a
+    successfully-set ``COMPLETED`` status with ``FAILED`` and skip
+    ``on_complete``. So we wrap, swallow, and move on.
+    """
+    try:
+        _safe_log(message)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -841,9 +881,10 @@ def run_ingest(
             raise NotImplementedError("Sonnet fallback not yet implemented")
         job_store.update(job_id, processor=processor)
 
-        # Stage 1: Triage
+        # Stage 1: Triage. Every log call here is _safe_log so a wedged
+        # log file can't promote a successful triage into a FAILED job.
         job_store.update(job_id, stage="triage")
-        _append_log("ingest | stage 1: triage started")
+        _safe_log("ingest | stage 1: triage started")
         plan = _triage(content)
 
         # None = parser/model failure → leave raws un-marked so the next
@@ -858,7 +899,7 @@ def run_ingest(
                 completed_at=_now(),
                 error="triage parse failed",
             )
-            _append_log("ingest | triage: parse failed (raws left pending for retry)")
+            _safe_log("ingest | triage: parse failed (raws left pending for retry)")
             return
 
         if not plan:
@@ -870,16 +911,16 @@ def run_ingest(
                 pages_created=[],
                 pages_updated=[],
             )
-            _append_log("ingest | triage: no operations planned (raws marked processed)")
+            _safe_log("ingest | triage: no operations planned (raws marked processed)")
             failed = False
             if on_complete:
                 try:
                     on_complete()
                 except Exception as cb_err:
-                    _append_log(f"ingest | on_complete callback failed: {cb_err}")
+                    _safe_log(f"ingest | on_complete callback failed: {cb_err}")
             return
 
-        _append_log(f"ingest | triage: {len(plan)} operations planned")
+        _safe_log(f"ingest | triage: {len(plan)} operations planned")
         job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
 
         # Stage 2: Generate each page
@@ -887,7 +928,7 @@ def run_ingest(
         failed_ops: list[str] = []
         for i, op in enumerate(plan):
             fname = op.get("filename", "?")
-            _append_log(f"ingest | generating {i+1}/{len(plan)}: {fname}")
+            _safe_log(f"ingest | generating {i+1}/{len(plan)}: {fname}")
             generated = _generate_one(op, content)
             if generated:
                 all_operations.append(generated)
@@ -913,7 +954,7 @@ def run_ingest(
                 pages_updated=[],
                 error=err,
             )
-            _append_log(
+            _safe_log(
                 f"ingest | partial generate ({len(all_operations)} ok, "
                 f"{len(failed_ops)} failed) — discarded, raws left pending for retry"
             )
@@ -928,17 +969,19 @@ def run_ingest(
         # Side effects (rebuild_index, IndexStore refresh, embeddings) are
         # derived artifacts. Pages are already on disk; failures here must
         # NOT undo the apply or block on_complete — that would leave raws
-        # pending forever and re-create the same pages on retry.
+        # pending forever and re-create the same pages on retry. Use
+        # _safe_log so a logging error in a side-effect handler doesn't
+        # promote a derived-artifact failure into a hard ingest failure.
         try:
             _rebuild_index()
         except Exception as e:
-            _append_log(f"ingest | index.md rebuild failed (non-fatal): {e}")
+            _safe_log(f"ingest | index.md rebuild failed (non-fatal): {e}")
 
         try:
             from llm_wiki_mcp.index_store import get_store
             get_store().refresh()
         except Exception as e:
-            _append_log(f"ingest | index_store refresh failed: {e}")
+            _safe_log(f"ingest | index_store refresh failed: {e}")
 
         changed_pages = created + updated
         if changed_pages:
@@ -955,14 +998,19 @@ def run_ingest(
             pages_created=created,
             pages_updated=updated,
         )
-        _append_log(f"ingest | completed: {len(created)} created, {len(updated)} updated")
+        # _safe_log so a log failure here can't fall through to the outer
+        # except, override COMPLETED with FAILED, and skip on_complete.
+        # That was the R5-Critical regression path.
+        _safe_log(
+            f"ingest | completed: {len(created)} created, {len(updated)} updated"
+        )
         failed = False
 
         if on_complete:
             try:
                 on_complete()
             except Exception as cb_err:
-                _append_log(f"ingest | on_complete callback failed: {cb_err}")
+                _safe_log(f"ingest | on_complete callback failed: {cb_err}")
 
     except Exception as e:
         job_store.update(
@@ -971,13 +1019,13 @@ def run_ingest(
             completed_at=_now(),
             error=str(e),
         )
-        _append_log(f"ingest | failed: {e}")
+        _safe_log(f"ingest | failed: {e}")
     finally:
         if on_finally:
             try:
                 on_finally(failed=failed, triage_failed=triage_failed)
             except Exception as cb_err:
-                _append_log(f"ingest | on_finally callback failed: {cb_err}")
+                _safe_log(f"ingest | on_finally callback failed: {cb_err}")
 
 
 def start_ingest(
