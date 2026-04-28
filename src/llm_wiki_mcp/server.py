@@ -378,29 +378,57 @@ def _extract_snippet(content: str, terms: list[str], max_len: int = 150) -> str 
     return None
 
 
-@mcp.tool()
-def wiki_ingest(content: str) -> str:
-    """Persist raw content and let the orchestrator schedule ingest.
+def _allocate_raw_path(prefix: str = "") -> Path:
+    """Reserve a unique raw/*.md path even under sub-millisecond contention.
 
-    The previous implementation called ``start_ingest`` directly, which
-    bypassed the orchestrator's in-flight lock and (worse) never wrote
-    the content to ``raw/`` first — so a partial failure threw the
-    source bytes away. We now persist via the same path
-    ``wiki_save_raw`` uses and return the orchestrator's verdict.
+    Filename = ``YYYYMMDD-HHMMSS{prefix}-{4hex}.md``. The 4-hex suffix from
+    ``time.time_ns()`` plus exclusive O_CREAT|O_EXCL create makes accidental
+    overwrite from concurrent callers (the previous second-precision name
+    silently overwrote a sibling raw on the same second) effectively
+    impossible. The empty file is created here so subsequent writers must
+    use a different name.
+    """
+    import os
+    import time
+    from datetime import datetime
+
+    while True:
+        suffix = f"{time.time_ns() & 0xFFFF:04x}"
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        name = f"{ts}{prefix}-{suffix}.md"
+        path = RAW_DIR / name
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.close(fd)
+            return path
+        except FileExistsError:
+            continue
+
+
+@mcp.tool()
+def wiki_ingest(content: str, force: bool = True) -> str:
+    """Persist raw content and trigger ingest.
+
+    The previous implementation called ``start_ingest`` directly, bypassing
+    the orchestrator lock and never persisting the content. We now write
+    to ``raw/`` first (so a partial failure can still be retried) and then
+    invoke the orchestrator.
 
     Args:
-        content: Raw session data to structure into wiki pages
+        content: Raw session data to structure into wiki pages.
+        force: If True (default, matching the historical contract of
+            "ingest now"), trigger ingest even if pending count is below
+            ``INGEST_THRESHOLD``. Pass ``force=False`` to defer to the
+            normal threshold check.
     """
-    from datetime import datetime
     from llm_wiki_mcp.orchestrator import run_pending_ingest
 
-    session_id = datetime.now().strftime("%Y%m%d-%H%M%S-ingest")
-    filename = f"{session_id}.md"
-    (RAW_DIR / filename).write_text(content)
+    path = _allocate_raw_path(prefix="-ingest")
+    path.write_text(content)
 
-    result = run_pending_ingest()
+    result = run_pending_ingest(force=force)
     payload = {
-        "saved": filename,
+        "saved": path.name,
         "ingest": result,
     }
     return json.dumps(payload, ensure_ascii=False)
@@ -552,9 +580,6 @@ def wiki_save_raw(content: str, session_id: str | None = None, keywords: list[st
         session_id: Optional session identifier. Auto-generated if not provided.
         keywords: Optional list of keywords for ingest context search.
     """
-    if not session_id:
-        session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-
     # Prepend keywords as YAML frontmatter if provided
     if keywords:
         kw_line = ", ".join(keywords)
@@ -562,8 +587,10 @@ def wiki_save_raw(content: str, session_id: str | None = None, keywords: list[st
     else:
         body = content
 
-    filename = f"{session_id}.md"
-    path = RAW_DIR / filename
+    # session_id is advisory; always allocate a unique path so two callers
+    # in the same second don't silently overwrite each other.
+    path = _allocate_raw_path(prefix=f"-{session_id}" if session_id else "")
+    filename = path.name
     path.write_text(body)
 
     # Check if orchestrator should trigger ingest

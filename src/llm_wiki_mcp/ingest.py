@@ -116,17 +116,30 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
     return validated
 
 
+# Filename hardening: kebab-case ASCII, optional single folder segment,
+# .md suffix, capped length. Anything else is treated as a triage failure
+# so it accrues toward dead-letter instead of crashing later in apply.
+_FILENAME_PATTERN = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?/)?"  # optional folder/
+    r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"          # stem
+    r"(?:\.md)?$"                               # optional .md
+)
+_MAX_FILENAME_LEN = 200
+
+
 def _validate_triage_plan(plan: list) -> list[dict] | None:
     """Reject any plan that doesn't match the documented operation schema.
 
     Each entry must be a dict with:
       * ``type`` ∈ {"create", "update"}
-      * ``filename``: non-empty string
+      * ``filename``: non-empty string, ASCII kebab-case, ≤ 200 chars,
+        no control chars / newlines / NUL, optional single ``folder/``
+        segment, optional ``.md`` suffix.
 
     Empty plan ([]) is valid and means "nothing wiki-worthy". Anything that
-    would crash later (string entries, nonsense types, missing filenames)
-    is treated as a triage failure here so it counts toward dead-letter
-    quarantine instead of poisoning the pipeline downstream.
+    would crash later (string entries, nonsense types, control chars in
+    filenames) is treated as a triage failure here so it counts toward
+    dead-letter quarantine instead of poisoning the pipeline downstream.
     """
     if not isinstance(plan, list):
         return None
@@ -138,7 +151,15 @@ def _validate_triage_plan(plan: list) -> list[dict] | None:
         if op_type not in ("create", "update"):
             return None
         filename = entry.get("filename")
-        if not isinstance(filename, str) or not filename.strip():
+        if not isinstance(filename, str):
+            return None
+        fn = filename.strip()
+        if not fn or len(fn) > _MAX_FILENAME_LEN:
+            return None
+        # Reject any control char (NUL, newline, tab, etc.) outright.
+        if any(ord(c) < 0x20 or c == "\x7f" for c in fn):
+            return None
+        if not _FILENAME_PATTERN.fullmatch(fn):
             return None
         cleaned.append(entry)
     return cleaned
@@ -531,19 +552,27 @@ def _safe_resolve_page_path(filename: str) -> Path:
     return full
 
 
-def _find_page_casefold(page_id: str) -> Path | None:
-    """find_page with macOS-case-insensitive semantics.
+def _normalize_for_collision(name: str) -> str:
+    """Canonical key for case- and Unicode-insensitive collision detection.
 
-    macOS's default APFS is case-insensitive but case-preserving: ``foo.md``
-    and ``Foo.md`` resolve to the same inode, and ``find_page`` (which does
-    a strict stem match) won't notice the collision until ``open()`` time.
+    macOS's default APFS is case-insensitive AND can ship the same logical
+    name in two byte representations (NFC vs NFD): ``café.md`` (NFC,
+    one ``é``) and ``café.md`` (NFD, ``e`` + combining acute) resolve to
+    the same file but compare as different strings. NFC-normalize first,
+    then casefold.
     """
+    import unicodedata
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _find_page_casefold(page_id: str) -> Path | None:
+    """find_page with macOS-case-insensitive + NFC-normalized semantics."""
     direct = find_page(page_id)
     if direct is not None:
         return direct
-    target = page_id.casefold()
+    target = _normalize_for_collision(page_id)
     for p in PAGES_DIR.rglob("*.md"):
-        if p.stem.casefold() == target:
+        if _normalize_for_collision(p.stem) == target:
             return p
     return None
 
@@ -588,7 +617,7 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         previous_text: str | None  # for rollback on update; None for create
 
     planned: list[_Plan] = []
-    seen_page_ids: set[str] = set()
+    seen_norm_ids: set[str] = set()
     seen_paths: set[Path] = set()
 
     for op in operations:
@@ -599,15 +628,20 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         full_path = _safe_resolve_page_path(op["filename"])
         page_id = full_path.stem
 
-        if page_id in seen_page_ids:
+        # Detect intra-batch dups using the same case/Unicode-insensitive key
+        # we use against the existing corpus, so two ops whose ids differ
+        # only in case or NFC/NFD form are caught before any write.
+        norm_key = _normalize_for_collision(page_id)
+        if norm_key in seen_norm_ids:
             raise IngestApplyError(
-                f"duplicate page_id within batch: {page_id!r}"
+                f"duplicate page_id within batch (case/Unicode-insensitive): "
+                f"{page_id!r}"
             )
         if full_path in seen_paths:
             raise IngestApplyError(
                 f"duplicate target path within batch: {full_path}"
             )
-        seen_page_ids.add(page_id)
+        seen_norm_ids.add(norm_key)
         seen_paths.add(full_path)
 
         allowed_ids.add(page_id)
@@ -674,44 +708,69 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     created: list[str] = []
     updated: list[str] = []
 
+    def _safe_log(msg: str) -> None:
+        # _append_log writes to disk; if that fails we MUST NOT abort the
+        # write/rollback flow — losing a log line is recoverable, leaving
+        # disk in a half-applied state is not.
+        try:
+            _append_log(msg)
+        except Exception:
+            pass
+
     try:
         for entry in planned:
             if entry.op_type == "create":
                 entry.path.parent.mkdir(parents=True, exist_ok=True)
                 atomic_write(entry.path, entry.new_body)
+                # Append BEFORE logging so a log failure can't drop this
+                # entry from the rollback set. Log failures are non-fatal
+                # via _safe_log.
+                written.append(entry)
                 created.append(entry.page_id)
-                _append_log(f"ingest | created {entry.page_id}")
+                _safe_log(f"ingest | created {entry.page_id}")
             else:
                 atomic_write(entry.path, entry.new_body)
+                written.append(entry)
                 updated.append(entry.page_id)
-                _append_log(f"ingest | updated {entry.page_id}")
-            written.append(entry)
+                _safe_log(f"ingest | updated {entry.page_id}")
     except Exception as write_err:
-        # Best-effort rollback: revert every page we successfully wrote so the
-        # wiki returns to its pre-batch state. Errors during rollback are
-        # logged and swallowed so we always surface the original error.
+        # Best-effort rollback. Each revert is gated by a CAS check: only
+        # restore if the file still contains exactly what we wrote. If
+        # another writer (e.g. wiki_apply) has modified it since, we leave
+        # their change intact and just log. _safe_log keeps log failures
+        # from masking the original error.
         rollback_errors: list[str] = []
         for entry in reversed(written):
             try:
                 if entry.op_type == "create":
-                    entry.path.unlink(missing_ok=True)
+                    if entry.path.exists() and entry.path.read_text() == entry.new_body:
+                        entry.path.unlink()
+                    elif entry.path.exists():
+                        rollback_errors.append(
+                            f"{entry.page_id}: skipped (modified by another writer)"
+                        )
                 else:
-                    atomic_write(entry.path, entry.previous_text or "")
+                    if entry.path.exists() and entry.path.read_text() == entry.new_body:
+                        atomic_write(entry.path, entry.previous_text or "")
+                    elif entry.path.exists():
+                        rollback_errors.append(
+                            f"{entry.page_id}: skipped (modified by another writer)"
+                        )
             except Exception as rb_err:
                 rollback_errors.append(f"{entry.page_id}: {rb_err}")
         if rollback_errors:
-            _append_log(
-                "ingest | rollback errors (wiki may be partially mutated): "
+            _safe_log(
+                "ingest | rollback partial (other writers or IO failures): "
                 + "; ".join(rollback_errors)
             )
         else:
-            _append_log(
+            _safe_log(
                 f"ingest | rolled back {len(written)} writes after error: {write_err}"
             )
         raise IngestApplyError(f"apply write failed: {write_err}") from write_err
 
     if any(totals.values()):
-        _append_log(
+        _safe_log(
             f"ingest | link reconcile: resolved={totals['resolved']} "
             f"rewritten={totals['rewritten']} unwrapped={totals['unwrapped']}"
         )
@@ -865,7 +924,15 @@ def run_ingest(
         # except marks the job FAILED *without* invoking on_complete, so raws
         # stay pending for retry.
         created, updated = _apply_operations(all_operations)
-        _rebuild_index()
+
+        # Side effects (rebuild_index, IndexStore refresh, embeddings) are
+        # derived artifacts. Pages are already on disk; failures here must
+        # NOT undo the apply or block on_complete — that would leave raws
+        # pending forever and re-create the same pages on retry.
+        try:
+            _rebuild_index()
+        except Exception as e:
+            _append_log(f"ingest | index.md rebuild failed (non-fatal): {e}")
 
         try:
             from llm_wiki_mcp.index_store import get_store

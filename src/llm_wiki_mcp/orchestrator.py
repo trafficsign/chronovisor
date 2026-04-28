@@ -185,15 +185,26 @@ def _quarantine_pending_raws(filenames: list[str]) -> Path:
     return dead_letter_dir
 
 
-def run_pending_ingest() -> dict:
+def run_pending_ingest(force: bool = False) -> dict:
     """Run ingest on all pending raw files if threshold is met.
+
+    Args:
+        force: When True, bypass the ``INGEST_THRESHOLD`` check and trigger
+            immediately as long as at least one raw is pending. Used by
+            ``wiki_ingest`` to preserve its historical "ingest now" contract.
 
     Returns result dict with status and details.
     """
     with _INGEST_LOCK:
-        should, reason = should_ingest()
-        if not should:
-            return {"triggered": False, "reason": reason}
+        if force:
+            pending_now = get_pending_raw_files()
+            if not pending_now:
+                return {"triggered": False, "reason": "no pending raws"}
+            reason = f"force=True with {len(pending_now)} pending"
+        else:
+            should, reason = should_ingest()
+            if not should:
+                return {"triggered": False, "reason": reason}
 
         state = _load_state()
         if state.get("current_job_id"):

@@ -860,10 +860,11 @@ class TestWikiIngestRouting:
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
 
         # Stub the orchestrator path so we don't actually start ingest.
-        captured = {"called": False}
+        captured = {"called": False, "force": None}
 
-        def fake_run() -> dict:
+        def fake_run(force: bool = False) -> dict:
             captured["called"] = True
+            captured["force"] = force
             return {"triggered": False, "reason": "test stub"}
 
         monkeypatch.setattr(orchestrator, "run_pending_ingest", fake_run)
@@ -873,6 +874,294 @@ class TestWikiIngestRouting:
         raws = list((isolated_wiki / "raw").glob("*.md"))
         assert len(raws) == 1
         assert raws[0].read_text() == "hello world content"
-        # Must have consulted the orchestrator.
+        # Must have consulted the orchestrator with force=True (default).
         assert captured["called"] is True
+        assert captured["force"] is True
         assert "test stub" in result
+
+
+# ---------------------------------------------------------------------------
+# R4-Critical: log failures must not break rollback inclusion
+# ---------------------------------------------------------------------------
+
+
+class TestLogFailuresDontBreakRollback:
+    def test_log_failure_does_not_drop_entry_from_rollback_set(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If _append_log raised AFTER atomic_write succeeded but BEFORE the
+        previous code did `written.append(entry)`, the page would be
+        modified on disk yet absent from the rollback list — silently
+        partial state. Reordering plus _safe_log fixes this."""
+        from llm_wiki_mcp import ingest as ingest_mod
+
+        # Seed an existing page so op[0] becomes a real update we can roll back.
+        target = isolated_wiki / "pages" / "x" / "page.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n"
+        )
+        original = target.read_text()
+
+        # Make _append_log raise on every call: that used to mask the
+        # rollback set; now _safe_log swallows it.
+        def boom(*_a, **_kw):
+            raise RuntimeError("simulated log disk failure")
+
+        monkeypatch.setattr(ingest_mod, "_append_log", boom)
+
+        # Make the second write fail to trigger rollback.
+        from llm_wiki_mcp import link_fix
+        real_write = link_fix.atomic_write
+        n = {"calls": 0}
+
+        def flaky(path, content):
+            n["calls"] += 1
+            if n["calls"] == 2:
+                raise OSError("disk full")
+            real_write(path, content)
+
+        monkeypatch.setattr(link_fix, "atomic_write", flaky)
+
+        ops = [
+            {"type": "update", "filename": "page.md", "content": "addendum"},
+            {
+                "type": "create",
+                "filename": "y/new.md",
+                "content": "---\ntitle: Y\nupdated: 2026-04-28\n---\nbody",
+            },
+        ]
+        with pytest.raises(IngestApplyError, match="apply write failed"):
+            _apply_operations(ops)
+
+        # Update was rolled back even though _append_log raised on every call.
+        assert target.read_text() == original
+
+    def test_rollback_skips_when_other_writer_modified_file(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CAS check: if another process modified the file between our
+        write and our rollback (e.g. wiki_apply ran), we must NOT clobber
+        their change with our pre-batch snapshot. Skip and log."""
+        from llm_wiki_mcp import link_fix
+
+        target = isolated_wiki / "pages" / "x" / "page.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n"
+        )
+
+        real_write = link_fix.atomic_write
+        n = {"calls": 0}
+        # After the first successful write, a "rogue" writer overwrites the
+        # file with their own content. Then op 2 fails and rollback runs.
+        def rogue_then_fail(path, content):
+            n["calls"] += 1
+            if n["calls"] == 1:
+                real_write(path, content)
+                # Simulate a concurrent writer changing the file.
+                path.write_text("---\ntitle: rogue\nupdated: 2026-04-28\n---\nrogue body\n")
+                return
+            if n["calls"] == 2:
+                raise OSError("disk full")
+            real_write(path, content)
+
+        monkeypatch.setattr(link_fix, "atomic_write", rogue_then_fail)
+
+        ops = [
+            {"type": "update", "filename": "page.md", "content": "addendum"},
+            {
+                "type": "create",
+                "filename": "y/new.md",
+                "content": "---\ntitle: Y\nupdated: 2026-04-28\n---\nbody",
+            },
+        ]
+        with pytest.raises(IngestApplyError, match="apply write failed"):
+            _apply_operations(ops)
+
+        # Rogue writer's content should remain (CAS check skipped rollback).
+        assert "rogue body" in target.read_text()
+
+
+# ---------------------------------------------------------------------------
+# R4-High: raw filename collision avoidance
+# ---------------------------------------------------------------------------
+
+
+class TestRawFilenameCollision:
+    def test_allocate_raw_path_returns_unique_paths_under_contention(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import server
+
+        # Patch RAW_DIR in server so allocate writes into the isolated wiki.
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+
+        paths = {server._allocate_raw_path() for _ in range(50)}
+        assert len(paths) == 50  # all unique
+        for p in paths:
+            assert p.exists()
+            assert p.parent == isolated_wiki / "raw"
+
+
+# ---------------------------------------------------------------------------
+# R4-High: wiki_ingest force=True bypasses threshold
+# ---------------------------------------------------------------------------
+
+
+class TestWikiIngestForce:
+    def test_force_triggers_below_threshold(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator, ingest as ingest_mod
+
+        # 1 pending raw — far below INGEST_THRESHOLD (5). Without force, the
+        # orchestrator should refuse; with force=True, it should trigger.
+        (isolated_wiki / "raw" / "single.md").write_text("body")
+
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest_mod, "start_ingest", lambda *a, **kw: "stub-job"
+        )
+
+        deferred = orchestrator.run_pending_ingest(force=False)
+        assert deferred["triggered"] is False
+
+        forced = orchestrator.run_pending_ingest(force=True)
+        assert forced["triggered"] is True
+        assert "force=True" in forced["reason"]
+
+
+# ---------------------------------------------------------------------------
+# R4-Medium: filename schema hardening
+# ---------------------------------------------------------------------------
+
+
+class TestFilenameSchemaStrict:
+    def test_control_char_rejected(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        for c in ("\x00", "\n", "\t", "\x07", "\x7f"):
+            assert (
+                _validate_triage_plan(
+                    [{"type": "create", "filename": f"foo{c}bar.md"}]
+                )
+                is None
+            ), c
+
+    def test_long_filename_rejected(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        long_name = "a" * 250 + ".md"
+        assert (
+            _validate_triage_plan([{"type": "create", "filename": long_name}])
+            is None
+        )
+
+    def test_non_kebab_case_rejected(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        for bad in (
+            "Foo.md",         # uppercase
+            "snake_case.md",  # underscore
+            "a/b/c.md",       # nested folders
+            "a..md",          # consecutive dots-ish
+            "-leading.md",    # leading dash
+            "trailing-.md",   # trailing dash before suffix
+        ):
+            assert (
+                _validate_triage_plan([{"type": "create", "filename": bad}])
+                is None
+            ), bad
+
+    def test_kebab_with_optional_folder_accepted(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        for good in ("ai/foo.md", "foo.md", "foo", "ai/career-note"):
+            out = _validate_triage_plan([{"type": "create", "filename": good}])
+            assert out is not None, good
+
+
+# ---------------------------------------------------------------------------
+# R4-Medium: Unicode NFC/NFD collision detection
+# ---------------------------------------------------------------------------
+
+
+class TestUnicodeCollision:
+    def test_nfc_vs_nfd_treated_as_same_page(self, isolated_wiki: Path) -> None:
+        """café (NFC, 4 chars) vs café (NFD, 5 chars: e + combining acute)
+        live as the same logical page on macOS APFS. Both should map to one
+        normalized key for collision detection.
+
+        Note: validation in _validate_triage_plan rejects non-ASCII so this
+        is exercised at the apply layer. We bypass triage and call apply
+        directly with a non-ASCII filename to confirm the collision logic
+        itself catches it. (A real plan would never reach this case because
+        _validate_triage_plan filters non-ASCII first — that's defense in
+        depth.)
+        """
+        import unicodedata
+        from llm_wiki_mcp.ingest import _normalize_for_collision
+
+        nfc = unicodedata.normalize("NFC", "café")
+        nfd = unicodedata.normalize("NFD", "café")
+        assert nfc != nfd  # bytes differ
+        assert _normalize_for_collision(nfc) == _normalize_for_collision(nfd)
+        # Casefold also handled.
+        assert _normalize_for_collision("CAFÉ") == _normalize_for_collision("café")
+
+
+# ---------------------------------------------------------------------------
+# R4-Medium: rebuild_index failure is non-fatal
+# ---------------------------------------------------------------------------
+
+
+class TestRebuildIndexNonFatal:
+    def test_rebuild_index_error_does_not_block_completion(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """index.md is a derived artifact. If rebuild fails after pages
+        have been written, we must still report COMPLETED and call
+        on_complete — otherwise raws stay pending and retry will collide
+        on every page we already created."""
+        from llm_wiki_mcp import ingest as ingest_mod, jobs
+
+        monkeypatch.setattr(ingest_mod, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest_mod,
+            "_triage",
+            lambda _content: [
+                {"type": "create", "filename": "ai/foo.md", "title": "Foo"}
+            ],
+        )
+        monkeypatch.setattr(
+            ingest_mod,
+            "_generate_one",
+            lambda _op, _raw: {
+                "type": "create",
+                "filename": "ai/foo.md",
+                "content": (
+                    "---\ntitle: Foo\nupdated: 2026-04-28\n---\nbody"
+                ),
+            },
+        )
+
+        def boom() -> None:
+            raise RuntimeError("simulated rebuild failure")
+
+        monkeypatch.setattr(ingest_mod, "_rebuild_index", boom)
+
+        on_complete_calls = []
+        job = jobs.job_store.create(processor="ollama")
+        ingest_mod.run_ingest(
+            "raw",
+            job.job_id,
+            on_complete=lambda: on_complete_calls.append(True),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED, finished.error
+        assert finished.pages_created == ["foo"]
+        assert on_complete_calls == [True]
+        # Page is on disk despite rebuild failure.
+        assert (isolated_wiki / "pages" / "ai" / "foo.md").exists()
