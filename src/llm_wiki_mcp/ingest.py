@@ -45,21 +45,26 @@ def _extract_json_array(output: str) -> list[dict] | None:
 
     decoder = json.JSONDecoder()
     best: list | None = None
-    best_len = -1
+    best_end = -1
     pos = 0
-    while True:
+    n = len(text)
+    while pos < n:
         idx = text.find("[", pos)
         if idx == -1:
             break
         try:
-            value, end = decoder.raw_decode(text[idx:])
+            # Pass the full text + an offset so we don't re-allocate a slice
+            # for every candidate position (was O(N²) on bracket-heavy input).
+            value, end_offset = decoder.raw_decode(text, idx)
         except json.JSONDecodeError:
             pos = idx + 1
             continue
-        if isinstance(value, list) and end > best_len:
-            best = value
-            best_len = end
-        pos = idx + max(end, 1)
+        if isinstance(value, list):
+            consumed = end_offset - idx
+            if consumed > best_end:
+                best = value
+                best_end = consumed
+        pos = max(end_offset, idx + 1)
 
     return best
 
@@ -269,7 +274,15 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
 
     # update: drop any stray FM blocks, reject if nothing meaningful is left.
     cleaned = _strip_all_frontmatter(body).strip()
-    return cleaned or None
+    if not cleaned:
+        return None
+    # A partial frontmatter (opening `---` with no closing) cannot be safely
+    # stripped; refuse rather than appending it raw.
+    has_open_fence = bool(re.match(r"^---\s*$", cleaned, re.MULTILINE))
+    has_closed_block = bool(_FRONTMATTER_BLOCK_RE.search(cleaned))
+    if has_open_fence and not has_closed_block:
+        return None
+    return cleaned
 
 
 def _generate_one(op: dict, raw_content: str) -> dict | None:
@@ -356,6 +369,35 @@ def _parse_output(output: str) -> list[dict]:
     return operations
 
 
+def _fenced_code_spans(text: str) -> list[tuple[int, int]]:
+    """Return spans of fenced code blocks, including unclosed ones at EOF.
+
+    `_FENCED_CODE_RE` from ``link_fix`` requires a closing ```````,
+    so a model that emits an opener without a closer (truncation, formatting
+    error) leaves the rest of the body unprotected. Walk the text once,
+    toggling on every ```````: if we end inside a fence, treat
+    the trailing region as a fence too.
+    """
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    open_at: int | None = None
+    n = len(text)
+    while pos < n:
+        idx = text.find("```", pos)
+        if idx == -1:
+            break
+        if open_at is None:
+            open_at = idx
+            pos = idx + 3
+        else:
+            spans.append((open_at, idx + 3))
+            open_at = None
+            pos = idx + 3
+    if open_at is not None:
+        spans.append((open_at, n))
+    return spans
+
+
 def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
     """Repair or unwrap [[wiki-links]] in prose, leaving code & frontmatter alone.
 
@@ -370,14 +412,15 @@ def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
 
     Code / frontmatter regions are detected via ``link_fix`` (the existing
     canonical implementation used by lint/server) so we never break
-    ``x = data[[1]]`` or fenced examples.
+    ``x = data[[1]]`` or fenced examples. Unclosed fences (truncated LLM
+    output) are also covered — we treat everything after the dangling
+    opener as code.
 
     Returns ``(rewritten_content, stats)``.
     """
     from llm_wiki_mcp.link_fix import (
         WIKI_LINK_RE,
         _FRONTMATTER_RE,
-        _FENCED_CODE_RE,
         _INLINE_CODE_RE,
     )
 
@@ -385,9 +428,11 @@ def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
 
     # Pre-compute byte spans we must NOT touch.
     skip_ranges: list[tuple[int, int]] = []
-    for pattern in (_FRONTMATTER_RE, _FENCED_CODE_RE, _INLINE_CODE_RE):
-        for sm in pattern.finditer(content):
-            skip_ranges.append(sm.span())
+    for sm in _FRONTMATTER_RE.finditer(content):
+        skip_ranges.append(sm.span())
+    skip_ranges.extend(_fenced_code_spans(content))
+    for sm in _INLINE_CODE_RE.finditer(content):
+        skip_ranges.append(sm.span())
     skip_ranges.sort()
 
     def in_skip(pos: int) -> bool:
@@ -441,6 +486,48 @@ class IngestApplyError(Exception):
     """Raised when an operation cannot be safely applied (fail-closed)."""
 
 
+def _safe_resolve_page_path(filename: str) -> Path:
+    """Resolve ``filename`` to a path strictly under ``PAGES_DIR``.
+
+    The triage stage is LLM-controlled and can be steered by adversarial
+    raw content, so we treat its filenames as untrusted input. Reject:
+
+      * absolute paths (``/etc/passwd``)
+      * parent traversal (``../../etc/passwd``)
+      * symlink-escape after resolution
+      * empty / whitespace-only / dotfile-only filenames
+
+    Returns the resolved path; raises :class:`IngestApplyError` otherwise.
+    """
+    if not filename or not filename.strip():
+        raise IngestApplyError("empty filename")
+
+    # Normalize the .md suffix so callers don't need to do it themselves.
+    fn = filename.strip()
+    if not fn.endswith(".md"):
+        fn = fn + ".md"
+
+    candidate = Path(fn)
+    if candidate.is_absolute():
+        raise IngestApplyError(f"absolute filename refused: {filename!r}")
+    if any(part in ("..", "") for part in candidate.parts):
+        raise IngestApplyError(f"parent-traversal filename refused: {filename!r}")
+    # Disallow filenames that resolve outside PAGES_DIR (e.g. via symlink).
+    pages_root = PAGES_DIR.resolve()
+    full = (PAGES_DIR / candidate).resolve()
+    try:
+        full.relative_to(pages_root)
+    except ValueError as e:
+        raise IngestApplyError(
+            f"filename escapes PAGES_DIR: {filename!r}"
+        ) from e
+
+    if full.name in (".md", ""):
+        raise IngestApplyError(f"degenerate filename: {filename!r}")
+
+    return full
+
+
 def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     """Apply page operations and return (created, updated) lists.
 
@@ -468,32 +555,31 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     except Exception as e:
         raise IngestApplyError(f"index_store unavailable: {e}") from e
 
+    # Pre-resolve every filename. Doing this up-front means a path-traversal
+    # attempt rejects the whole batch *before* any disk write, preserving
+    # the all-or-nothing apply contract.
+    resolved: list[tuple[dict, Path, str]] = []
     for op in operations:
-        fn = op["filename"]
-        if not fn.endswith(".md"):
-            fn += ".md"
-        allowed_ids.add(Path(fn).stem)
+        full_path = _safe_resolve_page_path(op["filename"])
+        page_id = full_path.stem
+        resolved.append((op, full_path, page_id))
+        allowed_ids.add(page_id)
 
     totals = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
 
-    for op in operations:
-        filename = op["filename"]
-        if not filename.endswith(".md"):
-            filename += ".md"
-        path = PAGES_DIR / filename
-        page_id = path.stem
-
+    for op, path, page_id in resolved:
         body, stats = _reconcile_links(op["content"], allowed_ids)
         for k in totals:
             totals[k] += stats[k]
 
         if op["type"] == "create":
-            if find_page(page_id) is not None:
+            existing = find_page(page_id)
+            if existing is not None:
                 # Stem collision: a page with the same id already exists in a
-                # different folder. Refuse silently overwriting it.
+                # different folder. Refuse silent overwrite.
                 raise IngestApplyError(
                     f"create op would overwrite existing page_id {page_id!r} "
-                    f"(target path: {filename})"
+                    f"(existing: {existing}, target: {path})"
                 )
             path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write(path, body + "\n")
@@ -504,18 +590,17 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
             existing_path = find_page(page_id)
             if existing_path is None or not existing_path.exists():
                 raise IngestApplyError(
-                    f"update target not found for page_id {page_id!r} "
-                    f"(filename: {filename})"
+                    f"update target not found for page_id {page_id!r}"
                 )
-            existing = existing_path.read_text()
+            existing_text = existing_path.read_text()
             today = date.today().isoformat()
-            existing = re.sub(
+            existing_text = re.sub(
                 r"updated:\s*.+",
                 f"updated: {today}",
-                existing,
+                existing_text,
                 count=1,
             )
-            atomic_write(existing_path, existing.rstrip() + "\n\n" + body + "\n")
+            atomic_write(existing_path, existing_text.rstrip() + "\n\n" + body + "\n")
             updated.append(page_id)
             _append_log(f"ingest | updated {page_id}")
 
@@ -574,11 +659,19 @@ def run_ingest(
 
     ``on_complete`` fires only on full success (so the orchestrator can mark
     raws processed). ``on_finally`` fires after every terminal state — success,
-    partial, parse failure, or apply failure — so the orchestrator can release
-    its in-flight lock and (on failure) bump retry counters.
+    partial, parse failure, or apply failure — and is called with two flags:
+
+      * ``failed`` — True for any non-success terminal state.
+      * ``triage_failed`` — True only when triage (stage 1) could not produce
+        a parseable plan. The orchestrator counts these specifically: a
+        triage failure means the raw content itself is unprocessable, so
+        repeated occurrences justify quarantine. Other failures (Ollama
+        unavailable, generate parse, apply error) are transient or per-op
+        and must not feed the dead-letter counter.
     """
     job_store.update(job_id, status=JobStatus.RUNNING)
     failed = True  # flipped to False on full-success path
+    triage_failed = False
 
     try:
         processor = "ollama" if is_available() else "sonnet"
@@ -596,6 +689,7 @@ def run_ingest(
         # mark the raws processed (via on_complete) so we don't loop on
         # them forever.
         if plan is None:
+            triage_failed = True
             job_store.update(
                 job_id,
                 status=JobStatus.FAILED,
@@ -639,34 +733,11 @@ def run_ingest(
                 failed_ops.append(fname)
             job_store.update(job_id, completed_ops=i + 1)
 
-        # Apply whatever succeeded. Fail-closed: a hard error during apply
-        # raises out of this try block and is caught by the outer except,
-        # which marks the job FAILED *without* invoking on_complete.
-        if all_operations:
-            created, updated = _apply_operations(all_operations)
-            _rebuild_index()
-
-            try:
-                from llm_wiki_mcp.index_store import get_store
-                get_store().refresh()
-            except Exception as e:
-                _append_log(f"ingest | index_store refresh failed: {e}")
-
-            changed_pages = created + updated
-            if changed_pages:
-                try:
-                    from llm_wiki_mcp.search import update_embeddings
-                    update_embeddings(page_ids=changed_pages)
-                except Exception:
-                    pass
-        else:
-            created, updated = [], []
-
-        # Distinguish full success / partial / total failure. Only full success
-        # marks raws processed — anything less keeps them pending for retry so
-        # we never lose the source content because of a flaky generate call.
+        # Critical: any generate failure → DO NOT mutate disk. The successful
+        # ops would otherwise be retried on the next tick (since raws stay
+        # pending) and either collide on stem or double-append. Better to
+        # discard the partial result and let the whole batch retry cleanly.
         if failed_ops:
-            status = JobStatus.FAILED if not all_operations else JobStatus.COMPLETED
             err = (
                 f"generate failed for {len(failed_ops)}/{len(plan)} ops: "
                 f"{', '.join(failed_ops[:5])}"
@@ -674,18 +745,38 @@ def run_ingest(
             )
             job_store.update(
                 job_id,
-                status=status,
+                status=JobStatus.FAILED,
                 completed_at=_now(),
-                pages_created=created,
-                pages_updated=updated,
+                pages_created=[],
+                pages_updated=[],
                 error=err,
             )
             _append_log(
-                f"ingest | partial: applied {len(created)} created / "
-                f"{len(updated)} updated, but {len(failed_ops)} ops failed "
-                f"— raws left pending for retry"
+                f"ingest | partial generate ({len(all_operations)} ok, "
+                f"{len(failed_ops)} failed) — discarded, raws left pending for retry"
             )
             return
+
+        # All ops generated successfully → apply atomically. _apply_operations
+        # raises IngestApplyError on any unrecoverable problem; the outer
+        # except marks the job FAILED *without* invoking on_complete, so raws
+        # stay pending for retry.
+        created, updated = _apply_operations(all_operations)
+        _rebuild_index()
+
+        try:
+            from llm_wiki_mcp.index_store import get_store
+            get_store().refresh()
+        except Exception as e:
+            _append_log(f"ingest | index_store refresh failed: {e}")
+
+        changed_pages = created + updated
+        if changed_pages:
+            try:
+                from llm_wiki_mcp.search import update_embeddings
+                update_embeddings(page_ids=changed_pages)
+            except Exception:
+                pass
 
         job_store.update(
             job_id,
@@ -714,7 +805,7 @@ def run_ingest(
     finally:
         if on_finally:
             try:
-                on_finally(failed=failed)
+                on_finally(failed=failed, triage_failed=triage_failed)
             except Exception as cb_err:
                 _append_log(f"ingest | on_finally callback failed: {cb_err}")
 

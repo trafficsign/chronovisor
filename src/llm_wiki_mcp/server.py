@@ -591,6 +591,14 @@ def wiki_tick() -> str:
 
 def main():
     init_wiki()
+    # job_store is in-memory: any current_job_id persisted from a previous
+    # process is, by definition, stale. Clear it so a crash mid-ingest
+    # doesn't permanently lock out run_pending_ingest.
+    try:
+        from llm_wiki_mcp.orchestrator import reset_stale_lock
+        reset_stale_lock()
+    except Exception:
+        pass
     # Warm both the page index and the BM25 cache on startup so the first
     # tool call doesn't pay the full-scan cost. Failures are non-fatal —
     # lazy refresh inside each tool will catch up on the next call.

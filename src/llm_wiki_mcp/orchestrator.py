@@ -41,6 +41,29 @@ def _load_state() -> dict:
     }
 
 
+def reset_stale_lock() -> None:
+    """Clear ``current_job_id`` on startup if the referenced job is gone.
+
+    ``job_store`` is in-memory: after a process restart, any job_id persisted
+    in the state file refers to a job that no longer exists, so the
+    orchestrator would refuse to ever trigger ingest again. Call this once
+    at server startup so a crash mid-ingest doesn't permanently brick the
+    queue. The reservation sentinel ``__pending__`` is also cleared.
+    """
+    state = _load_state()
+    cur = state.get("current_job_id")
+    if not cur:
+        return
+    if cur == "__pending__":
+        state["current_job_id"] = None
+        _save_state(state)
+        return
+    from llm_wiki_mcp.jobs import job_store  # local import to avoid cycle
+    if job_store.get(cur) is None:
+        state["current_job_id"] = None
+        _save_state(state)
+
+
 def _save_state(state: dict) -> None:
     """Save orchestrator state."""
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
@@ -93,15 +116,23 @@ def mark_raw_processed(filenames: list[str]) -> None:
     _save_state(state)
 
 
-def _release_lock(failed: bool = False) -> None:
-    """Clear the in-flight job marker after a job finishes (success or fail).
+def _release_lock(failed: bool = False, triage_failed: bool = False) -> None:
+    """Clear the in-flight job marker after a job finishes.
 
-    On failure we also bump triage_failure_count so the orchestrator can
-    quarantine raws that keep dying in the same way.
+    Counter semantics: only ``triage_failed`` increments
+    ``triage_failure_count``. A triage failure means the *content* is
+    unprocessable, so repeated occurrences justify quarantine. Generate
+    parse errors, apply errors, or Ollama-unavailable are transient or
+    per-op and must NOT push raws toward dead-letter.
+
+    A successful run (failed=False) clears the counter so transient
+    failures don't accumulate.
     """
     state = _load_state()
     state["current_job_id"] = None
-    if failed:
+    if not failed:
+        state["triage_failure_count"] = 0
+    elif triage_failed:
         state["triage_failure_count"] = state.get("triage_failure_count", 0) + 1
     _save_state(state)
 
@@ -203,20 +234,38 @@ def run_pending_ingest() -> dict:
         # bumping triage_failure_count if we landed in a failure path.
         from llm_wiki_mcp.ingest import start_ingest
 
-        def _on_finally(failed: bool) -> None:
-            _release_lock(failed=failed)
+        def _on_finally(failed: bool, triage_failed: bool) -> None:
+            _release_lock(failed=failed, triage_failed=triage_failed)
 
-        job_id = start_ingest(
-            combined,
-            on_complete=lambda: mark_raw_processed(filenames),
-            on_finally=_on_finally,
-        )
+        # Persist the in-flight marker BEFORE starting the worker thread.
+        # Otherwise a fast-failing job's on_finally could clear current_job_id
+        # before the parent has even saved it, and the parent then re-saves
+        # the now-stale id. Reserve the slot first, then claim it on success.
+        reserved_state = _load_state()
+        reserved_state["current_job_id"] = "__pending__"
+        _save_state(reserved_state)
 
-        # Persist the in-flight marker so a subsequent call (or process restart)
-        # can see we're busy.
-        state = _load_state()
-        state["current_job_id"] = job_id
-        _save_state(state)
+        try:
+            job_id = start_ingest(
+                combined,
+                on_complete=lambda: mark_raw_processed(filenames),
+                on_finally=_on_finally,
+            )
+        except Exception:
+            # If start_ingest itself blew up, drop the reservation so the
+            # next tick can retry instead of being permanently locked out.
+            release_state = _load_state()
+            release_state["current_job_id"] = None
+            _save_state(release_state)
+            raise
+
+        # Replace the reservation with the real job_id. The worker may have
+        # already finished and cleared current_job_id to None — only overwrite
+        # if our reservation is still in place.
+        latest = _load_state()
+        if latest.get("current_job_id") == "__pending__":
+            latest["current_job_id"] = job_id
+            _save_state(latest)
 
         return {
             "triggered": True,

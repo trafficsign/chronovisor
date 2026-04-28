@@ -228,11 +228,10 @@ class TestReconcileLinks:
 def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the whole package at a throw-away wiki under tmp_path.
 
-    We monkeypatch every module-level constant the ingest pipeline reads,
-    plus the IndexStore singleton, so each test gets a clean slate.
+    Every module that holds a copy of a wiki path constant gets patched.
+    Without this an IndexStore.refresh() during the test would scan the
+    real ``~/.wiki`` corpus.
     """
-    import importlib
-
     wiki_root = tmp_path / "wiki"
     pages = wiki_root / "pages"
     raw = wiki_root / "raw"
@@ -241,7 +240,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    from llm_wiki_mcp import wiki, ingest, index_store
+    from llm_wiki_mcp import wiki, ingest, index_store, orchestrator
 
     monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
     monkeypatch.setattr(wiki, "PAGES_DIR", pages)
@@ -252,8 +251,16 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
     monkeypatch.setattr(ingest, "INDEX_FILE", wiki_root / "index.md")
     monkeypatch.setattr(ingest, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
+    monkeypatch.setattr(orchestrator, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json")
 
-    # Reset the IndexStore singleton so it picks up the new paths.
+    # IndexStore reads its paths from module globals AND from wiki.PAGES_DIR
+    # internally; patch both layers.
+    monkeypatch.setattr(index_store, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(index_store, "PAGES_DIR", pages)
+    monkeypatch.setattr(index_store, "SYSTEM_DIR", system)
+    monkeypatch.setattr(index_store, "INDEX_DIR", index_dir)
     monkeypatch.setattr(index_store, "PAGES_INDEX_FILE", index_dir / "pages.json")
     monkeypatch.setattr(
         index_store, "BACKLINKS_INDEX_FILE", index_dir / "backlinks.json"
@@ -357,3 +364,261 @@ class TestApplyOperations:
         ]
         with pytest.raises(IngestApplyError, match="index_store unavailable"):
             _apply_operations(ops)
+
+
+# ---------------------------------------------------------------------------
+# Path-traversal sanitization (R2-High)
+# ---------------------------------------------------------------------------
+
+
+class TestSafeResolvePagePath:
+    def test_relative_ok(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp.ingest import _safe_resolve_page_path
+
+        out = _safe_resolve_page_path("ai/foo.md")
+        pages = isolated_wiki / "pages"
+        assert out == (pages / "ai" / "foo.md").resolve()
+
+    def test_relative_without_md_suffix(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp.ingest import _safe_resolve_page_path
+
+        out = _safe_resolve_page_path("ai/foo")
+        assert out.name == "foo.md"
+
+    def test_absolute_rejected(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp.ingest import _safe_resolve_page_path
+
+        with pytest.raises(IngestApplyError, match="absolute filename"):
+            _safe_resolve_page_path("/etc/passwd")
+
+    def test_parent_traversal_rejected(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp.ingest import _safe_resolve_page_path
+
+        with pytest.raises(IngestApplyError, match="parent-traversal"):
+            _safe_resolve_page_path("../../etc/passwd.md")
+        with pytest.raises(IngestApplyError, match="parent-traversal"):
+            _safe_resolve_page_path("ai/../../../etc/passwd.md")
+
+    def test_empty_or_dot_md_rejected(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp.ingest import _safe_resolve_page_path
+
+        with pytest.raises(IngestApplyError):
+            _safe_resolve_page_path("")
+        with pytest.raises(IngestApplyError):
+            _safe_resolve_page_path("   ")
+
+    def test_apply_rejects_traversal_before_writing(
+        self, isolated_wiki: Path
+    ) -> None:
+        # Even a single traversal op poisons the whole batch — nothing writes.
+        good = {
+            "type": "create",
+            "filename": "ok/safe.md",
+            "content": "---\ntitle: T\nupdated: 2026-04-28\n---\nbody",
+        }
+        evil = {
+            "type": "create",
+            "filename": "../../tmp/escape.md",
+            "content": "---\ntitle: E\nupdated: 2026-04-28\n---\nx",
+        }
+        with pytest.raises(IngestApplyError, match="parent-traversal"):
+            _apply_operations([good, evil])
+        # Confirm neither file was created.
+        pages = isolated_wiki / "pages"
+        assert not (pages / "ok" / "safe.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Update body — partial frontmatter rejection (R2-Medium)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdatePartialFrontmatter:
+    def test_unclosed_frontmatter_in_update_rejected(self) -> None:
+        # Opening `---` with no closing — _strip_all_frontmatter can't
+        # remove it, so the contract demands we reject rather than append.
+        out = _extract_page_body(
+            "=== UPDATE PAGE: foo.md ===\n"
+            "---\ntitle: X\nupdated: 2026-04-28\n"
+            "extra body but no closing fence\n"
+            "=== END PAGE ===",
+            op_type="update",
+        )
+        assert out is None
+
+    def test_closed_frontmatter_then_body_in_update(self) -> None:
+        # Closed FM followed by real body → strip the FM, keep the body.
+        out = _extract_page_body(
+            "=== UPDATE PAGE: foo.md ===\n"
+            "---\ntitle: X\nupdated: 2026-04-28\n---\n"
+            "## section\nnotes\n"
+            "=== END PAGE ===",
+            op_type="update",
+        )
+        assert out is not None
+        assert "title:" not in out
+        assert "## section" in out
+
+
+# ---------------------------------------------------------------------------
+# Unclosed fenced code preservation (R2-Medium)
+# ---------------------------------------------------------------------------
+
+
+class TestUnclosedFence:
+    def test_unclosed_fence_protects_trailing_subscript(self) -> None:
+        # Truncated LLM output: the fence opens but never closes. Everything
+        # after the opener must be treated as code so we don't eat
+        # `data[[1]]` -> `data1`.
+        text = (
+            "intro [[foo]] mid\n"
+            "```python\n"
+            "x = data[[1]]\n"
+            "y = also[[2]]\n"
+            # NOTE: no closing fence
+        )
+        out, stats = _reconcile_links(text, {"foo"})
+        assert "x = data[[1]]" in out
+        assert "y = also[[2]]" in out
+        assert "[[foo]]" in out
+        assert stats["resolved"] == 1
+        assert stats["unwrapped"] == 0
+
+
+# ---------------------------------------------------------------------------
+# run_ingest integration: partial generate failure (R2-Critical)
+# ---------------------------------------------------------------------------
+
+
+class TestRunIngestPartialFailure:
+    def test_partial_generate_does_not_mutate_disk(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Critical bug: in the prior version, a 2-of-3-ops generate failure
+        wrote the 2 successful pages to disk, the 3rd raw stayed pending,
+        and the next tick re-tried with the same page_ids → stem collision
+        or duplicate append. Verify the apply step is now skipped entirely
+        when ANY op failed, leaving the wiki untouched."""
+
+        from llm_wiki_mcp import ingest, jobs
+
+        # Stub triage → returns 3 ops.
+        plan = [
+            {"type": "create", "filename": f"misc/p{i}.md", "title": f"P{i}"}
+            for i in range(3)
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+
+        # Stub generate: succeed for op 0 and 1, fail for op 2.
+        def fake_generate(op: dict, _raw: str) -> dict | None:
+            if op["filename"].endswith("p2.md"):
+                return None
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: X\nupdated: 2026-04-28\n---\nbody"
+                ),
+            }
+
+        monkeypatch.setattr(ingest, "_generate_one", fake_generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        on_complete_called = []
+        on_finally_calls = []
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "raw content",
+            job.job_id,
+            on_complete=lambda: on_complete_called.append(True),
+            on_finally=lambda failed, triage_failed: on_finally_calls.append(
+                {"failed": failed, "triage_failed": triage_failed}
+            ),
+        )
+
+        # No on_complete → raws stay pending.
+        assert on_complete_called == []
+        # on_finally fired exactly once with failed=True, triage_failed=False.
+        assert on_finally_calls == [{"failed": True, "triage_failed": False}]
+        # Job marked failed; no pages claimed as written.
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert finished.pages_created == []
+        assert finished.pages_updated == []
+        # Disk: NEITHER p0 nor p1 should exist (apply was skipped).
+        pages = isolated_wiki / "pages"
+        assert not (pages / "misc" / "p0.md").exists()
+        assert not (pages / "misc" / "p1.md").exists()
+        assert not (pages / "misc" / "p2.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator (R2-High)
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestrator:
+    def test_reset_stale_lock_clears_pending_sentinel(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        # Simulate a server crash mid-`run_pending_ingest`: the sentinel was
+        # written but the real job_id never replaced it.
+        state = orchestrator._load_state()
+        state["current_job_id"] = "__pending__"
+        orchestrator._save_state(state)
+
+        orchestrator.reset_stale_lock()
+        assert orchestrator._load_state()["current_job_id"] is None
+
+    def test_reset_stale_lock_clears_unknown_job(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        state = orchestrator._load_state()
+        state["current_job_id"] = "no-such-job-12345"
+        orchestrator._save_state(state)
+
+        orchestrator.reset_stale_lock()
+        # job_store is in-memory → after restart, the id is unknown → cleared.
+        assert orchestrator._load_state()["current_job_id"] is None
+
+    def test_reset_stale_lock_keeps_known_job(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+        from llm_wiki_mcp import jobs
+
+        job = jobs.job_store.create(processor="ollama")
+        try:
+            state = orchestrator._load_state()
+            state["current_job_id"] = job.job_id
+            orchestrator._save_state(state)
+
+            orchestrator.reset_stale_lock()
+            assert orchestrator._load_state()["current_job_id"] == job.job_id
+        finally:
+            # Cleanup so other tests aren't polluted.
+            jobs.job_store._jobs.pop(job.job_id, None)
+
+    def test_release_lock_only_counts_triage_failures(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        # Non-triage failure (e.g. apply error, generate parse) must NOT
+        # advance the dead-letter counter.
+        orchestrator._release_lock(failed=True, triage_failed=False)
+        assert orchestrator._load_state()["triage_failure_count"] == 0
+
+        # Triage failure does advance.
+        orchestrator._release_lock(failed=True, triage_failed=True)
+        orchestrator._release_lock(failed=True, triage_failed=True)
+        assert orchestrator._load_state()["triage_failure_count"] == 2
+
+        # Success resets.
+        orchestrator._release_lock(failed=False)
+        assert orchestrator._load_state()["triage_failure_count"] == 0
