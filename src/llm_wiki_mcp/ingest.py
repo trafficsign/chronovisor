@@ -10,7 +10,8 @@ from llm_wiki_mcp.wiki import PAGES_DIR, INDEX_FILE, LOG_FILE, all_pages, find_p
 from llm_wiki_mcp.jobs import job_store, JobStatus
 from llm_wiki_mcp.ollama import (
     generate, is_available,
-    INGEST_SYSTEM_PROMPT, TRIAGE_SYSTEM_PROMPT, GENERATE_SYSTEM_PROMPT,
+    INGEST_SYSTEM_PROMPT, TRIAGE_SYSTEM_PROMPT,
+    GENERATE_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT,
 )
 
 
@@ -21,31 +22,46 @@ from llm_wiki_mcp.ollama import (
 def _extract_json_array(output: str) -> list[dict] | None:
     """Best-effort extraction of a JSON array from an LLM response.
 
-    Handles preamble/postamble (e.g. leading ``---``), markdown fences, and
-    trailing prose. Returns ``None`` on parse failure so the caller can
-    distinguish failure from a legitimate empty plan ``[]``.
+    Uses ``json.JSONDecoder.raw_decode`` to try every ``[`` position as the
+    start of a valid JSON value, taking the longest array that parses. This
+    is robust against:
+
+    * preamble fluff (``---\\n[...]``, ``Here is the plan: [...]``).
+    * postamble prose containing brackets (``[...]\\nNote: [done]``).
+    * markdown code fences.
+    * literal ``]`` inside summary fields (the parser doesn't care).
+
+    Returns ``None`` on parse failure so the caller can distinguish failure
+    from a legitimate empty plan (``[]``).
     """
+    if not output:
+        return None
+
     text = output.strip()
     if text.startswith("```"):
         text = re.sub(r"^```\w*\n?", "", text)
         text = re.sub(r"\n?```$", "", text)
         text = text.strip()
 
-    # Locate the JSON array even when the model wraps it in fluff.
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1 or end < start:
-        return None
-    candidate = text[start : end + 1]
+    decoder = json.JSONDecoder()
+    best: list | None = None
+    best_len = -1
+    pos = 0
+    while True:
+        idx = text.find("[", pos)
+        if idx == -1:
+            break
+        try:
+            value, end = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            pos = idx + 1
+            continue
+        if isinstance(value, list) and end > best_len:
+            best = value
+            best_len = end
+        pos = idx + max(end, 1)
 
-    try:
-        plan = json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
-
-    if not isinstance(plan, list):
-        return None
-    return plan
+    return best
 
 
 def _triage(content: str) -> list[dict] | None:
@@ -169,24 +185,52 @@ def _search_related_pages(keywords: list[str], min_score: float = 0.5, top_n: in
     return [path for _, path in scored[:top_n]]
 
 
-def _extract_page_body(output: str) -> str | None:
+_FRONTMATTER_BLOCK_RE = re.compile(
+    r"^---\n.*?\n---(?:\n|$)", re.MULTILINE | re.DOTALL
+)
+
+
+def _has_frontmatter(text: str) -> bool:
+    """True if ``text`` starts with a ``---\\n...\\n---\\n`` block containing ``title:``."""
+    if not text.startswith("---\n"):
+        return False
+    m = _FRONTMATTER_BLOCK_RE.match(text)
+    if not m:
+        return False
+    return bool(re.search(r"^title:\s*\S", m.group(0), re.MULTILINE))
+
+
+def _strip_all_frontmatter(text: str) -> str:
+    """Remove every ``---\\n...\\n---\\n`` block from ``text``.
+
+    Used as a defensive scrub on update bodies: even if the model ignored
+    UPDATE_SYSTEM_PROMPT and wrote frontmatter, we drop it before append.
+    """
+    return _FRONTMATTER_BLOCK_RE.sub("", text)
+
+
+def _extract_page_body(output: str, op_type: str = "create") -> str | None:
     """Pull a page body out of generate-stage LLM output.
 
-    The system prompt asks for ``=== NEW PAGE: filename === ... === END PAGE ===``,
-    but local models drift: gemma drops the ``NEW PAGE:`` keyword and emits
-    ``=== filename === ... === END PAGE ===``, others omit the wrapper entirely
-    and just return the page body. We try strict, then lenient, then "looks like
-    a page anyway".
+    Op-type rules:
+    - ``create``: body MUST contain a frontmatter block with ``title:``. We accept
+      strict (`=== NEW PAGE: ... ===`), lenient (`=== anything ===`), or
+      no-wrapper formats — but reject anything without frontmatter so we never
+      persist refusals or malformed pages.
+    - ``update``: body MUST NOT contain a frontmatter block. Stray FM is
+      stripped here as a belt-and-braces against UPDATE_SYSTEM_PROMPT
+      drift. Empty body after stripping → reject.
     """
     if not output:
         return None
 
     text = output.strip()
-    # Strip surrounding code fences if the model added them.
     if text.startswith("```"):
         text = re.sub(r"^```\w*\n?", "", text)
         text = re.sub(r"\n?```$", "", text)
         text = text.strip()
+
+    body: str | None = None
 
     # 1. Strict: === NEW/UPDATE PAGE: filename === ... === END PAGE ===
     m = re.search(
@@ -195,26 +239,37 @@ def _extract_page_body(output: str) -> str | None:
         re.DOTALL | re.IGNORECASE,
     )
     if m:
-        return m.group(1).strip() or None
+        body = m.group(1).strip() or None
 
     # 2. Lenient: === <anything> === ... === END PAGE === (NEW PAGE: keyword dropped)
-    m = re.search(
-        r"===[^\n]*===\n(.*?)\n===\s*END\s+PAGE\s*===",
-        text,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if m:
-        return m.group(1).strip() or None
+    if body is None:
+        m = re.search(
+            r"===[^\n]*===\n(.*?)\n===\s*END\s+PAGE\s*===",
+            text,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if m:
+            body = m.group(1).strip() or None
 
-    # 3. Fallback: the model returned the page body without any wrapper.
-    #    Accept it only if it looks like a frontmatter-led page so we don't
-    #    persist refusals or chatter.
-    if text.startswith("---\n") and re.search(r"^title:\s*", text, re.MULTILINE):
-        # Drop a stray trailing "=== END ===" or similar if present.
-        text = re.sub(r"\n=+\s*END[^\n]*\s*=+\s*$", "", text, flags=re.IGNORECASE).strip()
-        return text or None
+    # 3. Fallback: bare frontmatter-led page with no wrapper.
+    if body is None and _has_frontmatter(text):
+        body = re.sub(
+            r"\n=+\s*END[^\n]*\s*=+\s*$", "", text, flags=re.IGNORECASE
+        ).strip() or None
 
-    return None
+    if body is None:
+        return None
+
+    # Op-type sanity: enforce frontmatter contract.
+    op_type = (op_type or "create").lower()
+    if op_type == "create":
+        if not _has_frontmatter(body):
+            return None
+        return body
+
+    # update: drop any stray FM blocks, reject if nothing meaningful is left.
+    cleaned = _strip_all_frontmatter(body).strip()
+    return cleaned or None
 
 
 def _generate_one(op: dict, raw_content: str) -> dict | None:
@@ -222,6 +277,8 @@ def _generate_one(op: dict, raw_content: str) -> dict | None:
     context = _build_focused_context(op, raw_content)
 
     op_type = op.get("type", "create").lower()
+    if op_type not in ("create", "update"):
+        op_type = "create"
     filename = op.get("filename", "unknown.md")
     summary = op.get("summary", "")
     title = op.get("title", "")
@@ -240,21 +297,23 @@ Summary: {summary}
 
 Generate the page content based on the raw data and context above."""
 
+    system_prompt = UPDATE_SYSTEM_PROMPT if op_type == "update" else GENERATE_SYSTEM_PROMPT
+
     try:
-        output = generate(prompt, system=GENERATE_SYSTEM_PROMPT)
+        output = generate(prompt, system=system_prompt)
     except Exception as e:
         _append_log(f"ingest | generate failed for {filename}: {e}")
         return None
 
-    body = _extract_page_body(output)
+    body = _extract_page_body(output, op_type=op_type)
     if not body:
         _append_log(
-            f"ingest | generate parse failed for {filename} (preview: {output[:120]!r})"
+            f"ingest | generate parse failed for {filename} ({op_type}, preview: {output[:120]!r})"
         )
         return None
 
     return {
-        "type": op_type if op_type in ("create", "update") else "create",
+        "type": op_type,
         "filename": filename,
         "content": body,
     }
@@ -297,25 +356,56 @@ def _parse_output(output: str) -> list[dict]:
     return operations
 
 
-_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
-
-
 def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
-    """Repair or unwrap [[wiki-links]] so the wiki has no 404s.
+    """Repair or unwrap [[wiki-links]] in prose, leaving code & frontmatter alone.
 
-    For each ``[[target|alias#anchor]]`` (Obsidian-flavored):
-      - target resolves → leave intact.
-      - target has folder/.md prefix that strips to a known id → rewrite.
-      - target unresolvable → unwrap to plain text (alias if given, else target),
+    For each ``[[target|alias#anchor]]`` outside of frontmatter / fenced code /
+    inline code:
+
+      * target resolves → leave intact (anchor + alias preserved).
+      * target has ``folder/`` or ``.md`` clutter that strips to a known id
+        → rewrite to the canonical form.
+      * target unresolvable → unwrap to plain text (alias if given, else target),
         so the body keeps the entity name without polluting the link graph.
+
+    Code / frontmatter regions are detected via ``link_fix`` (the existing
+    canonical implementation used by lint/server) so we never break
+    ``x = data[[1]]`` or fenced examples.
 
     Returns ``(rewritten_content, stats)``.
     """
+    from llm_wiki_mcp.link_fix import (
+        WIKI_LINK_RE,
+        _FRONTMATTER_RE,
+        _FENCED_CODE_RE,
+        _INLINE_CODE_RE,
+    )
+
     stats = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
 
+    # Pre-compute byte spans we must NOT touch.
+    skip_ranges: list[tuple[int, int]] = []
+    for pattern in (_FRONTMATTER_RE, _FENCED_CODE_RE, _INLINE_CODE_RE):
+        for sm in pattern.finditer(content):
+            skip_ranges.append(sm.span())
+    skip_ranges.sort()
+
+    def in_skip(pos: int) -> bool:
+        # Linear scan is fine — N is small per page.
+        for start, end in skip_ranges:
+            if pos < start:
+                return False
+            if pos < end:
+                return True
+        return False
+
     def replace(m: re.Match) -> str:
+        if in_skip(m.start()):
+            return m.group(0)  # inside code/frontmatter — never rewrite
+
         inside = m.group(1)
-        target_part, alias = (inside.split("|", 1) + [None])[:2]
+        target_part, _, alias_raw = inside.partition("|")
+        alias = alias_raw if "|" in inside else None
         if "#" in target_part:
             target, anchor_body = target_part.split("#", 1)
             anchor = "#" + anchor_body
@@ -327,7 +417,7 @@ def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
             stats["resolved"] += 1
             return m.group(0)
 
-        # Try common rewrites: folder/page.md → page, foo.md → foo, foo/bar → bar
+        # Try canonicalizing: strip a single leading folder and a trailing .md.
         candidate = target
         if "/" in candidate:
             candidate = candidate.rsplit("/", 1)[-1]
@@ -343,17 +433,31 @@ def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
         stats["unwrapped"] += 1
         return alias if alias is not None else target
 
-    new_content = _LINK_RE.sub(replace, content)
+    new_content = WIKI_LINK_RE.sub(replace, content)
     return new_content, stats
 
 
+class IngestApplyError(Exception):
+    """Raised when an operation cannot be safely applied (fail-closed)."""
+
+
 def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
-    """Apply page operations and return (created, updated) lists."""
-    created = []
-    updated = []
+    """Apply page operations and return (created, updated) lists.
+
+    Fail-closed: any unrecoverable problem (index_store unavailable, missing
+    update target, write failure) raises ``IngestApplyError``. The caller
+    surfaces that as ``JobStatus.FAILED`` *without* invoking ``on_complete``,
+    so the source raws stay pending for retry.
+    """
+    from llm_wiki_mcp.link_fix import atomic_write
+
+    created: list[str] = []
+    updated: list[str] = []
 
     # Build the universe of valid link targets: every existing page plus every
     # page about to be created in this batch (so siblings can cross-reference).
+    # We fail closed here — a stale or missing index would otherwise cause
+    # _reconcile_links to silently unwrap every link in the corpus.
     try:
         from llm_wiki_mcp.index_store import get_store
         store = get_store()
@@ -362,8 +466,8 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
             m["page_id"] for m in store.all_pages_meta(include_system=True)
         }
     except Exception as e:
-        _append_log(f"ingest | reconcile: index_store unavailable ({e})")
-        allowed_ids = set()
+        raise IngestApplyError(f"index_store unavailable: {e}") from e
+
     for op in operations:
         fn = op["filename"]
         if not fn.endswith(".md"):
@@ -384,27 +488,39 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
             totals[k] += stats[k]
 
         if op["type"] == "create":
+            if find_page(page_id) is not None:
+                # Stem collision: a page with the same id already exists in a
+                # different folder. Refuse silently overwriting it.
+                raise IngestApplyError(
+                    f"create op would overwrite existing page_id {page_id!r} "
+                    f"(target path: {filename})"
+                )
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body + "\n")
+            atomic_write(path, body + "\n")
             created.append(page_id)
             _append_log(f"ingest | created {page_id}")
 
         elif op["type"] == "update":
             existing_path = find_page(page_id)
-            if existing_path:
-                path = existing_path
-            if path.exists():
-                existing = path.read_text()
-                today = date.today().isoformat()
-                existing = re.sub(
-                    r"updated:\s*.+",
-                    f"updated: {today}",
-                    existing,
-                    count=1,
+            if existing_path is None or not existing_path.exists():
+                raise IngestApplyError(
+                    f"update target not found for page_id {page_id!r} "
+                    f"(filename: {filename})"
                 )
-                path.write_text(existing.rstrip() + "\n\n" + body + "\n")
-                updated.append(page_id)
-                _append_log(f"ingest | updated {page_id}")
+            existing = existing_path.read_text()
+            today = date.today().isoformat()
+            existing = re.sub(
+                r"updated:\s*.+",
+                f"updated: {today}",
+                existing,
+                count=1,
+            )
+            atomic_write(existing_path, existing.rstrip() + "\n\n" + body + "\n")
+            updated.append(page_id)
+            _append_log(f"ingest | updated {page_id}")
+
+        else:
+            raise IngestApplyError(f"unknown op type: {op.get('type')!r}")
 
     if any(totals.values()):
         _append_log(
@@ -448,9 +564,21 @@ def _append_log(message: str) -> None:
 # Main entry point — two-stage pipeline
 # ---------------------------------------------------------------------------
 
-def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None) -> None:
-    """Run two-stage ingest in background thread."""
+def run_ingest(
+    content: str,
+    job_id: str,
+    on_complete: "callable | None" = None,
+    on_finally: "callable | None" = None,
+) -> None:
+    """Run two-stage ingest in background thread.
+
+    ``on_complete`` fires only on full success (so the orchestrator can mark
+    raws processed). ``on_finally`` fires after every terminal state — success,
+    partial, parse failure, or apply failure — so the orchestrator can release
+    its in-flight lock and (on failure) bump retry counters.
+    """
     job_store.update(job_id, status=JobStatus.RUNNING)
+    failed = True  # flipped to False on full-success path
 
     try:
         processor = "ollama" if is_available() else "sonnet"
@@ -487,6 +615,7 @@ def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None)
                 pages_updated=[],
             )
             _append_log("ingest | triage: no operations planned (raws marked processed)")
+            failed = False
             if on_complete:
                 try:
                     on_complete()
@@ -498,30 +627,31 @@ def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None)
         job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
 
         # Stage 2: Generate each page
-        all_operations = []
+        all_operations: list[dict] = []
+        failed_ops: list[str] = []
         for i, op in enumerate(plan):
-            _append_log(f"ingest | generating {i+1}/{len(plan)}: {op.get('filename', '?')}")
+            fname = op.get("filename", "?")
+            _append_log(f"ingest | generating {i+1}/{len(plan)}: {fname}")
             generated = _generate_one(op, content)
             if generated:
                 all_operations.append(generated)
+            else:
+                failed_ops.append(fname)
             job_store.update(job_id, completed_ops=i + 1)
 
-        # Apply all operations
+        # Apply whatever succeeded. Fail-closed: a hard error during apply
+        # raises out of this try block and is caught by the outer except,
+        # which marks the job FAILED *without* invoking on_complete.
         if all_operations:
             created, updated = _apply_operations(all_operations)
             _rebuild_index()
 
-            # Refresh the IndexStore so subsequent reads see fresh
-            # backlinks/outlinks. Do this *before* embedding updates so
-            # that any code path that consults the index during embedding
-            # gets the new state.
             try:
                 from llm_wiki_mcp.index_store import get_store
                 get_store().refresh()
             except Exception as e:
                 _append_log(f"ingest | index_store refresh failed: {e}")
 
-            # Update search embeddings
             changed_pages = created + updated
             if changed_pages:
                 try:
@@ -532,6 +662,31 @@ def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None)
         else:
             created, updated = [], []
 
+        # Distinguish full success / partial / total failure. Only full success
+        # marks raws processed — anything less keeps them pending for retry so
+        # we never lose the source content because of a flaky generate call.
+        if failed_ops:
+            status = JobStatus.FAILED if not all_operations else JobStatus.COMPLETED
+            err = (
+                f"generate failed for {len(failed_ops)}/{len(plan)} ops: "
+                f"{', '.join(failed_ops[:5])}"
+                + ("..." if len(failed_ops) > 5 else "")
+            )
+            job_store.update(
+                job_id,
+                status=status,
+                completed_at=_now(),
+                pages_created=created,
+                pages_updated=updated,
+                error=err,
+            )
+            _append_log(
+                f"ingest | partial: applied {len(created)} created / "
+                f"{len(updated)} updated, but {len(failed_ops)} ops failed "
+                f"— raws left pending for retry"
+            )
+            return
+
         job_store.update(
             job_id,
             status=JobStatus.COMPLETED,
@@ -540,6 +695,7 @@ def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None)
             pages_updated=updated,
         )
         _append_log(f"ingest | completed: {len(created)} created, {len(updated)} updated")
+        failed = False
 
         if on_complete:
             try:
@@ -555,16 +711,26 @@ def run_ingest(content: str, job_id: str, on_complete: "callable | None" = None)
             error=str(e),
         )
         _append_log(f"ingest | failed: {e}")
+    finally:
+        if on_finally:
+            try:
+                on_finally(failed=failed)
+            except Exception as cb_err:
+                _append_log(f"ingest | on_finally callback failed: {cb_err}")
 
 
-def start_ingest(content: str, on_complete: "callable | None" = None) -> str:
+def start_ingest(
+    content: str,
+    on_complete: "callable | None" = None,
+    on_finally: "callable | None" = None,
+) -> str:
     """Start an async ingest job. Returns job_id."""
     processor = "ollama" if is_available() else "sonnet"
     job = job_store.create(processor=processor)
 
     thread = threading.Thread(
         target=run_ingest,
-        args=(content, job.job_id, on_complete),
+        args=(content, job.job_id, on_complete, on_finally),
         daemon=True,
     )
     thread.start()

@@ -5,6 +5,7 @@ this module handles when to trigger it.
 """
 
 import json
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,12 @@ LINT_INTERVAL_HOURS = 24  # Run lint every N hours
 # State file
 STATE_FILE = WIKI_ROOT / ".orchestrator_state.json"
 
+# In-process lock so concurrent calls into run_pending_ingest can't both
+# spawn an ingest thread for the same batch. The state file holds the
+# cross-call truth (current_job_id), this lock just serializes the
+# read-modify-write around it.
+_INGEST_LOCK = threading.Lock()
+
 
 def _load_state() -> dict:
     """Load orchestrator state."""
@@ -29,6 +36,8 @@ def _load_state() -> dict:
         "last_lint": None,
         "processed_raw_files": [],
         "ollama_health": {"status": None, "checked_at": None},
+        "current_job_id": None,
+        "triage_failure_count": 0,
     }
 
 
@@ -79,6 +88,21 @@ def mark_raw_processed(filenames: list[str]) -> None:
     processed.update(filenames)
     state["processed_raw_files"] = sorted(processed)
     state["last_ingest"] = datetime.now().isoformat()
+    state["current_job_id"] = None
+    state["triage_failure_count"] = 0
+    _save_state(state)
+
+
+def _release_lock(failed: bool = False) -> None:
+    """Clear the in-flight job marker after a job finishes (success or fail).
+
+    On failure we also bump triage_failure_count so the orchestrator can
+    quarantine raws that keep dying in the same way.
+    """
+    state = _load_state()
+    state["current_job_id"] = None
+    if failed:
+        state["triage_failure_count"] = state.get("triage_failure_count", 0) + 1
     _save_state(state)
 
 
@@ -98,42 +122,109 @@ def get_ollama_status() -> dict:
     }
 
 
+# How many consecutive triage failures we tolerate before quarantining the
+# offending raws so the queue can keep moving.
+TRIAGE_FAILURE_QUARANTINE_THRESHOLD = 3
+
+
+def _quarantine_pending_raws(filenames: list[str]) -> Path:
+    """Move raws that keep killing triage into a dead-letter folder.
+
+    Marks them processed so the orchestrator stops retrying them, but keeps
+    the source bytes on disk under ``raw/.dead-letter/`` so we can inspect
+    or re-feed them after fixing the parser.
+    """
+    dead_letter_dir = RAW_DIR / ".dead-letter"
+    dead_letter_dir.mkdir(exist_ok=True)
+    moved: list[str] = []
+    for name in filenames:
+        src = RAW_DIR / name
+        if not src.exists():
+            continue
+        dst = dead_letter_dir / name
+        try:
+            src.rename(dst)
+            moved.append(name)
+        except OSError:
+            continue
+    if moved:
+        # Mark as processed so get_pending_raw_files() skips them even if a
+        # future operation copies them back into raw/.
+        mark_raw_processed(moved)
+    return dead_letter_dir
+
+
 def run_pending_ingest() -> dict:
     """Run ingest on all pending raw files if threshold is met.
 
     Returns result dict with status and details.
     """
-    should, reason = should_ingest()
-    if not should:
-        return {"triggered": False, "reason": reason}
+    with _INGEST_LOCK:
+        should, reason = should_ingest()
+        if not should:
+            return {"triggered": False, "reason": reason}
 
-    pending = get_pending_raw_files()
+        state = _load_state()
+        if state.get("current_job_id"):
+            return {
+                "triggered": False,
+                "reason": f"ingest job {state['current_job_id']} already in flight",
+            }
 
-    # Limit batch size to avoid overwhelming LLM
-    MAX_BATCH = 10
-    pending = pending[:MAX_BATCH]
+        pending = get_pending_raw_files()
 
-    # Collect content from pending raw files
-    contents = []
-    filenames = []
-    for f in pending:
-        raw_text = f.read_text()
-        contents.append(f"--- Source: {f.name} ---\n{raw_text}")
-        filenames.append(f.name)
+        # Limit batch size to avoid overwhelming LLM.
+        MAX_BATCH = 10
+        pending = pending[:MAX_BATCH]
+        filenames = [f.name for f in pending]
 
-    combined = "\n\n".join(contents)
+        # Quarantine if this same head-of-queue keeps blowing up triage.
+        if state.get("triage_failure_count", 0) >= TRIAGE_FAILURE_QUARANTINE_THRESHOLD:
+            quarantine_dir = _quarantine_pending_raws(filenames)
+            return {
+                "triggered": False,
+                "reason": (
+                    f"quarantined {len(filenames)} raws after "
+                    f"{state['triage_failure_count']} consecutive triage failures "
+                    f"→ {quarantine_dir}"
+                ),
+                "quarantined": filenames,
+            }
 
-    # Start ingest — mark as processed only after successful completion
-    from llm_wiki_mcp.ingest import start_ingest
-    job_id = start_ingest(combined, on_complete=lambda: mark_raw_processed(filenames))
+        # Collect content from pending raw files.
+        contents = []
+        for f in pending:
+            raw_text = f.read_text()
+            contents.append(f"--- Source: {f.name} ---\n{raw_text}")
+        combined = "\n\n".join(contents)
 
-    return {
-        "triggered": True,
-        "reason": reason,
-        "job_id": job_id,
-        "files_processed": filenames,
-        "processor": get_ollama_status()["processor"],
-    }
+        # Start ingest. on_complete only fires on full success → mark_raw_processed.
+        # on_finally fires on every terminal state → release the in-flight lock,
+        # bumping triage_failure_count if we landed in a failure path.
+        from llm_wiki_mcp.ingest import start_ingest
+
+        def _on_finally(failed: bool) -> None:
+            _release_lock(failed=failed)
+
+        job_id = start_ingest(
+            combined,
+            on_complete=lambda: mark_raw_processed(filenames),
+            on_finally=_on_finally,
+        )
+
+        # Persist the in-flight marker so a subsequent call (or process restart)
+        # can see we're busy.
+        state = _load_state()
+        state["current_job_id"] = job_id
+        _save_state(state)
+
+        return {
+            "triggered": True,
+            "reason": reason,
+            "job_id": job_id,
+            "files_processed": filenames,
+            "processor": get_ollama_status()["processor"],
+        }
 
 
 def run_lint_if_due() -> dict:

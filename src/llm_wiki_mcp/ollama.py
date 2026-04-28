@@ -182,7 +182,7 @@ Output format (JSON array only):
 """
 
 GENERATE_SYSTEM_PROMPT = """\
-You are a knowledge wiki structuring engine. Generate content for a SINGLE wiki page.
+You are a knowledge wiki structuring engine. Generate content for a SINGLE NEW wiki page.
 
 Rules:
 - Frontmatter: only title and updated
@@ -192,13 +192,30 @@ Rules:
 - Use the provided context for cross-references but do not duplicate existing content
 
 Output exactly one page block:
-=== {type} PAGE: {filename} ===
+=== NEW PAGE: {filename} ===
 ---
 title: Page Title
 updated: YYYY-MM-DD
 ---
 
 Page content here with [[wiki-links]] to related topics.
+
+=== END PAGE ===
+"""
+
+UPDATE_SYSTEM_PROMPT = """\
+You are a knowledge wiki structuring engine. Append content to an EXISTING wiki page.
+
+Rules:
+- DO NOT output frontmatter (no `---`, no title:, no updated: lines). The existing page already has frontmatter; your output is appended to its body.
+- DO NOT repeat content that already exists on the page (it is provided in context).
+- Output ONLY the new section(s) to add — Japanese prose, headings, lists, code, etc.
+- Cross-references: use [[wiki-link]] notation (page ID only, no folder path)
+- Focus on facts, decisions, and technical knowledge
+
+Output exactly one block:
+=== UPDATE PAGE: {filename} ===
+New section(s) here. Markdown body only — NO frontmatter delimiters.
 
 === END PAGE ===
 """
