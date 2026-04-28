@@ -842,7 +842,7 @@ def _safe_log(message: str) -> None:
     ``on_complete``. So we wrap, swallow, and move on.
     """
     try:
-        _safe_log(message)
+        _append_log(message)
     except Exception:
         pass
 

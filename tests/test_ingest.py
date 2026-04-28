@@ -1266,6 +1266,25 @@ class TestRawAllocationParallel:
 
 
 class TestPostApplyLogSafety:
+    def test_safe_log_actually_calls_append_log(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression test for the recursion bug Codex caught: a stray sed
+        pass once rewrote the body of ``_safe_log`` to call itself, making
+        every "safe" log silently no-op (and burn a recursion limit). All
+        the atomicity tests passed only because nothing was ever logged.
+        Verify that calling _safe_log with a working _append_log does in
+        fact write through."""
+        from llm_wiki_mcp import ingest as ingest_mod
+
+        captured: list[str] = []
+        monkeypatch.setattr(
+            ingest_mod, "_append_log", lambda msg: captured.append(msg)
+        )
+
+        ingest_mod._safe_log("hello via safe_log")
+        assert captured == ["hello via safe_log"]
+
     def test_log_failure_after_apply_still_completes_and_calls_on_complete(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
