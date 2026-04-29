@@ -587,14 +587,18 @@ class TestUnclosedFence:
 
 
 class TestRunIngestPartialFailure:
-    def test_partial_generate_does_not_mutate_disk(
+    def test_partial_generate_applies_successful_ops(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Critical bug: in the prior version, a 2-of-3-ops generate failure
-        wrote the 2 successful pages to disk, the 3rd raw stayed pending,
-        and the next tick re-tried with the same page_ids → stem collision
-        or duplicate append. Verify the apply step is now skipped entirely
-        when ANY op failed, leaving the wiki untouched."""
+        """Contract: a partial generate failure (2 of 3 ops succeed, even
+        after the per-op retry) writes the 2 successful pages, marks raws
+        processed (so the next tick won't re-triage and collide on stem),
+        and records the failed op in ``job.result`` for human triage.
+
+        Replaces the prior 'discard everything on any failure' contract.
+        Discarding both halved the data the wiki captured AND looped on
+        raws that kept failing; partial apply + raws-processed avoids both.
+        """
 
         from llm_wiki_mcp import ingest, jobs
 
@@ -605,7 +609,8 @@ class TestRunIngestPartialFailure:
         ]
         monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
 
-        # Stub generate: succeed for op 0 and 1, fail for op 2.
+        # Stub generate: always succeed for p0/p1, always fail for p2 (so
+        # the retry also fails — exercises the dead-letter path).
         def fake_generate(op: dict, _raw: str) -> dict | None:
             if op["filename"].endswith("p2.md"):
                 return None
@@ -633,20 +638,121 @@ class TestRunIngestPartialFailure:
             ),
         )
 
-        # No on_complete → raws stay pending.
+        # on_complete fires → raws marked processed (no infinite retry).
+        assert on_complete_called == [True]
+        # on_finally fires with failed=False (we did write pages successfully).
+        assert on_finally_calls == [{"failed": False, "triage_failed": False}]
+        # Job COMPLETED with partial flag + failed_ops in result.
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED
+        assert sorted(finished.pages_created) == ["p0", "p1"]
+        assert finished.pages_updated == []
+        assert finished.result is not None
+        assert finished.result.get("partial") is True
+        failed_ops = finished.result.get("failed_ops", [])
+        assert len(failed_ops) == 1
+        assert failed_ops[0]["filename"].endswith("p2.md")
+        # Disk: p0 and p1 were written; p2 was not.
+        pages = isolated_wiki / "pages"
+        assert (pages / "misc" / "p0.md").exists()
+        assert (pages / "misc" / "p1.md").exists()
+        assert not (pages / "misc" / "p2.md").exists()
+
+    def test_partial_generate_retries_once_before_dead_lettering(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-op retry: a transient generate failure on the first attempt
+        is retried once. If the retry succeeds, the op is applied; the job
+        completes cleanly with no partial flag and no failed_ops."""
+
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {"type": "create", "filename": "misc/p0.md", "title": "P0"},
+            {"type": "create", "filename": "misc/p1.md", "title": "P1"},
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+
+        attempts: dict[str, int] = {}
+
+        def flaky_generate(op: dict, _raw: str) -> dict | None:
+            fname = op["filename"]
+            attempts[fname] = attempts.get(fname, 0) + 1
+            # p1 fails on first attempt, succeeds on second.
+            if fname.endswith("p1.md") and attempts[fname] == 1:
+                return None
+            return {
+                "type": "create",
+                "filename": fname,
+                "content": "---\ntitle: X\nupdated: 2026-04-28\n---\nbody",
+            }
+
+        monkeypatch.setattr(ingest, "_generate_one", flaky_generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        on_complete_called = []
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "raw content",
+            job.job_id,
+            on_complete=lambda: on_complete_called.append(True),
+        )
+
+        # p1 was attempted twice; p0 only once.
+        assert attempts.get("misc/p1.md") == 2
+        assert attempts.get("misc/p0.md") == 1
+        # Full success — no partial flag.
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED
+        assert sorted(finished.pages_created) == ["p0", "p1"]
+        assert finished.result is None or not finished.result.get("partial")
+        assert on_complete_called == [True]
+
+    def test_all_ops_fail_keeps_raws_pending(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If every generate op fails (even after retry), the wiki must
+        not be mutated and on_complete must NOT fire — that way raws stay
+        pending and the next tick can re-triage with fresh output."""
+
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {"type": "create", "filename": f"misc/p{i}.md", "title": f"P{i}"}
+            for i in range(2)
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+        monkeypatch.setattr(
+            ingest, "_generate_one", lambda _op, _raw: None
+        )
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        on_complete_called = []
+        on_finally_calls = []
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "raw content",
+            job.job_id,
+            on_complete=lambda: on_complete_called.append(True),
+            on_finally=lambda failed, triage_failed: on_finally_calls.append(
+                {"failed": failed, "triage_failed": triage_failed}
+            ),
+        )
+
+        # Nothing succeeded → no on_complete (raws stay pending for retry).
         assert on_complete_called == []
-        # on_finally fired exactly once with failed=True, triage_failed=False.
+        # on_finally fires with failed=True; triage_failed stays False
+        # because the failure was in generate, not triage.
         assert on_finally_calls == [{"failed": True, "triage_failed": False}]
-        # Job marked failed; no pages claimed as written.
         finished = jobs.job_store.get(job.job_id)
         assert finished.status == jobs.JobStatus.FAILED
         assert finished.pages_created == []
         assert finished.pages_updated == []
-        # Disk: NEITHER p0 nor p1 should exist (apply was skipped).
+        # Disk untouched.
         pages = isolated_wiki / "pages"
         assert not (pages / "misc" / "p0.md").exists()
         assert not (pages / "misc" / "p1.md").exists()
-        assert not (pages / "misc" / "p2.md").exists()
 
 
 # ---------------------------------------------------------------------------

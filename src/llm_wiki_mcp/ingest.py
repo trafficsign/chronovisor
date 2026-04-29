@@ -873,9 +873,13 @@ def run_ingest(
 ) -> None:
     """Run two-stage ingest in background thread.
 
-    ``on_complete`` fires only on full success (so the orchestrator can mark
-    raws processed). ``on_finally`` fires after every terminal state — success,
-    partial, parse failure, or apply failure — and is called with two flags:
+    ``on_complete`` fires whenever any pages were applied — full success or
+    partial-with-some-ops-failed. The orchestrator uses it to mark raws
+    processed; partial apply still counts because the next tick mustn't
+    re-triage the same content (that's how the prior contract caused
+    duplicate page creation). ``on_finally`` fires after every terminal
+    state — success, partial, parse failure, or apply failure — and is
+    called with two flags:
 
       * ``failed`` — True for any non-success terminal state.
       * ``triage_failed`` — True only when triage (stage 1) could not produce
@@ -937,26 +941,47 @@ def run_ingest(
         _safe_log(f"ingest | triage: {len(plan)} operations planned")
         job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
 
-        # Stage 2: Generate each page
+        # Stage 2: Generate each page. Failed ops are retried once before
+        # being dead-lettered — most generate failures are transient
+        # (truncation, malformed wrapper) and a second sample from the
+        # model usually succeeds.
         all_operations: list[dict] = []
-        failed_ops: list[str] = []
+        failed_op_specs: list[dict] = []  # full op dicts for the dead-letter record
         for i, op in enumerate(plan):
             fname = op.get("filename", "?")
             _safe_log(f"ingest | generating {i+1}/{len(plan)}: {fname}")
             generated = _generate_one(op, content)
+            if generated is None:
+                _safe_log(f"ingest | retry generate for {fname}")
+                generated = _generate_one(op, content)
             if generated:
                 all_operations.append(generated)
             else:
-                failed_ops.append(fname)
+                failed_op_specs.append({
+                    "filename": fname,
+                    "type": op.get("type", "?"),
+                    "title": op.get("title", ""),
+                    "summary": op.get("summary", ""),
+                })
             job_store.update(job_id, completed_ops=i + 1)
 
-        # Critical: any generate failure → DO NOT mutate disk. The successful
-        # ops would otherwise be retried on the next tick (since raws stay
-        # pending) and either collide on stem or double-append. Better to
-        # discard the partial result and let the whole batch retry cleanly.
-        if failed_ops:
+        failed_ops = [spec["filename"] for spec in failed_op_specs]
+
+        # Apply policy:
+        # - All ops failed → discard, leave raws pending so the next tick
+        #   can re-triage with fresh model output. This avoids creating an
+        #   empty "completed" job that silently consumes the raws.
+        # - Some ops succeeded, some failed → apply the successful ops AND
+        #   mark raws processed (via on_complete). The previous "discard
+        #   everything" contract caused two problems: (1) successful ops
+        #   were thrown away, and (2) raws stayed pending so the next tick
+        #   re-triaged the same content, often producing a different plan
+        #   that would either redo work or generate divergent page_ids.
+        #   Marking raws processed after a partial apply prevents both.
+        # - All ops succeeded → standard happy path.
+        if failed_ops and not all_operations:
             err = (
-                f"generate failed for {len(failed_ops)}/{len(plan)} ops: "
+                f"generate failed for all {len(failed_ops)}/{len(plan)} ops: "
                 f"{', '.join(failed_ops[:5])}"
                 + ("..." if len(failed_ops) > 5 else "")
             )
@@ -969,15 +994,15 @@ def run_ingest(
                 error=err,
             )
             _safe_log(
-                f"ingest | partial generate ({len(all_operations)} ok, "
-                f"{len(failed_ops)} failed) — discarded, raws left pending for retry"
+                f"ingest | all {len(failed_ops)} generate ops failed "
+                f"— discarded, raws left pending for retry"
             )
             return
 
-        # All ops generated successfully → apply atomically. _apply_operations
-        # raises IngestApplyError on any unrecoverable problem; the outer
-        # except marks the job FAILED *without* invoking on_complete, so raws
-        # stay pending for retry.
+        # All ops generated successfully (or partial — apply what we have).
+        # _apply_operations raises IngestApplyError on any unrecoverable
+        # problem; the outer except marks the job FAILED *without* invoking
+        # on_complete, so raws stay pending for retry.
         created, updated = _apply_operations(all_operations)
 
         # Side effects (rebuild_index, IndexStore refresh, embeddings) are
@@ -1005,19 +1030,38 @@ def run_ingest(
             except Exception:
                 pass
 
+        # Build job result. For partial runs, surface the failed op specs
+        # so a human can `wiki_jobs <id>` to see what was dropped.
+        job_result: dict | None = None
+        if failed_op_specs:
+            job_result = {
+                "partial": True,
+                "failed_ops": failed_op_specs,
+            }
+
         job_store.update(
             job_id,
             status=JobStatus.COMPLETED,
             completed_at=_now(),
             pages_created=created,
             pages_updated=updated,
+            result=job_result,
         )
         # _safe_log so a log failure here can't fall through to the outer
         # except, override COMPLETED with FAILED, and skip on_complete.
         # That was the R5-Critical regression path.
-        _safe_log(
-            f"ingest | completed: {len(created)} created, {len(updated)} updated"
-        )
+        if failed_op_specs:
+            _safe_log(
+                f"ingest | partial: {len(created)} created, {len(updated)} updated, "
+                f"{len(failed_op_specs)} dead-lettered "
+                f"({', '.join(failed_ops[:3])}"
+                + ("..." if len(failed_ops) > 3 else "")
+                + ")"
+            )
+        else:
+            _safe_log(
+                f"ingest | completed: {len(created)} created, {len(updated)} updated"
+            )
         failed = False
 
         if on_complete:
