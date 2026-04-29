@@ -135,6 +135,13 @@ Output format (JSON array only):
     "summary": "What new information to add"
   }
 ]
+
+WRONG output (do NOT do these):
+- Bare keyword list: ["keyword1", "keyword2"]   ← This is a list of strings, not operations
+- Single object: {"type": "create", ...}        ← Must be wrapped in an array
+- Code fences around the JSON                   ← Output raw JSON only
+
+Each top-level element of the array MUST be an object with a "type" field.
 """
 
 GENERATE_SYSTEM_PROMPT = """\

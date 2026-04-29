@@ -68,6 +68,37 @@ class TestExtractJsonArray:
         out = _extract_json_array('[{"a":1}]\nthen the real plan:\n[{"a":1},{"b":2}]')
         assert out == [{"a": 1}, {"b": 2}]
 
+    def test_truncated_outer_with_inner_keywords_returns_none(self) -> None:
+        # Historical bug: when triage runs out of tokens mid-array, the
+        # inner ``"keywords": [...]`` list is the longest *parseable* array
+        # and used to be returned, silently routing truncated triage as
+        # either "nothing wiki-worthy" (empty `[]`) or "schema invalid"
+        # (string list). Both are wrong — the LLM had more to say.
+        truncated_string_inner = (
+            '[\n'
+            '  {"type": "create", "filename": "a.md", "title": "A", '
+            '"keywords": ["x", "y"], "summary": "..."},\n'
+            '  {"type": "create", "filename": "b.md", "title": "B", '
+            '"keywords": ['
+        )
+        assert _extract_json_array(truncated_string_inner) is None
+
+        truncated_empty_inner = (
+            '[\n'
+            '  {"type": "create", "filename": "a.md", '
+            '"keywords": []},\n'
+            '  {"type": "create", "filename": "b.md", '
+        )
+        assert _extract_json_array(truncated_empty_inner) is None
+
+    def test_truncated_outer_with_inner_dict_array_recovers(self) -> None:
+        # Edge case: the outer array is broken but a complete dict-array
+        # appears later. This *does* fit the contract, so accept it.
+        text = 'broken [stuff\nlater: [{"type": "create", "filename": "a.md"}]'
+        assert _extract_json_array(text) == [
+            {"type": "create", "filename": "a.md"}
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Frontmatter helpers
@@ -159,6 +190,71 @@ class TestExtractPageBody:
             "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
             "=== END PAGE ===",
             op_type="update",
+        )
+        assert out is None
+
+    def test_create_truncated_no_close_recovers(self) -> None:
+        # The most common Ollama failure mode: wrapper opened, full
+        # frontmatter + content emitted, but model ran out of tokens
+        # before "=== END PAGE ===". Without the truncation fallback all
+        # three earlier patterns fail and the body is silently discarded.
+        out = _extract_page_body(
+            "=== NEW PAGE: personal/smoking-habit-analysis.md ===\n"
+            "---\ntitle: Smoking Habit Analysis\nupdated: 2026-04-29\n---\n"
+            "\n# 概要\n\nニコチンの半減期は短い",
+            op_type="create",
+        )
+        assert out is not None
+        assert out.startswith("---\ntitle: Smoking Habit")
+        assert "ニコチンの半減期" in out
+
+    def test_create_truncated_partial_close_fence_stripped(self) -> None:
+        # Output ends with a partially-emitted close fence ("=== EN").
+        # We must strip it rather than letting it leak into the body.
+        out = _extract_page_body(
+            "=== NEW PAGE: foo.md ===\n"
+            "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
+            "\nbody text.\n=== EN",
+            op_type="create",
+        )
+        assert out is not None
+        assert "=== EN" not in out
+        assert out.rstrip().endswith("body text.")
+
+    def test_create_new_keyword_dropped_with_truncation(self) -> None:
+        # gemma sometimes drops the "NEW" keyword and uses the filename
+        # as the wrapper label. Combined with truncation, all three
+        # earlier patterns fail. Truncation fallback peels generic
+        # "=== ... ===" wrappers so this still recovers.
+        out = _extract_page_body(
+            "=== user-profile-background PAGE: user-profile-background ===\n"
+            "---\ntitle: User Profile\nupdated: 2026-04-29\n---\n"
+            "\nbody",
+            op_type="create",
+        )
+        assert out is not None
+        assert "title: User Profile" in out
+
+    def test_update_truncated_no_close_recovers(self) -> None:
+        # Same truncation pattern for updates: no frontmatter expected,
+        # so the contract check passes any non-empty body.
+        out = _extract_page_body(
+            "=== UPDATE PAGE: foo.md ===\n"
+            "\n## new section\n\nnotes...",
+            op_type="update",
+        )
+        assert out is not None
+        assert "## new section" in out
+        assert "title:" not in out
+
+    def test_create_truncated_broken_frontmatter_still_rejected(self) -> None:
+        # Truncation BEFORE the closing "---" of the frontmatter cannot
+        # be recovered: we'd persist a page with no proper frontmatter
+        # block. The op_type contract check must still reject.
+        out = _extract_page_body(
+            "=== NEW PAGE: foo.md ===\n"
+            "---\ntitle: Foo\nupdated: 2026",
+            op_type="create",
         )
         assert out is None
 

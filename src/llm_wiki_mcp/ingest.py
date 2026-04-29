@@ -45,10 +45,13 @@ def _extract_json_array(output: str) -> list[dict] | None:
         text = text.strip()
 
     decoder = json.JSONDecoder()
-    best: list | None = None
-    best_end = -1
-    pos = 0
     n = len(text)
+    first_idx_in_text = text.find("[")
+    if first_idx_in_text == -1:
+        return None
+
+    candidates: list[tuple[int, int, list]] = []  # (idx, consumed, value)
+    pos = 0
     while pos < n:
         idx = text.find("[", pos)
         if idx == -1:
@@ -61,13 +64,37 @@ def _extract_json_array(output: str) -> list[dict] | None:
             pos = idx + 1
             continue
         if isinstance(value, list):
-            consumed = end_offset - idx
-            if consumed > best_end:
-                best = value
-                best_end = consumed
+            candidates.append((idx, end_offset - idx, value))
         pos = max(end_offset, idx + 1)
 
-    return best
+    if not candidates:
+        return None
+
+    # If the outermost `[` parsed cleanly, trust the LLM's intent and return
+    # the longest array we found (preserves the historical "preamble [done]
+    # then real plan" behavior).
+    if candidates[0][0] == first_idx_in_text:
+        candidates.sort(key=lambda c: c[1], reverse=True)
+        return candidates[0][2]
+
+    # The outer array did not parse — usually because the model truncated
+    # mid-stream. raw_decode then picks up inner ``"keywords": []`` or
+    # ``"keywords": ["x", "y"]`` lists as the "best" valid array, which
+    # silently routes truncated triage as either "nothing wiki-worthy"
+    # (empty plan → raws marked processed) or "schema invalid" (counted
+    # toward dead-letter quarantine). Both are wrong: the LLM had more to
+    # say. Only accept inner matches that fit the contract — non-empty
+    # arrays of dicts; otherwise return ``None`` so the caller treats this
+    # as a parse failure and the raws stay pending for retry.
+    dict_arrays = [
+        (consumed, value)
+        for _, consumed, value in candidates
+        if value and all(isinstance(e, dict) for e in value)
+    ]
+    if dict_arrays:
+        dict_arrays.sort(reverse=True)
+        return dict_arrays[0][1]
+    return None
 
 
 def _triage(content: str) -> list[dict] | None:
@@ -333,6 +360,24 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
         body = re.sub(
             r"\n=+\s*END[^\n]*\s*=+\s*$", "", text, flags=re.IGNORECASE
         ).strip() or None
+
+    # 4. Truncation fallback: the wrapper opened (``=== ... ===``) but the
+    #    model ran out of tokens before emitting ``=== END PAGE ===``. Patterns
+    #    1 and 2 require the close, and pattern 3 requires the body to start
+    #    with ``---\n`` — none of them salvage this very common Ollama failure
+    #    mode. Peel the leading wrapper line and trust the remainder; the
+    #    op-type contract check at the bottom (frontmatter required for
+    #    create, no FM for update) still gates output.
+    if body is None:
+        m = re.match(r"===[^\n]*===\n(.*)$", text, re.DOTALL)
+        if m:
+            candidate = m.group(1).strip()
+            # Strip any partial trailing close fence: anything from the last
+            # ``\n=`` to EOF. This covers full ``=== END PAGE ===``, partials
+            # like ``=== EN`` or ``===`` alone, and any other ``=``-prefixed
+            # truncation tail, without touching mid-body lines.
+            candidate = re.sub(r"\n=[^\n]*$", "", candidate).strip()
+            body = candidate or None
 
     if body is None:
         return None
