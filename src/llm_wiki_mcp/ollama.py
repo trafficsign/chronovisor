@@ -6,7 +6,7 @@ import time
 import httpx
 
 OLLAMA_URL = "http://localhost:11434"
-MODEL = "gemma4:26b"
+MODEL = "hf.co/unsloth/Qwen3.6-27B-GGUF:Q8_K_XL"
 
 # Health check cache
 _health_cache: dict = {"status": None, "checked_at": 0.0}
@@ -66,6 +66,7 @@ def generate(prompt: str, system: str | None = None) -> str:
         "options": {
             "temperature": 0.3,
             "num_predict": 8192,
+            "num_ctx": 262144,
         },
     }
     if system:
