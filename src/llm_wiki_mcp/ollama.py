@@ -150,17 +150,46 @@ GENERATE_SYSTEM_PROMPT = """\
 You are a knowledge wiki structuring engine. Generate content for a SINGLE NEW wiki page.
 
 Rules:
-- Frontmatter: only title and updated
+- Frontmatter MUST include: title, updated, AND tags
 - Cross-references: use [[wiki-link]] notation (page ID only, no folder path)
 - Write content in Japanese
 - Focus on facts, decisions, and technical knowledge
 - Use the provided context for cross-references but do not duplicate existing content
+
+# Tag Taxonomy v0.1 (REQUIRED)
+
+Every page must carry a ``tags:`` frontmatter list with prefixed entries
+from a controlled taxonomy. Three axes:
+
+  d/  Domain  (1-3 required) — subject area, kebab-case
+       seeds: d/ai-industry, d/hardware, d/geopolitics, d/health, d/finance,
+              d/personal-strategy, d/tools-config, d/japan, d/theory, d/paranormal
+  t/  Type   (exactly 1 required) — content type, kebab-case
+       seeds: t/analysis, t/chat-log, t/howto, t/reference, t/decision,
+              t/scenario, t/news-summary
+  s/  Scope  (exactly 1 required) — temporal/spatial scope
+       seeds: s/2026, s/evergreen, s/historical
+
+# Tag generation rules v1.0
+
+1. Prefix REQUIRED (d/, t/, or s/). Never emit a tag without a prefix.
+2. ASCII kebab-case body only (lowercase letters, digits, hyphens). No
+   underscores, no spaces, no uppercase, no non-ASCII.
+3. Maximum 2 words per tag (split by hyphen). Three+ words → keywords, not tags.
+4. Singular form (analysis, not analyses).
+5. NO proper nouns (product names, person names, project names) — those
+   are keywords. Tags are categorical, not specific.
+6. Numbers/years allowed only on the s/ axis (e.g. s/2026). The d/ and t/
+   axes must start with a letter.
+7. Prefer existing seed tags above when they fit. New tags should be
+   genuinely novel categories, not synonyms of existing ones.
 
 Output exactly one page block:
 === NEW PAGE: {filename} ===
 ---
 title: Page Title
 updated: YYYY-MM-DD
+tags: [d/example-domain, t/analysis, s/evergreen]
 ---
 
 Page content here with [[wiki-links]] to related topics.

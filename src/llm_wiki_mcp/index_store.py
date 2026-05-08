@@ -25,7 +25,7 @@ from llm_wiki_mcp.link_fix import atomic_write, extract_targets
 from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR, WIKI_ROOT
 
 
-SCHEMA_VERSION = 2  # bumped for raw_keywords (Phase 5 of wiki-keywords-propagation)
+SCHEMA_VERSION = 3  # bumped for tags (plan-4: tags auto-generation)
 INDEX_DIR = WIKI_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
@@ -79,6 +79,12 @@ class PageEntry:
     deferred to a separate change so the public API stays stable through
     Phase 5). The field is kept here so future readers (search, lint,
     distribution reports) can use it without an extra disk read."""
+    tags: list[str] = field(default_factory=list)
+    """Frontmatter ``tags`` (Tag Taxonomy v0.1: ``d/`` ``t/`` ``s/`` axes).
+    Surfaced via the dedicated ``IndexStore.tags(page_id)`` accessor and
+    via ``all_tags()`` for the dedup candidate pool. Stored as the raw
+    list from frontmatter; per-tag form validation is the responsibility
+    of ``wiki_check`` lint, not the index."""
 
     def to_dict(self) -> dict:
         return {
@@ -91,18 +97,19 @@ class PageEntry:
             "updated": self.updated,
             "outlinks": list(self.outlinks),
             "raw_keywords": list(self.raw_keywords),
+            "tags": list(self.tags),
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "PageEntry":
-        # Defensively coerce raw_keywords to ``list[str]``: a manually
-        # edited cache file or a future-format mismatch shouldn't crash
-        # the singleton at startup.
-        rk_raw = d.get("raw_keywords", [])
-        if isinstance(rk_raw, list) and all(isinstance(v, str) for v in rk_raw):
-            raw_keywords = list(rk_raw)
-        else:
-            raw_keywords = []
+        # Defensively coerce list-of-string fields: a manually edited
+        # cache file or a future-format mismatch shouldn't crash the
+        # singleton at startup.
+        def _coerce_str_list(value):
+            if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                return list(value)
+            return []
+
         return cls(
             page_id=d["page_id"],
             path=d["path"],
@@ -112,7 +119,8 @@ class PageEntry:
             title=d.get("title", d["page_id"]),
             updated=d.get("updated", "unknown"),
             outlinks=list(d.get("outlinks", [])),
-            raw_keywords=raw_keywords,
+            raw_keywords=_coerce_str_list(d.get("raw_keywords")),
+            tags=_coerce_str_list(d.get("tags")),
         )
 
 
@@ -304,15 +312,16 @@ class IndexStore:
         title = fm.get("title", path.stem)
         updated = fm.get("updated", "unknown")
         outlinks = extract_targets(text, strip=True)
-        # raw_keywords: trust the frontmatter only when it's an actual
-        # ``list[str]``. Anything else (scalar string, missing, broken
-        # cache from a manual edit) collapses to an empty list so the
-        # rest of the system can rely on the type without re-validating.
-        rk = fm.get("raw_keywords")
-        if isinstance(rk, list) and all(isinstance(v, str) for v in rk):
-            raw_keywords = list(rk)
-        else:
-            raw_keywords = []
+        # raw_keywords / tags: trust the frontmatter only when it's an
+        # actual ``list[str]``. Anything else (scalar string, missing,
+        # broken cache from a manual edit) collapses to an empty list so
+        # the rest of the system can rely on the type without
+        # re-validating.
+        def _coerce_str_list(value):
+            if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                return list(value)
+            return []
+
         return PageEntry(
             page_id=pid,
             path=str(path),
@@ -322,7 +331,8 @@ class IndexStore:
             title=title,
             updated=updated,
             outlinks=outlinks,
-            raw_keywords=raw_keywords,
+            raw_keywords=_coerce_str_list(fm.get("raw_keywords")),
+            tags=_coerce_str_list(fm.get("tags")),
         )
 
     def _rebuild_backlinks(self) -> None:
@@ -400,6 +410,28 @@ class IndexStore:
         with self._lock:
             entry = self._entries.get(page_id)
             return list(entry.raw_keywords) if entry else []
+
+    def tags(self, page_id: str) -> list[str]:
+        """Return the page's frontmatter ``tags`` list."""
+        with self._lock:
+            entry = self._entries.get(page_id)
+            return list(entry.tags) if entry else []
+
+    def all_tags(self, include_system: bool = False) -> list[str]:
+        """Return every distinct tag across the corpus, sorted.
+
+        Used by ingest's ``dedupe_with_existing`` step (existing-tag
+        preference at >= 0.80 cosine similarity) and by
+        ``wiki_search``'s tag filter to surface the available filter
+        values.
+        """
+        with self._lock:
+            seen: set[str] = set()
+            for entry in self._entries.values():
+                if not include_system and entry.is_system:
+                    continue
+                seen.update(entry.tags)
+            return sorted(seen)
 
     def backlinks(self, page_id: str) -> list[str]:
         """Return source page_ids that link to `page_id`, in scan order."""

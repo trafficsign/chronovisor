@@ -16,6 +16,11 @@ from llm_wiki_mcp.link_fix import (
     position_in_spans,
     protected_spans,
 )
+from llm_wiki_mcp.tags import (
+    parse_tags,
+    validate_axis_counts,
+    validate_tag,
+)
 
 
 STALE_DAYS = 90  # Pages not updated in this many days are flagged
@@ -106,6 +111,49 @@ def check() -> list[dict]:
                 "detail": "No other pages link to this page",
                 "auto_fixable": False,
             })
+
+        # 4. Tag taxonomy enforcement (plan-4)
+        page_tags = store.tags(page_id)
+        if not page_tags:
+            issues.append({
+                "type": "tag_missing",
+                "severity": "high",
+                "page": page_id,
+                "detail": (
+                    "No tags. Required: 1-3 d/ tags, exactly 1 t/ tag, "
+                    "exactly 1 s/ tag"
+                ),
+                "auto_fixable": False,
+            })
+        else:
+            invalid: list[tuple[str, str]] = []
+            for tag in page_tags:
+                ok, reason = validate_tag(tag)
+                if not ok:
+                    invalid.append((tag, reason))
+            if invalid:
+                preview = ", ".join(f"{t!r} ({r})" for t, r in invalid[:3])
+                issues.append({
+                    "type": "tag_invalid",
+                    "severity": "medium",
+                    "page": page_id,
+                    "detail": (
+                        f"{len(invalid)} invalid tag(s): {preview}"
+                        + ("..." if len(invalid) > 3 else "")
+                    ),
+                    "auto_fixable": True,
+                })
+
+            parsed = parse_tags(page_tags)
+            count_violations = validate_axis_counts(parsed)
+            if count_violations:
+                issues.append({
+                    "type": "tag_count_violation",
+                    "severity": "medium",
+                    "page": page_id,
+                    "detail": "; ".join(count_violations),
+                    "auto_fixable": False,
+                })
 
     # 4. Duplicate detection (pages with very similar titles)
     titles: dict[str, str] = {}
@@ -216,45 +264,89 @@ def apply_safe_fixes(
     for issue in issues:
         if not issue.get("auto_fixable"):
             continue
-        if issue["type"] != "broken_link":
-            continue
-        if not fuzzy:
-            continue
 
-        page_id = issue["page"]
-        path = find_page(page_id)
-        if not path:
-            continue
+        if issue["type"] == "broken_link":
+            if not fuzzy:
+                continue
 
-        target = _broken_link_target(issue)
-        if not target:
-            continue
+            page_id = issue["page"]
+            path = find_page(page_id)
+            if not path:
+                continue
 
-        # system/ 配下に実在するなら書き換え不要 (lint false positive のガード)
-        if (SYSTEM_DIR / f"{target}.md").exists():
-            continue
+            target = _broken_link_target(issue)
+            if not target:
+                continue
 
-        replacement = find_fuzzy_match(target, all_page_ids)
+            # system/ 配下に実在するなら書き換え不要 (lint false positive のガード)
+            if (SYSTEM_DIR / f"{target}.md").exists():
+                continue
 
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
+            replacement = find_fuzzy_match(target, all_page_ids)
 
-        new_content, count = _replace_link_in_content(content, target, replacement)
-        if count == 0 or new_content == content:
-            continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
 
-        if replacement and replacement != target:
-            label = f"[{page_id}] [[{target}]] → [[{replacement}]] ({count}x)"
-        else:
-            label = f"[{page_id}] [[{target}]] → plaintext ({count}x)"
+            new_content, count = _replace_link_in_content(content, target, replacement)
+            if count == 0 or new_content == content:
+                continue
 
-        if dry_run:
-            actions.append(f"[dry-run] {label}")
-        else:
-            atomic_write(path, new_content)
-            actions.append(label)
+            if replacement and replacement != target:
+                label = f"[{page_id}] [[{target}]] → [[{replacement}]] ({count}x)"
+            else:
+                label = f"[{page_id}] [[{target}]] → plaintext ({count}x)"
+
+            if dry_run:
+                actions.append(f"[dry-run] {label}")
+            else:
+                atomic_write(path, new_content)
+                actions.append(label)
+
+        elif issue["type"] == "tag_invalid":
+            # Drop malformed tags from frontmatter. Count violations are NOT
+            # auto-fixed (need a human or LLM to decide which tag to add /
+            # which to remove); only obviously-broken individual tags are
+            # safe to silently strip.
+            page_id = issue["page"]
+            path = find_page(page_id)
+            if not path:
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            from llm_wiki_mcp.frontmatter import (
+                parse as _frontmatter_parse,
+                patch as _frontmatter_patch,
+            )
+            meta, _ = _frontmatter_parse(content)
+            tags_raw = meta.get("tags")
+            if not isinstance(tags_raw, list):
+                continue
+
+            kept: list[str] = []
+            dropped: list[str] = []
+            for t in tags_raw:
+                if isinstance(t, str) and validate_tag(t)[0]:
+                    kept.append(t)
+                else:
+                    dropped.append(repr(t))
+            if not dropped:
+                continue
+            new_content = _frontmatter_patch(content, {"tags": kept})
+            label = (
+                f"[{page_id}] dropped {len(dropped)} invalid tag(s): "
+                f"{', '.join(dropped[:3])}"
+                + ("..." if len(dropped) > 3 else "")
+            )
+            if dry_run:
+                actions.append(f"[dry-run] {label}")
+            else:
+                atomic_write(path, new_content)
+                actions.append(label)
 
     # If we mutated pages, the index is now stale — refresh once at the end
     # so subsequent reads see consistent backlinks/outlinks.

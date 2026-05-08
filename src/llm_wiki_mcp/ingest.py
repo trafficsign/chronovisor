@@ -623,6 +623,58 @@ def _find_page_casefold(page_id: str) -> Path | None:
     return None
 
 
+def _process_tags_in_body(
+    body: str, existing_tags: list[str], parse, patch
+) -> str:
+    """For ``create`` bodies: validate, dedupe, record tags from frontmatter.
+
+    Soft-fail throughout — a malformed tag drops itself rather than
+    aborting the page. Strict enforcement is wiki_check's job.
+
+    Steps for each tag in the LLM output:
+      1. ``validate_tag`` — drop on form-rule failure
+      2. ``dedupe_with_existing`` — if cosine similarity to an existing
+         same-axis tag is ``>= 0.80``, replace the new tag with the
+         existing one (prevents proliferation of near-synonyms)
+      3. ``record_new_tag`` — append truly-new tags to the changelog
+    """
+    from llm_wiki_mcp.tags import (
+        dedupe_with_existing,
+        record_new_tag,
+        validate_tag,
+    )
+
+    meta, _ = parse(body)
+    tags_raw = meta.get("tags")
+    if not isinstance(tags_raw, list) or not tags_raw:
+        return body
+
+    existing_set = set(existing_tags)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw_tag in tags_raw:
+        if not isinstance(raw_tag, str):
+            continue
+        ok, _reason = validate_tag(raw_tag)
+        if not ok:
+            continue
+        # Dedup against the corpus first; the LLM may have invented a
+        # synonym for something we already have.
+        canonical = dedupe_with_existing(raw_tag, existing_tags, threshold=0.80)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        cleaned.append(canonical)
+        # Audit only tags that survived as truly new (not redirected by
+        # dedupe and not present in the corpus).
+        if canonical == raw_tag and canonical not in existing_set:
+            record_new_tag(canonical, reason="ingest auto-gen")
+
+    if cleaned == tags_raw:
+        return body
+    return patch(body, {"tags": cleaned})
+
+
 def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     """Apply page operations and return (created, updated) lists.
 
@@ -641,6 +693,13 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     prepare phase — never inside the write phase, so a partial-write
     rollback restores either the pre-batch text or nothing at all, never
     a half-patched frontmatter.
+
+    Plan-4 tag processing: ``create`` op bodies whose generated frontmatter
+    already includes a ``tags:`` list (per ``GENERATE_SYSTEM_PROMPT``) get
+    each tag form-validated, dedup'd against the existing corpus's tag
+    pool (cosine similarity >= 0.80 → reuse), and audited via
+    ``tag-changelog.md``. ``update`` ops never touch ``tags`` because
+    ``UPDATE_SYSTEM_PROMPT`` forbids the LLM from emitting frontmatter.
     """
     from llm_wiki_mcp.link_fix import atomic_write
     from llm_wiki_mcp.frontmatter import (
@@ -658,6 +717,12 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         allowed_ids: set[str] = {
             m["page_id"] for m in store.all_pages_meta(include_system=True)
         }
+        # Snapshot the tag pool once for the whole batch so dedupe doesn't
+        # re-walk the index on every op. Same-batch siblings can't see
+        # each other's newly-coined tags here, but that's fine: dedup is
+        # only meaningful against the *committed* corpus, and within-batch
+        # divergence will be reconciled the next time wiki_check runs.
+        existing_tags_snapshot = store.all_tags(include_system=False)
     except Exception as e:
         raise IngestApplyError(f"index_store unavailable: {e}") from e
 
@@ -733,6 +798,17 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                     f"create op would overwrite existing page_id {page_id!r} "
                     f"(existing: {existing}, target: {full_path})"
                 )
+            # Tag processing happens BEFORE raw_keywords patch so the
+            # final frontmatter goes through one consistent serialization
+            # path. Soft-fail: a missing or malformed ``tags`` list just
+            # passes the body through unchanged — wiki_check lint will
+            # surface the absent-tags case for human attention.
+            body = _process_tags_in_body(
+                body,
+                existing_tags_snapshot,
+                _frontmatter_parse,
+                _frontmatter_patch,
+            )
             if propagate_raw_keywords:
                 # generate output already carries a frontmatter block
                 # (enforced by ``_extract_page_body`` for create), so

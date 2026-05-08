@@ -266,6 +266,8 @@ def wiki_search(
     updated_before: str | None = None,
     sort_by: str = "relevance",
     semantic: bool = True,
+    tags: list[str] | None = None,
+    tag_match: str = "all",
 ) -> str:
     """Search wiki pages with BM25 + semantic search and link expansion.
 
@@ -279,6 +281,12 @@ def wiki_search(
         updated_before: Filter pages updated before this date (ISO format)
         sort_by: Sort order - "relevance" (default), "date", or "title"
         semantic: Use semantic search when Ollama is available (default True)
+        tags: Filter results to pages whose frontmatter ``tags:`` field
+            includes these values. Tags must be the full prefixed form
+            (e.g. ``d/ai-industry``). Empty list / None disables the filter.
+        tag_match: ``"all"`` (default) requires every tag in ``tags`` to be
+            present; ``"any"`` matches if at least one tag overlaps. Ignored
+            when ``tags`` is empty / None.
     """
     from llm_wiki_mcp.search import search as run_search
 
@@ -292,6 +300,24 @@ def wiki_search(
         semantic=semantic,
     )
 
+    # Tag filter: post-process search results so the tag axis composes
+    # with relevance / date / folder cleanly. Done in Python rather than
+    # pushed into BM25 because tag membership is exact-match, not scored.
+    tag_filter = [t for t in (tags or []) if isinstance(t, str) and t]
+    if tag_filter:
+        match_mode = "any" if tag_match == "any" else "all"
+        target = set(tag_filter)
+        kept: list = []
+        for r in results:
+            page_tags = set(store.tags(r.page_id))
+            if match_mode == "all":
+                if target.issubset(page_tags):
+                    kept.append(r)
+            else:  # any
+                if target & page_tags:
+                    kept.append(r)
+        results = kept
+
     query_terms = query.lower().split()
     direct_hits = []
     for r in results:
@@ -304,10 +330,14 @@ def wiki_search(
             "updated": r.updated,
             "score": round(r.score, 4),
             "snippets": [snippet] if snippet else [],
+            "tags": store.tags(r.page_id),
         })
 
     # Expand via links — outlinks and link metadata both come from the
     # IndexStore, so no extra disk reads are needed in this pass.
+    # When a tag filter is active, expanded hits inherit the same tag
+    # constraint so a casual link from a matching page to a wildly
+    # off-tag page doesn't sneak past the filter.
     expanded_hits = []
     edges = []
     if depth > 0 and direct_hits:
@@ -322,6 +352,14 @@ def wiki_search(
                     # Link points to a non-existent page; skip (matches
                     # legacy behaviour, which used find_page() == None).
                     continue
+                if tag_filter:
+                    link_tags = set(store.tags(link))
+                    if tag_match == "any":
+                        if not (set(tag_filter) & link_tags):
+                            continue
+                    else:
+                        if not set(tag_filter).issubset(link_tags):
+                            continue
                 seen.add(link)
                 expanded_hits.append({
                     "page_id": link,
@@ -331,6 +369,7 @@ def wiki_search(
                     "via": [hit["page_id"]],
                     "score": round(hit["score"] * 0.5, 4),
                     "reason": "linked from direct hit",
+                    "tags": store.tags(link),
                 })
                 edges.append({
                     "from": hit["page_id"],
@@ -345,6 +384,9 @@ def wiki_search(
         filters_applied["updated_after"] = updated_after
     if updated_before:
         filters_applied["updated_before"] = updated_before
+    if tag_filter:
+        filters_applied["tags"] = tag_filter
+        filters_applied["tag_match"] = tag_match if tag_match in ("all", "any") else "all"
 
     return json.dumps({
         "query": query,
