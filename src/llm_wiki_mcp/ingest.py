@@ -402,8 +402,21 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
     return cleaned
 
 
-def _generate_one(op: dict, raw_content: str) -> dict | None:
-    """Stage 2: generate one page; return an operation dict ready for apply."""
+def _generate_one(
+    op: dict,
+    raw_content: str,
+    *,
+    raw_keywords: list[str] | None = None,
+) -> dict | None:
+    """Stage 2: generate one page; return an operation dict ready for apply.
+
+    ``raw_keywords`` is a side-channel list lifted from the source raw's
+    frontmatter (not from triage). It rides on the returned operation dict
+    so the apply layer can patch it onto the page frontmatter without an
+    extra LLM round-trip. ``None`` means "no metadata propagation" — the
+    field is omitted from the output, distinguishing it from an explicit
+    empty list which would survive as ``[]``.
+    """
     context = _build_focused_context(op, raw_content)
 
     op_type = op.get("type", "create").lower()
@@ -442,11 +455,14 @@ Generate the page content based on the raw data and context above."""
         )
         return None
 
-    return {
+    result: dict = {
         "type": op_type,
         "filename": filename,
         "content": body,
     }
+    if raw_keywords is not None:
+        result["raw_keywords"] = list(raw_keywords)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -618,8 +634,19 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
 
     Fail-closed: any unrecoverable problem raises :class:`IngestApplyError`.
     The caller marks the job FAILED without invoking ``on_complete``.
+
+    Phase 4 propagation: any op that carries a non-empty ``raw_keywords``
+    list (from the source raw's frontmatter, riding on metadata since
+    Phase 3) gets that list patched onto the page frontmatter inside the
+    prepare phase — never inside the write phase, so a partial-write
+    rollback restores either the pre-batch text or nothing at all, never
+    a half-patched frontmatter.
     """
     from llm_wiki_mcp.link_fix import atomic_write
+    from llm_wiki_mcp.frontmatter import (
+        parse as _frontmatter_parse,
+        patch as _frontmatter_patch,
+    )
 
     # Build the universe of valid link targets: every existing page plus every
     # page about to be created in this batch (so siblings can cross-reference).
@@ -687,6 +714,18 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         for k in totals:
             totals[k] += stats[k]
 
+        # Phase 4: lift the raw_keywords side channel off the op. Empty
+        # lists are treated as "no propagation" — writing ``raw_keywords:
+        # []`` to a page would create a zero-information diff against the
+        # existing frontmatter. The propagate flag distinguishes "list[str]
+        # with content" from anything else.
+        op_raw_keywords = op.get("raw_keywords")
+        propagate_raw_keywords = (
+            isinstance(op_raw_keywords, list)
+            and all(isinstance(v, str) for v in op_raw_keywords)
+            and len(op_raw_keywords) > 0
+        )
+
         if op_type == "create":
             existing = _find_page_casefold(page_id)
             if existing is not None:
@@ -694,12 +733,18 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                     f"create op would overwrite existing page_id {page_id!r} "
                     f"(existing: {existing}, target: {full_path})"
                 )
+            if propagate_raw_keywords:
+                # generate output already carries a frontmatter block
+                # (enforced by ``_extract_page_body`` for create), so
+                # ``patch`` will splice raw_keywords into it without
+                # synthesizing a new block.
+                body = _frontmatter_patch(body, {"raw_keywords": op_raw_keywords})
             planned.append(
                 _Plan(
                     op_type="create",
                     path=full_path,
                     page_id=page_id,
-                    new_body=body + "\n",
+                    new_body=body.rstrip() + "\n",
                     previous_text=None,
                 )
             )
@@ -711,6 +756,30 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                     f"update target not found for page_id {page_id!r}"
                 )
             previous = existing_path.read_text()
+            # Preserve the on-disk text for rollback BEFORE we mutate
+            # ``previous`` with a frontmatter patch — the rollback path
+            # restores the file as it was before this batch ran, not as
+            # it was after the patch.
+            previous_text_for_rollback = previous
+
+            # raw_keywords union with the existing page's value, preserving
+            # insertion order so the diff stays deterministic. If the
+            # existing field is missing or malformed (legacy data, manual
+            # edit), treat it as empty rather than raising — the apply
+            # phase shouldn't reject otherwise-valid updates because of
+            # frontmatter rot somewhere upstream.
+            if propagate_raw_keywords:
+                existing_meta, _existing_body = _frontmatter_parse(previous)
+                existing_kw_raw = existing_meta.get("raw_keywords")
+                if isinstance(existing_kw_raw, list) and all(
+                    isinstance(v, str) for v in existing_kw_raw
+                ):
+                    existing_kw = existing_kw_raw
+                else:
+                    existing_kw = []
+                union_kw = list(dict.fromkeys(existing_kw + op_raw_keywords))
+                previous = _frontmatter_patch(previous, {"raw_keywords": union_kw})
+
             today = date.today().isoformat()
             stamped = re.sub(
                 r"updated:\s*.+",
@@ -725,7 +794,7 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                     path=existing_path,
                     page_id=page_id,
                     new_body=new_body,
-                    previous_text=previous,
+                    previous_text=previous_text_for_rollback,
                 )
             )
 
@@ -870,6 +939,8 @@ def run_ingest(
     job_id: str,
     on_complete: "callable | None" = None,
     on_finally: "callable | None" = None,
+    *,
+    metadata: dict | None = None,
 ) -> None:
     """Run two-stage ingest in background thread.
 
@@ -888,10 +959,28 @@ def run_ingest(
         repeated occurrences justify quarantine. Other failures (Ollama
         unavailable, generate parse, apply error) are transient or per-op
         and must not feed the dead-letter counter.
+
+    ``metadata`` is a keyword-only optional dict carrying side-channel data
+    that should be attached to the resulting operations. Currently supports
+    ``raw_keywords: list[str]`` — keywords lifted from the raw frontmatter
+    that need to land on the page frontmatter without re-running an LLM.
+    Unknown keys are ignored so future extensions don't break callers.
     """
     job_store.update(job_id, status=JobStatus.RUNNING)
     failed = True  # flipped to False on full-success path
     triage_failed = False
+
+    # Extract the raw_keywords side channel from metadata once, up front.
+    # Every operation generated from this raw shares the same propagated
+    # value: a single raw can produce N operations (e.g. 1 create + 1
+    # update from the same session), and the source-of-truth keywords
+    # belong to all of them. Anything that isn't a list[str] is treated
+    # as "no metadata" so we don't fabricate values.
+    raw_keywords_for_ops: list[str] | None = None
+    if metadata is not None:
+        candidate = metadata.get("raw_keywords")
+        if isinstance(candidate, list) and all(isinstance(v, str) for v in candidate):
+            raw_keywords_for_ops = list(candidate)
 
     try:
         processor = "ollama" if is_available() else "sonnet"
@@ -950,10 +1039,10 @@ def run_ingest(
         for i, op in enumerate(plan):
             fname = op.get("filename", "?")
             _safe_log(f"ingest | generating {i+1}/{len(plan)}: {fname}")
-            generated = _generate_one(op, content)
+            generated = _generate_one(op, content, raw_keywords=raw_keywords_for_ops)
             if generated is None:
                 _safe_log(f"ingest | retry generate for {fname}")
-                generated = _generate_one(op, content)
+                generated = _generate_one(op, content, raw_keywords=raw_keywords_for_ops)
             if generated:
                 all_operations.append(generated)
             else:
@@ -1090,14 +1179,23 @@ def start_ingest(
     content: str,
     on_complete: "callable | None" = None,
     on_finally: "callable | None" = None,
+    *,
+    metadata: dict | None = None,
 ) -> str:
-    """Start an async ingest job. Returns job_id."""
+    """Start an async ingest job. Returns job_id.
+
+    ``metadata`` is forwarded to :func:`run_ingest` (keyword-only) so callers
+    that want raw-side context (e.g. ``raw_keywords``) propagated to the
+    resulting operations can pass it through without changing positional
+    argument order.
+    """
     processor = "ollama" if is_available() else "sonnet"
     job = job_store.create(processor=processor)
 
     thread = threading.Thread(
         target=run_ingest,
         args=(content, job.job_id, on_complete, on_finally),
+        kwargs={"metadata": metadata},
         daemon=True,
     )
     thread.start()

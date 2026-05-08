@@ -6,6 +6,7 @@ replacing it with something that catches the same class of mistake.
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -463,6 +464,186 @@ class TestApplyOperations:
 
 
 # ---------------------------------------------------------------------------
+# Phase 4: raw_keywords frontmatter patch in apply prepare phase
+# ---------------------------------------------------------------------------
+
+
+class TestApplyRawKeywordsPatch:
+    """``_apply_operations`` patches ``raw_keywords`` onto the page
+    frontmatter in the prepare phase only — never in the write phase. The
+    write phase keeps the existing single-atomic-write contract so partial
+    failure rolls back to the pre-batch state.
+    """
+
+    def test_create_writes_raw_keywords_to_frontmatter(
+        self, isolated_wiki: Path
+    ) -> None:
+        ops = [
+            {
+                "type": "create",
+                "filename": "misc/p.md",
+                "content": "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
+                "raw_keywords": ["alpha", "beta"],
+            }
+        ]
+        _apply_operations(ops)
+        text = (isolated_wiki / "pages" / "misc" / "p.md").read_text()
+        assert "raw_keywords: [alpha, beta]" in text
+        assert "title: P" in text
+
+    def test_create_without_raw_keywords_leaves_field_absent(
+        self, isolated_wiki: Path
+    ) -> None:
+        """When the op carries no raw_keywords (e.g. raw frontmatter had
+        none), the resulting page must not gain a stray empty field."""
+        ops = [
+            {
+                "type": "create",
+                "filename": "misc/q.md",
+                "content": "---\ntitle: Q\nupdated: 2026-04-28\n---\nbody",
+            }
+        ]
+        _apply_operations(ops)
+        text = (isolated_wiki / "pages" / "misc" / "q.md").read_text()
+        assert "raw_keywords" not in text
+
+    def test_create_empty_list_skips_patch(self, isolated_wiki: Path) -> None:
+        """Empty list = no information — don't bloat the frontmatter."""
+        ops = [
+            {
+                "type": "create",
+                "filename": "misc/r.md",
+                "content": "---\ntitle: R\nupdated: 2026-04-28\n---\nbody",
+                "raw_keywords": [],
+            }
+        ]
+        _apply_operations(ops)
+        text = (isolated_wiki / "pages" / "misc" / "r.md").read_text()
+        assert "raw_keywords" not in text
+
+    def test_update_unions_with_existing_preserving_order(
+        self, isolated_wiki: Path
+    ) -> None:
+        _seed_page(
+            isolated_wiki,
+            "career/x.md",
+            "---\ntitle: X\nupdated: 2026-01-01\nraw_keywords: [a, b]\n---\noriginal\n",
+        )
+        ops = [
+            {
+                "type": "update",
+                "filename": "x.md",
+                "content": "## addendum",
+                "raw_keywords": ["b", "c", "d"],
+            }
+        ]
+        _apply_operations(ops)
+        text = (isolated_wiki / "pages" / "career" / "x.md").read_text()
+        # Order-preserving dedupe: a, b come from existing; c, d are appended.
+        assert "raw_keywords: [a, b, c, d]" in text
+        # ``updated:`` was bumped to today as part of the existing contract.
+        assert f"updated: {date.today().isoformat()}" in text
+        # Body append still works.
+        assert "## addendum" in text and "original" in text
+
+    def test_update_recovers_from_broken_existing_value(
+        self, isolated_wiki: Path
+    ) -> None:
+        """If a page's existing raw_keywords field is malformed (wrong
+        type, manual edit, legacy), apply must self-heal by treating the
+        existing value as empty rather than aborting the whole op."""
+        _seed_page(
+            isolated_wiki,
+            "misc/y.md",
+            # Scalar instead of list — broken shape.
+            "---\ntitle: Y\nupdated: 2026-01-01\nraw_keywords: oops\n---\nbody\n",
+        )
+        ops = [
+            {
+                "type": "update",
+                "filename": "y.md",
+                "content": "## more",
+                "raw_keywords": ["clean1", "clean2"],
+            }
+        ]
+        _apply_operations(ops)
+        text = (isolated_wiki / "pages" / "misc" / "y.md").read_text()
+        assert "raw_keywords: [clean1, clean2]" in text
+
+    def test_update_without_raw_keywords_leaves_existing_intact(
+        self, isolated_wiki: Path
+    ) -> None:
+        """An update op with no raw_keywords must not erase or rewrite
+        the existing field."""
+        _seed_page(
+            isolated_wiki,
+            "misc/z.md",
+            "---\ntitle: Z\nupdated: 2026-01-01\nraw_keywords: [keep, me]\n---\nbody\n",
+        )
+        ops = [
+            {
+                "type": "update",
+                "filename": "z.md",
+                "content": "## tail",
+            }
+        ]
+        _apply_operations(ops)
+        text = (isolated_wiki / "pages" / "misc" / "z.md").read_text()
+        assert "raw_keywords: [keep, me]" in text
+
+    def test_write_phase_rollback_restores_pre_batch_text(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 4 must keep the prepare/write split intact — the
+        rollback path restores the on-disk text as it was BEFORE the
+        batch ran, not as it was after the in-memory raw_keywords patch.
+        """
+        original = (
+            "---\ntitle: A\nupdated: 2026-01-01\nraw_keywords: [old]\n---\nbody\n"
+        )
+        path_a = _seed_page(isolated_wiki, "misc/a.md", original)
+
+        # Make atomic_write fail on the SECOND op so the first op's write
+        # is committed and then must be rolled back.
+        from llm_wiki_mcp import ingest as ingest_mod
+
+        real_atomic = ingest_mod.atomic_write if hasattr(ingest_mod, "atomic_write") else None
+        from llm_wiki_mcp import link_fix
+
+        original_atomic = link_fix.atomic_write
+        call_count = {"n": 0}
+
+        def flaky_atomic(p, content):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("simulated disk full on op 2")
+            return original_atomic(p, content)
+
+        monkeypatch.setattr(link_fix, "atomic_write", flaky_atomic)
+
+        ops = [
+            {
+                "type": "update",
+                "filename": "a.md",
+                "content": "## first",
+                "raw_keywords": ["new1"],
+            },
+            {
+                "type": "create",
+                "filename": "misc/never.md",
+                "content": "---\ntitle: N\nupdated: 2026-04-28\n---\nbody",
+                "raw_keywords": ["nope"],
+            },
+        ]
+        with pytest.raises(IngestApplyError):
+            _apply_operations(ops)
+
+        # The first op was rolled back to ORIGINAL — not to the
+        # raw_keywords-patched intermediate.
+        assert path_a.read_text() == original
+
+
+# ---------------------------------------------------------------------------
 # Path-traversal sanitization (R2-High)
 # ---------------------------------------------------------------------------
 
@@ -611,7 +792,7 @@ class TestRunIngestPartialFailure:
 
         # Stub generate: always succeed for p0/p1, always fail for p2 (so
         # the retry also fails — exercises the dead-letter path).
-        def fake_generate(op: dict, _raw: str) -> dict | None:
+        def fake_generate(op: dict, _raw: str, **_kw) -> dict | None:
             if op["filename"].endswith("p2.md"):
                 return None
             return {
@@ -675,7 +856,7 @@ class TestRunIngestPartialFailure:
 
         attempts: dict[str, int] = {}
 
-        def flaky_generate(op: dict, _raw: str) -> dict | None:
+        def flaky_generate(op: dict, _raw: str, **_kw) -> dict | None:
             fname = op["filename"]
             attempts[fname] = attempts.get(fname, 0) + 1
             # p1 fails on first attempt, succeeds on second.
@@ -723,7 +904,7 @@ class TestRunIngestPartialFailure:
         ]
         monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
         monkeypatch.setattr(
-            ingest, "_generate_one", lambda _op, _raw: None
+            ingest, "_generate_one", lambda _op, _raw, **_kw: None
         )
         monkeypatch.setattr(ingest, "is_available", lambda: True)
 
@@ -753,6 +934,130 @@ class TestRunIngestPartialFailure:
         pages = isolated_wiki / "pages"
         assert not (pages / "misc" / "p0.md").exists()
         assert not (pages / "misc" / "p1.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3b: raw_keywords metadata propagation through run_ingest
+# ---------------------------------------------------------------------------
+
+
+class TestRawKeywordsMetadataPropagation:
+    """run_ingest must lift raw_keywords from metadata and ride it on
+    every operation generated from this raw — without leaking into the
+    triage prompt or being fabricated when absent.
+    """
+
+    def test_metadata_raw_keywords_lands_on_every_operation(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {"type": "create", "filename": f"misc/p{i}.md", "title": f"P{i}"}
+            for i in range(3)
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+
+        captured_raw_keywords: list[list[str] | None] = []
+
+        def stub_generate(op, _raw, *, raw_keywords=None):
+            captured_raw_keywords.append(raw_keywords)
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": "---\ntitle: X\nupdated: 2026-04-28\n---\nbody",
+            }
+
+        monkeypatch.setattr(ingest, "_generate_one", stub_generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "raw content",
+            job.job_id,
+            metadata={"raw_keywords": ["alpha", "beta"]},
+        )
+
+        # Every _generate_one call saw the same raw_keywords payload.
+        assert captured_raw_keywords == [["alpha", "beta"]] * 3
+
+    def test_no_metadata_means_no_raw_keywords_field(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Distinguishes "no propagation requested" from an empty list:
+        when metadata is None the operation dict has NO ``raw_keywords``
+        key at all (so the apply layer can skip patching).
+        """
+        from llm_wiki_mcp import ingest
+
+        op = {"type": "create", "filename": "misc/p0.md", "title": "P"}
+        monkeypatch.setattr(
+            ingest,
+            "generate",
+            lambda *_a, **_kw: (
+                "---\ntitle: P\nupdated: 2026-04-28\n---\nbody"
+            ),
+        )
+
+        result = ingest._generate_one(op, "raw content", raw_keywords=None)
+        assert result is not None
+        assert "raw_keywords" not in result
+
+    def test_explicit_empty_list_survives(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty list is intent — the apply layer should see ``[]`` and
+        decide for itself, not have it elided into "no propagation".
+        """
+        from llm_wiki_mcp import ingest
+
+        op = {"type": "create", "filename": "misc/p0.md", "title": "P"}
+        monkeypatch.setattr(
+            ingest,
+            "generate",
+            lambda *_a, **_kw: (
+                "---\ntitle: P\nupdated: 2026-04-28\n---\nbody"
+            ),
+        )
+
+        result = ingest._generate_one(op, "raw content", raw_keywords=[])
+        assert result is not None
+        assert result.get("raw_keywords") == []
+
+    def test_invalid_metadata_normalized_to_no_propagation(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-list / list with non-str items in metadata is treated as
+        "no propagation". Important defensive behavior so a malformed raw
+        frontmatter can't produce mojibake page metadata.
+        """
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [{"type": "create", "filename": "misc/p0.md", "title": "P"}]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+
+        captured: list[list[str] | None] = []
+
+        def stub_generate(op, _raw, *, raw_keywords=None):
+            captured.append(raw_keywords)
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": "---\ntitle: X\nupdated: 2026-04-28\n---\nbody",
+            }
+
+        monkeypatch.setattr(ingest, "_generate_one", stub_generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        for bad in ("not-a-list", 42, None, ["ok", 123], {"k": "v"}):
+            captured.clear()
+            job = jobs.job_store.create(processor="ollama")
+            ingest.run_ingest(
+                "raw content",
+                job.job_id,
+                metadata={"raw_keywords": bad},
+            )
+            assert captured == [None], f"bad={bad!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -806,37 +1111,60 @@ class TestOrchestrator:
             # Cleanup so other tests aren't polluted.
             jobs.job_store._jobs.pop(job.job_id, None)
 
-    def test_run_pending_ingest_refuses_double_trigger(
+    def test_run_pending_ingest_serial_then_idempotent(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Two run_pending_ingest calls back-to-back must not both spawn a
-        worker. The second sees the in-flight marker and refuses."""
+        """Per-raw synchronous serial design: the first call ingests every
+        pending raw individually; the second call sees them all marked
+        processed and declines with a no-pending / threshold-not-met
+        reason. Concurrency safety against true parallel callers is
+        enforced by ``_INGEST_LOCK`` (in-process) and tested separately.
+        """
         from llm_wiki_mcp import orchestrator
 
         # Make 5 fake raws so should_ingest() fires.
         for i in range(5):
             (isolated_wiki / "raw" / f"r{i}.md").write_text("body")
 
-        # Stub start_ingest so it doesn't actually try to run anything.
-        captured = {"calls": 0}
+        # Stub run_ingest to simulate full-success: invoke on_complete so
+        # the orchestrator marks each raw processed individually.
+        captured = {"calls": 0, "metadata_keys": []}
 
-        def fake_start(content: str, on_complete=None, on_finally=None) -> str:
+        def fake_run_ingest(
+            content,
+            job_id,
+            on_complete=None,
+            on_finally=None,
+            *,
+            metadata=None,
+        ):
             captured["calls"] += 1
-            return "stub-job-id-1"
+            captured["metadata_keys"].append(
+                sorted((metadata or {}).keys())
+            )
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
 
         from llm_wiki_mcp import ingest as ingest_mod
 
-        monkeypatch.setattr(ingest_mod, "start_ingest", fake_start)
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
         monkeypatch.setattr(orchestrator, "is_available", lambda: True)
 
         first = orchestrator.run_pending_ingest()
         second = orchestrator.run_pending_ingest()
 
         assert first["triggered"] is True
-        assert first["job_id"] == "stub-job-id-1"
+        assert len(first["job_ids"]) == 5
+        assert sorted(first["files_processed"]) == [f"r{i}.md" for i in range(5)]
+        # Every raw fed metadata that includes the raw_keywords side channel.
+        assert all("raw_keywords" in keys for keys in captured["metadata_keys"])
+        assert captured["calls"] == 5
+
+        # Second call: every raw is now marked processed → below threshold.
         assert second["triggered"] is False
-        assert "already in flight" in second["reason"]
-        assert captured["calls"] == 1
+        assert "threshold" in second["reason"].lower() or "pending" in second["reason"].lower()
 
     def test_release_lock_only_counts_triage_failures(
         self, isolated_wiki: Path
@@ -856,6 +1184,303 @@ class TestOrchestrator:
         # Success resets.
         orchestrator._release_lock(failed=False)
         assert orchestrator._load_state()["triage_failure_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: per-raw orchestrator invariants (attribution / mark / fallback)
+# ---------------------------------------------------------------------------
+
+
+class TestPerRawOrchestrator:
+    """Verifies the Phase 2-5 contract end-to-end at the orchestrator
+    level: each raw's keywords reach run_ingest as its own metadata,
+    success and failure are tracked per-file, and legacy raws written
+    before the field rename are still readable."""
+
+    def test_attribution_two_raws_distinct_keywords(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each raw's frontmatter keywords must reach run_ingest as that
+        raw's own metadata — no blanket copy across the batch."""
+        from llm_wiki_mcp import orchestrator, ingest as ingest_mod
+
+        (isolated_wiki / "raw" / "a.md").write_text(
+            "---\nraw_keywords: [alpha-1, alpha-2]\n---\nA body\n"
+        )
+        (isolated_wiki / "raw" / "b.md").write_text(
+            "---\nraw_keywords: [beta-1]\n---\nB body\n"
+        )
+        # The orchestrator's threshold is 5; force=True bypasses it.
+        for i in range(3):
+            (isolated_wiki / "raw" / f"f{i}.md").write_text("body")
+
+        seen: list[tuple[str, list[str] | None]] = []
+
+        def fake_run_ingest(
+            content,
+            job_id,
+            on_complete=None,
+            on_finally=None,
+            *,
+            metadata=None,
+        ):
+            kw = (metadata or {}).get("raw_keywords")
+            # Identify which raw this call belongs to by the leading body
+            # line (we wrote distinct bodies above).
+            tag = (
+                "a"
+                if "A body" in content
+                else "b"
+                if "B body" in content
+                else "f"
+            )
+            seen.append((tag, kw))
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        result = orchestrator.run_pending_ingest(force=True)
+        assert result["triggered"] is True
+        # Every distinct raw_keywords payload was delivered to its OWN raw.
+        a_calls = [kw for tag, kw in seen if tag == "a"]
+        b_calls = [kw for tag, kw in seen if tag == "b"]
+        f_calls = [kw for tag, kw in seen if tag == "f"]
+        assert a_calls == [["alpha-1", "alpha-2"]]
+        assert b_calls == [["beta-1"]]
+        # The keyword-less raws got an empty list (not the neighbors' list).
+        assert all(kw == [] for kw in f_calls)
+
+    def test_legacy_keywords_field_falls_back(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-rename raws written with ``keywords:`` (not ``raw_keywords:``)
+        must still propagate via the legacy fallback path."""
+        from llm_wiki_mcp import orchestrator, ingest as ingest_mod
+
+        (isolated_wiki / "raw" / "legacy.md").write_text(
+            "---\nkeywords: [legacy-only]\n---\nlegacy body\n"
+        )
+
+        seen: list[list[str] | None] = []
+
+        def fake_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            seen.append((metadata or {}).get("raw_keywords"))
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        orchestrator.run_pending_ingest(force=True)
+        assert seen == [["legacy-only"]]
+
+    def test_raw_keywords_preferred_over_legacy_when_both_present(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If a raw has both fields (transitional state), the new
+        ``raw_keywords`` wins — fallback is a strict else branch."""
+        from llm_wiki_mcp import orchestrator, ingest as ingest_mod
+
+        (isolated_wiki / "raw" / "both.md").write_text(
+            "---\nraw_keywords: [new-name]\nkeywords: [old-name]\n---\nbody\n"
+        )
+
+        seen: list[list[str] | None] = []
+
+        def fake_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            seen.append((metadata or {}).get("raw_keywords"))
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        orchestrator.run_pending_ingest(force=True)
+        assert seen == [["new-name"]]
+
+    def test_per_raw_mark_partial_failure(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed raw must remain pending while its successful peers
+        get marked processed individually."""
+        from llm_wiki_mcp import orchestrator, ingest as ingest_mod
+
+        (isolated_wiki / "raw" / "ok.md").write_text("ok body")
+        (isolated_wiki / "raw" / "broken.md").write_text("broken body")
+
+        def fake_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            # ``ok`` succeeds (calls on_complete), ``broken`` fails
+            # (skips on_complete) — mirrors run_ingest's contract for
+            # full success vs failure.
+            if "ok body" in content:
+                if on_complete:
+                    on_complete()
+                if on_finally:
+                    on_finally(failed=False, triage_failed=False)
+            else:
+                if on_finally:
+                    on_finally(failed=True, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert result["files_processed"] == ["ok.md"]
+        # ``broken.md`` is still pending for the next tick.
+        pending = {p.name for p in orchestrator.get_pending_raw_files()}
+        assert "broken.md" in pending
+        assert "ok.md" not in pending
+
+    def test_serial_execution_no_concurrent_threads(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Phase 2 design replaces ``start_ingest`` (which spawned
+        a worker thread) with a synchronous ``run_ingest`` call. We
+        verify by counting the active thread delta around the batch:
+        no per-raw worker thread should be spawned.
+        """
+        import threading
+        from llm_wiki_mcp import orchestrator, ingest as ingest_mod
+
+        for i in range(3):
+            (isolated_wiki / "raw" / f"r{i}.md").write_text("body")
+
+        thread_counts: list[int] = []
+
+        def fake_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            # Sample active thread count INSIDE each "ingest" invocation.
+            thread_counts.append(threading.active_count())
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        baseline = threading.active_count()
+        orchestrator.run_pending_ingest(force=True)
+
+        # Every per-raw call ran on the same thread as the batch driver
+        # (no Thread() per raw). Allow +/- 1 for unrelated background
+        # threads, but assert no growth across calls.
+        assert all(c <= baseline + 1 for c in thread_counts), thread_counts
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: signature backward compatibility + field-naming independence
+# ---------------------------------------------------------------------------
+
+
+class TestPhase6Compatibility:
+    def test_run_ingest_positional_signature_still_works(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Phase 3 keyword-only ``metadata`` parameter must not
+        break callers that still pass the original 4 positional args."""
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [{"type": "create", "filename": "misc/p.md", "title": "P"}]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+        monkeypatch.setattr(
+            ingest,
+            "_generate_one",
+            lambda _op, _raw, **_kw: {
+                "type": "create",
+                "filename": "misc/p.md",
+                "content": "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
+            },
+        )
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        on_complete_called = []
+        on_finally_called = []
+        job = jobs.job_store.create(processor="ollama")
+
+        # Original 4-positional call shape — no metadata kwarg.
+        ingest.run_ingest(
+            "raw",
+            job.job_id,
+            lambda: on_complete_called.append(True),
+            lambda failed, triage_failed: on_finally_called.append(
+                (failed, triage_failed)
+            ),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED
+        assert finished.pages_created == ["p"]
+        assert on_complete_called == [True]
+        assert on_finally_called == [(False, False)]
+
+    def test_triage_keywords_field_independent_of_raw_keywords(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The triage plan dict can carry its own ``keywords`` field for
+        related-page search (``ingest._build_focused_context``) without
+        being conflated with the raw frontmatter's ``raw_keywords``.
+        Verify by feeding a triage plan with ``keywords`` AND a metadata
+        ``raw_keywords`` — they must reach the operation as two distinct
+        signals."""
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {
+                "type": "create",
+                "filename": "misc/p.md",
+                "title": "P",
+                "keywords": ["search-only-1", "search-only-2"],
+            }
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+
+        captured_op: dict = {}
+        captured_kw: list[list[str] | None] = []
+
+        def stub_generate(op, _raw, *, raw_keywords=None):
+            # The op coming into generate still has its triage-side
+            # ``keywords`` field — that's the search-related signal.
+            captured_op.update(op)
+            captured_kw.append(raw_keywords)
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
+            }
+
+        monkeypatch.setattr(ingest, "_generate_one", stub_generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "raw",
+            job.job_id,
+            metadata={"raw_keywords": ["fm-only"]},
+        )
+
+        # Triage's ``keywords`` survived on the op (used downstream by
+        # _build_focused_context), distinct from raw_keywords.
+        assert captured_op.get("keywords") == ["search-only-1", "search-only-2"]
+        # raw_keywords reached generate as the dedicated metadata channel,
+        # NOT mixed into the triage keywords list.
+        assert captured_kw == [["fm-only"]]
 
 
 # ---------------------------------------------------------------------------
@@ -1222,9 +1847,16 @@ class TestWikiIngestForce:
         (isolated_wiki / "raw" / "single.md").write_text("body")
 
         monkeypatch.setattr(orchestrator, "is_available", lambda: True)
-        monkeypatch.setattr(
-            ingest_mod, "start_ingest", lambda *a, **kw: "stub-job"
-        )
+
+        def _noop_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", _noop_run_ingest)
 
         deferred = orchestrator.run_pending_ingest(force=False)
         assert deferred["triggered"] is False
@@ -1339,7 +1971,7 @@ class TestRebuildIndexNonFatal:
         monkeypatch.setattr(
             ingest_mod,
             "_generate_one",
-            lambda _op, _raw: {
+            lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "ai/foo.md",
                 "content": (
@@ -1392,7 +2024,7 @@ class TestRebuildIndexNonFatal:
         monkeypatch.setattr(
             ingest_mod,
             "_generate_one",
-            lambda _op, _raw: {
+            lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "ai/bar.md",
                 "content": (
@@ -1510,7 +2142,7 @@ class TestPostApplyLogSafety:
         monkeypatch.setattr(
             ingest_mod,
             "_generate_one",
-            lambda _op, _raw: {
+            lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "ai/baz.md",
                 "content": (

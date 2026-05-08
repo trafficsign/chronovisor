@@ -13,6 +13,7 @@ from llm_wiki_mcp.wiki import (
 )
 from llm_wiki_mcp.link_fix import extract_targets as _extract_targets
 from llm_wiki_mcp.index_store import get_store
+from llm_wiki_mcp.frontmatter import parse as _frontmatter_parse, patch as _frontmatter_patch
 
 mcp = FastMCP(
     "llm-wiki",
@@ -25,18 +26,15 @@ mcp = FastMCP(
 
 
 def _parse_frontmatter(text: str) -> dict:
-    """Extract frontmatter from markdown."""
-    if not text.startswith("---"):
-        return {}
-    end = text.find("---", 3)
-    if end == -1:
-        return {}
-    fm = {}
-    for line in text[3:end].strip().splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            fm[key.strip()] = value.strip()
-    return fm
+    """Extract frontmatter from markdown.
+
+    Thin wrapper around :func:`frontmatter.parse` that returns just the
+    metadata dict (no body). Behaves as a strict superset of the legacy
+    scalar-only parser: scalar values still come back as ``str``, while
+    inline/block lists are decoded as ``list[str]``.
+    """
+    meta, _ = _frontmatter_parse(text)
+    return meta
 
 
 def _extract_wiki_links(text: str) -> list[str]:
@@ -614,6 +612,26 @@ def wiki_provenance(page: str) -> str:
     }, ensure_ascii=False)
 
 
+# Characters that would break the inline-list serialization or carry
+# semantic meaning in YAML-flavored frontmatter. Keywords containing any
+# of these are rejected at the writer boundary; consumers never see them.
+_RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")
+
+
+def _validate_raw_keyword(kw: object) -> bool:
+    """Return True iff ``kw`` is safe to serialize as an inline-list item."""
+    if not isinstance(kw, str):
+        return False
+    if not kw or not kw.strip():
+        return False
+    for ch in kw:
+        if ch in _RAW_KEYWORD_FORBIDDEN_CHARS:
+            return False
+        if ord(ch) < 0x20:  # control characters
+            return False
+    return True
+
+
 @mcp.tool()
 def wiki_save_raw(content: str, session_id: str | None = None, keywords: list[str] | None = None) -> str:
     """Save raw session data to raw/ for later ingest.
@@ -623,12 +641,24 @@ def wiki_save_raw(content: str, session_id: str | None = None, keywords: list[st
     Args:
         content: Raw session content to save
         session_id: Optional session identifier. Auto-generated if not provided.
-        keywords: Optional list of keywords for ingest context search.
+        keywords: Optional list of keywords carried into the ingest context.
+            Items are written to the raw frontmatter as ``raw_keywords: [...]``.
+            Keywords containing characters that would break inline-list
+            serialization (``,[]:#{}\\n\\r`` or control chars) or that are
+            empty/whitespace-only are rejected; rejected items are returned
+            in the ``rejected_keywords`` field of the result.
     """
-    # Prepend keywords as YAML frontmatter if provided
+    accepted: list[str] = []
+    rejected: list[str] = []
     if keywords:
-        kw_line = ", ".join(keywords)
-        body = f"---\nkeywords: [{kw_line}]\n---\n\n{content}"
+        for kw in keywords:
+            if _validate_raw_keyword(kw):
+                accepted.append(kw)
+            else:
+                rejected.append(kw if isinstance(kw, str) else repr(kw))
+
+    if accepted:
+        body = _frontmatter_patch(content, {"raw_keywords": accepted})
     else:
         body = content
 
@@ -642,12 +672,14 @@ def wiki_save_raw(content: str, session_id: str | None = None, keywords: list[st
     from llm_wiki_mcp.orchestrator import should_ingest, run_pending_ingest
     should, reason = should_ingest()
 
-    result = {
+    result: dict = {
         "saved": filename,
         "path": str(path),
         "ingest_pending": should,
         "ingest_reason": reason,
     }
+    if rejected:
+        result["rejected_keywords"] = rejected
 
     if should:
         ingest_result = run_pending_ingest()

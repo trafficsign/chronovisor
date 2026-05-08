@@ -20,30 +20,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from llm_wiki_mcp.frontmatter import parse as _frontmatter_parse
 from llm_wiki_mcp.link_fix import atomic_write, extract_targets
 from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR, WIKI_ROOT
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # bumped for raw_keywords (Phase 5 of wiki-keywords-propagation)
 INDEX_DIR = WIKI_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
 
 
 def _parse_frontmatter(text: str) -> dict:
-    """Same shape as `server._parse_frontmatter` — kept independent to avoid
-    a server.py import cycle."""
-    if not text.startswith("---"):
-        return {}
-    end = text.find("---", 3)
-    if end == -1:
-        return {}
-    fm: dict = {}
-    for line in text[3:end].strip().splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            fm[key.strip()] = value.strip()
-    return fm
+    """Thin wrapper around :func:`frontmatter.parse` returning only the
+    metadata dict. Kept as a local function so existing call sites in
+    this module don't need to change."""
+    meta, _ = _frontmatter_parse(text)
+    return meta
 
 
 def _read_text_stable(path: Path, retries: int = 1) -> str | None:
@@ -80,6 +73,12 @@ class PageEntry:
     title: str
     updated: str
     outlinks: list[str] = field(default_factory=list)  # raw, preserves duplicates + order
+    raw_keywords: list[str] = field(default_factory=list)
+    """Frontmatter ``raw_keywords`` lifted from disk. Internal-only — not
+    surfaced via ``meta()`` / ``all_pages_meta()`` yet (that decision is
+    deferred to a separate change so the public API stays stable through
+    Phase 5). The field is kept here so future readers (search, lint,
+    distribution reports) can use it without an extra disk read."""
 
     def to_dict(self) -> dict:
         return {
@@ -91,10 +90,19 @@ class PageEntry:
             "title": self.title,
             "updated": self.updated,
             "outlinks": list(self.outlinks),
+            "raw_keywords": list(self.raw_keywords),
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "PageEntry":
+        # Defensively coerce raw_keywords to ``list[str]``: a manually
+        # edited cache file or a future-format mismatch shouldn't crash
+        # the singleton at startup.
+        rk_raw = d.get("raw_keywords", [])
+        if isinstance(rk_raw, list) and all(isinstance(v, str) for v in rk_raw):
+            raw_keywords = list(rk_raw)
+        else:
+            raw_keywords = []
         return cls(
             page_id=d["page_id"],
             path=d["path"],
@@ -104,6 +112,7 @@ class PageEntry:
             title=d.get("title", d["page_id"]),
             updated=d.get("updated", "unknown"),
             outlinks=list(d.get("outlinks", [])),
+            raw_keywords=raw_keywords,
         )
 
 
@@ -295,6 +304,15 @@ class IndexStore:
         title = fm.get("title", path.stem)
         updated = fm.get("updated", "unknown")
         outlinks = extract_targets(text, strip=True)
+        # raw_keywords: trust the frontmatter only when it's an actual
+        # ``list[str]``. Anything else (scalar string, missing, broken
+        # cache from a manual edit) collapses to an empty list so the
+        # rest of the system can rely on the type without re-validating.
+        rk = fm.get("raw_keywords")
+        if isinstance(rk, list) and all(isinstance(v, str) for v in rk):
+            raw_keywords = list(rk)
+        else:
+            raw_keywords = []
         return PageEntry(
             page_id=pid,
             path=str(path),
@@ -304,6 +322,7 @@ class IndexStore:
             title=title,
             updated=updated,
             outlinks=outlinks,
+            raw_keywords=raw_keywords,
         )
 
     def _rebuild_backlinks(self) -> None:
@@ -365,6 +384,22 @@ class IndexStore:
         with self._lock:
             entry = self._entries.get(page_id)
             return list(entry.outlinks) if entry else []
+
+    def raw_keywords(self, page_id: str) -> list[str]:
+        """Return the page's frontmatter ``raw_keywords`` list.
+
+        Empty list if the page has no field, the value isn't a clean
+        ``list[str]``, or the page is unknown — callers don't need to
+        distinguish "absent" from "empty" because both mean "no
+        keyword-driven signal to use here". Surfaced as a dedicated
+        method (rather than a key on ``meta()``) so the public meta
+        contract stays stable; downstream features that need keywords
+        (search expansion, distribution reports, link suggestions)
+        can opt in by calling this directly.
+        """
+        with self._lock:
+            entry = self._entries.get(page_id)
+            return list(entry.raw_keywords) if entry else []
 
     def backlinks(self, page_id: str) -> list[str]:
         """Return source page_ids that link to `page_id`, in scan order."""
