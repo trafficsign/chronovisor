@@ -43,7 +43,9 @@ class SamplingPlan:
 @dataclass
 class PageAnalysis:
     page_id: str
+    main_topic: str = ""
     assigned_tags: list[str] = field(default_factory=list)
+    tag_evidence: dict[str, str] = field(default_factory=dict)
     rejected_assigned_tags: list[str] = field(default_factory=list)
     suggested_missing_categories: list[dict] = field(default_factory=list)
     confidence: float = 0.0
@@ -62,45 +64,118 @@ def _flatten_master(master: dict[str, list[str]]) -> list[str]:
 TAG_REPORT_SYSTEM_PROMPT = """\
 You are auditing whether a controlled tag taxonomy fits a real wiki page.
 
-You will be given:
-  - a TAG MASTER LIST (the only tags that may appear in ``assigned_tags``)
-  - a PAGE (title + body head)
+The caller will provide in the user message:
+- TAG MASTER LIST: the only allowed values for assigned_tags (verbatim, case-sensitive)
+- PAGE: page_id, title, and a body head snippet (may be truncated)
 
-Output ONE JSON object with exactly these fields:
+Return ONE JSON object.
+Output JSON ONLY: no preamble, no markdown fences, no extra text.
 
+Top-level JSON MUST have exactly these 6 keys (no more, no less):
+- main_topic
+- assigned_tags
+- tag_evidence
+- rejected_assigned_tags
+- suggested_missing_categories
+- confidence
+
+Schema:
 {
+  "main_topic": "<short sentence, max 50 characters>",
   "assigned_tags": ["d/...", "t/...", "s/..."],
-  "rejected_assigned_tags": ["d/automotive"],
+  "tag_evidence": {"d/...": "<verbatim phrase, max 5 words>"},
+  "rejected_assigned_tags": ["d/..."],
   "suggested_missing_categories": [
-    {"label": "automotive-engineering", "justification": "<one sentence>", "fallback_axis": "d/"}
+    {"label": "kebab-case", "justification": "<1 sentence>", "fallback_axis": "d/|t/|s/"}
   ],
   "confidence": 0.0
 }
 
-Rules:
-- ``assigned_tags``: ONLY values from the master list. Each entry must
-  appear verbatim in the master. Aim for the canonical set: 1-3 d/, 1 t/,
-  1 s/. Pick fewer if no master tag fits — empty list is acceptable.
-- ``rejected_assigned_tags``: tags you wanted to assign but had to drop
-  because they aren't on the master list. This is the hallucination
-  audit channel.
-- ``suggested_missing_categories``: free-form. Each item is an object
-  with ``label`` (kebab-case body without prefix), ``justification`` (one
-  short sentence in Japanese), and ``fallback_axis`` (one of "d/", "t/",
-  "s/" — best guess). Empty list is fine if the master suffices.
-- ``confidence``: float in [0, 1] reflecting how well the master
-  taxonomy describes the page. Low confidence = the page sits awkwardly
-  in this taxonomy.
-- Output JSON ONLY, no preamble, no markdown fences.
+Quality rules (precision first):
+- Do NOT guess. Wrong tags are worse than missing tags.
+- It is acceptable (often correct) to return assigned_tags as [].
+- Do NOT "fill the quota". Do not force 1-3 d/ + 1 t/ + 1 s/.
+- Only assign a tag if the PAGE text contains explicit evidence for it.
+- Aim for the smallest defensible set. One d/ tag is usually correct.
+  Add a second d/ ONLY when both domains have explicit evidence in the body.
+
+assigned_tags rules:
+- Every item MUST appear verbatim in TAG MASTER LIST.
+- If a tag is not in TAG MASTER LIST, do not put it in assigned_tags.
+
+tag_evidence rules (hard requirement):
+- tag_evidence MUST be an object whose keys match assigned_tags exactly.
+  No missing keys, no extra keys.
+- Each value MUST be a verbatim phrase copied from the PAGE (title or body head).
+- Evidence length MUST be at most 5 words (whitespace split).
+- If you cannot quote a short verbatim phrase for a tag, do not assign that tag.
+
+rejected_assigned_tags rules:
+- Tags you considered but rejected (not in master, or no body-level evidence).
+- Empty list is fine.
+
+suggested_missing_categories rules:
+- Use ONLY when the PAGE has an obvious key category that the master cannot express.
+- Each item MUST have exactly: label, justification, fallback_axis.
+- label: kebab-case body, no axis prefix (e.g. "automotive-engineering").
+- fallback_axis: one of "d/", "t/", "s/".
+- justification: 1 short sentence (JP if PAGE is JP, else EN).
+
+main_topic rules:
+- 1 sentence, no newline, max 50 characters.
+- Use the PAGE language.
+- This replaces hidden reasoning. Do NOT output reasoning outside JSON.
+
+confidence rules:
+- Float in [0, 1]. Reflects how well the master taxonomy describes the page.
+- Low confidence is fine and useful — do not inflate.
+
+High-risk tag definitions (apply ONLY to these three tags):
+- d/tools-config: MCP/CLI/開発ツール、環境変数、設定ファイル、コマンドラインフラグ、セットアップ手順の話。
+  NOT for: テック業界ニュース、人材論、戦略論、組織論。
+- d/personal-strategy: ユーザー自身のキャリア・学習・運用ルールの話（一人称・自分の選択）。
+  NOT for: 第三者の組織論、一般的なベストプラクティス記事、他社の戦略分析。
+- d/theory: 抽象概念・モデル理論・原則・分析枠組みの話。
+  NOT for: 手順書、設定ガイド、チェックリスト、時事ニュース。
+
+d/tools-config keyword gate (MUST pass; otherwise NEVER assign d/tools-config):
+- The PAGE must explicitly contain at least one of the following concrete words:
+  "MCP", "CLI", "config", "configuration", "flag", "--", "env", ".env",
+  "PATH", "install", "export", "command-line",
+  "設定", "環境変数", "フラグ", "オプション", "セットアップ", "インストール", "コマンド".
+- The evidence phrase for d/tools-config MUST include at least one such concrete word.
+- A generic word like "setup" alone (e.g., "meeting setup") is NOT enough.
+
+Negative examples (do NOT do this):
+- Do NOT assign d/tools-config for generic planning/strategy notes with no config/CLI/env details.
+- Do NOT assign d/personal-strategy for third-person summaries or purely technical docs.
+- Do NOT assign d/theory for step-by-step how-to/config/checklists.
+
+Example 1 (empty is OK):
+PAGE body head: "…今週はレビューだけ。次は○○を読む…"
+{"main_topic":"週次レビューのメモ","assigned_tags":[],"tag_evidence":{},"rejected_assigned_tags":[],"suggested_missing_categories":[],"confidence":0.3}
+
+Example 2 (tools-config gate passes):
+PAGE body head: "…MCP server config… set env var OLLAMA_HOST…"
+{"main_topic":"MCP設定の手順","assigned_tags":["d/tools-config"],"tag_evidence":{"d/tools-config":"MCP server config"},"rejected_assigned_tags":[],"suggested_missing_categories":[],"confidence":0.8}
+
+Example 3 (resist filling the quota — single d/ is correct):
+PAGE body head: "Google Brain の主要研究者が次々と離脱。Bell Labs の崩壊と類似のパターン..."
+{"main_topic":"Google Brainの人材流出論","assigned_tags":["d/ai-industry","t/analysis"],"tag_evidence":{"d/ai-industry":"Google Brain 主要研究者離脱","t/analysis":"Bell Labs 崩壊と類似"},"rejected_assigned_tags":["d/tools-config"],"suggested_missing_categories":[],"confidence":0.85}
 """
 
 
 _REQUIRED_FIELDS = {
+    "main_topic",
     "assigned_tags",
+    "tag_evidence",
     "rejected_assigned_tags",
     "suggested_missing_categories",
     "confidence",
 }
+
+_MAIN_TOPIC_MAX_CHARS = 50
+_TAG_EVIDENCE_MAX_WORDS = 5
 
 
 def parse_llm_response(raw: str, master_set: set[str]) -> dict | None:
@@ -126,6 +201,14 @@ def parse_llm_response(raw: str, master_set: set[str]) -> dict | None:
     if not _REQUIRED_FIELDS.issubset(obj.keys()):
         return None
 
+    # main_topic: short single-line string.
+    main_topic_raw = obj.get("main_topic")
+    if not isinstance(main_topic_raw, str):
+        return None
+    main_topic = main_topic_raw.strip()
+    if "\n" in main_topic or len(main_topic) > _MAIN_TOPIC_MAX_CHARS:
+        return None
+
     # assigned_tags: list[str], split into in-master / out-of-master.
     raw_assigned = obj.get("assigned_tags", [])
     if not isinstance(raw_assigned, list) or not all(
@@ -134,6 +217,26 @@ def parse_llm_response(raw: str, master_set: set[str]) -> dict | None:
         return None
     in_master = [t for t in raw_assigned if t in master_set]
     leaked = [t for t in raw_assigned if t not in master_set]
+
+    # tag_evidence: dict[str, str]. Keys must match assigned_tags exactly
+    # (after master filtering). Values must be max 5 words.
+    evidence_raw = obj.get("tag_evidence", {})
+    if not isinstance(evidence_raw, dict):
+        return None
+    evidence: dict[str, str] = {}
+    for k, v in evidence_raw.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            return None
+        phrase = v.strip()
+        if not phrase or len(phrase.split()) > _TAG_EVIDENCE_MAX_WORDS:
+            return None
+        evidence[k] = phrase
+    # Drop tags whose evidence is missing — they fail the hard gate and
+    # get reclassified as rejected. This makes the contract structural.
+    gated_in_master = [t for t in in_master if t in evidence]
+    evidence_dropped = [t for t in in_master if t not in evidence]
+    # Trim evidence keys to the surviving assigned tags.
+    evidence = {t: evidence[t] for t in gated_in_master}
 
     # rejected_assigned_tags: list[str] (the LLM's own audit channel).
     rejected = obj.get("rejected_assigned_tags", [])
@@ -172,10 +275,13 @@ def parse_llm_response(raw: str, master_set: set[str]) -> dict | None:
         return None
 
     return {
-        "assigned_tags": in_master,
-        # Merge the LLM's self-flagged rejections with anything we caught
-        # leaking past the master gate. Keep duplicates de-duped.
-        "rejected_assigned_tags": sorted(set(rejected) | set(leaked)),
+        "main_topic": main_topic,
+        "assigned_tags": gated_in_master,
+        "tag_evidence": evidence,
+        # Merge: LLM's own rejections + master gate leak + evidence gate fail.
+        "rejected_assigned_tags": sorted(
+            set(rejected) | set(leaked) | set(evidence_dropped)
+        ),
         "suggested_missing_categories": smc,
         "confidence": float(confidence),
     }
@@ -377,7 +483,9 @@ def analyze_page(
 
     return PageAnalysis(
         page_id=page_id,
+        main_topic=parsed["main_topic"],
         assigned_tags=parsed["assigned_tags"],
+        tag_evidence=parsed["tag_evidence"],
         rejected_assigned_tags=parsed["rejected_assigned_tags"],
         suggested_missing_categories=parsed["suggested_missing_categories"],
         confidence=parsed["confidence"],

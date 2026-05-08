@@ -123,73 +123,109 @@ class TestParseLLMResponse:
     def _master(self) -> set[str]:
         return {"d/ai-industry", "t/analysis", "s/2026"}
 
+    def _valid_payload(self, **overrides) -> dict:
+        base = {
+            "main_topic": "topic",
+            "assigned_tags": [],
+            "tag_evidence": {},
+            "rejected_assigned_tags": [],
+            "suggested_missing_categories": [],
+            "confidence": 0.5,
+        }
+        base.update(overrides)
+        return base
+
     def test_valid_response(self) -> None:
         raw = json.dumps(
-            {
-                "assigned_tags": ["d/ai-industry", "t/analysis", "s/2026"],
-                "rejected_assigned_tags": [],
-                "suggested_missing_categories": [],
-                "confidence": 0.9,
-            }
+            self._valid_payload(
+                main_topic="AI industry analysis note",
+                assigned_tags=["d/ai-industry", "t/analysis", "s/2026"],
+                tag_evidence={
+                    "d/ai-industry": "AI industry brief",
+                    "t/analysis": "deep dive",
+                    "s/2026": "2026 outlook",
+                },
+                confidence=0.9,
+            )
         )
         out = parse_llm_response(raw, self._master())
         assert out is not None
         assert out["assigned_tags"] == ["d/ai-industry", "t/analysis", "s/2026"]
+        assert out["main_topic"] == "AI industry analysis note"
+        assert out["tag_evidence"]["d/ai-industry"] == "AI industry brief"
 
     def test_leaked_tag_moved_to_rejected(self) -> None:
         raw = json.dumps(
-            {
-                "assigned_tags": ["d/ai-industry", "d/automotive"],  # last not in master
-                "rejected_assigned_tags": [],
-                "suggested_missing_categories": [],
-                "confidence": 0.6,
-            }
+            self._valid_payload(
+                assigned_tags=["d/ai-industry", "d/automotive"],
+                tag_evidence={
+                    "d/ai-industry": "industry note",
+                    "d/automotive": "car spec",
+                },
+                confidence=0.6,
+            )
         )
         out = parse_llm_response(raw, self._master())
         assert out is not None
         assert "d/automotive" not in out["assigned_tags"]
         assert "d/automotive" in out["rejected_assigned_tags"]
 
+    def test_missing_evidence_drops_tag(self) -> None:
+        # Tag in assigned_tags but no key in tag_evidence → reclassified.
+        raw = json.dumps(
+            self._valid_payload(
+                assigned_tags=["d/ai-industry", "t/analysis"],
+                tag_evidence={"d/ai-industry": "industry brief"},
+            )
+        )
+        out = parse_llm_response(raw, self._master())
+        assert out is not None
+        assert "t/analysis" not in out["assigned_tags"]
+        assert "t/analysis" in out["rejected_assigned_tags"]
+
+    def test_evidence_too_long_rejects_response(self) -> None:
+        raw = json.dumps(
+            self._valid_payload(
+                assigned_tags=["d/ai-industry"],
+                tag_evidence={
+                    "d/ai-industry": "this evidence is much too long for the limit"
+                },
+            )
+        )
+        assert parse_llm_response(raw, self._master()) is None
+
+    def test_main_topic_too_long_rejected(self) -> None:
+        raw = json.dumps(self._valid_payload(main_topic="x" * 51))
+        assert parse_llm_response(raw, self._master()) is None
+
+    def test_main_topic_with_newline_rejected(self) -> None:
+        raw = json.dumps(self._valid_payload(main_topic="line one\nline two"))
+        assert parse_llm_response(raw, self._master()) is None
+
     def test_smc_with_extra_field_rejected(self) -> None:
         raw = json.dumps(
-            {
-                "assigned_tags": [],
-                "rejected_assigned_tags": [],
-                "suggested_missing_categories": [
+            self._valid_payload(
+                suggested_missing_categories=[
                     {
                         "label": "x",
                         "justification": "y",
                         "fallback_axis": "d/",
-                        "stowaway": "z",  # disallowed
+                        "stowaway": "z",
                     }
-                ],
-                "confidence": 0.5,
-            }
+                ]
+            )
         )
         assert parse_llm_response(raw, self._master()) is None
 
     def test_extra_top_level_field_rejected(self) -> None:
-        raw = json.dumps(
-            {
-                "assigned_tags": [],
-                "rejected_assigned_tags": [],
-                "suggested_missing_categories": [],
-                "confidence": 0.5,
-                "page_id": "should-not-leak",
-            }
-        )
+        payload = self._valid_payload()
+        payload["page_id"] = "should-not-leak"
+        raw = json.dumps(payload)
         assert parse_llm_response(raw, self._master()) is None
 
     def test_bad_confidence_rejected(self) -> None:
         for bad in (-0.1, 1.5, "0.5", None):
-            raw = json.dumps(
-                {
-                    "assigned_tags": [],
-                    "rejected_assigned_tags": [],
-                    "suggested_missing_categories": [],
-                    "confidence": bad,
-                }
-            )
+            raw = json.dumps(self._valid_payload(confidence=bad))
             assert parse_llm_response(raw, self._master()) is None
 
 
@@ -270,7 +306,13 @@ class TestAnalyzePage:
         def fake_generate(prompt, system=None):
             return json.dumps(
                 {
+                    "main_topic": "happy path",
                     "assigned_tags": ["d/ai-industry", "t/analysis", "s/2026"],
+                    "tag_evidence": {
+                        "d/ai-industry": "industry brief",
+                        "t/analysis": "deep dive",
+                        "s/2026": "2026 outlook",
+                    },
                     "rejected_assigned_tags": [],
                     "suggested_missing_categories": [],
                     "confidence": 0.85,
@@ -280,6 +322,8 @@ class TestAnalyzePage:
         analysis = analyze_page("p1", master, fake_generate)
         assert analysis.page_id == "p1"
         assert analysis.assigned_tags == ["d/ai-industry", "t/analysis", "s/2026"]
+        assert analysis.tag_evidence["d/ai-industry"] == "industry brief"
+        assert analysis.main_topic == "happy path"
         assert analysis.confidence == pytest.approx(0.85)
 
     def test_llm_exception_records_audit(self, isolated_pages: Path) -> None:
@@ -415,7 +459,13 @@ class TestRunDryRun:
             # Master tags only; everyone gets the same canonical set.
             return json.dumps(
                 {
+                    "main_topic": "test page summary",
                     "assigned_tags": ["d/ai-industry", "t/analysis", "s/2026"],
+                    "tag_evidence": {
+                        "d/ai-industry": "industry brief",
+                        "t/analysis": "deep dive",
+                        "s/2026": "2026 outlook",
+                    },
                     "rejected_assigned_tags": [],
                     "suggested_missing_categories": [],
                     "confidence": 0.8,
@@ -464,7 +514,9 @@ class TestRunDryRun:
             store=store,
             generate_fn=lambda *_a, **_kw: json.dumps(
                 {
+                    "main_topic": "empty",
                     "assigned_tags": [],
+                    "tag_evidence": {},
                     "rejected_assigned_tags": [],
                     "suggested_missing_categories": [],
                     "confidence": 0.0,
