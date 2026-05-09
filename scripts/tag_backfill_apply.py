@@ -43,6 +43,12 @@ from llm_wiki_mcp.wiki import find_page  # noqa: E402
 PROGRESS_FILE = Path.home() / ".wiki" / ".tag-backfill-progress.jsonl"
 PLAN_INBOX = Path.home() / "projects" / "plan" / "inbox"
 
+# tag_status frontmatter values for pages where the LLM gave up.
+# Future sweeps look at this field to skip already-attempted pages
+# without consulting the progress jsonl.
+TAG_STATUS_NO_FIT = "no-fit-master"   # LLM returned an empty assigned_tags list
+TAG_STATUS_FORMAT_FAIL = "format-fail"  # JSON / schema validation failed
+
 
 def _flatten_master() -> list[str]:
     return [t for axis in SEED_TAGS.values() for t in axis]
@@ -67,15 +73,52 @@ def _load_done(progress_path: Path) -> set[str]:
     return done
 
 
+def _is_marked_unfit(page_id: str) -> bool:
+    """True if a previous run already concluded this page can't be tagged.
+
+    We re-parse the page's frontmatter (rather than trust the IndexStore)
+    because ``tag_status`` is a backfill-private field that the IndexStore
+    does not expose.
+    """
+    path = find_page(page_id)
+    if path is None:
+        return False
+    try:
+        meta_fm, _ = fm_parse(path.read_text())
+    except Exception:
+        return False
+    return bool(meta_fm.get("tag_status"))
+
+
 def _select_candidates(store) -> list[str]:
-    """All pages without ``tags`` frontmatter, ordered by recency."""
+    """All pages without ``tags`` frontmatter, ordered by recency.
+
+    Pages already marked ``tag_status: …`` from a prior run are skipped
+    so a re-run does not hammer Ollama on the same untaggable corpus.
+    """
     out: list[str] = []
     for meta in store.all_pages_meta(include_system=False):
         page_id = meta["page_id"]
         if store.tags(page_id):
             continue  # already tagged
+        if _is_marked_unfit(page_id):
+            continue  # previously attempted, marked untaggable
         out.append(page_id)
     return out
+
+
+def _mark_unfit(path: Path, status_value: str) -> None:
+    """Stamp ``tag_status: <value>`` into the page frontmatter.
+
+    Best-effort: any IO or parse error is swallowed so a stamp failure
+    cannot derail the sweep.
+    """
+    try:
+        original = path.read_text()
+        patched = fm_patch(original, {"tag_status": status_value})
+        path.write_text(patched)
+    except Exception:
+        pass
 
 
 def _build_prompt(page_id: str, body: str, master: list[str]) -> str:
@@ -131,6 +174,7 @@ def _process_one(page_id: str, master: list[str]) -> dict:
 
     parsed = parse_llm_response(raw, set(master))
     if parsed is None:
+        _mark_unfit(path, TAG_STATUS_FORMAT_FAIL)
         return {
             "page_id": page_id,
             "status": "skipped",
@@ -141,6 +185,7 @@ def _process_one(page_id: str, master: list[str]) -> dict:
 
     tags = parsed["assigned_tags"]
     if not tags:
+        _mark_unfit(path, TAG_STATUS_NO_FIT)
         return {
             "page_id": page_id,
             "status": "skipped",
@@ -150,7 +195,8 @@ def _process_one(page_id: str, master: list[str]) -> dict:
             "elapsed_ms": int((time.time() - started) * 1000),
         }
 
-    patched = fm_patch(original, {"tags": tags})
+    # On success, clear any stale tag_status from a prior failed attempt.
+    patched = fm_patch(original, {"tags": tags}, deletes=["tag_status"])
     path.write_text(patched)
 
     return {
