@@ -6,7 +6,7 @@ import time
 import httpx
 
 OLLAMA_URL = "http://localhost:11434"
-MODEL = "qwen3.6:27b-q8_0"
+MODEL = "qwen3.6:35b-a3b"
 
 # Health check cache
 _health_cache: dict = {"status": None, "checked_at": 0.0}
