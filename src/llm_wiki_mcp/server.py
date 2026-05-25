@@ -675,7 +675,12 @@ def _validate_raw_keyword(kw: object) -> bool:
 
 
 @mcp.tool()
-def wiki_save_raw(content: str, session_id: str | None = None, keywords: list[str] | None = None) -> str:
+def wiki_save_raw(
+    content: str,
+    session_id: str | None = None,
+    keywords: list[str] | None = None,
+    trigger_ingest: bool = True,
+) -> str:
     """Save raw session data to raw/ for later ingest.
 
     This is the entry point for hooks to dump session logs.
@@ -689,6 +694,9 @@ def wiki_save_raw(content: str, session_id: str | None = None, keywords: list[st
             serialization (``,[]:#{}\\n\\r`` or control chars) or that are
             empty/whitespace-only are rejected; rejected items are returned
             in the ``rejected_keywords`` field of the result.
+        trigger_ingest: When True, preserve the historical behavior of
+            running pending ingest immediately if the raw threshold is met.
+            Set False for hooks that must not block on local LLM ingestion.
     """
     accepted: list[str] = []
     rejected: list[str] = []
@@ -723,9 +731,11 @@ def wiki_save_raw(content: str, session_id: str | None = None, keywords: list[st
     if rejected:
         result["rejected_keywords"] = rejected
 
-    if should:
+    if should and trigger_ingest:
         ingest_result = run_pending_ingest()
         result["ingest_triggered"] = ingest_result
+    elif should:
+        result["ingest_deferred"] = True
 
     return json.dumps(result, ensure_ascii=False)
 

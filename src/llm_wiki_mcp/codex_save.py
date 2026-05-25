@@ -1,0 +1,753 @@
+"""Codex session saver for LLM Wiki raw entries."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from llm_wiki_mcp.wiki import WIKI_ROOT, init_wiki
+
+
+DEFAULT_MEMORY_MODEL = "gpt-5.4-mini"
+DEFAULT_STATE_FILE = WIKI_ROOT / "codex-save-state.json"
+DEFAULT_MAX_CHARS = 120_000
+DEFAULT_TIMEOUT_SECONDS = 300
+HOOK_ENABLE_ENV = "CODEX_WIKI_SAVE_ENABLED"
+_RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")
+
+MEMORY_WRITER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["should_save", "content", "keywords", "reason"],
+    "properties": {
+        "should_save": {"type": "boolean"},
+        "content": {"type": "string"},
+        "keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 0,
+            "maxItems": 20,
+        },
+        "reason": {"type": "string"},
+    },
+}
+
+
+class CodexSaveError(RuntimeError):
+    """Raised when the Codex save flow cannot complete."""
+
+
+@dataclass(frozen=True)
+class TranscriptRecord:
+    line: int
+    role: str
+    text: str
+    timestamp: str | None = None
+    phase: str | None = None
+
+
+@dataclass(frozen=True)
+class TranscriptSlice:
+    session_file: Path
+    scanned_until_line: int
+    records: list[TranscriptRecord]
+    session_id: str | None = None
+    cwd: str | None = None
+    originator: str | None = None
+    cli_version: str | None = None
+    source: str | None = None
+    model_provider: str | None = None
+    after_line: int = 0
+
+
+@dataclass(frozen=True)
+class WriterResult:
+    should_save: bool
+    content: str
+    keywords: list[str]
+    reason: str
+    rejected_keywords: list[str]
+
+
+def codex_home() -> Path:
+    """Return the Codex home used for session logs."""
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    default_config = Path.home() / ".config" / "codex"
+    if default_config.exists():
+        return default_config
+    return Path.home() / ".codex"
+
+
+def default_sessions_root() -> Path:
+    return codex_home() / "sessions"
+
+
+def read_hook_payload(stdin_text: str | None) -> dict[str, Any]:
+    if not stdin_text:
+        return {}
+    try:
+        parsed = json.loads(stdin_text)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def hook_hints(payload: dict[str, Any]) -> dict[str, str]:
+    hints: dict[str, str] = {}
+
+    session_id = _find_string_value(
+        payload,
+        ("session_id", "sessionId", "conversation_id", "conversationId", "rollout_id"),
+        uuid_like=True,
+    )
+    if session_id:
+        hints["session_id"] = session_id
+
+    cwd = _find_string_value(payload, ("cwd", "working_directory", "workspace"))
+    if cwd:
+        hints["cwd"] = cwd
+
+    session_file = _find_string_value(
+        payload,
+        ("session_file", "sessionFile", "transcript_path", "transcriptPath", "path"),
+        suffix=".jsonl",
+    )
+    if session_file:
+        hints["session_file"] = session_file
+
+    return hints
+
+
+def _find_string_value(
+    value: Any,
+    keys: tuple[str, ...],
+    *,
+    uuid_like: bool = False,
+    suffix: str | None = None,
+) -> str | None:
+    if isinstance(value, dict):
+        for key in keys:
+            found = value.get(key)
+            if isinstance(found, str) and _matches_hint(found, uuid_like, suffix):
+                return found
+        for child in value.values():
+            found = _find_string_value(child, keys, uuid_like=uuid_like, suffix=suffix)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_string_value(child, keys, uuid_like=uuid_like, suffix=suffix)
+            if found:
+                return found
+    return None
+
+
+def _matches_hint(value: str, uuid_like: bool, suffix: str | None) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    if suffix and not text.endswith(suffix):
+        return False
+    if uuid_like and not _looks_like_uuid(text):
+        return False
+    return True
+
+
+def _looks_like_uuid(value: str) -> bool:
+    parts = value.split("-")
+    return (
+        len(parts) == 5
+        and [len(part) for part in parts] == [8, 4, 4, 4, 12]
+        and all(all(ch in "0123456789abcdefABCDEF" for ch in part) for part in parts)
+    )
+
+
+def find_session_file(
+    *,
+    session_id: str | None = None,
+    cwd: str | None = None,
+    sessions_root: Path | None = None,
+) -> Path:
+    root = sessions_root or default_sessions_root()
+    if not root.exists():
+        raise CodexSaveError(f"Codex sessions root does not exist: {root}")
+
+    candidates = sorted(root.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        raise CodexSaveError(f"No Codex session logs found under: {root}")
+
+    if session_id or cwd:
+        for candidate in candidates:
+            meta = read_session_meta(candidate)
+            if session_id and meta.get("id") == session_id:
+                return candidate
+            if cwd and meta.get("cwd") == cwd:
+                return candidate
+
+    return candidates[0]
+
+
+def read_session_meta(path: Path) -> dict[str, Any]:
+    for _, item in iter_jsonl(path):
+        if item.get("type") == "session_meta":
+            payload = item.get("payload")
+            return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def iter_jsonl(path: Path):
+    with path.open() as f:
+        for line_no, line in enumerate(f, start=1):
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                yield line_no, parsed
+
+
+def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSlice:
+    meta: dict[str, Any] = {}
+    records: list[TranscriptRecord] = []
+    scanned_until_line = 0
+
+    for line_no, item in iter_jsonl(path):
+        scanned_until_line = max(scanned_until_line, line_no)
+        item_type = item.get("type")
+        if item_type == "session_meta":
+            payload = item.get("payload")
+            if isinstance(payload, dict):
+                meta = payload
+            continue
+        if line_no <= after_line or item_type != "response_item":
+            continue
+
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("type") != "message":
+            continue
+
+        role = payload.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+
+        text = message_content_text(payload.get("content"))
+        if not text:
+            continue
+
+        records.append(
+            TranscriptRecord(
+                line=line_no,
+                role=role,
+                text=text,
+                timestamp=item.get("timestamp") if isinstance(item.get("timestamp"), str) else None,
+                phase=payload.get("phase") if isinstance(payload.get("phase"), str) else None,
+            )
+        )
+
+    return TranscriptSlice(
+        session_file=path,
+        scanned_until_line=scanned_until_line,
+        records=records,
+        session_id=meta.get("id") if isinstance(meta.get("id"), str) else None,
+        cwd=meta.get("cwd") if isinstance(meta.get("cwd"), str) else None,
+        originator=meta.get("originator") if isinstance(meta.get("originator"), str) else None,
+        cli_version=meta.get("cli_version") if isinstance(meta.get("cli_version"), str) else None,
+        source=meta.get("source") if isinstance(meta.get("source"), str) else None,
+        model_provider=meta.get("model_provider")
+        if isinstance(meta.get("model_provider"), str)
+        else None,
+        after_line=after_line,
+    )
+
+
+def message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        fragments = [content]
+    elif isinstance(content, list):
+        fragments = []
+        for part in content:
+            text = ""
+            if isinstance(part, dict):
+                if part.get("type") in {"input_text", "output_text"}:
+                    text = part.get("text") if isinstance(part.get("text"), str) else ""
+                elif isinstance(part.get("text"), str):
+                    text = part["text"]
+            elif isinstance(part, str):
+                text = part
+            if text and not is_injected_context(text):
+                fragments.append(text.strip())
+    else:
+        fragments = []
+
+    clean = [fragment.strip() for fragment in fragments if fragment.strip()]
+    return "\n\n".join(clean)
+
+
+def is_injected_context(text: str) -> bool:
+    stripped = text.lstrip()
+    return (
+        stripped.startswith("# AGENTS.md instructions")
+        or stripped.startswith("<environment_context>")
+        or stripped.startswith("<developer_context>")
+        or stripped.startswith("<system_context>")
+    )
+
+
+def format_transcript(records: list[TranscriptRecord]) -> str:
+    parts: list[str] = []
+    for record in records:
+        phase = f" ({record.phase})" if record.phase else ""
+        timestamp = f" @ {record.timestamp}" if record.timestamp else ""
+        parts.append(
+            f"### {record.role.upper()}{phase} line {record.line}{timestamp}\n"
+            f"{record.text.strip()}"
+        )
+    return "\n\n".join(parts)
+
+
+def trim_middle(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars < 1_000:
+        return text[-max_chars:]
+    head_len = max_chars // 5
+    tail_len = max_chars - head_len
+    return (
+        text[:head_len]
+        + "\n\n[... transcript trimmed for memory-writer budget ...]\n\n"
+        + text[-tail_len:]
+    )
+
+
+def build_writer_prompt(transcript_slice: TranscriptSlice, *, max_chars: int) -> str:
+    transcript = trim_middle(format_transcript(transcript_slice.records), max_chars)
+    metadata = {
+        "source": "codex",
+        "session_id": transcript_slice.session_id,
+        "cwd": transcript_slice.cwd,
+        "originator": transcript_slice.originator,
+        "cli_version": transcript_slice.cli_version,
+        "session_file": str(transcript_slice.session_file),
+        "after_line": transcript_slice.after_line,
+        "scanned_until_line": transcript_slice.scanned_until_line,
+    }
+    return (
+        "You are the memory-writer subagent for LLM Wiki.\n"
+        "Read the Codex session delta and decide whether it contains durable memory.\n"
+        "Durable memory includes user preferences, project decisions, implementation outcomes, "
+        "environment facts, debugging findings, or lessons likely to help future sessions.\n"
+        "Ignore transient command output unless it supports a durable fact.\n"
+        "Do not use tools, browse the web, or modify files.\n\n"
+        "Return JSON only, matching this shape:\n"
+        '{"should_save": true, "content": "...", "keywords": ["..."], "reason": "..."}\n\n'
+        "Rules:\n"
+        "- Prefer Japanese when the source conversation is Japanese.\n"
+        "- Preserve exact dates, paths, commands, model names, and decisions.\n"
+        "- Mention that the source is Codex when relevant.\n"
+        "- If there is no durable memory, set should_save=false, content=\"\", keywords=[].\n"
+        "- Use 10 to 20 specific keywords when saving; avoid generic words by themselves.\n"
+        "- Keywords must not contain commas, brackets, colons, braces, or newlines.\n"
+        "- Do not invent facts beyond the transcript.\n\n"
+        "Session metadata:\n"
+        f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n\n"
+        "Transcript delta:\n"
+        f"{transcript}\n"
+    )
+
+
+def run_memory_writer(
+    prompt: str,
+    *,
+    model: str = DEFAULT_MEMORY_MODEL,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> WriterResult:
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-codex-save-") as tmp:
+        tmpdir = Path(tmp)
+        schema_path = tmpdir / "schema.json"
+        output_path = tmpdir / "last-message.json"
+        schema_path.write_text(json.dumps(MEMORY_WRITER_SCHEMA))
+
+        cmd = [
+            "codex",
+            "exec",
+            "-m",
+            model,
+            "-s",
+            "read-only",
+            "--disable",
+            "hooks",
+            "--ephemeral",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+            "--output-schema",
+            str(schema_path),
+            "-o",
+            str(output_path),
+            "-",
+        ]
+        env = os.environ.copy()
+        if not env.get("CODEX_HOME"):
+            env["CODEX_HOME"] = str(codex_home())
+        env[HOOK_ENABLE_ENV] = "0"
+        env["CODEX_WIKI_SAVE_DISABLED"] = "1"
+        env.setdefault("NO_COLOR", "1")
+
+        completed = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise CodexSaveError(f"memory writer failed: {detail[-4000:]}")
+
+        output = output_path.read_text() if output_path.exists() else completed.stdout
+        return parse_writer_output(output)
+
+
+def parse_writer_output(output: str) -> WriterResult:
+    parsed = extract_json_object(output)
+    if not isinstance(parsed, dict):
+        raise CodexSaveError("memory writer did not return a JSON object")
+
+    should_save = parsed.get("should_save")
+    content = parsed.get("content")
+    keywords = parsed.get("keywords")
+    reason = parsed.get("reason")
+
+    if not isinstance(should_save, bool):
+        raise CodexSaveError("memory writer JSON missing boolean should_save")
+    if not isinstance(content, str):
+        raise CodexSaveError("memory writer JSON missing string content")
+    if not isinstance(keywords, list):
+        raise CodexSaveError("memory writer JSON missing keyword list")
+    if not isinstance(reason, str):
+        raise CodexSaveError("memory writer JSON missing string reason")
+
+    accepted, rejected = sanitize_keywords(keywords)
+    return WriterResult(
+        should_save=should_save,
+        content=content.strip(),
+        keywords=accepted,
+        reason=reason.strip(),
+        rejected_keywords=rejected,
+    )
+
+
+def extract_json_object(output: str) -> Any:
+    text = output.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].startswith("```"):
+            text = "\n".join(lines[1:-1]).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def sanitize_keywords(values: list[Any], *, limit: int = 20) -> tuple[list[str], list[str]]:
+    accepted: list[str] = []
+    rejected: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            rejected.append(repr(value))
+            continue
+        keyword = value.strip()
+        if not validate_raw_keyword(keyword):
+            rejected.append(value)
+            continue
+        key = keyword.casefold()
+        if key in seen:
+            continue
+        accepted.append(keyword)
+        seen.add(key)
+        if len(accepted) >= limit:
+            break
+    return accepted, rejected
+
+
+def validate_raw_keyword(keyword: str) -> bool:
+    if not keyword:
+        return False
+    for ch in keyword:
+        if ch in _RAW_KEYWORD_FORBIDDEN_CHARS:
+            return False
+        if ord(ch) < 0x20:
+            return False
+    return True
+
+
+def load_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"version": 1, "files": {}}
+    try:
+        parsed = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {"version": 1, "files": {}}
+    if not isinstance(parsed, dict):
+        return {"version": 1, "files": {}}
+    parsed.setdefault("version", 1)
+    parsed.setdefault("files", {})
+    if not isinstance(parsed["files"], dict):
+        parsed["files"] = {}
+    return parsed
+
+
+def saved_line_for(state: dict[str, Any], session_file: Path) -> int:
+    entry = state.get("files", {}).get(str(session_file))
+    if not isinstance(entry, dict):
+        return 0
+    value = entry.get("last_saved_line", 0)
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def update_state(
+    state: dict[str, Any],
+    *,
+    session_file: Path,
+    transcript_slice: TranscriptSlice,
+    status: str,
+) -> dict[str, Any]:
+    files = state.setdefault("files", {})
+    files[str(session_file)] = {
+        "last_saved_line": transcript_slice.scanned_until_line,
+        "session_id": transcript_slice.session_id,
+        "cwd": transcript_slice.cwd,
+        "status": status,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return state
+
+
+def write_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def raw_session_id(transcript_slice: TranscriptSlice) -> str:
+    if transcript_slice.session_id:
+        return f"codex-{transcript_slice.session_id}"
+    digest = hashlib.sha1(str(transcript_slice.session_file).encode()).hexdigest()[:12]
+    return f"codex-{digest}"
+
+
+def build_raw_content(
+    transcript_slice: TranscriptSlice,
+    writer: WriterResult,
+    *,
+    model: str,
+) -> str:
+    header = [
+        "# Codex Session Memory Save",
+        "",
+        f"- Source: Codex",
+        f"- Session ID: {transcript_slice.session_id or 'unknown'}",
+        f"- CWD: {transcript_slice.cwd or 'unknown'}",
+        f"- Session file: {transcript_slice.session_file}",
+        f"- Lines: {transcript_slice.after_line + 1}-{transcript_slice.scanned_until_line}",
+        f"- Memory writer model: {model}",
+        f"- Generated at: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "## Memory",
+        "",
+        writer.content.strip(),
+        "",
+        "## Writer Reason",
+        "",
+        writer.reason.strip(),
+        "",
+    ]
+    if writer.rejected_keywords:
+        header.extend(
+            [
+                "## Rejected Keywords",
+                "",
+                ", ".join(writer.rejected_keywords),
+                "",
+            ]
+        )
+    return "\n".join(header)
+
+
+def save_raw(
+    content: str,
+    *,
+    session_id: str,
+    keywords: list[str],
+    trigger_ingest: bool,
+) -> dict[str, Any]:
+    from llm_wiki_mcp.server import wiki_save_raw
+
+    result = wiki_save_raw(
+        content=content,
+        session_id=session_id,
+        keywords=keywords,
+        trigger_ingest=trigger_ingest,
+    )
+    parsed = json.loads(result)
+    return parsed if isinstance(parsed, dict) else {"result": parsed}
+
+
+def resolve_session_file(args: argparse.Namespace, hints: dict[str, str]) -> Path:
+    if args.session_file:
+        return Path(args.session_file).expanduser()
+    if hints.get("session_file"):
+        return Path(hints["session_file"]).expanduser()
+
+    session_id = args.session_id or hints.get("session_id")
+    cwd = args.cwd or hints.get("cwd") or os.environ.get("PWD")
+    return find_session_file(
+        session_id=session_id,
+        cwd=cwd,
+        sessions_root=Path(args.sessions_root).expanduser() if args.sessions_root else None,
+    )
+
+
+def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str, Any]:
+    init_wiki()
+
+    if args.hook and os.environ.get(HOOK_ENABLE_ENV) != "1":
+        return {
+            "status": "disabled",
+            "reason": f"{HOOK_ENABLE_ENV}=1 is required for hook execution",
+        }
+
+    hints = hook_hints(read_hook_payload(stdin_text)) if args.hook else {}
+    session_file = resolve_session_file(args, hints)
+    if not session_file.exists():
+        raise CodexSaveError(f"session file does not exist: {session_file}")
+
+    state_file = Path(args.state_file).expanduser()
+    state = load_state(state_file)
+    after_line = 0 if args.ignore_state else saved_line_for(state, session_file)
+    transcript_slice = extract_transcript_slice(session_file, after_line=after_line)
+
+    base_result: dict[str, Any] = {
+        "session_file": str(session_file),
+        "session_id": transcript_slice.session_id,
+        "cwd": transcript_slice.cwd,
+        "after_line": after_line,
+        "scanned_until_line": transcript_slice.scanned_until_line,
+        "record_count": len(transcript_slice.records),
+    }
+
+    if not transcript_slice.records:
+        if args.save and not args.dry_run:
+            update_state(state, session_file=session_file, transcript_slice=transcript_slice, status="empty")
+            write_state(state_file, state)
+        return {**base_result, "status": "skipped", "reason": "no new user/assistant messages"}
+
+    prompt = build_writer_prompt(transcript_slice, max_chars=args.max_chars)
+    if args.extract_only:
+        return {
+            **base_result,
+            "status": "extracted",
+            "prompt_chars": len(prompt),
+            "transcript_preview": format_transcript(transcript_slice.records)[:4000],
+        }
+
+    writer = run_memory_writer(prompt, model=args.model, timeout=args.timeout)
+    writer_result = {
+        "writer_model": args.model,
+        "should_save": writer.should_save,
+        "keywords": writer.keywords,
+        "rejected_keywords": writer.rejected_keywords,
+        "writer_reason": writer.reason,
+    }
+
+    if not writer.should_save or not writer.content:
+        if args.save and not args.dry_run:
+            update_state(state, session_file=session_file, transcript_slice=transcript_slice, status="declined")
+            write_state(state_file, state)
+        return {**base_result, **writer_result, "status": "skipped"}
+
+    raw_content = build_raw_content(transcript_slice, writer, model=args.model)
+    if args.dry_run or not args.save:
+        return {
+            **base_result,
+            **writer_result,
+            "status": "dry_run",
+            "raw_content_preview": raw_content[:4000],
+        }
+
+    save_result = save_raw(
+        raw_content,
+        session_id=raw_session_id(transcript_slice),
+        keywords=writer.keywords,
+        trigger_ingest=args.trigger_ingest,
+    )
+    update_state(state, session_file=session_file, transcript_slice=transcript_slice, status="saved")
+    write_state(state_file, state)
+    return {**base_result, **writer_result, "status": "saved", "save_result": save_result}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Save Codex sessions into LLM Wiki raw entries.")
+    parser.add_argument("--session-id")
+    parser.add_argument("--cwd")
+    parser.add_argument("--session-file")
+    parser.add_argument("--sessions-root")
+    parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE))
+    parser.add_argument("--model", default=DEFAULT_MEMORY_MODEL)
+    parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--dry-run", action="store_true", help="Run the writer but do not save raw data.")
+    parser.add_argument("--save", action="store_true", help="Write to wiki_save_raw and update state.")
+    parser.add_argument("--extract-only", action="store_true", help="Only parse the transcript; do not call LLM.")
+    parser.add_argument("--ignore-state", action="store_true", help="Read the whole session instead of the delta.")
+    parser.add_argument("--hook", action="store_true", help="Read Codex hook JSON from stdin.")
+    parser.add_argument(
+        "--trigger-ingest",
+        action="store_true",
+        help="Allow wiki_save_raw to run local LLM ingest immediately when the threshold is met.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    stdin_text = sys.stdin.read() if args.hook else None
+    try:
+        result = run(args, stdin_text=stdin_text)
+    except Exception as exc:
+        result = {"status": "error", "error": str(exc)}
+        print(json.dumps(result, ensure_ascii=False))
+        return 1
+
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

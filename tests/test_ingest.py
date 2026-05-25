@@ -1707,6 +1707,32 @@ class TestWikiIngestRouting:
         assert "test stub" in result
 
 
+class TestWikiSaveRawRouting:
+    def test_trigger_ingest_false_defers_threshold_ingest(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import server, orchestrator
+
+        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (True, "threshold met"))
+
+        captured = {"called": False}
+
+        def fake_run_pending_ingest() -> dict:
+            captured["called"] = True
+            return {"triggered": True}
+
+        monkeypatch.setattr(orchestrator, "run_pending_ingest", fake_run_pending_ingest)
+
+        result = json.loads(tool_fn("hello world content", trigger_ingest=False))
+
+        assert result["ingest_pending"] is True
+        assert result["ingest_deferred"] is True
+        assert "ingest_triggered" not in result
+        assert captured["called"] is False
+
+
 # ---------------------------------------------------------------------------
 # R4-Critical: log failures must not break rollback inclusion
 # ---------------------------------------------------------------------------
