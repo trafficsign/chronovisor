@@ -20,7 +20,6 @@ from llm_wiki_mcp.wiki import WIKI_ROOT, init_wiki
 
 DEFAULT_STATE_FILE = WIKI_ROOT / "claude-code-save-state.json"
 DEFAULT_MAX_CHARS = 120_000
-DEFAULT_TIMEOUT_SECONDS = 300
 HOOK_ENABLE_ENV = "CLAUDE_CODE_WIKI_SAVE_ENABLED"
 _RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")
 
@@ -274,18 +273,12 @@ def build_writer_prompt(transcript_slice: TranscriptSlice, *, max_chars: int) ->
     )
 
 
-def run_memory_writer(
-    prompt: str,
-    *,
-    model: str | None = None,
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
-) -> WriterResult:
-    from llm_wiki_mcp.ollama import generate, is_available, MODEL
+def run_memory_writer(prompt: str) -> WriterResult:
+    from llm_wiki_mcp.ollama import generate, is_available
 
     if not is_available():
         raise ClaudeCodeSaveError("Ollama is not running")
 
-    used_model = model or MODEL
     output = generate(prompt, format=MEMORY_WRITER_SCHEMA)
     return parse_writer_output(output)
 
@@ -574,7 +567,7 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
             "transcript_preview": format_transcript(transcript_slice.records)[:4000],
         }
 
-    writer = run_memory_writer(prompt, model=args.model, timeout=args.timeout)
+    writer = run_memory_writer(prompt)
     writer_result = {
         "should_save": writer.should_save,
         "keywords": writer.keywords,
@@ -613,9 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id")
     parser.add_argument("--session-file")
     parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE))
-    parser.add_argument("--model", default=None)
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--extract-only", action="store_true")
