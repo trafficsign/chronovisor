@@ -9,4 +9,13 @@ if [ "${CODEX_WIKI_SAVE_ENABLED:-0}" != "1" ]; then
   exit 0
 fi
 
-exec uv run --project "$PROJECT_DIR" llm-wiki-codex-save --hook --save --model "$MODEL"
+STDIN_DATA="$(cat)"
+LOG_DIR="${HOME}/.wiki/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="${LOG_DIR}/codex-save-$(date +%Y%m%d).log"
+
+printf '%s\n' "$STDIN_DATA" \
+  | nohup uv run --project "$PROJECT_DIR" llm-wiki-codex-save --hook --save --model "$MODEL" \
+  >> "$LOG_FILE" 2>&1 &
+
+printf '%s\n' '{"status":"launched","pid":'"$!"'}'
