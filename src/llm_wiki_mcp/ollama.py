@@ -51,7 +51,7 @@ def is_available() -> bool:
         return False
 
 
-def generate(prompt: str, system: str | None = None) -> str:
+def generate(prompt: str, system: str | None = None, *, format: dict | str | None = None) -> str:
     """Call Ollama generate API.
 
     Uses keep_alive="5m" to keep model loaded for 5 minutes after use.
@@ -72,6 +72,8 @@ def generate(prompt: str, system: str | None = None) -> str:
     }
     if system:
         payload["system"] = system
+    if format is not None:
+        payload["format"] = format
 
     # Timeout: 60s for model load + 600s for generation
     resp = _client().post(

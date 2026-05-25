@@ -11,6 +11,7 @@ dependencies = [
 [project.scripts]
 llm-wiki-mcp = "llm_wiki_mcp.server:main"
 llm-wiki-codex-save = "llm_wiki_mcp.codex_save:main"
+llm-wiki-claude-code-save = "llm_wiki_mcp.claude_code_save:main"
 
 [build-system]
 requires = ["hatchling"]
