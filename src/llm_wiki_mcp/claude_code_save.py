@@ -21,6 +21,10 @@ from llm_wiki_mcp.wiki import WIKI_ROOT, init_wiki
 DEFAULT_STATE_FILE = WIKI_ROOT / "claude-code-save-state.json"
 DEFAULT_MAX_CHARS = 120_000
 HOOK_ENABLE_ENV = "CLAUDE_CODE_WIKI_SAVE_ENABLED"
+
+TURN_INTERVAL = 10
+COOLDOWN_SECONDS = 900
+FILE_CHANGE_TOOLS = frozenset({"Edit", "Write"})
 _RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")
 
 MEMORY_WRITER_SCHEMA: dict[str, Any] = {
@@ -61,6 +65,8 @@ class TranscriptSlice:
     session_id: str | None = None
     cwd: str | None = None
     after_line: int = 0
+    has_file_changes: bool = False
+    user_turn_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -126,6 +132,8 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
     scanned_until_line = 0
     session_id: str | None = None
     cwd: str | None = None
+    has_file_changes = False
+    user_turn_count = 0
 
     for line_no, item in iter_jsonl(path):
         scanned_until_line = max(scanned_until_line, line_no)
@@ -145,10 +153,18 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
         if item_type not in ("user", "assistant"):
             continue
 
+        content = item.get("message", {}).get("content")
+
+        if item_type == "assistant" and not has_file_changes:
+            has_file_changes = _content_has_file_changes(content)
+
         role = item_type
-        text = message_content_text(item.get("message", {}).get("content"))
+        text = message_content_text(content)
         if not text:
             continue
+
+        if role == "user":
+            user_turn_count += 1
 
         records.append(
             TranscriptRecord(
@@ -166,7 +182,19 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
         session_id=session_id,
         cwd=cwd,
         after_line=after_line,
+        has_file_changes=has_file_changes,
+        user_turn_count=user_turn_count,
     )
+
+
+def _content_has_file_changes(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "tool_use":
+            if part.get("name") in FILE_CHANGE_TOOLS:
+                return True
+    return False
 
 
 def message_content_text(content: Any) -> str:
@@ -393,6 +421,39 @@ def saved_line_for(state: dict[str, Any], session_file: Path) -> int:
     return value if isinstance(value, int) and value > 0 else 0
 
 
+def last_saved_at(state: dict[str, Any], session_file: Path) -> datetime | None:
+    entry = state.get("files", {}).get(str(session_file))
+    if not isinstance(entry, dict):
+        return None
+    ts = entry.get("last_saved_at")
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+
+
+def should_process(transcript_slice: TranscriptSlice, state: dict[str, Any]) -> tuple[bool, str]:
+    if transcript_slice.has_file_changes:
+        prev = last_saved_at(state, transcript_slice.session_file)
+        if prev is not None:
+            elapsed = (datetime.now(timezone.utc) - prev).total_seconds()
+            if elapsed < COOLDOWN_SECONDS:
+                return False, f"cooldown ({int(elapsed)}s / {COOLDOWN_SECONDS}s)"
+        return True, "file_changes"
+
+    if transcript_slice.user_turn_count >= TURN_INTERVAL:
+        prev = last_saved_at(state, transcript_slice.session_file)
+        if prev is not None:
+            elapsed = (datetime.now(timezone.utc) - prev).total_seconds()
+            if elapsed < COOLDOWN_SECONDS:
+                return False, f"cooldown ({int(elapsed)}s / {COOLDOWN_SECONDS}s)"
+        return True, f"turn_interval ({transcript_slice.user_turn_count} turns)"
+
+    return False, f"waiting ({transcript_slice.user_turn_count}/{TURN_INTERVAL} turns, no file changes)"
+
+
 def update_state(
     state: dict[str, Any],
     *,
@@ -400,14 +461,22 @@ def update_state(
     transcript_slice: TranscriptSlice,
     status: str,
 ) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
     files = state.setdefault("files", {})
-    files[str(session_file)] = {
+    entry: dict[str, Any] = {
         "last_saved_line": transcript_slice.scanned_until_line,
         "session_id": transcript_slice.session_id,
         "cwd": transcript_slice.cwd,
         "status": status,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": now,
     }
+    if status == "saved":
+        entry["last_saved_at"] = now
+    else:
+        prev = files.get(str(session_file))
+        if isinstance(prev, dict) and "last_saved_at" in prev:
+            entry["last_saved_at"] = prev["last_saved_at"]
+    files[str(session_file)] = entry
     return state
 
 
@@ -553,10 +622,19 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
     }
 
     if not transcript_slice.records:
-        if args.save and not args.dry_run:
-            update_state(state, session_file=session_file, transcript_slice=transcript_slice, status="empty")
-            write_state(state_file, state)
         return {**base_result, "status": "skipped", "reason": "no new user/assistant messages"}
+
+    if not args.ignore_state:
+        proceed, trigger_reason = should_process(transcript_slice, state)
+        if not proceed:
+            return {
+                **base_result,
+                "status": "skipped",
+                "reason": trigger_reason,
+                "has_file_changes": transcript_slice.has_file_changes,
+                "user_turn_count": transcript_slice.user_turn_count,
+            }
+        base_result["trigger"] = trigger_reason
 
     prompt = build_writer_prompt(transcript_slice, max_chars=args.max_chars)
     if args.extract_only:

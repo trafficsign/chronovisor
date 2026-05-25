@@ -72,7 +72,7 @@ def sample_session(path: Path) -> None:
     )
 
 
-def args_for(session_file: Path, state_file: Path) -> SimpleNamespace:
+def args_for(session_file: Path, state_file: Path, *, ignore_state: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
         session_id=None,
         cwd=None,
@@ -85,7 +85,7 @@ def args_for(session_file: Path, state_file: Path) -> SimpleNamespace:
         dry_run=False,
         save=True,
         extract_only=False,
-        ignore_state=False,
+        ignore_state=ignore_state,
         hook=False,
         trigger_ingest=False,
     )
@@ -208,7 +208,7 @@ def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, mon
 
     monkeypatch.setattr(codex_save, "save_raw", fake_save_raw)
 
-    first = codex_save.run(args_for(session, state))
+    first = codex_save.run(args_for(session, state, ignore_state=True))
     second = codex_save.run(args_for(session, state))
 
     assert first["status"] == "saved"
