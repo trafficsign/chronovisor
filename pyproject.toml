@@ -12,6 +12,7 @@ dependencies = [
 llm-wiki-mcp = "llm_wiki_mcp.server:main"
 llm-wiki-codex-save = "llm_wiki_mcp.codex_save:main"
 llm-wiki-claude-code-save = "llm_wiki_mcp.claude_code_save:main"
+llm-wiki-ingest-drain = "llm_wiki_mcp.ingest_drain:main"
 
 [build-system]
 requires = ["hatchling"]

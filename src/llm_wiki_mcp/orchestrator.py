@@ -5,6 +5,7 @@ this module handles when to trigger it.
 """
 
 import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta
@@ -37,8 +38,50 @@ def _load_state() -> dict:
         "processed_raw_files": [],
         "ollama_health": {"status": None, "checked_at": None},
         "current_job_id": None,
+        "current_job_pid": None,
+        "current_job_started_at": None,
         "triage_failure_count": 0,
     }
+
+
+STALE_LOCK_MAX_AGE_SECONDS = 12 * 60 * 60
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _pid_is_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _lock_is_fresh_in_live_process(state: dict) -> bool:
+    started_at = _parse_iso_datetime(state.get("current_job_started_at"))
+    if started_at is None:
+        return False
+    age = (datetime.now() - started_at).total_seconds()
+    if age > STALE_LOCK_MAX_AGE_SECONDS:
+        return False
+    return _pid_is_alive(state.get("current_job_pid"))
+
+
+def _clear_current_job(state: dict) -> None:
+    state["current_job_id"] = None
+    state["current_job_pid"] = None
+    state["current_job_started_at"] = None
 
 
 def reset_stale_lock() -> None:
@@ -54,13 +97,15 @@ def reset_stale_lock() -> None:
     cur = state.get("current_job_id")
     if not cur:
         return
+    if _lock_is_fresh_in_live_process(state):
+        return
     if cur == "__pending__":
-        state["current_job_id"] = None
+        _clear_current_job(state)
         _save_state(state)
         return
     from llm_wiki_mcp.jobs import job_store  # local import to avoid cycle
     if job_store.get(cur) is None:
-        state["current_job_id"] = None
+        _clear_current_job(state)
         _save_state(state)
 
 
@@ -119,7 +164,7 @@ def mark_raw_processed(filenames: list[str]) -> None:
     processed.update(filenames)
     state["processed_raw_files"] = sorted(processed)
     state["last_ingest"] = datetime.now().isoformat()
-    state["current_job_id"] = None
+    _clear_current_job(state)
     state["triage_failure_count"] = 0
     _save_state(state)
 
@@ -173,7 +218,7 @@ def _release_lock(failed: bool = False, triage_failed: bool = False) -> None:
     failures don't accumulate.
     """
     state = _load_state()
-    state["current_job_id"] = None
+    _clear_current_job(state)
     if not failed:
         state["triage_failure_count"] = 0
     elif triage_failed:
@@ -307,6 +352,8 @@ def run_pending_ingest(force: bool = False) -> dict:
         # Cleared in the outer ``finally`` regardless of how we exit.
         reserved_state = _load_state()
         reserved_state["current_job_id"] = "__pending__"
+        reserved_state["current_job_pid"] = os.getpid()
+        reserved_state["current_job_started_at"] = datetime.now().isoformat()
         _save_state(reserved_state)
 
         # Lazy imports keep module-level cycles minimal and isolate test
@@ -350,6 +397,9 @@ def run_pending_ingest(force: bool = False) -> dict:
                 # while it runs. The outer ``finally`` will clear it.
                 visible_state = _load_state()
                 visible_state["current_job_id"] = job.job_id
+                visible_state["current_job_pid"] = os.getpid()
+                if not visible_state.get("current_job_started_at"):
+                    visible_state["current_job_started_at"] = datetime.now().isoformat()
                 _save_state(visible_state)
 
                 # Mutable flag the on_complete closure flips on success.
@@ -390,7 +440,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                 })
         finally:
             release_state = _load_state()
-            release_state["current_job_id"] = None
+            _clear_current_job(release_state)
             _save_state(release_state)
 
         elapsed = time.time() - batch_started

@@ -15,7 +15,7 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="${LOG_DIR}/codex-save-$(date +%Y%m%d).log"
 
 printf '%s\n' "$STDIN_DATA" \
-  | nohup uv run --project "$PROJECT_DIR" llm-wiki-codex-save --hook --save --model "$MODEL" \
+  | nohup uv run --project "$PROJECT_DIR" llm-wiki-codex-save --hook --save --trigger-ingest --model "$MODEL" \
   >> "$LOG_FILE" 2>&1 &
 
 printf '%s\n' '{}'

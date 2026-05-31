@@ -6,7 +6,8 @@ replacing it with something that catches the same class of mistake.
 from __future__ import annotations
 
 import json
-from datetime import date
+import os
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -1110,6 +1111,38 @@ class TestOrchestrator:
         finally:
             # Cleanup so other tests aren't polluted.
             jobs.job_store._jobs.pop(job.job_id, None)
+
+    def test_reset_stale_lock_keeps_live_cross_process_lock(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        state = orchestrator._load_state()
+        state["current_job_id"] = "job-in-another-process"
+        state["current_job_pid"] = os.getpid()
+        state["current_job_started_at"] = datetime.now().isoformat()
+        orchestrator._save_state(state)
+
+        orchestrator.reset_stale_lock()
+        assert orchestrator._load_state()["current_job_id"] == "job-in-another-process"
+
+    def test_reset_stale_lock_clears_dead_cross_process_lock(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        state = orchestrator._load_state()
+        state["current_job_id"] = "job-from-dead-process"
+        state["current_job_pid"] = 12345
+        state["current_job_started_at"] = datetime.now().isoformat()
+        orchestrator._save_state(state)
+        monkeypatch.setattr(orchestrator, "_pid_is_alive", lambda _pid: False)
+
+        orchestrator.reset_stale_lock()
+        loaded = orchestrator._load_state()
+        assert loaded["current_job_id"] is None
+        assert loaded["current_job_pid"] is None
+        assert loaded["current_job_started_at"] is None
 
     def test_run_pending_ingest_serial_then_idempotent(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
