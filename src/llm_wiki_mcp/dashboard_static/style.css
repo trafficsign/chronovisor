@@ -326,65 +326,150 @@ canvas {
   color: var(--text);
 }
 
-.llm-live {
+.llm-signal {
   display: grid;
-  gap: 8px;
+  gap: 9px;
+  min-height: 106px;
+  padding: 10px 12px;
+  border: 1px solid rgba(235, 229, 210, 0.1);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(102, 217, 232, 0.08), transparent 42%),
+    rgba(9, 10, 8, 0.36);
 }
 
-.llm-live > div {
+.llm-signal-top {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 
-.llm-live strong {
+.signal-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   color: var(--muted);
-  font-size: 13px;
+}
+
+.signal-badge strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.llm-live.active strong {
-  color: var(--cyan);
+.signal-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--dim);
+  box-shadow: 0 0 0 4px rgba(112, 109, 99, 0.08);
 }
 
-.llm-live span {
+.signal-age,
+.signal-stats {
   color: var(--dim);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.llm-stream-bar {
-  display: block;
+.signal-target {
   overflow: hidden;
-  height: 8px;
-  border: 1px solid rgba(235, 229, 210, 0.1);
-  border-radius: 999px;
-  background: rgba(242, 239, 229, 0.08);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 740;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.llm-stream-bar span {
-  display: block;
-  width: 0;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--cyan), var(--green), var(--amber));
-  transition: width 0.24s ease;
+.signal-stats {
+  white-space: normal;
 }
 
-.llm-live.active .llm-stream-bar span {
-  width: 100%;
-  animation: streamPulse 1.2s ease-in-out infinite alternate;
+.signal-sparkline {
+  display: grid;
+  grid-template-columns: repeat(32, minmax(2px, 1fr));
+  align-items: end;
+  gap: 3px;
+  height: 34px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(235, 229, 210, 0.08);
 }
 
-@keyframes streamPulse {
-  from {
-    opacity: 0.48;
-    transform: translateX(-18%);
+.signal-sparkline span {
+  min-height: 3px;
+  border-radius: 999px 999px 2px 2px;
+  background: rgba(112, 109, 99, 0.36);
+  transform-origin: bottom;
+  transition: height 0.18s ease, background 0.18s ease, opacity 0.18s ease;
+}
+
+.llm-signal.live .signal-badge strong,
+.llm-signal.live .signal-age {
+  color: var(--cyan);
+}
+
+.llm-signal.live .signal-dot {
+  background: var(--cyan);
+  box-shadow: 0 0 18px rgba(102, 217, 232, 0.9), 0 0 0 4px rgba(102, 217, 232, 0.12);
+  animation: signalBeat 0.9s ease-out infinite;
+}
+
+.llm-signal.prefill .signal-badge strong,
+.llm-signal.prefill .signal-age {
+  color: var(--amber);
+}
+
+.llm-signal.prefill .signal-dot,
+.llm-signal.waiting .signal-dot {
+  background: var(--amber);
+  box-shadow: 0 0 14px rgba(240, 188, 98, 0.62), 0 0 0 4px rgba(240, 188, 98, 0.1);
+}
+
+.llm-signal.waiting .signal-badge strong,
+.llm-signal.waiting .signal-age {
+  color: var(--amber);
+}
+
+.llm-signal.stalled .signal-badge strong,
+.llm-signal.stalled .signal-age {
+  color: var(--red);
+}
+
+.llm-signal.stalled .signal-dot {
+  background: var(--red);
+  box-shadow: 0 0 14px rgba(255, 115, 105, 0.58), 0 0 0 4px rgba(255, 115, 105, 0.1);
+}
+
+.llm-signal.live .signal-sparkline span {
+  background: linear-gradient(180deg, var(--cyan), rgba(102, 217, 232, 0.3));
+}
+
+.llm-signal.waiting .signal-sparkline span,
+.llm-signal.prefill .signal-sparkline span {
+  background: linear-gradient(180deg, var(--amber), rgba(240, 188, 98, 0.24));
+}
+
+.llm-signal.stalled .signal-sparkline span {
+  background: linear-gradient(180deg, var(--red), rgba(255, 115, 105, 0.24));
+}
+
+@keyframes signalBeat {
+  0% {
+    transform: scale(0.88);
   }
-  to {
-    opacity: 1;
-    transform: translateX(0);
+  42% {
+    transform: scale(1.24);
+  }
+  100% {
+    transform: scale(0.88);
   }
 }
 

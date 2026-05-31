@@ -127,14 +127,17 @@
           <dd id="current-op">--</dd>
           <dt>LLM</dt>
           <dd>
-            <div class="llm-live" id="llm-live">
-              <div>
-                <strong id="llm-state">idle</strong>
-                <span id="llm-stats">--</span>
+            <div class="llm-signal" id="llm-signal">
+              <div class="llm-signal-top">
+                <span class="signal-badge" id="llm-badge">
+                  <span class="signal-dot"></span>
+                  <strong id="llm-state">idle</strong>
+                </span>
+                <span class="signal-age" id="llm-age">--</span>
               </div>
-              <span class="llm-stream-bar">
-                <span id="llm-bar"></span>
-              </span>
+              <div class="signal-target" id="llm-target">--</div>
+              <div class="signal-stats" id="llm-stats">--</div>
+              <div class="signal-sparkline" id="llm-sparkline" aria-hidden="true"></div>
             </div>
           </dd>
           <dt>Job</dt>

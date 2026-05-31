@@ -11,10 +11,12 @@ const els = {
   ollamaSub: document.getElementById("ollama-sub"),
   currentRaw: document.getElementById("current-raw"),
   currentOp: document.getElementById("current-op"),
-  llmLive: document.getElementById("llm-live"),
+  llmSignal: document.getElementById("llm-signal"),
   llmState: document.getElementById("llm-state"),
+  llmAge: document.getElementById("llm-age"),
+  llmTarget: document.getElementById("llm-target"),
   llmStats: document.getElementById("llm-stats"),
-  llmBar: document.getElementById("llm-bar"),
+  llmSparkline: document.getElementById("llm-sparkline"),
   currentJob: document.getElementById("current-job"),
   lastSuccess: document.getElementById("last-success"),
   trendCaption: document.getElementById("trend-caption"),
@@ -29,6 +31,13 @@ const els = {
   eventFeed: document.getElementById("event-feed"),
   pendingChart: document.getElementById("pending-chart"),
   batchChart: document.getElementById("batch-chart"),
+};
+
+const llmSignalHistory = {
+  key: null,
+  lastChars: null,
+  lastSeenMs: null,
+  rates: Array(32).fill(0),
 };
 
 function fmt(value, fallback = "--") {
@@ -187,33 +196,109 @@ function setState(state) {
   els.stateText.textContent = normalized;
 }
 
+function setLlmSignalClass(kind) {
+  els.llmSignal.classList.remove("idle", "prefill", "live", "waiting", "stalled", "complete");
+  els.llmSignal.classList.add(kind);
+}
+
+function llmSignalKey(llm) {
+  return [llm.job_id || "", llm.phase || "", llm.target || ""].join("|");
+}
+
+function updateLlmRates(llm, nowMs) {
+  const key = llmSignalKey(llm);
+  const chars = Number(llm.generated_chars || 0);
+  if (llmSignalHistory.key !== key) {
+    llmSignalHistory.key = key;
+    llmSignalHistory.lastChars = chars;
+    llmSignalHistory.lastSeenMs = nowMs;
+    llmSignalHistory.rates = Array(32).fill(0);
+    return 0;
+  }
+
+  const elapsed = Math.max(0.001, (nowMs - (llmSignalHistory.lastSeenMs || nowMs)) / 1000);
+  const delta = Math.max(0, chars - (llmSignalHistory.lastChars || 0));
+  const rate = delta / elapsed;
+  llmSignalHistory.lastChars = chars;
+  llmSignalHistory.lastSeenMs = nowMs;
+  llmSignalHistory.rates.push(rate);
+  llmSignalHistory.rates = llmSignalHistory.rates.slice(-32);
+  return rate;
+}
+
+function renderSparkline(kind) {
+  const rates = llmSignalHistory.rates;
+  const max = Math.max(1, ...rates);
+  els.llmSparkline.innerHTML = "";
+  rates.forEach((rate) => {
+    const bar = document.createElement("span");
+    const height = 3 + (rate / max) * 31;
+    bar.style.height = `${Math.max(3, Math.min(34, height))}px`;
+    bar.style.opacity = rate > 0 ? "1" : kind === "idle" ? "0.18" : "0.34";
+    els.llmSparkline.appendChild(bar);
+  });
+}
+
 function renderLlm(llm) {
-  const active = Boolean(llm && llm.active);
-  els.llmLive.classList.toggle("active", active);
   if (!llm) {
+    setLlmSignalClass("idle");
+    llmSignalHistory.key = null;
+    llmSignalHistory.lastChars = null;
+    llmSignalHistory.lastSeenMs = null;
+    llmSignalHistory.rates = Array(32).fill(0);
     els.llmState.textContent = "idle";
+    els.llmAge.textContent = "--";
+    els.llmTarget.textContent = "--";
     els.llmStats.textContent = "--";
-    els.llmBar.style.width = "0";
+    renderSparkline("idle");
     return;
   }
 
+  const nowMs = Date.now();
+  const updatedMs = parseMs(llm.updated_at) ?? parseMs(llm.started_at) ?? nowMs;
   const startedMs = parseMs(llm.started_at);
+  const active = Boolean(llm.active);
   const elapsed = active && startedMs !== null
-    ? Math.max(0, (Date.now() - startedMs) / 1000)
+    ? Math.max(0, (nowMs - startedMs) / 1000)
     : Number(llm.elapsed_seconds || 0);
   const chars = Number(llm.generated_chars || 0);
-  const rate = elapsed > 0 ? chars / elapsed : Number(llm.chars_per_second || 0);
+  const instantRate = updateLlmRates(llm, nowMs);
+  const avgRate = elapsed > 0 ? chars / elapsed : Number(llm.chars_per_second || 0);
+  const signalAge = Math.max(0, (nowMs - updatedMs) / 1000);
   const finalTokens = Number(llm.eval_count || 0);
   const phase = fmt(llm.phase || llm.event || "llm");
-  els.llmState.textContent = active ? `${phase} streaming` : phase;
+
+  let kind = "complete";
+  let stateLabel = phase;
+  if (active && chars === 0) {
+    kind = "prefill";
+    stateLabel = `${phase} prefill`;
+  } else if (active && signalAge <= 5) {
+    kind = "live";
+    stateLabel = `${phase} live`;
+  } else if (active && signalAge <= 15) {
+    kind = "waiting";
+    stateLabel = `${phase} waiting`;
+  } else if (active) {
+    kind = "stalled";
+    stateLabel = `${phase} stalled`;
+  }
+
+  setLlmSignalClass(kind);
+  els.llmState.textContent = stateLabel;
+  els.llmAge.textContent = chars === 0
+    ? `first token ${preciseDuration(elapsed)}`
+    : `last chunk ${preciseDuration(signalAge)} ago`;
+  els.llmTarget.textContent = fmt(llm.target || llm.raw || "operation");
   const parts = [
     `${chars.toLocaleString()} chars`,
     preciseDuration(elapsed),
   ];
-  if (rate > 0) parts.push(`${rate.toFixed(rate < 10 ? 1 : 0)} c/s`);
+  if (instantRate > 0) parts.push(`${instantRate.toFixed(instantRate < 10 ? 1 : 0)} c/s now`);
+  if (avgRate > 0) parts.push(`${avgRate.toFixed(avgRate < 10 ? 1 : 0)} c/s avg`);
   if (finalTokens > 0) parts.push(`${finalTokens.toLocaleString()} tok`);
   els.llmStats.textContent = parts.join(" · ");
-  els.llmBar.style.width = active || chars > 0 ? "100%" : "0";
+  renderSparkline(kind);
 }
 
 function drawLineChart(canvas, rows) {
