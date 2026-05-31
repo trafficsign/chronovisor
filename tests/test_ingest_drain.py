@@ -5,7 +5,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from llm_wiki_mcp import ingest_drain
+
+
+@pytest.fixture(autouse=True)
+def _disable_runtime_status_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ingest_drain.runtime_status,
+        "reset_stale_runtime_status",
+        lambda: False,
+    )
 
 
 def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:

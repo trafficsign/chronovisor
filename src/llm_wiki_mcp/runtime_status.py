@@ -17,10 +17,39 @@ EVENTS_FILE = RUNTIME_DIR / "events.jsonl"
 METRICS_FILE = RUNTIME_DIR / "metrics.jsonl"
 MAX_EVENTS = 2000
 MAX_METRICS = 5000
+STALE_RUNTIME_MAX_AGE_SECONDS = 30 * 60
 
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _pid_is_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _age_seconds(value: object) -> float | None:
+    timestamp = _parse_iso_datetime(value)
+    if timestamp is None:
+        return None
+    return (datetime.now() - timestamp).total_seconds()
 
 
 def _ensure_runtime_dir() -> None:
@@ -159,6 +188,66 @@ def safe_append_metric(kind: str, **fields: Any) -> None:
         append_metric(kind, **fields)
     except Exception:
         pass
+
+
+def reset_stale_runtime_status(
+    *,
+    max_age_seconds: int = STALE_RUNTIME_MAX_AGE_SECONDS,
+) -> bool:
+    """Clear a stale live status left by a killed/slept ingest process.
+
+    Runtime status is just an observability cache. After a sleep/wake or
+    process kill, the orchestrator lock can be reset while the dashboard still
+    shows an old "running" / "LLM streaming" state. This function removes that
+    stale live surface before a new drain cycle starts.
+    """
+    status = read_status()
+    llm = status.get("llm") if isinstance(status.get("llm"), dict) else None
+    active_llm = bool(llm and llm.get("active"))
+    live_stage = status.get("stage") in {
+        "batch",
+        "raw",
+        "triage",
+        "generate",
+        "apply",
+        "locked",
+    }
+    looks_live = status.get("state") == "running" or live_stage or active_llm
+    if not looks_live:
+        return False
+
+    pid = status.get("current_job_pid")
+    if _pid_is_alive(pid):
+        return False
+
+    status_age = _age_seconds(status.get("updated_at"))
+    llm_age = _age_seconds(llm.get("updated_at")) if llm else None
+    has_dead_pid = isinstance(pid, int) and pid > 0
+    pid_missing = pid is None
+    aged_without_pid = (
+        pid_missing
+        and (llm_age is None or llm_age > max_age_seconds)
+        and (status_age is None or status_age > max_age_seconds)
+    )
+    if not has_dead_pid and not aged_without_pid:
+        return False
+
+    write_status({
+        "state": "idle",
+        "stage": "waiting",
+        "current_raw": None,
+        "current_op": None,
+        "current_job_id": None,
+        "current_job_pid": None,
+        "llm": None,
+    })
+    append_event(
+        "warn",
+        "runtime | cleared stale live status after drain startup",
+        source="runtime",
+        stale_pid=pid,
+    )
+    return True
 
 
 def classify_log_message(message: str) -> str:

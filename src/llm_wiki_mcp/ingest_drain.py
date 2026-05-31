@@ -11,11 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from llm_wiki_mcp import orchestrator
+from llm_wiki_mcp import orchestrator, runtime_status
 from llm_wiki_mcp.wiki import WIKI_ROOT, init_wiki
 
 DEFAULT_MAX_BATCHES = 24
 DEFAULT_SLEEP_SECONDS = 1.0
+DEFAULT_IDLE_SLEEP_SECONDS = 60.0
 
 
 def _env_int(name: str, default: int) -> int:
@@ -63,6 +64,7 @@ def drain(
 
     init_wiki()
     orchestrator.reset_stale_lock()
+    runtime_status.reset_stale_runtime_status()
 
     started = time.time()
     log_path = log_file or _default_log_file()
@@ -138,6 +140,35 @@ def drain(
     }
 
 
+def watch(
+    *,
+    max_batches: int = DEFAULT_MAX_BATCHES,
+    sleep_seconds: float = DEFAULT_SLEEP_SECONDS,
+    idle_sleep_seconds: float = DEFAULT_IDLE_SLEEP_SECONDS,
+    log_file: Path | None = None,
+) -> None:
+    """Run drain cycles forever for launchd KeepAlive mode."""
+    if idle_sleep_seconds < 0:
+        raise ValueError("idle_sleep_seconds must be >= 0")
+
+    while True:
+        try:
+            result = drain(
+                max_batches=max_batches,
+                sleep_seconds=sleep_seconds,
+                log_file=log_file,
+            )
+            print(json.dumps(result, ensure_ascii=False), flush=True)
+        except Exception as exc:
+            print(json.dumps({
+                "status": "error",
+                "error": str(exc),
+                "timestamp": datetime.now().isoformat(),
+            }, ensure_ascii=False), flush=True)
+        if idle_sleep_seconds:
+            time.sleep(idle_sleep_seconds)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Drain LLM Wiki pending raw ingest backlog.")
     parser.add_argument(
@@ -153,12 +184,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delay between successful batches.",
     )
     parser.add_argument("--log-file", type=Path)
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Stay alive and run drain cycles repeatedly. Intended for launchd KeepAlive.",
+    )
+    parser.add_argument(
+        "--idle-sleep-seconds",
+        type=float,
+        default=_env_float("LLM_WIKI_INGEST_DRAIN_IDLE_SLEEP_SECONDS", DEFAULT_IDLE_SLEEP_SECONDS),
+        help="Delay between drain cycles in --watch mode.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.watch:
+        watch(
+            max_batches=args.max_batches,
+            sleep_seconds=args.sleep_seconds,
+            idle_sleep_seconds=args.idle_sleep_seconds,
+            log_file=args.log_file,
+        )
+        return 0
     try:
         result = drain(
             max_batches=args.max_batches,

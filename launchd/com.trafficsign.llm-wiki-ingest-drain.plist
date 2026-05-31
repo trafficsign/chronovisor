@@ -9,10 +9,13 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/trafficsign/projects/personal/llm-wiki-mcp/scripts/llm-wiki-ingest-drain</string>
+    <string>--watch</string>
     <string>--max-batches</string>
     <string>24</string>
     <string>--sleep-seconds</string>
     <string>1</string>
+    <string>--idle-sleep-seconds</string>
+    <string>60</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -29,8 +32,11 @@
   <key>RunAtLoad</key>
   <true/>
 
-  <key>StartInterval</key>
-  <integer>300</integer>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
 
   <key>StandardOutPath</key>
   <string>/Users/trafficsign/.wiki/logs/ingest-drain.launchd.out.log</string>

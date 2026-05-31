@@ -46,3 +46,43 @@ def test_classify_log_message() -> None:
     assert runtime_status.classify_log_message("ingest | partial: 1 dead-lettered") == "warn"
     assert runtime_status.classify_log_message("ingest | generate parse failed") == "error"
     assert runtime_status.classify_log_message("ingest | stage 1: triage started") == "info"
+
+
+def test_reset_stale_runtime_status_clears_dead_live_pid(tmp_path: Path, monkeypatch) -> None:
+    patch_runtime(tmp_path, monkeypatch)
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: False)
+
+    runtime_status.write_status({
+        "state": "running",
+        "stage": "generate",
+        "current_job_pid": 12345,
+        "current_job_id": "job-1",
+        "current_raw": "raw.md",
+        "current_op": "page.md",
+        "llm": {"active": True, "updated_at": runtime_status.now_iso()},
+    })
+
+    assert runtime_status.reset_stale_runtime_status() is True
+    status = runtime_status.read_status()
+    assert status["state"] == "idle"
+    assert status["stage"] == "waiting"
+    assert status["current_job_pid"] is None
+    assert status["llm"] is None
+    assert runtime_status.read_events()[-1]["source"] == "runtime"
+
+
+def test_reset_stale_runtime_status_keeps_live_pid(tmp_path: Path, monkeypatch) -> None:
+    patch_runtime(tmp_path, monkeypatch)
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+
+    runtime_status.write_status({
+        "state": "running",
+        "stage": "generate",
+        "current_job_pid": 12345,
+        "llm": {"active": True, "updated_at": runtime_status.now_iso()},
+    })
+
+    assert runtime_status.reset_stale_runtime_status() is False
+    status = runtime_status.read_status()
+    assert status["state"] == "running"
+    assert status["llm"]["active"] is True
