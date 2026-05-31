@@ -14,6 +14,7 @@ from llm_wiki_mcp.ollama import (
     TRIAGE_SYSTEM_PROMPT,
     GENERATE_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT,
 )
+from llm_wiki_mcp import runtime_status
 
 
 # ---------------------------------------------------------------------------
@@ -1022,6 +1023,11 @@ def _safe_log(message: str) -> None:
         _append_log(message)
     except Exception:
         pass
+    runtime_status.safe_append_event(
+        runtime_status.classify_log_message(message),
+        message,
+        source="ingest",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1071,10 +1077,14 @@ def run_ingest(
     # belong to all of them. Anything that isn't a list[str] is treated
     # as "no metadata" so we don't fabricate values.
     raw_keywords_for_ops: list[str] | None = None
+    source_raw: str | None = None
     if metadata is not None:
         candidate = metadata.get("raw_keywords")
         if isinstance(candidate, list) and all(isinstance(v, str) for v in candidate):
             raw_keywords_for_ops = list(candidate)
+        source_candidate = metadata.get("source_raw")
+        if isinstance(source_candidate, str):
+            source_raw = source_candidate
 
     try:
         processor = "ollama" if is_available() else "sonnet"
@@ -1085,6 +1095,13 @@ def run_ingest(
         # Stage 1: Triage. Every log call here is _safe_log so a wedged
         # log file can't promote a successful triage into a FAILED job.
         job_store.update(job_id, stage="triage")
+        runtime_status.safe_write_status(
+            state="running",
+            stage="triage",
+            current_job_id=job_id,
+            current_raw=source_raw,
+            current_op=None,
+        )
         _safe_log("ingest | stage 1: triage started")
         plan = _triage(content)
 
@@ -1100,6 +1117,14 @@ def run_ingest(
                 completed_at=_now(),
                 error="triage parse failed",
             )
+            runtime_status.safe_write_status(
+                state="error",
+                stage="triage",
+                current_job_id=job_id,
+                current_raw=source_raw,
+                current_op=None,
+                last_error="triage parse failed",
+            )
             _safe_log("ingest | triage: parse failed (raws left pending for retry)")
             return
 
@@ -1114,6 +1139,14 @@ def run_ingest(
             )
             _safe_log("ingest | triage: no operations planned (raws marked processed)")
             failed = False
+            runtime_status.safe_write_status(
+                state="running",
+                stage="complete",
+                current_job_id=job_id,
+                current_raw=source_raw,
+                current_op=None,
+                last_success={"job_id": job_id, "raw": source_raw, "message": "No wiki-worthy content"},
+            )
             if on_complete:
                 try:
                     on_complete()
@@ -1123,6 +1156,14 @@ def run_ingest(
 
         _safe_log(f"ingest | triage: {len(plan)} operations planned")
         job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
+        runtime_status.safe_write_status(
+            state="running",
+            stage="generate",
+            current_job_id=job_id,
+            current_raw=source_raw,
+            current_op=None,
+            op_progress={"index": 0, "total": len(plan)},
+        )
 
         # Stage 2: Generate each page. Failed ops are retried once before
         # being dead-lettered — most generate failures are transient
@@ -1132,6 +1173,14 @@ def run_ingest(
         failed_op_specs: list[dict] = []  # full op dicts for the dead-letter record
         for i, op in enumerate(plan):
             fname = op.get("filename", "?")
+            runtime_status.safe_write_status(
+                state="running",
+                stage="generate",
+                current_job_id=job_id,
+                current_raw=source_raw,
+                current_op=fname,
+                op_progress={"index": i + 1, "total": len(plan)},
+            )
             _safe_log(f"ingest | generating {i+1}/{len(plan)}: {fname}")
             generated = _generate_one(op, content, raw_keywords=raw_keywords_for_ops)
             if generated is None:
@@ -1183,6 +1232,20 @@ def run_ingest(
                 + ")"
             )
             failed = False
+            runtime_status.safe_write_status(
+                state="running",
+                stage="complete",
+                current_job_id=job_id,
+                current_raw=source_raw,
+                current_op=None,
+                last_success={
+                    "job_id": job_id,
+                    "raw": source_raw,
+                    "created": [],
+                    "updated": [],
+                    "failed_ops": failed_op_specs,
+                },
+            )
             if on_complete:
                 try:
                     on_complete()
@@ -1194,6 +1257,14 @@ def run_ingest(
         # _apply_operations raises IngestApplyError on any unrecoverable
         # problem; the outer except marks the job FAILED *without* invoking
         # on_complete, so raws stay pending for retry.
+        runtime_status.safe_write_status(
+            state="running",
+            stage="apply",
+            current_job_id=job_id,
+            current_raw=source_raw,
+            current_op=None,
+            op_progress={"index": len(plan), "total": len(plan)},
+        )
         created, updated = _apply_operations(all_operations)
 
         # Side effects (rebuild_index, IndexStore refresh, embeddings) are
@@ -1254,6 +1325,20 @@ def run_ingest(
                 f"ingest | completed: {len(created)} created, {len(updated)} updated"
             )
         failed = False
+        runtime_status.safe_write_status(
+            state="running",
+            stage="complete",
+            current_job_id=job_id,
+            current_raw=source_raw,
+            current_op=None,
+            last_success={
+                "job_id": job_id,
+                "raw": source_raw,
+                "created": created,
+                "updated": updated,
+                "failed_ops": failed_op_specs,
+            },
+        )
 
         if on_complete:
             try:
@@ -1267,6 +1352,14 @@ def run_ingest(
             status=JobStatus.FAILED,
             completed_at=_now(),
             error=str(e),
+        )
+        runtime_status.safe_write_status(
+            state="error",
+            stage="failed",
+            current_job_id=job_id,
+            current_raw=source_raw,
+            current_op=None,
+            last_error=str(e),
         )
         _safe_log(f"ingest | failed: {e}")
     finally:

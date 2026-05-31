@@ -347,7 +347,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    from llm_wiki_mcp import wiki, ingest, index_store, orchestrator
+    from llm_wiki_mcp import wiki, ingest, index_store, orchestrator, runtime_status
 
     monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
     monkeypatch.setattr(wiki, "PAGES_DIR", pages)
@@ -361,6 +361,10 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
     monkeypatch.setattr(orchestrator, "WIKI_ROOT", wiki_root)
     monkeypatch.setattr(orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json")
+    monkeypatch.setattr(runtime_status, "RUNTIME_DIR", wiki_root / "runtime")
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", wiki_root / "runtime" / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", wiki_root / "runtime" / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", wiki_root / "runtime" / "metrics.jsonl")
 
     # IndexStore reads its paths from module globals AND from wiki.PAGES_DIR
     # internally; patch both layers.

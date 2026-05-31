@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Wiki Observatory</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Local memory pipeline</p>
+        <h1>LLM Wiki Observatory</h1>
+      </div>
+      <div class="status-pill" id="state-pill">
+        <span class="pulse"></span>
+        <span id="state-text">connecting</span>
+      </div>
+    </header>
+
+    <section class="metrics-grid" aria-label="Primary metrics">
+      <article class="metric-card">
+        <span class="metric-label">Pending</span>
+        <strong id="pending-value">--</strong>
+        <small id="pending-sub">raw queue</small>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Stage</span>
+        <strong id="stage-value">--</strong>
+        <small id="raw-value">no active raw</small>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Batch</span>
+        <strong id="batch-value">--</strong>
+        <small id="batch-sub">waiting</small>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Ollama</span>
+        <strong id="ollama-value">--</strong>
+        <small id="ollama-sub">model state</small>
+      </article>
+    </section>
+
+    <section class="stage-flow" aria-label="Pipeline stage">
+      <div class="stage-node" data-stage="raw">Raw</div>
+      <div class="stage-line"></div>
+      <div class="stage-node" data-stage="triage">Triage</div>
+      <div class="stage-line"></div>
+      <div class="stage-node" data-stage="generate">Generate</div>
+      <div class="stage-line"></div>
+      <div class="stage-node" data-stage="apply">Apply</div>
+      <div class="stage-line"></div>
+      <div class="stage-node" data-stage="complete">Index</div>
+    </section>
+
+    <section class="dashboard-grid">
+      <article class="panel panel-large">
+        <div class="panel-head">
+          <div>
+            <h2>Pending Trend</h2>
+            <p>Queue depth from drain and runtime metrics.</p>
+          </div>
+          <span id="trend-caption">waiting for data</span>
+        </div>
+        <canvas id="pending-chart" height="260"></canvas>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Batch Yield</h2>
+            <p>Processed vs failed per batch.</p>
+          </div>
+        </div>
+        <canvas id="batch-chart" height="260"></canvas>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Current Work</h2>
+            <p>Live raw and generated page target.</p>
+          </div>
+        </div>
+        <dl class="work-list">
+          <dt>Raw</dt>
+          <dd id="current-raw">--</dd>
+          <dt>Op</dt>
+          <dd id="current-op">--</dd>
+          <dt>Job</dt>
+          <dd id="current-job">--</dd>
+          <dt>Last Success</dt>
+          <dd id="last-success">--</dd>
+        </dl>
+      </article>
+
+      <article class="panel panel-large">
+        <div class="panel-head">
+          <div>
+            <h2>Recent Events</h2>
+            <p>Classified pipeline events from runtime and log.md.</p>
+          </div>
+        </div>
+        <div class="event-feed" id="event-feed"></div>
+      </article>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, LOG_FILE
 from llm_wiki_mcp.ollama import is_available
+from llm_wiki_mcp import runtime_status
 
 # Config
 INGEST_THRESHOLD = 5  # Trigger ingest after N raw files
@@ -236,6 +237,11 @@ def _orch_log(message: str) -> None:
             f.write(f"\n- [{timestamp}] {message}")
     except Exception:
         pass
+    runtime_status.safe_append_event(
+        runtime_status.classify_log_message(message),
+        message,
+        source="orchestrator",
+    )
 
 
 def mark_lint_complete() -> None:
@@ -314,21 +320,52 @@ def run_pending_ingest(force: bool = False) -> dict:
         if force:
             pending_now = get_pending_raw_files()
             if not pending_now:
+                runtime_status.safe_write_status(
+                    state="idle",
+                    stage="idle",
+                    pending=0,
+                    current_raw=None,
+                    current_op=None,
+                    batch=None,
+                    current_job_id=None,
+                    current_job_pid=None,
+                    ollama=get_ollama_status(),
+                )
                 return {"triggered": False, "reason": "no pending raws"}
             reason = f"force=True with {len(pending_now)} pending"
         else:
             should, reason = should_ingest()
             if not should:
+                runtime_status.safe_write_status(
+                    state="idle",
+                    stage="waiting",
+                    pending=len(get_pending_raw_files()),
+                    current_raw=None,
+                    current_op=None,
+                    batch=None,
+                    current_job_id=None,
+                    current_job_pid=None,
+                    ollama=get_ollama_status(),
+                )
                 return {"triggered": False, "reason": reason}
 
         state = _load_state()
         if state.get("current_job_id"):
+            runtime_status.safe_write_status(
+                state="running",
+                stage="locked",
+                pending=len(get_pending_raw_files()),
+                current_job_id=state.get("current_job_id"),
+                current_job_pid=state.get("current_job_pid"),
+                ollama=get_ollama_status(),
+            )
             return {
                 "triggered": False,
                 "reason": f"ingest job {state['current_job_id']} already in flight",
             }
 
         pending = get_pending_raw_files()
+        pending_before_count = len(pending)
 
         # Limit batch size to avoid overwhelming LLM.
         MAX_BATCH = 10
@@ -338,6 +375,13 @@ def run_pending_ingest(force: bool = False) -> dict:
         # Quarantine if this same head-of-queue keeps blowing up triage.
         if state.get("triage_failure_count", 0) >= TRIAGE_FAILURE_QUARANTINE_THRESHOLD:
             quarantine_dir = _quarantine_pending_raws(filenames)
+            runtime_status.safe_append_event(
+                "warn",
+                f"orchestrator | quarantined {len(filenames)} raws",
+                source="orchestrator",
+                raw_files=filenames,
+                quarantine_dir=str(quarantine_dir),
+            )
             return {
                 "triggered": False,
                 "reason": (
@@ -366,9 +410,27 @@ def run_pending_ingest(force: bool = False) -> dict:
         job_ids: list[str] = []
         succeeded_filenames: list[str] = []
         batch_started = time.time()
+        runtime_status.safe_write_status(
+            state="running",
+            stage="batch",
+            pending=pending_before_count,
+            current_raw=None,
+            current_op=None,
+            current_job_id="__pending__",
+            current_job_pid=os.getpid(),
+            batch={
+                "started_at": datetime.now().isoformat(),
+                "index": 0,
+                "total": len(filenames),
+                "succeeded": 0,
+                "failed": 0,
+                "files": filenames,
+            },
+            ollama=get_ollama_status(),
+        )
 
         try:
-            for raw_path in pending:
+            for raw_index, raw_path in enumerate(pending, start=1):
                 fname = raw_path.name
                 try:
                     raw_text = raw_path.read_text()
@@ -392,6 +454,24 @@ def run_pending_ingest(force: bool = False) -> dict:
                 processor = "ollama" if is_available() else "sonnet"
                 job = job_store.create(processor=processor)
                 job_ids.append(job.job_id)
+                runtime_status.safe_write_status(
+                    state="running",
+                    stage="raw",
+                    pending=len(get_pending_raw_files()),
+                    current_raw=fname,
+                    current_op=None,
+                    current_job_id=job.job_id,
+                    current_job_pid=os.getpid(),
+                    batch={
+                        "started_at": datetime.fromtimestamp(batch_started).isoformat(),
+                        "index": raw_index,
+                        "total": len(filenames),
+                        "succeeded": len(succeeded_filenames),
+                        "failed": len(per_raw) - len(succeeded_filenames),
+                        "files": filenames,
+                    },
+                    ollama=get_ollama_status(),
+                )
 
                 # Make the per-raw job_id observable to other processes
                 # while it runs. The outer ``finally`` will clear it.
@@ -420,7 +500,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                         job.job_id,
                         on_complete=_on_complete,
                         on_finally=_on_finally,
-                        metadata={"raw_keywords": raw_keywords},
+                        metadata={"raw_keywords": raw_keywords, "source_raw": fname},
                     )
                 except Exception as e:
                     # ``run_ingest`` already routes its own exceptions through
@@ -438,6 +518,16 @@ def run_pending_ingest(force: bool = False) -> dict:
                     "job_id": job.job_id,
                     "succeeded": raw_success_flag[0],
                 })
+                runtime_status.safe_append_event(
+                    "success" if raw_success_flag[0] else "warn",
+                    (
+                        f"orchestrator | raw {fname} "
+                        + ("processed" if raw_success_flag[0] else "not processed")
+                    ),
+                    source="orchestrator",
+                    raw_file=fname,
+                    job_id=job.job_id,
+                )
         finally:
             release_state = _load_state()
             _clear_current_job(release_state)
@@ -447,6 +537,36 @@ def run_pending_ingest(force: bool = False) -> dict:
         _orch_log(
             f"orchestrator | batch done: {len(succeeded_filenames)}/{len(filenames)} "
             f"succeeded, {elapsed:.1f}s, jobs={len(job_ids)}"
+        )
+        pending_after = len(get_pending_raw_files())
+        runtime_status.safe_append_metric(
+            "batch",
+            pending_before=pending_before_count,
+            pending_after=pending_after,
+            files_attempted=len(filenames),
+            files_processed=len(succeeded_filenames),
+            files_failed=len(filenames) - len(succeeded_filenames),
+            elapsed_seconds=round(elapsed, 2),
+            processor=get_ollama_status()["processor"],
+        )
+        runtime_status.safe_write_status(
+            state="running" if pending_after else "idle",
+            stage="waiting" if pending_after else "idle",
+            pending=pending_after,
+            current_raw=None,
+            current_op=None,
+            current_job_id=None,
+            current_job_pid=None,
+            batch={
+                "started_at": datetime.fromtimestamp(batch_started).isoformat(),
+                "index": len(filenames),
+                "total": len(filenames),
+                "succeeded": len(succeeded_filenames),
+                "failed": len(filenames) - len(succeeded_filenames),
+                "elapsed_seconds": round(elapsed, 2),
+                "files": filenames,
+            },
+            ollama=get_ollama_status(),
         )
 
         return {
