@@ -8,8 +8,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/sh</string>
-    <string>/Users/trafficsign/projects/personal/llm-wiki-mcp/scripts/llm_wiki_ingest_drain.sh</string>
+    <string>/Users/trafficsign/projects/personal/llm-wiki-mcp/scripts/llm-wiki-ingest-drain</string>
     <string>--max-batches</string>
     <string>24</string>
     <string>--sleep-seconds</string>
