@@ -249,6 +249,15 @@ class TestExtractPageBody:
         assert "## new section" in out
         assert "title:" not in out
 
+    def test_update_bare_markdown_recovers(self) -> None:
+        # Qwen often follows the body contract but omits the wrapper
+        # entirely. For updates that is acceptable Markdown to append.
+        out = _extract_page_body(
+            "## 6.5 Stop Hook 最適化\n\n本文だけ返ってきたケース。",
+            op_type="update",
+        )
+        assert out == "## 6.5 Stop Hook 最適化\n\n本文だけ返ってきたケース。"
+
     def test_create_truncated_broken_frontmatter_still_rejected(self) -> None:
         # Truncation BEFORE the closing "---" of the frontmatter cannot
         # be recovered: we'd persist a page with no proper frontmatter
@@ -390,8 +399,8 @@ class TestApplyOperations:
         body = (isolated_wiki / "pages" / "misc" / "new-page.md").read_text()
         assert "title: T" in body and body.endswith("\n")
 
-    def test_create_rejects_stem_collision(self, isolated_wiki: Path) -> None:
-        _seed_page(
+    def test_create_collision_converts_to_update(self, isolated_wiki: Path) -> None:
+        path = _seed_page(
             isolated_wiki, "a/foo.md", "---\ntitle: existing\nupdated: 2026-01-01\n---\nold"
         )
         ops = [
@@ -401,8 +410,15 @@ class TestApplyOperations:
                 "content": "---\ntitle: dup\nupdated: 2026-04-28\n---\nnew",
             }
         ]
-        with pytest.raises(IngestApplyError, match="overwrite existing page_id"):
-            _apply_operations(ops)
+        created, updated = _apply_operations(ops)
+
+        assert created == []
+        assert updated == ["foo"]
+        text = path.read_text()
+        assert "old" in text
+        assert "new" in text
+        assert "title: dup" not in text
+        assert not (isolated_wiki / "pages" / "b" / "foo.md").exists()
 
     def test_update_missing_target_fails(self, isolated_wiki: Path) -> None:
         ops = [
@@ -890,12 +906,12 @@ class TestRunIngestPartialFailure:
         assert finished.result is None or not finished.result.get("partial")
         assert on_complete_called == [True]
 
-    def test_all_ops_fail_keeps_raws_pending(
+    def test_all_ops_fail_marks_raw_processed(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """If every generate op fails (even after retry), the wiki must
-        not be mutated and on_complete must NOT fire — that way raws stay
-        pending and the next tick can re-triage with fresh output."""
+        not be mutated, but on_complete still fires so one bad model
+        output does not block the pending drain forever."""
 
         from llm_wiki_mcp import ingest, jobs
 
@@ -922,15 +938,17 @@ class TestRunIngestPartialFailure:
             ),
         )
 
-        # Nothing succeeded → no on_complete (raws stay pending for retry).
-        assert on_complete_called == []
-        # on_finally fires with failed=True; triage_failed stays False
-        # because the failure was in generate, not triage.
-        assert on_finally_calls == [{"failed": True, "triage_failed": False}]
+        # Nothing succeeded, but raws are marked processed to avoid an
+        # infinite retry loop on deterministic malformed output.
+        assert on_complete_called == [True]
+        assert on_finally_calls == [{"failed": False, "triage_failed": False}]
         finished = jobs.job_store.get(job.job_id)
-        assert finished.status == jobs.JobStatus.FAILED
+        assert finished.status == jobs.JobStatus.COMPLETED
         assert finished.pages_created == []
         assert finished.pages_updated == []
+        assert finished.result is not None
+        assert finished.result.get("partial") is True
+        assert len(finished.result.get("failed_ops", [])) == 2
         # Disk untouched.
         pages = isolated_wiki / "pages"
         assert not (pages / "misc" / "p0.md").exists()
@@ -1574,13 +1592,11 @@ class TestTriagePlanSchema:
 
 
 class TestApplyPreparePhase:
-    def test_collision_rejects_whole_batch_before_writing(
+    def test_collision_converts_without_blocking_batch(
         self, isolated_wiki: Path
     ) -> None:
-        """The previous flow wrote op[0] before the prepare-phase check
-        on op[1] failed. After the fix, every op is validated before any
-        disk write so a single collision aborts the entire batch."""
-        # Seed an existing page so op[1] collides.
+        """A create for an existing page_id is treated as an update, so it
+        does not strand unrelated successful operations in the same batch."""
         existing = isolated_wiki / "pages" / "a" / "blocking.md"
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text(
@@ -1599,16 +1615,15 @@ class TestApplyPreparePhase:
                 "content": "---\ntitle: Dup\nupdated: 2026-04-28\n---\nx",
             },
         ]
-        with pytest.raises(IngestApplyError, match="overwrite existing"):
-            _apply_operations(ops)
+        created, updated = _apply_operations(ops)
 
-        # The first (would-have-succeeded) op must NOT be on disk.
-        assert not (isolated_wiki / "pages" / "fresh" / "safe-page.md").exists()
-        # The blocking page is untouched.
-        assert (
-            existing.read_text()
-            == "---\ntitle: existing\nupdated: 2026-01-01\n---\noriginal\n"
-        )
+        assert created == ["safe-page"]
+        assert updated == ["blocking"]
+        assert (isolated_wiki / "pages" / "fresh" / "safe-page.md").exists()
+        text = existing.read_text()
+        assert "original" in text
+        assert "\nx\n" in text
+        assert "title: Dup" not in text
 
     def test_duplicate_page_id_within_batch_rejected(
         self, isolated_wiki: Path
@@ -1683,10 +1698,10 @@ class TestApplyPreparePhase:
         # Create never wrote (write failed before append).
         assert not (isolated_wiki / "pages" / "y" / "new.md").exists()
 
-    def test_casefold_collision_detected(self, isolated_wiki: Path) -> None:
+    def test_casefold_collision_converts_to_update(self, isolated_wiki: Path) -> None:
         """``Foo.md`` and ``foo.md`` resolve to the same inode on
-        case-insensitive macOS filesystems. We catch that even when
-        ``find_page`` (strict-case) wouldn't."""
+        case-insensitive macOS filesystems. We route the create into the
+        existing page rather than writing a second logical duplicate."""
         existing = isolated_wiki / "pages" / "a" / "Foo.md"
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text(
@@ -1699,8 +1714,14 @@ class TestApplyPreparePhase:
                 "content": "---\ntitle: dup\nupdated: 2026-04-28\n---\nx",
             }
         ]
-        with pytest.raises(IngestApplyError, match="overwrite existing"):
-            _apply_operations(ops)
+        created, updated = _apply_operations(ops)
+
+        assert created == []
+        assert updated == ["Foo"]
+        text = existing.read_text()
+        assert "body" in text
+        assert "\nx\n" in text
+        assert not (isolated_wiki / "pages" / "b" / "foo.md").exists()
 
 
 # ---------------------------------------------------------------------------

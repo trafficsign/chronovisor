@@ -328,6 +328,7 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
     if not output:
         return None
 
+    op_type = (op_type or "create").lower()
     text = output.strip()
     if text.startswith("```"):
         text = re.sub(r"^```\w*\n?", "", text)
@@ -379,11 +380,18 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
             candidate = re.sub(r"\n=[^\n]*$", "", candidate).strip()
             body = candidate or None
 
+    # 5. Ollama often follows the update *content* contract but drops the
+    # wrapper entirely, returning bare Markdown such as ``## New section``.
+    # For updates this is safe to accept because the existing page already
+    # supplies frontmatter and the cleanup below still rejects empty or
+    # partial-frontmatter bodies. Creates remain strict.
+    if body is None and op_type == "update" and not _has_frontmatter(text):
+        body = text
+
     if body is None:
         return None
 
     # Op-type sanity: enforce frontmatter contract.
-    op_type = (op_type or "create").lower()
     if op_type == "create":
         if not _has_frontmatter(body):
             return None
@@ -794,10 +802,20 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         if op_type == "create":
             existing = _find_page_casefold(page_id)
             if existing is not None:
-                raise IngestApplyError(
-                    f"create op would overwrite existing page_id {page_id!r} "
-                    f"(existing: {existing}, target: {full_path})"
+                _safe_log(
+                    f"ingest | create op for existing page_id {page_id!r} "
+                    f"converted to update (existing: {existing}, target: {full_path})"
                 )
+                op_type = "update"
+                full_path = existing
+                page_id = existing.stem
+                body = _strip_all_frontmatter(body).strip()
+                if not body:
+                    raise IngestApplyError(
+                        f"create collision for page_id {page_id!r} produced no update body"
+                    )
+
+        if op_type == "create":
             # Tag processing happens BEFORE raw_keywords patch so the
             # final frontmatter goes through one consistent serialization
             # path. Soft-fail: a missing or malformed ``tags`` list just
@@ -826,7 +844,7 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
             )
 
         else:  # update
-            existing_path = find_page(page_id)
+            existing_path = full_path if full_path.exists() else find_page(page_id)
             if existing_path is None or not existing_path.exists():
                 raise IngestApplyError(
                     f"update target not found for page_id {page_id!r}"
@@ -1133,9 +1151,9 @@ def run_ingest(
         failed_ops = [spec["filename"] for spec in failed_op_specs]
 
         # Apply policy:
-        # - All ops failed → discard, leave raws pending so the next tick
-        #   can re-triage with fresh model output. This avoids creating an
-        #   empty "completed" job that silently consumes the raws.
+        # - All ops failed → mark the raw processed and surface a completed
+        #   job with failed_ops. Re-queuing here made one malformed model
+        #   sample block the whole pending drain indefinitely.
         # - Some ops succeeded, some failed → apply the successful ops AND
         #   mark raws processed (via on_complete). The previous "discard
         #   everything" contract caused two problems: (1) successful ops
@@ -1145,23 +1163,31 @@ def run_ingest(
         #   Marking raws processed after a partial apply prevents both.
         # - All ops succeeded → standard happy path.
         if failed_ops and not all_operations:
-            err = (
-                f"generate failed for all {len(failed_ops)}/{len(plan)} ops: "
-                f"{', '.join(failed_ops[:5])}"
-                + ("..." if len(failed_ops) > 5 else "")
-            )
             job_store.update(
                 job_id,
-                status=JobStatus.FAILED,
+                status=JobStatus.COMPLETED,
                 completed_at=_now(),
                 pages_created=[],
                 pages_updated=[],
-                error=err,
+                result={
+                    "partial": True,
+                    "failed_ops": failed_op_specs,
+                    "message": "All generated operations failed; raw marked processed.",
+                },
             )
             _safe_log(
                 f"ingest | all {len(failed_ops)} generate ops failed "
-                f"— discarded, raws left pending for retry"
+                f"— discarded, raw marked processed "
+                f"({', '.join(failed_ops[:3])}"
+                + ("..." if len(failed_ops) > 3 else "")
+                + ")"
             )
+            failed = False
+            if on_complete:
+                try:
+                    on_complete()
+                except Exception as cb_err:
+                    _safe_log(f"ingest | on_complete callback failed: {cb_err}")
             return
 
         # All ops generated successfully (or partial — apply what we have).
