@@ -11,6 +11,10 @@ const els = {
   ollamaSub: document.getElementById("ollama-sub"),
   currentRaw: document.getElementById("current-raw"),
   currentOp: document.getElementById("current-op"),
+  llmLive: document.getElementById("llm-live"),
+  llmState: document.getElementById("llm-state"),
+  llmStats: document.getElementById("llm-stats"),
+  llmBar: document.getElementById("llm-bar"),
   currentJob: document.getElementById("current-job"),
   lastSuccess: document.getElementById("last-success"),
   trendCaption: document.getElementById("trend-caption"),
@@ -55,6 +59,12 @@ function compactDuration(seconds) {
   const hours = minutes / 60;
   if (hours < 48) return `${hours.toFixed(hours < 10 ? 1 : 0)}h`;
   return `${Math.round(hours / 24)}d`;
+}
+
+function preciseDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "--";
+  if (seconds < 90) return `${Math.floor(seconds)}s`;
+  return compactDuration(seconds);
 }
 
 function parseMs(value) {
@@ -175,6 +185,35 @@ function setState(state) {
   if (normalized === "running") els.statePill.classList.add("running");
   if (normalized === "error" || normalized === "blocked") els.statePill.classList.add("error");
   els.stateText.textContent = normalized;
+}
+
+function renderLlm(llm) {
+  const active = Boolean(llm && llm.active);
+  els.llmLive.classList.toggle("active", active);
+  if (!llm) {
+    els.llmState.textContent = "idle";
+    els.llmStats.textContent = "--";
+    els.llmBar.style.width = "0";
+    return;
+  }
+
+  const startedMs = parseMs(llm.started_at);
+  const elapsed = active && startedMs !== null
+    ? Math.max(0, (Date.now() - startedMs) / 1000)
+    : Number(llm.elapsed_seconds || 0);
+  const chars = Number(llm.generated_chars || 0);
+  const rate = elapsed > 0 ? chars / elapsed : Number(llm.chars_per_second || 0);
+  const finalTokens = Number(llm.eval_count || 0);
+  const phase = fmt(llm.phase || llm.event || "llm");
+  els.llmState.textContent = active ? `${phase} streaming` : phase;
+  const parts = [
+    `${chars.toLocaleString()} chars`,
+    preciseDuration(elapsed),
+  ];
+  if (rate > 0) parts.push(`${rate.toFixed(rate < 10 ? 1 : 0)} c/s`);
+  if (finalTokens > 0) parts.push(`${finalTokens.toLocaleString()} tok`);
+  els.llmStats.textContent = parts.join(" · ");
+  els.llmBar.style.width = active || chars > 0 ? "100%" : "0";
 }
 
 function drawLineChart(canvas, rows) {
@@ -489,6 +528,7 @@ function render(snapshot) {
   els.ollamaSub.textContent = model.name || model.model || "no model";
   els.currentRaw.textContent = fmt(status.current_raw);
   els.currentOp.textContent = fmt(status.current_op);
+  renderLlm(status.llm);
   els.currentJob.textContent = fmt(status.current_job_id);
   els.lastSuccess.textContent = status.last_success ? `${fmt(status.last_success.raw)} -> ${[...(status.last_success.created || []), ...(status.last_success.updated || [])].join(", ") || "none"}` : "--";
   els.trendCaption.textContent = metrics.length ? `${completedRows(metrics).length} batches` : "waiting for data";
@@ -515,5 +555,5 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 2000);
+setInterval(refresh, 1000);
 window.addEventListener("resize", refresh);

@@ -3,9 +3,12 @@
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass
 from datetime import date
+from inspect import Parameter, signature
 from pathlib import Path
+from typing import Any, Callable
 
 from llm_wiki_mcp.wiki import PAGES_DIR, INDEX_FILE, LOG_FILE, all_pages, find_page, page_id_from_path
 from llm_wiki_mcp.jobs import job_store, JobStatus
@@ -98,7 +101,113 @@ def _extract_json_array(output: str) -> list[dict] | None:
     return None
 
 
-def _triage(content: str) -> list[dict] | None:
+def _supports_keyword(fn: Callable[..., Any], name: str) -> bool:
+    try:
+        params = signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        p.kind == Parameter.VAR_KEYWORD or p.name == name
+        for p in params
+    )
+
+
+def _generate_with_progress(
+    prompt: str,
+    *,
+    system: str | None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> str:
+    if progress_callback is not None and _supports_keyword(generate, "progress_callback"):
+        try:
+            return generate(prompt, system=system, progress_callback=progress_callback)
+        except Exception as e:
+            progress_callback({"event": "error", "active": False, "error": str(e)})
+            raise
+    return generate(prompt, system=system)
+
+
+def _triage_with_progress(
+    content: str,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+) -> list[dict] | None:
+    if progress_callback is not None and _supports_keyword(_triage, "progress_callback"):
+        return _triage(content, progress_callback=progress_callback)
+    return _triage(content)
+
+
+def _generate_one_with_progress(
+    op: dict,
+    raw_content: str,
+    *,
+    raw_keywords: list[str] | None,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+) -> dict | None:
+    kwargs: dict[str, Any] = {"raw_keywords": raw_keywords}
+    if progress_callback is not None and _supports_keyword(_generate_one, "progress_callback"):
+        kwargs["progress_callback"] = progress_callback
+    return _generate_one(op, raw_content, **kwargs)
+
+
+def _llm_progress_callback(
+    *,
+    phase: str,
+    target: str,
+    job_id: str | None,
+    source_raw: str | None,
+    op_progress: dict[str, int] | None = None,
+) -> Callable[[dict[str, Any]], None]:
+    started = time.time()
+    started_at = runtime_status.now_iso()
+
+    def emit(update: dict[str, Any]) -> None:
+        elapsed = update.get("elapsed_seconds")
+        if not isinstance(elapsed, (int, float)):
+            elapsed = round(max(0.001, time.time() - started), 2)
+        generated_chars = update.get("generated_chars", update.get("chars", 0))
+        chunks = update.get("chunks", 0)
+        status_payload: dict[str, Any] = {
+            "active": bool(update.get("active", update.get("event") not in {"done", "error"})),
+            "event": update.get("event", "chunk"),
+            "phase": phase,
+            "target": target,
+            "job_id": job_id,
+            "raw": source_raw,
+            "started_at": started_at,
+            "updated_at": runtime_status.now_iso(),
+            "generated_chars": generated_chars,
+            "chunks": chunks,
+            "elapsed_seconds": elapsed,
+        }
+        if op_progress is not None:
+            status_payload["op_progress"] = dict(op_progress)
+        for key in (
+            "chars_per_second",
+            "prompt_eval_count",
+            "eval_count",
+            "total_duration",
+            "eval_duration",
+            "error",
+        ):
+            if key in update:
+                status_payload[key] = update[key]
+        runtime_status.safe_write_status(llm=status_payload)
+
+    emit({
+        "event": "start",
+        "active": True,
+        "generated_chars": 0,
+        "chunks": 0,
+        "elapsed_seconds": 0,
+    })
+    return emit
+
+
+def _triage(
+    content: str,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> list[dict] | None:
     """Stage 1: Analyze raw content and return a plan, or None on parse failure.
 
     Distinguishing ``None`` (parser/model failure) from ``[]`` (model said
@@ -128,7 +237,7 @@ Raw session data to triage:
 
 Analyze the raw data above. Output a JSON array of page operations (create/update)."""
 
-    output = generate(prompt, system=TRIAGE_SYSTEM_PROMPT)
+    output = _generate_with_progress(prompt, system=TRIAGE_SYSTEM_PROMPT, progress_callback=progress_callback)
     raw_plan = _extract_json_array(output)
     if raw_plan is None:
         _safe_log(
@@ -416,6 +525,7 @@ def _generate_one(
     raw_content: str,
     *,
     raw_keywords: list[str] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict | None:
     """Stage 2: generate one page; return an operation dict ready for apply.
 
@@ -452,7 +562,7 @@ Generate the page content based on the raw data and context above."""
     system_prompt = UPDATE_SYSTEM_PROMPT if op_type == "update" else GENERATE_SYSTEM_PROMPT
 
     try:
-        output = generate(prompt, system=system_prompt)
+        output = _generate_with_progress(prompt, system=system_prompt, progress_callback=progress_callback)
     except Exception as e:
         _safe_log(f"ingest | generate failed for {filename}: {e}")
         return None
@@ -1103,7 +1213,15 @@ def run_ingest(
             current_op=None,
         )
         _safe_log("ingest | stage 1: triage started")
-        plan = _triage(content)
+        plan = _triage_with_progress(
+            content,
+            _llm_progress_callback(
+                phase="triage",
+                target="operation plan",
+                job_id=job_id,
+                source_raw=source_raw,
+            ),
+        )
 
         # None = parser/model failure → leave raws un-marked so the next
         # tick can retry. [] = model legitimately said "nothing here" →
@@ -1124,6 +1242,7 @@ def run_ingest(
                 current_raw=source_raw,
                 current_op=None,
                 last_error="triage parse failed",
+                llm=None,
             )
             _safe_log("ingest | triage: parse failed (raws left pending for retry)")
             return
@@ -1145,6 +1264,7 @@ def run_ingest(
                 current_job_id=job_id,
                 current_raw=source_raw,
                 current_op=None,
+                llm=None,
                 last_success={"job_id": job_id, "raw": source_raw, "message": "No wiki-worthy content"},
             )
             if on_complete:
@@ -1182,10 +1302,34 @@ def run_ingest(
                 op_progress={"index": i + 1, "total": len(plan)},
             )
             _safe_log(f"ingest | generating {i+1}/{len(plan)}: {fname}")
-            generated = _generate_one(op, content, raw_keywords=raw_keywords_for_ops)
+            progress = _llm_progress_callback(
+                phase="generate",
+                target=fname,
+                job_id=job_id,
+                source_raw=source_raw,
+                op_progress={"index": i + 1, "total": len(plan)},
+            )
+            generated = _generate_one_with_progress(
+                op,
+                content,
+                raw_keywords=raw_keywords_for_ops,
+                progress_callback=progress,
+            )
             if generated is None:
                 _safe_log(f"ingest | retry generate for {fname}")
-                generated = _generate_one(op, content, raw_keywords=raw_keywords_for_ops)
+                retry_progress = _llm_progress_callback(
+                    phase="generate-retry",
+                    target=fname,
+                    job_id=job_id,
+                    source_raw=source_raw,
+                    op_progress={"index": i + 1, "total": len(plan)},
+                )
+                generated = _generate_one_with_progress(
+                    op,
+                    content,
+                    raw_keywords=raw_keywords_for_ops,
+                    progress_callback=retry_progress,
+                )
             if generated:
                 all_operations.append(generated)
             else:
@@ -1238,6 +1382,7 @@ def run_ingest(
                 current_job_id=job_id,
                 current_raw=source_raw,
                 current_op=None,
+                llm=None,
                 last_success={
                     "job_id": job_id,
                     "raw": source_raw,
@@ -1264,6 +1409,7 @@ def run_ingest(
             current_raw=source_raw,
             current_op=None,
             op_progress={"index": len(plan), "total": len(plan)},
+            llm=None,
         )
         created, updated = _apply_operations(all_operations)
 
@@ -1331,6 +1477,7 @@ def run_ingest(
             current_job_id=job_id,
             current_raw=source_raw,
             current_op=None,
+            llm=None,
             last_success={
                 "job_id": job_id,
                 "raw": source_raw,
@@ -1360,6 +1507,7 @@ def run_ingest(
             current_raw=source_raw,
             current_op=None,
             last_error=str(e),
+            llm=None,
         )
         _safe_log(f"ingest | failed: {e}")
     finally:

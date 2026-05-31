@@ -330,6 +330,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                     current_job_id=None,
                     current_job_pid=None,
                     ollama=get_ollama_status(),
+                    llm=None,
                 )
                 return {"triggered": False, "reason": "no pending raws"}
             reason = f"force=True with {len(pending_now)} pending"
@@ -346,6 +347,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                     current_job_id=None,
                     current_job_pid=None,
                     ollama=get_ollama_status(),
+                    llm=None,
                 )
                 return {"triggered": False, "reason": reason}
 
@@ -427,6 +429,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                 "files": filenames,
             },
             ollama=get_ollama_status(),
+            llm=None,
         )
 
         try:
@@ -471,6 +474,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                         "files": filenames,
                     },
                     ollama=get_ollama_status(),
+                    llm=None,
                 )
 
                 # Make the per-raw job_id observable to other processes
@@ -567,6 +571,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                 "files": filenames,
             },
             ollama=get_ollama_status(),
+            llm=None,
         )
 
         return {

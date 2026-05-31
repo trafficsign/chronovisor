@@ -69,6 +69,7 @@ def _default_status() -> dict[str, Any]:
         "current_job_pid": None,
         "batch": None,
         "ollama": None,
+        "llm": None,
         "last_event": None,
         "updated_at": None,
     }

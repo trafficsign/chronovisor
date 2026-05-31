@@ -1,7 +1,10 @@
 """Ollama API client for Ingest/Lint operations."""
 
+import json
 import threading
 import time
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -51,17 +54,36 @@ def is_available() -> bool:
         return False
 
 
-def generate(prompt: str, system: str | None = None, *, format: dict | str | None = None) -> str:
+def _emit_progress(callback: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]) -> None:
+    if callback is None:
+        return
+    try:
+        callback(payload)
+    except Exception:
+        pass
+
+
+def generate(
+    prompt: str,
+    system: str | None = None,
+    *,
+    format: dict | str | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> str:
     """Call Ollama generate API.
 
     Uses keep_alive="5m" to keep model loaded for 5 minutes after use.
     This avoids cold-start on consecutive calls (e.g. Ingest then Lint)
     while still freeing memory after a reasonable idle period.
+
+    When ``progress_callback`` is provided, the call uses Ollama's streaming
+    response and periodically emits lightweight progress dictionaries while
+    still returning the final response string for existing callers.
     """
     payload = {
         "model": MODEL,
         "prompt": prompt,
-        "stream": False,
+        "stream": progress_callback is not None,
         "think": False,
         "keep_alive": "5m",
         "options": {
@@ -76,10 +98,77 @@ def generate(prompt: str, system: str | None = None, *, format: dict | str | Non
         payload["format"] = format
 
     # Timeout: 60s for model load + 600s for generation
+    timeout = httpx.Timeout(connect=10.0, read=660.0, write=10.0, pool=10.0)
+    if progress_callback is not None:
+        chunks = 0
+        chars = 0
+        started = time.monotonic()
+        last_emit = 0.0
+        pieces: list[str] = []
+        final_payload: dict[str, Any] | None = None
+
+        with _client().stream(
+            "POST",
+            "/api/generate",
+            json=payload,
+            timeout=timeout,
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                data = json.loads(line)
+                piece = data.get("response") or ""
+                if piece:
+                    pieces.append(piece)
+                    chunks += 1
+                    chars += len(piece)
+
+                done = bool(data.get("done"))
+                now = time.monotonic()
+                elapsed = max(0.001, now - started)
+                if done or now - last_emit >= 0.75:
+                    update = {
+                        "event": "done" if done else "chunk",
+                        "active": not done,
+                        "generated_chars": chars,
+                        "chunks": chunks,
+                        "elapsed_seconds": round(elapsed, 2),
+                        "chars_per_second": round(chars / elapsed, 1),
+                    }
+                    for key in (
+                        "total_duration",
+                        "load_duration",
+                        "prompt_eval_count",
+                        "prompt_eval_duration",
+                        "eval_count",
+                        "eval_duration",
+                    ):
+                        if key in data:
+                            update[key] = data[key]
+                    _emit_progress(progress_callback, update)
+                    last_emit = now
+
+                if done:
+                    final_payload = data
+                    break
+
+        if final_payload is None:
+            _emit_progress(progress_callback, {
+                "event": "error",
+                "active": False,
+                "generated_chars": chars,
+                "chunks": chunks,
+                "elapsed_seconds": round(max(0.001, time.monotonic() - started), 2),
+                "error": "stream ended before done",
+            })
+            raise RuntimeError("Ollama stream ended before done")
+        return "".join(pieces)
+
     resp = _client().post(
         "/api/generate",
         json=payload,
-        timeout=httpx.Timeout(connect=10.0, read=660.0, write=10.0, pool=10.0),
+        timeout=timeout,
     )
     resp.raise_for_status()
     return resp.json()["response"]
