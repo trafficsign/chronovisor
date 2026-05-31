@@ -243,6 +243,68 @@ canvas {
   max-width: 100%;
 }
 
+.chart-frame {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(235, 229, 210, 0.1);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015)),
+    rgba(10, 11, 9, 0.32);
+}
+
+.chart-frame::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.16;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: 42px 42px;
+}
+
+.chart-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.chart-summary.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.chart-stat {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(235, 229, 210, 0.1);
+  border-radius: 8px;
+  background: rgba(9, 10, 8, 0.34);
+}
+
+.chart-stat span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.chart-stat strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 780;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .work-list {
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr);
@@ -347,5 +409,10 @@ canvas {
 
   .event-message {
     grid-column: 1 / -1;
+  }
+
+  .chart-summary,
+  .chart-summary.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

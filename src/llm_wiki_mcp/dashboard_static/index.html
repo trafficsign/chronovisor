@@ -63,7 +63,27 @@
           </div>
           <span id="trend-caption">waiting for data</span>
         </div>
-        <canvas id="pending-chart" height="260"></canvas>
+        <div class="chart-frame">
+          <canvas id="pending-chart" height="300"></canvas>
+        </div>
+        <div class="chart-summary" aria-label="Pending trend summary">
+          <div class="chart-stat">
+            <span>Current</span>
+            <strong id="pending-current">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Drained</span>
+            <strong id="pending-delta">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Rate</span>
+            <strong id="pending-rate">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>ETA</span>
+            <strong id="pending-eta">--</strong>
+          </div>
+        </div>
       </article>
 
       <article class="panel">
@@ -72,8 +92,25 @@
             <h2>Batch Yield</h2>
             <p>Processed vs failed per batch.</p>
           </div>
+          <span id="batch-caption">waiting</span>
         </div>
-        <canvas id="batch-chart" height="260"></canvas>
+        <div class="chart-frame">
+          <canvas id="batch-chart" height="300"></canvas>
+        </div>
+        <div class="chart-summary compact" aria-label="Batch yield summary">
+          <div class="chart-stat">
+            <span>OK</span>
+            <strong id="batch-ok">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Failed</span>
+            <strong id="batch-failed">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Avg Time</span>
+            <strong id="batch-duration">--</strong>
+          </div>
+        </div>
       </article>
 
       <article class="panel">
