@@ -435,6 +435,54 @@ class TestApplyOperations:
         with pytest.raises(IngestApplyError, match="update target not found"):
             _apply_operations(ops)
 
+    def test_update_resolves_single_loose_page_id(
+        self, isolated_wiki: Path
+    ) -> None:
+        path = _seed_page(
+            isolated_wiki,
+            "ai/opus-4.7-evaluation-and-industry-geopolitics.md",
+            "---\ntitle: Opus\nupdated: 2026-01-01\n---\nold",
+        )
+        ops = [
+            {
+                "type": "update",
+                "filename": "opus-4-7-evaluation-and-industry-geopolitics.md",
+                "content": "new",
+            }
+        ]
+
+        created, updated = _apply_operations(ops)
+
+        assert created == []
+        assert updated == ["opus-4.7-evaluation-and-industry-geopolitics"]
+        text = path.read_text()
+        assert "old" in text
+        assert "new" in text
+
+    def test_update_ambiguous_loose_page_id_fails(
+        self, isolated_wiki: Path
+    ) -> None:
+        _seed_page(
+            isolated_wiki,
+            "a/foo.bar.md",
+            "---\ntitle: A\nupdated: 2026-01-01\n---\nold",
+        )
+        _seed_page(
+            isolated_wiki,
+            "b/foo-bar.md",
+            "---\ntitle: B\nupdated: 2026-01-01\n---\nold",
+        )
+        ops = [
+            {
+                "type": "update",
+                "filename": "foo_bar.md",
+                "content": "new",
+            }
+        ]
+
+        with pytest.raises(IngestApplyError, match="ambiguous loose page_id"):
+            _apply_operations(ops)
+
     def test_update_appends_without_frontmatter_injection(
         self, isolated_wiki: Path
     ) -> None:
@@ -1400,6 +1448,58 @@ class TestPerRawOrchestrator:
         pending = {p.name for p in orchestrator.get_pending_raw_files()}
         assert "broken.md" in pending
         assert "ok.md" not in pending
+
+    def test_repeated_apply_failure_quarantines_raw(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repeated deterministic apply failures leave the queue and become
+        self-healing packets instead of being retried forever."""
+        from llm_wiki_mcp import orchestrator, ingest as ingest_mod
+        from llm_wiki_mcp.jobs import JobStatus, job_store
+
+        raw_path = isolated_wiki / "raw" / "broken.md"
+        raw_path.write_text("broken body")
+        _seed_page(
+            isolated_wiki,
+            "ai/opus-4.7-evaluation-and-industry-geopolitics.md",
+            "---\ntitle: Opus\nupdated: 2026-01-01\n---\nold",
+        )
+
+        def fake_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            job_store.update(
+                job_id,
+                status=JobStatus.FAILED,
+                error=(
+                    "update target not found for page_id "
+                    "'opus-4-7-evaluation-and-industry-geopolitics'"
+                ),
+            )
+            if on_finally:
+                on_finally(failed=True, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        first = orchestrator.run_pending_ingest(force=True)
+        second = orchestrator.run_pending_ingest(force=True)
+        third = orchestrator.run_pending_ingest(force=True)
+
+        assert first["per_raw"][0]["supervision"]["attempts"] == 1
+        assert second["per_raw"][0]["supervision"]["attempts"] == 2
+        supervision = third["per_raw"][0]["supervision"]
+        assert supervision["attempts"] == 3
+        assert supervision["quarantined"] is True
+        assert not raw_path.exists()
+        packet_path = Path(supervision["packet_path"])
+        assert packet_path.exists()
+        packet = json.loads(packet_path.read_text())
+        assert packet["failure_class"] == "apply.update_target_not_found"
+        assert packet["similar_existing_pages"] == [
+            "ai/opus-4.7-evaluation-and-industry-geopolitics"
+        ]
+        assert orchestrator.get_pending_raw_files() == []
 
     def test_serial_execution_no_concurrent_threads(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

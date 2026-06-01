@@ -514,14 +514,48 @@ def run_pending_ingest(force: bool = False) -> dict:
                     # so one bad raw can't strand the whole batch.
                     _orch_log(f"orchestrator | raw {fname} ingest exception: {e}")
 
+                supervision = None
                 if raw_success_flag[0]:
                     succeeded_filenames.append(fname)
+                    try:
+                        from llm_wiki_mcp.failure_supervisor import reset_raw_failure
 
-                per_raw.append({
+                        reset_raw_failure(fname)
+                    except Exception as e:
+                        _orch_log(
+                            f"orchestrator | failure supervisor reset failed "
+                            f"for {fname}: {e}"
+                        )
+                else:
+                    try:
+                        from llm_wiki_mcp.failure_supervisor import (
+                            record_raw_failure,
+                            result_to_dict,
+                        )
+
+                        job_record = job_store.get(job.job_id)
+                        supervision = result_to_dict(
+                            record_raw_failure(
+                                raw_path=raw_path,
+                                error=job_record.error if job_record else None,
+                                job_id=job.job_id,
+                                raw_text=raw_text,
+                            )
+                        )
+                    except Exception as e:
+                        _orch_log(
+                            f"orchestrator | failure supervisor failed "
+                            f"for {fname}: {e}"
+                        )
+
+                raw_result = {
                     "filename": fname,
                     "job_id": job.job_id,
                     "succeeded": raw_success_flag[0],
-                })
+                }
+                if supervision is not None:
+                    raw_result["supervision"] = supervision
+                per_raw.append(raw_result)
                 runtime_status.safe_append_event(
                     "success" if raw_success_flag[0] else "warn",
                     (
@@ -531,6 +565,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                     source="orchestrator",
                     raw_file=fname,
                     job_id=job.job_id,
+                    supervision=supervision,
                 )
         finally:
             release_state = _load_state()

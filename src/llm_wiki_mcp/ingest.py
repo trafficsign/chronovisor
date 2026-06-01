@@ -730,6 +730,19 @@ def _normalize_for_collision(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
 
+def _normalize_for_loose_page_id(name: str) -> str:
+    """Canonical key for legacy slug drift.
+
+    This is deliberately used only after exact/casefold lookup fails.  It
+    catches model-normalized variants such as ``opus-4.7`` → ``opus-4-7``
+    without making fuzzy semantic guesses.
+    """
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFC", name).casefold()
+    return re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+
+
 def _find_page_casefold(page_id: str) -> Path | None:
     """find_page with macOS-case-insensitive + NFC-normalized semantics."""
     direct = find_page(page_id)
@@ -740,6 +753,35 @@ def _find_page_casefold(page_id: str) -> Path | None:
         if _normalize_for_collision(p.stem) == target:
             return p
     return None
+
+
+def _find_page_resilient(page_id: str) -> Path | None:
+    """Find a page by exact id first, then by safe single-candidate loose id."""
+    existing = _find_page_casefold(page_id)
+    if existing is not None:
+        return existing
+
+    target = _normalize_for_loose_page_id(page_id)
+    if not target:
+        return None
+    matches = [
+        p
+        for p in PAGES_DIR.rglob("*.md")
+        if _normalize_for_loose_page_id(p.stem) == target
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        choices = ", ".join(sorted(str(p.relative_to(PAGES_DIR)) for p in matches[:5]))
+        raise IngestApplyError(
+            f"ambiguous loose page_id match for {page_id!r}: {choices}"
+        )
+    resolved = matches[0]
+    _safe_log(
+        f"ingest | resolved page_id {page_id!r} by loose match "
+        f"→ {resolved.relative_to(PAGES_DIR)}"
+    )
+    return resolved
 
 
 def _process_tags_in_body(
@@ -911,7 +953,7 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
         )
 
         if op_type == "create":
-            existing = _find_page_casefold(page_id)
+            existing = _find_page_resilient(page_id)
             if existing is not None:
                 _safe_log(
                     f"ingest | create op for existing page_id {page_id!r} "
@@ -955,11 +997,12 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
             )
 
         else:  # update
-            existing_path = full_path if full_path.exists() else find_page(page_id)
+            existing_path = full_path if full_path.exists() else _find_page_resilient(page_id)
             if existing_path is None or not existing_path.exists():
                 raise IngestApplyError(
                     f"update target not found for page_id {page_id!r}"
                 )
+            page_id = existing_path.stem
             previous = existing_path.read_text()
             # Preserve the on-disk text for rollback BEFORE we mutate
             # ``previous`` with a frontmatter patch — the rollback path
