@@ -437,6 +437,19 @@ def _extract_snippet(content: str, terms: list[str], max_len: int = 150) -> str 
 
 
 _RAW_PREFIX_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+_RAW_SLUG_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
+_RAW_UUIDISH_RE = re.compile(r"^[0-9a-f]{8,}(?:-[0-9a-f]{4,})*$", re.IGNORECASE)
+_RAW_TOPIC_STOPWORDS = {
+    "and",
+    "code",
+    "codex",
+    "claude",
+    "memory",
+    "save",
+    "session",
+    "the",
+}
+_RAW_SOURCE_PREFIXES = ("claude-code", "codex", "ingest")
 
 
 def _sanitize_raw_prefix(prefix: str) -> str:
@@ -454,29 +467,109 @@ def _sanitize_raw_prefix(prefix: str) -> str:
     return f"-{cleaned}" if cleaned else ""
 
 
+def _sanitize_raw_component(value: str, *, max_len: int = 64) -> str:
+    cleaned = _RAW_PREFIX_RE.sub("-", value.strip().lower())
+    cleaned = re.sub(r"-{2,}", "-", cleaned)
+    return cleaned.strip("-_")[:max_len].strip("-_")
+
+
+def _raw_source_label(session_id: str | None) -> str:
+    if not session_id:
+        return ""
+    cleaned = _sanitize_raw_component(session_id, max_len=64)
+    for source in _RAW_SOURCE_PREFIXES:
+        if cleaned == source or cleaned.startswith(f"{source}-"):
+            return source
+    if _RAW_UUIDISH_RE.match(cleaned):
+        return "session"
+    return cleaned[:28].strip("-_")
+
+
+def _raw_topic_slug(content: str, keywords: list[str] | None = None, *, max_len: int = 56) -> str:
+    """Create a readable raw filename slug while keeping ASCII-only safety."""
+
+    parts: list[str] = []
+    if keywords:
+        for keyword in keywords:
+            for match in _RAW_SLUG_TOKEN_RE.finditer(keyword.lower()):
+                token = match.group(0)
+                if len(token) < 2 or token in _RAW_TOPIC_STOPWORDS or _RAW_UUIDISH_RE.match(token):
+                    continue
+                parts.append(token)
+                slug = "-".join(parts)
+                if len(slug) >= max_len:
+                    return slug[:max_len].strip("-")
+        if parts:
+            return "-".join(parts)[:max_len].strip("-")
+
+    candidates: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip(" #-\t")
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if lower in {
+            "codex session memory save",
+            "claude code session memory save",
+            "memory",
+            "writer reason",
+            "rejected keywords",
+        }:
+            continue
+        if lower.startswith((
+            "source:",
+            "session id:",
+            "cwd:",
+            "session file:",
+            "lines:",
+            "memory writer model:",
+            "generated at:",
+            "raw_keywords:",
+        )):
+            continue
+        candidates.append(stripped)
+        break
+
+    for candidate in candidates:
+        for match in _RAW_SLUG_TOKEN_RE.finditer(candidate.lower()):
+            token = match.group(0)
+            if len(token) < 2 or token in _RAW_TOPIC_STOPWORDS or _RAW_UUIDISH_RE.match(token):
+                continue
+            parts.append(token)
+            slug = "-".join(parts)
+            if len(slug) >= max_len:
+                return slug[:max_len].strip("-")
+    return "-".join(parts)[:max_len].strip("-")
+
+
 _RAW_ALLOC_MAX_RETRIES = 32
 
 
-def _allocate_raw_path(prefix: str = "") -> Path:
+def _allocate_raw_path(prefix: str = "", topic_slug: str = "") -> Path:
     """Reserve a unique raw/*.md path even under sub-millisecond contention.
 
-    Filename = ``YYYYMMDD-HHMMSS{sanitized-prefix}-{8hex}.md``. The 8-hex
-    suffix is from :func:`secrets.token_hex` (32 bits of OS entropy, far
-    less collision-prone than ``time.time_ns() & 0xFFFF``). Combined with
-    ``O_CREAT|O_EXCL`` exclusive create this makes accidental overwrite
-    from concurrent callers effectively impossible. We bound retries so
-    a misconfigured filesystem doesn't spin forever.
+    Filename = ``YYYYMMDD-HHMMSS-{source}-{topic}-{8hex}.md`` when source or
+    topic can be derived, falling back to the old timestamp/hash shape. The
+    8-hex suffix is from :func:`secrets.token_hex` (32 bits of OS entropy,
+    far less collision-prone than ``time.time_ns() & 0xFFFF``). Combined
+    with ``O_CREAT|O_EXCL`` exclusive create this makes accidental overwrite
+    from concurrent callers effectively impossible. We bound retries so a
+    misconfigured filesystem doesn't spin forever.
     """
     import os
     import secrets
     from datetime import datetime
 
-    safe_prefix = _sanitize_raw_prefix(prefix)
+    source = _raw_source_label(prefix)
+    topic = _sanitize_raw_component(topic_slug, max_len=56)
+    name_parts = [part for part in (source, topic) if part]
+    readable = f"-{'-'.join(name_parts)}" if name_parts else _sanitize_raw_prefix(prefix)
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
     last_err: Exception | None = None
     for _ in range(_RAW_ALLOC_MAX_RETRIES):
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         suffix = secrets.token_hex(4)  # 8 hex chars / 32 bits
-        path = RAW_DIR / f"{ts}{safe_prefix}-{suffix}.md"
+        path = RAW_DIR / f"{ts}{readable}-{suffix}.md"
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             os.close(fd)
@@ -508,7 +601,7 @@ def wiki_ingest(content: str, force: bool = True) -> str:
     """
     from llm_wiki_mcp.orchestrator import run_pending_ingest
 
-    path = _allocate_raw_path(prefix="-ingest")
+    path = _allocate_raw_path(prefix="ingest", topic_slug=_raw_topic_slug(content))
     path.write_text(content)
 
     result = run_pending_ingest(force=force)
@@ -714,7 +807,8 @@ def wiki_save_raw(
 
     # session_id is advisory; always allocate a unique path so two callers
     # in the same second don't silently overwrite each other.
-    path = _allocate_raw_path(prefix=f"-{session_id}" if session_id else "")
+    raw_slug = _raw_topic_slug(body, accepted)
+    path = _allocate_raw_path(prefix=session_id or "", topic_slug=raw_slug)
     filename = path.name
     path.write_text(body)
 
@@ -725,6 +819,7 @@ def wiki_save_raw(
     result: dict = {
         "saved": filename,
         "path": str(path),
+        "raw_slug": raw_slug,
         "ingest_pending": should,
         "ingest_reason": reason,
     }

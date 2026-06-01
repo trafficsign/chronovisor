@@ -1913,6 +1913,49 @@ class TestWikiSaveRawRouting:
         assert "ingest_triggered" not in result
         assert captured["called"] is False
 
+    def test_save_raw_filename_includes_readable_keyword_slug(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import server, orchestrator
+
+        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+
+        result = json.loads(
+            tool_fn(
+                "body",
+                session_id="codex-019e80cb-8df9-7aa1-ba75-cc58c6f759ae",
+                keywords=["llm-wiki", "dashboard", "self-heal"],
+                trigger_ingest=False,
+            )
+        )
+
+        assert result["saved"].startswith("20")
+        assert "-codex-llm-wiki-dashboard-self-heal-" in result["saved"]
+        assert result["saved"].endswith(".md")
+        assert result["raw_slug"] == "llm-wiki-dashboard-self-heal"
+
+    def test_save_raw_filename_falls_back_to_content_slug(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import server, orchestrator
+
+        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+
+        result = json.loads(
+            tool_fn(
+                "# Codex Session Memory Save\n\n## Memory\n\nDashboard filename cleanup",
+                session_id="codex-019e80cb-8df9-7aa1-ba75-cc58c6f759ae",
+                keywords=[],
+                trigger_ingest=False,
+            )
+        )
+
+        assert "-codex-dashboard-filename-cleanup-" in result["saved"]
+
 
 # ---------------------------------------------------------------------------
 # R4-Critical: log failures must not break rollback inclusion
@@ -2036,6 +2079,20 @@ class TestRawFilenameCollision:
         for p in paths:
             assert p.exists()
             assert p.parent == isolated_wiki / "raw"
+
+    def test_allocate_raw_path_creates_raw_dir_if_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import server
+
+        raw_dir = tmp_path / "wiki" / "raw"
+        monkeypatch.setattr(server, "RAW_DIR", raw_dir)
+
+        path = server._allocate_raw_path(prefix="codex", topic_slug="readable-name")
+
+        assert path.exists()
+        assert path.parent == raw_dir
+        assert "-codex-readable-name-" in path.name
 
 
 # ---------------------------------------------------------------------------
