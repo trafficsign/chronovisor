@@ -146,6 +146,32 @@ def _basename(value: object) -> str | None:
     return Path(value).name
 
 
+def _failure_detail(packet: dict[str, Any] | None, record: dict[str, Any] | None = None) -> dict[str, Any]:
+    packet = packet or {}
+    record = record or {}
+    return {
+        "failure_id": record.get("failure_id") or packet.get("failure_id"),
+        "raw_file": record.get("raw_file") or packet.get("raw_file"),
+        "failure_class": record.get("failure_class") or packet.get("failure_class"),
+        "fingerprint": record.get("fingerprint") or packet.get("fingerprint"),
+        "attempts": packet.get("attempts"),
+        "packet_status": packet.get("status"),
+        "packet_path": packet.get("_path"),
+    }
+
+
+def _retry_detail(action: dict[str, Any]) -> dict[str, Any] | None:
+    retry = action.get("retry")
+    if not isinstance(retry, dict):
+        return None
+    return {
+        "triggered": retry.get("triggered"),
+        "files_attempted": retry.get("files_attempted"),
+        "files_processed": retry.get("files_processed"),
+        "elapsed_seconds": retry.get("elapsed_seconds"),
+    }
+
+
 def _self_heal_packet_index() -> dict[str, dict[str, Any]]:
     packets_dir = WIKI_ROOT / "runtime" / "failures" / "packets"
     packets: dict[str, dict[str, Any]] = {}
@@ -199,11 +225,29 @@ def _local_repair_summary(record: dict[str, Any], packet: dict[str, Any] | None)
         "action": decision.get("action"),
         "source": decision.get("source"),
         "retry_success": bool(retry.get("files_processed")),
+        "details": {
+            "failure": _failure_detail(packet, record),
+            "decision": {
+                "status": decision.get("status"),
+                "action": decision.get("action"),
+                "confidence": decision.get("confidence"),
+                "requested_page_id": decision.get("requested_page_id"),
+                "target_page_id": decision.get("target_page_id"),
+                "source": decision.get("source"),
+                "reason": decision.get("reason"),
+            },
+            "action": {
+                "alias": alias or None,
+                "restore": restore or None,
+                "retry": _retry_detail(action),
+            },
+        },
     }
 
 
 def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> dict[str, Any]:
     frontier = record.get("frontier") if isinstance(record.get("frontier"), dict) else {}
+    local_decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
     decision = frontier.get("decision") or "unknown"
     level = "success" if decision == "approved" else "warn" if decision in {"needs_retry", "quarantined"} else "error"
     state = "resolved" if decision == "approved" else "pending" if decision == "needs_retry" else "failed"
@@ -225,6 +269,20 @@ def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> 
         "action": decision,
         "source": "frontier",
         "retry_success": False,
+        "details": {
+            "failure": _failure_detail(packet, record),
+            "local_decision": local_decision or None,
+            "frontier": {
+                "decision": frontier.get("decision"),
+                "summary": frontier.get("summary"),
+                "tests_run": frontier.get("tests_run"),
+                "commit": frontier.get("commit"),
+                "committed": frontier.get("committed"),
+                "pushed": frontier.get("pushed"),
+                "risk": frontier.get("risk"),
+                "notes": frontier.get("notes"),
+            },
+        },
     }
 
 
@@ -267,6 +325,14 @@ def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
         "action": packet.get("status"),
         "source": "packet",
         "retry_success": False,
+        "details": {
+            "failure": _failure_detail(packet),
+            "error": packet.get("error"),
+            "requested_page_id": packet.get("requested_page_id"),
+            "similar_existing_pages": packet.get("similar_existing_pages"),
+            "local_decision": packet.get("local_decision"),
+            "frontier_result": packet.get("frontier_result"),
+        },
     }
 
 

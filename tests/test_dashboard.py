@@ -82,3 +82,6 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     assert snapshot["self_heal"]["counts"]["resolved"] == 1
     assert snapshot["self_heal"]["latest"]["raw_file"] == "broken.md"
     assert "alias missing -> ai/target" in snapshot["self_heal"]["latest"]["detail"]
+    assert snapshot["self_heal"]["latest"]["details"]["failure"]["packet_status"] == "local_repair_applied"
+    assert snapshot["self_heal"]["latest"]["details"]["decision"]["source"] == "qwen"
+    assert snapshot["self_heal"]["latest"]["details"]["action"]["retry"]["files_processed"] == ["broken.md"]

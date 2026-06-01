@@ -645,8 +645,9 @@ function renderSelfHeal(selfHeal) {
   }
 
   [...history].slice(-5).reverse().forEach((item) => {
-    const row = document.createElement("div");
+    const row = document.createElement("details");
     row.className = `self-heal-row ${(item.level || "info").toLowerCase()}`;
+    const summary = document.createElement("summary");
     const time = document.createElement("time");
     time.textContent = timeLabel(item.timestamp);
     const body = document.createElement("div");
@@ -656,7 +657,14 @@ function renderSelfHeal(selfHeal) {
     const detail = document.createElement("span");
     detail.textContent = [item.raw_file, item.detail].filter(Boolean).join(" · ");
     body.append(title, detail);
-    row.append(time, body);
+    summary.append(time, body);
+    row.append(summary);
+    if (item.details) {
+      const pre = document.createElement("pre");
+      pre.className = "self-heal-json";
+      pre.textContent = JSON.stringify(item.details, null, 2);
+      row.appendChild(pre);
+    }
     els.selfHealFeed.appendChild(row);
   });
 }
