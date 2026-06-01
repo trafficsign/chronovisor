@@ -263,6 +263,7 @@ def handle_packet(
             _append_registry({
                 "timestamp": datetime.now().isoformat(),
                 "failure_id": packet.get("failure_id"),
+                "raw_file": packet.get("raw_file"),
                 "failure_class": packet.get("failure_class"),
                 "fingerprint": packet.get("fingerprint"),
                 "resolution": "local",
@@ -339,12 +340,20 @@ def handle_packet(
     _append_registry({
         "timestamp": datetime.now().isoformat(),
         "failure_id": packet.get("failure_id"),
+        "raw_file": packet.get("raw_file"),
         "failure_class": packet.get("failure_class"),
         "fingerprint": packet.get("fingerprint"),
         "resolution": "frontier",
         "decision": decision.to_dict(),
         "frontier": frontier_result,
     })
+    runtime_status.safe_append_event(
+        "success" if final_status == "frontier_approved" else "warn",
+        f"self-heal | frontier {frontier_result.get('decision')} for {packet.get('raw_file')}",
+        source="self-heal",
+        packet=str(packet_path),
+        frontier_status=final_status,
+    )
     result["status"] = final_status
     result["frontier_result"] = frontier_result
     return result

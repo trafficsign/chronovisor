@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from llm_wiki_mcp import dashboard, runtime_status
@@ -38,6 +39,38 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     runtime_status.write_status({"state": "running", "stage": "generate"})
     runtime_status.append_event("info", "ingest | stage 1: triage started")
     runtime_status.append_metric("batch", pending_before=2, pending_after=1, files_processed=1)
+    failures_dir = runtime_dir / "failures"
+    packets_dir = failures_dir / "packets"
+    packets_dir.mkdir(parents=True)
+    packet = {
+        "failure_id": "f1",
+        "created_at": "2026-06-01T12:00:00",
+        "raw_file": "broken.md",
+        "failure_class": "apply.update_target_not_found",
+        "status": "local_repair_applied",
+    }
+    (packets_dir / "f1.json").write_text(json.dumps(packet), encoding="utf-8")
+    registry_record = {
+        "timestamp": "2026-06-01T12:01:00",
+        "failure_id": "f1",
+        "raw_file": "broken.md",
+        "failure_class": "apply.update_target_not_found",
+        "resolution": "local",
+        "decision": {
+            "action": "resolve_update_target",
+            "requested_page_id": "missing",
+            "target_page_id": "ai/target",
+            "source": "qwen",
+        },
+        "action": {
+            "alias": {"requested": "missing", "target": "ai/target"},
+            "retry": {"files_processed": ["broken.md"]},
+        },
+    }
+    (failures_dir / "failure-registry.jsonl").write_text(
+        json.dumps(registry_record) + "\n",
+        encoding="utf-8",
+    )
 
     snapshot = dashboard.build_snapshot()
 
@@ -45,3 +78,7 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     assert snapshot["status"]["state"] == "running"
     assert snapshot["events"]
     assert snapshot["metrics"][0]["pending_after"] == 1
+    assert snapshot["self_heal"]["status"] == "resolved"
+    assert snapshot["self_heal"]["counts"]["resolved"] == 1
+    assert snapshot["self_heal"]["latest"]["raw_file"] == "broken.md"
+    assert "alias missing -> ai/target" in snapshot["self_heal"]["latest"]["detail"]

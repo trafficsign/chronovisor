@@ -109,6 +109,212 @@ def _recent_log_events(limit: int = 80) -> list[dict[str, Any]]:
     return events
 
 
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_jsonl_file(path: Path, limit: int) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines[-limit:]:
+        try:
+            data = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            rows.append(data)
+    return rows
+
+
+def _shorten(value: object, limit: int = 180) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1]}..."
+
+
+def _basename(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return Path(value).name
+
+
+def _self_heal_packet_index() -> dict[str, dict[str, Any]]:
+    packets_dir = WIKI_ROOT / "runtime" / "failures" / "packets"
+    packets: dict[str, dict[str, Any]] = {}
+    if not packets_dir.exists():
+        return packets
+    for path in sorted(packets_dir.glob("*.json")):
+        packet = _read_json_file(path)
+        if not packet:
+            continue
+        failure_id = packet.get("failure_id")
+        if isinstance(failure_id, str):
+            packets[failure_id] = {**packet, "_path": str(path)}
+    return packets
+
+
+def _local_repair_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> dict[str, Any]:
+    decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+    action = record.get("action") if isinstance(record.get("action"), dict) else {}
+    retry = action.get("retry") if isinstance(action.get("retry"), dict) else {}
+    restore = action.get("restore") if isinstance(action.get("restore"), dict) else {}
+    alias = action.get("alias") if isinstance(action.get("alias"), dict) else {}
+
+    requested = decision.get("requested_page_id") or alias.get("requested")
+    target = decision.get("target_page_id") or alias.get("target")
+    details: list[str] = []
+    if requested and target:
+        details.append(f"alias {requested} -> {target}")
+    elif decision.get("action"):
+        details.append(str(decision["action"]))
+    if retry.get("files_processed"):
+        details.append("retry ok")
+    elif retry:
+        details.append("retry ran")
+
+    raw_file = (
+        record.get("raw_file")
+        or (packet or {}).get("raw_file")
+        or _basename(restore.get("target"))
+        or _basename(restore.get("source"))
+    )
+    return {
+        "timestamp": record.get("timestamp") or (packet or {}).get("updated_at") or (packet or {}).get("created_at"),
+        "failure_id": record.get("failure_id"),
+        "state": "resolved",
+        "level": "success",
+        "title": "Local repair applied",
+        "detail": _shorten("; ".join(details) or decision.get("reason") or "local repair applied"),
+        "raw_file": raw_file,
+        "failure_class": record.get("failure_class") or (packet or {}).get("failure_class"),
+        "resolution": "local",
+        "action": decision.get("action"),
+        "source": decision.get("source"),
+        "retry_success": bool(retry.get("files_processed")),
+    }
+
+
+def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> dict[str, Any]:
+    frontier = record.get("frontier") if isinstance(record.get("frontier"), dict) else {}
+    decision = frontier.get("decision") or "unknown"
+    level = "success" if decision == "approved" else "warn" if decision in {"needs_retry", "quarantined"} else "error"
+    state = "resolved" if decision == "approved" else "pending" if decision == "needs_retry" else "failed"
+    raw_file = record.get("raw_file") or (packet or {}).get("raw_file")
+    commit = frontier.get("commit")
+    detail = frontier.get("summary") or decision
+    if commit:
+        detail = f"{detail}; commit {str(commit)[:8]}"
+    return {
+        "timestamp": record.get("timestamp") or (packet or {}).get("updated_at") or (packet or {}).get("created_at"),
+        "failure_id": record.get("failure_id"),
+        "state": state,
+        "level": level,
+        "title": f"Frontier {decision}",
+        "detail": _shorten(detail),
+        "raw_file": raw_file,
+        "failure_class": record.get("failure_class") or (packet or {}).get("failure_class"),
+        "resolution": "frontier",
+        "action": decision,
+        "source": "frontier",
+        "retry_success": False,
+    }
+
+
+def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
+    status = str(packet.get("status") or "unknown")
+    pending_statuses = {
+        "pending_local_repair",
+        "local_repairing",
+        "pending_frontier",
+        "frontier_running",
+        "frontier_retry",
+    }
+    failed_statuses = {
+        "local_repair_failed",
+        "frontier_rejected",
+        "frontier_quarantined",
+    }
+    state = "pending" if status in pending_statuses else "failed" if status in failed_statuses else "resolved"
+    level = "info" if state == "pending" else "error" if state == "failed" else "success"
+    title = {
+        "pending_local_repair": "Repair queued",
+        "local_repairing": "Local repair running",
+        "pending_frontier": "Frontier queued",
+        "frontier_running": "Frontier running",
+        "frontier_retry": "Frontier retry needed",
+        "local_repair_failed": "Local repair failed",
+        "frontier_rejected": "Frontier rejected",
+        "frontier_quarantined": "Frontier quarantined",
+    }.get(status, status.replace("_", " "))
+    return {
+        "timestamp": packet.get("updated_at") or packet.get("created_at"),
+        "failure_id": packet.get("failure_id"),
+        "state": state,
+        "level": level,
+        "title": title,
+        "detail": _shorten(packet.get("error") or packet.get("fingerprint") or status),
+        "raw_file": packet.get("raw_file"),
+        "failure_class": packet.get("failure_class"),
+        "resolution": None,
+        "action": packet.get("status"),
+        "source": "packet",
+        "retry_success": False,
+    }
+
+
+def _self_heal_snapshot(limit: int = 12) -> dict[str, Any]:
+    failures_dir = WIKI_ROOT / "runtime" / "failures"
+    packets = _self_heal_packet_index()
+    registry = _read_jsonl_file(failures_dir / "failure-registry.jsonl", limit=200)
+    seen_failure_ids: set[str] = set()
+    history: list[dict[str, Any]] = []
+
+    for record in registry:
+        failure_id = record.get("failure_id")
+        packet = packets.get(failure_id) if isinstance(failure_id, str) else None
+        if isinstance(failure_id, str):
+            seen_failure_ids.add(failure_id)
+        if record.get("resolution") == "frontier":
+            history.append(_frontier_summary(record, packet))
+        else:
+            history.append(_local_repair_summary(record, packet))
+
+    for failure_id, packet in packets.items():
+        if failure_id not in seen_failure_ids:
+            history.append(_packet_summary(packet))
+
+    history.sort(key=lambda item: str(item.get("timestamp") or ""))
+    history = history[-limit:]
+    counts = {
+        "resolved": sum(1 for item in history if item.get("state") == "resolved"),
+        "pending": sum(1 for item in history if item.get("state") == "pending"),
+        "failed": sum(1 for item in history if item.get("state") == "failed"),
+        "frontier": sum(1 for item in history if item.get("resolution") == "frontier"),
+    }
+    latest = history[-1] if history else None
+    status = "quiet"
+    if latest:
+        status = str(latest.get("state") or "unknown")
+    return {
+        "status": status,
+        "latest": latest,
+        "history": history,
+        "counts": counts,
+        "paths": {
+            "failures_dir": str(failures_dir),
+            "registry_file": str(failures_dir / "failure-registry.jsonl"),
+        },
+    }
+
+
 def build_snapshot() -> dict[str, Any]:
     init_wiki()
     status = runtime_status.read_status()
@@ -153,6 +359,7 @@ def build_snapshot() -> dict[str, Any]:
         "ollama": ollama,
         "events": events,
         "metrics": metrics,
+        "self_heal": _self_heal_snapshot(),
         "paths": {
             "wiki_root": str(WIKI_ROOT),
             "status_file": str(runtime_status.STATUS_FILE),
@@ -178,6 +385,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _json_response(self, {"events": build_snapshot()["events"]})
         elif path == "/api/metrics":
             _json_response(self, {"metrics": build_snapshot()["metrics"]})
+        elif path == "/api/self-heal":
+            _json_response(self, {"self_heal": build_snapshot()["self_heal"]})
         elif path.startswith("/static/"):
             rel = path.removeprefix("/static/").lstrip("/")
             target = (STATIC_DIR / rel).resolve()

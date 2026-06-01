@@ -19,6 +19,13 @@ const els = {
   llmSparkline: document.getElementById("llm-sparkline"),
   currentJob: document.getElementById("current-job"),
   lastSuccess: document.getElementById("last-success"),
+  selfHealPanel: document.getElementById("self-heal-panel"),
+  selfHealCaption: document.getElementById("self-heal-caption"),
+  selfHealState: document.getElementById("self-heal-state"),
+  selfHealLatest: document.getElementById("self-heal-latest"),
+  selfHealDetail: document.getElementById("self-heal-detail"),
+  selfHealCounts: document.getElementById("self-heal-counts"),
+  selfHealFeed: document.getElementById("self-heal-feed"),
   trendCaption: document.getElementById("trend-caption"),
   pendingCurrent: document.getElementById("pending-current"),
   pendingDelta: document.getElementById("pending-delta"),
@@ -594,6 +601,66 @@ function renderEvents(events) {
   });
 }
 
+function renderSelfHeal(selfHeal) {
+  const data = selfHeal || {};
+  const latest = data.latest || null;
+  const history = Array.isArray(data.history) ? data.history : [];
+  const counts = data.counts || {};
+  const status = (data.status || "quiet").toLowerCase();
+
+  els.selfHealPanel.classList.remove("resolved", "pending", "failed", "quiet");
+  els.selfHealPanel.classList.add(["resolved", "pending", "failed"].includes(status) ? status : "quiet");
+  els.selfHealCaption.textContent = history.length ? `${history.length} records` : "quiet";
+  els.selfHealState.textContent = status;
+  els.selfHealLatest.textContent = latest ? fmt(latest.title) : "No repairs yet";
+  els.selfHealDetail.textContent = latest
+    ? [latest.raw_file, latest.detail].filter(Boolean).join(" · ")
+    : "--";
+
+  const countItems = [
+    ["resolved", counts.resolved || 0],
+    ["pending", counts.pending || 0],
+    ["failed", counts.failed || 0],
+    ["frontier", counts.frontier || 0],
+  ];
+  els.selfHealCounts.innerHTML = "";
+  countItems.forEach(([label, value]) => {
+    const item = document.createElement("div");
+    item.className = "self-heal-count";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const count = document.createElement("strong");
+    count.textContent = String(value);
+    item.append(name, count);
+    els.selfHealCounts.appendChild(item);
+  });
+
+  els.selfHealFeed.innerHTML = "";
+  if (!history.length) {
+    const empty = document.createElement("div");
+    empty.className = "self-heal-empty";
+    empty.textContent = "No self-heal records yet.";
+    els.selfHealFeed.appendChild(empty);
+    return;
+  }
+
+  [...history].slice(-5).reverse().forEach((item) => {
+    const row = document.createElement("div");
+    row.className = `self-heal-row ${(item.level || "info").toLowerCase()}`;
+    const time = document.createElement("time");
+    time.textContent = timeLabel(item.timestamp);
+    const body = document.createElement("div");
+    body.className = "self-heal-row-body";
+    const title = document.createElement("strong");
+    title.textContent = fmt(item.title);
+    const detail = document.createElement("span");
+    detail.textContent = [item.raw_file, item.detail].filter(Boolean).join(" · ");
+    body.append(title, detail);
+    row.append(time, body);
+    els.selfHealFeed.appendChild(row);
+  });
+}
+
 function render(snapshot) {
   const status = snapshot.status || {};
   const metrics = snapshot.metrics || [];
@@ -618,6 +685,7 @@ function render(snapshot) {
   els.lastSuccess.textContent = status.last_success ? `${fmt(status.last_success.raw)} -> ${[...(status.last_success.created || []), ...(status.last_success.updated || [])].join(", ") || "none"}` : "--";
   els.trendCaption.textContent = metrics.length ? `${completedRows(metrics).length} batches` : "waiting for data";
   updateStageFlow(status.stage);
+  renderSelfHeal(snapshot.self_heal || {});
   renderEvents(snapshot.events || []);
   drawLineChart(els.pendingChart, metrics);
   drawBatchChart(els.batchChart, metrics, status);

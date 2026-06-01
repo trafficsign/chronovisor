@@ -147,7 +147,24 @@
         </dl>
       </article>
 
-      <article class="panel panel-large">
+      <article class="panel self-heal-panel" id="self-heal-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Self-Heal</h2>
+            <p>Automatic repair decisions and retry outcomes.</p>
+          </div>
+          <span id="self-heal-caption">quiet</span>
+        </div>
+        <div class="self-heal-summary">
+          <span class="self-heal-badge" id="self-heal-state">quiet</span>
+          <strong id="self-heal-latest">No repairs yet</strong>
+          <p id="self-heal-detail">--</p>
+        </div>
+        <div class="self-heal-counts" id="self-heal-counts"></div>
+        <div class="self-heal-feed" id="self-heal-feed"></div>
+      </article>
+
+      <article class="panel panel-large panel-wide">
         <div class="panel-head">
           <div>
             <h2>Recent Events</h2>
