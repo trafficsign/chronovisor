@@ -93,3 +93,20 @@ def test_drill_returns_local_repair_decision(isolated_wiki: Path) -> None:
 
     assert result["decision"]["status"] == "resolved"
     assert result["decision"]["action"] == "resolve_update_target"
+
+
+def test_sandbox_drill_runs_pending_raw_to_self_heal(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_wiki_mcp.self_heal import run_sandbox_drill
+
+    monkeypatch.setenv("LLM_WIKI_SELF_HEAL_AUTORUN", "0")
+
+    result = run_sandbox_drill(use_qwen=False)
+
+    assert result["status"] == "ok"
+    assert result["packet_paths"]
+    assert result["heal_result"]["status"] == "local_repair_applied"
+    assert result["pending_after"] == []
+    assert (
+        result["aliases"]["opus-4-7-evaluation-and-industry-geopolitics"]
+        == "ai/opus-4.7-evaluation-and-industry-geopolitics"
+    )

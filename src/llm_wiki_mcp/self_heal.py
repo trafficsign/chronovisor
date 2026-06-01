@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -426,6 +427,162 @@ def run_drill(*, use_qwen: bool = True) -> dict[str, Any]:
     return {"packet": packet, "decision": decision.to_dict()}
 
 
+def _patch_wiki_paths(wiki_root: Path) -> dict[str, Any]:
+    """Point path globals at a sandbox wiki for an end-to-end drill."""
+
+    pages = wiki_root / "pages"
+    raw = wiki_root / "raw"
+    system = wiki_root / "system"
+    runtime = wiki_root / "runtime"
+    for path in (pages, raw, system, runtime):
+        path.mkdir(parents=True, exist_ok=True)
+
+    from llm_wiki_mcp import ingest, orchestrator
+
+    snapshot = {
+        "wiki": {
+            "WIKI_ROOT": wiki.WIKI_ROOT,
+            "PAGES_DIR": wiki.PAGES_DIR,
+            "RAW_DIR": wiki.RAW_DIR,
+            "SYSTEM_DIR": wiki.SYSTEM_DIR,
+            "INDEX_FILE": wiki.INDEX_FILE,
+            "LOG_FILE": wiki.LOG_FILE,
+        },
+        "ingest": {
+            "PAGES_DIR": ingest.PAGES_DIR,
+            "INDEX_FILE": ingest.INDEX_FILE,
+            "LOG_FILE": ingest.LOG_FILE,
+        },
+        "orchestrator": {
+            "RAW_DIR": orchestrator.RAW_DIR,
+            "WIKI_ROOT": orchestrator.WIKI_ROOT,
+            "LOG_FILE": orchestrator.LOG_FILE,
+            "STATE_FILE": orchestrator.STATE_FILE,
+        },
+        "runtime_status": {
+            "RUNTIME_DIR": runtime_status.RUNTIME_DIR,
+            "STATUS_FILE": runtime_status.STATUS_FILE,
+            "EVENTS_FILE": runtime_status.EVENTS_FILE,
+            "METRICS_FILE": runtime_status.METRICS_FILE,
+        },
+    }
+
+    wiki.WIKI_ROOT = wiki_root
+    wiki.PAGES_DIR = pages
+    wiki.RAW_DIR = raw
+    wiki.SYSTEM_DIR = system
+    wiki.INDEX_FILE = wiki_root / "index.md"
+    wiki.LOG_FILE = wiki_root / "log.md"
+
+    ingest.PAGES_DIR = pages
+    ingest.INDEX_FILE = wiki_root / "index.md"
+    ingest.LOG_FILE = wiki_root / "log.md"
+    orchestrator.RAW_DIR = raw
+    orchestrator.WIKI_ROOT = wiki_root
+    orchestrator.LOG_FILE = wiki_root / "log.md"
+    orchestrator.STATE_FILE = wiki_root / ".orchestrator_state.json"
+
+    runtime_status.RUNTIME_DIR = runtime
+    runtime_status.STATUS_FILE = runtime / "status.json"
+    runtime_status.EVENTS_FILE = runtime / "events.jsonl"
+    runtime_status.METRICS_FILE = runtime / "metrics.jsonl"
+    return snapshot
+
+
+def _restore_wiki_paths(snapshot: dict[str, Any]) -> None:
+    """Restore path globals after a sandbox drill."""
+
+    from llm_wiki_mcp import ingest, orchestrator
+
+    for name, value in snapshot["wiki"].items():
+        setattr(wiki, name, value)
+    for name, value in snapshot["ingest"].items():
+        setattr(ingest, name, value)
+    for name, value in snapshot["orchestrator"].items():
+        setattr(orchestrator, name, value)
+    for name, value in snapshot["runtime_status"].items():
+        setattr(runtime_status, name, value)
+
+
+def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
+    """Exercise pending raw -> failure packet -> self-heal -> retry success."""
+
+    sandbox_root = Path(tempfile.mkdtemp(prefix="llm-wiki-self-heal-drill-"))
+    path_snapshot = _patch_wiki_paths(sandbox_root)
+
+    page = sandbox_root / "pages" / "ai" / "opus-4.7-evaluation-and-industry-geopolitics.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("---\ntitle: Opus\nupdated: 2026-01-01\n---\nold\n", encoding="utf-8")
+    raw_path = sandbox_root / "raw" / "broken.md"
+    raw_path.write_text("sandbox drill raw\n", encoding="utf-8")
+
+    old_autorun = os.environ.get("LLM_WIKI_SELF_HEAL_AUTORUN")
+    os.environ["LLM_WIKI_SELF_HEAL_AUTORUN"] = "0"
+
+    from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+    from llm_wiki_mcp.alias_store import load_aliases
+    from llm_wiki_mcp.jobs import JobStatus, job_store
+
+    original_run_ingest = ingest_mod.run_ingest
+
+    def fake_run_ingest(
+        content, job_id, on_complete=None, on_finally=None, *, metadata=None
+    ):
+        aliases = load_aliases()
+        if (
+            aliases.get("opus-4-7-evaluation-and-industry-geopolitics")
+            == "ai/opus-4.7-evaluation-and-industry-geopolitics"
+        ):
+            job_store.update(job_id, status=JobStatus.COMPLETED)
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+            return
+        job_store.update(
+            job_id,
+            status=JobStatus.FAILED,
+            error=(
+                "update target not found for page_id "
+                "'opus-4-7-evaluation-and-industry-geopolitics'"
+            ),
+        )
+        if on_finally:
+            on_finally(failed=True, triage_failed=False)
+
+    ingest_mod.run_ingest = fake_run_ingest
+    try:
+        batches = [orchestrator.run_pending_ingest(force=True) for _ in range(3)]
+        packet_paths = sorted((_packet_dir()).glob("*.json"))
+        heal_result = None
+        if packet_paths:
+            heal_result = handle_packet(
+                packet_paths[0],
+                use_qwen=use_qwen,
+                enable_frontier=False,
+                dry_run=False,
+            )
+        pending_after = [p.name for p in orchestrator.get_pending_raw_files()]
+        aliases = load_aliases()
+    finally:
+        ingest_mod.run_ingest = original_run_ingest
+        if old_autorun is None:
+            os.environ.pop("LLM_WIKI_SELF_HEAL_AUTORUN", None)
+        else:
+            os.environ["LLM_WIKI_SELF_HEAL_AUTORUN"] = old_autorun
+        _restore_wiki_paths(path_snapshot)
+
+    return {
+        "status": "ok",
+        "sandbox_root": str(sandbox_root),
+        "batches": batches,
+        "packet_paths": [str(p) for p in packet_paths],
+        "heal_result": heal_result,
+        "pending_after": pending_after,
+        "aliases": aliases,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run LLM Wiki self-healing.")
     parser.add_argument("--packet", type=Path, help="Process one failure packet.")
@@ -435,11 +592,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--review-only", action="store_true", help="Frontier may review but not patch.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--drill", action="store_true", help="Run a synthetic local repair drill.")
+    parser.add_argument(
+        "--sandbox-drill",
+        action="store_true",
+        help="Run a sandbox pending-raw self-heal drill without touching production wiki.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.sandbox_drill:
+        print(
+            json.dumps(
+                run_sandbox_drill(use_qwen=not args.no_qwen),
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
     if args.drill:
         print(json.dumps(run_drill(use_qwen=not args.no_qwen), ensure_ascii=False, indent=2))
         return 0

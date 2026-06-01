@@ -75,10 +75,13 @@ def add_alias(alias: str, target: str, *, source: str | None = None) -> None:
     if target_path is None:
         raise ValueError(f"alias target does not exist: {target!r}")
 
-    try:
-        target_ref = str(target_path.relative_to(wiki.PAGES_DIR).with_suffix(""))
-    except ValueError:
-        target_ref = target_path.stem
+    if "/" in target_id:
+        target_ref = target_id[:-3] if target_id.endswith(".md") else target_id
+    else:
+        try:
+            target_ref = str(target_path.relative_to(wiki.PAGES_DIR).with_suffix(""))
+        except ValueError:
+            target_ref = target_path.stem
 
     data = _load()
     aliases = data.setdefault("aliases", {})
