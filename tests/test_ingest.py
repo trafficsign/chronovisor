@@ -483,6 +483,29 @@ class TestApplyOperations:
         with pytest.raises(IngestApplyError, match="ambiguous loose page_id"):
             _apply_operations(ops)
 
+    def test_update_resolves_page_id_alias(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp.alias_store import add_alias
+
+        path = _seed_page(
+            isolated_wiki,
+            "ai/canonical-target.md",
+            "---\ntitle: Canonical\nupdated: 2026-01-01\n---\nold",
+        )
+        add_alias("model-made-up-target", "ai/canonical-target")
+        ops = [
+            {
+                "type": "update",
+                "filename": "model-made-up-target.md",
+                "content": "new",
+            }
+        ]
+
+        created, updated = _apply_operations(ops)
+
+        assert created == []
+        assert updated == ["canonical-target"]
+        assert "new" in path.read_text()
+
     def test_update_appends_without_frontmatter_injection(
         self, isolated_wiki: Path
     ) -> None:

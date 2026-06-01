@@ -271,6 +271,18 @@ def record_raw_failure(
         quarantine_path=str(quarantine_path) if quarantine_path else None,
     )
 
+    try:
+        from llm_wiki_mcp.self_heal import start_background
+
+        start_background(packet_path)
+    except Exception as exc:
+        runtime_status.safe_append_event(
+            "warn",
+            f"failure-supervisor | self-heal launch failed: {exc}",
+            source="failure-supervisor",
+            packet_path=str(packet_path),
+        )
+
     return SupervisionResult(
         raw_file=raw_file,
         failure_class=record.failure_class,

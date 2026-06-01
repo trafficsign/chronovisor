@@ -92,6 +92,12 @@ def drain(
         result = orchestrator.run_pending_ingest(force=True)
         processed = len(result.get("files_processed", []))
         total_processed += processed
+        try:
+            from llm_wiki_mcp.self_heal import run_pending as run_pending_self_heal
+
+            self_heal_result = run_pending_self_heal(max_packets=1)
+        except Exception as exc:
+            self_heal_result = {"status": "error", "error": str(exc)}
         pending_after = len(orchestrator.get_pending_raw_files())
         record = {
             "timestamp": datetime.now().isoformat(),
@@ -100,6 +106,7 @@ def drain(
             "pending_after": pending_after,
             "files_processed": processed,
             "result": result,
+            "self_heal": self_heal_result,
         }
         batches.append(record)
         _append_jsonl(log_path, record)

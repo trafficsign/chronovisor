@@ -761,6 +761,19 @@ def _find_page_resilient(page_id: str) -> Path | None:
     if existing is not None:
         return existing
 
+    try:
+        from llm_wiki_mcp.alias_store import resolve_alias_path
+
+        alias_target = resolve_alias_path(page_id)
+    except Exception:
+        alias_target = None
+    if alias_target is not None:
+        _safe_log(
+            f"ingest | resolved page_id {page_id!r} by alias "
+            f"→ {alias_target.relative_to(PAGES_DIR)}"
+        )
+        return alias_target
+
     target = _normalize_for_loose_page_id(page_id)
     if not target:
         return None
