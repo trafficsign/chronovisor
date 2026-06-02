@@ -7,8 +7,10 @@ from llm_wiki_mcp.recall_runtime import (
     RecallRequest,
     append_feedback,
     evaluate_heuristic,
+    load_policy,
     render_output,
     request_from_hook_payload,
+    run_local_judge,
     run_recall,
 )
 
@@ -111,6 +113,29 @@ def test_judge_timeout_can_fall_back_when_fail_silent_disabled(monkeypatch) -> N
     assert "judge unavailable: ReadTimeout" in result.reasons
 
 
+def test_judge_can_lower_search_zone_to_none(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    def no_recall_judge(*_args: object, **_kwargs: object) -> tuple[float, list[str], str]:
+        return 0.2, [], "不要"
+
+    monkeypatch.setattr(recall_runtime, "run_local_judge", no_recall_judge)
+    policy = RecallPolicy(judge_mode="auto", log_decisions=False)
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="LLM Wiki の運用どうする?",
+        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+    )
+
+    result = recall_runtime.run_recall(request, policy, perform_search=False)
+
+    assert result.decision == "none"
+    assert result.confidence == 0.2
+    assert result.queries == []
+    assert "judge: 不要" in result.reasons
+
+
 def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 
@@ -130,6 +155,138 @@ def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
 
     assert result.decision == "read"
     assert result.confidence >= policy.read_threshold
+
+
+def test_gate_config_overrides_legacy_model_and_budget(tmp_path) -> None:
+    config = tmp_path / "recall.toml"
+    config.write_text(
+        """
+enabled = true
+model = "qwen3.6:35b-a3b-q8_0"
+
+[budgets]
+judge_timeout_ms = 4000
+
+[gate]
+model = "qwen3.5:4b"
+think = false
+timeout_ms = 1200
+num_ctx = 2048
+num_predict = 128
+"""
+    )
+
+    policy = load_policy(config)
+
+    assert policy.judge_model == "qwen3.5:4b"
+    assert policy.judge_think is False
+    assert policy.judge_timeout_ms == 1200
+    assert policy.judge_num_ctx == 2048
+    assert policy.judge_num_predict == 128
+
+
+def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {
+                "response": json.dumps(
+                    {"decision": "none", "confidence": 0.2, "reason": "不要", "queries": []},
+                    ensure_ascii=False,
+                )
+            }
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured["client_args"] = args
+            captured["client_kwargs"] = kwargs
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, path: str, *, json: dict[str, object]) -> FakeResponse:
+            captured["path"] = path
+            captured["payload"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
+    policy = RecallPolicy(
+        judge_model="qwen3.5:4b",
+        judge_think=False,
+        judge_timeout_ms=1200,
+        judge_num_ctx=2048,
+        judge_num_predict=128,
+    )
+
+    score, queries, reason = run_local_judge(
+        RecallRequest(host="test", event="UserPromptSubmit", prompt="LLM Wiki の運用どうする?"),
+        0.5,
+        policy,
+    )
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert score == 0.2
+    assert queries == []
+    assert reason == "不要"
+    assert captured["path"] == "/api/generate"
+    assert payload["model"] == "qwen3.5:4b"
+    assert payload["think"] is False
+    assert payload["options"] == {
+        "temperature": 0,
+        "num_ctx": 2048,
+        "num_predict": 128,
+    }
+
+
+def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {
+                "response": json.dumps(
+                    {"decision": "none", "confidence": 0.9, "reason": "不要"},
+                    ensure_ascii=False,
+                )
+            }
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, _path: str, *, json: dict[str, object]) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
+    policy = RecallPolicy(judge_model="qwen3.5:4b", judge_timeout_ms=2000)
+
+    score, _queries, reason = run_local_judge(
+        RecallRequest(host="test", event="UserPromptSubmit", prompt="LLM Wiki の運用どうする?"),
+        0.5,
+        policy,
+    )
+
+    assert score < policy.search_threshold
+    assert reason == "不要"
 
 
 def test_system_task_notification_skips_recall() -> None:

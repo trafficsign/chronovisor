@@ -169,8 +169,12 @@ class RecallPolicy:
     use_feedback_suppressions: bool = True
     fail_silent_on_judge_unavailable: bool = True
     judge_mode: str = "auto"  # off | auto | always
-    judge_model: str = "qwen3.6:35b-a3b-q8_0"
-    judge_timeout_ms: int = 4000
+    judge_model: str = "qwen3.5:4b"
+    judge_think: bool = False
+    judge_timeout_ms: int = 2000
+    judge_num_ctx: int = 4096
+    judge_num_predict: int = 64
+    judge_include_queries: bool = False
 
 
 @dataclass
@@ -255,6 +259,23 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             policy.semantic = recall["semantic"]
         if isinstance(recall.get("judge_mode"), str):
             policy.judge_mode = recall["judge_mode"]
+
+    gate = data.get("gate", {})
+    if isinstance(gate, dict):
+        if isinstance(gate.get("model"), str):
+            policy.judge_model = gate["model"]
+        if isinstance(gate.get("think"), bool):
+            policy.judge_think = gate["think"]
+        if isinstance(gate.get("timeout_ms"), int):
+            policy.judge_timeout_ms = max(200, gate["timeout_ms"])
+        if isinstance(gate.get("judge_timeout_ms"), int):
+            policy.judge_timeout_ms = max(200, gate["judge_timeout_ms"])
+        if isinstance(gate.get("num_ctx"), int):
+            policy.judge_num_ctx = max(512, gate["num_ctx"])
+        if isinstance(gate.get("num_predict"), int):
+            policy.judge_num_predict = max(16, gate["num_predict"])
+        if isinstance(gate.get("include_queries"), bool):
+            policy.judge_include_queries = gate["include_queries"]
 
     behavior = data.get("policy", {})
     if isinstance(behavior, dict):
@@ -467,36 +488,32 @@ def should_run_judge(score: float, policy: RecallPolicy) -> bool:
 
 
 def run_local_judge(request: RecallRequest, heuristic_score: float, policy: RecallPolicy) -> tuple[float | None, list[str], str]:
-    system = (
-        "You are an LLM Wiki recall gate. Decide if the assistant should retrieve "
-        "past user/project memory before answering. Return JSON only."
-    )
+    system = "You are a fast LLM Wiki recall classifier. Return compact JSON only."
     prompt = {
         "user_prompt": request.prompt,
         "cwd": request.cwd,
-        "host": request.host,
         "heuristic_score": round(heuristic_score, 3),
-        "rubric": {
-            "0.0-0.34": "do not recall",
-            "0.35-0.64": "search memory",
-            "0.65-1.0": "search and read top pages",
-        },
-        "avoid": "Do not recall heavy personal context for simple chitchat.",
+        "task": "Return whether past user/project memory should be recalled.",
+        "rubric": "0.0-0.34 none, 0.35-0.64 search, 0.65-1.0 read",
+        "rule": "Prefer silence for uncertain/simple chitchat. Do not recall heavy personal context.",
         "output": {
+            "decision": "none | search | read",
             "confidence": "number 0..1",
-            "reason": "short Japanese reason",
-            "queries": ["1-3 search queries if recall is useful"],
+            "reason": "very short Japanese reason",
         },
     }
     schema = {
         "type": "object",
         "properties": {
+            "decision": {"type": "string", "enum": ["none", "search", "read"]},
             "confidence": {"type": "number"},
             "reason": {"type": "string"},
-            "queries": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["confidence", "reason", "queries"],
+        "required": ["decision", "confidence", "reason"],
     }
+    if policy.judge_include_queries:
+        prompt["output"]["queries"] = ["1-3 short search queries if recall is useful"]
+        schema["properties"]["queries"] = {"type": "array", "items": {"type": "string"}}
 
     try:
         from llm_wiki_mcp.ollama import OLLAMA_URL
@@ -516,29 +533,46 @@ def run_local_judge(request: RecallRequest, heuristic_score: float, policy: Reca
                     "system": system,
                     "prompt": json.dumps(prompt, ensure_ascii=False),
                     "stream": False,
-                    "think": False,
+                    "think": policy.judge_think,
                     "keep_alive": "5m",
                     "format": schema,
                     "options": {
                         "temperature": 0,
-                        "num_ctx": 4096,
-                        "num_predict": 256,
+                        "num_ctx": policy.judge_num_ctx,
+                        "num_predict": policy.judge_num_predict,
                     },
                 },
             )
             resp.raise_for_status()
         raw = resp.json().get("response", "{}")
         parsed = json.loads(raw)
+        decision = parsed.get("decision")
+        if decision not in {"none", "search", "read"}:
+            return None, [], "judge returned no valid decision"
         confidence = parsed.get("confidence")
         if not isinstance(confidence, int | float):
             return None, [], "judge returned no numeric confidence"
-        queries = [q for q in parsed.get("queries", []) if isinstance(q, str) and q.strip()]
+        confidence = normalize_judge_confidence(float(confidence), decision, policy)
+        queries = (
+            [q for q in parsed.get("queries", []) if isinstance(q, str) and q.strip()]
+            if policy.judge_include_queries
+            else []
+        )
         reason = parsed.get("reason", "")
         if not isinstance(reason, str):
             reason = ""
-        return max(0.0, min(1.0, float(confidence))), queries, reason
+        return confidence, queries, reason
     except Exception as exc:
         return None, [], f"judge unavailable: {exc.__class__.__name__}"
+
+
+def normalize_judge_confidence(confidence: float, decision: str, policy: RecallPolicy) -> float:
+    confidence = max(0.0, min(1.0, confidence))
+    if decision == "none":
+        return min(confidence, policy.search_threshold - 0.01)
+    if decision == "search":
+        return min(max(confidence, policy.search_threshold), policy.read_threshold - 0.01)
+    return max(confidence, policy.read_threshold)
 
 
 def build_queries(
@@ -777,7 +811,7 @@ def run_recall(
         judge_score, judge_queries, judge_reason = run_local_judge(active_request, score, policy)
         used_judge = judge_score is not None
         if judge_score is not None:
-            score = max(score, judge_score)
+            score = judge_score
             if judge_reason:
                 reasons.append("judge: " + judge_reason)
         elif judge_reason:
