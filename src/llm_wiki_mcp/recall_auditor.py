@@ -9,6 +9,7 @@ missed useful memory. It never changes runtime recall decisions.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -36,6 +37,7 @@ from llm_wiki_mcp.search import search as run_search
 
 
 DEFAULT_STATE_FILE = RECALL_DIR / "audit-state.json"
+DEFAULT_LOCK_FILE = RECALL_DIR / "audit.lock"
 HOOK_ENABLE_ENV = "LLM_WIKI_RECALL_AUDIT_ENABLED"
 
 AUTO_ACTIONS = frozenset({"alias", "query_hint", "page_tag"})
@@ -382,6 +384,42 @@ def run_auditor_judge(
         return str(resp.json().get("response", "{}"))
 
 
+def acquire_audit_lock(path: Path) -> Any | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    except OSError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+    handle.flush()
+    return handle
+
+
+def release_audit_lock(handle: Any | None) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
 def read_jsonl_tail(path: Path, limit: int) -> list[dict[str, Any]]:
     try:
         with path.open(encoding="utf-8") as f:
@@ -676,7 +714,21 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
         }
 
     started = time.monotonic()
-    raw_output = args.auditor_json or run_auditor_judge(turn, recall_snapshot, top_pages, policy)
+    if args.auditor_json:
+        raw_output = args.auditor_json
+    else:
+        lock_handle = acquire_audit_lock(Path(args.lock_file).expanduser())
+        if lock_handle is None:
+            return {
+                "status": "skipped",
+                "reason": "another recall audit is already running",
+                "turn_ref": turn.turn_ref(),
+                "ref": recall_snapshot.get("decision_id", "") if recall_snapshot else "",
+            }
+        try:
+            raw_output = run_auditor_judge(turn, recall_snapshot, top_pages, policy)
+        finally:
+            release_audit_lock(lock_handle)
     decision = parse_auditor_output(raw_output, top_pages)
     latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -749,6 +801,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--assistant-response")
     parser.add_argument("--decision-id", default="")
     parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE))
+    parser.add_argument("--lock-file", default=str(DEFAULT_LOCK_FILE))
     parser.add_argument("--config", default=str(RECALL_CONFIG_FILE))
     parser.add_argument("--ignore-state", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

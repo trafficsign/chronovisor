@@ -296,3 +296,45 @@ def test_run_skips_read_decisions_by_default(tmp_path, monkeypatch) -> None:
 
     assert result["status"] == "skipped"
     assert result["reason"] == "recall decision was already read"
+
+
+def test_auditor_single_flight_skips_when_lock_is_held(tmp_path, monkeypatch) -> None:
+    lock_file = tmp_path / "audit.lock"
+    lock_handle = recall_auditor.acquire_audit_lock(lock_file)
+    assert lock_handle is not None
+    monkeypatch.setattr(recall_auditor, "collect_top_pages", lambda _prompt, _policy: ([], "bm25"))
+
+    def unexpected_judge(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("heavy auditor should not run when lock is held")
+
+    monkeypatch.setattr(recall_auditor, "run_auditor_judge", unexpected_judge)
+    try:
+        result = recall_auditor.run(
+            Namespace(
+                host="codex",
+                hook=False,
+                session_id="s1",
+                session_file=None,
+                sessions_root=None,
+                cwd="",
+                prompt="昨日の recall hook の続き",
+                assistant_response="続きです。",
+                decision_id="",
+                state_file=str(tmp_path / "state.json"),
+                lock_file=str(lock_file),
+                config=str(tmp_path / "missing.toml"),
+                ignore_state=True,
+                dry_run=False,
+                extract_only=False,
+                force=False,
+                audit_read=False,
+                top_k=None,
+                min_confidence=None,
+                auditor_json=None,
+            )
+        )
+    finally:
+        recall_auditor.release_audit_lock(lock_handle)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "another recall audit is already running"
