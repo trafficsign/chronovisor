@@ -60,6 +60,78 @@ def test_run_recall_without_search_returns_queries_for_gate_hit() -> None:
     assert result.confidence >= policy.read_threshold
 
 
+def test_judge_timeout_fails_silent_in_search_zone(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    def timeout_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
+        return None, [], "judge unavailable: ReadTimeout"
+
+    monkeypatch.setattr(recall_runtime, "run_local_judge", timeout_judge)
+    policy = RecallPolicy(judge_mode="auto", log_decisions=False)
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="LLM Wiki の運用どうする?",
+        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+    )
+
+    result = recall_runtime.run_recall(request, policy, perform_search=False)
+
+    assert result.status == "skipped"
+    assert result.decision == "none"
+    assert result.queries == []
+    assert result.confidence >= policy.search_threshold
+    assert "judge unavailable: ReadTimeout" in result.reasons
+    assert "judge unavailable; fail-silent" in result.reasons
+
+
+def test_judge_timeout_can_fall_back_when_fail_silent_disabled(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    def timeout_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
+        return None, [], "judge unavailable: ReadTimeout"
+
+    monkeypatch.setattr(recall_runtime, "run_local_judge", timeout_judge)
+    policy = RecallPolicy(
+        judge_mode="auto",
+        log_decisions=False,
+        fail_silent_on_judge_unavailable=False,
+    )
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="LLM Wiki の運用どうする?",
+        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+    )
+
+    result = recall_runtime.run_recall(request, policy, perform_search=False)
+
+    assert result.decision == "search"
+    assert result.queries
+    assert "judge unavailable: ReadTimeout" in result.reasons
+
+
+def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    def unexpected_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
+        raise AssertionError("auto judge should not run for obvious read prompts")
+
+    monkeypatch.setattr(recall_runtime, "run_local_judge", unexpected_judge)
+    policy = RecallPolicy(judge_mode="auto", log_decisions=False)
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="昨日LLM Wikiのフック直したやつ、Claude Codeにも入れられる?",
+        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+    )
+
+    result = recall_runtime.run_recall(request, policy, perform_search=False)
+
+    assert result.decision == "read"
+    assert result.confidence >= policy.read_threshold
+
+
 def test_system_task_notification_skips_recall() -> None:
     policy = RecallPolicy(judge_mode="off", log_decisions=False)
     request = RecallRequest(

@@ -167,6 +167,7 @@ class RecallPolicy:
     log_decisions: bool = True
     avoid_heavy_personal_context_in_chitchat: bool = True
     use_feedback_suppressions: bool = True
+    fail_silent_on_judge_unavailable: bool = True
     judge_mode: str = "auto"  # off | auto | always
     judge_model: str = "qwen3.6:35b-a3b-q8_0"
     judge_timeout_ms: int = 4000
@@ -265,6 +266,8 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             ]
         if isinstance(behavior.get("use_feedback_suppressions"), bool):
             policy.use_feedback_suppressions = behavior["use_feedback_suppressions"]
+        if isinstance(behavior.get("fail_silent_on_judge_unavailable"), bool):
+            policy.fail_silent_on_judge_unavailable = behavior["fail_silent_on_judge_unavailable"]
 
 
 def request_from_hook_payload(payload: dict[str, Any], *, host: str, event: str) -> RecallRequest:
@@ -458,8 +461,9 @@ def should_run_judge(score: float, policy: RecallPolicy) -> bool:
         return False
     if policy.judge_mode == "always":
         return True
-    # The judge is most valuable near the gate, not for obvious no-op prompts.
-    return (policy.search_threshold - 0.10) <= score < (policy.read_threshold + 0.10)
+    # Auto judge is for the ambiguous search zone. Obvious read decisions should
+    # not depend on a synchronous local model being available.
+    return (policy.search_threshold - 0.10) <= score < policy.read_threshold
 
 
 def run_local_judge(request: RecallRequest, heuristic_score: float, policy: RecallPolicy) -> tuple[float | None, list[str], str]:
@@ -778,6 +782,22 @@ def run_recall(
                 reasons.append("judge: " + judge_reason)
         elif judge_reason:
             reasons.append(judge_reason)
+            if policy.fail_silent_on_judge_unavailable:
+                reasons.append("judge unavailable; fail-silent")
+                result = RecallResult(
+                    status="skipped",
+                    decision="none",
+                    confidence=round(score, 3),
+                    queries=[],
+                    reasons=reasons,
+                    matched_terms=matched,
+                    used_judge=False,
+                    judge_reason=judge_reason,
+                    latency_ms=_elapsed_ms(started),
+                )
+                if policy.log_decisions:
+                    append_recall_log(request, result)
+                return result
 
     decision = decision_from_score(score, policy)
     queries = build_queries(active_request, matched, judge_queries, policy) if decision != "none" else []
