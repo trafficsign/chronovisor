@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+import json
+
+from llm_wiki_mcp.recall_runtime import (
+    RecallPolicy,
+    RecallRequest,
+    append_feedback,
+    evaluate_heuristic,
+    render_output,
+    request_from_hook_payload,
+    run_recall,
+)
+
+
+def test_explicit_past_project_prompt_crosses_read_threshold() -> None:
+    policy = RecallPolicy(judge_mode="off")
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="昨日LLM Wikiのフック直したやつ、Claude Codeにも入れられる?",
+        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+    )
+
+    score, reasons, matched = evaluate_heuristic(request, policy)
+
+    assert score >= policy.read_threshold
+    assert "昨日" in matched["past_reference"]
+    assert any("known recurring" in reason for reason in reasons)
+
+
+def test_simple_chitchat_stays_below_search_threshold() -> None:
+    policy = RecallPolicy(judge_mode="off")
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="今日暑いな",
+        cwd="/tmp",
+    )
+
+    score, reasons, _matched = evaluate_heuristic(request, policy)
+
+    assert score < policy.search_threshold
+    assert "simple chitchat" in reasons
+
+
+def test_run_recall_without_search_returns_queries_for_gate_hit() -> None:
+    policy = RecallPolicy(judge_mode="off", log_decisions=False)
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="前回のCodex hook設定の続き、どう実装する?",
+        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+    )
+
+    result = run_recall(request, policy, perform_search=False)
+
+    assert result.decision == "read"
+    assert result.queries
+    assert result.confidence >= policy.read_threshold
+
+
+def test_hook_payload_accepts_claude_and_codex_prompt_keys() -> None:
+    claude = request_from_hook_payload(
+        {"user_prompt": "昨日のあれ", "cwd": "/a", "session_id": "s1"},
+        host="claude-code",
+        event="UserPromptSubmit",
+    )
+    codex = request_from_hook_payload(
+        {"prompt": "前回の続き", "working_directory": "/b", "thread_id": "t1"},
+        host="codex",
+        event="UserPromptSubmit",
+    )
+
+    assert claude.prompt == "昨日のあれ"
+    assert claude.cwd == "/a"
+    assert claude.session_id == "s1"
+    assert codex.prompt == "前回の続き"
+    assert codex.cwd == "/b"
+    assert codex.session_id == "t1"
+
+
+def test_codex_output_uses_hook_json_when_context_exists() -> None:
+    policy = RecallPolicy(judge_mode="off", log_decisions=False)
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="前回のLLM Wiki設計の続き",
+    )
+    result = run_recall(request, policy, perform_search=False)
+    result.context = "[RECALL_CONTEXT]\nhello\n[/RECALL_CONTEXT]"
+
+    rendered = render_output(result, "codex")
+    parsed = json.loads(rendered)
+
+    assert parsed["systemMessage"]
+    assert parsed["hookSpecificOutput"]["additionalContext"] == result.context
+
+
+def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+
+    record = append_feedback("missed", "前回の話を検索しなかった", prompt="昨日のあれ")
+
+    assert record["kind"] == "missed"
+    assert feedback_file.exists()
+    assert "前回の話" in feedback_file.read_text()
