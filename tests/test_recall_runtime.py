@@ -60,6 +60,76 @@ def test_run_recall_without_search_returns_queries_for_gate_hit() -> None:
     assert result.confidence >= policy.read_threshold
 
 
+def test_system_task_notification_skips_recall() -> None:
+    policy = RecallPolicy(judge_mode="off", log_decisions=False)
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="<task-notification>Codex hook task completed for yesterday's LLM Wiki work.</task-notification>",
+        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+    )
+
+    result = run_recall(request, policy, perform_search=False)
+
+    assert result.status == "skipped"
+    assert result.decision == "none"
+    assert result.queries == []
+    assert "system notification prompt" in result.reasons
+
+
+def test_recall_context_injection_skips_recall() -> None:
+    policy = RecallPolicy(judge_mode="off", log_decisions=False)
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="[RECALL_CONTEXT]\npages:\n- systemheadertemplate\n[/RECALL_CONTEXT]",
+        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+    )
+
+    result = run_recall(request, policy, perform_search=False)
+
+    assert result.status == "skipped"
+    assert result.decision == "none"
+    assert result.queries == []
+    assert "recall context injection" in result.reasons
+
+
+def test_codex_internal_suggestion_prompt_skips_recall() -> None:
+    policy = RecallPolicy(judge_mode="off", log_decisions=False)
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt=(
+            "# Overview\n\n"
+            "Generate 0 to 3 hyperpersonalized suggestions for what this user can do "
+            "with Codex in this local project."
+        ),
+        cwd="/Users/trafficsign/Documents/Codex/2026-05-02/new-chat",
+    )
+
+    result = run_recall(request, policy, perform_search=False)
+
+    assert result.status == "skipped"
+    assert result.decision == "none"
+    assert result.queries == []
+    assert "codex internal suggestion prompt" in result.reasons
+
+
+def test_user_discussing_task_notification_is_not_filtered() -> None:
+    policy = RecallPolicy(judge_mode="off", log_decisions=False)
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="さっきの <task-notification> の recall 誤発火をどう直す?",
+        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+    )
+
+    result = run_recall(request, policy, perform_search=False)
+
+    assert result.decision != "none"
+    assert result.queries
+
+
 def test_hook_payload_accepts_claude_and_codex_prompt_keys() -> None:
     claude = request_from_hook_payload(
         {"user_prompt": "昨日のあれ", "cwd": "/a", "session_id": "s1"},

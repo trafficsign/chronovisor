@@ -35,6 +35,14 @@ TRIVIAL_PROMPT_RE = re.compile(
     r"^\s*(はい|いいえ|うん|おう|ok|okay|yes|no|y|n|ありがとう|thanks|thx|了解|りょ)\s*[。.!！?？]*\s*$",
     re.IGNORECASE,
 )
+SYSTEM_ENVELOPE_RE = re.compile(
+    r"^\s*<(task-notification|system-reminder|system-notification)\b",
+    re.IGNORECASE,
+)
+CODEX_INTERNAL_SUGGESTION_RE = re.compile(
+    r"^\s*#\s*Overview\s+Generate\s+0\s+to\s+3\s+hyperpersonalized\s+suggestions\b",
+    re.IGNORECASE,
+)
 
 PAST_REFERENCE_TERMS = [
     "昨日",
@@ -147,7 +155,7 @@ class RecallPolicy:
     avoid_heavy_personal_context_in_chitchat: bool = True
     judge_mode: str = "auto"  # off | auto | always
     judge_model: str = "qwen3.6:35b-a3b-q8_0"
-    judge_timeout_ms: int = 2500
+    judge_timeout_ms: int = 4000
 
 
 @dataclass
@@ -338,6 +346,17 @@ def evaluate_heuristic(request: RecallRequest, policy: RecallPolicy) -> tuple[fl
             reasons.append("personal-context guard")
 
     return max(0.0, min(1.0, score)), reasons, matched
+
+
+def classify_non_user_prompt(prompt: str) -> str:
+    stripped = prompt.lstrip()
+    if SYSTEM_ENVELOPE_RE.match(stripped):
+        return "system notification prompt"
+    if CODEX_INTERNAL_SUGGESTION_RE.match(stripped):
+        return "codex internal suggestion prompt"
+    if stripped.startswith("[RECALL_CONTEXT]") or stripped.startswith("[/RECALL_CONTEXT]"):
+        return "recall context injection"
+    return ""
 
 
 def _matched_terms(prompt_lower: str, terms: list[str]) -> list[str]:
@@ -621,6 +640,21 @@ def run_recall(
             matched_terms={},
             latency_ms=_elapsed_ms(started),
         )
+
+    skip_reason = classify_non_user_prompt(request.prompt)
+    if skip_reason:
+        result = RecallResult(
+            status="skipped",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[skip_reason],
+            matched_terms={},
+            latency_ms=_elapsed_ms(started),
+        )
+        if policy.log_decisions:
+            append_recall_log(request, result)
+        return result
 
     score, reasons, matched = evaluate_heuristic(request, policy)
     used_judge = False
