@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 
 from llm_wiki_mcp.recall_runtime import (
+    ContextItem,
     RecallPolicy,
     RecallRequest,
+    RecallResult,
     append_feedback,
     evaluate_heuristic,
+    format_recall_context,
     load_policy,
+    main,
     render_output,
     request_from_hook_payload,
     run_local_judge,
@@ -492,6 +496,56 @@ def test_codex_output_uses_hook_json_when_context_exists() -> None:
     assert parsed["hookSpecificOutput"]["additionalContext"] == result.context
 
 
+def test_recall_context_includes_decision_id() -> None:
+    result = RecallResult(
+        status="ok",
+        decision="read",
+        confidence=0.8,
+        queries=["昨日のLLM Wiki"],
+        reasons=["past reference term"],
+        matched_terms={},
+        decision_id="20260602T120000-deadbeef",
+        context_items=[
+            ContextItem(
+                page_id="llm-wiki-recall-configuration",
+                title="LLM Wiki Recall Configuration",
+                updated="2026-06-02",
+                score=1.0,
+            )
+        ],
+    )
+
+    context = format_recall_context(result, RecallPolicy())
+
+    assert "decision_id=20260602T120000-deadbeef" in context
+
+
+def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    log_file = tmp_path / "recall-log.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
+
+    result = run_recall(
+        RecallRequest(
+            host="test",
+            event="UserPromptSubmit",
+            prompt="昨日LLM Wikiのフック直したやつ、Claude Codeにも入れられる?",
+            cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        ),
+        RecallPolicy(judge_mode="off", log_decisions=True),
+        perform_search=False,
+    )
+    record = json.loads(log_file.read_text().splitlines()[-1])
+
+    assert record["decision_id"] == result.decision_id
+    assert record["decision"] == "read"
+    assert record["confidence"] == result.confidence
+    assert record["queries"] == result.queries
+    assert record["judge_confidence"] is None
+    assert "past reference term" in record["reasons"]
+
+
 def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 
@@ -503,3 +557,128 @@ def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
     assert record["kind"] == "missed"
     assert feedback_file.exists()
     assert "前回の話" in feedback_file.read_text()
+
+
+def test_missed_feedback_prompt_only_records_without_expected(tmp_path, monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+
+    record = append_feedback("missed", prompt="本当は前回の設定を引くべきだった")
+
+    assert record["kind"] == "missed"
+    assert record["prompt"] == "本当は前回の設定を引くべきだった"
+    assert record["note"] == ""
+    assert record["expected_pages"] == []
+    assert record["expected_queries"] == []
+    assert record["ref"] == ""
+    assert record["snapshot"] is None
+
+
+def test_recent_cli_lists_latest_recall_decisions(tmp_path, monkeypatch, capsys) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    log_file = tmp_path / "recall-log.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
+    log_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-06-02T10:00:00",
+                        "decision_id": "old",
+                        "host": "codex",
+                        "decision": "none",
+                        "confidence": 0.1,
+                        "prompt_preview": "old prompt",
+                        "queries": [],
+                        "pages": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-06-02T10:01:00",
+                        "decision_id": "new",
+                        "host": "claude-code",
+                        "decision": "read",
+                        "confidence": 0.8,
+                        "prompt_preview": "new prompt",
+                        "queries": ["new query"],
+                        "pages": ["claude-code-recall-hook-implementation"],
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    assert main(["--recent", "1"]) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["status"] == "ok"
+    assert len(output["items"]) == 1
+    assert output["items"][0]["decision_id"] == "new"
+    assert output["items"][0]["pages"] == ["claude-code-recall-hook-implementation"]
+
+
+def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    log_file = tmp_path / "recall-log.jsonl"
+    feedback_file = tmp_path / "feedback.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+    log_file.write_text(
+        json.dumps(
+            {
+                "ts": "2026-06-02T10:00:00",
+                "decision_id": "20260602T100000-deadbeef",
+                "host": "codex",
+                "event": "UserPromptSubmit",
+                "cwd": "/repo",
+                "session_id": "s1",
+                "prompt_preview": "前に話した recall gate",
+                "decision": "none",
+                "confidence": 0.34,
+                "queries": [],
+                "pages": [],
+                "reasons": ["judge: 不要"],
+                "used_judge": True,
+                "judge_confidence": 0.34,
+                "judge_reason": "不要",
+                "latency_ms": 900,
+                "status": "ok",
+                "error": "",
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+
+    assert main(
+        [
+            "--feedback",
+            "missed",
+            "--prompt",
+            "前に話した recall gate",
+            "--expected-page",
+            "llm-wiki-recall-configuration",
+            "--expected-query",
+            "recall gate model",
+            "--ref",
+            "20260602T100000-deadbeef",
+        ]
+    ) == 0
+    output = json.loads(capsys.readouterr().out)
+    record = json.loads(feedback_file.read_text().splitlines()[-1])
+
+    assert output["status"] == "recorded"
+    assert record["kind"] == "missed"
+    assert record["expected_pages"] == ["llm-wiki-recall-configuration"]
+    assert record["expected_queries"] == ["recall gate model"]
+    assert record["snapshot"]["decision_id"] == "20260602T100000-deadbeef"
+    assert record["snapshot"]["score"] == 0.34
+    assert record["snapshot"]["judge_reason"] == "不要"

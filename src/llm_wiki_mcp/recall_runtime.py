@@ -14,6 +14,7 @@ import re
 import sys
 import time
 import tomllib
+import uuid
 from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
@@ -204,9 +205,11 @@ class RecallResult:
     queries: list[str]
     reasons: list[str]
     matched_terms: dict[str, list[str]]
+    decision_id: str = field(default_factory=lambda: new_decision_id())
     context_items: list[ContextItem] = field(default_factory=list)
     context: str = ""
     used_judge: bool = False
+    judge_confidence: float | None = None
     judge_reason: str = ""
     latency_ms: int = 0
     error: str = ""
@@ -225,6 +228,11 @@ def load_policy(path: Path = RECALL_CONFIG_FILE) -> RecallPolicy:
     if enabled_env is not None:
         policy.enabled = enabled_env not in {"0", "false", "False", "no", "NO"}
     return policy
+
+
+def new_decision_id() -> str:
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    return f"{ts}-{uuid.uuid4().hex[:8]}"
 
 
 def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
@@ -714,6 +722,7 @@ def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
         "[RECALL_CONTEXT]",
         "LLM Wiki が過去文脈候補を見つけました。関連すると判断した場合だけ使ってください。",
         "雑談に重い個人事情を勝手に混ぜないでください。",
+        f"decision_id={result.decision_id}",
         f"decision={result.decision} confidence={result.confidence:.2f}",
     ]
     if result.reasons:
@@ -805,6 +814,7 @@ def run_recall(
     score, reasons, matched = evaluate_heuristic(active_request, policy)
     reasons = stripped_reasons + reasons
     used_judge = False
+    judge_confidence: float | None = None
     judge_reason = ""
     judge_queries: list[str] = []
     if should_run_judge(score, policy):
@@ -812,6 +822,7 @@ def run_recall(
         used_judge = judge_score is not None
         if judge_score is not None:
             score = judge_score
+            judge_confidence = judge_score
             if judge_reason:
                 reasons.append("judge: " + judge_reason)
         elif judge_reason:
@@ -826,6 +837,7 @@ def run_recall(
                     reasons=reasons,
                     matched_terms=matched,
                     used_judge=False,
+                    judge_confidence=None,
                     judge_reason=judge_reason,
                     latency_ms=_elapsed_ms(started),
                 )
@@ -856,6 +868,7 @@ def run_recall(
         matched_terms=matched,
         context_items=context_items,
         used_judge=used_judge,
+        judge_confidence=judge_confidence,
         judge_reason=judge_reason,
         latency_ms=_elapsed_ms(started),
         error=error,
@@ -873,6 +886,7 @@ def _elapsed_ms(started: float) -> int:
 def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
     record = {
         "ts": datetime.now().isoformat(timespec="seconds"),
+        "decision_id": result.decision_id,
         "host": request.host,
         "event": request.event,
         "cwd": request.cwd,
@@ -884,6 +898,8 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "pages": [item.page_id for item in result.context_items],
         "reasons": result.reasons,
         "used_judge": result.used_judge,
+        "judge_confidence": result.judge_confidence,
+        "judge_reason": result.judge_reason,
         "latency_ms": result.latency_ms,
         "status": result.status,
         "error": result.error,
@@ -891,13 +907,99 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
     append_jsonl(RECALL_LOG_FILE, record)
 
 
-def append_feedback(kind: str, note: str, prompt: str = "", host: str = "") -> dict[str, Any]:
+def recall_log_snapshot(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "decision_id": record.get("decision_id", ""),
+        "ts": record.get("ts", ""),
+        "host": record.get("host", ""),
+        "event": record.get("event", ""),
+        "cwd": record.get("cwd", ""),
+        "session_id": record.get("session_id", ""),
+        "prompt_preview": record.get("prompt_preview", ""),
+        "decision": record.get("decision", ""),
+        "confidence": record.get("confidence", 0.0),
+        "score": record.get("confidence", 0.0),
+        "queries": record.get("queries", []),
+        "pages": record.get("pages", []),
+        "reasons": record.get("reasons", []),
+        "used_judge": record.get("used_judge", False),
+        "judge_confidence": record.get("judge_confidence"),
+        "judge_reason": record.get("judge_reason", ""),
+        "latency_ms": record.get("latency_ms", 0),
+        "status": record.get("status", ""),
+        "error": record.get("error", ""),
+    }
+
+
+def recent_recall_logs(limit: int = 10) -> list[dict[str, Any]]:
+    limit = max(1, limit)
+    try:
+        with RECALL_LOG_FILE.open(encoding="utf-8") as f:
+            lines = deque(f, maxlen=limit)
+    except OSError:
+        return []
+    items: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            snapshot = recall_log_snapshot(record)
+            items.append(
+                {
+                    "decision_id": snapshot["decision_id"],
+                    "ts": snapshot["ts"],
+                    "host": snapshot["host"],
+                    "decision": snapshot["decision"],
+                    "confidence": snapshot["confidence"],
+                    "prompt_preview": snapshot["prompt_preview"],
+                    "queries": snapshot["queries"],
+                    "pages": snapshot["pages"],
+                }
+            )
+    return items
+
+
+def find_recall_log(decision_id: str, limit: int = 5000) -> dict[str, Any] | None:
+    if not decision_id:
+        return None
+    try:
+        with RECALL_LOG_FILE.open(encoding="utf-8") as f:
+            lines = deque(f, maxlen=limit)
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and record.get("decision_id") == decision_id:
+            return record
+    return None
+
+
+def append_feedback(
+    kind: str,
+    note: str = "",
+    prompt: str = "",
+    host: str = "",
+    *,
+    expected_pages: list[str] | None = None,
+    expected_queries: list[str] | None = None,
+    ref: str = "",
+) -> dict[str, Any]:
+    snapshot = recall_log_snapshot(found) if ref and (found := find_recall_log(ref)) else None
     record = {
         "ts": datetime.now().isoformat(timespec="seconds"),
         "kind": kind,
         "host": host,
         "prompt": prompt,
         "note": note,
+        "expected_pages": expected_pages or [],
+        "expected_queries": expected_queries or [],
+        "ref": ref,
+        "snapshot": snapshot,
     }
     append_jsonl(RECALL_FEEDBACK_FILE, record)
     return record
@@ -947,6 +1049,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hook", action="store_true", help="Read hook JSON from stdin.")
     parser.add_argument("--no-search", action="store_true", help="Only evaluate the gate; do not search pages.")
     parser.add_argument(
+        "--recent",
+        nargs="?",
+        type=int,
+        const=10,
+        help="List recent recall decisions and exit. Defaults to 10 when N is omitted.",
+    )
+    parser.add_argument(
         "--format",
         choices=["json", "plain", "claude", "codex", "hook-json"],
         default="json",
@@ -957,6 +1066,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record human feedback instead of running recall.",
     )
     parser.add_argument("--note", default="", help="Feedback note.")
+    parser.add_argument("--expected-page", action="append", default=[], help="Expected page id for missed recall.")
+    parser.add_argument("--expected-query", action="append", default=[], help="Expected query for missed recall.")
+    parser.add_argument("--ref", default="", help="Decision id to attach as a feedback snapshot.")
     return parser
 
 
@@ -964,8 +1076,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.recent is not None:
+        print(json.dumps({"status": "ok", "items": recent_recall_logs(args.recent)}, ensure_ascii=False))
+        return 0
+
     if args.feedback:
-        record = append_feedback(args.feedback, args.note, prompt=args.prompt or "", host=args.host)
+        record = append_feedback(
+            args.feedback,
+            args.note,
+            prompt=args.prompt or "",
+            host=args.host,
+            expected_pages=args.expected_page,
+            expected_queries=args.expected_query,
+            ref=args.ref,
+        )
         print(json.dumps({"status": "recorded", "feedback": record}, ensure_ascii=False))
         return 0
 
