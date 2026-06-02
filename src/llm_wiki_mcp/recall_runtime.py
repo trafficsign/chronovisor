@@ -14,7 +14,8 @@ import re
 import sys
 import time
 import tomllib
-from dataclasses import asdict, dataclass, field
+from collections import deque
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -39,10 +40,22 @@ SYSTEM_ENVELOPE_RE = re.compile(
     r"^\s*<(task-notification|system-reminder|system-notification)\b",
     re.IGNORECASE,
 )
+SYSTEM_BLOCK_RE = re.compile(
+    r"(?ims)(^|\n)\s*<(task-notification|system-reminder|system-notification)\b.*?</\2>\s*"
+)
+SYSTEM_BLOCK_TO_END_RE = re.compile(
+    r"(?ims)(^|\n)\s*<(task-notification|system-reminder|system-notification)\b.*\Z"
+)
+RECALL_CONTEXT_BLOCK_RE = re.compile(r"(?ms)(^|\n)\s*\[RECALL_CONTEXT\].*?\[/RECALL_CONTEXT\]\s*")
+RECALL_CONTEXT_TO_END_RE = re.compile(r"(?ms)(^|\n)\s*\[RECALL_CONTEXT\].*\Z")
 CODEX_INTERNAL_SUGGESTION_RE = re.compile(
     r"^\s*#\s*Overview\s+Generate\s+0\s+to\s+3\s+hyperpersonalized\s+suggestions\b",
     re.IGNORECASE,
 )
+CODEX_INTERNAL_SUGGESTION_BLOCK_RE = re.compile(
+    r"(?ims)(^|\n)\s*#\s*Overview\s+Generate\s+0\s+to\s+3\s+hyperpersonalized\s+suggestions\b.*\Z"
+)
+MACHINE_TAG_RE = re.compile(r"^\s*<([a-z][a-z0-9-]{2,})\b", re.IGNORECASE)
 
 PAST_REFERENCE_TERMS = [
     "昨日",
@@ -153,6 +166,7 @@ class RecallPolicy:
     semantic: bool = False
     log_decisions: bool = True
     avoid_heavy_personal_context_in_chitchat: bool = True
+    use_feedback_suppressions: bool = True
     judge_mode: str = "auto"  # off | auto | always
     judge_model: str = "qwen3.6:35b-a3b-q8_0"
     judge_timeout_ms: int = 4000
@@ -249,6 +263,8 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             policy.avoid_heavy_personal_context_in_chitchat = behavior[
                 "avoid_heavy_personal_context_in_chitchat"
             ]
+        if isinstance(behavior.get("use_feedback_suppressions"), bool):
+            policy.use_feedback_suppressions = behavior["use_feedback_suppressions"]
 
 
 def request_from_hook_payload(payload: dict[str, Any], *, host: str, event: str) -> RecallRequest:
@@ -348,7 +364,7 @@ def evaluate_heuristic(request: RecallRequest, policy: RecallPolicy) -> tuple[fl
     return max(0.0, min(1.0, score)), reasons, matched
 
 
-def classify_non_user_prompt(prompt: str) -> str:
+def classify_non_user_prompt(prompt: str, policy: RecallPolicy | None = None) -> str:
     stripped = prompt.lstrip()
     if SYSTEM_ENVELOPE_RE.match(stripped):
         return "system notification prompt"
@@ -356,7 +372,81 @@ def classify_non_user_prompt(prompt: str) -> str:
         return "codex internal suggestion prompt"
     if stripped.startswith("[RECALL_CONTEXT]") or stripped.startswith("[/RECALL_CONTEXT]"):
         return "recall context injection"
+    if policy is None or policy.use_feedback_suppressions:
+        feedback_reason = classify_feedback_suppressed_prompt(stripped)
+        if feedback_reason:
+            return feedback_reason
     return ""
+
+
+def strip_non_user_blocks(prompt: str) -> tuple[str, list[str]]:
+    cleaned = prompt
+    reasons: list[str] = []
+    cleaned, removed = _strip_block(cleaned, SYSTEM_BLOCK_RE)
+    if removed:
+        reasons.append("stripped system notification block")
+    cleaned, removed_to_end = _strip_block(cleaned, SYSTEM_BLOCK_TO_END_RE)
+    if removed_to_end and "stripped system notification block" not in reasons:
+        reasons.append("stripped system notification block")
+
+    cleaned, removed = _strip_block(cleaned, RECALL_CONTEXT_BLOCK_RE)
+    if removed:
+        reasons.append("stripped recall context block")
+    cleaned, removed_to_end = _strip_block(cleaned, RECALL_CONTEXT_TO_END_RE)
+    if removed_to_end and "stripped recall context block" not in reasons:
+        reasons.append("stripped recall context block")
+
+    cleaned, removed = _strip_block(cleaned, CODEX_INTERNAL_SUGGESTION_BLOCK_RE)
+    if removed:
+        reasons.append("stripped codex internal suggestion block")
+
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip(), reasons
+
+
+def _strip_block(text: str, pattern: re.Pattern[str]) -> tuple[str, bool]:
+    cleaned, count = pattern.subn("\n", text)
+    return cleaned, count > 0
+
+
+def classify_feedback_suppressed_prompt(prompt: str) -> str:
+    prompt_key = _feedback_key(prompt)
+    if not prompt_key:
+        return ""
+    prompt_tag = MACHINE_TAG_RE.match(prompt)
+    for record in recent_false_positive_feedback():
+        feedback_prompt = record.get("prompt", "")
+        if not isinstance(feedback_prompt, str):
+            continue
+        feedback_key = _feedback_key(feedback_prompt)
+        if feedback_key and prompt_key == feedback_key:
+            return "feedback false-positive prompt"
+        feedback_tag = MACHINE_TAG_RE.match(feedback_prompt)
+        if feedback_tag and prompt_tag:
+            feedback_tag_name = feedback_tag.group(1).lower()
+            if prompt_tag.group(1).lower() == feedback_tag_name:
+                return f"feedback false-positive tag <{feedback_tag_name}>"
+    return ""
+
+
+def recent_false_positive_feedback(limit: int = 100) -> list[dict[str, Any]]:
+    try:
+        with RECALL_FEEDBACK_FILE.open(encoding="utf-8") as f:
+            lines = deque(f, maxlen=limit)
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and record.get("kind") == "false-positive":
+            records.append(record)
+    return records
+
+
+def _feedback_key(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().lower()
 
 
 def _matched_terms(prompt_lower: str, terms: list[str]) -> list[str]:
@@ -641,7 +731,7 @@ def run_recall(
             latency_ms=_elapsed_ms(started),
         )
 
-    skip_reason = classify_non_user_prompt(request.prompt)
+    skip_reason = classify_non_user_prompt(request.prompt, policy)
     if skip_reason:
         result = RecallResult(
             status="skipped",
@@ -656,12 +746,31 @@ def run_recall(
             append_recall_log(request, result)
         return result
 
-    score, reasons, matched = evaluate_heuristic(request, policy)
+    active_request = request
+    cleaned_prompt, stripped_reasons = strip_non_user_blocks(request.prompt)
+    if stripped_reasons:
+        if not cleaned_prompt:
+            result = RecallResult(
+                status="skipped",
+                decision="none",
+                confidence=0.0,
+                queries=[],
+                reasons=stripped_reasons,
+                matched_terms={},
+                latency_ms=_elapsed_ms(started),
+            )
+            if policy.log_decisions:
+                append_recall_log(request, result)
+            return result
+        active_request = replace(request, prompt=cleaned_prompt)
+
+    score, reasons, matched = evaluate_heuristic(active_request, policy)
+    reasons = stripped_reasons + reasons
     used_judge = False
     judge_reason = ""
     judge_queries: list[str] = []
     if should_run_judge(score, policy):
-        judge_score, judge_queries, judge_reason = run_local_judge(request, score, policy)
+        judge_score, judge_queries, judge_reason = run_local_judge(active_request, score, policy)
         used_judge = judge_score is not None
         if judge_score is not None:
             score = max(score, judge_score)
@@ -671,7 +780,7 @@ def run_recall(
             reasons.append(judge_reason)
 
     decision = decision_from_score(score, policy)
-    queries = build_queries(request, matched, judge_queries, policy) if decision != "none" else []
+    queries = build_queries(active_request, matched, judge_queries, policy) if decision != "none" else []
 
     context_items: list[ContextItem] = []
     error = ""
