@@ -542,6 +542,7 @@ def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None
     assert record["decision"] == "read"
     assert record["confidence"] == result.confidence
     assert record["queries"] == result.queries
+    assert record["prompt_hash"]
     assert record["judge_confidence"] is None
     assert "past reference term" in record["reasons"]
 
@@ -682,3 +683,26 @@ def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> N
     assert record["snapshot"]["decision_id"] == "20260602T100000-deadbeef"
     assert record["snapshot"]["score"] == 0.34
     assert record["snapshot"]["judge_reason"] == "不要"
+
+
+def test_missed_candidate_feedback_does_not_suppress_runtime(tmp_path, monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+    prompt = "昨日LLM Wikiのフック直したやつ、Claude Codeにも入れられる?"
+    append_feedback("missed_candidate", prompt=prompt, extra={"source": "auditor"})
+
+    result = run_recall(
+        RecallRequest(
+            host="test",
+            event="UserPromptSubmit",
+            prompt=prompt,
+            cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        ),
+        RecallPolicy(judge_mode="off", log_decisions=False),
+        perform_search=False,
+    )
+
+    assert result.decision == "read"
+    assert "feedback false-positive prompt" not in result.reasons

@@ -8,6 +8,7 @@ answers. Claude Code and Codex only need thin adapters around this CLI.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -233,6 +234,10 @@ def load_policy(path: Path = RECALL_CONFIG_FILE) -> RecallPolicy:
 def new_decision_id() -> str:
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
     return f"{ts}-{uuid.uuid4().hex[:8]}"
+
+
+def stable_prompt_hash(text: str) -> str:
+    return hashlib.sha1(_feedback_key(text).encode("utf-8")).hexdigest()[:16]
 
 
 def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
@@ -891,6 +896,8 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "event": request.event,
         "cwd": request.cwd,
         "session_id": request.session_id,
+        "prompt_hash": stable_prompt_hash(request.prompt),
+        "prompt_chars": len(request.prompt),
         "prompt_preview": request.prompt[:300],
         "decision": result.decision,
         "confidence": result.confidence,
@@ -915,6 +922,8 @@ def recall_log_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "event": record.get("event", ""),
         "cwd": record.get("cwd", ""),
         "session_id": record.get("session_id", ""),
+        "prompt_hash": record.get("prompt_hash", ""),
+        "prompt_chars": record.get("prompt_chars", 0),
         "prompt_preview": record.get("prompt_preview", ""),
         "decision": record.get("decision", ""),
         "confidence": record.get("confidence", 0.0),
@@ -953,6 +962,7 @@ def recent_recall_logs(limit: int = 10) -> list[dict[str, Any]]:
                     "host": snapshot["host"],
                     "decision": snapshot["decision"],
                     "confidence": snapshot["confidence"],
+                    "prompt_hash": snapshot["prompt_hash"],
                     "prompt_preview": snapshot["prompt_preview"],
                     "queries": snapshot["queries"],
                     "pages": snapshot["pages"],
@@ -988,6 +998,7 @@ def append_feedback(
     expected_pages: list[str] | None = None,
     expected_queries: list[str] | None = None,
     ref: str = "",
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     snapshot = recall_log_snapshot(found) if ref and (found := find_recall_log(ref)) else None
     record = {
@@ -1001,6 +1012,10 @@ def append_feedback(
         "ref": ref,
         "snapshot": snapshot,
     }
+    if extra:
+        for key, value in extra.items():
+            if key not in {"ts", "kind"}:
+                record[key] = value
     append_jsonl(RECALL_FEEDBACK_FILE, record)
     return record
 
@@ -1062,7 +1077,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--feedback",
-        choices=["missed", "false-positive", "useful"],
+        choices=["missed", "missed_candidate", "false-positive", "useful"],
         help="Record human feedback instead of running recall.",
     )
     parser.add_argument("--note", default="", help="Feedback note.")
