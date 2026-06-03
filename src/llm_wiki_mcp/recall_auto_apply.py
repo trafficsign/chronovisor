@@ -19,6 +19,7 @@ from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.frontmatter import patch as patch_frontmatter
 from llm_wiki_mcp.recall_hints import QUERY_HINTS_FILE, add_query_hint
 from llm_wiki_mcp.recall_runtime import RECALL_CONFIG_FILE, RECALL_DIR, RECALL_FEEDBACK_FILE, append_jsonl
+from llm_wiki_mcp.runtime_config import active_config_file
 from llm_wiki_mcp.tags import record_new_tag, validate_tag
 
 
@@ -35,6 +36,7 @@ class AutoApplyPolicy:
 
 def load_auto_apply_policy(path: Path = RECALL_CONFIG_FILE) -> AutoApplyPolicy:
     policy = AutoApplyPolicy()
+    path = active_config_file(path)
     if not path.exists():
         return policy
     try:

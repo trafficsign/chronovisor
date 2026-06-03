@@ -33,6 +33,7 @@ from llm_wiki_mcp.recall_runtime import (
     recall_log_snapshot,
     stable_prompt_hash,
 )
+from llm_wiki_mcp.runtime_config import active_config_file, normalize_audit_config
 from llm_wiki_mcp.search import search as run_search
 
 
@@ -145,9 +146,10 @@ class AuditDecision:
 
 def load_audit_policy(path: Path = RECALL_CONFIG_FILE) -> AuditPolicy:
     policy = AuditPolicy()
+    path = active_config_file(path)
     if path.exists():
         try:
-            data = tomllib.loads(path.read_text())
+            data = normalize_audit_config(tomllib.loads(path.read_text()))
         except (OSError, tomllib.TOMLDecodeError):
             data = {}
         policy = _apply_config(policy, data)

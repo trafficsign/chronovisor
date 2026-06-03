@@ -25,6 +25,10 @@ from typing import Any
 import httpx
 
 from llm_wiki_mcp.index_store import get_store
+from llm_wiki_mcp.runtime_config import (
+    active_config_file,
+    normalize_recall_config,
+)
 from llm_wiki_mcp.search import search as run_search
 from llm_wiki_mcp.wiki import WIKI_ROOT, find_page, init_wiki
 
@@ -32,7 +36,7 @@ from llm_wiki_mcp.wiki import WIKI_ROOT, find_page, init_wiki
 RECALL_DIR = WIKI_ROOT / "recall"
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
-RECALL_CONFIG_FILE = WIKI_ROOT / "recall.toml"
+RECALL_CONFIG_FILE = active_config_file()
 
 TRIVIAL_PROMPT_RE = re.compile(
     r"^\s*(はい|いいえ|うん|おう|ok|okay|yes|no|y|n|ありがとう|thanks|thx|了解|りょ)\s*[。.!！?？]*\s*$",
@@ -218,9 +222,10 @@ class RecallResult:
 
 def load_policy(path: Path = RECALL_CONFIG_FILE) -> RecallPolicy:
     policy = RecallPolicy()
+    path = active_config_file(path)
     if path.exists():
         try:
-            data = tomllib.loads(path.read_text())
+            data = normalize_recall_config(tomllib.loads(path.read_text()))
         except (OSError, tomllib.TOMLDecodeError):
             data = {}
         _apply_config(policy, data)
