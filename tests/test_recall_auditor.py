@@ -212,6 +212,7 @@ def test_cli_records_missed_candidate_with_snapshot(tmp_path, monkeypatch, capsy
             decision_id,
             "--state-file",
             str(state_file),
+            "--no-auto-apply",
             "--auditor-json",
             auditor_json,
         ]

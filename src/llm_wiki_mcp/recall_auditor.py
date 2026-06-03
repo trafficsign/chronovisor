@@ -77,6 +77,10 @@ AUDITOR_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": sorted(ACTION_TYPES),
         },
+        "action_payload": {
+            "type": "object",
+            "additionalProperties": True,
+        },
     },
 }
 
@@ -133,6 +137,7 @@ class AuditDecision:
     expected_pages: list[str]
     missing_signal: str
     action_type: str
+    action_payload: dict[str, Any]
     lane: str
     auto_apply_eligible: bool
     normalize_key: str
@@ -244,9 +249,12 @@ def parse_auditor_output(output: str, top_pages: list[dict[str, Any]]) -> AuditD
 
     reason_code = normalize_reason_code(parsed.get("reason_code"), missed=missed)
     action_type = normalize_action_type(parsed.get("action_type"))
+    payload = parsed.get("action_payload")
+    action_payload = payload if isinstance(payload, dict) else {}
     if not missed:
         reason_code = "valid_skip"
         action_type = "none"
+        action_payload = {}
 
     top_page_ids = [str(page.get("page_id", "")) for page in top_pages if page.get("page_id")]
     raw_expected = parsed.get("expected_pages")
@@ -271,6 +279,7 @@ def parse_auditor_output(output: str, top_pages: list[dict[str, Any]]) -> AuditD
         expected_pages=expected_pages,
         missing_signal=missing_signal.strip(),
         action_type=action_type,
+        action_payload=action_payload,
         lane=lane,
         auto_apply_eligible=auto_apply_eligible,
         normalize_key=build_normalize_key(reason_code, expected_pages, missing_signal),
@@ -654,6 +663,7 @@ def feedback_extra(
         "missing_signal": decision.missing_signal,
         "normalize_key": decision.normalize_key,
         "action_type": decision.action_type,
+        "action_payload": decision.action_payload,
         "lane": decision.lane,
         "auto_apply_eligible": decision.auto_apply_eligible,
         "top_pages": top_pages,
@@ -743,6 +753,7 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
             "lane": decision.lane,
             "auto_apply_eligible": decision.auto_apply_eligible,
             "normalize_key": decision.normalize_key,
+            "action_payload": decision.action_payload,
             "latency_ms": latency_ms,
         },
     }
@@ -786,7 +797,22 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
     if session_file and not args.ignore_state:
         update_state(state, session_file=session_file, scanned_until_line=scanned_until_line, status="recorded")
         write_state(state_file, state)
-    return {**base, "status": "recorded", "feedback": record}
+    result = {**base, "status": "recorded", "feedback": record}
+    if not getattr(args, "no_auto_apply", False):
+        try:
+            from llm_wiki_mcp.recall_auto_apply import apply_feedback_file
+
+            result["auto_apply"] = apply_feedback_file(
+                config_file=Path(args.config).expanduser(),
+                min_count=getattr(args, "auto_apply_min_count", None),
+                dry_run=False,
+            )
+        except Exception as exc:
+            result["auto_apply"] = {
+                "status": "error",
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -808,6 +834,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--extract-only", action="store_true")
     parser.add_argument("--force", action="store_true", help="Run even when auditor config is disabled.")
     parser.add_argument("--audit-read", action="store_true", help="Also audit turns where recall already decided read.")
+    parser.add_argument("--no-auto-apply", action="store_true", help="Record candidates without applying auto-lane actions.")
+    parser.add_argument("--auto-apply-min-count", type=int, help="Override auto-apply same-pattern threshold.")
     parser.add_argument("--top-k", type=int)
     parser.add_argument("--min-confidence", type=float)
     parser.add_argument(

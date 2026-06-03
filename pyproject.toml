@@ -17,6 +17,7 @@ llm-wiki-dashboard = "llm_wiki_mcp.dashboard:main"
 llm-wiki-self-heal = "llm_wiki_mcp.self_heal:main"
 llm-wiki-recall = "llm_wiki_mcp.recall_runtime:main"
 llm-wiki-recall-audit = "llm_wiki_mcp.recall_auditor:main"
+llm-wiki-recall-auto-apply = "llm_wiki_mcp.recall_auto_apply:main"
 
 [build-system]
 requires = ["hatchling"]

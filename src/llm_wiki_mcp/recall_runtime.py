@@ -654,6 +654,17 @@ def collect_context(queries: list[str], decision: str, policy: RecallPolicy) -> 
 
     items: list[ContextItem] = []
     seen: set[str] = set()
+    for page_id in query_hint_page_ids(queries, limit=policy.max_pages):
+        if page_id in seen:
+            continue
+        hinted = context_item_from_page_id(page_id, queries, decision, score=1.0)
+        if hinted is None:
+            continue
+        seen.add(page_id)
+        items.append(hinted)
+        if len(items) >= policy.max_pages:
+            return items
+
     for query in queries:
         results, _mode = run_search(query=query, top_n=policy.max_pages, semantic=policy.semantic)
         for result in results:
@@ -677,6 +688,47 @@ def collect_context(queries: list[str], decision: str, policy: RecallPolicy) -> 
             if len(items) >= policy.max_pages:
                 return items
     return items
+
+
+def query_hint_page_ids(queries: list[str], *, limit: int) -> list[str]:
+    try:
+        from llm_wiki_mcp.recall_hints import matching_hint_page_ids
+
+        return matching_hint_page_ids(queries, limit=limit)
+    except Exception:
+        return []
+
+
+def context_item_from_page_id(page_id: str, queries: list[str], decision: str, *, score: float) -> ContextItem | None:
+    path = find_page(page_id)
+    if not path or not path.exists():
+        return None
+    title = page_id
+    updated = ""
+    try:
+        from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+
+        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        if isinstance(meta.get("title"), str):
+            title = meta["title"]
+        if isinstance(meta.get("updated"), str):
+            updated = meta["updated"]
+    except OSError:
+        return None
+    except Exception:
+        pass
+    snippets: list[str] = []
+    if decision == "read":
+        snippet = excerpt_page(page_id, queries, max_chars=650)
+        if snippet:
+            snippets = [snippet]
+    return ContextItem(
+        page_id=page_id,
+        title=title,
+        updated=updated,
+        score=score,
+        snippets=snippets,
+    )
 
 
 def excerpt_page(page_id: str, queries: list[str], max_chars: int = 650) -> str:
