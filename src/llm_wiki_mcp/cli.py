@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from llm_wiki_mcp.runtime_config import config_summary, load_hook_policy
 CODEX_HOOKS_FILE = Path.home() / ".config/codex/hooks.json"
 CODEX_CONFIG_FILE = Path.home() / ".config/codex/config.toml"
 CLAUDE_SETTINGS_FILE = Path.home() / "dotfiles/claude/settings.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -24,6 +26,14 @@ def read_json(path: Path) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def read_jsonl_counter(path: Path, field: str) -> Counter[str]:
@@ -119,6 +129,246 @@ def _codex_event_name(event: str) -> str:
     return mapping.get(event, event.lower())
 
 
+def _codex_state_index(event: str, group_i: int, hook_i: int) -> str:
+    return f"{_codex_event_name(event)}:{group_i}:{hook_i}"
+
+
+def default_hook_command_prefix() -> str:
+    if (PROJECT_ROOT / "pyproject.toml").exists():
+        return f"uv run --project {PROJECT_ROOT} llm-wiki-hook"
+    return "llm-wiki-hook"
+
+
+def _is_llm_wiki_command(command: object) -> bool:
+    if not isinstance(command, str):
+        return False
+    markers = (
+        "llm-wiki-hook",
+        "llm-wiki-recall",
+        "llm-wiki-codex-save",
+        "llm-wiki-claude-code-save",
+        "codex_recall_hook.sh",
+        "codex_wiki_save_hook.sh",
+        "codex_recall_audit_hook.sh",
+        "claude_code_recall_hook.sh",
+        "claude_code_wiki_save_hook.sh",
+        "claude_code_recall_audit_hook.sh",
+    )
+    return any(marker in command for marker in markers)
+
+
+def _hook(type_: str, command: str, timeout: int | None = None) -> dict[str, Any]:
+    data: dict[str, Any] = {"type": type_, "command": command}
+    if timeout is not None:
+        data["timeout"] = timeout
+    return data
+
+
+def _replace_event_llm_wiki_hooks(
+    data: dict[str, Any],
+    event: str,
+    new_hooks: list[dict[str, Any]],
+) -> None:
+    hooks = data.setdefault("hooks", {})
+    groups = hooks.setdefault(event, [{"hooks": []}])
+    if not groups:
+        groups.append({"hooks": []})
+    group = groups[0]
+    existing = group.setdefault("hooks", [])
+    kept: list[dict[str, Any]] = []
+    insert_at: int | None = None
+    for hook in existing:
+        command = hook.get("command") if isinstance(hook, dict) else ""
+        if _is_llm_wiki_command(command):
+            if insert_at is None:
+                insert_at = len(kept)
+            continue
+        kept.append(hook)
+    if insert_at is None:
+        insert_at = len(kept)
+    group["hooks"] = kept[:insert_at] + new_hooks + kept[insert_at:]
+
+
+def _llm_wiki_codex_state_indexes(data: dict[str, Any], event: str) -> set[str]:
+    indexes: set[str] = set()
+    for group_i, group in enumerate(data.get("hooks", {}).get(event, [])):
+        if not isinstance(group, dict):
+            continue
+        for hook_i, hook in enumerate(group.get("hooks", [])):
+            if isinstance(hook, dict) and _is_llm_wiki_command(hook.get("command")):
+                indexes.add(_codex_state_index(event, group_i, hook_i))
+    return indexes
+
+
+def _find_codex_state_index(data: dict[str, Any], event: str, command: str) -> str:
+    for group_i, group in enumerate(data.get("hooks", {}).get(event, [])):
+        if not isinstance(group, dict):
+            continue
+        for hook_i, hook in enumerate(group.get("hooks", [])):
+            if isinstance(hook, dict) and hook.get("command") == command:
+                return _codex_state_index(event, group_i, hook_i)
+    raise ValueError(f"installed hook not found for {event}: {command}")
+
+
+def install_codex_hooks(command_prefix: str | None = None, *, dry_run: bool = False) -> dict[str, Any]:
+    prefix = command_prefix or default_hook_command_prefix()
+    data = read_json(CODEX_HOOKS_FILE)
+    if not data:
+        data = {"hooks": {}}
+    stale_state_indexes = (
+        _llm_wiki_codex_state_indexes(data, "UserPromptSubmit")
+        | _llm_wiki_codex_state_indexes(data, "Stop")
+    )
+
+    user_command = (
+        "CODEX_HOME=/Users/trafficsign/.config/codex "
+        f"{prefix} --host codex --event UserPromptSubmit --hook"
+    )
+    stop_command = (
+        "CODEX_HOME=/Users/trafficsign/.config/codex "
+        f"{prefix} --host codex --event Stop --hook"
+    )
+    user_hook = _hook("command", user_command, 5000)
+    stop_hook = _hook("command", stop_command, 5000)
+    _replace_event_llm_wiki_hooks(data, "UserPromptSubmit", [user_hook])
+    _replace_event_llm_wiki_hooks(data, "Stop", [stop_hook])
+
+    hashes = {
+        _find_codex_state_index(data, "UserPromptSubmit", user_command): _canonical_hook_hash(
+            "user_prompt_submit",
+            user_hook,
+        ),
+        _find_codex_state_index(data, "Stop", stop_command): _canonical_hook_hash(
+            "stop",
+            stop_hook,
+        ),
+    }
+    stale_state_indexes -= set(hashes)
+    if not dry_run:
+        write_json(CODEX_HOOKS_FILE, data)
+        update_codex_trust_state(CODEX_CONFIG_FILE, hashes, remove_indexes=stale_state_indexes)
+    return {
+        "host": "codex",
+        "hooks_file": str(CODEX_HOOKS_FILE),
+        "config_file": str(CODEX_CONFIG_FILE),
+        "commands": {"user_prompt_submit": user_command, "stop": stop_command},
+        "trusted_hashes": hashes,
+        "dry_run": dry_run,
+    }
+
+
+def install_claude_code_hooks(command_prefix: str | None = None, *, dry_run: bool = False) -> dict[str, Any]:
+    prefix = command_prefix or default_hook_command_prefix()
+    data = read_json(CLAUDE_SETTINGS_FILE)
+    if not data:
+        data = {"hooks": {}}
+    user_command = f"{prefix} --host claude-code --event UserPromptSubmit --hook"
+    stop_command = f"{prefix} --host claude-code --event Stop --hook"
+    _replace_event_llm_wiki_hooks(
+        data,
+        "UserPromptSubmit",
+        [_hook("command", user_command, 5000)],
+    )
+    _replace_event_llm_wiki_hooks(
+        data,
+        "Stop",
+        [_hook("command", stop_command, 5000)],
+    )
+    if not dry_run:
+        write_json(CLAUDE_SETTINGS_FILE, data)
+    return {
+        "host": "claude-code",
+        "settings_file": str(CLAUDE_SETTINGS_FILE),
+        "commands": {"user_prompt_submit": user_command, "stop": stop_command},
+        "dry_run": dry_run,
+    }
+
+
+def _state_key(event_and_index: str) -> str:
+    return f'/Users/trafficsign/.config/codex/hooks.json:{event_and_index}'
+
+
+def _section_header(key: str) -> str:
+    return f'[hooks.state."{key}"]'
+
+
+def _render_state_section(key: str, trusted_hash: str) -> list[str]:
+    return [
+        f'{_section_header(key)}\n',
+        "enabled = true\n",
+        f'trusted_hash = "{trusted_hash}"\n',
+        "\n",
+    ]
+
+
+def update_codex_trust_state(
+    config_file: Path,
+    hashes: dict[str, str],
+    *,
+    remove_indexes: set[str] | None = None,
+) -> None:
+    try:
+        lines = config_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        lines = ["[hooks.state]\n", "\n"]
+
+    desired = {
+        _state_key(index): trusted_hash
+        for index, trusted_hash in hashes.items()
+    }
+    remove = {_state_key(index) for index in (remove_indexes or set())}
+    seen: set[str] = set()
+    out: list[str] = []
+    i = 0
+    section_re = re.compile(r'^\[hooks\.state\."(.+)"\]\s*$')
+    while i < len(lines):
+        match = section_re.match(lines[i].strip())
+        if not match:
+            out.append(lines[i])
+            i += 1
+            continue
+        key = match.group(1)
+        j = i + 1
+        while j < len(lines) and not lines[j].startswith("["):
+            j += 1
+        if key in remove:
+            i = j
+            continue
+        if key in desired:
+            out.extend(_render_state_section(key, desired[key]))
+            seen.add(key)
+            i = j
+            continue
+        out.extend(lines[i:j])
+        i = j
+
+    if not any(line.strip() == "[hooks.state]" for line in out):
+        out.append("\n[hooks.state]\n\n")
+    if out and out[-1].strip():
+        out.append("\n")
+    for key, trusted_hash in desired.items():
+        if key not in seen:
+            out.extend(_render_state_section(key, trusted_hash))
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text("".join(out), encoding="utf-8")
+
+
+def install_hooks(host: str, command_prefix: str | None = None, *, dry_run: bool = False) -> dict[str, Any]:
+    if host == "codex":
+        return install_codex_hooks(command_prefix, dry_run=dry_run)
+    if host == "claude-code":
+        return install_claude_code_hooks(command_prefix, dry_run=dry_run)
+    if host == "all":
+        return {
+            "host": "all",
+            "results": [
+                install_codex_hooks(command_prefix, dry_run=dry_run),
+                install_claude_code_hooks(command_prefix, dry_run=dry_run),
+            ],
+        }
+    raise ValueError(f"unsupported host: {host}")
+
+
 def inspect_hooks() -> dict[str, Any]:
     codex_data = read_json(CODEX_HOOKS_FILE)
     claude_data = read_json(CLAUDE_SETTINGS_FILE)
@@ -149,6 +399,30 @@ def inspect_hooks() -> dict[str, Any]:
     }
 
 
+def _has_user_prompt_hook(entries: list[dict[str, Any]]) -> bool:
+    for entry in entries:
+        if entry.get("event") != "UserPromptSubmit":
+            continue
+        command = entry.get("command", "")
+        if "llm-wiki-hook" in command and "--event UserPromptSubmit" in command:
+            return True
+        if "llm-wiki" in command and "recall" in command:
+            return True
+    return False
+
+
+def _has_stop_hook(entries: list[dict[str, Any]]) -> bool:
+    for entry in entries:
+        if entry.get("event") != "Stop":
+            continue
+        command = entry.get("command", "")
+        if "llm-wiki-hook" in command and "--event Stop" in command:
+            return True
+        if "llm-wiki" in command and ("save" in command or "audit" in command):
+            return True
+    return False
+
+
 def doctor() -> dict[str, Any]:
     status = build_status()
     hooks = inspect_hooks()
@@ -163,13 +437,23 @@ def doctor() -> dict[str, Any]:
     check("config", status["config"]["exists"], status["config"]["path"])
     check(
         "codex.recall_hook",
-        any("llm-wiki" in e.get("command", "") and "recall" in e.get("command", "") for e in hooks["codex"]["entries"]),
+        _has_user_prompt_hook(hooks["codex"]["entries"]),
         "Codex UserPromptSubmit recall hook",
     )
     check(
+        "codex.stop_hook",
+        _has_stop_hook(hooks["codex"]["entries"]),
+        "Codex Stop save/audit hook",
+    )
+    check(
         "claude.recall_hook",
-        any("llm-wiki" in e.get("command", "") and "recall" in e.get("command", "") for e in hooks["claude_code"]["entries"]),
+        _has_user_prompt_hook(hooks["claude_code"]["entries"]),
         "Claude Code UserPromptSubmit recall hook",
+    )
+    check(
+        "claude.stop_hook",
+        _has_stop_hook(hooks["claude_code"]["entries"]),
+        "Claude Code Stop save/audit hook",
     )
     check(
         "audit.feedback",
@@ -212,6 +496,11 @@ def main(argv: list[str] | None = None) -> int:
     hooks_sub = hooks_parser.add_subparsers(dest="hooks_command", required=True)
     hooks_inspect = hooks_sub.add_parser("inspect", help="List configured host hooks.")
     hooks_inspect.add_argument("--json", action="store_true")
+    hooks_install = hooks_sub.add_parser("install", help="Install direct host hook entries.")
+    hooks_install.add_argument("--host", choices=("codex", "claude-code", "all"), required=True)
+    hooks_install.add_argument("--command-prefix", help="Override the llm-wiki-hook command prefix.")
+    hooks_install.add_argument("--dry-run", action="store_true")
+    hooks_install.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     if args.command == "status":
@@ -240,6 +529,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"== {host} ==")
                 for entry in section["entries"]:
                     print(f"{entry['event']}:{entry['group']}:{entry['index']}\t{entry['command']}")
+        return 0
+    if args.command == "hooks" and args.hooks_command == "install":
+        data = install_hooks(args.host, args.command_prefix, dry_run=args.dry_run)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            results = data.get("results", [data])
+            action = "would install" if args.dry_run else "installed"
+            for result in results:
+                print(f"{action}\t{result['host']}")
+                for event_name, command in result["commands"].items():
+                    print(f"{event_name}\t{command}")
         return 0
     return 0
 

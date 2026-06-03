@@ -72,3 +72,187 @@ def test_hooks_inspect_json_handles_missing_host_files(tmp_path, monkeypatch, ca
     assert output["codex"]["entries"] == []
     assert output["claude_code"]["entries"] == []
     assert output["hook_policy"]["stop_audit"] is True
+
+
+def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeypatch) -> None:
+    patch_wiki(tmp_path, monkeypatch)
+    hooks_file = tmp_path / "codex/hooks.json"
+    config_file = tmp_path / "codex/config.toml"
+    hooks_file.parent.mkdir(parents=True)
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": "cmux notify", "timeout": 1000},
+                                {
+                                    "type": "command",
+                                    "command": "bash /repo/scripts/codex_recall_hook.sh",
+                                    "timeout": 5000,
+                                },
+                            ]
+                        }
+                    ],
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": "cmux stop", "timeout": 1000},
+                                {
+                                    "type": "command",
+                                    "command": "bash /repo/scripts/codex_wiki_save_hook.sh",
+                                    "timeout": 5000,
+                                },
+                                {
+                                    "type": "command",
+                                    "command": "bash /repo/scripts/codex_recall_audit_hook.sh",
+                                    "timeout": 5000,
+                                },
+                            ]
+                        }
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_file.write_text(
+        "\n".join(
+            [
+                "[hooks.state]",
+                "",
+                '[hooks.state."/Users/trafficsign/.config/codex/hooks.json:user_prompt_submit:0:1"]',
+                "enabled = true",
+                'trusted_hash = "old-user"',
+                "",
+                '[hooks.state."/Users/trafficsign/.config/codex/hooks.json:stop:0:1"]',
+                "enabled = true",
+                'trusted_hash = "old-stop-save"',
+                "",
+                '[hooks.state."/Users/trafficsign/.config/codex/hooks.json:stop:0:2"]',
+                "enabled = true",
+                'trusted_hash = "old-stop-audit"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "CODEX_HOOKS_FILE", hooks_file)
+    monkeypatch.setattr(cli, "CODEX_CONFIG_FILE", config_file)
+
+    result = cli.install_codex_hooks("llm-wiki-hook")
+
+    installed = json.loads(hooks_file.read_text(encoding="utf-8"))
+    user_hooks = installed["hooks"]["UserPromptSubmit"][0]["hooks"]
+    stop_hooks = installed["hooks"]["Stop"][0]["hooks"]
+    assert [hook["command"] for hook in user_hooks] == [
+        "cmux notify",
+        (
+            "CODEX_HOME=/Users/trafficsign/.config/codex "
+            "llm-wiki-hook --host codex --event UserPromptSubmit --hook"
+        ),
+    ]
+    assert [hook["command"] for hook in stop_hooks] == [
+        "cmux stop",
+        (
+            "CODEX_HOME=/Users/trafficsign/.config/codex "
+            "llm-wiki-hook --host codex --event Stop --hook"
+        ),
+    ]
+    assert set(result["trusted_hashes"]) == {"user_prompt_submit:0:1", "stop:0:1"}
+    config_text = config_file.read_text(encoding="utf-8")
+    assert "old-user" not in config_text
+    assert "old-stop-save" not in config_text
+    assert "old-stop-audit" not in config_text
+    assert "stop:0:2" not in config_text
+    assert result["trusted_hashes"]["user_prompt_submit:0:1"] in config_text
+    assert result["trusted_hashes"]["stop:0:1"] in config_text
+
+
+def test_install_claude_code_hooks_preserves_non_wiki_entries(tmp_path, monkeypatch) -> None:
+    patch_wiki(tmp_path, monkeypatch)
+    settings_file = tmp_path / "claude/settings.json"
+    settings_file.parent.mkdir(parents=True)
+    settings_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "bash /repo/scripts/claude_code_recall_hook.sh",
+                                    "timeout": 5000,
+                                },
+                                {"type": "command", "command": "agent-router", "timeout": 1000},
+                            ]
+                        }
+                    ],
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": "afplay done.aiff"},
+                                {"type": "command", "command": "lazy-detect", "timeout": 1000},
+                                {
+                                    "type": "command",
+                                    "command": "bash /repo/scripts/claude_code_wiki_save_hook.sh",
+                                    "timeout": 5000,
+                                },
+                                {
+                                    "type": "command",
+                                    "command": "bash /repo/scripts/claude_code_recall_audit_hook.sh",
+                                    "timeout": 5000,
+                                },
+                            ]
+                        }
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "CLAUDE_SETTINGS_FILE", settings_file)
+
+    cli.install_claude_code_hooks("llm-wiki-hook")
+
+    installed = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert [hook["command"] for hook in installed["hooks"]["UserPromptSubmit"][0]["hooks"]] == [
+        "llm-wiki-hook --host claude-code --event UserPromptSubmit --hook",
+        "agent-router",
+    ]
+    assert [hook["command"] for hook in installed["hooks"]["Stop"][0]["hooks"]] == [
+        "afplay done.aiff",
+        "lazy-detect",
+        "llm-wiki-hook --host claude-code --event Stop --hook",
+    ]
+
+
+def test_hooks_install_cli_dry_run_json(tmp_path, monkeypatch, capsys) -> None:
+    patch_wiki(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "CODEX_HOOKS_FILE", tmp_path / "codex/hooks.json")
+    monkeypatch.setattr(cli, "CODEX_CONFIG_FILE", tmp_path / "codex/config.toml")
+    monkeypatch.setattr(cli, "CLAUDE_SETTINGS_FILE", tmp_path / "claude/settings.json")
+
+    assert cli.main([
+        "hooks",
+        "install",
+        "--host",
+        "all",
+        "--command-prefix",
+        "llm-wiki-hook",
+        "--dry-run",
+        "--json",
+    ]) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["host"] == "all"
+    assert [result["host"] for result in output["results"]] == ["codex", "claude-code"]
+    assert all(result["dry_run"] for result in output["results"])
+    assert not (tmp_path / "codex/hooks.json").exists()
+    assert not (tmp_path / "claude/settings.json").exists()

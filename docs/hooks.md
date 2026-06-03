@@ -35,6 +35,20 @@ Save and audit wrappers call the dispatcher with `--only save` or
 `--only audit` to avoid duplicate work while current host settings still invoke
 two separate Stop hooks.
 
+## Install
+
+```sh
+llm-wiki hooks install --host codex
+llm-wiki hooks install --host claude-code
+llm-wiki hooks install --host all
+llm-wiki hooks install --host all --dry-run --json
+```
+
+The installer replaces only existing LLM Wiki hook commands, preserves unrelated
+host hooks, and writes direct `llm-wiki-hook` entries. For Codex it also updates
+the matching trusted hash entries in `~/.config/codex/config.toml` and removes
+stale LLM Wiki trust entries from the old split Stop hooks.
+
 ## Inspect
 
 ```sh

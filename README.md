@@ -8,7 +8,7 @@ wire host hooks for automatic save, recall, audit, and safe self-improvement.
 
 - `llm-wiki-mcp`: MCP server.
 - `llm-wiki-hook`: single hook dispatcher for Codex, Claude Code, and future hosts.
-- `llm-wiki`: operational CLI (`status`, `doctor`, `hooks inspect`).
+- `llm-wiki`: operational CLI (`status`, `doctor`, `hooks inspect`, `hooks install`).
 - `llm-wiki-recall`: synchronous recall gate.
 - `llm-wiki-recall-audit`: asynchronous missed-recall auditor.
 - `llm-wiki-recall-auto-apply`: applies safe auto-lane recall improvements.
@@ -34,6 +34,12 @@ llm-wiki-hook --host codex --event UserPromptSubmit --hook
 llm-wiki-hook --host codex --event Stop --hook
 llm-wiki-hook --host claude-code --event UserPromptSubmit --hook
 llm-wiki-hook --host claude-code --event Stop --hook
+```
+
+To update local Codex and Claude Code settings in one pass:
+
+```sh
+llm-wiki hooks install --host all
 ```
 
 See `docs/architecture.md`, `docs/config.md`, `docs/hooks.md`, and

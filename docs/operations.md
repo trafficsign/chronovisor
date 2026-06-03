@@ -20,6 +20,17 @@ llm-wiki doctor --json
 Runs lightweight operational checks for wiki directories, config, and detected
 host hooks.
 
+## Hook Install
+
+```sh
+llm-wiki hooks install --host all
+llm-wiki hooks inspect --json
+```
+
+Use the installer after changing host hook topology. It keeps non-wiki hooks in
+place, replaces legacy LLM Wiki script wrappers with direct dispatcher commands,
+and refreshes Codex trusted hashes.
+
 ## Recall Logs
 
 ```sh
