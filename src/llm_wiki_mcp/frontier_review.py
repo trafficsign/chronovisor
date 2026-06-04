@@ -122,6 +122,23 @@ def _parse_result(text: str) -> FrontierResult:
     )
 
 
+def _codex_home() -> Path:
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    default_config = Path.home() / ".config" / "codex"
+    if default_config.exists():
+        return default_config
+    return Path.home() / ".codex"
+
+
+def _frontier_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("CODEX_HOME", str(_codex_home()))
+    env.setdefault("NO_COLOR", "1")
+    return env
+
+
 def build_frontier_prompt(
     packet: dict[str, Any],
     local_decision: dict[str, Any] | None,
@@ -172,6 +189,7 @@ def _run_custom_command(command: str, prompt: str, *, timeout: int) -> FrontierR
         text=True,
         capture_output=True,
         timeout=timeout,
+        env=_frontier_env(),
     )
     output = (completed.stdout or "") + "\n" + (completed.stderr or "")
     if completed.returncode != 0:
@@ -226,6 +244,7 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
             text=True,
             capture_output=True,
             timeout=timeout,
+            env=_frontier_env(),
         )
         output_text = ""
         if output_path.exists():
