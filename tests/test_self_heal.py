@@ -110,3 +110,118 @@ def test_sandbox_drill_runs_pending_raw_to_self_heal(monkeypatch: pytest.MonkeyP
         result["aliases"]["opus-4-7-evaluation-and-industry-geopolitics"]
         == "ai/opus-4.7-evaluation-and-industry-geopolitics"
     )
+
+
+def test_frontier_human_required_sends_notification(
+    isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_wiki_mcp import self_heal
+    from llm_wiki_mcp.local_repair import LocalRepairDecision
+
+    packet = {
+        "failure_id": "auth1",
+        "raw_file": "auth-broken.md",
+        "failure_class": "triage.parse_failed",
+        "fingerprint": "triage.parse_failed",
+        "attempts": 3,
+        "error": "triage parse failed",
+        "status": "pending_local_repair",
+    }
+    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "auth1.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    sent: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        self_heal,
+        "propose_repair",
+        lambda *_args, **_kwargs: LocalRepairDecision(
+            status="escalate",
+            action="escalate_to_frontier",
+            confidence=0.9,
+            reason="needs frontier",
+            source="deterministic",
+        ),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: {
+            "decision": "needs_retry",
+            "summary": "codex auth missing",
+            "tests_run": [],
+            "commit": None,
+            "committed": False,
+            "pushed": False,
+            "risk": None,
+            "notes": None,
+            "raw_output": "401 Unauthorized",
+            "frontier_failure": {
+                "failure_class": "auth_required",
+                "rescue_status": "human_required",
+                "summary": "frontier API authentication is missing or invalid",
+                "human_required": True,
+                "notify_user": True,
+            },
+            "rescue_status": "human_required",
+            "human_required": True,
+            "notify_user": True,
+            "rescue_attempt": None,
+        },
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_send_mac_notification",
+        lambda title, body: sent.append((title, body)) or {"sent": True},
+    )
+
+    result = self_heal.handle_packet(packet_path, use_qwen=False)
+
+    assert result["status"] == "human_required"
+    assert sent == [
+        (
+            self_heal.MAC_NOTIFICATION_TITLE,
+            "Codex の認証が切れている可能性があります。ログイン確認が必要です。",
+        )
+    ]
+    updated_packet = json.loads(packet_path.read_text())
+    assert updated_packet["status"] == "human_required"
+    assert updated_packet["human_notification"]["delivery"]["sent"] is True
+
+
+def test_human_required_notification_cooldown(
+    isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import datetime, timedelta
+
+    from llm_wiki_mcp import self_heal
+
+    packet = {
+        "failure_id": "auth1",
+        "raw_file": "auth-broken.md",
+        "fingerprint": "triage.parse_failed",
+    }
+    frontier_result = {
+        "human_required": True,
+        "notify_user": True,
+        "frontier_failure": {"failure_class": "auth_required"},
+        "rescue_status": "human_required",
+    }
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        self_heal,
+        "_send_mac_notification",
+        lambda title, body: sent.append((title, body)) or {"sent": True},
+    )
+    now = datetime(2026, 6, 4, 22, 0, 0)
+
+    first = self_heal.maybe_notify_human_required(packet, frontier_result, now=now)
+    second = self_heal.maybe_notify_human_required(
+        packet,
+        frontier_result,
+        now=now + timedelta(seconds=10),
+    )
+
+    assert first["delivery"]["sent"] is True
+    assert second["reason"] == "cooldown"
+    assert len(sent) == 1

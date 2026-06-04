@@ -24,6 +24,18 @@ SELF_HEAL_STATUSES = {
     "frontier_retry",
 }
 
+HUMAN_REQUIRED_STATUSES = {
+    "human_required",
+}
+
+PENDING_REVIEW_STATUSES = {
+    "frontier_preflight_failed",
+    "pending_frontier_review",
+}
+
+MAC_NOTIFICATION_TITLE = "LLM Wiki 自己修復"
+MAC_NOTIFICATION_COOLDOWN_SECONDS = 3600
+
 
 def _repo_root() -> Path:
     configured = os.environ.get("LLM_WIKI_REPO_ROOT")
@@ -64,6 +76,10 @@ def _registry_file() -> Path:
     return _failures_dir() / "failure-registry.jsonl"
 
 
+def _notification_file() -> Path:
+    return _failures_dir() / "notifications.json"
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -78,6 +94,146 @@ def _append_registry(record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+
+def _read_notification_state() -> dict[str, Any]:
+    path = _notification_file()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"notifications": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("notifications"), dict):
+        return {"notifications": {}}
+    return data
+
+
+def _write_notification_state(state: dict[str, Any]) -> None:
+    _write_json(_notification_file(), state)
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _notification_cooldown_seconds() -> int:
+    try:
+        return int(
+            os.environ.get(
+                "LLM_WIKI_MAC_NOTIFICATION_COOLDOWN_SECONDS",
+                MAC_NOTIFICATION_COOLDOWN_SECONDS,
+            )
+        )
+    except ValueError:
+        return MAC_NOTIFICATION_COOLDOWN_SECONDS
+
+
+def _notification_key(packet: dict[str, Any], frontier_result: dict[str, Any]) -> str:
+    failure = (
+        frontier_result.get("frontier_failure")
+        if isinstance(frontier_result.get("frontier_failure"), dict)
+        else {}
+    )
+    return ":".join(
+        str(part or "unknown")
+        for part in (
+            packet.get("fingerprint") or packet.get("failure_id") or packet.get("raw_file"),
+            failure.get("failure_class") or frontier_result.get("rescue_status"),
+        )
+    )
+
+
+def _human_notification_body(packet: dict[str, Any], frontier_result: dict[str, Any]) -> str:
+    failure = (
+        frontier_result.get("frontier_failure")
+        if isinstance(frontier_result.get("frontier_failure"), dict)
+        else {}
+    )
+    failure_class = failure.get("failure_class") or "frontier"
+    if failure_class in {"auth_required", "oauth_required"}:
+        return "Codex の認証が切れている可能性があります。ログイン確認が必要です。"
+    if failure_class == "quota_or_billing_required":
+        return "Codex の quota または billing の確認が必要です。"
+    if failure_class == "keychain_permission_required":
+        return "Codex の Keychain アクセス許可が必要です。"
+    if failure_class == "frontier_tool_unavailable":
+        return "Codex CLI が見つかりません。インストール状態の確認が必要です。"
+    if failure_class == "both_frontiers_unavailable":
+        return "Codex と Claude Code の両方を呼び出せません。手動確認が必要です。"
+    raw_file = packet.get("raw_file")
+    if isinstance(raw_file, str) and raw_file:
+        return f"自己修復に人間の確認が必要です: {Path(raw_file).name}"
+    return "自己修復に人間の確認が必要です。"
+
+
+def _send_mac_notification(title: str, body: str) -> dict[str, Any]:
+    if os.environ.get("LLM_WIKI_MAC_NOTIFICATIONS", "1") in {"0", "false", "False"}:
+        return {"sent": False, "reason": "disabled"}
+    osascript = "/usr/bin/osascript"
+    if not Path(osascript).exists():
+        found = shutil.which("osascript")
+        if found is None:
+            return {"sent": False, "reason": "osascript not found"}
+        osascript = found
+    script = f"display notification {json.dumps(body)} with title {json.dumps(title)}"
+    try:
+        completed = subprocess.run(
+            [osascript, "-e", script],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        return {"sent": False, "reason": str(exc)}
+    return {
+        "sent": completed.returncode == 0,
+        "exit_code": completed.returncode,
+        "stderr": (completed.stderr or "")[-500:],
+    }
+
+
+def maybe_notify_human_required(
+    packet: dict[str, Any],
+    frontier_result: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if not frontier_result.get("human_required") and not frontier_result.get("notify_user"):
+        return {"sent": False, "reason": "not human required"}
+    now = now or datetime.now()
+    key = _notification_key(packet, frontier_result)
+    state = _read_notification_state()
+    notifications = state.setdefault("notifications", {})
+    prior = notifications.get(key) if isinstance(notifications.get(key), dict) else {}
+    prior_at = _parse_iso(prior.get("last_notified_at"))
+    cooldown = _notification_cooldown_seconds()
+    if prior_at is not None and prior_at.tzinfo is not None and now.tzinfo is None:
+        prior_at = prior_at.replace(tzinfo=None)
+    if prior_at is not None and prior_at.tzinfo is None and now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    if prior_at is not None and (now - prior_at).total_seconds() < cooldown:
+        return {
+            "sent": False,
+            "reason": "cooldown",
+            "key": key,
+            "last_notified_at": prior_at.isoformat(),
+            "cooldown_seconds": cooldown,
+        }
+    body = _human_notification_body(packet, frontier_result)
+    delivery = _send_mac_notification(MAC_NOTIFICATION_TITLE, body)
+    record = {
+        "last_notified_at": now.isoformat(),
+        "title": MAC_NOTIFICATION_TITLE,
+        "body": body,
+        "delivery": delivery,
+    }
+    notifications[key] = record
+    _write_notification_state(state)
+    return {"key": key, **record}
 
 
 def _update_packet(path: Path, packet: dict[str, Any], **updates: Any) -> None:
@@ -225,6 +381,21 @@ def _run_frontier(
     return payload
 
 
+def _frontier_final_status(frontier_result: dict[str, Any]) -> str:
+    if frontier_result.get("decision") == "approved":
+        return "frontier_approved"
+    if frontier_result.get("human_required"):
+        return "human_required"
+    rescue_status = frontier_result.get("rescue_status")
+    if rescue_status in PENDING_REVIEW_STATUSES:
+        return str(rescue_status)
+    if frontier_result.get("decision") == "needs_retry":
+        return "frontier_retry"
+    if frontier_result.get("decision") == "quarantined":
+        return "frontier_quarantined"
+    return "frontier_rejected"
+
+
 def handle_packet(
     packet_path: Path,
     *,
@@ -322,20 +493,16 @@ def handle_packet(
         decision.to_dict(),
         execute_patch=execute_frontier_patch and not dry_run,
     )
-    final_status = (
-        "frontier_approved"
-        if frontier_result.get("decision") == "approved"
-        else "frontier_retry"
-        if frontier_result.get("decision") == "needs_retry"
-        else "frontier_quarantined"
-        if frontier_result.get("decision") == "quarantined"
-        else "frontier_rejected"
-    )
+    final_status = _frontier_final_status(frontier_result)
+    human_notification = None
+    if final_status == "human_required" and not dry_run:
+        human_notification = maybe_notify_human_required(packet, frontier_result)
     _update_packet(
         packet_path,
         packet,
         status=final_status,
         frontier_result=frontier_result,
+        human_notification=human_notification,
     )
     _append_registry({
         "timestamp": datetime.now().isoformat(),
@@ -346,16 +513,31 @@ def handle_packet(
         "resolution": "frontier",
         "decision": decision.to_dict(),
         "frontier": frontier_result,
+        "human_notification": human_notification,
     })
+    event_level = (
+        "success"
+        if final_status == "frontier_approved"
+        else "error"
+        if final_status in HUMAN_REQUIRED_STATUSES
+        else "warn"
+    )
+    event_message = (
+        f"self-heal | human required for {packet.get('raw_file')}"
+        if final_status == "human_required"
+        else f"self-heal | frontier {frontier_result.get('decision')} for {packet.get('raw_file')}"
+    )
     runtime_status.safe_append_event(
-        "success" if final_status == "frontier_approved" else "warn",
-        f"self-heal | frontier {frontier_result.get('decision')} for {packet.get('raw_file')}",
+        event_level,
+        event_message,
         source="self-heal",
         packet=str(packet_path),
         frontier_status=final_status,
+        human_required=final_status == "human_required",
     )
     result["status"] = final_status
     result["frontier_result"] = frontier_result
+    result["human_notification"] = human_notification
     return result
 
 

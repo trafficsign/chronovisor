@@ -249,8 +249,28 @@ def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> 
     frontier = record.get("frontier") if isinstance(record.get("frontier"), dict) else {}
     local_decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
     decision = frontier.get("decision") or "unknown"
-    level = "success" if decision == "approved" else "warn" if decision in {"needs_retry", "quarantined"} else "error"
-    state = "resolved" if decision == "approved" else "pending" if decision == "needs_retry" else "failed"
+    rescue_status = frontier.get("rescue_status")
+    human_required = bool(frontier.get("human_required"))
+    if decision == "approved":
+        state = "resolved"
+        level = "success"
+        title = "Frontier approved"
+    elif human_required:
+        state = "failed"
+        level = "error"
+        title = "Human required"
+    elif rescue_status == "pending_frontier_review":
+        state = "pending"
+        level = "warn"
+        title = "Frontier review pending"
+    elif rescue_status == "frontier_preflight_failed":
+        state = "pending"
+        level = "warn"
+        title = "Frontier preflight failed"
+    else:
+        level = "warn" if decision in {"needs_retry", "quarantined"} else "error"
+        state = "pending" if decision == "needs_retry" else "failed"
+        title = f"Frontier {decision}"
     raw_file = record.get("raw_file") or (packet or {}).get("raw_file")
     commit = frontier.get("commit")
     detail = frontier.get("summary") or decision
@@ -261,7 +281,7 @@ def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> 
         "failure_id": record.get("failure_id"),
         "state": state,
         "level": level,
-        "title": f"Frontier {decision}",
+        "title": title,
         "detail": _shorten(detail),
         "raw_file": raw_file,
         "failure_class": record.get("failure_class") or (packet or {}).get("failure_class"),
@@ -281,7 +301,12 @@ def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> 
                 "pushed": frontier.get("pushed"),
                 "risk": frontier.get("risk"),
                 "notes": frontier.get("notes"),
+                "rescue_status": rescue_status,
+                "human_required": human_required,
+                "frontier_failure": frontier.get("frontier_failure"),
+                "rescue_attempt": frontier.get("rescue_attempt"),
             },
+            "human_notification": record.get("human_notification") or (packet or {}).get("human_notification"),
         },
     }
 
@@ -294,11 +319,14 @@ def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
         "pending_frontier",
         "frontier_running",
         "frontier_retry",
+        "frontier_preflight_failed",
+        "pending_frontier_review",
     }
     failed_statuses = {
         "local_repair_failed",
         "frontier_rejected",
         "frontier_quarantined",
+        "human_required",
     }
     state = "pending" if status in pending_statuses else "failed" if status in failed_statuses else "resolved"
     level = "info" if state == "pending" else "error" if state == "failed" else "success"
@@ -308,6 +336,9 @@ def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
         "pending_frontier": "Frontier queued",
         "frontier_running": "Frontier running",
         "frontier_retry": "Frontier retry needed",
+        "frontier_preflight_failed": "Frontier preflight failed",
+        "pending_frontier_review": "Frontier review pending",
+        "human_required": "Human required",
         "local_repair_failed": "Local repair failed",
         "frontier_rejected": "Frontier rejected",
         "frontier_quarantined": "Frontier quarantined",
@@ -332,6 +363,7 @@ def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
             "similar_existing_pages": packet.get("similar_existing_pages"),
             "local_decision": packet.get("local_decision"),
             "frontier_result": packet.get("frontier_result"),
+            "human_notification": packet.get("human_notification"),
         },
     }
 
@@ -364,6 +396,8 @@ def _self_heal_snapshot(limit: int = 12) -> dict[str, Any]:
         "pending": sum(1 for item in history if item.get("state") == "pending"),
         "failed": sum(1 for item in history if item.get("state") == "failed"),
         "frontier": sum(1 for item in history if item.get("resolution") == "frontier"),
+        "human_required": sum(1 for item in history if item.get("title") == "Human required"),
+        "pending_frontier_review": sum(1 for item in history if item.get("title") == "Frontier review pending"),
     }
     latest = history[-1] if history else None
     status = "quiet"

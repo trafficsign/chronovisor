@@ -622,6 +622,8 @@ function renderSelfHeal(selfHeal) {
     ["pending", counts.pending || 0],
     ["failed", counts.failed || 0],
     ["frontier", counts.frontier || 0],
+    ["human", counts.human_required || 0],
+    ["review", counts.pending_frontier_review || 0],
   ];
   els.selfHealCounts.innerHTML = "";
   countItems.forEach(([label, value]) => {
