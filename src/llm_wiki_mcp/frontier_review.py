@@ -15,7 +15,16 @@ from typing import Any
 FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["decision", "summary", "tests_run", "committed", "pushed"],
+    "required": [
+        "decision",
+        "summary",
+        "tests_run",
+        "commit",
+        "committed",
+        "pushed",
+        "risk",
+        "notes",
+    ],
     "properties": {
         "decision": {
             "type": "string",

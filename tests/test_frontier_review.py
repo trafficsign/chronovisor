@@ -45,3 +45,9 @@ def test_run_codex_supplies_codex_home_from_config_dir(
 
     assert result.decision == "approved"
     assert seen["env"]["CODEX_HOME"] == str(config_home)
+
+
+def test_frontier_schema_requires_all_declared_properties() -> None:
+    schema = frontier_review.FRONTIER_DECISION_SCHEMA
+
+    assert set(schema["required"]) == set(schema["properties"])
