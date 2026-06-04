@@ -305,8 +305,13 @@ def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> 
                 "human_required": human_required,
                 "frontier_failure": frontier.get("frontier_failure"),
                 "rescue_attempt": frontier.get("rescue_attempt"),
+                "access_repair": frontier.get("access_repair"),
             },
             "human_notification": record.get("human_notification") or (packet or {}).get("human_notification"),
+            "pending_frontier_review_path": (
+                record.get("pending_frontier_review_path")
+                or (packet or {}).get("pending_frontier_review_path")
+            ),
         },
     }
 

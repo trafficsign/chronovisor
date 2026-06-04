@@ -189,6 +189,77 @@ def test_frontier_human_required_sends_notification(
     assert updated_packet["human_notification"]["delivery"]["sent"] is True
 
 
+def test_frontier_pending_review_writes_artifact(
+    isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_wiki_mcp import self_heal
+    from llm_wiki_mcp.local_repair import LocalRepairDecision
+
+    packet = {
+        "failure_id": "schema1",
+        "raw_file": "schema-broken.md",
+        "failure_class": "triage.parse_failed",
+        "fingerprint": "triage.parse_failed",
+        "attempts": 3,
+        "error": "triage parse failed",
+        "status": "pending_local_repair",
+    }
+    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "schema1.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+
+    monkeypatch.setattr(
+        self_heal,
+        "propose_repair",
+        lambda *_args, **_kwargs: LocalRepairDecision(
+            status="escalate",
+            action="escalate_to_frontier",
+            confidence=0.9,
+            reason="needs frontier",
+            source="deterministic",
+        ),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: {
+            "decision": "needs_retry",
+            "summary": "codex schema needs review",
+            "tests_run": [],
+            "commit": None,
+            "committed": False,
+            "pushed": False,
+            "risk": None,
+            "notes": None,
+            "frontier_failure": {
+                "failure_class": "schema_invalid",
+                "rescue_status": "pending_frontier_review",
+                "summary": "schema repaired but needs review",
+                "human_required": False,
+                "notify_user": False,
+            },
+            "rescue_status": "pending_frontier_review",
+            "human_required": False,
+            "notify_user": False,
+            "access_repair": {
+                "applied": True,
+                "repairs": [{"type": "schema_strictness_autofix"}],
+            },
+        },
+    )
+
+    result = self_heal.handle_packet(packet_path, use_qwen=False)
+
+    assert result["status"] == "pending_frontier_review"
+    pending_path = Path(result["pending_frontier_review_path"])
+    assert pending_path.exists()
+    pending = json.loads(pending_path.read_text())
+    assert pending["status"] == "pending_frontier_review"
+    assert pending["access_repair"]["applied"] is True
+    updated_packet = json.loads(packet_path.read_text())
+    assert updated_packet["pending_frontier_review_path"] == str(pending_path)
+
+
 def test_human_required_notification_cooldown(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

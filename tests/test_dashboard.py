@@ -134,11 +134,13 @@ def test_build_snapshot_surfaces_frontier_human_required(
             "rescue_status": "human_required",
             "human_required": True,
             "frontier_failure": {"failure_class": "auth_required"},
+            "access_repair": {"applied": True, "repairs": [{"type": "cli_option_adapted"}]},
         },
         "human_notification": {
             "body": "Codex の認証が切れている可能性があります。ログイン確認が必要です。",
             "delivery": {"sent": True},
         },
+        "pending_frontier_review_path": str(failures_dir / "pending-frontier-review" / "auth1.json"),
     }
     (packets_dir / "auth1.json").write_text(json.dumps(packet), encoding="utf-8")
     registry_record = {
@@ -151,6 +153,7 @@ def test_build_snapshot_surfaces_frontier_human_required(
         "decision": {"status": "escalate", "action": "escalate_to_frontier"},
         "frontier": packet["frontier_result"],
         "human_notification": packet["human_notification"],
+        "pending_frontier_review_path": packet["pending_frontier_review_path"],
     }
     (failures_dir / "failure-registry.jsonl").write_text(
         json.dumps(registry_record, ensure_ascii=False) + "\n",
@@ -165,4 +168,6 @@ def test_build_snapshot_surfaces_frontier_human_required(
     assert self_heal["counts"]["failed"] == 1
     assert self_heal["latest"]["title"] == "Human required"
     assert self_heal["latest"]["details"]["frontier"]["human_required"] is True
+    assert self_heal["latest"]["details"]["frontier"]["access_repair"]["applied"] is True
     assert self_heal["latest"]["details"]["human_notification"]["delivery"]["sent"] is True
+    assert self_heal["latest"]["details"]["pending_frontier_review_path"] == packet["pending_frontier_review_path"]

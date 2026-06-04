@@ -22,6 +22,8 @@ SELF_HEAL_STATUSES = {
     "local_repair_failed",
     "pending_frontier",
     "frontier_retry",
+    "frontier_preflight_failed",
+    "pending_frontier_review",
 }
 
 HUMAN_REQUIRED_STATUSES = {
@@ -62,6 +64,10 @@ def _frontier_queue_dir() -> Path:
 
 def _frontier_decision_dir() -> Path:
     return _failures_dir() / "frontier-decisions"
+
+
+def _pending_frontier_review_dir() -> Path:
+    return _failures_dir() / "pending-frontier-review"
 
 
 def _applied_actions_dir() -> Path:
@@ -381,6 +387,29 @@ def _run_frontier(
     return payload
 
 
+def _save_pending_frontier_review(
+    packet_path: Path,
+    packet: dict[str, Any],
+    local_decision: dict[str, Any],
+    frontier_result: dict[str, Any],
+    *,
+    status: str,
+) -> Path:
+    payload = {
+        "queued_at": datetime.now().isoformat(),
+        "status": status,
+        "packet_path": str(packet_path),
+        "packet": packet,
+        "local_decision": local_decision,
+        "frontier_result": frontier_result,
+        "access_repair": frontier_result.get("access_repair"),
+        "rescue_attempt": frontier_result.get("rescue_attempt"),
+    }
+    path = _pending_frontier_review_dir() / packet_path.name
+    _write_json(path, payload)
+    return path
+
+
 def _frontier_final_status(frontier_result: dict[str, Any]) -> str:
     if frontier_result.get("decision") == "approved":
         return "frontier_approved"
@@ -495,14 +524,24 @@ def handle_packet(
     )
     final_status = _frontier_final_status(frontier_result)
     human_notification = None
+    pending_review_path = None
     if final_status == "human_required" and not dry_run:
         human_notification = maybe_notify_human_required(packet, frontier_result)
+    if final_status in PENDING_REVIEW_STATUSES:
+        pending_review_path = _save_pending_frontier_review(
+            packet_path,
+            packet,
+            decision.to_dict(),
+            frontier_result,
+            status=final_status,
+        )
     _update_packet(
         packet_path,
         packet,
         status=final_status,
         frontier_result=frontier_result,
         human_notification=human_notification,
+        pending_frontier_review_path=str(pending_review_path) if pending_review_path else None,
     )
     _append_registry({
         "timestamp": datetime.now().isoformat(),
@@ -514,6 +553,7 @@ def handle_packet(
         "decision": decision.to_dict(),
         "frontier": frontier_result,
         "human_notification": human_notification,
+        "pending_frontier_review_path": str(pending_review_path) if pending_review_path else None,
     })
     event_level = (
         "success"
@@ -538,6 +578,7 @@ def handle_packet(
     result["status"] = final_status
     result["frontier_result"] = frontier_result
     result["human_notification"] = human_notification
+    result["pending_frontier_review_path"] = str(pending_review_path) if pending_review_path else None
     return result
 
 

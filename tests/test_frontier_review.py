@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,7 +40,8 @@ def test_run_codex_supplies_codex_home_from_config_dir(
         preflight = _preflight_response(cmd)
         if preflight:
             return preflight
-        output_path = Path(cmd[cmd.index("-o") + 1])
+        output_option = "-o" if "-o" in cmd else "--output-last-message"
+        output_path = Path(cmd[cmd.index(output_option) + 1])
         output_path.write_text(
             json.dumps(
                 {
@@ -74,6 +76,36 @@ def test_frontier_schema_requires_all_declared_properties() -> None:
     schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
     assert set(schema["required"]) == set(schema["properties"])
+
+
+def test_schema_strictness_autofix_normalizes_required_fields() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "decision": {"type": "string"},
+            "summary": {"type": "string"},
+        },
+        "required": ["decision"],
+    }
+
+    strict_schema, repair = frontier_review._strict_schema_with_repair(schema)
+
+    assert strict_schema["required"] == ["decision", "summary"]
+    assert strict_schema["additionalProperties"] is False
+    assert repair["type"] == "schema_strictness_autofix"
+
+
+def test_classifies_frontier_failures() -> None:
+    quota = frontier_review.classify_frontier_failure("insufficient_quota billing")
+    transient = frontier_review.classify_frontier_failure("request timed out")
+    option = frontier_review.classify_frontier_failure("unknown option --foo")
+
+    assert quota.failure_class == "quota_or_billing_required"
+    assert quota.human_required is True
+    assert transient.failure_class == "network_transient"
+    assert transient.rescue_status == "frontier_retry"
+    assert option.failure_class == "cli_option_invalid"
+    assert option.rescue_status == "pending_frontier_review"
 
 
 def test_run_codex_missing_auth_stops_before_subprocess(
@@ -117,7 +149,7 @@ def test_run_codex_schema_failure_records_rescue_attempt(
         preflight = _preflight_response(cmd)
         if preflight:
             return preflight
-        if "-o" in cmd:
+        if "-o" in cmd or "--output-last-message" in cmd:
             return SimpleNamespace(
                 returncode=1,
                 stdout="",
@@ -126,6 +158,7 @@ def test_run_codex_schema_failure_records_rescue_attempt(
         return SimpleNamespace(returncode=0, stdout="diagnosis", stderr="")
 
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("LLM_WIKI_FRONTIER_DOC_LOOKUP", "0")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
     monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
@@ -159,7 +192,7 @@ def test_redacts_secrets_and_allows_only_official_urls() -> None:
     assert not frontier_review.is_allowed_official_url("https://github.com/random/repo")
 
 
-def test_preflight_detects_incompatible_codex_exec_options(
+def test_preflight_reports_adaptive_codex_exec_options(
     tmp_path: Path, monkeypatch
 ) -> None:
     home = tmp_path / "home"
@@ -181,9 +214,91 @@ def test_preflight_detects_incompatible_codex_exec_options(
 
     result = frontier_review.run_frontier_preflight()
 
-    assert result["ok"] is False
-    assert result["failure"]["failure_class"] == "cli_option_invalid"
-    assert result["failure"]["rescue_status"] == "pending_frontier_review"
+    assert result["ok"] is True
+    assert result["codex"]["adaptive_required"] is True
+    assert "--output-schema" in result["codex"]["missing_exec_options"]
+
+
+def test_run_codex_adapts_to_missing_cli_options(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    config_home = home / ".config" / "codex"
+    config_home.mkdir(parents=True)
+    (config_home / "auth.json").write_text("{}")
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd[-1:] == ["--version"]:
+            return SimpleNamespace(returncode=0, stdout="codex 1.2.3", stderr="")
+        if cmd[-2:] == ["exec", "--help"]:
+            return SimpleNamespace(returncode=0, stdout="--ephemeral\n", stderr="")
+        seen["cmd"] = cmd
+        seen["cwd"] = kwargs.get("cwd")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "decision": "approved",
+                    "summary": "ok",
+                    "tests_run": [],
+                    "commit": None,
+                    "committed": False,
+                    "pushed": False,
+                    "risk": None,
+                    "notes": None,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
+    monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
+
+    result = frontier_review._run_codex(
+        "prompt", repo_root=tmp_path, timeout=1, execute_patch=False
+    )
+
+    assert result.decision == "approved"
+    assert seen["cwd"] == str(tmp_path)
+    assert "--output-schema" not in seen["cmd"]
+    assert "-o" not in seen["cmd"]
+    assert result.access_repair["applied"] is True
+    assert {
+        repair["option"]
+        for repair in result.access_repair["repairs"]
+        if repair["type"] == "cli_option_adapted"
+    } >= {"--cd", "--output-schema", "--output-last-message"}
+
+
+def test_collect_official_frontier_docs_uses_allowlist(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        url = "https://platform.openai.com/docs"
+        text = "<html><body><h1>Codex exec</h1><p>Use official commands.</p></body></html>"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeHttpx:
+        @staticmethod
+        def get(url, **_kwargs):
+            assert frontier_review.is_allowed_official_url(url)
+            return FakeResponse()
+
+    monkeypatch.setenv(
+        "LLM_WIKI_FRONTIER_DOC_URLS",
+        "https://platform.openai.com/docs,https://example.com/bad",
+    )
+    monkeypatch.setitem(sys.modules, "httpx", FakeHttpx)
+
+    result = frontier_review.collect_official_frontier_docs("codex exec option")
+
+    assert result["attempted"] is True
+    assert result["documents"]
+    assert all(frontier_review.is_allowed_official_url(url) for url in result["allowlist"])
 
 
 def test_frontier_rescue_falls_back_to_claude_code(
@@ -206,6 +321,7 @@ def test_frontier_rescue_falls_back_to_claude_code(
 
     monkeypatch.setattr(frontier_review.shutil, "which", fake_which)
     monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
+    monkeypatch.setenv("LLM_WIKI_FRONTIER_DOC_LOOKUP", "0")
 
     result = frontier_review._run_frontier_rescue(
         "invalid_json_schema",
