@@ -24,6 +24,7 @@ from llm_wiki_mcp.tags import record_new_tag, validate_tag
 
 
 AUTO_ACTIONS = frozenset({"alias", "query_hint", "page_tag"})
+VALIDATED_AUTO_LANE = "validated-auto"
 AUTO_APPLY_LOG_FILE = RECALL_DIR / "auto-apply.jsonl"
 
 

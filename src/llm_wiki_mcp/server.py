@@ -73,13 +73,14 @@ def _page_metadata(path: Path) -> dict:
 
 
 @mcp.tool()
-def wiki_read(page: str) -> str:
+def wiki_read(page: str, session_id: str | None = None) -> str:
     """Read a wiki page with outlinks and backlinks.
 
     Searches pages/ first, then system/ for system files.
 
     Args:
         page: Page ID (filename without .md extension)
+        session_id: Optional session id for recall pull feedback.
     """
     store = get_store()
     store.refresh()
@@ -94,6 +95,7 @@ def wiki_read(page: str) -> str:
     content = path.read_text()
     outlinks = store.outlinks(page) or _extract_wiki_links(content)
     backlinks = store.backlinks(page)
+    _append_pull_log({"type": "read", "session_id": session_id or "", "page_id": page})
 
     return json.dumps({
         "page_id": page,
@@ -204,6 +206,19 @@ def _append_log(message: str) -> None:
     LOG_FILE.write_text(content)
 
 
+def _append_pull_log(record: dict) -> None:
+    try:
+        from llm_wiki_mcp.recall_runtime import RECALL_PULL_LOG_FILE, append_jsonl
+
+        record = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            **record,
+        }
+        append_jsonl(RECALL_PULL_LOG_FILE, record)
+    except Exception:
+        pass
+
+
 @mcp.tool()
 def wiki_init() -> str:
     """Initialize session: returns system pages + status in a single call.
@@ -268,6 +283,7 @@ def wiki_search(
     semantic: bool = True,
     tags: list[str] | None = None,
     tag_match: str = "all",
+    session_id: str | None = None,
 ) -> str:
     """Search wiki pages with BM25 + semantic search and link expansion.
 
@@ -287,6 +303,7 @@ def wiki_search(
         tag_match: ``"all"`` (default) requires every tag in ``tags`` to be
             present; ``"any"`` matches if at least one tag overlaps. Ignored
             when ``tags`` is empty / None.
+        session_id: Optional session id for recall pull feedback.
     """
     from llm_wiki_mcp.search import search as run_search
 
@@ -387,6 +404,15 @@ def wiki_search(
     if tag_filter:
         filters_applied["tags"] = tag_filter
         filters_applied["tag_match"] = tag_match if tag_match in ("all", "any") else "all"
+    _append_pull_log(
+        {
+            "type": "search",
+            "session_id": session_id or "",
+            "query": query,
+            "direct_pages": [hit["page_id"] for hit in direct_hits],
+            "expanded_pages": [hit["page_id"] for hit in expanded_hits],
+        }
+    )
 
     return json.dumps({
         "query": query,

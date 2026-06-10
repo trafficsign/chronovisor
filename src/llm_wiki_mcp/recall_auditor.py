@@ -27,6 +27,7 @@ import httpx
 from llm_wiki_mcp.recall_runtime import (
     RECALL_CONFIG_FILE,
     RECALL_DIR,
+    RECALL_PULL_LOG_FILE,
     RECALL_LOG_FILE,
     append_feedback,
     find_recall_log,
@@ -82,6 +83,11 @@ AUDITOR_SCHEMA: dict[str, Any] = {
             "type": "object",
             "additionalProperties": True,
         },
+        "injection_usefulness": {
+            "type": "string",
+            "enum": ["used", "ignored", "unknown"],
+        },
+        "injection_reason": {"type": "string"},
     },
 }
 
@@ -142,6 +148,8 @@ class AuditDecision:
     lane: str
     auto_apply_eligible: bool
     normalize_key: str
+    injection_usefulness: str = "unknown"
+    injection_reason: str = ""
 
 
 def load_audit_policy(path: Path = RECALL_CONFIG_FILE) -> AuditPolicy:
@@ -285,6 +293,10 @@ def parse_auditor_output(output: str, top_pages: list[dict[str, Any]]) -> AuditD
         lane=lane,
         auto_apply_eligible=auto_apply_eligible,
         normalize_key=build_normalize_key(reason_code, expected_pages, missing_signal),
+        injection_usefulness=str(parsed.get("injection_usefulness", "unknown"))
+        if parsed.get("injection_usefulness") in {"used", "ignored", "unknown"}
+        else "unknown",
+        injection_reason=str(parsed.get("injection_reason", "")).strip(),
     )
 
 
@@ -355,6 +367,8 @@ def build_auditor_prompt(
         "Do not propose runtime threshold changes unless the evidence is systemic. Prefer additive, local actions.\n"
         "Safe automatic action types are alias, query_hint, and page_tag. Risky review-only action types are "
         "few_shot and threshold. Use action_type=none when no improvement action is clear.\n\n"
+        "Also judge precision when recall_snapshot.pages is non-empty: set injection_usefulness to used, ignored, "
+        "or unknown, and explain briefly in injection_reason.\n\n"
         "Return JSON only with this schema:\n"
         f"{json.dumps(AUDITOR_SCHEMA, ensure_ascii=False)}\n\n"
         "Metadata:\n"
@@ -674,6 +688,85 @@ def feedback_extra(
     }
 
 
+def matching_pull_events(turn: TurnContext, recall_snapshot: dict[str, Any] | None, *, limit: int = 200) -> list[dict[str, Any]]:
+    try:
+        with RECALL_PULL_LOG_FILE.open(encoding="utf-8") as f:
+            lines = deque(f, maxlen=limit)
+    except OSError:
+        return []
+    injected = set((recall_snapshot or {}).get("pages", []) or [])
+    out: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if turn.session_id and record.get("session_id") and record.get("session_id") != turn.session_id:
+            continue
+        pages: list[str] = []
+        if record.get("type") == "read" and isinstance(record.get("page_id"), str):
+            pages = [record["page_id"]]
+        elif record.get("type") == "search":
+            for key in ("direct_pages", "expanded_pages"):
+                values = record.get(key)
+                if isinstance(values, list):
+                    pages.extend(page for page in values if isinstance(page, str))
+        missed_pages = [page for page in pages if page and page not in injected]
+        if missed_pages:
+            event = dict(record)
+            event["missed_pages"] = list(dict.fromkeys(missed_pages))
+            out.append(event)
+    return out[:5]
+
+
+def record_pull_missed_candidates(
+    *,
+    turn: TurnContext,
+    recall_snapshot: dict[str, Any] | None,
+    pull_events: list[dict[str, Any]],
+    host: str,
+) -> list[dict[str, Any]]:
+    if not pull_events:
+        return []
+    recorded: list[dict[str, Any]] = []
+    for event in pull_events:
+        pages = event.get("missed_pages")
+        if not isinstance(pages, list) or not pages:
+            continue
+        record = append_feedback(
+            "missed_candidate",
+            note="Agent pulled related wiki context after recall did not inject it.",
+            prompt=turn.prompt,
+            host=host,
+            expected_pages=[page for page in pages if isinstance(page, str)][:5],
+            expected_queries=[event.get("query")] if isinstance(event.get("query"), str) else [],
+            ref=recall_snapshot.get("decision_id", "") if recall_snapshot else "",
+            extra={
+                "source": "pull-log",
+                "turn_ref": turn.turn_ref(),
+                "pull_event": event,
+                "reason_code": "gate_missed",
+                "missing_signal": event.get("query", "pull-log"),
+                "normalize_key": build_normalize_key(
+                    "gate_missed",
+                    [page for page in pages if isinstance(page, str)],
+                    str(event.get("query", "pull-log")),
+                ),
+                "action_type": "query_hint",
+                "action_payload": {
+                    "query": event.get("query", ""),
+                    "page_id": pages[0],
+                },
+                "lane": "auto",
+                "auto_apply_eligible": True,
+            },
+        )
+        recorded.append(record)
+    return recorded
+
+
 def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str, Any]:
     policy = load_audit_policy(Path(args.config).expanduser())
     if args.top_k is not None:
@@ -708,27 +801,8 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
         recall_record = find_matching_recall_log(turn, host=args.host, limit=policy.recent_log_limit)
 
     recall_snapshot = recall_log_snapshot(recall_record) if recall_record else None
-    skip_reason = should_skip_recall_snapshot(recall_snapshot, audit_read=args.audit_read)
-    if skip_reason:
-        if session_file and not args.dry_run and not args.ignore_state:
-            update_state(state, session_file=session_file, scanned_until_line=scanned_until_line, status="skipped")
-            write_state(state_file, state)
-        return {"status": "skipped", "reason": skip_reason, "turn_ref": turn.turn_ref()}
-
-    top_pages, search_mode = collect_top_pages(turn.prompt, policy)
-    if args.extract_only:
-        return {
-            "status": "extracted",
-            "turn_ref": turn.turn_ref(),
-            "recall_snapshot": recall_snapshot,
-            "top_pages": top_pages,
-            "search_mode": search_mode,
-        }
-
-    started = time.monotonic()
-    if args.auditor_json:
-        raw_output = args.auditor_json
-    else:
+    lock_handle = None
+    if not args.auditor_json:
         lock_handle = acquire_audit_lock(Path(args.lock_file).expanduser())
         if lock_handle is None:
             return {
@@ -737,10 +811,44 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
                 "turn_ref": turn.turn_ref(),
                 "ref": recall_snapshot.get("decision_id", "") if recall_snapshot else "",
             }
+    skip_reason = should_skip_recall_snapshot(recall_snapshot, audit_read=args.audit_read)
+    if skip_reason:
+        release_audit_lock(lock_handle)
+        if session_file and not args.dry_run and not args.ignore_state:
+            update_state(state, session_file=session_file, scanned_until_line=scanned_until_line, status="skipped")
+            write_state(state_file, state)
+        return {"status": "skipped", "reason": skip_reason, "turn_ref": turn.turn_ref()}
+
+    top_pages, search_mode = collect_top_pages(turn.prompt, policy)
+    if args.extract_only:
+        release_audit_lock(lock_handle)
+        return {
+            "status": "extracted",
+            "turn_ref": turn.turn_ref(),
+            "recall_snapshot": recall_snapshot,
+            "top_pages": top_pages,
+            "search_mode": search_mode,
+        }
+
+    pull_feedback: list[dict[str, Any]] = []
+    pull_events = matching_pull_events(turn, recall_snapshot)
+    if pull_events and not args.dry_run:
+        pull_feedback = record_pull_missed_candidates(
+            turn=turn,
+            recall_snapshot=recall_snapshot,
+            pull_events=pull_events,
+            host=args.host,
+        )
+
+    started = time.monotonic()
+    if args.auditor_json:
+        raw_output = args.auditor_json
+    else:
         try:
             raw_output = run_auditor_judge(turn, recall_snapshot, top_pages, policy)
         finally:
             release_audit_lock(lock_handle)
+            lock_handle = None
     decision = parse_auditor_output(raw_output, top_pages)
     latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -757,9 +865,44 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
             "normalize_key": decision.normalize_key,
             "action_payload": decision.action_payload,
             "latency_ms": latency_ms,
+            "injection_usefulness": decision.injection_usefulness,
+            "injection_reason": decision.injection_reason,
         },
     }
+    if pull_feedback:
+        base["pull_feedback"] = pull_feedback
 
+    precision_record: dict[str, Any] | None = None
+    injected_pages = (recall_snapshot or {}).get("pages", [])
+    if (
+        isinstance(injected_pages, list)
+        and injected_pages
+        and decision.injection_usefulness in {"used", "ignored"}
+        and not args.dry_run
+    ):
+        precision_record = append_feedback(
+            "injection_used" if decision.injection_usefulness == "used" else "injection_ignored",
+            note=decision.injection_reason,
+            prompt=turn.prompt,
+            host=args.host,
+            expected_pages=[page for page in injected_pages if isinstance(page, str)],
+            expected_queries=[],
+            ref=recall_snapshot.get("decision_id", "") if recall_snapshot else "",
+            extra={
+                "source": "auditor_precision",
+                "turn_ref": turn.turn_ref(),
+                "auditor_model": policy.model,
+                "auditor_confidence": decision.confidence,
+                "assistant_response_preview": trim_text(turn.assistant_response, 1000),
+            },
+        )
+        base["precision_feedback"] = precision_record
+
+    if not decision.missed and (precision_record or pull_feedback):
+        if session_file and not args.dry_run and not args.ignore_state:
+            update_state(state, session_file=session_file, scanned_until_line=scanned_until_line, status="recorded")
+            write_state(state_file, state)
+        return {**base, "status": "recorded"}
     if not decision.missed:
         status = "skipped"
         reason = "auditor did not classify this as missed"

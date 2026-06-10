@@ -849,6 +849,100 @@ def _process_tags_in_body(
     return patch(body, {"tags": cleaned})
 
 
+_RECALL_FM_FORBIDDEN = frozenset(",[]:#{}\n\r")
+
+
+def _safe_recall_field(value: str, *, limit: int = 120) -> str:
+    text = re.sub(r"\s+", " ", value).strip()
+    text = "".join(" " if ch in _RECALL_FM_FORBIDDEN or ord(ch) < 0x20 else ch for ch in text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit].strip()
+
+
+def _fallback_recall_metadata(title: str, body: str, page_id: str) -> dict[str, Any]:
+    first_line = ""
+    for line in body.splitlines():
+        stripped = line.strip(" #-\t")
+        if stripped:
+            first_line = stripped
+            break
+    summary = _safe_recall_field(first_line or title or page_id, limit=180)
+    base = _safe_recall_field(title or page_id, limit=80)
+    topic = _safe_recall_field(page_id.replace("-", " "), limit=80)
+    questions = [
+        f"{base} について何を話した?",
+        f"{topic} の続きは?",
+        f"{base} の決定事項は?",
+    ]
+    return {
+        "summary": summary,
+        "recall_questions": list(dict.fromkeys(q for q in questions if q)),
+    }
+
+
+def _generate_recall_metadata(title: str, body: str, page_id: str) -> dict[str, Any]:
+    fallback = _fallback_recall_metadata(title, body, page_id)
+    try:
+        from llm_wiki_mcp.ollama import generate, is_available
+
+        if not is_available():
+            return fallback
+        schema = {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "recall_questions": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+            },
+            "required": ["summary", "recall_questions"],
+        }
+        prompt = {
+            "task": "Create retrievability metadata for this wiki page.",
+            "rules": [
+                "summary must be one short line.",
+                "recall_questions must be 3-5 questions a user may ask later.",
+                "Return JSON only.",
+            ],
+            "page_id": page_id,
+            "title": title,
+            "body": body[:2500],
+        }
+        parsed = json.loads(generate(json.dumps(prompt, ensure_ascii=False), format=schema))
+        summary = parsed.get("summary")
+        questions = parsed.get("recall_questions")
+        if isinstance(summary, str) and isinstance(questions, list):
+            cleaned_questions = [
+                _safe_recall_field(q, limit=120)
+                for q in questions
+                if isinstance(q, str) and q.strip()
+            ]
+            cleaned_questions = list(dict.fromkeys(q for q in cleaned_questions if q))[:5]
+            cleaned_summary = _safe_recall_field(summary, limit=180)
+            if cleaned_summary and cleaned_questions:
+                return {"summary": cleaned_summary, "recall_questions": cleaned_questions}
+    except Exception:
+        pass
+    return fallback
+
+
+def _ensure_recall_metadata_frontmatter(text: str, page_id: str, parse, patch) -> str:
+    meta, body = parse(text)
+    title = meta.get("title", page_id)
+    title_text = title if isinstance(title, str) else page_id
+    updates: dict[str, Any] = {}
+    generated: dict[str, Any] | None = None
+    if not isinstance(meta.get("summary"), str) or not str(meta.get("summary")).strip():
+        generated = generated or _generate_recall_metadata(title_text, body, page_id)
+        updates["summary"] = generated["summary"]
+    questions = meta.get("recall_questions")
+    if not isinstance(questions, list) or not questions:
+        generated = generated or _generate_recall_metadata(title_text, body, page_id)
+        updates["recall_questions"] = generated["recall_questions"]
+        updates.setdefault("summary", generated["summary"])
+    if not updates:
+        return text
+    return patch(text, updates)
+
+
 def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     """Apply page operations and return (created, updated) lists.
 
@@ -999,6 +1093,12 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                 # ``patch`` will splice raw_keywords into it without
                 # synthesizing a new block.
                 body = _frontmatter_patch(body, {"raw_keywords": op_raw_keywords})
+            body = _ensure_recall_metadata_frontmatter(
+                body,
+                page_id,
+                _frontmatter_parse,
+                _frontmatter_patch,
+            )
             planned.append(
                 _Plan(
                     op_type="create",
@@ -1049,6 +1149,12 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                 count=1,
             )
             new_body = stamped.rstrip() + "\n\n" + body + "\n"
+            new_body = _ensure_recall_metadata_frontmatter(
+                new_body,
+                page_id,
+                _frontmatter_parse,
+                _frontmatter_patch,
+            )
             planned.append(
                 _Plan(
                     op_type="update",

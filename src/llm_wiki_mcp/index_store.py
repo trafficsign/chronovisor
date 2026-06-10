@@ -25,7 +25,7 @@ from llm_wiki_mcp.link_fix import atomic_write, extract_targets
 from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR, WIKI_ROOT
 
 
-SCHEMA_VERSION = 3  # bumped for tags (plan-4: tags auto-generation)
+SCHEMA_VERSION = 4  # bumped for recall summary/questions
 INDEX_DIR = WIKI_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
@@ -85,6 +85,8 @@ class PageEntry:
     via ``all_tags()`` for the dedup candidate pool. Stored as the raw
     list from frontmatter; per-tag form validation is the responsibility
     of ``wiki_check`` lint, not the index."""
+    summary: str = ""
+    recall_questions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -98,6 +100,8 @@ class PageEntry:
             "outlinks": list(self.outlinks),
             "raw_keywords": list(self.raw_keywords),
             "tags": list(self.tags),
+            "summary": self.summary,
+            "recall_questions": list(self.recall_questions),
         }
 
     @classmethod
@@ -121,6 +125,8 @@ class PageEntry:
             outlinks=list(d.get("outlinks", [])),
             raw_keywords=_coerce_str_list(d.get("raw_keywords")),
             tags=_coerce_str_list(d.get("tags")),
+            summary=d.get("summary", "") if isinstance(d.get("summary", ""), str) else "",
+            recall_questions=_coerce_str_list(d.get("recall_questions")),
         )
 
 
@@ -333,6 +339,8 @@ class IndexStore:
             outlinks=outlinks,
             raw_keywords=_coerce_str_list(fm.get("raw_keywords")),
             tags=_coerce_str_list(fm.get("tags")),
+            summary=fm.get("summary", "") if isinstance(fm.get("summary", ""), str) else "",
+            recall_questions=_coerce_str_list(fm.get("recall_questions")),
         )
 
     def _rebuild_backlinks(self) -> None:
@@ -387,6 +395,8 @@ class IndexStore:
                 "path": entry.path,
                 "mtime_ns": entry.mtime_ns,
                 "is_system": entry.is_system,
+                "summary": entry.summary,
+                "recall_questions": list(entry.recall_questions),
             }
 
     def outlinks(self, page_id: str) -> list[str]:

@@ -26,13 +26,33 @@ num_predict = 64
 include_queries = false
 
 [recall.budgets]
-max_context_chars = 1800
+max_context_chars = 600
 max_pages = 3
 max_queries = 3
 
 [recall]
-semantic = false
+gate_mode = "evidence"
+context_style = "cards"
+semantic = true
 judge_mode = "auto"
+session_ttl_seconds = 604800
+
+[recall.rewrite]
+enabled = true
+model = "qwen3.5:4b"
+timeout_ms = 1200
+
+[recall.fusion]
+bm25 = 1.0
+semantic = 1.0
+graph = 0.5
+usage_prior = 0.2
+
+[recall.calibration]
+enabled = true
+min_samples = 500
+holdout_ratio = 0.2
+min_improvement = 0.02
 
 [recall.policy]
 avoid_heavy_personal_context_in_chitchat = true
@@ -69,3 +89,10 @@ remain supported.
 
 The compatibility wrappers preserve the old environment behavior. Direct
 `llm-wiki-hook --event Stop` deployments can rely on `config.toml`.
+
+## Recall Defaults
+
+The completed recall path defaults to `gate_mode = "evidence"`,
+`context_style = "cards"`, `semantic = true`, rewrite enabled, and calibration
+enabled. BM25 still runs without Ollama; semantic and rewrite fail open when the
+local model is unavailable.

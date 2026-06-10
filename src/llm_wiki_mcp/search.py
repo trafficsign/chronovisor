@@ -4,8 +4,10 @@ import json
 import math
 import re
 import threading
+from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, all_pages, page_id_from_path
 from llm_wiki_mcp.link_fix import atomic_write
@@ -402,6 +404,20 @@ def _connect_embeddings() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS question_embeddings (
+            key TEXT PRIMARY KEY,
+            page_id TEXT NOT NULL,
+            question_idx INTEGER NOT NULL,
+            question TEXT NOT NULL,
+            vector BLOB NOT NULL,
+            mtime REAL NOT NULL,
+            norm REAL NOT NULL,
+            dim INTEGER NOT NULL
+        )
+        """
+    )
     return conn
 
 
@@ -494,6 +510,26 @@ def _store_embeddings_batch(rows: list[tuple[str, list[float], float]]) -> None:
             conn.close()
 
 
+def _store_question_embeddings_batch(rows: list[tuple[str, int, str, list[float], float]]) -> None:
+    """Insert/replace recall-question embedding rows."""
+    if not rows:
+        return
+    packed = [
+        (f"{pid}#q{idx}", pid, idx, question, _pack_vector(vec), float(mtime), _vec_norm(vec), len(vec))
+        for pid, idx, question, vec, mtime in rows
+    ]
+    with _EMBED_DB_LOCK:
+        conn = _connect_embeddings()
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO question_embeddings VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                packed,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
     """Snapshot all rows as (page_id, vector, mtime, norm)."""
     _maybe_migrate_legacy_json()
@@ -510,6 +546,22 @@ def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
     return out
 
 
+def _iter_all_question_embeddings() -> "list[tuple[str, str, int, list[float], float, float]]":
+    """Snapshot all recall-question rows as (key, page_id, idx, vector, mtime, norm)."""
+    _maybe_migrate_legacy_json()
+    conn = _connect_embeddings()
+    try:
+        rows = conn.execute(
+            "SELECT key, page_id, question_idx, vector, mtime, norm, dim FROM question_embeddings"
+        ).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for key, pid, idx, blob, mtime, norm, dim in rows:
+        out.append((key, pid, int(idx), _unpack_vector(blob, int(dim)), float(mtime), float(norm)))
+    return out
+
+
 def _embedding_count() -> int:
     _maybe_migrate_legacy_json()
     conn = _connect_embeddings()
@@ -517,6 +569,19 @@ def _embedding_count() -> int:
         return conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
     finally:
         conn.close()
+
+
+def _recall_questions_from_content(content: str) -> list[str]:
+    try:
+        from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+
+        meta, _body = parse_frontmatter(content)
+    except Exception:
+        return []
+    questions = meta.get("recall_questions")
+    if not isinstance(questions, list):
+        return []
+    return [q for q in questions if isinstance(q, str) and q.strip()][:8]
 
 
 def _cosine_sim(a: list[float], b: list[float]) -> float:
@@ -582,8 +647,12 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
 
         fm_match = re.search(r"title:\s*(.+)", content)
         title = fm_match.group(1).strip() if fm_match else pid
-        embed_text = f"{title}\n\n{_FRONTMATTER_RE.sub('', content)[:2000]}"
+        questions = _recall_questions_from_content(content)
+        recall_text = "\n".join(f"Q: {q}" for q in questions)
+        embed_text = f"{title}\n\n{recall_text}\n\n{_FRONTMATTER_RE.sub('', content)[:2000]}"
         pages_to_process.append((pid, embed_text, mtime))
+        for idx, question in enumerate(questions):
+            pages_to_process.append((f"{pid}#q{idx}", question, mtime))
 
     updated_count = 0
     if pages_to_process:
@@ -596,9 +665,18 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
             except Exception:
                 continue
             rows: list[tuple[str, list[float], float]] = []
-            for (pid, _, mtime), vec in zip(batch, vectors):
-                rows.append((pid, vec, mtime))
+            question_rows: list[tuple[str, int, str, list[float], float]] = []
+            for (pid, text, mtime), vec in zip(batch, vectors):
+                if "#q" in pid:
+                    page_id, _, idx_text = pid.partition("#q")
+                    try:
+                        question_rows.append((page_id, int(idx_text), text, vec, mtime))
+                    except ValueError:
+                        continue
+                else:
+                    rows.append((pid, vec, mtime))
             _store_embeddings_batch(rows)
+            _store_question_embeddings_batch(question_rows)
             updated_count += len(rows)
 
     return updated_count
@@ -634,7 +712,7 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
     store = get_store()
     store.refresh()
 
-    results = []
+    by_page: dict[str, ScoredPage] = {}
     for pid, vec, _mtime, norm in _iter_all_embeddings():
         if norm == 0:
             continue
@@ -655,14 +733,42 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
         for x, y in zip(q_vec, vec):
             dot += x * y
         sim = dot / (q_norm * norm)
-        results.append(ScoredPage(
+        by_page[pid] = ScoredPage(
             page_id=pid,
             title=meta["title"],
             folder=folder,
             updated=meta["updated"],
             score=sim,
-        ))
+        )
 
+    for _key, pid, _idx, vec, _mtime, norm in _iter_all_question_embeddings():
+        if norm == 0:
+            continue
+        meta = store.meta(pid)
+        if meta is None:
+            continue
+        folder = ""
+        try:
+            parent = Path(meta["path"]).parent
+            if parent != PAGES_DIR:
+                folder = parent.name
+        except (KeyError, TypeError):
+            folder = ""
+        dot = 0.0
+        for x, y in zip(q_vec, vec):
+            dot += x * y
+        sim = dot / (q_norm * norm)
+        existing = by_page.get(pid)
+        if existing is None or sim > existing.score:
+            by_page[pid] = ScoredPage(
+                page_id=pid,
+                title=meta["title"],
+                folder=folder,
+                updated=meta["updated"],
+                score=sim,
+            )
+
+    results = list(by_page.values())
     results.sort(key=lambda x: x.score, reverse=True)
     return results[:top_n]
 
@@ -674,20 +780,29 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
 def fuse_results(
     bm25_results: list[ScoredPage],
     semantic_results: list[ScoredPage],
+    graph_results: list[ScoredPage] | None = None,
+    usage_results: list[ScoredPage] | None = None,
     k: int = 60,
+    weights: dict[str, float] | None = None,
 ) -> list[ScoredPage]:
-    """Reciprocal Rank Fusion of two result lists."""
+    """Weighted Reciprocal Rank Fusion of result lists."""
     scores: dict[str, float] = {}
     meta: dict[str, ScoredPage] = {}
+    weights = weights or {}
 
-    for rank, page in enumerate(bm25_results):
-        scores[page.page_id] = scores.get(page.page_id, 0) + 1 / (k + rank)
-        meta[page.page_id] = page
+    def add_results(results: list[ScoredPage], channel: str) -> None:
+        weight = max(0.0, float(weights.get(channel, 1.0)))
+        if weight == 0:
+            return
+        for rank, page in enumerate(results):
+            scores[page.page_id] = scores.get(page.page_id, 0) + weight / (k + rank)
+            if page.page_id not in meta:
+                meta[page.page_id] = page
 
-    for rank, page in enumerate(semantic_results):
-        scores[page.page_id] = scores.get(page.page_id, 0) + 1 / (k + rank)
-        if page.page_id not in meta:
-            meta[page.page_id] = page
+    add_results(bm25_results, "bm25")
+    add_results(semantic_results, "semantic")
+    add_results(graph_results or [], "graph")
+    add_results(usage_results or [], "usage_prior")
 
     fused = []
     for pid, score in scores.items():
@@ -699,6 +814,98 @@ def fuse_results(
 
     fused.sort(key=lambda x: x.score, reverse=True)
     return fused
+
+
+def graph_expand_results(results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50) -> list[ScoredPage]:
+    if decay <= 0 or not results:
+        return []
+    from llm_wiki_mcp.index_store import get_store
+
+    store = get_store()
+    store.refresh()
+    seen = {result.page_id for result in results}
+    expanded: dict[str, ScoredPage] = {}
+    for result in results[:10]:
+        linked = store.outlinks(result.page_id) + store.backlinks(result.page_id)
+        for page_id in linked:
+            if page_id in seen:
+                continue
+            meta = store.meta(page_id)
+            if meta is None:
+                continue
+            score = result.score * decay
+            existing = expanded.get(page_id)
+            if existing is not None and existing.score >= score:
+                continue
+            folder = ""
+            try:
+                parent = Path(meta["path"]).parent
+                if parent != PAGES_DIR:
+                    folder = parent.name
+            except (KeyError, TypeError):
+                folder = ""
+            expanded[page_id] = ScoredPage(
+                page_id=page_id,
+                title=meta["title"],
+                folder=folder,
+                updated=meta["updated"],
+                score=score,
+            )
+            if len(expanded) >= limit:
+                break
+        if len(expanded) >= limit:
+            break
+    return sorted(expanded.values(), key=lambda page: page.score, reverse=True)
+
+
+def usage_prior_results(candidate_ids: set[str], *, limit: int = 50) -> list[ScoredPage]:
+    if not candidate_ids:
+        return []
+    feedback_file = WIKI_ROOT / "recall" / "feedback.jsonl"
+    try:
+        with feedback_file.open(encoding="utf-8") as f:
+            lines = deque(f, maxlen=1000)
+    except OSError:
+        return []
+    counts: Counter[str] = Counter()
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("kind") != "injection_used":
+            continue
+        for page_id in record.get("expected_pages", []) or record.get("injected_pages", []):
+            if isinstance(page_id, str) and page_id in candidate_ids:
+                counts[page_id] += 1
+    if not counts:
+        return []
+    from llm_wiki_mcp.index_store import get_store
+
+    store = get_store()
+    store.refresh()
+    out: list[ScoredPage] = []
+    for page_id, count in counts.most_common(limit):
+        meta = store.meta(page_id)
+        if meta is None:
+            continue
+        folder = ""
+        try:
+            parent = Path(meta["path"]).parent
+            if parent != PAGES_DIR:
+                folder = parent.name
+        except (KeyError, TypeError):
+            folder = ""
+        out.append(
+            ScoredPage(
+                page_id=page_id,
+                title=meta["title"],
+                folder=folder,
+                updated=meta["updated"],
+                score=float(count),
+            )
+        )
+    return out
 
 
 def apply_filters(
@@ -739,6 +946,7 @@ def search(
     updated_before: str | None = None,
     sort_by: str = "relevance",
     semantic: bool = True,
+    fusion_weights: dict[str, float] | None = None,
 ) -> tuple[list[ScoredPage], str]:
     """Run search and return (results, search_mode)."""
     # Fetch more results before filtering to avoid truncation-before-filter bug
@@ -749,13 +957,41 @@ def search(
     bm25_results = bm25.query(query, top_n=fetch_n)
 
     search_mode = "bm25"
+    weights = fusion_weights or {"bm25": 1.0, "semantic": 1.0, "graph": 0.0, "usage_prior": 0.0}
+    sem_results: list[ScoredPage] = []
     if semantic:
         sem_results = semantic_search(query, top_n=fetch_n)
         if sem_results:
-            results = fuse_results(bm25_results, sem_results)
             search_mode = "hybrid"
-        else:
-            results = bm25_results
+    graph_results = graph_expand_results(
+        bm25_results + sem_results,
+        decay=float(weights.get("graph", 0.0) or 0.0),
+        limit=fetch_n,
+    )
+    candidate_ids = {page.page_id for page in bm25_results + sem_results + graph_results}
+    usage_results = (
+        usage_prior_results(candidate_ids, limit=fetch_n)
+        if float(weights.get("usage_prior", 0.0) or 0.0) > 0
+        else []
+    )
+    if graph_results and search_mode == "bm25":
+        search_mode = "bm25+graph"
+    if semantic and sem_results:
+        results = fuse_results(
+            bm25_results,
+            sem_results,
+            graph_results,
+            usage_results,
+            weights=weights,
+        )
+    elif graph_results or usage_results:
+        results = fuse_results(
+            bm25_results,
+            [],
+            graph_results,
+            usage_results,
+            weights=weights,
+        )
     else:
         results = bm25_results
 

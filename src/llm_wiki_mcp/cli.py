@@ -501,6 +501,13 @@ def main(argv: list[str] | None = None) -> int:
     hooks_install.add_argument("--command-prefix", help="Override the llm-wiki-hook command prefix.")
     hooks_install.add_argument("--dry-run", action="store_true")
     hooks_install.add_argument("--json", action="store_true")
+    recall_eval_parser = sub.add_parser("recall-eval", help="Replay-evaluate recall decisions.")
+    recall_eval_parser.add_argument("--config")
+    recall_eval_parser.add_argument("--log-file", default=str(RECALL_LOG_FILE))
+    recall_eval_parser.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))
+    recall_eval_parser.add_argument("--save-baseline", action="store_true")
+    recall_eval_parser.add_argument("--config-override", action="append", default=[])
+    recall_eval_parser.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     if args.command == "status":
@@ -541,6 +548,26 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{action}\t{result['host']}")
                 for event_name, command in result["commands"].items():
                     print(f"{event_name}\t{command}")
+        return 0
+    if args.command == "recall-eval":
+        from llm_wiki_mcp.recall_eval import run_eval
+
+        data = run_eval(
+            config_file=Path(args.config).expanduser() if args.config else None,
+            log_file=Path(args.log_file).expanduser(),
+            feedback_file=Path(args.feedback_file).expanduser(),
+            replay=True,
+            save=args.save_baseline,
+            overrides=args.config_override,
+        )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            metrics = data["metrics"]
+            print(f"examples\t{metrics['examples']}")
+            print(f"recall@3\t{metrics['recall_at_3']:.3f}")
+            print(f"waste_injection_rate\t{metrics['waste_injection_rate']:.3f}")
+            print(f"latency_p95_ms\t{metrics['latency_ms']['p95']:.1f}")
         return 0
     return 0
 

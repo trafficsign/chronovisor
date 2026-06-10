@@ -29,14 +29,16 @@ from llm_wiki_mcp.runtime_config import (
     active_config_file,
     normalize_recall_config,
 )
+from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 from llm_wiki_mcp.search import search as run_search
 from llm_wiki_mcp.wiki import WIKI_ROOT, find_page, init_wiki
 
 
-RECALL_DIR = WIKI_ROOT / "recall"
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
 RECALL_CONFIG_FILE = active_config_file()
+RECALL_PULL_LOG_FILE = RECALL_DIR / "pull-log.jsonl"
+RECALL_CALIBRATION_FILE = RECALL_DIR / "calibration.json"
 
 TRIVIAL_PROMPT_RE = re.compile(
     r"^\s*(はい|いいえ|うん|おう|ok|okay|yes|no|y|n|ありがとう|thanks|thx|了解|りょ)\s*[。.!！?？]*\s*$",
@@ -166,10 +168,12 @@ class RecallPolicy:
     enabled: bool = True
     search_threshold: float = 0.35
     read_threshold: float = 0.65
-    max_context_chars: int = 1800
+    max_context_chars: int = 600
     max_pages: int = 3
     max_queries: int = 3
-    semantic: bool = False
+    semantic: bool = True
+    gate_mode: str = "evidence"  # legacy | evidence
+    context_style: str = "cards"  # legacy | cards
     log_decisions: bool = True
     avoid_heavy_personal_context_in_chitchat: bool = True
     use_feedback_suppressions: bool = True
@@ -181,6 +185,18 @@ class RecallPolicy:
     judge_num_ctx: int = 4096
     judge_num_predict: int = 64
     judge_include_queries: bool = False
+    rewrite_enabled: bool = True
+    rewrite_model: str = "qwen3.5:4b"
+    rewrite_timeout_ms: int = 1200
+    fusion_bm25: float = 1.0
+    fusion_semantic: float = 1.0
+    fusion_graph: float = 0.5
+    fusion_usage_prior: float = 0.2
+    calibration_enabled: bool = True
+    calibration_min_samples: int = 500
+    calibration_holdout_ratio: float = 0.2
+    calibration_min_improvement: float = 0.02
+    session_ttl_seconds: int = 7 * 24 * 60 * 60
 
 
 @dataclass
@@ -216,6 +232,9 @@ class RecallResult:
     used_judge: bool = False
     judge_confidence: float | None = None
     judge_reason: str = ""
+    evidence_features: dict[str, Any] = field(default_factory=dict)
+    search_mode: str = ""
+    context_style: str = ""
     latency_ms: int = 0
     error: str = ""
 
@@ -275,8 +294,16 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
     if isinstance(recall, dict):
         if isinstance(recall.get("semantic"), bool):
             policy.semantic = recall["semantic"]
+        if isinstance(recall.get("gate_mode"), str):
+            policy.gate_mode = recall["gate_mode"]
+        if isinstance(recall.get("context_style"), str):
+            policy.context_style = recall["context_style"]
+        if isinstance(recall.get("max_context_chars"), int):
+            policy.max_context_chars = max(400, recall["max_context_chars"])
         if isinstance(recall.get("judge_mode"), str):
             policy.judge_mode = recall["judge_mode"]
+        if isinstance(recall.get("session_ttl_seconds"), int):
+            policy.session_ttl_seconds = max(3600, recall["session_ttl_seconds"])
 
     gate = data.get("gate", {})
     if isinstance(gate, dict):
@@ -294,6 +321,38 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             policy.judge_num_predict = max(16, gate["num_predict"])
         if isinstance(gate.get("include_queries"), bool):
             policy.judge_include_queries = gate["include_queries"]
+
+    rewrite = data.get("rewrite", {})
+    if isinstance(rewrite, dict):
+        if isinstance(rewrite.get("enabled"), bool):
+            policy.rewrite_enabled = rewrite["enabled"]
+        if isinstance(rewrite.get("model"), str):
+            policy.rewrite_model = rewrite["model"]
+        if isinstance(rewrite.get("timeout_ms"), int):
+            policy.rewrite_timeout_ms = max(200, rewrite["timeout_ms"])
+
+    fusion = data.get("fusion", {})
+    if isinstance(fusion, dict):
+        for key, attr in (
+            ("bm25", "fusion_bm25"),
+            ("semantic", "fusion_semantic"),
+            ("graph", "fusion_graph"),
+            ("usage_prior", "fusion_usage_prior"),
+        ):
+            value = fusion.get(key)
+            if isinstance(value, int | float):
+                setattr(policy, attr, max(0.0, float(value)))
+
+    calibration = data.get("calibration", {})
+    if isinstance(calibration, dict):
+        if isinstance(calibration.get("enabled"), bool):
+            policy.calibration_enabled = calibration["enabled"]
+        if isinstance(calibration.get("min_samples"), int):
+            policy.calibration_min_samples = max(1, calibration["min_samples"])
+        if isinstance(calibration.get("holdout_ratio"), int | float):
+            policy.calibration_holdout_ratio = max(0.05, min(0.8, float(calibration["holdout_ratio"])))
+        if isinstance(calibration.get("min_improvement"), int | float):
+            policy.calibration_min_improvement = max(0.0, float(calibration["min_improvement"]))
 
     behavior = data.get("policy", {})
     if isinstance(behavior, dict):
@@ -495,11 +554,18 @@ def _matched_terms(prompt_lower: str, terms: list[str]) -> list[str]:
     return [term for term in terms if term.lower() in prompt_lower]
 
 
-def should_run_judge(score: float, policy: RecallPolicy) -> bool:
+def should_run_judge(score: float, policy: RecallPolicy, features: dict[str, Any] | None = None) -> bool:
     if policy.judge_mode == "off":
         return False
     if policy.judge_mode == "always":
         return True
+    if policy.gate_mode == "evidence" and features:
+        margin = float(features.get("margin_norm", 0.0) or 0.0)
+        hit_count = int(features.get("hit_count", 0) or 0)
+        evidence = float(features.get("evidence_score", score) or score)
+        if hit_count == 0:
+            return False
+        return policy.search_threshold <= evidence < policy.read_threshold and margin < 0.12
     # Auto judge is for the ambiguous search zone. Obvious read decisions should
     # not depend on a synchronous local model being available.
     return (policy.search_threshold - 0.10) <= score < policy.read_threshold
@@ -598,10 +664,18 @@ def build_queries(
     matched: dict[str, list[str]],
     judge_queries: list[str],
     policy: RecallPolicy,
+    session_state: Any | None = None,
+    rewrite_queries: list[str] | None = None,
 ) -> list[str]:
     candidates: list[str] = []
+    candidates.extend(rewrite_queries or [])
     candidates.extend(judge_queries)
     candidates.append(_compact_query(request.prompt))
+    if session_state is not None:
+        candidates.extend(getattr(session_state, "recent_queries", [])[-3:])
+        recent_topics = getattr(session_state, "recent_topics", [])[-8:]
+        if recent_topics and matched.get("ambiguity"):
+            candidates.append(" ".join(recent_topics + [_compact_query(request.prompt, limit=80)]))
 
     topic_terms = []
     for key in ("project", "decision", "past_reference", "ownership"):
@@ -615,6 +689,83 @@ def build_queries(
             candidates.append(f"{cwd_name} {request.prompt}")
 
     return _dedupe_queries(candidates, limit=policy.max_queries)
+
+
+def should_rewrite_query(
+    *,
+    request: RecallRequest,
+    matched: dict[str, list[str]],
+    policy: RecallPolicy,
+    preliminary_features: dict[str, Any] | None = None,
+) -> bool:
+    if not policy.rewrite_enabled:
+        return False
+    if not (matched.get("ambiguity") or matched.get("past_reference")):
+        return False
+    features = preliminary_features or {}
+    hit_count = int(features.get("hit_count", 0) or 0)
+    top1 = float(features.get("top1_score_norm", 0.0) or 0.0)
+    return hit_count == 0 or top1 < 0.35 or bool(matched.get("ambiguity"))
+
+
+def run_query_rewriter(
+    request: RecallRequest,
+    matched: dict[str, list[str]],
+    policy: RecallPolicy,
+    session_summary: str,
+) -> tuple[list[str], float, str]:
+    prompt = {
+        "task": "Rewrite an ambiguous user prompt into 1-3 explicit LLM Wiki search queries.",
+        "user_prompt": request.prompt,
+        "cwd": request.cwd,
+        "matched_terms": matched,
+        "session_state": session_summary,
+        "output": {"queries": ["short search query"], "confidence": "number 0..1"},
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "queries": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+            "confidence": {"type": "number"},
+        },
+        "required": ["queries", "confidence"],
+    }
+    try:
+        from llm_wiki_mcp.ollama import OLLAMA_URL
+
+        timeout_seconds = max(0.2, policy.rewrite_timeout_ms / 1000)
+        timeout = httpx.Timeout(
+            connect=min(1.0, timeout_seconds),
+            read=timeout_seconds,
+            write=1.0,
+            pool=0.5,
+        )
+        with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
+            resp = client.post(
+                "/api/generate",
+                json={
+                    "model": policy.rewrite_model or policy.judge_model,
+                    "prompt": json.dumps(prompt, ensure_ascii=False),
+                    "stream": False,
+                    "think": False,
+                    "keep_alive": "5m",
+                    "format": schema,
+                    "options": {
+                        "temperature": 0,
+                        "num_ctx": policy.judge_num_ctx,
+                        "num_predict": 96,
+                    },
+                },
+            )
+            resp.raise_for_status()
+        parsed = json.loads(resp.json().get("response", "{}"))
+        raw_queries = parsed.get("queries")
+        queries = [q for q in raw_queries if isinstance(q, str) and q.strip()] if isinstance(raw_queries, list) else []
+        confidence = parsed.get("confidence", 0.0)
+        confidence_f = max(0.0, min(1.0, float(confidence))) if isinstance(confidence, int | float) else 0.0
+        return _dedupe_queries(queries, limit=policy.max_queries), confidence_f, "rewrite ok"
+    except Exception as exc:
+        return [], 0.0, f"rewrite unavailable: {exc.__class__.__name__}"
 
 
 def _compact_query(text: str, limit: int = 180) -> str:
@@ -649,7 +800,139 @@ def decision_from_score(score: float, policy: RecallPolicy) -> str:
     return "none"
 
 
-def collect_context(queries: list[str], decision: str, policy: RecallPolicy) -> list[ContextItem]:
+def _score_norm(score: float) -> float:
+    # BM25 can be unbounded and RRF is tiny; this stable squashing keeps the
+    # evidence gate comparable across search modes.
+    if score <= 0:
+        return 0.0
+    if score < 0.2:
+        return min(1.0, score * 30.0)
+    return score / (score + 3.0)
+
+
+def calibration_artifact() -> dict[str, Any] | None:
+    try:
+        data = json.loads(RECALL_CALIBRATION_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("weights"), dict):
+        return None
+    return data
+
+
+def calibrated_score(features: dict[str, Any], policy: RecallPolicy) -> float | None:
+    if not policy.calibration_enabled:
+        return None
+    artifact = calibration_artifact()
+    if not artifact:
+        return None
+    weights = artifact.get("weights")
+    if not isinstance(weights, dict):
+        return None
+    bias = artifact.get("bias", 0.0)
+    try:
+        total = float(bias)
+        for key, weight in weights.items():
+            total += float(weight) * float(features.get(key, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if total < -40:
+        return 0.0
+    if total > 40:
+        return 1.0
+    return 1.0 / (1.0 + pow(2.718281828459045, -total))
+
+
+def build_evidence_features(
+    *,
+    request: RecallRequest,
+    matched: dict[str, list[str]],
+    heuristic_score: float,
+    results: list[Any],
+    search_mode: str,
+    rewrite_confidence: float = 0.0,
+) -> dict[str, Any]:
+    top1 = float(results[0].score) if results else 0.0
+    top2 = float(results[1].score) if len(results) > 1 else 0.0
+    top1_norm = _score_norm(top1)
+    top2_norm = _score_norm(top2)
+    margin_norm = max(0.0, top1_norm - top2_norm)
+    prompt_chars = len(request.prompt)
+    return {
+        "top1_score": top1,
+        "top2_score": top2,
+        "top1_score_norm": top1_norm,
+        "margin_norm": margin_norm,
+        "hit_count": len(results),
+        "hit_count_norm": min(1.0, len(results) / 5.0),
+        "prompt_chars": prompt_chars,
+        "prompt_len_norm": min(1.0, prompt_chars / 300.0),
+        "ambiguity": 1.0 if matched.get("ambiguity") else 0.0,
+        "past_reference": 1.0 if matched.get("past_reference") else 0.0,
+        "project": 1.0 if matched.get("project") else 0.0,
+        "heuristic_score": heuristic_score,
+        "rewrite_confidence": rewrite_confidence,
+        "search_mode": search_mode,
+    }
+
+
+def evidence_score(features: dict[str, Any], policy: RecallPolicy) -> float:
+    calibrated = calibrated_score(features, policy)
+    if calibrated is not None:
+        features["calibrated"] = True
+        return calibrated
+    score = (
+        0.52 * float(features.get("top1_score_norm", 0.0) or 0.0)
+        + 0.18 * float(features.get("margin_norm", 0.0) or 0.0)
+        + 0.12 * float(features.get("hit_count_norm", 0.0) or 0.0)
+        + 0.14 * float(features.get("heuristic_score", 0.0) or 0.0)
+        + 0.08 * float(features.get("rewrite_confidence", 0.0) or 0.0)
+    )
+    if features.get("ambiguity") and features.get("hit_count", 0):
+        score += 0.04
+    if features.get("hit_count", 0):
+        score = max(score, float(features.get("heuristic_score", 0.0) or 0.0) * 0.85)
+    if not features.get("hit_count"):
+        score = min(score, policy.search_threshold - 0.05)
+    features["calibrated"] = False
+    return max(0.0, min(1.0, score))
+
+
+def search_candidates(queries: list[str], policy: RecallPolicy) -> tuple[list[Any], str]:
+    if not queries:
+        return [], ""
+    merged: dict[str, Any] = {}
+    mode = "bm25"
+    for query in queries:
+        results, search_mode = run_search(
+            query=query,
+            top_n=max(policy.max_pages * 3, 8),
+            semantic=policy.semantic,
+            fusion_weights={
+                "bm25": policy.fusion_bm25,
+                "semantic": policy.fusion_semantic,
+                "graph": policy.fusion_graph,
+                "usage_prior": policy.fusion_usage_prior,
+            },
+        )
+        if search_mode != "bm25":
+            mode = search_mode
+        for result in results:
+            existing = merged.get(result.page_id)
+            if existing is None or result.score > existing.score:
+                merged[result.page_id] = result
+    out = sorted(merged.values(), key=lambda item: item.score, reverse=True)
+    return out, mode
+
+
+def collect_context(
+    queries: list[str],
+    decision: str,
+    policy: RecallPolicy,
+    *,
+    session_state: Any | None = None,
+    pre_results: list[Any] | None = None,
+) -> list[ContextItem]:
     if decision == "none" or not queries:
         return []
 
@@ -670,28 +953,36 @@ def collect_context(queries: list[str], decision: str, policy: RecallPolicy) -> 
         if len(items) >= policy.max_pages:
             return items
 
-    for query in queries:
-        results, _mode = run_search(query=query, top_n=policy.max_pages, semantic=policy.semantic)
-        for result in results:
-            if result.page_id in seen:
-                continue
+    results = pre_results
+    if results is None:
+        results, _mode = search_candidates(queries, policy)
+    for result in results:
+        if result.page_id in seen:
+            continue
+        if should_skip_session_page(session_state, result.page_id, result.updated):
             seen.add(result.page_id)
-            snippets = [result.snippet] if result.snippet else []
-            if decision == "read":
-                snippet = excerpt_page(result.page_id, queries, max_chars=650)
-                if snippet:
-                    snippets = [snippet]
-            items.append(
-                ContextItem(
-                    page_id=result.page_id,
-                    title=result.title,
-                    updated=result.updated,
-                    score=round(result.score, 4),
-                    snippets=snippets,
-                )
+            continue
+        seen.add(result.page_id)
+        snippets = [result.snippet] if result.snippet else []
+        if not snippets and policy.context_style == "cards":
+            summary = page_summary(result.page_id)
+            if summary:
+                snippets = [summary]
+        if decision == "read":
+            snippet = excerpt_page(result.page_id, queries, max_chars=650)
+            if snippet:
+                snippets = [snippet]
+        items.append(
+            ContextItem(
+                page_id=result.page_id,
+                title=result.title,
+                updated=result.updated,
+                score=round(result.score, 4),
+                snippets=snippets,
             )
-            if len(items) >= policy.max_pages:
-                return items
+        )
+        if len(items) >= policy.max_pages:
+            return items
     return items
 
 
@@ -734,6 +1025,37 @@ def context_item_from_page_id(page_id: str, queries: list[str], decision: str, *
         score=score,
         snippets=snippets,
     )
+
+
+def should_skip_session_page(session_state: Any | None, page_id: str, updated: str) -> bool:
+    if session_state is None:
+        return False
+    try:
+        from llm_wiki_mcp.recall_session import should_skip_page
+
+        return should_skip_page(session_state, page_id, updated)
+    except Exception:
+        return False
+
+
+def page_summary(page_id: str) -> str:
+    path = find_page(page_id)
+    if not path or not path.exists():
+        return ""
+    try:
+        from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+
+        meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    summary = meta.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    for line in body.splitlines():
+        line = line.strip(" #-\t")
+        if line:
+            return _one_line(line, limit=220)
+    return ""
 
 
 def excerpt_page(page_id: str, queries: list[str], max_chars: int = 650) -> str:
@@ -779,6 +1101,30 @@ def _trim_text(text: str, max_chars: int) -> str:
 def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
     if result.decision == "none" or not result.context_items:
         return ""
+
+    if policy.context_style == "cards" and result.decision != "read":
+        lines = [
+            "[RECALL_CONTEXT]",
+            "LLM Wiki が過去文脈候補を見つけました。必要なら wiki.search/wiki.read で深掘りしてください。",
+            "雑談に重い個人事情を勝手に混ぜないでください。",
+            f"decision_id={result.decision_id}",
+            f"decision={result.decision} confidence={result.confidence:.2f}",
+        ]
+        if result.reasons:
+            lines.append("reasons: " + ", ".join(result.reasons[:4]))
+        if result.queries:
+            lines.append("queries: " + " | ".join(result.queries[:3]))
+        lines.append("cards:")
+        for item in result.context_items:
+            summary = item.snippets[0] if item.snippets else page_summary(item.page_id)
+            suffix = f" — {_one_line(summary, limit=160)}" if summary else ""
+            lines.append(f"- {item.page_id}: {item.title}{suffix}")
+        lines.append("詳細が必要なページは wiki.read(page_id) で取得。")
+        lines.append("[/RECALL_CONTEXT]")
+        context = "\n".join(lines)
+        if len(context) > policy.max_context_chars:
+            return context[: policy.max_context_chars].rstrip() + "\n[/RECALL_CONTEXT]"
+        return context
 
     lines = [
         "[RECALL_CONTEXT]",
@@ -879,7 +1225,77 @@ def run_recall(
     judge_confidence: float | None = None
     judge_reason = ""
     judge_queries: list[str] = []
-    if should_run_judge(score, policy):
+    rewrite_queries: list[str] = []
+    rewrite_confidence = 0.0
+    search_mode = ""
+    evidence_features: dict[str, Any] = {}
+    session_state = None
+    pre_results: list[Any] = []
+
+    if policy.gate_mode == "evidence" and perform_search:
+        try:
+            from llm_wiki_mcp.recall_session import (
+                cleanup_sessions,
+                load_session_state,
+                session_summary,
+                update_session_after_recall,
+            )
+
+            cleanup_sessions(policy.session_ttl_seconds)
+            session_state = load_session_state(active_request.session_id)
+            initial_queries = build_queries(active_request, matched, [], policy, session_state=session_state)
+            pre_results, search_mode = search_candidates(initial_queries, policy)
+            evidence_features = build_evidence_features(
+                request=active_request,
+                matched=matched,
+                heuristic_score=score,
+                results=pre_results,
+                search_mode=search_mode,
+            )
+            preliminary_score = evidence_score(evidence_features, policy)
+            evidence_features["evidence_score"] = preliminary_score
+            if should_rewrite_query(
+                request=active_request,
+                matched=matched,
+                policy=policy,
+                preliminary_features=evidence_features,
+            ):
+                rewrite_queries, rewrite_confidence, rewrite_reason = run_query_rewriter(
+                    active_request,
+                    matched,
+                    policy,
+                    session_summary(session_state),
+                )
+                if rewrite_reason:
+                    reasons.append(rewrite_reason)
+                if rewrite_queries:
+                    reasons.append("query rewritten")
+                    queries_for_search = build_queries(
+                        active_request,
+                        matched,
+                        [],
+                        policy,
+                        session_state=session_state,
+                        rewrite_queries=rewrite_queries,
+                    )
+                    pre_results, search_mode = search_candidates(queries_for_search, policy)
+                    evidence_features = build_evidence_features(
+                        request=active_request,
+                        matched=matched,
+                        heuristic_score=score,
+                        results=pre_results,
+                        search_mode=search_mode,
+                        rewrite_confidence=rewrite_confidence,
+                    )
+            score = evidence_score(evidence_features, policy)
+            evidence_features["evidence_score"] = score
+            evidence_features["decision_pre_judge"] = decision_from_score(score, policy)
+        except Exception as exc:
+            reasons.append(f"evidence gate failed: {exc.__class__.__name__}")
+            pre_results = []
+            search_mode = "error"
+
+    if should_run_judge(score, policy, evidence_features):
         judge_score, judge_queries, judge_reason = run_local_judge(active_request, score, policy)
         used_judge = judge_score is not None
         if judge_score is not None:
@@ -908,13 +1324,30 @@ def run_recall(
                 return result
 
     decision = decision_from_score(score, policy)
-    queries = build_queries(active_request, matched, judge_queries, policy) if decision != "none" else []
+    queries = (
+        build_queries(
+            active_request,
+            matched,
+            judge_queries,
+            policy,
+            session_state=session_state,
+            rewrite_queries=rewrite_queries,
+        )
+        if decision != "none" or (policy.gate_mode == "evidence" and perform_search)
+        else []
+    )
 
     context_items: list[ContextItem] = []
     error = ""
     if perform_search and decision != "none":
         try:
-            context_items = collect_context(queries, decision, policy)
+            context_items = collect_context(
+                queries,
+                decision,
+                policy,
+                session_state=session_state,
+                pre_results=pre_results or None,
+            )
             if not context_items:
                 reasons.append("no matching pages")
         except Exception as exc:
@@ -932,10 +1365,25 @@ def run_recall(
         used_judge=used_judge,
         judge_confidence=judge_confidence,
         judge_reason=judge_reason,
+        evidence_features=evidence_features,
+        search_mode=search_mode,
+        context_style=policy.context_style,
         latency_ms=_elapsed_ms(started),
         error=error,
     )
     result.context = format_recall_context(result, policy)
+    if session_state is not None:
+        try:
+            from llm_wiki_mcp.recall_session import update_session_after_recall
+
+            update_session_after_recall(
+                session_state,
+                queries=queries,
+                page_ids=[item.page_id for item in result.context_items],
+                page_updated={item.page_id: item.updated for item in result.context_items},
+            )
+        except Exception:
+            pass
     if policy.log_decisions:
         append_recall_log(request, result)
     return result
@@ -964,6 +1412,9 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "used_judge": result.used_judge,
         "judge_confidence": result.judge_confidence,
         "judge_reason": result.judge_reason,
+        "evidence_features": result.evidence_features,
+        "search_mode": result.search_mode,
+        "context_style": result.context_style,
         "latency_ms": result.latency_ms,
         "status": result.status,
         "error": result.error,
@@ -991,6 +1442,9 @@ def recall_log_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "used_judge": record.get("used_judge", False),
         "judge_confidence": record.get("judge_confidence"),
         "judge_reason": record.get("judge_reason", ""),
+        "evidence_features": record.get("evidence_features", {}),
+        "search_mode": record.get("search_mode", ""),
+        "context_style": record.get("context_style", ""),
         "latency_ms": record.get("latency_ms", 0),
         "status": record.get("status", ""),
         "error": record.get("error", ""),

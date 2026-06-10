@@ -201,7 +201,7 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
             BackgroundTask(
                 name=f"{host}-recall-audit",
                 module="llm_wiki_mcp.recall_auditor",
-                args=["--host", host, "--hook", "--config", str(config)],
+                args=["--host", host, "--hook", "--config", str(config), "--audit-read"],
                 env={"LLM_WIKI_RECALL_AUDIT_ENABLED": "1"},
                 log_prefix=f"{host}-recall-audit",
             )

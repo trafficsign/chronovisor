@@ -95,12 +95,12 @@ def normalize_recall_config(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(recall.get("model"), str):
         out["model"] = recall["model"]
 
-    for section in ("thresholds", "budgets", "gate", "policy"):
+    for section in ("thresholds", "budgets", "gate", "policy", "rewrite", "fusion", "calibration"):
         if isinstance(recall.get(section), dict):
             out[section] = recall[section]
 
     recall_options: dict[str, Any] = {}
-    for key in ("semantic", "judge_mode"):
+    for key in ("semantic", "judge_mode", "gate_mode", "context_style", "max_context_chars", "session_ttl_seconds"):
         if key in recall:
             recall_options[key] = recall[key]
     if recall_options:
