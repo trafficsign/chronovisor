@@ -1,0 +1,151 @@
+from __future__ import annotations
+
+import json
+
+from llm_wiki_mcp import search_eval
+from llm_wiki_mcp.search import ScoredPage
+
+
+def page(page_id: str, score: float = 1.0) -> ScoredPage:
+    return ScoredPage(
+        page_id=page_id,
+        title=page_id,
+        folder="",
+        updated="2026-06-11",
+        score=score,
+    )
+
+
+def write_jsonl(path, rows) -> None:
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def test_language_and_kind_buckets() -> None:
+    assert search_eval.language_bucket("LLM Wiki 検索") == "mixed"
+    assert search_eval.language_bucket("検索エンジン") == "ja"
+    assert search_eval.language_bucket("search engine") == "en"
+    assert search_eval.query_kind("短い質問?") == "short"
+    assert search_eval.query_kind("この検索結果はどうして外れているのかを確認したい？") == "question"
+    assert search_eval.query_kind("uv run pytest -q") == "short"
+
+
+def test_build_candidates_uses_feedback_labels(tmp_path) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file = tmp_path / "recall-log.jsonl"
+    write_jsonl(
+        feedback_file,
+        [
+            {
+                "kind": "missed_candidate",
+                "prompt": "LLM Wiki 検索 ロードマップ",
+                "expected_pages": ["llm-wiki-search-improvement-roadmap"],
+                "source": "auditor",
+                "ref": "d1",
+            },
+            {
+                "kind": "injection_ignored",
+                "prompt": "軽い雑談",
+                "expected_pages": ["noisy-page"],
+                "source": "auditor_precision",
+                "ref": "d2",
+            },
+        ],
+    )
+    write_jsonl(log_file, [])
+
+    examples = search_eval.build_candidates(
+        feedback_file=feedback_file,
+        log_file=log_file,
+        limit=10,
+    )
+
+    assert len(examples) == 2
+    assert examples[0].expected_pages == ("llm-wiki-search-improvement-roadmap",)
+    assert examples[0].negative_pages == ()
+    assert examples[0].language == "mixed"
+    assert examples[0].reviewed is False
+    assert examples[1].expected_pages == ()
+    assert examples[1].negative_pages == ("noisy-page",)
+
+
+def test_evaluate_examples_reports_ranking_metrics(monkeypatch) -> None:
+    examples = [
+        search_eval.SearchExample(
+            query="q1",
+            expected_pages=("target",),
+            split="dev",
+            language="en",
+            kind="manual",
+        ),
+        search_eval.SearchExample(
+            query="q2",
+            expected_pages=("other",),
+            negative_pages=("stale",),
+            split="locked-test",
+            language="ja",
+            kind="manual",
+        ),
+    ]
+
+    def fake_run_variant(query: str, variant: str, *, top_n: int = 20):
+        if query == "q1":
+            results = [page("noise"), page("target"), page("later")]
+        else:
+            results = [page("stale"), page("other")]
+        return {
+            "variant": variant,
+            "results": results,
+            "latency_ms": 7,
+            "channels": {"bm25": [p.page_id for p in results], "semantic": [], "graph": [], "usage_prior": []},
+        }
+
+    monkeypatch.setattr(search_eval, "run_variant", fake_run_variant)
+
+    payload = search_eval.evaluate_examples(examples, variants=("bm25",), top_n=20)
+
+    metrics = payload["variants"]["bm25"]["metrics"]
+    assert metrics["recall_at_5"] == 1.0
+    assert metrics["recall_at_20"] == 1.0
+    assert metrics["mrr_at_10"] == 0.5
+    assert metrics["stale_hit_rate_at_20"] == 1.0
+    assert metrics["latency_ms"]["p95"] == 7.0
+    assert payload["variants"]["bm25"]["by_bucket"]["split:dev"]["examples"] == 1
+
+
+def test_cli_build_golden_json(tmp_path, capsys) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file = tmp_path / "recall-log.jsonl"
+    output_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        feedback_file,
+        [
+            {
+                "kind": "missed_candidate",
+                "prompt": "検索エンジン",
+                "expected_pages": ["search-page"],
+                "ref": "d1",
+            }
+        ],
+    )
+    write_jsonl(log_file, [])
+
+    rc = search_eval.main(
+        [
+            "--build-golden",
+            "--feedback-file",
+            str(feedback_file),
+            "--log-file",
+            str(log_file),
+            "--output-file",
+            str(output_file),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["examples"] == 1
+    assert output_file.exists()
