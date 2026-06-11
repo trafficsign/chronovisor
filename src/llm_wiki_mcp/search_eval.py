@@ -37,7 +37,10 @@ RECALL_DIR = WIKI_ROOT / "recall"
 RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 GOLDEN_FILE = RECALL_DIR / "search-golden.jsonl"
+LABEL_QUEUE_FILE = RECALL_DIR / "search-label-queue.jsonl"
+FAILURE_INDEX_FILE = RECALL_DIR / "search-failures.jsonl"
 BASELINE_DIR = WIKI_ROOT / "runtime" / "search-eval"
+SELF_TUNE_HISTORY_FILE = BASELINE_DIR / "self-tune-history.jsonl"
 
 DEFAULT_VARIANTS = (
     "bm25",
@@ -93,6 +96,12 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
         "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _str_tuple(value: Any) -> tuple[str, ...]:
@@ -555,12 +564,172 @@ def build_golden(
     }
 
 
+def build_label_queue(
+    *,
+    feedback_file: Path = RECALL_FEEDBACK_FILE,
+    log_file: Path = RECALL_LOG_FILE,
+    output_file: Path = LABEL_QUEUE_FILE,
+    limit: int = 100,
+) -> dict[str, Any]:
+    examples = build_candidates(feedback_file=feedback_file, log_file=log_file, limit=limit)
+    rows = []
+    for row in examples_to_rows(examples):
+        rows.append(
+            {
+                **row,
+                "queue_status": "pending_review",
+                "promoted_to_golden": False,
+                "review_note": "",
+            }
+        )
+    write_jsonl(output_file, rows)
+    return {
+        "status": "ok",
+        "output_file": str(output_file),
+        "examples": len(rows),
+        "reviewed": 0,
+        "note": "Candidates are not added to search-golden.jsonl until human review.",
+    }
+
+
 def _count_by(examples: list[SearchExample], field: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for example in examples:
         value = str(getattr(example, field))
         counts[value] = counts.get(value, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def _failure_index_rows(debug_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in debug_rows:
+        expected = [page for page in row.get("expected_pages", []) if isinstance(page, str)]
+        if not expected:
+            continue
+        result_pages = [page for page in row.get("result_pages", []) if isinstance(page, str)]
+        if set(expected) & set(result_pages[:20]):
+            continue
+        channels = row.get("channels") if isinstance(row.get("channels"), dict) else {}
+        channel_candidates: dict[str, list[str]] = {}
+        channel_hit = False
+        for name, values in channels.items():
+            if not isinstance(values, list):
+                continue
+            pages = [page for page in values[:20] if isinstance(page, str)]
+            channel_candidates[str(name)] = pages
+            if set(expected) & set(pages):
+                channel_hit = True
+
+        failed_stage = "fusion" if channel_hit else "retrieval"
+        rows.append(
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "variant": row.get("variant", ""),
+                "query": row.get("query", ""),
+                "split": row.get("split", ""),
+                "language": row.get("language", ""),
+                "kind": row.get("kind", ""),
+                "expected_pages": expected,
+                "result_pages": result_pages[:20],
+                "channel_candidates": channel_candidates,
+                "failed_stage": failed_stage,
+                "reason_code": "fusion_missed" if channel_hit else "retrieval_missed",
+                "fix_kind": "fusion" if channel_hit else "data_or_rewrite",
+            }
+        )
+    return rows
+
+
+def write_failure_index(debug_rows: list[dict[str, Any]], path: Path = FAILURE_INDEX_FILE) -> dict[str, Any]:
+    rows = _failure_index_rows(debug_rows)
+    write_jsonl(path, rows)
+    return {"path": str(path), "failures": len(rows)}
+
+
+def run_weighted_hybrid(query: str, weights: dict[str, float], *, top_n: int = 20) -> dict[str, Any]:
+    fetch_n = max(top_n * 5, 100)
+    started = time.perf_counter()
+    bm25 = get_bm25()
+    bm25.build()
+    bm25_results = bm25.query(query, top_n=fetch_n)
+    sem_results = semantic_search(query, top_n=fetch_n)
+    results = fuse_results(bm25_results, sem_results, [], [], weights=weights)
+    elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+    return {"results": apply_filters(results)[:top_n], "latency_ms": elapsed_ms}
+
+
+def _rows_for_weight_eval(examples: list[SearchExample], weights: dict[str, float]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for example in examples:
+        result = run_weighted_hybrid(example.query, weights, top_n=20)
+        rows.append(
+            {
+                "query": example.query,
+                "split": example.split,
+                "language": example.language,
+                "kind": example.kind,
+                "source": example.source,
+                "reviewed": example.reviewed,
+                "expected_pages": list(example.expected_pages),
+                "negative_pages": list(example.negative_pages),
+                "stale_pages": list(example.stale_pages),
+                "bad_pages": list(example.bad_pages),
+                "result_pages": [page.page_id for page in result["results"]],
+                "latency_ms": result["latency_ms"],
+            }
+        )
+    return rows
+
+
+def self_tune(
+    *,
+    golden_file: Path = GOLDEN_FILE,
+    history_file: Path = SELF_TUNE_HISTORY_FILE,
+) -> dict[str, Any]:
+    examples = load_examples(golden_file)
+    dev = [example for example in examples if example.split == "dev"] or examples
+    locked = [example for example in examples if example.split == "locked-test"] or examples
+    baseline_weights = dict(DEFAULT_FUSION_WEIGHTS)
+    baseline_dev = _metrics(_rows_for_weight_eval(dev, baseline_weights))
+    baseline_locked = _metrics(_rows_for_weight_eval(locked, baseline_weights))
+
+    candidates = []
+    for semantic_weight in (0.4, 0.5, 0.6, 0.7, 0.8):
+        weights = {**DEFAULT_FUSION_WEIGHTS, "semantic": semantic_weight}
+        dev_metrics = _metrics(_rows_for_weight_eval(dev, weights))
+        candidates.append({"weights": weights, "dev": dev_metrics})
+    best = max(
+        candidates,
+        key=lambda item: (
+            item["dev"]["mrr_at_10"],
+            item["dev"]["recall_at_5"],
+            item["dev"]["ndcg_at_10"],
+        ),
+    )
+    locked_metrics = _metrics(_rows_for_weight_eval(locked, best["weights"]))
+    locked_ok = (
+        locked_metrics["recall_at_5"] >= baseline_locked["recall_at_5"]
+        and locked_metrics["mrr_at_10"] >= baseline_locked["mrr_at_10"]
+        and locked_metrics["stale_hit_rate_at_20"] <= baseline_locked["stale_hit_rate_at_20"]
+        and locked_metrics["negative_hit_rate_at_20"] <= baseline_locked["negative_hit_rate_at_20"]
+    )
+    dev_improved = best["dev"]["mrr_at_10"] > baseline_dev["mrr_at_10"]
+    status = "shadow_pass" if dev_improved and locked_ok else "blocked"
+    record = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "status": status,
+        "applied": False,
+        "reason": "" if status == "shadow_pass" else "dev improvement or locked-test guard failed",
+        "baseline": {"dev": baseline_dev, "locked-test": baseline_locked},
+        "best": {"weights": best["weights"], "dev": best["dev"], "locked-test": locked_metrics},
+        "guardrails": {
+            "dev_improved": dev_improved,
+            "locked_non_degrading": locked_ok,
+            "apply_policy": "shadow_only",
+        },
+    }
+    append_jsonl(history_file, record)
+    return record
 
 
 def run_report(
@@ -570,6 +739,7 @@ def run_report(
     top_n: int = 20,
     save: bool = False,
     debug_dump: Path | None = None,
+    failure_index: Path | None = None,
 ) -> dict[str, Any]:
     examples = load_examples(golden_file)
     result = evaluate_examples(examples, variants=variants, top_n=top_n)
@@ -590,6 +760,8 @@ def run_report(
     if debug_dump is not None:
         write_jsonl(debug_dump, result["debug_rows"])
         payload["debug_dump"] = str(debug_dump)
+    if failure_index is not None:
+        payload["failure_index"] = write_failure_index(result["debug_rows"], failure_index)
     if save:
         payload["baseline_file"] = str(save_baseline(payload))
     return payload
@@ -638,7 +810,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--variants", help="Comma-separated variants to evaluate.")
     parser.add_argument("--debug-dump", help="Write per-query channel/result rows as JSONL.")
+    parser.add_argument("--failure-index", nargs="?", const=str(FAILURE_INDEX_FILE), help="Write failed query index JSONL.")
     parser.add_argument("--build-golden", action="store_true")
+    parser.add_argument("--build-label-queue", action="store_true")
+    parser.add_argument("--self-tune", action="store_true", help="Run dev-only shadow self-tune with locked-test guard.")
+    parser.add_argument("--self-tune-history", default=str(SELF_TUNE_HISTORY_FILE))
     parser.add_argument("--report", action="store_true")
     parser.add_argument("--save-baseline", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -661,6 +837,34 @@ def main(argv: list[str] | None = None) -> int:
             print(f"examples\t{payload['examples']}")
             print(f"reviewed\t{payload['reviewed']}")
         return 0
+    if args.build_label_queue:
+        payload = build_label_queue(
+            feedback_file=Path(args.feedback_file).expanduser(),
+            log_file=Path(args.log_file).expanduser(),
+            output_file=Path(args.output_file).expanduser()
+            if args.output_file != str(GOLDEN_FILE)
+            else LABEL_QUEUE_FILE,
+            limit=args.limit,
+        )
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"label_queue\t{payload['output_file']}")
+            print(f"examples\t{payload['examples']}")
+            print(payload["note"])
+        return 0
+    if args.self_tune:
+        payload = self_tune(
+            golden_file=Path(args.golden_file).expanduser(),
+            history_file=Path(args.self_tune_history).expanduser(),
+        )
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"self_tune\t{payload['status']}")
+            print(f"applied\t{payload['applied']}")
+            print(f"history\t{args.self_tune_history}")
+        return 0
 
     payload = run_report(
         golden_file=Path(args.golden_file).expanduser(),
@@ -668,6 +872,7 @@ def main(argv: list[str] | None = None) -> int:
         top_n=args.top_n,
         save=args.save_baseline,
         debug_dump=Path(args.debug_dump).expanduser() if args.debug_dump else None,
+        failure_index=Path(args.failure_index).expanduser() if args.failure_index else None,
     )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))

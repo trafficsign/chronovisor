@@ -76,6 +76,8 @@ bm25_rank_decay = 0.006
 semantic_min_top_score = 0.45
 semantic_min_margin = 0.002
 semantic_low_confidence_weight = 0.25
+usage_prior_decay = 0.98
+usage_prior_cap = 3.0
 
 [recall.calibration]
 enabled = true

@@ -199,3 +199,108 @@ def test_cli_build_golden_json(tmp_path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["examples"] == 1
     assert output_file.exists()
+
+
+def test_build_label_queue_does_not_touch_golden(tmp_path) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file = tmp_path / "recall-log.jsonl"
+    output_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    golden_file.write_text("", encoding="utf-8")
+    write_jsonl(
+        feedback_file,
+        [
+            {
+                "kind": "missed_candidate",
+                "prompt": "query",
+                "expected_pages": ["target"],
+                "ref": "r1",
+            }
+        ],
+    )
+    write_jsonl(log_file, [])
+
+    payload = search_eval.build_label_queue(
+        feedback_file=feedback_file,
+        log_file=log_file,
+        output_file=output_file,
+    )
+
+    rows = [json.loads(line) for line in output_file.read_text(encoding="utf-8").splitlines()]
+    assert payload["examples"] == 1
+    assert rows[0]["queue_status"] == "pending_review"
+    assert rows[0]["promoted_to_golden"] is False
+    assert golden_file.read_text(encoding="utf-8") == ""
+
+
+def test_failure_index_records_missed_expected_pages(tmp_path) -> None:
+    output_file = tmp_path / "failures.jsonl"
+    debug_rows = [
+        {
+            "variant": "hybrid-current",
+            "query": "query",
+            "split": "dev",
+            "language": "en",
+            "kind": "question",
+            "expected_pages": ["target"],
+            "result_pages": ["other"],
+            "channels": {"bm25": ["target"], "semantic": ["other"]},
+        }
+    ]
+
+    payload = search_eval.write_failure_index(debug_rows, output_file)
+
+    rows = [json.loads(line) for line in output_file.read_text(encoding="utf-8").splitlines()]
+    assert payload["failures"] == 1
+    assert rows[0]["failed_stage"] == "fusion"
+    assert rows[0]["reason_code"] == "fusion_missed"
+
+
+def test_self_tune_shadow_blocks_when_locked_regresses(tmp_path, monkeypatch) -> None:
+    golden_file = tmp_path / "golden.jsonl"
+    history_file = tmp_path / "self-tune.jsonl"
+    write_jsonl(
+        golden_file,
+        [
+            {
+                "query": "dev",
+                "expected_pages": ["target"],
+                "split": "dev",
+                "reviewed": True,
+            },
+            {
+                "query": "locked",
+                "expected_pages": ["target"],
+                "split": "locked-test",
+                "reviewed": True,
+            },
+        ],
+    )
+
+    def fake_rows(examples, weights):
+        semantic_weight = weights["semantic"]
+        rows = []
+        for example in examples:
+            hit = example.query == "dev" and semantic_weight == 0.8
+            if example.query == "locked" and semantic_weight == 0.8:
+                hit = False
+            if example.query == "locked" and semantic_weight != 0.8:
+                hit = True
+            rows.append(
+                {
+                    "expected_pages": list(example.expected_pages),
+                    "negative_pages": [],
+                    "stale_pages": [],
+                    "result_pages": ["target"] if hit else ["other"],
+                    "latency_ms": 1,
+                }
+            )
+        return rows
+
+    monkeypatch.setattr(search_eval, "_rows_for_weight_eval", fake_rows)
+
+    result = search_eval.self_tune(golden_file=golden_file, history_file=history_file)
+
+    assert result["status"] == "blocked"
+    assert result["applied"] is False
+    assert history_file.exists()

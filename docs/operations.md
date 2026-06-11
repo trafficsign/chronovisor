@@ -60,6 +60,21 @@ false negatives. Precision labels use `kind = "injection_used"` or
 `kind = "injection_ignored"`. The Stop dispatcher passes `--audit-read` so read
 decisions can be precision-audited without changing the auditor CLI default.
 
+## Search Ranking Review
+
+```sh
+llm-wiki-eval --build-label-queue
+llm-wiki-eval --report --failure-index
+llm-wiki-eval --self-tune
+```
+
+`--build-label-queue` writes auditor/search candidates to
+`recall/search-label-queue.jsonl`; it does not promote rows into
+`search-golden.jsonl`. Promote only after human review. `--failure-index`
+records missed expected pages with channel candidates and a reason code.
+`--self-tune` is shadow-only: it searches dev-set weights and checks locked-test
+guardrails, but never edits config by itself.
+
 ## Calibration
 
 ```sh

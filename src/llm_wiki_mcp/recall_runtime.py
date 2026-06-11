@@ -200,6 +200,8 @@ class RecallPolicy:
     fusion_semantic_min_top_score: float = 0.45
     fusion_semantic_min_margin: float = 0.002
     fusion_semantic_low_confidence_weight: float = 0.25
+    fusion_usage_prior_decay: float = 0.98
+    fusion_usage_prior_cap: float = 3.0
     calibration_enabled: bool = True
     calibration_min_samples: int = 500
     calibration_holdout_ratio: float = 0.2
@@ -356,6 +358,8 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             ("semantic_min_top_score", "fusion_semantic_min_top_score"),
             ("semantic_min_margin", "fusion_semantic_min_margin"),
             ("semantic_low_confidence_weight", "fusion_semantic_low_confidence_weight"),
+            ("usage_prior_decay", "fusion_usage_prior_decay"),
+            ("usage_prior_cap", "fusion_usage_prior_cap"),
         ):
             value = fusion.get(key)
             if isinstance(value, int | float):
@@ -1001,6 +1005,8 @@ def search_candidates(queries: list[str], policy: RecallPolicy) -> tuple[list[An
                 "semantic_min_top_score": policy.fusion_semantic_min_top_score,
                 "semantic_min_margin": policy.fusion_semantic_min_margin,
                 "semantic_low_confidence_weight": policy.fusion_semantic_low_confidence_weight,
+                "usage_prior_decay": policy.fusion_usage_prior_decay,
+                "usage_prior_cap": policy.fusion_usage_prior_cap,
             },
         )
         if search_mode != "bm25":

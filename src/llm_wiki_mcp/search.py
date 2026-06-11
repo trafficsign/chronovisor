@@ -1157,6 +1157,8 @@ DEFAULT_FUSION_WEIGHTS: dict[str, float] = {
     "semantic_min_top_score": 0.45,
     "semantic_min_margin": 0.002,
     "semantic_low_confidence_weight": 0.25,
+    "usage_prior_decay": 0.98,
+    "usage_prior_cap": 3.0,
 }
 
 
@@ -1273,7 +1275,13 @@ def graph_expand_results(results: list[ScoredPage], *, decay: float = 0.5, limit
     return sorted(expanded.values(), key=lambda page: page.score, reverse=True)
 
 
-def usage_prior_results(candidate_ids: set[str], *, limit: int = 50) -> list[ScoredPage]:
+def usage_prior_results(
+    candidate_ids: set[str],
+    *,
+    limit: int = 50,
+    decay: float = 0.98,
+    cap: float = 3.0,
+) -> list[ScoredPage]:
     if not candidate_ids:
         return []
     feedback_file = WIKI_ROOT / "recall" / "feedback.jsonl"
@@ -1282,25 +1290,28 @@ def usage_prior_results(candidate_ids: set[str], *, limit: int = 50) -> list[Sco
             lines = deque(f, maxlen=1000)
     except OSError:
         return []
-    counts: Counter[str] = Counter()
-    for line in lines:
+    scores: Counter[str] = Counter()
+    decay = max(0.0, min(1.0, float(decay)))
+    cap = max(0.0, float(cap))
+    for age, line in enumerate(reversed(lines)):
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
         if not isinstance(record, dict) or record.get("kind") != "injection_used":
             continue
+        weight = decay ** age
         for page_id in record.get("expected_pages", []) or record.get("injected_pages", []):
             if isinstance(page_id, str) and page_id in candidate_ids:
-                counts[page_id] += 1
-    if not counts:
+                scores[page_id] = min(cap, scores[page_id] + weight)
+    if not scores:
         return []
     from llm_wiki_mcp.index_store import get_store
 
     store = get_store()
     store.refresh()
     out: list[ScoredPage] = []
-    for page_id, count in counts.most_common(limit):
+    for page_id, score in scores.most_common(limit):
         meta = store.meta(page_id)
         if meta is None:
             continue
@@ -1317,7 +1328,7 @@ def usage_prior_results(candidate_ids: set[str], *, limit: int = 50) -> list[Sco
                 title=meta["title"],
                 folder=folder,
                 updated=meta["updated"],
-                score=float(count),
+                score=float(score),
                 status=_normalize_lifecycle_status(meta.get("status")),
                 superseded_by=meta.get("superseded_by", "")
                 if isinstance(meta.get("superseded_by", ""), str)
@@ -1389,7 +1400,12 @@ def search(
     )
     candidate_ids = {page.page_id for page in bm25_results + sem_results + graph_results}
     usage_results = (
-        usage_prior_results(candidate_ids, limit=fetch_n)
+        usage_prior_results(
+            candidate_ids,
+            limit=fetch_n,
+            decay=float(weights.get("usage_prior_decay", 0.98)),
+            cap=float(weights.get("usage_prior_cap", 3.0)),
+        )
         if float(weights.get("usage_prior", 0.0) or 0.0) > 0
         else []
     )

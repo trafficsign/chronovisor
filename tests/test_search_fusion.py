@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 
 from llm_wiki_mcp import search
 from llm_wiki_mcp import ollama
 from llm_wiki_mcp import index_store as index_store_mod
 from llm_wiki_mcp.runtime_config import EmbeddingConfig
-from llm_wiki_mcp.search import ScoredPage, apply_filters, fuse_results
+from llm_wiki_mcp.search import ScoredPage, apply_filters, fuse_results, usage_prior_results
 
 
 def page(page_id: str, score: float, *, status: str = "active") -> ScoredPage:
@@ -344,3 +345,40 @@ def test_semantic_search_skips_chunks_for_confident_page_hits(tmp_path, monkeypa
     results = search.semantic_search("clear target", top_n=1)
 
     assert [result.page_id for result in results] == ["p"]
+
+
+def test_usage_prior_applies_recency_decay_and_cap(tmp_path, monkeypatch) -> None:
+    wiki_root = tmp_path / "wiki"
+    recall_dir = wiki_root / "recall"
+    recall_dir.mkdir(parents=True)
+    rows = [
+        {"kind": "injection_used", "expected_pages": ["p"]},
+        {"kind": "injection_used", "expected_pages": ["p"]},
+        {"kind": "injection_used", "expected_pages": ["p"]},
+    ]
+    (recall_dir / "feedback.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeStore:
+        def refresh(self) -> None:
+            pass
+
+        def meta(self, page_id: str):
+            return {
+                "title": page_id,
+                "updated": "2026-06-11",
+                "path": str(tmp_path / f"{page_id}.md"),
+                "status": "active",
+                "superseded_by": "",
+            }
+
+    monkeypatch.setattr(search, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(index_store_mod, "get_store", lambda: FakeStore())
+
+    results = usage_prior_results({"p"}, decay=0.5, cap=1.2)
+
+    assert len(results) == 1
+    assert results[0].page_id == "p"
+    assert results[0].score == 1.2
