@@ -20,6 +20,7 @@ LEGACY_RECALL_CONFIG_FILE = WIKI_ROOT / "recall.toml"
 
 FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
+DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,13 @@ class HookPolicy:
     user_prompt_recall: bool = True
     stop_save: bool = True
     stop_audit: bool = True
+
+
+@dataclass(frozen=True)
+class EmbeddingConfig:
+    model: str = DEFAULT_EMBEDDING_MODEL
+    document_prefix: str = ""
+    query_prefix: str = ""
 
 
 def active_config_file(path: Path | str | None = None) -> Path:
@@ -74,6 +82,21 @@ def load_hook_policy(path: Path | str | None = None) -> HookPolicy:
         user_prompt_recall=nested_bool(data, ("hooks", "user_prompt", "recall"), True),
         stop_save=nested_bool(data, ("hooks", "stop", "save"), True),
         stop_audit=nested_bool(data, ("hooks", "stop", "audit"), True),
+    )
+
+
+def load_embedding_config(path: Path | str | None = None) -> EmbeddingConfig:
+    data = load_toml_file(path)
+    embedding = data.get("embedding")
+    if not isinstance(embedding, dict):
+        return EmbeddingConfig()
+    model = embedding.get("model")
+    document_prefix = embedding.get("document_prefix")
+    query_prefix = embedding.get("query_prefix")
+    return EmbeddingConfig(
+        model=model if isinstance(model, str) and model.strip() else DEFAULT_EMBEDDING_MODEL,
+        document_prefix=document_prefix if isinstance(document_prefix, str) else "",
+        query_prefix=query_prefix if isinstance(query_prefix, str) else "",
     )
 
 

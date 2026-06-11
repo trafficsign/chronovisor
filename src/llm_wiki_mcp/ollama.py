@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from llm_wiki_mcp.runtime_config import DEFAULT_EMBEDDING_MODEL, load_embedding_config
+
 OLLAMA_URL = "http://localhost:11434"
 MODEL = "qwen3.6:35b-a3b-q8_0"
 
@@ -174,14 +176,18 @@ def generate(
     return resp.json()["response"]
 
 
-EMBED_MODEL = "nomic-embed-text"
+EMBED_MODEL = DEFAULT_EMBEDDING_MODEL
 
 
-def embed(texts: list[str]) -> list[list[float]]:
+def embedding_model() -> str:
+    return load_embedding_config().model
+
+
+def embed(texts: list[str], *, model: str | None = None) -> list[list[float]]:
     """Get embedding vectors via Ollama /api/embed."""
     resp = _client().post(
         "/api/embed",
-        json={"model": EMBED_MODEL, "input": texts},
+        json={"model": model or embedding_model(), "input": texts},
         timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
     )
     resp.raise_for_status()

@@ -67,3 +67,25 @@ audit = false
     assert policy.user_prompt_recall is False
     assert policy.stop_save is True
     assert policy.stop_audit is False
+
+
+def test_embedding_config_reads_model_and_prefixes(tmp_path: Path, monkeypatch) -> None:
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "recall.toml"
+    config.write_text(
+        """
+[embedding]
+model = "bge-m3"
+document_prefix = "検索文書: "
+query_prefix = "検索クエリ: "
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
+    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", legacy)
+
+    cfg = runtime_config.load_embedding_config()
+
+    assert cfg.model == "bge-m3"
+    assert cfg.document_prefix == "検索文書: "
+    assert cfg.query_prefix == "検索クエリ: "

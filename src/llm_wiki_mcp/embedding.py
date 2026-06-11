@@ -1,4 +1,4 @@
-"""Embedding helpers via Ollama ``nomic-embed-text``.
+"""Embedding helpers via the configured Ollama embedding model.
 
 Thin layer over :func:`ollama.embed` adding a disk cache keyed by
 ``sha256(model|text)`` plus cosine similarity. Used by the tag
@@ -17,7 +17,8 @@ import json
 import math
 from pathlib import Path
 
-from llm_wiki_mcp.ollama import EMBED_MODEL, embed as _ollama_embed
+from llm_wiki_mcp.ollama import embed as _ollama_embed
+from llm_wiki_mcp.runtime_config import load_embedding_config
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 
@@ -28,8 +29,9 @@ from llm_wiki_mcp.wiki import WIKI_ROOT
 _CACHE_DIR = WIKI_ROOT / ".index" / "embeddings"
 
 
-def _cache_path(text: str, model: str = EMBED_MODEL) -> Path:
-    h = hashlib.sha256(f"{model}|{text}".encode("utf-8")).hexdigest()
+def _cache_path(text: str, model: str | None = None) -> Path:
+    model_id = model or load_embedding_config().model
+    h = hashlib.sha256(f"{model_id}|{text}".encode("utf-8")).hexdigest()
     return _CACHE_DIR / h[:2] / f"{h}.json"
 
 

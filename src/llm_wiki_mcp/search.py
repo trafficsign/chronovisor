@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+from llm_wiki_mcp.runtime_config import DEFAULT_EMBEDDING_MODEL, load_embedding_config
 from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, SYSTEM_DIR, all_pages, page_id_from_path
 from llm_wiki_mcp.link_fix import atomic_write
 
@@ -388,9 +389,10 @@ def get_bm25() -> BM25Index:
 # ---------------------------------------------------------------------------
 #
 # Storage model:
-#   ~/.wiki/.index/embeddings.sqlite has one table:
-#     embeddings(page_id PK, vector BLOB, mtime REAL, norm REAL, dim INT)
-#   `vector` is a packed float32 array (4 bytes per dim → ~3KB per 768-dim
+#   ~/.wiki/.index/embeddings.sqlite stores page and recall-question vectors:
+#     embeddings(page_id PK, vector BLOB, mtime REAL, norm REAL, dim INT,
+#                model TEXT, text_prefix TEXT)
+#   `vector` is a packed float64 array (8 bytes per dim -> ~6KB per 768-dim
 #   vector). `norm` is precomputed at write time so semantic_search never
 #   recomputes per-row norms at query time.
 #
@@ -400,13 +402,28 @@ def get_bm25() -> BM25Index:
 import sqlite3
 import struct
 
-EMBED_MODEL = "nomic-embed-text"
+EMBED_MODEL = DEFAULT_EMBEDDING_MODEL
 
 EMBEDDINGS_DB = WIKI_ROOT / ".index" / "embeddings.sqlite"
 LEGACY_EMBEDDINGS_FILE = WIKI_ROOT / ".embeddings.json"
 EMBEDDINGS_FILE = LEGACY_EMBEDDINGS_FILE  # back-compat alias for any external imports
 
 _EMBED_DB_LOCK = threading.Lock()
+
+
+def _embedding_profile() -> tuple[str, str, str]:
+    cfg = load_embedding_config()
+    return cfg.model, cfg.document_prefix, cfg.query_prefix
+
+
+def _apply_prefix(prefix: str, text: str) -> str:
+    return f"{prefix}{text}" if prefix else text
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
 def _pack_vector(vec: list[float]) -> bytes:
@@ -434,7 +451,9 @@ def _connect_embeddings() -> sqlite3.Connection:
             vector BLOB NOT NULL,
             mtime REAL NOT NULL,
             norm REAL NOT NULL,
-            dim INTEGER NOT NULL
+            dim INTEGER NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            text_prefix TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -448,9 +467,20 @@ def _connect_embeddings() -> sqlite3.Connection:
             vector BLOB NOT NULL,
             mtime REAL NOT NULL,
             norm REAL NOT NULL,
-            dim INTEGER NOT NULL
+            dim INTEGER NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            text_prefix TEXT NOT NULL DEFAULT ''
         )
         """
+    )
+    _ensure_column(conn, "embeddings", "model", "model TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "embeddings", "text_prefix", "text_prefix TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "question_embeddings", "model", "model TEXT NOT NULL DEFAULT ''")
+    _ensure_column(
+        conn,
+        "question_embeddings",
+        "text_prefix",
+        "text_prefix TEXT NOT NULL DEFAULT ''",
     )
     return conn
 
@@ -488,6 +518,8 @@ def _maybe_migrate_legacy_json() -> None:
             if existing > 0:
                 _legacy_migration_done = True
                 return
+            model = EMBED_MODEL
+            text_prefix = ""
             rows = []
             for pid, data in payload.items():
                 vec = data.get("vector") if isinstance(data, dict) else None
@@ -495,10 +527,14 @@ def _maybe_migrate_legacy_json() -> None:
                     continue
                 mtime = float(data.get("mtime", 0.0))
                 norm = _vec_norm(vec)
-                rows.append((pid, _pack_vector(vec), mtime, norm, len(vec)))
+                rows.append((pid, _pack_vector(vec), mtime, norm, len(vec), model, text_prefix))
             if rows:
                 conn.executemany(
-                    "INSERT OR REPLACE INTO embeddings VALUES (?, ?, ?, ?, ?)",
+                    """
+                    INSERT OR REPLACE INTO embeddings
+                    (page_id, vector, mtime, norm, dim, model, text_prefix)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
                     rows,
                 )
                 conn.commit()
@@ -510,11 +546,15 @@ def _maybe_migrate_legacy_json() -> None:
 def _load_embedding(pid: str) -> tuple[list[float], float, float] | None:
     """Return (vector, mtime, norm) for a single page, or None."""
     _maybe_migrate_legacy_json()
+    model, document_prefix, _query_prefix = _embedding_profile()
     conn = _connect_embeddings()
     try:
         row = conn.execute(
-            "SELECT vector, mtime, norm, dim FROM embeddings WHERE page_id = ?",
-            (pid,),
+            """
+            SELECT vector, mtime, norm, dim FROM embeddings
+            WHERE page_id = ? AND model = ? AND text_prefix = ?
+            """,
+            (pid, model, document_prefix),
         ).fetchone()
     finally:
         conn.close()
@@ -524,19 +564,28 @@ def _load_embedding(pid: str) -> tuple[list[float], float, float] | None:
     return _unpack_vector(blob, int(dim)), float(mtime), float(norm)
 
 
-def _store_embeddings_batch(rows: list[tuple[str, list[float], float]]) -> None:
+def _store_embeddings_batch(
+    rows: list[tuple[str, list[float], float]],
+    *,
+    model: str,
+    text_prefix: str,
+) -> None:
     """Insert/replace a batch of (page_id, vector, mtime) rows."""
     if not rows:
         return
     packed = [
-        (pid, _pack_vector(vec), float(mtime), _vec_norm(vec), len(vec))
+        (pid, _pack_vector(vec), float(mtime), _vec_norm(vec), len(vec), model, text_prefix)
         for pid, vec, mtime in rows
     ]
     with _EMBED_DB_LOCK:
         conn = _connect_embeddings()
         try:
             conn.executemany(
-                "INSERT OR REPLACE INTO embeddings VALUES (?, ?, ?, ?, ?)",
+                """
+                INSERT OR REPLACE INTO embeddings
+                (page_id, vector, mtime, norm, dim, model, text_prefix)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
                 packed,
             )
             conn.commit()
@@ -544,19 +593,39 @@ def _store_embeddings_batch(rows: list[tuple[str, list[float], float]]) -> None:
             conn.close()
 
 
-def _store_question_embeddings_batch(rows: list[tuple[str, int, str, list[float], float]]) -> None:
+def _store_question_embeddings_batch(
+    rows: list[tuple[str, int, str, list[float], float]],
+    *,
+    model: str,
+    text_prefix: str,
+) -> None:
     """Insert/replace recall-question embedding rows."""
     if not rows:
         return
     packed = [
-        (f"{pid}#q{idx}", pid, idx, question, _pack_vector(vec), float(mtime), _vec_norm(vec), len(vec))
+        (
+            f"{pid}#q{idx}",
+            pid,
+            idx,
+            question,
+            _pack_vector(vec),
+            float(mtime),
+            _vec_norm(vec),
+            len(vec),
+            model,
+            text_prefix,
+        )
         for pid, idx, question, vec, mtime in rows
     ]
     with _EMBED_DB_LOCK:
         conn = _connect_embeddings()
         try:
             conn.executemany(
-                "INSERT OR REPLACE INTO question_embeddings VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                """
+                INSERT OR REPLACE INTO question_embeddings
+                (key, page_id, question_idx, question, vector, mtime, norm, dim, model, text_prefix)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 packed,
             )
             conn.commit()
@@ -567,10 +636,15 @@ def _store_question_embeddings_batch(rows: list[tuple[str, int, str, list[float]
 def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
     """Snapshot all rows as (page_id, vector, mtime, norm)."""
     _maybe_migrate_legacy_json()
+    model, document_prefix, _query_prefix = _embedding_profile()
     conn = _connect_embeddings()
     try:
         rows = conn.execute(
-            "SELECT page_id, vector, mtime, norm, dim FROM embeddings"
+            """
+            SELECT page_id, vector, mtime, norm, dim FROM embeddings
+            WHERE model = ? AND text_prefix = ?
+            """,
+            (model, document_prefix),
         ).fetchall()
     finally:
         conn.close()
@@ -583,10 +657,16 @@ def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
 def _iter_all_question_embeddings() -> "list[tuple[str, str, int, list[float], float, float]]":
     """Snapshot all recall-question rows as (key, page_id, idx, vector, mtime, norm)."""
     _maybe_migrate_legacy_json()
+    model, document_prefix, _query_prefix = _embedding_profile()
     conn = _connect_embeddings()
     try:
         rows = conn.execute(
-            "SELECT key, page_id, question_idx, vector, mtime, norm, dim FROM question_embeddings"
+            """
+            SELECT key, page_id, question_idx, vector, mtime, norm, dim
+            FROM question_embeddings
+            WHERE model = ? AND text_prefix = ?
+            """,
+            (model, document_prefix),
         ).fetchall()
     finally:
         conn.close()
@@ -598,9 +678,13 @@ def _iter_all_question_embeddings() -> "list[tuple[str, str, int, list[float], f
 
 def _embedding_count() -> int:
     _maybe_migrate_legacy_json()
+    model, document_prefix, _query_prefix = _embedding_profile()
     conn = _connect_embeddings()
     try:
-        return conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM embeddings WHERE model = ? AND text_prefix = ?",
+            (model, document_prefix),
+        ).fetchone()[0]
     finally:
         conn.close()
 
@@ -643,6 +727,7 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
         return 0
 
     _maybe_migrate_legacy_json()
+    model, document_prefix, _query_prefix = _embedding_profile()
 
     # Pull existing mtimes for the candidate page set in one query so
     # we don't pay per-row SELECTs inside the loop.
@@ -650,7 +735,13 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
     try:
         existing_mtimes: dict[str, float] = {
             row[0]: float(row[1])
-            for row in conn.execute("SELECT page_id, mtime FROM embeddings").fetchall()
+            for row in conn.execute(
+                """
+                SELECT page_id, mtime FROM embeddings
+                WHERE model = ? AND text_prefix = ?
+                """,
+                (model, document_prefix),
+            ).fetchall()
         }
     finally:
         conn.close()
@@ -693,9 +784,9 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
         batch_size = 32
         for i in range(0, len(pages_to_process), batch_size):
             batch = pages_to_process[i:i + batch_size]
-            texts = [t[1] for t in batch]
+            texts = [_apply_prefix(document_prefix, t[1]) for t in batch]
             try:
-                vectors = embed(texts)
+                vectors = embed(texts, model=model)
             except Exception:
                 continue
             rows: list[tuple[str, list[float], float]] = []
@@ -709,8 +800,12 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
                         continue
                 else:
                     rows.append((pid, vec, mtime))
-            _store_embeddings_batch(rows)
-            _store_question_embeddings_batch(question_rows)
+            _store_embeddings_batch(rows, model=model, text_prefix=document_prefix)
+            _store_question_embeddings_batch(
+                question_rows,
+                model=model,
+                text_prefix=document_prefix,
+            )
             updated_count += len(rows)
 
     return updated_count
@@ -734,8 +829,9 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
     if _embedding_count() == 0:
         return []
 
+    model, _document_prefix, query_prefix = _embedding_profile()
     try:
-        q_vec = embed([query])[0]
+        q_vec = embed([_apply_prefix(query_prefix, query)], model=model)[0]
     except Exception:
         return []
 

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
+
 from llm_wiki_mcp import search
+from llm_wiki_mcp import ollama
+from llm_wiki_mcp import index_store as index_store_mod
+from llm_wiki_mcp.runtime_config import EmbeddingConfig
 from llm_wiki_mcp.search import ScoredPage, apply_filters, fuse_results
 
 
@@ -61,3 +66,96 @@ def test_fusion_preserves_lifecycle_status_for_filtering() -> None:
 
     assert results[0].status == "deprecated"
     assert apply_filters(results) == []
+
+
+def test_update_embeddings_rebuilds_when_model_profile_changes(tmp_path, monkeypatch) -> None:
+    wiki_root = tmp_path / "wiki"
+    pages_dir = wiki_root / "pages"
+    system_dir = wiki_root / "system"
+    index_dir = wiki_root / ".index"
+    pages_dir.mkdir(parents=True)
+    system_dir.mkdir(parents=True)
+    index_dir.mkdir(parents=True)
+    page_path = pages_dir / "p.md"
+    page_path.write_text(
+        "---\ntitle: P\nupdated: 2026-06-11\n---\nbody\n",
+        encoding="utf-8",
+    )
+    db_path = index_dir / "embeddings.sqlite"
+
+    monkeypatch.setattr(search, "PAGES_DIR", pages_dir)
+    monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
+    monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
+    monkeypatch.setattr(search, "LEGACY_EMBEDDINGS_FILE", wiki_root / ".embeddings.json")
+    monkeypatch.setattr(search, "all_pages", lambda: [page_path])
+    monkeypatch.setattr(search, "_legacy_migration_done", True)
+    monkeypatch.setattr(ollama, "is_available", lambda: True)
+
+    profile = {"value": EmbeddingConfig(model="m1", document_prefix="D1:", query_prefix="Q1:")}
+    calls: list[tuple[str | None, list[str]]] = []
+
+    def fake_embed(texts, *, model=None):
+        calls.append((model, list(texts)))
+        return [[float(len(text)), 1.0] for text in texts]
+
+    monkeypatch.setattr(search, "load_embedding_config", lambda: profile["value"])
+    monkeypatch.setattr(ollama, "embed", fake_embed)
+
+    assert search.update_embeddings() == 1
+    assert calls[-1][0] == "m1"
+    assert calls[-1][1][0].startswith("D1:")
+    assert search._embedding_count() == 1
+
+    profile["value"] = EmbeddingConfig(model="m2", document_prefix="D2:", query_prefix="Q2:")
+    assert search._embedding_count() == 0
+    assert search.update_embeddings() == 1
+    assert calls[-1][0] == "m2"
+    assert calls[-1][1][0].startswith("D2:")
+    assert search._embedding_count() == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT model, text_prefix, COUNT(*) FROM embeddings GROUP BY model, text_prefix"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [("m2", "D2:", 1)]
+
+
+def test_semantic_search_applies_query_prefix(tmp_path, monkeypatch) -> None:
+    captured: list[tuple[str | None, list[str]]] = []
+
+    def fake_embed(texts, *, model=None):
+        captured.append((model, list(texts)))
+        return [[1.0, 0.0] for _ in texts]
+
+    class FakeStore:
+        def refresh(self) -> None:
+            pass
+
+        def meta(self, page_id: str):
+            return {
+                "title": page_id,
+                "updated": "2026-06-11",
+                "path": str(tmp_path / f"{page_id}.md"),
+                "status": "active",
+                "superseded_by": "",
+            }
+
+    monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(ollama, "embed", fake_embed)
+    monkeypatch.setattr(
+        search,
+        "load_embedding_config",
+        lambda: EmbeddingConfig(model="ruri", document_prefix="検索文書: ", query_prefix="検索クエリ: "),
+    )
+    monkeypatch.setattr(search, "_embedding_count", lambda: 1)
+    monkeypatch.setattr(search, "_iter_all_embeddings", lambda: [("p", [1.0, 0.0], 0.0, 1.0)])
+    monkeypatch.setattr(search, "_iter_all_question_embeddings", lambda: [])
+    monkeypatch.setattr(index_store_mod, "get_store", lambda: FakeStore())
+
+    results = search.semantic_search("テスト", top_n=1)
+
+    assert [result.page_id for result in results] == ["p"]
+    assert captured[0] == ("ruri", ["検索クエリ: テスト"])

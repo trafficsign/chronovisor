@@ -42,6 +42,25 @@ class _StreamClient:
         ])
 
 
+class _PostResponse:
+    status_code = 200
+
+    def json(self) -> dict:
+        return {"embeddings": [[1.0, 2.0]]}
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _PostClient:
+    def __init__(self) -> None:
+        self.payload = None
+
+    def post(self, _path: str, *, json: dict, timeout: object) -> _PostResponse:
+        self.payload = json
+        return _PostResponse()
+
+
 def test_generate_streams_progress_and_returns_text(monkeypatch) -> None:
     client = _StreamClient()
     monkeypatch.setattr(ollama, "_client", lambda: client)
@@ -55,3 +74,11 @@ def test_generate_streams_progress_and_returns_text(monkeypatch) -> None:
     assert updates[-1]["active"] is False
     assert updates[-1]["generated_chars"] == 5
     assert updates[-1]["eval_count"] == 2
+
+
+def test_embed_uses_explicit_model(monkeypatch) -> None:
+    client = _PostClient()
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    assert ollama.embed(["hello"], model="bge-m3") == [[1.0, 2.0]]
+    assert client.payload["model"] == "bge-m3"
