@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
-from llm_wiki_mcp.runtime_config import DEFAULT_EMBEDDING_MODEL, load_embedding_config
+from llm_wiki_mcp.runtime_config import (
+    DEFAULT_EMBEDDING_MODEL,
+    load_embedding_config,
+    load_negative_feedback_config,
+)
 from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, SYSTEM_DIR, all_pages, page_id_from_path
 from llm_wiki_mcp.link_fix import atomic_write
 
@@ -1429,6 +1433,14 @@ def search(
         )
     else:
         results = bm25_results
+
+    negative_config = load_negative_feedback_config()
+    if negative_config.enabled:
+        from llm_wiki_mcp.negative_feedback import apply_penalties, penalties_for_query
+
+        penalties = penalties_for_query(query, negative_config)
+        if penalties:
+            results = apply_penalties(results, penalties)
 
     # Filter THEN truncate (not the other way around)
     results = apply_filters(results, folder, updated_after, updated_before)

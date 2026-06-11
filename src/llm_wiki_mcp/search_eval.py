@@ -29,7 +29,8 @@ from llm_wiki_mcp.search import (
     usage_prior_results,
 )
 from llm_wiki_mcp.reranker import rerank_results
-from llm_wiki_mcp.runtime_config import load_reranker_config
+from llm_wiki_mcp.negative_feedback import apply_penalties, penalties_for_query
+from llm_wiki_mcp.runtime_config import load_negative_feedback_config, load_reranker_config
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 
@@ -401,6 +402,17 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
     else:
         raise ValueError(f"unknown search eval variant: {variant}")
 
+    # Match production search(): query-conditioned negative feedback demotion.
+    negative_meta: dict[str, Any] = {"status": "disabled"}
+    negative_config = load_negative_feedback_config()
+    if negative_config.enabled:
+        penalties = penalties_for_query(query, negative_config)
+        if penalties:
+            results = apply_penalties(results, penalties)
+            negative_meta = {"status": "applied", "pages": sorted(penalties)}
+        else:
+            negative_meta = {"status": "no_match"}
+
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
     out = apply_filters(results)[:top_n]
     return {
@@ -413,6 +425,7 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
             "graph": [page.page_id for page in graph_results[:top_n]],
             "usage_prior": [page.page_id for page in usage_results[:top_n]],
             "reranker": reranker_meta,
+            "negative_feedback": negative_meta,
         },
     }
 

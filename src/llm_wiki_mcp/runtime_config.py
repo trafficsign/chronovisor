@@ -152,6 +152,53 @@ def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
     )
 
 
+@dataclass(frozen=True)
+class NegativeFeedbackConfig:
+    enabled: bool = False
+    kinds: tuple[str, ...] = ("injection_ignored", "false-positive")
+    similarity_threshold: float = 0.35
+    penalty: float = 0.85
+    max_age_days: int = 180
+    max_entries: int = 500
+
+
+def load_negative_feedback_config(path: Path | str | None = None) -> NegativeFeedbackConfig:
+    data = load_toml_file(path)
+    search = data.get("search")
+    section: Any = None
+    if isinstance(search, dict) and isinstance(search.get("negative_feedback"), dict):
+        section = search["negative_feedback"]
+    if not isinstance(section, dict):
+        return NegativeFeedbackConfig()
+
+    kinds_value = section.get("kinds")
+    kinds = NegativeFeedbackConfig.kinds
+    if isinstance(kinds_value, list):
+        cleaned = tuple(k for k in kinds_value if isinstance(k, str) and k.strip())
+        if cleaned:
+            kinds = cleaned
+    threshold = section.get("similarity_threshold")
+    penalty = section.get("penalty")
+    return NegativeFeedbackConfig(
+        enabled=section.get("enabled") is True,
+        kinds=kinds,
+        similarity_threshold=(
+            float(threshold)
+            if isinstance(threshold, (int, float)) and not isinstance(threshold, bool)
+            and 0.0 < float(threshold) <= 1.0
+            else NegativeFeedbackConfig.similarity_threshold
+        ),
+        penalty=(
+            float(penalty)
+            if isinstance(penalty, (int, float)) and not isinstance(penalty, bool)
+            and 0.0 < float(penalty) <= 1.0
+            else NegativeFeedbackConfig.penalty
+        ),
+        max_age_days=_positive_int(section.get("max_age_days"), NegativeFeedbackConfig.max_age_days),
+        max_entries=_positive_int(section.get("max_entries"), NegativeFeedbackConfig.max_entries),
+    )
+
+
 def normalize_recall_config(data: dict[str, Any]) -> dict[str, Any]:
     """Return a config shape accepted by ``recall_runtime._apply_config``.
 

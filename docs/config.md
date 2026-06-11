@@ -19,6 +19,17 @@ model = "bge-m3"
 document_prefix = ""
 query_prefix = ""
 
+[search.negative_feedback]
+# Optional. Demotes pages recorded as injection_ignored / false-positive
+# feedback when the incoming query is lexically similar (Jaccard over search
+# tokens) to the feedback prompt. Pages confirmed relevant by reviewed golden
+# labels for a similar query are protected and never demoted.
+enabled = false
+similarity_threshold = 0.35
+penalty = 0.85
+max_age_days = 180
+max_entries = 500
+
 [search.reranker]
 # Optional. Used only by MCP wiki.search when enabled; synchronous recall hooks
 # keep using the faster BM25/dense fusion path.
