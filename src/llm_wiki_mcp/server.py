@@ -722,6 +722,7 @@ def wiki_jobs(job_id: str | None = None) -> str:
             "completed_at": job.completed_at,
             "pages_created": job.pages_created,
             "pages_updated": job.pages_updated,
+            "result": job.result,
             "error": job.error,
         }, ensure_ascii=False)
 
@@ -737,6 +738,57 @@ def wiki_jobs(job_id: str | None = None) -> str:
             for j in jobs
         ]
     }, ensure_ascii=False)
+
+
+@mcp.tool()
+def wiki_deep_dive(
+    query: str,
+    max_iterations: int = 3,
+    fanout: int = 5,
+    semantic: bool = True,
+    use_llm: bool = True,
+    background: bool = True,
+) -> str:
+    """Run agentic search -> read -> wikilink -> requery retrieval.
+
+    Args:
+        query: Initial research query.
+        max_iterations: Search/read/requery loops to run, capped at 5.
+        fanout: Direct and linked pages to inspect per loop, capped at 10.
+        semantic: Use hybrid semantic search for each loop.
+        use_llm: Ask the local heavy model to propose follow-up queries.
+            When unavailable, the tool falls back to deterministic requery.
+        background: When True, return a job_id immediately and inspect with
+            wiki.jobs(job_id). When False, run synchronously and return result.
+    """
+    from llm_wiki_mcp.deep_retrieval import run_deep_dive, start_deep_dive
+
+    if background:
+        job_id = start_deep_dive(
+            query,
+            max_iterations=max_iterations,
+            fanout=fanout,
+            semantic=semantic,
+            use_llm=use_llm,
+        )
+        return json.dumps(
+            {
+                "status": "started",
+                "job_id": job_id,
+                "processor": "deep-retrieval",
+                "query": query,
+            },
+            ensure_ascii=False,
+        )
+
+    result = run_deep_dive(
+        query,
+        max_iterations=max_iterations,
+        fanout=fanout,
+        semantic=semantic,
+        use_llm=use_llm,
+    )
+    return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()
