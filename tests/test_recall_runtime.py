@@ -18,8 +18,10 @@ from llm_wiki_mcp.recall_runtime import (
     render_output,
     request_from_hook_payload,
     run_local_judge,
+    run_query_rewriter,
     run_recall,
     search_candidates,
+    warm_recall_model,
 )
 from llm_wiki_mcp.search import ScoredPage
 
@@ -251,6 +253,11 @@ think = false
 timeout_ms = 1200
 num_ctx = 2048
 num_predict = 128
+keep_alive = "1h"
+warmup_timeout_ms = 9000
+
+[rewrite]
+timeout_ms = 1400
 """
     )
 
@@ -261,6 +268,20 @@ num_predict = 128
     assert policy.judge_timeout_ms == 1200
     assert policy.judge_num_ctx == 2048
     assert policy.judge_num_predict == 128
+    assert policy.judge_keep_alive == "1h"
+    assert policy.warmup_timeout_ms == 9000
+    assert policy.rewrite_timeout_ms == 1400
+
+
+def test_gate_defaults_keep_model_resident_and_rewrite_timeout_longer(tmp_path) -> None:
+    config = tmp_path / "recall.toml"
+    config.write_text("enabled = true\n")
+
+    policy = load_policy(config)
+
+    assert policy.judge_keep_alive == "24h"
+    assert policy.warmup_timeout_ms == 15000
+    assert policy.rewrite_timeout_ms == 3000
 
 
 def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
@@ -365,6 +386,104 @@ def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
 
     assert score < policy.search_threshold
     assert reason == "不要"
+
+
+def test_query_rewriter_timeout_falls_back_with_reason(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, _path: str, *, json: dict[str, object]) -> object:
+            raise recall_runtime.httpx.ReadTimeout("cold model")
+
+    monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
+
+    queries, confidence, reason = run_query_rewriter(
+        RecallRequest(host="test", event="UserPromptSubmit", prompt="前のあれ"),
+        {"past_reference": ["前の"], "ambiguity": ["あれ"]},
+        RecallPolicy(rewrite_timeout_ms=3000),
+        "",
+    )
+
+    assert queries == []
+    assert confidence == 0.0
+    assert reason == "rewrite fallback: ReadTimeout"
+
+
+def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    captured: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, _path: str, *, json: dict[str, object]) -> FakeResponse:
+            captured.append(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
+
+    result = warm_recall_model(
+        RecallPolicy(
+            judge_model="judge-model",
+            rewrite_model="rewrite-model",
+            judge_keep_alive="1h",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["models"] == ["judge-model", "rewrite-model"]
+    assert [payload["keep_alive"] for payload in captured] == ["1h", "1h"]
+
+
+def test_run_recall_records_rewrite_fallback_metrics(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    def fake_search(**_kwargs: object) -> tuple[list[ScoredPage], str]:
+        return [], "bm25"
+
+    def timeout_rewriter(*_args: object, **_kwargs: object) -> tuple[list[str], float, str]:
+        return [], 0.0, "rewrite fallback: ReadTimeout"
+
+    monkeypatch.setattr(recall_runtime, "run_search", fake_search)
+    monkeypatch.setattr(recall_runtime, "run_query_rewriter", timeout_rewriter)
+
+    result = run_recall(
+        RecallRequest(
+            host="test",
+            event="UserPromptSubmit",
+            prompt="前のあれ、LLM Wikiでどう直すんだっけ?",
+            cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        ),
+        RecallPolicy(judge_mode="off", log_decisions=False),
+        perform_search=True,
+    )
+
+    assert "rewrite fallback: ReadTimeout" in result.reasons
+    assert result.evidence_features["rewrite_attempted"] is True
+    assert result.evidence_features["rewrite_status"] == "fallback"
+    assert result.evidence_features["rewrite_reason"] == "rewrite fallback: ReadTimeout"
+    assert isinstance(result.evidence_features["rewrite_latency_ms"], int)
 
 
 def test_system_task_notification_skips_recall() -> None:

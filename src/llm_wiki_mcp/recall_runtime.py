@@ -184,10 +184,12 @@ class RecallPolicy:
     judge_timeout_ms: int = 2000
     judge_num_ctx: int = 4096
     judge_num_predict: int = 64
+    judge_keep_alive: str = "24h"
+    warmup_timeout_ms: int = 15000
     judge_include_queries: bool = False
     rewrite_enabled: bool = True
     rewrite_model: str = "qwen3.5:4b"
-    rewrite_timeout_ms: int = 1200
+    rewrite_timeout_ms: int = 3000
     fusion_bm25: float = 1.0
     fusion_semantic: float = 1.0
     fusion_graph: float = 0.5
@@ -321,6 +323,10 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             policy.judge_num_predict = max(16, gate["num_predict"])
         if isinstance(gate.get("include_queries"), bool):
             policy.judge_include_queries = gate["include_queries"]
+        if isinstance(gate.get("keep_alive"), str) and gate["keep_alive"]:
+            policy.judge_keep_alive = gate["keep_alive"]
+        if isinstance(gate.get("warmup_timeout_ms"), int):
+            policy.warmup_timeout_ms = max(1000, gate["warmup_timeout_ms"])
 
     rewrite = data.get("rewrite", {})
     if isinstance(rewrite, dict):
@@ -630,7 +636,7 @@ def run_local_judge(request: RecallRequest, heuristic_score: float, policy: Reca
                     "prompt": json.dumps(prompt, ensure_ascii=False),
                     "stream": False,
                     "think": policy.judge_think,
-                    "keep_alive": "5m",
+                    "keep_alive": policy.judge_keep_alive,
                     "format": schema,
                     "options": {
                         "temperature": 0,
@@ -763,7 +769,7 @@ def run_query_rewriter(
                     "prompt": json.dumps(prompt, ensure_ascii=False),
                     "stream": False,
                     "think": False,
-                    "keep_alive": "5m",
+                    "keep_alive": policy.judge_keep_alive,
                     "format": schema,
                     "options": {
                         "temperature": 0,
@@ -780,7 +786,56 @@ def run_query_rewriter(
         confidence_f = max(0.0, min(1.0, float(confidence))) if isinstance(confidence, int | float) else 0.0
         return _dedupe_queries(queries, limit=policy.max_queries), confidence_f, "rewrite ok"
     except Exception as exc:
-        return [], 0.0, f"rewrite unavailable: {exc.__class__.__name__}"
+        return [], 0.0, f"rewrite fallback: {exc.__class__.__name__}"
+
+
+def warm_recall_model(policy: RecallPolicy) -> dict[str, Any]:
+    """Warm the gate/rewrite Ollama model so sync recall avoids cold starts."""
+    from llm_wiki_mcp.ollama import OLLAMA_URL
+
+    started = time.monotonic()
+    models = _dedupe_queries(
+        [policy.judge_model, policy.rewrite_model or policy.judge_model],
+        limit=2,
+    )
+    timeout_seconds = max(1.0, policy.warmup_timeout_ms / 1000)
+    timeout = httpx.Timeout(
+        connect=min(3.0, timeout_seconds),
+        read=timeout_seconds,
+        write=3.0,
+        pool=1.0,
+    )
+    warmed: list[str] = []
+    errors: dict[str, str] = {}
+    for model in models:
+        try:
+            with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
+                resp = client.post(
+                    "/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": "warmup",
+                        "stream": False,
+                        "think": False,
+                        "keep_alive": policy.judge_keep_alive,
+                        "options": {
+                            "temperature": 0,
+                            "num_ctx": 128,
+                            "num_predict": 1,
+                        },
+                    },
+                )
+                resp.raise_for_status()
+            warmed.append(model)
+        except Exception as exc:
+            errors[model] = exc.__class__.__name__
+    return {
+        "ok": not errors,
+        "models": warmed,
+        "errors": errors,
+        "keep_alive": policy.judge_keep_alive,
+        "latency_ms": _elapsed_ms(started),
+    }
 
 
 def _compact_query(text: str, limit: int = 180) -> str:
@@ -1302,6 +1357,7 @@ def run_recall(
     evidence_features: dict[str, Any] = {}
     session_state = None
     pre_results: list[Any] = []
+    rewrite_metrics: dict[str, Any] = {}
 
     if policy.gate_mode == "evidence" and perform_search:
         try:
@@ -1331,12 +1387,24 @@ def run_recall(
                 policy=policy,
                 preliminary_features=evidence_features,
             ):
+                rewrite_started = time.monotonic()
                 rewrite_queries, rewrite_confidence, rewrite_reason = run_query_rewriter(
                     active_request,
                     matched,
                     policy,
                     session_summary(session_state),
                 )
+                rewrite_metrics = {
+                    "rewrite_attempted": True,
+                    "rewrite_latency_ms": _elapsed_ms(rewrite_started),
+                    "rewrite_reason": rewrite_reason,
+                    "rewrite_status": "ok"
+                    if rewrite_queries
+                    else "fallback"
+                    if rewrite_reason.startswith("rewrite fallback:")
+                    else "empty",
+                }
+                evidence_features.update(rewrite_metrics)
                 if rewrite_reason:
                     reasons.append(rewrite_reason)
                 if rewrite_queries:
@@ -1358,6 +1426,7 @@ def run_recall(
                         search_mode=search_mode,
                         rewrite_confidence=rewrite_confidence,
                     )
+                    evidence_features.update(rewrite_metrics)
             score = evidence_score(evidence_features, policy)
             evidence_features["evidence_score"] = score
             evidence_features["decision_pre_judge"] = decision_from_score(score, policy)
@@ -1645,6 +1714,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=str(RECALL_CONFIG_FILE))
     parser.add_argument("--hook", action="store_true", help="Read hook JSON from stdin.")
     parser.add_argument("--no-search", action="store_true", help="Only evaluate the gate; do not search pages.")
+    parser.add_argument("--warmup", action="store_true", help="Warm the gate/rewrite model and exit.")
     parser.add_argument(
         "--recent",
         nargs="?",
@@ -1690,6 +1760,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "recorded", "feedback": record}, ensure_ascii=False))
         return 0
 
+    policy = load_policy(Path(args.config).expanduser())
+    if args.warmup:
+        result = warm_recall_model(policy)
+        print(json.dumps({"status": "ok" if result["ok"] else "error", **result}, ensure_ascii=False))
+        return 0 if result["ok"] else 1
+
     payload: dict[str, Any] = {}
     if args.hook:
         raw = sys.stdin.read()
@@ -1713,7 +1789,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.session_id:
         request.session_id = args.session_id
 
-    policy = load_policy(Path(args.config).expanduser())
     result = run_recall(request, policy, perform_search=not args.no_search)
     output = render_output(result, args.format)
     if output:

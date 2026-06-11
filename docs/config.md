@@ -24,6 +24,11 @@ timeout_ms = 2000
 num_ctx = 4096
 num_predict = 64
 include_queries = false
+# How long ollama keeps the gate/rewrite model resident after a call.
+# Default "24h" avoids cold-start timeouts on the synchronous recall path.
+keep_alive = "24h"
+# Used by `llm-wiki-recall --warmup` before hook sessions.
+warmup_timeout_ms = 15000
 
 [recall.budgets]
 max_context_chars = 600
@@ -40,7 +45,7 @@ session_ttl_seconds = 604800
 [recall.rewrite]
 enabled = true
 model = "qwen3.5:4b"
-timeout_ms = 1200
+timeout_ms = 3000
 
 [recall.fusion]
 bm25 = 1.0
