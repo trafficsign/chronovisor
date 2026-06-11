@@ -24,10 +24,37 @@ def test_fusion_keeps_strong_bm25_match_ahead_of_semantic_only_neighbor() -> Non
     results = fuse_results(
         bm25_results=[page("exact", 100.0), page("neighbor", 10.0)],
         semantic_results=[page("neighbor", 0.9), page("other", 0.8)],
-        weights={"bm25": 1.0, "semantic": 1.0},
     )
 
     assert [result.page_id for result in results[:2]] == ["exact", "neighbor"]
+
+
+def test_fusion_bm25_bonus_is_parameterized() -> None:
+    without_bonus = fuse_results(
+        bm25_results=[page("exact", 100.0)],
+        semantic_results=[page("semantic", 0.9)],
+        weights={
+            "bm25": 0.1,
+            "semantic": 1.0,
+            "bm25_score_bonus": 0.0,
+            "bm25_rank_bonus": 0.0,
+            "bm25_rank_decay": 0.0,
+        },
+    )
+    with_bonus = fuse_results(
+        bm25_results=[page("exact", 100.0)],
+        semantic_results=[page("semantic", 0.9)],
+        weights={
+            "bm25": 0.1,
+            "semantic": 1.0,
+            "bm25_score_bonus": 0.0,
+            "bm25_rank_bonus": 0.2,
+            "bm25_rank_decay": 0.0,
+        },
+    )
+
+    assert without_bonus[0].page_id == "semantic"
+    assert with_bonus[0].page_id == "exact"
 
 
 def test_searchable_pages_includes_system_pages(tmp_path, monkeypatch) -> None:

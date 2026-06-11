@@ -13,6 +13,12 @@ recall = true
 save = true
 audit = true
 
+[embedding]
+# Tuned search profile. If omitted, runtime falls back to nomic-embed-text.
+model = "bge-m3"
+document_prefix = ""
+query_prefix = ""
+
 [recall.thresholds]
 search = 0.35
 read = 0.65
@@ -49,9 +55,12 @@ timeout_ms = 3000
 
 [recall.fusion]
 bm25 = 1.0
-semantic = 1.0
-graph = 0.5
-usage_prior = 0.2
+semantic = 0.6
+graph = 0.0
+usage_prior = 0.0
+bm25_score_bonus = 0.005
+bm25_rank_bonus = 0.006
+bm25_rank_decay = 0.006
 
 [recall.calibration]
 enabled = true

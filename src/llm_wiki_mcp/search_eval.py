@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.search import (
+    DEFAULT_FUSION_WEIGHTS,
     ScoredPage,
     apply_filters,
     fuse_results,
@@ -345,7 +346,7 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
             sem_results,
             graph_results,
             [],
-            weights={"bm25": 1.0, "semantic": 1.0, "graph": 0.5, "usage_prior": 0.0},
+            weights={**DEFAULT_FUSION_WEIGHTS, "graph": 0.5, "usage_prior": 0.0},
         )
     elif variant == "hybrid-usage":
         results = fuse_results(
@@ -353,7 +354,7 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
             sem_results,
             [],
             usage_results,
-            weights={"bm25": 1.0, "semantic": 1.0, "graph": 0.0, "usage_prior": 0.2},
+            weights={**DEFAULT_FUSION_WEIGHTS, "graph": 0.0, "usage_prior": 0.2},
         )
     elif variant == "hybrid-current":
         results = fuse_results(
@@ -361,7 +362,7 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
             sem_results,
             [],
             [],
-            weights={"bm25": 1.0, "semantic": 1.0, "graph": 0.0, "usage_prior": 0.0},
+            weights=DEFAULT_FUSION_WEIGHTS,
         )
     else:
         raise ValueError(f"unknown search eval variant: {variant}")

@@ -191,9 +191,12 @@ class RecallPolicy:
     rewrite_model: str = "qwen3.5:4b"
     rewrite_timeout_ms: int = 3000
     fusion_bm25: float = 1.0
-    fusion_semantic: float = 1.0
-    fusion_graph: float = 0.5
-    fusion_usage_prior: float = 0.2
+    fusion_semantic: float = 0.6
+    fusion_graph: float = 0.0
+    fusion_usage_prior: float = 0.0
+    fusion_bm25_score_bonus: float = 0.005
+    fusion_bm25_rank_bonus: float = 0.006
+    fusion_bm25_rank_decay: float = 0.006
     calibration_enabled: bool = True
     calibration_min_samples: int = 500
     calibration_holdout_ratio: float = 0.2
@@ -344,6 +347,9 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             ("semantic", "fusion_semantic"),
             ("graph", "fusion_graph"),
             ("usage_prior", "fusion_usage_prior"),
+            ("bm25_score_bonus", "fusion_bm25_score_bonus"),
+            ("bm25_rank_bonus", "fusion_bm25_rank_bonus"),
+            ("bm25_rank_decay", "fusion_bm25_rank_decay"),
         ):
             value = fusion.get(key)
             if isinstance(value, int | float):
@@ -983,6 +989,9 @@ def search_candidates(queries: list[str], policy: RecallPolicy) -> tuple[list[An
                 "semantic": policy.fusion_semantic,
                 "graph": policy.fusion_graph,
                 "usage_prior": policy.fusion_usage_prior,
+                "bm25_score_bonus": policy.fusion_bm25_score_bonus,
+                "bm25_rank_bonus": policy.fusion_bm25_rank_bonus,
+                "bm25_rank_decay": policy.fusion_bm25_rank_decay,
             },
         )
         if search_mode != "bm25":

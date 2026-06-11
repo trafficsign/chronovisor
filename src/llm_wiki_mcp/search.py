@@ -915,6 +915,17 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
 # RRF Fusion + Filter + Sort
 # ---------------------------------------------------------------------------
 
+DEFAULT_FUSION_WEIGHTS: dict[str, float] = {
+    "bm25": 1.0,
+    "semantic": 0.6,
+    "graph": 0.0,
+    "usage_prior": 0.0,
+    "bm25_score_bonus": 0.005,
+    "bm25_rank_bonus": 0.006,
+    "bm25_rank_decay": 0.006,
+}
+
+
 def fuse_results(
     bm25_results: list[ScoredPage],
     semantic_results: list[ScoredPage],
@@ -926,7 +937,10 @@ def fuse_results(
     """Weighted Reciprocal Rank Fusion of result lists."""
     scores: dict[str, float] = {}
     meta: dict[str, ScoredPage] = {}
-    weights = weights or {}
+    weights = {**DEFAULT_FUSION_WEIGHTS, **(weights or {})}
+    bm25_score_bonus = max(0.0, float(weights.get("bm25_score_bonus", 0.0)))
+    bm25_rank_bonus = max(0.0, float(weights.get("bm25_rank_bonus", 0.0)))
+    bm25_rank_decay = max(0.0, float(weights.get("bm25_rank_decay", 0.0)))
 
     def add_results(results: list[ScoredPage], channel: str) -> None:
         weight = max(0.0, float(weights.get(channel, 1.0)))
@@ -936,8 +950,8 @@ def fuse_results(
         for rank, page in enumerate(results):
             score = weight / (k + rank)
             if channel == "bm25" and top_raw > 0:
-                score += weight * 0.025 * (max(0.0, float(page.score)) / top_raw)
-                score += weight * max(0.0, 0.04 - (0.01 * rank))
+                score += weight * bm25_score_bonus * (max(0.0, float(page.score)) / top_raw)
+                score += weight * max(0.0, bm25_rank_bonus - (bm25_rank_decay * rank))
             scores[page.page_id] = scores.get(page.page_id, 0) + score
             if page.page_id not in meta:
                 meta[page.page_id] = page
@@ -1109,7 +1123,7 @@ def search(
     bm25_results = bm25.query(query, top_n=fetch_n)
 
     search_mode = "bm25"
-    weights = fusion_weights or {"bm25": 1.0, "semantic": 1.0, "graph": 0.0, "usage_prior": 0.0}
+    weights = {**DEFAULT_FUSION_WEIGHTS, **(fusion_weights or {})}
     sem_results: list[ScoredPage] = []
     if semantic:
         sem_results = semantic_search(query, top_n=fetch_n)

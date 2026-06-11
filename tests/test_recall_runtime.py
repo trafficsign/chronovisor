@@ -284,6 +284,33 @@ def test_gate_defaults_keep_model_resident_and_rewrite_timeout_longer(tmp_path) 
     assert policy.rewrite_timeout_ms == 3000
 
 
+def test_fusion_config_reads_channel_weights_and_bm25_bonus(tmp_path) -> None:
+    config = tmp_path / "recall.toml"
+    config.write_text(
+        """
+[fusion]
+bm25 = 1.0
+semantic = 0.6
+graph = 0.0
+usage_prior = 0.0
+bm25_score_bonus = 0.005
+bm25_rank_bonus = 0.006
+bm25_rank_decay = 0.006
+""",
+        encoding="utf-8",
+    )
+
+    policy = load_policy(config)
+
+    assert policy.fusion_bm25 == 1.0
+    assert policy.fusion_semantic == 0.6
+    assert policy.fusion_graph == 0.0
+    assert policy.fusion_usage_prior == 0.0
+    assert policy.fusion_bm25_score_bonus == 0.005
+    assert policy.fusion_bm25_rank_bonus == 0.006
+    assert policy.fusion_bm25_rank_decay == 0.006
+
+
 def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 
