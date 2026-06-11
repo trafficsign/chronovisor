@@ -409,6 +409,11 @@ LEGACY_EMBEDDINGS_FILE = WIKI_ROOT / ".embeddings.json"
 EMBEDDINGS_FILE = LEGACY_EMBEDDINGS_FILE  # back-compat alias for any external imports
 
 _EMBED_DB_LOCK = threading.Lock()
+MAX_CHUNKS_PER_PAGE = 8
+MAX_CHUNK_CHARS = 900
+CHUNK_SCORE_WEIGHT = 0.92
+CHUNK_SEARCH_MIN_TOP_SCORE = 0.45
+CHUNK_SEARCH_MIN_MARGIN = 0.002
 
 
 def _embedding_profile() -> tuple[str, str, str]:
@@ -473,6 +478,22 @@ def _connect_embeddings() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chunk_embeddings (
+            key TEXT PRIMARY KEY,
+            page_id TEXT NOT NULL,
+            chunk_idx INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            vector BLOB NOT NULL,
+            mtime REAL NOT NULL,
+            norm REAL NOT NULL,
+            dim INTEGER NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            text_prefix TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
     _ensure_column(conn, "embeddings", "model", "model TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "embeddings", "text_prefix", "text_prefix TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "question_embeddings", "model", "model TEXT NOT NULL DEFAULT ''")
@@ -482,6 +503,8 @@ def _connect_embeddings() -> sqlite3.Connection:
         "text_prefix",
         "text_prefix TEXT NOT NULL DEFAULT ''",
     )
+    _ensure_column(conn, "chunk_embeddings", "model", "model TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "chunk_embeddings", "text_prefix", "text_prefix TEXT NOT NULL DEFAULT ''")
     return conn
 
 
@@ -633,6 +656,70 @@ def _store_question_embeddings_batch(
             conn.close()
 
 
+def _delete_chunk_embeddings(
+    page_ids: set[str],
+    *,
+    model: str,
+    text_prefix: str,
+) -> None:
+    if not page_ids:
+        return
+    with _EMBED_DB_LOCK:
+        conn = _connect_embeddings()
+        try:
+            for pid in page_ids:
+                conn.execute(
+                    """
+                    DELETE FROM chunk_embeddings
+                    WHERE page_id = ? AND model = ? AND text_prefix = ?
+                    """,
+                    (pid, model, text_prefix),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _store_chunk_embeddings_batch(
+    rows: list[tuple[str, int, str, list[float], float]],
+    *,
+    model: str,
+    text_prefix: str,
+) -> None:
+    """Insert/replace chunk embedding rows."""
+    if not rows:
+        return
+    packed = [
+        (
+            f"{pid}#c{idx}",
+            pid,
+            idx,
+            text,
+            _pack_vector(vec),
+            float(mtime),
+            _vec_norm(vec),
+            len(vec),
+            model,
+            text_prefix,
+        )
+        for pid, idx, text, vec, mtime in rows
+    ]
+    with _EMBED_DB_LOCK:
+        conn = _connect_embeddings()
+        try:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO chunk_embeddings
+                (key, page_id, chunk_idx, text, vector, mtime, norm, dim, model, text_prefix)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                packed,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
     """Snapshot all rows as (page_id, vector, mtime, norm)."""
     _maybe_migrate_legacy_json()
@@ -651,6 +738,28 @@ def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
     out = []
     for pid, blob, mtime, norm, dim in rows:
         out.append((pid, _unpack_vector(blob, int(dim)), float(mtime), float(norm)))
+    return out
+
+
+def _iter_all_chunk_embeddings() -> "list[tuple[str, str, int, str, list[float], float, float]]":
+    """Snapshot chunk rows as (key, page_id, idx, text, vector, mtime, norm)."""
+    _maybe_migrate_legacy_json()
+    model, document_prefix, _query_prefix = _embedding_profile()
+    conn = _connect_embeddings()
+    try:
+        rows = conn.execute(
+            """
+            SELECT key, page_id, chunk_idx, text, vector, mtime, norm, dim
+            FROM chunk_embeddings
+            WHERE model = ? AND text_prefix = ?
+            """,
+            (model, document_prefix),
+        ).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for key, pid, idx, text, blob, mtime, norm, dim in rows:
+        out.append((key, pid, int(idx), text, _unpack_vector(blob, int(dim)), float(mtime), float(norm)))
     return out
 
 
@@ -689,6 +798,25 @@ def _embedding_count() -> int:
         conn.close()
 
 
+def _chunked_page_ids() -> set[str]:
+    _maybe_migrate_legacy_json()
+    model, document_prefix, _query_prefix = _embedding_profile()
+    conn = _connect_embeddings()
+    try:
+        return {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT DISTINCT page_id FROM chunk_embeddings
+                WHERE model = ? AND text_prefix = ?
+                """,
+                (model, document_prefix),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+
 def _recall_questions_from_content(content: str) -> list[str]:
     try:
         from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
@@ -702,6 +830,54 @@ def _recall_questions_from_content(content: str) -> list[str]:
     return [q for q in questions if isinstance(q, str) and q.strip()][:8]
 
 
+def _markdown_chunks(content: str, title: str) -> list[str]:
+    body = _FRONTMATTER_RE.sub("", content)
+    chunks: list[str] = []
+    heading = title
+    buffer: list[str] = []
+
+    def flush() -> None:
+        nonlocal buffer
+        text = re.sub(r"\s+", " ", "\n".join(buffer)).strip()
+        buffer = []
+        if not text:
+            return
+        prefix = f"{title}\n{heading}" if heading and heading != title else title
+        while text:
+            piece = text[:MAX_CHUNK_CHARS].strip()
+            if len(text) > MAX_CHUNK_CHARS and " " in piece:
+                piece = piece.rsplit(" ", 1)[0].strip() or text[:MAX_CHUNK_CHARS].strip()
+            chunks.append(f"{prefix}\n\n{piece}")
+            text = text[len(piece):].strip()
+            if len(chunks) >= MAX_CHUNKS_PER_PAGE:
+                return
+
+    for line in body.splitlines():
+        stripped = line.strip()
+        heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if heading_match:
+            flush()
+            heading = heading_match.group(2).strip()
+            if len(chunks) >= MAX_CHUNKS_PER_PAGE:
+                break
+            continue
+        if not stripped:
+            flush()
+            if len(chunks) >= MAX_CHUNKS_PER_PAGE:
+                break
+            continue
+        buffer.append(stripped)
+        if sum(len(item) for item in buffer) >= MAX_CHUNK_CHARS:
+            flush()
+            if len(chunks) >= MAX_CHUNKS_PER_PAGE:
+                break
+    if len(chunks) < MAX_CHUNKS_PER_PAGE:
+        flush()
+    if not chunks and title.strip():
+        chunks.append(title.strip())
+    return chunks[:MAX_CHUNKS_PER_PAGE]
+
+
 def _cosine_sim(a: list[float], b: list[float]) -> float:
     """Public-style helper kept for test/debug use; semantic_search uses
     a faster path with precomputed norms.
@@ -712,6 +888,15 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
     if na == 0 or nb == 0:
         return 0.0
     return dot / (na * nb)
+
+
+def _should_scan_chunks(page_scores: list[float]) -> bool:
+    if not page_scores:
+        return True
+    ordered = sorted(page_scores, reverse=True)
+    top1 = ordered[0]
+    top2 = ordered[1] if len(ordered) > 1 else 0.0
+    return top1 < CHUNK_SEARCH_MIN_TOP_SCORE or (top1 - top2) < CHUNK_SEARCH_MIN_MARGIN
 
 
 def update_embeddings(page_ids: list[str] | None = None) -> int:
@@ -746,7 +931,8 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
     finally:
         conn.close()
 
-    pages_to_process: list[tuple[str, str, float]] = []
+    existing_chunk_pages = _chunked_page_ids()
+    pages_to_process: list[tuple[str, str, int, str, float]] = []
     for path in searchable_pages():
         pid = page_id_from_path(path)
         if page_ids and pid not in page_ids:
@@ -761,6 +947,7 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
         if (
             existing_mtime is not None
             and existing_mtime >= mtime
+            and pid in existing_chunk_pages
             and not page_ids
         ):
             continue
@@ -775,34 +962,45 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
         questions = _recall_questions_from_content(content)
         recall_text = "\n".join(f"Q: {q}" for q in questions)
         embed_text = f"{title}\n\n{recall_text}\n\n{_FRONTMATTER_RE.sub('', content)[:2000]}"
-        pages_to_process.append((pid, embed_text, mtime))
+        pages_to_process.append(("page", pid, -1, embed_text, mtime))
         for idx, question in enumerate(questions):
-            pages_to_process.append((f"{pid}#q{idx}", question, mtime))
+            pages_to_process.append(("question", pid, idx, question, mtime))
+        for idx, chunk in enumerate(_markdown_chunks(content, title)):
+            pages_to_process.append(("chunk", pid, idx, chunk, mtime))
 
     updated_count = 0
     if pages_to_process:
+        _delete_chunk_embeddings(
+            {pid for kind, pid, _idx, _text, _mtime in pages_to_process if kind == "page"},
+            model=model,
+            text_prefix=document_prefix,
+        )
         batch_size = 32
         for i in range(0, len(pages_to_process), batch_size):
             batch = pages_to_process[i:i + batch_size]
-            texts = [_apply_prefix(document_prefix, t[1]) for t in batch]
+            texts = [_apply_prefix(document_prefix, t[3]) for t in batch]
             try:
                 vectors = embed(texts, model=model)
             except Exception:
                 continue
             rows: list[tuple[str, list[float], float]] = []
             question_rows: list[tuple[str, int, str, list[float], float]] = []
-            for (pid, text, mtime), vec in zip(batch, vectors):
-                if "#q" in pid:
-                    page_id, _, idx_text = pid.partition("#q")
-                    try:
-                        question_rows.append((page_id, int(idx_text), text, vec, mtime))
-                    except ValueError:
-                        continue
+            chunk_rows: list[tuple[str, int, str, list[float], float]] = []
+            for (kind, pid, idx, text, mtime), vec in zip(batch, vectors):
+                if kind == "question":
+                    question_rows.append((pid, idx, text, vec, mtime))
+                elif kind == "chunk":
+                    chunk_rows.append((pid, idx, text, vec, mtime))
                 else:
                     rows.append((pid, vec, mtime))
             _store_embeddings_batch(rows, model=model, text_prefix=document_prefix)
             _store_question_embeddings_batch(
                 question_rows,
+                model=model,
+                text_prefix=document_prefix,
+            )
+            _store_chunk_embeddings_batch(
+                chunk_rows,
                 model=model,
                 text_prefix=document_prefix,
             )
@@ -905,6 +1103,39 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
                 if isinstance(meta.get("superseded_by", ""), str)
                 else "",
             )
+
+    if _should_scan_chunks([page.score for page in by_page.values()]):
+        for _key, pid, _idx, text, vec, _mtime, norm in _iter_all_chunk_embeddings():
+            if norm == 0:
+                continue
+            meta = store.meta(pid)
+            if meta is None:
+                continue
+            folder = ""
+            try:
+                parent = Path(meta["path"]).parent
+                if parent != PAGES_DIR:
+                    folder = parent.name
+            except (KeyError, TypeError):
+                folder = ""
+            dot = 0.0
+            for x, y in zip(q_vec, vec):
+                dot += x * y
+            sim = (dot / (q_norm * norm)) * CHUNK_SCORE_WEIGHT
+            existing = by_page.get(pid)
+            if existing is None or sim > existing.score:
+                by_page[pid] = ScoredPage(
+                    page_id=pid,
+                    title=meta["title"],
+                    folder=folder,
+                    updated=meta["updated"],
+                    score=sim,
+                    snippet=text[:240],
+                    status=_normalize_lifecycle_status(meta.get("status")),
+                    superseded_by=meta.get("superseded_by", "")
+                    if isinstance(meta.get("superseded_by", ""), str)
+                    else "",
+                )
 
     results = list(by_page.values())
     results.sort(key=lambda x: x.score, reverse=True)
