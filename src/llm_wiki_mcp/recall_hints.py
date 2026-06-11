@@ -12,6 +12,50 @@ from llm_wiki_mcp import wiki
 
 
 QUERY_HINTS_FILE = wiki.WIKI_ROOT / "recall" / "query-hints.json"
+GENERIC_HINT_TOKENS = {
+    "about",
+    "and",
+    "are",
+    "as",
+    "assistant",
+    "available",
+    "based",
+    "but",
+    "codex",
+    "context",
+    "details",
+    "for",
+    "from",
+    "history",
+    "implying",
+    "in",
+    "is",
+    "memory",
+    "not",
+    "of",
+    "on",
+    "or",
+    "past",
+    "previous",
+    "project",
+    "prompt",
+    "recall",
+    "reference",
+    "references",
+    "response",
+    "session",
+    "specific",
+    "stored",
+    "that",
+    "the",
+    "this",
+    "to",
+    "user",
+    "was",
+    "which",
+    "wiki",
+    "with",
+}
 
 
 def normalize_query_text(text: str) -> str:
@@ -104,12 +148,27 @@ def add_query_hint(
 def hint_matches_query(hint: dict[str, Any], query: str) -> bool:
     query_key = normalize_query_text(query)
     hint_key = str(hint.get("query_key") or normalize_query_text(str(hint.get("query", ""))))
-    if hint_key and (hint_key in query_key or query_key in hint_key):
+    if hint_key and len(hint_key) >= 12 and len(query_key) >= 12 and (
+        hint_key in query_key or query_key in hint_key
+    ):
         return True
     raw_tokens = hint.get("tokens")
     hint_tokens = {str(token) for token in raw_tokens if isinstance(token, str)} if isinstance(raw_tokens, list) else query_tokens(hint_key)
-    overlap = hint_tokens & query_tokens(query)
-    return len(overlap) >= min(2, len(hint_tokens)) if hint_tokens else False
+    hint_tokens = meaningful_hint_tokens(hint_tokens)
+    query_tokens_ = meaningful_hint_tokens(query_tokens(query))
+    overlap = hint_tokens & query_tokens_
+    if not hint_tokens or not query_tokens_:
+        return False
+    required = max(2, min(4, (min(len(hint_tokens), len(query_tokens_)) + 1) // 2))
+    return len(overlap) >= required and len(overlap) / min(len(hint_tokens), len(query_tokens_)) >= 0.5
+
+
+def meaningful_hint_tokens(tokens: set[str]) -> set[str]:
+    return {
+        token
+        for token in tokens
+        if token not in GENERIC_HINT_TOKENS and (len(token) >= 3 or re.search(r"[\u3040-\u30ff\u3400-\u9fff]", token))
+    }
 
 
 def matching_hint_page_ids(queries: list[str], *, limit: int = 3, path: Path | None = None) -> list[str]:

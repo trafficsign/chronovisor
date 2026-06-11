@@ -64,6 +64,17 @@ def test_query_hint_auto_apply_feeds_runtime_context(tmp_path, monkeypatch) -> N
     assert [item.page_id for item in context] == ["claude-code-recall-hook-implementation"]
 
 
+def test_query_hint_ignores_generic_context_tokens() -> None:
+    hint = {
+        "page_id": "wrong-page",
+        "query": "old broad prompt",
+        "query_key": "old broad prompt",
+        "tokens": ["assistant", "codex", "context", "project", "wiki"],
+    }
+
+    assert not recall_hints.hint_matches_query(hint, "codex context window 切り分け")
+
+
 def test_auto_apply_min_count_groups_by_normalize_key(tmp_path, monkeypatch) -> None:
     pages_root = tmp_path / "wiki"
     _page(pages_root, "claude-code-recall-hook-implementation")

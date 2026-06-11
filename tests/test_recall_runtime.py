@@ -8,7 +8,10 @@ from llm_wiki_mcp.recall_runtime import (
     RecallRequest,
     RecallResult,
     append_feedback,
+    best_excerpt_index,
+    build_queries,
     evaluate_heuristic,
+    excerpt_terms,
     format_recall_context,
     load_policy,
     main,
@@ -16,7 +19,9 @@ from llm_wiki_mcp.recall_runtime import (
     request_from_hook_payload,
     run_local_judge,
     run_recall,
+    search_candidates,
 )
+from llm_wiki_mcp.search import ScoredPage
 
 
 def test_explicit_past_project_prompt_crosses_read_threshold() -> None:
@@ -33,6 +38,75 @@ def test_explicit_past_project_prompt_crosses_read_threshold() -> None:
     assert score >= policy.read_threshold
     assert "昨日" in matched["past_reference"]
     assert any("known recurring" in reason for reason in reasons)
+
+
+def test_ascii_term_matching_uses_word_boundaries() -> None:
+    policy = RecallPolicy(judge_mode="off")
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="LLM Wiki runtime と uvx cache の注意点",
+    )
+
+    _score, _reasons, matched = evaluate_heuristic(request, policy)
+
+    assert "me " not in matched["ownership"]
+    assert "llm wiki" in matched["project"]
+    assert "uvx" in matched["project"]
+
+
+def test_build_queries_does_not_add_single_generic_decision_term() -> None:
+    policy = RecallPolicy(max_queries=3)
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="マツダでCADグループから設計グループへ移った話",
+    )
+    matched = {
+        "project": [],
+        "decision": ["設計"],
+        "past_reference": [],
+        "ownership": [],
+        "ambiguity": [],
+    }
+
+    queries = build_queries(request, matched, [], policy)
+
+    assert queries == ["マツダでCADグループから設計グループへ移った話"]
+
+
+def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    def fake_search(
+        *,
+        query: str,
+        top_n: int,
+        semantic: bool,
+        fusion_weights: dict[str, float],
+    ) -> tuple[list[ScoredPage], str]:
+        if query == "specific":
+            return [ScoredPage("target", "target", "", "", 0.08)], "hybrid"
+        return [ScoredPage("generic", "generic", "", "", 0.10)], "hybrid"
+
+    monkeypatch.setattr(recall_runtime, "run_search", fake_search)
+
+    results, _mode = search_candidates(["specific", "generic"], RecallPolicy())
+
+    assert [result.page_id for result in results[:2]] == ["target", "generic"]
+
+
+def test_best_excerpt_index_prefers_dense_query_terms() -> None:
+    body = (
+        "LLM Wiki was mentioned near the top.\n"
+        "Some unrelated changelog text follows.\n"
+        "Deployment note: git push plus uvx cache refresh is required before restart.\n"
+    ).lower()
+    terms = excerpt_terms(["LLM Wiki GitHub runtime uvx cache push"])
+
+    idx = best_excerpt_index(body, terms, max_chars=80)
+
+    assert "uvx cache refresh" in body[max(0, idx - 50) : idx + 80]
 
 
 def test_simple_chitchat_stays_below_search_threshold() -> None:

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, all_pages, page_id_from_path
+from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, SYSTEM_DIR, all_pages, page_id_from_path
 from llm_wiki_mcp.link_fix import atomic_write
 
 
@@ -40,6 +40,11 @@ _CJK_RANGES = (
 )
 
 _FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
+
+
+def searchable_pages() -> list[Path]:
+    """Return normal pages plus system pages that are useful recall targets."""
+    return all_pages() + sorted(SYSTEM_DIR.glob("*.md"))
 
 
 def _is_cjk(ch: str) -> bool:
@@ -197,7 +202,7 @@ class BM25Index:
 
         # Snapshot disk state.
         current: dict[str, tuple[Path, int, int]] = {}
-        for path in all_pages():
+        for path in searchable_pages():
             try:
                 st = path.stat()
             except OSError:
@@ -622,7 +627,7 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
         conn.close()
 
     pages_to_process: list[tuple[str, str, float]] = []
-    for path in all_pages():
+    for path in searchable_pages():
         pid = page_id_from_path(path)
         if page_ids and pid not in page_ids:
             continue
@@ -794,8 +799,13 @@ def fuse_results(
         weight = max(0.0, float(weights.get(channel, 1.0)))
         if weight == 0:
             return
+        top_raw = max((float(page.score) for page in results), default=0.0)
         for rank, page in enumerate(results):
-            scores[page.page_id] = scores.get(page.page_id, 0) + weight / (k + rank)
+            score = weight / (k + rank)
+            if channel == "bm25" and top_raw > 0:
+                score += weight * 0.025 * (max(0.0, float(page.score)) / top_raw)
+                score += weight * max(0.0, 0.04 - (0.01 * rank))
+            scores[page.page_id] = scores.get(page.page_id, 0) + score
             if page.page_id not in meta:
                 meta[page.page_id] = page
 

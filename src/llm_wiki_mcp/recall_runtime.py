@@ -31,7 +31,7 @@ from llm_wiki_mcp.runtime_config import (
 )
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 from llm_wiki_mcp.search import search as run_search
-from llm_wiki_mcp.wiki import WIKI_ROOT, find_page, init_wiki
+from llm_wiki_mcp.wiki import WIKI_ROOT, SYSTEM_DIR, find_page, init_wiki
 
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
@@ -551,7 +551,19 @@ def _feedback_key(text: str) -> str:
 
 
 def _matched_terms(prompt_lower: str, terms: list[str]) -> list[str]:
-    return [term for term in terms if term.lower() in prompt_lower]
+    matched: list[str] = []
+    for term in terms:
+        needle = term.lower().strip()
+        if not needle:
+            continue
+        if re.fullmatch(r"[a-z0-9_][a-z0-9_ ]*[a-z0-9_]", needle):
+            pattern = rf"(?<![a-z0-9_]){re.escape(needle)}(?![a-z0-9_])"
+            if re.search(pattern, prompt_lower):
+                matched.append(term)
+            continue
+        if needle in prompt_lower:
+            matched.append(term)
+    return matched
 
 
 def should_run_judge(score: float, policy: RecallPolicy, features: dict[str, Any] | None = None) -> bool:
@@ -678,10 +690,13 @@ def build_queries(
             candidates.append(" ".join(recent_topics + [_compact_query(request.prompt, limit=80)]))
 
     topic_terms = []
-    for key in ("project", "decision", "past_reference", "ownership"):
+    for key in ("project", "past_reference", "ownership"):
         topic_terms.extend(matched.get(key, []))
+    decision_terms = matched.get("decision", [])
     if topic_terms:
-        candidates.append(" ".join(topic_terms))
+        candidates.append(" ".join(topic_terms + decision_terms))
+    elif len(decision_terms) >= 2:
+        candidates.append(" ".join(decision_terms))
 
     if request.cwd:
         cwd_name = Path(request.cwd).name
@@ -903,7 +918,7 @@ def search_candidates(queries: list[str], policy: RecallPolicy) -> tuple[list[An
         return [], ""
     merged: dict[str, Any] = {}
     mode = "bm25"
-    for query in queries:
+    for query_index, query in enumerate(queries):
         results, search_mode = run_search(
             query=query,
             top_n=max(policy.max_pages * 3, 8),
@@ -917,10 +932,12 @@ def search_candidates(queries: list[str], policy: RecallPolicy) -> tuple[list[An
         )
         if search_mode != "bm25":
             mode = search_mode
+        query_weight = max(0.50, 1.0 - (0.25 * query_index))
         for result in results:
+            adjusted = replace(result, score=float(result.score) * query_weight)
             existing = merged.get(result.page_id)
-            if existing is None or result.score > existing.score:
-                merged[result.page_id] = result
+            if existing is None or adjusted.score > existing.score:
+                merged[result.page_id] = adjusted
     out = sorted(merged.values(), key=lambda item: item.score, reverse=True)
     return out, mode
 
@@ -996,7 +1013,7 @@ def query_hint_page_ids(queries: list[str], *, limit: int) -> list[str]:
 
 
 def context_item_from_page_id(page_id: str, queries: list[str], decision: str, *, score: float) -> ContextItem | None:
-    path = find_page(page_id)
+    path = find_readable_page(page_id)
     if not path or not path.exists():
         return None
     title = page_id
@@ -1039,7 +1056,7 @@ def should_skip_session_page(session_state: Any | None, page_id: str, updated: s
 
 
 def page_summary(page_id: str) -> str:
-    path = find_page(page_id)
+    path = find_readable_page(page_id)
     if not path or not path.exists():
         return ""
     try:
@@ -1059,7 +1076,7 @@ def page_summary(page_id: str) -> str:
 
 
 def excerpt_page(page_id: str, queries: list[str], max_chars: int = 650) -> str:
-    path = find_page(page_id)
+    path = find_readable_page(page_id)
     if not path or not path.exists():
         return ""
     try:
@@ -1067,20 +1084,74 @@ def excerpt_page(page_id: str, queries: list[str], max_chars: int = 650) -> str:
     except (OSError, UnicodeDecodeError):
         return ""
     body = strip_frontmatter(content)
-    terms = []
-    for query in queries:
-        terms.extend(token for token in re.split(r"\s+", query.lower()) if len(token) >= 2)
+    terms = excerpt_terms(queries)
     body_lower = body.lower()
-    idx = -1
-    for term in terms:
-        idx = body_lower.find(term)
-        if idx >= 0:
-            break
+    idx = best_excerpt_index(body_lower, terms, max_chars=max_chars)
     if idx < 0:
         return _trim_text(body, max_chars)
     start = max(0, idx - 180)
     end = min(len(body), start + max_chars)
     return _trim_text(body[start:end], max_chars)
+
+
+def excerpt_terms(queries: list[str]) -> list[str]:
+    generic = {
+        "llm",
+        "wiki",
+        "llm-wiki-mcp",
+        "の",
+        "と",
+        "を",
+        "に",
+        "で",
+        "したい",
+        "思い出したい",
+    }
+    seen: set[str] = set()
+    out: list[str] = []
+    for query in queries:
+        for token in re.findall(r"[a-z0-9_+.-]{2,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", query.lower()):
+            token = token.strip("。、.?!！？」』")
+            if len(token) < 2 or token in generic or token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+    return sorted(out, key=len, reverse=True)[:30]
+
+
+def best_excerpt_index(body_lower: str, terms: list[str], *, max_chars: int) -> int:
+    best_idx = -1
+    best_score = 0
+    positions: list[int] = []
+    for term in terms:
+        start = 0
+        while True:
+            idx = body_lower.find(term, start)
+            if idx < 0:
+                break
+            positions.append(idx)
+            start = idx + max(1, len(term))
+            if len(positions) >= 200:
+                break
+        if len(positions) >= 200:
+            break
+    for idx in positions:
+        window = body_lower[max(0, idx - 180) : idx + max_chars]
+        score = sum(len(term) for term in terms if term in window)
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+    return best_idx
+
+
+def find_readable_page(page_id: str) -> Path | None:
+    path = find_page(page_id)
+    if path is not None:
+        return path
+    system_path = SYSTEM_DIR / f"{page_id}.md"
+    if system_path.exists():
+        return system_path
+    return None
 
 
 def strip_frontmatter(content: str) -> str:
