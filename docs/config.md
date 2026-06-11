@@ -19,6 +19,18 @@ model = "bge-m3"
 document_prefix = ""
 query_prefix = ""
 
+[search.reranker]
+# Optional. Used only by MCP wiki.search when enabled; synchronous recall hooks
+# keep using the faster BM25/dense fusion path.
+enabled = false
+backend = "transformers"
+model = "BAAI/bge-reranker-v2-m3"
+top_n = 20
+max_length = 1024
+batch_size = 8
+device = ""
+weight = 0.25
+
 [recall.thresholds]
 search = 0.35
 read = 0.65
@@ -106,6 +118,13 @@ remain supported.
 
 The compatibility wrappers preserve the old environment behavior. Direct
 `llm-wiki-hook --event Stop` deployments can rely on `config.toml`.
+
+## Optional Reranker
+
+Install the optional local reranker dependencies with `uv sync --extra reranker`
+before enabling `[search.reranker]`. The default backend uses Hugging Face
+Transformers with `BAAI/bge-reranker-v2-m3` and reranks only the MCP
+`wiki.search` top candidates. It is not called by the synchronous recall hook.
 
 ## Recall Defaults
 

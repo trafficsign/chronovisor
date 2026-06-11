@@ -37,6 +37,18 @@ class EmbeddingConfig:
     query_prefix: str = ""
 
 
+@dataclass(frozen=True)
+class RerankerConfig:
+    enabled: bool = False
+    model: str = "BAAI/bge-reranker-v2-m3"
+    backend: str = "transformers"
+    top_n: int = 20
+    max_length: int = 1024
+    batch_size: int = 8
+    device: str = ""
+    weight: float = 0.25
+
+
 def active_config_file(path: Path | str | None = None) -> Path:
     if path:
         return Path(path).expanduser()
@@ -97,6 +109,46 @@ def load_embedding_config(path: Path | str | None = None) -> EmbeddingConfig:
         model=model if isinstance(model, str) and model.strip() else DEFAULT_EMBEDDING_MODEL,
         document_prefix=document_prefix if isinstance(document_prefix, str) else "",
         query_prefix=query_prefix if isinstance(query_prefix, str) else "",
+    )
+
+
+def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value if value >= minimum else default
+    return default
+
+
+def _nonnegative_float(value: Any, default: float) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value) if value >= 0 else default
+    return default
+
+
+def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
+    data = load_toml_file(path)
+    search = data.get("search")
+    reranker: Any = data.get("reranker")
+    if isinstance(search, dict) and isinstance(search.get("reranker"), dict):
+        reranker = search["reranker"]
+    if not isinstance(reranker, dict):
+        return RerankerConfig()
+
+    model = reranker.get("model")
+    backend = reranker.get("backend")
+    device = reranker.get("device")
+    return RerankerConfig(
+        enabled=reranker.get("enabled") is True,
+        model=model if isinstance(model, str) and model.strip() else RerankerConfig.model,
+        backend=backend if isinstance(backend, str) and backend.strip() else RerankerConfig.backend,
+        top_n=_positive_int(reranker.get("top_n"), RerankerConfig.top_n),
+        max_length=_positive_int(reranker.get("max_length"), RerankerConfig.max_length),
+        batch_size=_positive_int(reranker.get("batch_size"), RerankerConfig.batch_size),
+        device=device if isinstance(device, str) else "",
+        weight=_nonnegative_float(reranker.get("weight"), RerankerConfig.weight),
     )
 
 

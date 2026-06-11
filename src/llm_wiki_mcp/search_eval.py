@@ -28,6 +28,8 @@ from llm_wiki_mcp.search import (
     semantic_search,
     usage_prior_results,
 )
+from llm_wiki_mcp.reranker import rerank_results
+from llm_wiki_mcp.runtime_config import load_reranker_config
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 
@@ -318,7 +320,13 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
     graph_results: list[ScoredPage] = []
     usage_results: list[ScoredPage] = []
 
-    if variant in {"semantic", "hybrid-current", "hybrid-plain-rrf", "hybrid-graph"}:
+    if variant in {
+        "semantic",
+        "hybrid-current",
+        "hybrid-plain-rrf",
+        "hybrid-graph",
+        "hybrid-rerank",
+    }:
         sem_results = semantic_search(query, top_n=fetch_n)
     if variant == "hybrid-graph":
         graph_results = graph_expand_results(
@@ -330,6 +338,8 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
         sem_results = semantic_search(query, top_n=fetch_n)
         candidate_ids = {page.page_id for page in bm25_results + sem_results}
         usage_results = usage_prior_results(candidate_ids, limit=fetch_n)
+
+    reranker_meta: dict[str, Any] = {"status": "not_requested"}
 
     if variant == "bm25":
         results = bm25_results
@@ -364,6 +374,21 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
             [],
             weights=DEFAULT_FUSION_WEIGHTS,
         )
+    elif variant == "hybrid-rerank":
+        results = fuse_results(
+            bm25_results,
+            sem_results,
+            [],
+            [],
+            weights=DEFAULT_FUSION_WEIGHTS,
+        )
+        rerank_outcome = rerank_results(
+            query,
+            apply_filters(results),
+            config=load_reranker_config(),
+        )
+        results = rerank_outcome.results
+        reranker_meta = rerank_outcome.metadata
     else:
         raise ValueError(f"unknown search eval variant: {variant}")
 
@@ -378,6 +403,7 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
             "semantic": [page.page_id for page in sem_results[:top_n]],
             "graph": [page.page_id for page in graph_results[:top_n]],
             "usage_prior": [page.page_id for page in usage_results[:top_n]],
+            "reranker": reranker_meta,
         },
     }
 

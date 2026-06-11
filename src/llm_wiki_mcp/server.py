@@ -306,12 +306,17 @@ def wiki_search(
         session_id: Optional session id for recall pull feedback.
     """
     from llm_wiki_mcp.search import search as run_search
+    from llm_wiki_mcp.reranker import rerank_results
+    from llm_wiki_mcp.runtime_config import load_reranker_config
 
     store = get_store()
     store.refresh()
+    reranker_cfg = load_reranker_config()
+    rerank_allowed = reranker_cfg.enabled and sort_by == "relevance"
+    search_top_n = max(10, reranker_cfg.top_n) if rerank_allowed else 10
 
     results, search_mode = run_search(
-        query=query, top_n=10,
+        query=query, top_n=search_top_n,
         folder=folder, updated_after=updated_after,
         updated_before=updated_before, sort_by=sort_by,
         semantic=semantic,
@@ -334,6 +339,20 @@ def wiki_search(
                 if target & page_tags:
                     kept.append(r)
         results = kept
+
+    reranker_meta = {
+        "status": "disabled" if not reranker_cfg.enabled else "skipped",
+        "reason": "config_disabled" if not reranker_cfg.enabled else "sort_by_not_relevance",
+        "model": reranker_cfg.model,
+        "backend": reranker_cfg.backend,
+    }
+    if rerank_allowed and results:
+        rerank_outcome = rerank_results(query, results, config=reranker_cfg)
+        results = rerank_outcome.results
+        reranker_meta = rerank_outcome.metadata
+        if reranker_meta.get("status") == "applied":
+            search_mode = f"{search_mode}+rerank"
+    results = results[:10]
 
     query_terms = query.lower().split()
     direct_hits = []
@@ -419,6 +438,7 @@ def wiki_search(
         "depth": depth,
         "search_mode": search_mode,
         "filters_applied": filters_applied,
+        "reranker": reranker_meta,
         "direct_hits": direct_hits,
         "expanded_hits": expanded_hits,
         "edges": edges,

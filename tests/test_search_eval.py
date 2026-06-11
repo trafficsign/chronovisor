@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 
 from llm_wiki_mcp import search_eval
+from llm_wiki_mcp.reranker import RerankOutcome
+from llm_wiki_mcp.runtime_config import RerankerConfig
 from llm_wiki_mcp.search import ScoredPage
 
 
@@ -134,6 +136,33 @@ def test_run_variant_filters_lifecycle_pages(monkeypatch) -> None:
     payload = search_eval.run_variant("anything", "bm25", top_n=10)
 
     assert [result.page_id for result in payload["results"]] == ["active"]
+
+
+def test_run_variant_can_apply_hybrid_reranker(monkeypatch) -> None:
+    class FakeBM25:
+        def build(self) -> None:
+            pass
+
+        def query(self, query: str, top_n: int = 20):
+            return [page("a", 2.0), page("b", 1.0)]
+
+    def fake_rerank(query, candidates, *, config):
+        assert query == "anything"
+        assert config.enabled is True
+        return RerankOutcome(
+            [candidates[1], candidates[0]],
+            {"status": "applied", "candidate_count": 2},
+        )
+
+    monkeypatch.setattr(search_eval, "get_bm25", lambda: FakeBM25())
+    monkeypatch.setattr(search_eval, "semantic_search", lambda query, top_n=20: [])
+    monkeypatch.setattr(search_eval, "load_reranker_config", lambda: RerankerConfig(enabled=True))
+    monkeypatch.setattr(search_eval, "rerank_results", fake_rerank)
+
+    payload = search_eval.run_variant("anything", "hybrid-rerank", top_n=2)
+
+    assert [result.page_id for result in payload["results"]] == ["b", "a"]
+    assert payload["channels"]["reranker"]["status"] == "applied"
 
 
 def test_cli_build_golden_json(tmp_path, capsys) -> None:

@@ -89,3 +89,35 @@ query_prefix = "検索クエリ: "
     assert cfg.model == "bge-m3"
     assert cfg.document_prefix == "検索文書: "
     assert cfg.query_prefix == "検索クエリ: "
+
+
+def test_reranker_config_reads_nested_search_section(tmp_path: Path, monkeypatch) -> None:
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "recall.toml"
+    config.write_text(
+        """
+[search.reranker]
+enabled = true
+model = "BAAI/bge-reranker-v2-m3"
+backend = "transformers"
+top_n = 20
+max_length = 1024
+batch_size = 4
+device = "mps"
+weight = 0.4
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
+    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", legacy)
+
+    cfg = runtime_config.load_reranker_config()
+
+    assert cfg.enabled is True
+    assert cfg.model == "BAAI/bge-reranker-v2-m3"
+    assert cfg.backend == "transformers"
+    assert cfg.top_n == 20
+    assert cfg.max_length == 1024
+    assert cfg.batch_size == 4
+    assert cfg.device == "mps"
+    assert cfg.weight == 0.4
