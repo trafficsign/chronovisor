@@ -25,10 +25,20 @@ from llm_wiki_mcp.link_fix import atomic_write, extract_targets
 from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR, WIKI_ROOT
 
 
-SCHEMA_VERSION = 4  # bumped for recall summary/questions
+SCHEMA_VERSION = 5  # bumped for lifecycle status/superseded_by
 INDEX_DIR = WIKI_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
+VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
+
+
+def _normalize_lifecycle_status(value: object) -> str:
+    if not isinstance(value, str):
+        return "active"
+    normalized = value.strip().lower()
+    if normalized in VALID_LIFECYCLE_STATUSES:
+        return normalized
+    return "active"
 
 
 def _parse_frontmatter(text: str) -> dict:
@@ -87,6 +97,8 @@ class PageEntry:
     of ``wiki_check`` lint, not the index."""
     summary: str = ""
     recall_questions: list[str] = field(default_factory=list)
+    status: str = "active"
+    superseded_by: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -102,6 +114,8 @@ class PageEntry:
             "tags": list(self.tags),
             "summary": self.summary,
             "recall_questions": list(self.recall_questions),
+            "status": self.status,
+            "superseded_by": self.superseded_by,
         }
 
     @classmethod
@@ -127,6 +141,8 @@ class PageEntry:
             tags=_coerce_str_list(d.get("tags")),
             summary=d.get("summary", "") if isinstance(d.get("summary", ""), str) else "",
             recall_questions=_coerce_str_list(d.get("recall_questions")),
+            status=_normalize_lifecycle_status(d.get("status")),
+            superseded_by=d.get("superseded_by", "") if isinstance(d.get("superseded_by", ""), str) else "",
         )
 
 
@@ -341,6 +357,12 @@ class IndexStore:
             tags=_coerce_str_list(fm.get("tags")),
             summary=fm.get("summary", "") if isinstance(fm.get("summary", ""), str) else "",
             recall_questions=_coerce_str_list(fm.get("recall_questions")),
+            status=_normalize_lifecycle_status(fm.get("status")),
+            superseded_by=(
+                fm.get("superseded_by", "")
+                if isinstance(fm.get("superseded_by", ""), str)
+                else ""
+            ),
         )
 
     def _rebuild_backlinks(self) -> None:
@@ -397,6 +419,8 @@ class IndexStore:
                 "is_system": entry.is_system,
                 "summary": entry.summary,
                 "recall_questions": list(entry.recall_questions),
+                "status": entry.status,
+                "superseded_by": entry.superseded_by,
             }
 
     def outlinks(self, page_id: str) -> list[str]:
@@ -473,6 +497,8 @@ class IndexStore:
                     "page_id": e.page_id,
                     "title": e.title,
                     "updated": e.updated,
+                    "status": e.status,
+                    "superseded_by": e.superseded_by,
                 }
                 for e in items
             ]

@@ -20,6 +20,7 @@ from typing import Any
 
 from llm_wiki_mcp.search import (
     ScoredPage,
+    apply_filters,
     fuse_results,
     get_bm25,
     graph_expand_results,
@@ -298,6 +299,8 @@ def _plain_rrf(
                 folder=page.folder,
                 updated=page.updated,
                 score=score,
+                status=page.status,
+                superseded_by=page.superseded_by,
             )
         )
     return sorted(fused, key=lambda page: page.score, reverse=True)
@@ -364,7 +367,7 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
         raise ValueError(f"unknown search eval variant: {variant}")
 
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
-    out = results[:top_n]
+    out = apply_filters(results)[:top_n]
     return {
         "variant": variant,
         "results": out,
@@ -396,7 +399,8 @@ def percentile(values: list[int], pct: float) -> float:
 
 def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     positives = [row for row in rows if row["expected_pages"]]
-    bad_labeled = [row for row in rows if row["bad_pages"]]
+    negative_labeled = [row for row in rows if row["negative_pages"]]
+    stale_labeled = [row for row in rows if row["stale_pages"]]
     latencies = [int(row["latency_ms"]) for row in rows]
 
     def recall_at(k: int) -> float:
@@ -417,20 +421,29 @@ def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ideal = _ideal_dcg(len(expected), k=10)
         ndcgs.append((_dcg(ranks, k=10) / ideal) if ideal else 0.0)
 
+    negative_hits = 0
+    for row in negative_labeled:
+        if set(row["negative_pages"]) & set(row["result_pages"][:20]):
+            negative_hits += 1
+
     stale_hits = 0
-    for row in bad_labeled:
-        if set(row["bad_pages"]) & set(row["result_pages"][:20]):
+    for row in stale_labeled:
+        if set(row["stale_pages"]) & set(row["result_pages"][:20]):
             stale_hits += 1
 
     return {
         "examples": len(rows),
         "positives": len(positives),
-        "bad_label_examples": len(bad_labeled),
+        "negative_label_examples": len(negative_labeled),
+        "stale_label_examples": len(stale_labeled),
         "recall_at_5": recall_at(5),
         "recall_at_20": recall_at(20),
         "mrr_at_10": statistics.mean(reciprocal_ranks) if reciprocal_ranks else 0.0,
         "ndcg_at_10": statistics.mean(ndcgs) if ndcgs else 0.0,
-        "stale_hit_rate_at_20": (stale_hits / len(bad_labeled)) if bad_labeled else 0.0,
+        "negative_hit_rate_at_20": (
+            negative_hits / len(negative_labeled)
+        ) if negative_labeled else 0.0,
+        "stale_hit_rate_at_20": (stale_hits / len(stale_labeled)) if stale_labeled else 0.0,
         "latency_ms": {
             "p50": float(statistics.median(latencies)) if latencies else 0.0,
             "p95": percentile(latencies, 0.95),
@@ -472,6 +485,8 @@ def evaluate_examples(
                 "source": example.source,
                 "reviewed": example.reviewed,
                 "expected_pages": list(example.expected_pages),
+                "negative_pages": list(example.negative_pages),
+                "stale_pages": list(example.stale_pages),
                 "bad_pages": list(example.bad_pages),
                 "result_pages": result_pages,
                 "latency_ms": result["latency_ms"],
@@ -574,6 +589,7 @@ def print_report(payload: dict[str, Any]) -> None:
                     f"recall@20={metrics['recall_at_20']:.3f}",
                     f"mrr@10={metrics['mrr_at_10']:.3f}",
                     f"ndcg@10={metrics['ndcg_at_10']:.3f}",
+                    f"negative@20={metrics['negative_hit_rate_at_20']:.3f}",
                     f"stale@20={metrics['stale_hit_rate_at_20']:.3f}",
                     f"p95={metrics['latency_ms']['p95']:.0f}ms",
                 ]

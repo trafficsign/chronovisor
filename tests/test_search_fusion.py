@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from llm_wiki_mcp import search
-from llm_wiki_mcp.search import ScoredPage, fuse_results
+from llm_wiki_mcp.search import ScoredPage, apply_filters, fuse_results
 
 
-def page(page_id: str, score: float) -> ScoredPage:
+def page(page_id: str, score: float, *, status: str = "active") -> ScoredPage:
     return ScoredPage(
         page_id=page_id,
         title=page_id,
         folder="",
         updated="2026-06-11",
         score=score,
+        status=status,
     )
 
 
@@ -37,3 +38,26 @@ def test_searchable_pages_includes_system_pages(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(search, "all_pages", lambda: [page])
 
     assert search.searchable_pages() == [page, system]
+
+
+def test_apply_filters_excludes_deprecated_and_archived_pages() -> None:
+    results = apply_filters(
+        [
+            page("active", 1.0),
+            page("old", 2.0, status="deprecated"),
+            page("gone", 3.0, status="archived"),
+        ]
+    )
+
+    assert [result.page_id for result in results] == ["active"]
+
+
+def test_fusion_preserves_lifecycle_status_for_filtering() -> None:
+    results = fuse_results(
+        bm25_results=[page("old", 100.0, status="deprecated")],
+        semantic_results=[],
+        weights={"bm25": 1.0},
+    )
+
+    assert results[0].status == "deprecated"
+    assert apply_filters(results) == []

@@ -158,6 +158,37 @@ class TestBuildEntryRawKeywords:
         assert entry is not None
         assert entry.raw_keywords == []
 
+    def test_extracts_lifecycle_frontmatter(self, isolated_index: Path) -> None:
+        path = _seed(
+            isolated_index,
+            "old.md",
+            (
+                "---\n"
+                "title: Old\n"
+                "updated: 2026-01-01\n"
+                "status: deprecated\n"
+                "superseded_by: new-page\n"
+                "---\n"
+                "body\n"
+            ),
+        )
+        st = path.stat()
+        entry = IndexStore._build_entry("old", path, False, st.st_mtime_ns, st.st_size)
+        assert entry is not None
+        assert entry.status == "deprecated"
+        assert entry.superseded_by == "new-page"
+
+    def test_invalid_lifecycle_status_defaults_to_active(self, isolated_index: Path) -> None:
+        path = _seed(
+            isolated_index,
+            "bad.md",
+            "---\ntitle: Bad\nupdated: 2026-01-01\nstatus: stale-ish\n---\nbody\n",
+        )
+        st = path.stat()
+        entry = IndexStore._build_entry("bad", path, False, st.st_mtime_ns, st.st_size)
+        assert entry is not None
+        assert entry.status == "active"
+
 
 # ---------------------------------------------------------------------------
 # Public accessor
@@ -193,6 +224,27 @@ class TestRawKeywordsAccessor:
         meta = store.meta("p")
         assert meta is not None
         assert "raw_keywords" not in meta
+
+    def test_meta_exposes_lifecycle_fields(self, isolated_index: Path) -> None:
+        _seed(
+            isolated_index,
+            "old.md",
+            (
+                "---\n"
+                "title: Old\n"
+                "updated: 2026-01-01\n"
+                "status: archived\n"
+                "superseded_by: new-page\n"
+                "---\n"
+                "body\n"
+            ),
+        )
+        store = IndexStore()
+        store.refresh()
+        meta = store.meta("old")
+        assert meta is not None
+        assert meta["status"] == "archived"
+        assert meta["superseded_by"] == "new-page"
 
 
 # ---------------------------------------------------------------------------

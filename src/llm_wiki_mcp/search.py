@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, SYSTEM_DIR, all_pages, page_id_from_path
 from llm_wiki_mcp.link_fix import atomic_write
 
@@ -25,6 +26,8 @@ class ScoredPage:
     updated: str
     score: float
     snippet: str = ""
+    status: str = "active"
+    superseded_by: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +88,22 @@ def tokenize(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 _BM25_CACHE_FILE = WIKI_ROOT / ".index" / "bm25.json"
-_BM25_CACHE_SCHEMA = 1
+_BM25_CACHE_SCHEMA = 2
+_ACTIVE_STATUS = "active"
+_VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
+
+
+def _normalize_lifecycle_status(value: object) -> str:
+    if not isinstance(value, str):
+        return _ACTIVE_STATUS
+    normalized = value.strip().lower()
+    if normalized in _VALID_LIFECYCLE_STATUSES:
+        return normalized
+    return _ACTIVE_STATUS
+
+
+def _is_active_result(result: ScoredPage) -> bool:
+    return _normalize_lifecycle_status(result.status) == _ACTIVE_STATUS
 
 
 class BM25Index:
@@ -235,10 +253,15 @@ class BM25Index:
                 self._cache.pop(pid, None)
                 changed = True
                 continue
-            fm_match = re.search(r"title:\s*(.+)", content)
-            title = fm_match.group(1).strip() if fm_match else pid
-            updated_match = re.search(r"updated:\s*(.+)", content)
-            updated = updated_match.group(1).strip() if updated_match else ""
+            fm, _body = parse_frontmatter(content)
+            title = fm.get("title", pid) if isinstance(fm.get("title", pid), str) else pid
+            updated = fm.get("updated", "") if isinstance(fm.get("updated", ""), str) else ""
+            status = _normalize_lifecycle_status(fm.get("status"))
+            superseded_by = (
+                fm.get("superseded_by", "")
+                if isinstance(fm.get("superseded_by", ""), str)
+                else ""
+            )
             folder = path.parent.name if path.parent != PAGES_DIR else ""
 
             title_tokens = tokenize(title) * 3
@@ -257,6 +280,8 @@ class BM25Index:
                 "title": title,
                 "folder": folder,
                 "updated": updated,
+                "status": status,
+                "superseded_by": superseded_by,
                 "doc_len": doc_len,
                 "tf_map": tf_map,
             }
@@ -325,6 +350,10 @@ class BM25Index:
                         folder=doc["folder"],
                         updated=doc["updated"],
                         score=score,
+                        status=_normalize_lifecycle_status(doc.get("status")),
+                        superseded_by=doc.get("superseded_by", "")
+                        if isinstance(doc.get("superseded_by", ""), str)
+                        else "",
                     ))
 
             results.sort(key=lambda x: x.score, reverse=True)
@@ -744,6 +773,10 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
             folder=folder,
             updated=meta["updated"],
             score=sim,
+            status=_normalize_lifecycle_status(meta.get("status")),
+            superseded_by=meta.get("superseded_by", "")
+            if isinstance(meta.get("superseded_by", ""), str)
+            else "",
         )
 
     for _key, pid, _idx, vec, _mtime, norm in _iter_all_question_embeddings():
@@ -771,6 +804,10 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
                 folder=folder,
                 updated=meta["updated"],
                 score=sim,
+                status=_normalize_lifecycle_status(meta.get("status")),
+                superseded_by=meta.get("superseded_by", "")
+                if isinstance(meta.get("superseded_by", ""), str)
+                else "",
             )
 
     results = list(by_page.values())
@@ -820,6 +857,7 @@ def fuse_results(
         fused.append(ScoredPage(
             page_id=p.page_id, title=p.title, folder=p.folder,
             updated=p.updated, score=score,
+            status=p.status, superseded_by=p.superseded_by,
         ))
 
     fused.sort(key=lambda x: x.score, reverse=True)
@@ -860,6 +898,10 @@ def graph_expand_results(results: list[ScoredPage], *, decay: float = 0.5, limit
                 folder=folder,
                 updated=meta["updated"],
                 score=score,
+                status=_normalize_lifecycle_status(meta.get("status")),
+                superseded_by=meta.get("superseded_by", "")
+                if isinstance(meta.get("superseded_by", ""), str)
+                else "",
             )
             if len(expanded) >= limit:
                 break
@@ -913,6 +955,10 @@ def usage_prior_results(candidate_ids: set[str], *, limit: int = 50) -> list[Sco
                 folder=folder,
                 updated=meta["updated"],
                 score=float(count),
+                status=_normalize_lifecycle_status(meta.get("status")),
+                superseded_by=meta.get("superseded_by", "")
+                if isinstance(meta.get("superseded_by", ""), str)
+                else "",
             )
         )
     return out
@@ -925,7 +971,7 @@ def apply_filters(
     updated_before: str | None = None,
 ) -> list[ScoredPage]:
     """Filter results by folder and date range."""
-    filtered = results
+    filtered = [r for r in results if _is_active_result(r)]
     if folder:
         filtered = [r for r in filtered if r.folder.startswith(folder)]
     if updated_after:

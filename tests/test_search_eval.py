@@ -6,13 +6,14 @@ from llm_wiki_mcp import search_eval
 from llm_wiki_mcp.search import ScoredPage
 
 
-def page(page_id: str, score: float = 1.0) -> ScoredPage:
+def page(page_id: str, score: float = 1.0, *, status: str = "active") -> ScoredPage:
     return ScoredPage(
         page_id=page_id,
         title=page_id,
         folder="",
         updated="2026-06-11",
         score=score,
+        status=status,
     )
 
 
@@ -84,6 +85,7 @@ def test_evaluate_examples_reports_ranking_metrics(monkeypatch) -> None:
             query="q2",
             expected_pages=("other",),
             negative_pages=("stale",),
+            stale_pages=("stale",),
             split="locked-test",
             language="ja",
             kind="manual",
@@ -110,9 +112,28 @@ def test_evaluate_examples_reports_ranking_metrics(monkeypatch) -> None:
     assert metrics["recall_at_5"] == 1.0
     assert metrics["recall_at_20"] == 1.0
     assert metrics["mrr_at_10"] == 0.5
+    assert metrics["negative_hit_rate_at_20"] == 1.0
     assert metrics["stale_hit_rate_at_20"] == 1.0
     assert metrics["latency_ms"]["p95"] == 7.0
     assert payload["variants"]["bm25"]["by_bucket"]["split:dev"]["examples"] == 1
+
+
+def test_run_variant_filters_lifecycle_pages(monkeypatch) -> None:
+    class FakeBM25:
+        def build(self) -> None:
+            pass
+
+        def query(self, query: str, top_n: int = 20):
+            return [
+                page("old", 2.0, status="deprecated"),
+                page("active", 1.0),
+            ]
+
+    monkeypatch.setattr(search_eval, "get_bm25", lambda: FakeBM25())
+
+    payload = search_eval.run_variant("anything", "bm25", top_n=10)
+
+    assert [result.page_id for result in payload["results"]] == ["active"]
 
 
 def test_cli_build_golden_json(tmp_path, capsys) -> None:
