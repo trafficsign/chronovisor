@@ -296,6 +296,9 @@ usage_prior = 0.0
 bm25_score_bonus = 0.005
 bm25_rank_bonus = 0.006
 bm25_rank_decay = 0.006
+semantic_min_top_score = 0.45
+semantic_min_margin = 0.002
+semantic_low_confidence_weight = 0.25
 """,
         encoding="utf-8",
     )
@@ -309,6 +312,9 @@ bm25_rank_decay = 0.006
     assert policy.fusion_bm25_score_bonus == 0.005
     assert policy.fusion_bm25_rank_bonus == 0.006
     assert policy.fusion_bm25_rank_decay == 0.006
+    assert policy.fusion_semantic_min_top_score == 0.45
+    assert policy.fusion_semantic_min_margin == 0.002
+    assert policy.fusion_semantic_low_confidence_weight == 0.25
 
 
 def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:

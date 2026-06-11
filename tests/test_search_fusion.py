@@ -57,6 +57,25 @@ def test_fusion_bm25_bonus_is_parameterized() -> None:
     assert with_bonus[0].page_id == "exact"
 
 
+def test_fusion_degrades_flat_semantic_channel() -> None:
+    results = fuse_results(
+        bm25_results=[page("bm25", 100.0)],
+        semantic_results=[page("semantic-a", 0.500), page("semantic-b", 0.499)],
+        weights={
+            "bm25": 1.0,
+            "semantic": 1.0,
+            "bm25_score_bonus": 0.0,
+            "bm25_rank_bonus": 0.0,
+            "bm25_rank_decay": 0.0,
+            "semantic_min_top_score": 0.45,
+            "semantic_min_margin": 0.01,
+            "semantic_low_confidence_weight": 0.0,
+        },
+    )
+
+    assert results[0].page_id == "bm25"
+
+
 def test_searchable_pages_includes_system_pages(tmp_path, monkeypatch) -> None:
     pages_dir = tmp_path / "pages"
     system_dir = tmp_path / "system"

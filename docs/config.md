@@ -61,6 +61,9 @@ usage_prior = 0.0
 bm25_score_bonus = 0.005
 bm25_rank_bonus = 0.006
 bm25_rank_decay = 0.006
+semantic_min_top_score = 0.45
+semantic_min_margin = 0.002
+semantic_low_confidence_weight = 0.25
 
 [recall.calibration]
 enabled = true

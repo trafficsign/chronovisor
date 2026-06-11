@@ -923,7 +923,26 @@ DEFAULT_FUSION_WEIGHTS: dict[str, float] = {
     "bm25_score_bonus": 0.005,
     "bm25_rank_bonus": 0.006,
     "bm25_rank_decay": 0.006,
+    "semantic_min_top_score": 0.45,
+    "semantic_min_margin": 0.002,
+    "semantic_low_confidence_weight": 0.25,
 }
+
+
+def _semantic_reliability_multiplier(
+    semantic_results: list[ScoredPage],
+    weights: dict[str, float],
+) -> float:
+    if not semantic_results:
+        return 0.0
+    min_top = max(0.0, float(weights.get("semantic_min_top_score", 0.0)))
+    min_margin = max(0.0, float(weights.get("semantic_min_margin", 0.0)))
+    low_weight = max(0.0, float(weights.get("semantic_low_confidence_weight", 1.0)))
+    top1 = max(0.0, float(semantic_results[0].score))
+    top2 = max(0.0, float(semantic_results[1].score)) if len(semantic_results) > 1 else 0.0
+    if top1 < min_top or (top1 - top2) < min_margin:
+        return low_weight
+    return 1.0
 
 
 def fuse_results(
@@ -941,9 +960,12 @@ def fuse_results(
     bm25_score_bonus = max(0.0, float(weights.get("bm25_score_bonus", 0.0)))
     bm25_rank_bonus = max(0.0, float(weights.get("bm25_rank_bonus", 0.0)))
     bm25_rank_decay = max(0.0, float(weights.get("bm25_rank_decay", 0.0)))
+    semantic_multiplier = _semantic_reliability_multiplier(semantic_results, weights)
 
     def add_results(results: list[ScoredPage], channel: str) -> None:
         weight = max(0.0, float(weights.get(channel, 1.0)))
+        if channel == "semantic":
+            weight *= semantic_multiplier
         if weight == 0:
             return
         top_raw = max((float(page.score) for page in results), default=0.0)
