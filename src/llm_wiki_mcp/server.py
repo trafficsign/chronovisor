@@ -307,6 +307,7 @@ def wiki_search(
     """
     from llm_wiki_mcp.search import search as run_search
     from llm_wiki_mcp.reranker import rerank_results
+    from llm_wiki_mcp.pipeline import apply_rerank_stage
     from llm_wiki_mcp.runtime_config import load_reranker_config
 
     store = get_store()
@@ -340,18 +341,17 @@ def wiki_search(
                     kept.append(r)
         results = kept
 
-    reranker_meta = {
-        "status": "disabled" if not reranker_cfg.enabled else "skipped",
-        "reason": "config_disabled" if not reranker_cfg.enabled else "sort_by_not_relevance",
-        "model": reranker_cfg.model,
-        "backend": reranker_cfg.backend,
-    }
-    if rerank_allowed and results:
-        rerank_outcome = rerank_results(query, results, config=reranker_cfg)
-        results = rerank_outcome.results
-        reranker_meta = rerank_outcome.metadata
-        if reranker_meta.get("status") == "applied":
-            search_mode = f"{search_mode}+rerank"
+    rerank_stage = apply_rerank_stage(
+        query,
+        results,
+        reranker_config=reranker_cfg,
+        rerank_results=rerank_results,
+        sort_by=sort_by,
+    )
+    results = rerank_stage.results
+    reranker_meta = rerank_stage.metadata
+    if rerank_stage.applied:
+        search_mode = f"{search_mode}+rerank"
     results = results[:10]
 
     query_terms = query.lower().split()

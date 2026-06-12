@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from llm_wiki_mcp.runtime_config import NegativeFeedbackConfig
+from llm_wiki_mcp.runtime_config import NegativeFeedbackConfig, RerankerConfig
 from llm_wiki_mcp.search_types import ScoredPage
 
 
@@ -54,6 +54,13 @@ class PipelineResult:
     graph_results: list[ScoredPage]
     usage_results: list[ScoredPage]
     negative_feedback: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RerankStageResult:
+    results: list[ScoredPage]
+    metadata: dict[str, Any]
+    applied: bool
 
 
 def production_pipeline_config(
@@ -131,6 +138,34 @@ def apply_negative_feedback_stage(
             {"status": "applied", "pages": sorted(penalties)},
         )
     return results, {"status": "no_match"}
+
+
+def apply_rerank_stage(
+    query: str,
+    results: list[ScoredPage],
+    *,
+    reranker_config: RerankerConfig,
+    rerank_results: Callable[..., Any],
+    sort_by: str = "relevance",
+) -> RerankStageResult:
+    if sort_by != "relevance":
+        return RerankStageResult(
+            results=results,
+            metadata={
+                "status": "skipped",
+                "reason": "sort_by_not_relevance",
+                "model": reranker_config.model,
+                "backend": reranker_config.backend,
+            },
+            applied=False,
+        )
+    outcome = rerank_results(query, results, config=reranker_config)
+    metadata = dict(outcome.metadata)
+    return RerankStageResult(
+        results=outcome.results,
+        metadata=metadata,
+        applied=metadata.get("status") == "applied",
+    )
 
 
 def _graph_results(

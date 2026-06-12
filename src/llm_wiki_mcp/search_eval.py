@@ -39,6 +39,7 @@ from llm_wiki_mcp.pipeline import (
     PipelineConfig,
     PipelineDependencies,
     apply_negative_feedback_stage,
+    apply_rerank_stage,
     production_pipeline_config,
     run_search_pipeline,
 )
@@ -446,13 +447,14 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
     reranker_meta: dict[str, Any] = {"status": "not_requested"}
     negative_meta = pipeline_result.negative_feedback
     if needs_rerank:
-        rerank_outcome = rerank_results(
+        rerank_stage = apply_rerank_stage(
             query,
             apply_filters(results),
-            config=load_reranker_config(),
+            reranker_config=load_reranker_config(),
+            rerank_results=rerank_results,
         )
-        results = rerank_outcome.results
-        reranker_meta = rerank_outcome.metadata
+        results = rerank_stage.results
+        reranker_meta = rerank_stage.metadata
         results, negative_meta = apply_negative_feedback_stage(query, results, deps=deps)
 
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
