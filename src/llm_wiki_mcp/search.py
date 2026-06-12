@@ -14,6 +14,8 @@ from llm_wiki_mcp.runtime_config import (
     load_embedding_config,
     load_negative_feedback_config,
 )
+from llm_wiki_mcp.negative_feedback import apply_penalties, penalties_for_query
+from llm_wiki_mcp.pipeline import PipelineConfig, PipelineDependencies, run_search_pipeline
 from llm_wiki_mcp.search_types import ScoredPage, _FRONTMATTER_RE, tokenize
 from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, SYSTEM_DIR, all_pages, page_id_from_path
 from llm_wiki_mcp.link_fix import atomic_write
@@ -1308,6 +1310,21 @@ def apply_sort(results: list[ScoredPage], sort_by: str = "relevance") -> list[Sc
 # Public search API
 # ---------------------------------------------------------------------------
 
+def _pipeline_dependencies() -> PipelineDependencies:
+    return PipelineDependencies(
+        get_bm25=get_bm25,
+        semantic_search=semantic_search,
+        graph_expand_results=graph_expand_results,
+        usage_prior_results=usage_prior_results,
+        fuse_results=fuse_results,
+        apply_filters=apply_filters,
+        apply_sort=apply_sort,
+        load_negative_feedback_config=load_negative_feedback_config,
+        penalties_for_query=penalties_for_query,
+        apply_penalties=apply_penalties,
+    )
+
+
 def search(
     query: str,
     top_n: int = 20,
@@ -1319,66 +1336,18 @@ def search(
     fusion_weights: dict[str, float] | None = None,
 ) -> tuple[list[ScoredPage], str]:
     """Run search and return (results, search_mode)."""
-    # Fetch more results before filtering to avoid truncation-before-filter bug
-    fetch_n = max(top_n * 5, 100)
-
-    bm25 = get_bm25()
-    bm25.build()
-    bm25_results = bm25.query(query, top_n=fetch_n)
-
-    search_mode = "bm25"
     weights = {**DEFAULT_FUSION_WEIGHTS, **(fusion_weights or {})}
-    sem_results: list[ScoredPage] = []
-    if semantic:
-        sem_results = semantic_search(query, top_n=fetch_n)
-        if sem_results:
-            search_mode = "hybrid"
-    graph_results = graph_expand_results(
-        bm25_results + sem_results,
-        decay=float(weights.get("graph", 0.0) or 0.0),
-        limit=fetch_n,
+    result = run_search_pipeline(
+        query,
+        config=PipelineConfig(
+            top_n=top_n,
+            folder=folder,
+            updated_after=updated_after,
+            updated_before=updated_before,
+            sort_by=sort_by,
+            semantic=semantic,
+            fusion_weights=weights,
+        ),
+        deps=_pipeline_dependencies(),
     )
-    candidate_ids = {page.page_id for page in bm25_results + sem_results + graph_results}
-    usage_results = (
-        usage_prior_results(
-            candidate_ids,
-            limit=fetch_n,
-            decay=float(weights.get("usage_prior_decay", 0.98)),
-            cap=float(weights.get("usage_prior_cap", 3.0)),
-        )
-        if float(weights.get("usage_prior", 0.0) or 0.0) > 0
-        else []
-    )
-    if graph_results and search_mode == "bm25":
-        search_mode = "bm25+graph"
-    if semantic and sem_results:
-        results = fuse_results(
-            bm25_results,
-            sem_results,
-            graph_results,
-            usage_results,
-            weights=weights,
-        )
-    elif graph_results or usage_results:
-        results = fuse_results(
-            bm25_results,
-            [],
-            graph_results,
-            usage_results,
-            weights=weights,
-        )
-    else:
-        results = bm25_results
-
-    negative_config = load_negative_feedback_config()
-    if negative_config.enabled:
-        from llm_wiki_mcp.negative_feedback import apply_penalties, penalties_for_query
-
-        penalties = penalties_for_query(query, negative_config)
-        if penalties:
-            results = apply_penalties(results, penalties)
-
-    # Filter THEN truncate (not the other way around)
-    results = apply_filters(results, folder, updated_after, updated_before)
-    results = apply_sort(results, sort_by)
-    return results[:top_n], search_mode
+    return result.results, result.search_mode
