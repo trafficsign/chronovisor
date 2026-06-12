@@ -31,8 +31,8 @@ max_age_days = 180
 max_entries = 500
 
 [search.reranker]
-# Optional. Used only by MCP wiki.search when enabled; synchronous recall hooks
-# keep using the faster BM25/dense fusion path.
+# Optional. Used by MCP wiki.search and the search-eval hybrid-rerank variant;
+# synchronous recall hooks keep using the faster BM25/dense fusion path.
 enabled = false
 backend = "transformers"
 model = "BAAI/bge-reranker-v2-m3"
@@ -137,7 +137,8 @@ The compatibility wrappers preserve the old environment behavior. Direct
 Install the optional local reranker dependencies with `uv sync --extra reranker`
 before enabling `[search.reranker]`. The default backend uses Hugging Face
 Transformers with `BAAI/bge-reranker-v2-m3` and reranks only the MCP
-`wiki.search` top candidates. It is not called by the synchronous recall hook.
+`wiki.search` top candidates (plus explicit search-eval reranker experiments).
+It is not called by the synchronous recall hook.
 
 ## Recall Defaults
 

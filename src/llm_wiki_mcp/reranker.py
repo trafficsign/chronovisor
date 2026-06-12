@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from llm_wiki_mcp.runtime_config import RerankerConfig, load_reranker_config
-from llm_wiki_mcp.search import ScoredPage
+from llm_wiki_mcp.search_types import ScoredPage
 from llm_wiki_mcp.wiki import find_page
 
 _FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n?", re.DOTALL)

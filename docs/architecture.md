@@ -53,6 +53,27 @@ Nightly / manual
 `few_shot` and `threshold` actions are review-lane only because they alter the
 gate's decision behavior globally.
 
+## Search Pipeline
+
+`llm_wiki_mcp.pipeline` owns the shared ranking orchestration. Production
+`search.search()`, search evaluation variants, and self-tune weight trials all
+enter through `run_search_pipeline()` with different `PipelineConfig` values:
+
+```text
+BM25
+  -> optional semantic search
+  -> graph expansion (production config calls it even when graph weight is 0)
+  -> usage prior (production config only when usage_prior weight > 0)
+  -> weighted fusion or plain RRF
+  -> negative feedback demotion
+  -> filter / sort / truncate
+```
+
+The MCP `wiki.search` tool adds one post-search stage: exact tag filtering,
+then `apply_rerank_stage()` when the reranker is enabled for relevance-sorted
+queries. The synchronous recall hook keeps using the faster fused search path
+and does not call the reranker.
+
 ## Host Boundary
 
 Codex and Claude Code now enter through `llm-wiki-hook`. Legacy scripts remain
