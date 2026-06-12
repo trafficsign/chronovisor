@@ -14,6 +14,7 @@ Options:
       --skip-git-repo-check
       --ephemeral
       --ignore-rules
+  -s, --sandbox <SANDBOX_MODE>
       --output-schema <FILE>
   -o, --output-last-message <FILE>
 """
@@ -57,6 +58,7 @@ def test_run_codex_supplies_codex_home_from_config_dir(
             )
         )
         seen["env"] = kwargs["env"]
+        seen["cmd"] = cmd
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.delenv("CODEX_HOME", raising=False)
@@ -70,6 +72,8 @@ def test_run_codex_supplies_codex_home_from_config_dir(
 
     assert result.decision == "approved"
     assert seen["env"]["CODEX_HOME"] == str(config_home)
+    assert "--sandbox" in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("--sandbox") + 1] == "read-only"
 
 
 def test_frontier_schema_requires_all_declared_properties() -> None:

@@ -228,9 +228,246 @@ def test_build_label_queue_does_not_touch_golden(tmp_path) -> None:
 
     rows = [json.loads(line) for line in output_file.read_text(encoding="utf-8").splitlines()]
     assert payload["examples"] == 1
-    assert rows[0]["queue_status"] == "pending_review"
+    assert rows[0]["queue_status"] == "pending_frontier_review"
     assert rows[0]["promoted_to_golden"] is False
+    assert rows[0]["reviewer"] == ""
     assert golden_file.read_text(encoding="utf-8") == ""
+
+
+def test_frontier_review_promotes_trusted_label_queue_rows(tmp_path) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "query",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "split": "dev",
+                "language": "en",
+                "kind": "manual",
+                "source": "feedback",
+                "ref": "r1",
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+    golden_file.write_text("", encoding="utf-8")
+
+    def reviewer(row):
+        assert row["query"] == "query"
+        return {
+            "decision": "approved",
+            "confidence": 0.93,
+            "expected_pages": ["target"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "target matches the query",
+            "notes": "ok",
+            "reviewer": "frontier:test",
+        }
+
+    payload = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        min_confidence=0.8,
+        reviewer=reviewer,
+    )
+
+    queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
+    golden_rows = [json.loads(line) for line in golden_file.read_text(encoding="utf-8").splitlines()]
+    assert payload["promoted"] == 1
+    assert queue_rows[0]["queue_status"] == "frontier_approved"
+    assert queue_rows[0]["promoted_to_golden"] is True
+    assert queue_rows[0]["reviewer"] == "frontier:test"
+    assert golden_rows[0]["reviewed"] is True
+    assert golden_rows[0]["reviewer"] == "frontier:test"
+    assert golden_rows[0]["review_confidence"] == 0.93
+    assert golden_rows[0]["expected_pages"] == ["target"]
+
+
+def test_frontier_review_keeps_low_confidence_rows_out_of_golden(tmp_path) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "query",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+
+    payload = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        min_confidence=0.8,
+        reviewer=lambda _row: {
+            "decision": "approved",
+            "confidence": 0.5,
+            "expected_pages": ["target"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "maybe",
+            "notes": None,
+        },
+    )
+
+    queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
+    assert payload["promoted"] == 0
+    assert payload["status_counts"] == {"frontier_uncertain": 1}
+    assert queue_rows[0]["queue_status"] == "frontier_uncertain"
+    assert not golden_file.exists()
+
+
+def test_frontier_review_votes_require_same_label_set(tmp_path) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "query",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+    responses = iter(
+        [
+            {
+                "decision": "approved",
+                "confidence": 0.9,
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "summary": "first",
+                "notes": None,
+            },
+            {
+                "decision": "approved",
+                "confidence": 0.92,
+                "expected_pages": ["other"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "summary": "second",
+                "notes": None,
+            },
+        ]
+    )
+
+    payload = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        min_confidence=0.8,
+        votes=2,
+        reviewer=lambda _row: next(responses),
+    )
+
+    queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
+    assert payload["promoted"] == 0
+    assert queue_rows[0]["queue_status"] == "frontier_uncertain"
+    assert queue_rows[0]["frontier_review"]["reviewer"] == "frontier_consensus"
+
+
+def test_frontier_review_marks_environment_failures_human_required(tmp_path) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "query",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+
+    payload = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: {
+            "decision": "needs_retry",
+            "confidence": 0,
+            "expected_pages": [],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "codex executable not found",
+            "notes": None,
+            "frontier_failure": {
+                "failure_class": "frontier_tool_unavailable",
+                "rescue_status": "human_required",
+                "summary": "codex executable not found",
+                "human_required": True,
+            },
+        },
+    )
+
+    queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
+    assert payload["promoted"] == 0
+    assert queue_rows[0]["queue_status"] == "human_required"
+
+
+def test_cli_frontier_review_labels_json(tmp_path, capsys, monkeypatch) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "query",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        search_eval,
+        "run_frontier_label_review",
+        lambda row, **_kwargs: {
+            "decision": "approved",
+            "confidence": 0.91,
+            "expected_pages": row["expected_pages"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "ok",
+            "notes": None,
+        },
+    )
+
+    rc = search_eval.main(
+        [
+            "--frontier-review-labels",
+            "--label-queue-file",
+            str(queue_file),
+            "--golden-file",
+            str(golden_file),
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["promoted"] == 1
+    assert golden_file.exists()
 
 
 def test_failure_index_records_missed_expected_pages(tmp_path) -> None:

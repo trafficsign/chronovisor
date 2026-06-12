@@ -545,6 +545,17 @@ def _build_codex_exec_invocation(
             "replacement": "omitted",
         })
 
+    if not execute_patch:
+        sandbox_option = _preferred_option(exec_help, "--sandbox")
+        if sandbox_option:
+            cmd.extend([sandbox_option, "read-only"])
+        else:
+            repairs.append({
+                "type": "cli_option_adapted",
+                "option": "--sandbox",
+                "replacement": "default_sandbox",
+            })
+
     model = os.environ.get("LLM_WIKI_FRONTIER_MODEL")
     if model:
         cmd.extend(["--model", model])

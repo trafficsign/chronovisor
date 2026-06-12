@@ -11,12 +11,17 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import shlex
+import shutil
 import statistics
+import subprocess
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from llm_wiki_mcp.search import (
     DEFAULT_FUSION_WEIGHTS,
@@ -31,9 +36,10 @@ from llm_wiki_mcp.search import (
 from llm_wiki_mcp.reranker import rerank_results
 from llm_wiki_mcp.negative_feedback import apply_penalties, penalties_for_query
 from llm_wiki_mcp.runtime_config import load_negative_feedback_config, load_reranker_config
-from llm_wiki_mcp.wiki import WIKI_ROOT
+from llm_wiki_mcp.wiki import SYSTEM_DIR, WIKI_ROOT, find_page
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 RECALL_DIR = WIKI_ROOT / "recall"
 RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
@@ -50,6 +56,42 @@ DEFAULT_VARIANTS = (
     "hybrid-plain-rrf",
     "hybrid-graph",
 )
+
+FRONTIER_LABEL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "decision",
+        "confidence",
+        "expected_pages",
+        "negative_pages",
+        "stale_pages",
+        "summary",
+        "notes",
+    ],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected", "uncertain", "needs_retry"],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "expected_pages": {"type": "array", "items": {"type": "string"}},
+        "negative_pages": {"type": "array", "items": {"type": "string"}},
+        "stale_pages": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"},
+        "notes": {"type": ["string", "null"]},
+    },
+}
+
+FRONTIER_PENDING_STATUSES = {
+    "",
+    "pending_review",
+    "pending_frontier_review",
+    "frontier_retry",
+    "frontier_uncertain",
+}
+
+FrontierLabelReviewer = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -109,6 +151,10 @@ def _str_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(dict.fromkeys(item for item in value if isinstance(item, str) and item))
+
+
+def _str_list(value: Any) -> list[str]:
+    return list(_str_tuple(value))
 
 
 def _top_page_ids(value: Any) -> tuple[str, ...]:
@@ -590,8 +636,10 @@ def build_label_queue(
         rows.append(
             {
                 **row,
-                "queue_status": "pending_review",
+                "queue_status": "pending_frontier_review",
                 "promoted_to_golden": False,
+                "reviewer": "",
+                "review_confidence": None,
                 "review_note": "",
             }
         )
@@ -601,7 +649,452 @@ def build_label_queue(
         "output_file": str(output_file),
         "examples": len(rows),
         "reviewed": 0,
-        "note": "Candidates are not added to search-golden.jsonl until human review.",
+        "note": "Candidates are not added to search-golden.jsonl until trusted frontier review.",
+    }
+
+
+def _page_for_label(page_id: str) -> Path | None:
+    page = find_page(page_id)
+    if page is not None:
+        return page
+    system_page = SYSTEM_DIR / f"{page_id}.md"
+    return system_page if system_page.exists() else None
+
+
+def _page_excerpt(page_id: str, *, limit: int = 1800) -> dict[str, Any]:
+    path = _page_for_label(page_id)
+    if path is None:
+        return {"page_id": page_id, "exists": False, "path": "", "excerpt": ""}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {"page_id": page_id, "exists": False, "path": str(path), "error": str(exc), "excerpt": ""}
+    return {
+        "page_id": page_id,
+        "exists": True,
+        "path": str(path),
+        "excerpt": text[:limit],
+    }
+
+
+def _candidate_label_pages(row: dict[str, Any]) -> list[str]:
+    pages: list[str] = []
+    for field in ("expected_pages", "negative_pages", "stale_pages"):
+        pages.extend(_str_list(row.get(field)))
+    return list(dict.fromkeys(pages))
+
+
+def build_frontier_label_prompt(row: dict[str, Any]) -> str:
+    payload = {
+        "query": str(row.get("query") or ""),
+        "candidate_labels": {
+            "expected_pages": _str_list(row.get("expected_pages")),
+            "negative_pages": _str_list(row.get("negative_pages")),
+            "stale_pages": _str_list(row.get("stale_pages")),
+        },
+        "metadata": {
+            "split": row.get("split"),
+            "language": row.get("language"),
+            "kind": row.get("kind"),
+            "source": row.get("source"),
+            "ref": row.get("ref"),
+            "ts": row.get("ts"),
+        },
+        "page_excerpts": [_page_excerpt(page_id) for page_id in _candidate_label_pages(row)],
+    }
+    schema = FRONTIER_LABEL_SCHEMA
+    return f"""\
+You are the trusted frontier label reviewer for LLM Wiki search evaluation.
+
+Goal:
+- Decide whether the candidate labels are trustworthy for the user's search query.
+- Promote only labels that are clearly supported by the query and page excerpts.
+- Keep false positives out of search-golden.jsonl.
+- Do not edit files, run commands, ask a human, or invent unrelated page ids.
+
+Decision policy:
+- approved: the label set is trustworthy. You may move page ids between expected_pages,
+  negative_pages, and stale_pages if the candidate type is wrong but the evidence is clear.
+- rejected: the candidate labels are clearly wrong and should not be promoted.
+- uncertain: evidence is insufficient or ambiguous; leave it for another frontier pass.
+- needs_retry: the review cannot be completed because context is malformed or unavailable.
+
+Return JSON only matching this schema:
+{json.dumps(schema, ensure_ascii=False, indent=2)}
+
+Candidate:
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
+
+
+def _frontier_label_failure(summary: str, *, output: str = "", failure: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "decision": "needs_retry",
+        "confidence": 0.0,
+        "expected_pages": [],
+        "negative_pages": [],
+        "stale_pages": [],
+        "summary": summary,
+        "notes": None,
+        "reviewer": "frontier",
+        "frontier_failure": failure,
+        "raw_output": output[-4000:] if output else "",
+    }
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _normalize_frontier_label_result(raw: dict[str, Any], *, raw_output: str = "") -> dict[str, Any]:
+    decision = raw.get("decision")
+    if decision not in {"approved", "rejected", "uncertain", "needs_retry"}:
+        return _frontier_label_failure("frontier label JSON failed schema validation", output=raw_output)
+    confidence = raw.get("confidence")
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        confidence_value = 0.0
+    confidence_value = max(0.0, min(1.0, confidence_value))
+    summary = raw.get("summary")
+    normalized = {
+        "decision": decision,
+        "confidence": confidence_value,
+        "expected_pages": _str_list(raw.get("expected_pages")),
+        "negative_pages": _str_list(raw.get("negative_pages")),
+        "stale_pages": _str_list(raw.get("stale_pages")),
+        "summary": summary if isinstance(summary, str) and summary.strip() else decision,
+        "notes": raw.get("notes") if isinstance(raw.get("notes"), str) else None,
+        "reviewer": str(raw.get("reviewer") or "frontier"),
+    }
+    raw_text = raw_output or str(raw.get("raw_output") or "")
+    if raw_text and decision == "needs_retry":
+        normalized["raw_output"] = raw_text[-4000:]
+    for key in (
+        "frontier_failure",
+        "human_required",
+        "notify_user",
+        "access_repair",
+        "votes",
+    ):
+        if key in raw:
+            normalized[key] = raw[key]
+    return normalized
+
+
+def _parse_frontier_label_output(output: str) -> dict[str, Any]:
+    parsed = _extract_json_object(output)
+    if parsed is None:
+        return _frontier_label_failure("frontier label output did not contain JSON", output=output)
+    return _normalize_frontier_label_result(parsed, raw_output=output)
+
+
+def run_frontier_label_review(
+    row: dict[str, Any],
+    *,
+    repo_root: Path = REPO_ROOT,
+    timeout: int | None = None,
+) -> dict[str, Any]:
+    from llm_wiki_mcp import frontier_review
+
+    prompt = build_frontier_label_prompt(row)
+    timeout_seconds = timeout or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600"))
+    command = os.environ.get("LLM_WIKI_LABEL_REVIEW_CMD")
+    if command:
+        completed = subprocess.run(
+            shlex.split(command),
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env=frontier_review._frontier_env(),
+        )
+        output = frontier_review.redact_sensitive_text((completed.stdout or "") + "\n" + (completed.stderr or ""))
+        if completed.returncode != 0:
+            failure = frontier_review.classify_frontier_failure(output).to_dict()
+            return _frontier_label_failure(
+                f"frontier label command failed with exit {completed.returncode}",
+                output=output,
+                failure=failure,
+            )
+        return _parse_frontier_label_output(output)
+
+    codex = shutil.which("codex")
+    if codex is None:
+        failure = {
+            "failure_class": "frontier_tool_unavailable",
+            "rescue_status": "human_required",
+            "summary": "codex executable not found",
+            "human_required": True,
+            "notify_user": True,
+        }
+        return _frontier_label_failure("codex executable not found", failure=failure)
+
+    preflight = frontier_review.run_frontier_preflight()
+    if not preflight.get("ok"):
+        failure = preflight.get("failure") if isinstance(preflight.get("failure"), dict) else None
+        return _frontier_label_failure("frontier preflight failed", failure=failure)
+
+    with tempfile.TemporaryDirectory() as td:
+        schema_path = Path(td) / "frontier-label.schema.json"
+        output_path = Path(td) / "frontier-label-output.json"
+        strict_schema, _schema_repair = frontier_review._strict_schema_with_repair(FRONTIER_LABEL_SCHEMA)
+        schema_path.write_text(json.dumps(strict_schema, indent=2) + "\n", encoding="utf-8")
+        invocation = frontier_review._build_codex_exec_invocation(
+            codex,
+            repo_root=repo_root,
+            schema_path=schema_path,
+            output_path=output_path,
+            execute_patch=False,
+            preflight=preflight,
+        )
+        completed = subprocess.run(
+            invocation["cmd"],
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env=frontier_review._frontier_env(),
+            cwd=invocation.get("cwd") or None,
+        )
+        output_text = ""
+        if output_path.exists():
+            output_text += output_path.read_text(encoding="utf-8", errors="replace")
+        output_text += "\n" + (completed.stdout or "") + "\n" + (completed.stderr or "")
+        output_text = frontier_review.redact_sensitive_text(output_text)
+        if completed.returncode != 0:
+            failure = frontier_review.classify_frontier_failure(output_text).to_dict()
+            return _frontier_label_failure(
+                f"codex frontier label review failed with exit {completed.returncode}",
+                output=output_text,
+                failure=failure,
+            )
+        result = _parse_frontier_label_output(output_text)
+        result["access_repair"] = {
+            "invocation": {
+                "source": invocation.get("source"),
+                "cmd": invocation.get("cmd"),
+                "cwd": invocation.get("cwd"),
+                "schema_path": invocation.get("schema_path"),
+                "output_path": invocation.get("output_path"),
+            },
+            "preflight": {
+                "codex_home": preflight.get("codex_home"),
+                "auth_path": preflight.get("auth_path"),
+            },
+        }
+        return result
+
+
+def _label_tuple_from_review(review: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    return (
+        tuple(_str_list(review.get("expected_pages"))),
+        tuple(_str_list(review.get("negative_pages"))),
+        tuple(_str_list(review.get("stale_pages"))),
+    )
+
+
+def _combine_frontier_label_reviews(
+    reviews: list[dict[str, Any]],
+    *,
+    min_confidence: float,
+) -> dict[str, Any]:
+    if not reviews:
+        return _frontier_label_failure("no frontier label reviews were attempted")
+    if len(reviews) == 1:
+        return reviews[0]
+
+    if any(review.get("human_required") for review in reviews):
+        first = next(review for review in reviews if review.get("human_required"))
+        return {**first, "summary": f"frontier label review needs human action: {first.get('summary', '')}"}
+
+    retry = [review for review in reviews if review.get("decision") == "needs_retry"]
+    if retry:
+        return {
+            **retry[0],
+            "summary": f"frontier label consensus needs retry: {retry[0].get('summary', '')}",
+            "votes": reviews,
+        }
+
+    approvals = [
+        review
+        for review in reviews
+        if review.get("decision") == "approved" and float(review.get("confidence") or 0.0) >= min_confidence
+    ]
+    label_sets = {_label_tuple_from_review(review) for review in approvals}
+    if len(approvals) == len(reviews) and len(label_sets) == 1:
+        best = max(approvals, key=lambda review: float(review.get("confidence") or 0.0))
+        return {
+            **best,
+            "reviewer": "frontier_consensus",
+            "summary": f"frontier consensus approved: {best.get('summary', '')}",
+            "votes": reviews,
+        }
+
+    if any(review.get("decision") == "rejected" for review in reviews):
+        return {
+            **next(review for review in reviews if review.get("decision") == "rejected"),
+            "reviewer": "frontier_consensus",
+            "summary": "frontier consensus rejected or disagreed on labels",
+            "votes": reviews,
+        }
+
+    return {
+        "decision": "uncertain",
+        "confidence": 0.0,
+        "expected_pages": [],
+        "negative_pages": [],
+        "stale_pages": [],
+        "summary": "frontier reviewers did not agree on a high-confidence label set",
+        "notes": None,
+        "reviewer": "frontier_consensus",
+        "votes": reviews,
+    }
+
+
+def _golden_key(row: dict[str, Any]) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    return (
+        str(row.get("query") or ""),
+        tuple(_str_list(row.get("expected_pages"))),
+        tuple(_str_list(row.get("negative_pages"))),
+        tuple(_str_list(row.get("stale_pages"))),
+    )
+
+
+def _golden_row_from_review(row: dict[str, Any], review: dict[str, Any], *, reviewed_at: str) -> dict[str, Any]:
+    expected = _str_list(review.get("expected_pages"))
+    negative = _str_list(review.get("negative_pages"))
+    stale = _str_list(review.get("stale_pages"))
+    out = {
+        "query": str(row.get("query") or ""),
+        "expected_pages": expected,
+        "negative_pages": negative,
+        "stale_pages": stale,
+        "split": str(row.get("split") or assign_split(str(row.get("query") or ""))),
+        "language": str(row.get("language") or language_bucket(str(row.get("query") or ""))),
+        "kind": str(row.get("kind") or query_kind(str(row.get("query") or ""))),
+        "source": str(row.get("source") or "frontier_label_review"),
+        "ref": str(row.get("ref") or ""),
+        "ts": str(row.get("ts") or ""),
+        "reviewed": True,
+        "reviewer": str(review.get("reviewer") or "frontier"),
+        "review_confidence": float(review.get("confidence") or 0.0),
+        "reviewed_at": reviewed_at,
+        "review_note": str(review.get("summary") or ""),
+    }
+    return out
+
+
+def _queue_status_for_review(review: dict[str, Any], *, min_confidence: float) -> str:
+    failure = review.get("frontier_failure") if isinstance(review.get("frontier_failure"), dict) else {}
+    if review.get("human_required") or failure.get("human_required"):
+        return "human_required"
+    decision = review.get("decision")
+    confidence = float(review.get("confidence") or 0.0)
+    if decision == "approved" and confidence >= min_confidence and any(_label_tuple_from_review(review)):
+        return "frontier_approved"
+    if decision == "approved":
+        return "frontier_uncertain"
+    if decision == "rejected":
+        return "frontier_rejected"
+    if decision == "needs_retry":
+        return "frontier_retry"
+    return "frontier_uncertain"
+
+
+def review_label_queue_with_frontier(
+    *,
+    queue_file: Path = LABEL_QUEUE_FILE,
+    golden_file: Path = GOLDEN_FILE,
+    limit: int = 100,
+    min_confidence: float = 0.8,
+    votes: int = 1,
+    timeout: int | None = None,
+    repo_root: Path = REPO_ROOT,
+    reviewer: FrontierLabelReviewer | None = None,
+) -> dict[str, Any]:
+    rows = read_jsonl(queue_file)
+    golden_rows = read_jsonl(golden_file)
+    golden_keys = {_golden_key(row) for row in golden_rows}
+    reviewed_at = datetime.now().isoformat(timespec="seconds")
+    attempted = 0
+    promoted = 0
+    status_counts: dict[str, int] = {}
+    updated_rows: list[dict[str, Any]] = []
+    max_votes = max(1, votes)
+
+    for row in rows:
+        status = str(row.get("queue_status") or "")
+        if attempted >= limit or bool(row.get("promoted_to_golden")) or status not in FRONTIER_PENDING_STATUSES:
+            updated_rows.append(row)
+            continue
+
+        reviews: list[dict[str, Any]] = []
+        for _idx in range(max_votes):
+            review = (
+                reviewer(row)
+                if reviewer is not None
+                else run_frontier_label_review(row, repo_root=repo_root, timeout=timeout)
+            )
+            reviews.append(_normalize_frontier_label_result(review) if "decision" in review else review)
+        combined = _combine_frontier_label_reviews(reviews, min_confidence=min_confidence)
+        next_status = _queue_status_for_review(combined, min_confidence=min_confidence)
+        attempted += 1
+        status_counts[next_status] = status_counts.get(next_status, 0) + 1
+
+        updated = {
+            **row,
+            "queue_status": next_status,
+            "reviewer": combined.get("reviewer") or "frontier",
+            "review_confidence": float(combined.get("confidence") or 0.0),
+            "review_note": combined.get("summary") or "",
+            "frontier_review": combined,
+        }
+
+        if next_status == "frontier_approved":
+            golden_row = _golden_row_from_review(row, combined, reviewed_at=reviewed_at)
+            key = _golden_key(golden_row)
+            if key not in golden_keys:
+                golden_rows.append(golden_row)
+                golden_keys.add(key)
+                promoted += 1
+            updated["promoted_to_golden"] = True
+            updated["reviewed"] = True
+            updated["reviewed_at"] = reviewed_at
+        else:
+            updated["promoted_to_golden"] = False
+        updated_rows.append(updated)
+
+    write_jsonl(queue_file, updated_rows)
+    if promoted:
+        write_jsonl(golden_file, golden_rows)
+    return {
+        "status": "ok",
+        "queue_file": str(queue_file),
+        "golden_file": str(golden_file),
+        "attempted": attempted,
+        "promoted": promoted,
+        "remaining": sum(
+            1
+            for row in updated_rows
+            if str(row.get("queue_status") or "") in FRONTIER_PENDING_STATUSES
+            and not bool(row.get("promoted_to_golden"))
+        ),
+        "status_counts": dict(sorted(status_counts.items())),
+        "min_confidence": min_confidence,
+        "votes": max_votes,
     }
 
 
@@ -816,6 +1309,7 @@ def print_report(payload: dict[str, Any]) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate LLM Wiki search ranking quality.")
     parser.add_argument("--golden-file", default=str(GOLDEN_FILE))
+    parser.add_argument("--label-queue-file", default=str(LABEL_QUEUE_FILE))
     parser.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))
     parser.add_argument("--log-file", default=str(RECALL_LOG_FILE))
     parser.add_argument("--output-file", default=str(GOLDEN_FILE))
@@ -826,6 +1320,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--failure-index", nargs="?", const=str(FAILURE_INDEX_FILE), help="Write failed query index JSONL.")
     parser.add_argument("--build-golden", action="store_true")
     parser.add_argument("--build-label-queue", action="store_true")
+    parser.add_argument("--frontier-review-labels", action="store_true", help="Use a frontier model to promote trusted label-queue rows into the golden set.")
+    parser.add_argument("--frontier-min-confidence", type=float, default=0.8)
+    parser.add_argument("--frontier-votes", type=int, default=1, help="Number of frontier votes required to agree before promotion.")
+    parser.add_argument("--frontier-timeout", type=int, default=None)
     parser.add_argument("--self-tune", action="store_true", help="Run dev-only shadow self-tune with locked-test guard.")
     parser.add_argument("--self-tune-history", default=str(SELF_TUNE_HISTORY_FILE))
     parser.add_argument("--report", action="store_true")
@@ -851,12 +1349,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"reviewed\t{payload['reviewed']}")
         return 0
     if args.build_label_queue:
+        queue_output = (
+            Path(args.label_queue_file).expanduser()
+            if args.label_queue_file != str(LABEL_QUEUE_FILE)
+            else (
+                Path(args.output_file).expanduser()
+                if args.output_file != str(GOLDEN_FILE)
+                else LABEL_QUEUE_FILE
+            )
+        )
         payload = build_label_queue(
             feedback_file=Path(args.feedback_file).expanduser(),
             log_file=Path(args.log_file).expanduser(),
-            output_file=Path(args.output_file).expanduser()
-            if args.output_file != str(GOLDEN_FILE)
-            else LABEL_QUEUE_FILE,
+            output_file=queue_output,
             limit=args.limit,
         )
         if args.json:
@@ -865,6 +1370,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"label_queue\t{payload['output_file']}")
             print(f"examples\t{payload['examples']}")
             print(payload["note"])
+        return 0
+    if args.frontier_review_labels:
+        payload = review_label_queue_with_frontier(
+            queue_file=Path(args.label_queue_file).expanduser(),
+            golden_file=Path(args.golden_file).expanduser(),
+            limit=args.limit,
+            min_confidence=args.frontier_min_confidence,
+            votes=args.frontier_votes,
+            timeout=args.frontier_timeout,
+        )
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"frontier_label_review\t{payload['status']}")
+            print(f"attempted\t{payload['attempted']}")
+            print(f"promoted\t{payload['promoted']}")
+            print(f"remaining\t{payload['remaining']}")
+            print(f"golden_file\t{payload['golden_file']}")
         return 0
     if args.self_tune:
         payload = self_tune(
