@@ -117,26 +117,59 @@ def test_production_search_builds_usage_prior_only_when_weight_is_positive(monke
     assert [result.page_id for result in results] == ["bm25-a", "graph-a"]
 
 
-def test_eval_hybrid_current_omits_graph_and_usage_channels(monkeypatch) -> None:
+def test_eval_hybrid_current_uses_production_graph_call_and_usage_gate(monkeypatch) -> None:
     bm25 = FakeBM25([page("bm25-a", 10.0), page("bm25-b", 9.0)])
+    graph_calls: list[dict[str, object]] = []
 
-    def fail_graph(*args, **kwargs):
-        raise AssertionError("hybrid-current currently does not construct graph candidates")
+    def fake_graph(results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50):
+        graph_calls.append(
+            {
+                "page_ids": [result.page_id for result in results],
+                "decay": decay,
+                "limit": limit,
+            }
+        )
+        return []
 
     def fail_usage(*args, **kwargs):
-        raise AssertionError("hybrid-current currently does not construct usage-prior candidates")
+        raise AssertionError("hybrid-current must keep usage-prior gated while weight is zero")
 
     monkeypatch.setattr(search_eval, "get_bm25", lambda: bm25)
     monkeypatch.setattr(search_eval, "semantic_search", lambda query, top_n=20: [page("sem-a", 0.8)])
-    monkeypatch.setattr(search_eval, "graph_expand_results", fail_graph)
+    monkeypatch.setattr(search_eval, "graph_expand_results", fake_graph)
     monkeypatch.setattr(search_eval, "usage_prior_results", fail_usage)
     monkeypatch.setattr(search_eval, "load_negative_feedback_config", disabled_negative_feedback)
 
     payload = search_eval.run_variant("query", "hybrid-current", top_n=3)
 
+    assert graph_calls == [
+        {"page_ids": ["bm25-a", "bm25-b", "sem-a"], "decay": 0.0, "limit": 100}
+    ]
     assert [result.page_id for result in payload["results"]] == ["bm25-a", "bm25-b", "sem-a"]
     assert payload["channels"]["graph"] == []
     assert payload["channels"]["usage_prior"] == []
+
+
+def test_hybrid_current_tracks_production_when_default_graph_weight_changes(monkeypatch) -> None:
+    def fake_graph(results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50):
+        assert decay == 0.5
+        return [page("graph-a", 5.0)]
+
+    for module in (search, search_eval):
+        monkeypatch.setattr(module, "get_bm25", lambda: FakeBM25([page("bm25-a", 10.0)]))
+        monkeypatch.setattr(module, "semantic_search", lambda query, top_n=20: [])
+        monkeypatch.setattr(module, "graph_expand_results", fake_graph)
+        monkeypatch.setattr(module, "usage_prior_results", lambda *args, **kwargs: [])
+        monkeypatch.setattr(module, "load_negative_feedback_config", disabled_negative_feedback)
+        monkeypatch.setitem(module.DEFAULT_FUSION_WEIGHTS, "graph", 0.5)
+
+    production_results, production_mode = search.search("query", top_n=2)
+    eval_payload = search_eval.run_variant("query", "hybrid-current", top_n=2)
+
+    assert production_mode == "bm25+graph"
+    assert [result.page_id for result in production_results] == ["bm25-a", "graph-a"]
+    assert [result.page_id for result in eval_payload["results"]] == ["bm25-a", "graph-a"]
+    assert eval_payload["channels"]["graph"] == ["graph-a"]
 
 
 def test_eval_hybrid_rerank_applies_negative_feedback_after_rerank(monkeypatch) -> None:

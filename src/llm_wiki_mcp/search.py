@@ -15,7 +15,7 @@ from llm_wiki_mcp.runtime_config import (
     load_negative_feedback_config,
 )
 from llm_wiki_mcp.negative_feedback import apply_penalties, penalties_for_query
-from llm_wiki_mcp.pipeline import PipelineConfig, PipelineDependencies, run_search_pipeline
+from llm_wiki_mcp.pipeline import PipelineDependencies, production_pipeline_config, run_search_pipeline
 from llm_wiki_mcp.search_types import ScoredPage, _FRONTMATTER_RE, tokenize
 from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, SYSTEM_DIR, all_pages, page_id_from_path
 from llm_wiki_mcp.link_fix import atomic_write
@@ -1339,7 +1339,7 @@ def search(
     weights = {**DEFAULT_FUSION_WEIGHTS, **(fusion_weights or {})}
     result = run_search_pipeline(
         query,
-        config=PipelineConfig(
+        config=production_pipeline_config(
             top_n=top_n,
             folder=folder,
             updated_after=updated_after,

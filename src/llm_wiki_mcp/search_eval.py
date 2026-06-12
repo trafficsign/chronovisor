@@ -18,7 +18,7 @@ import statistics
 import subprocess
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -35,6 +35,13 @@ from llm_wiki_mcp.search import (
 )
 from llm_wiki_mcp.reranker import rerank_results
 from llm_wiki_mcp.negative_feedback import apply_penalties, penalties_for_query
+from llm_wiki_mcp.pipeline import (
+    PipelineConfig,
+    PipelineDependencies,
+    apply_negative_feedback_stage,
+    production_pipeline_config,
+    run_search_pipeline,
+)
 from llm_wiki_mcp.runtime_config import load_negative_feedback_config, load_reranker_config
 from llm_wiki_mcp.wiki import SYSTEM_DIR, WIKI_ROOT, find_page
 
@@ -331,113 +338,114 @@ def examples_to_rows(examples: list[SearchExample]) -> list[dict[str, Any]]:
     ]
 
 
-def _plain_rrf(
-    channels: list[tuple[str, list[ScoredPage]]],
-    *,
-    k: int = 60,
-    weights: dict[str, float] | None = None,
-) -> list[ScoredPage]:
-    weights = weights or {}
-    scores: dict[str, float] = {}
-    meta: dict[str, ScoredPage] = {}
-    for channel, results in channels:
-        weight = max(0.0, float(weights.get(channel, 1.0)))
-        if weight == 0:
-            continue
-        for rank, page in enumerate(results):
-            scores[page.page_id] = scores.get(page.page_id, 0.0) + weight / (k + rank)
-            meta.setdefault(page.page_id, page)
+def _pipeline_dependencies() -> PipelineDependencies:
+    return PipelineDependencies(
+        get_bm25=get_bm25,
+        semantic_search=semantic_search,
+        graph_expand_results=graph_expand_results,
+        usage_prior_results=usage_prior_results,
+        fuse_results=fuse_results,
+        apply_filters=apply_filters,
+        apply_sort=lambda results, sort_by="relevance": results,
+        load_negative_feedback_config=load_negative_feedback_config,
+        penalties_for_query=penalties_for_query,
+        apply_penalties=apply_penalties,
+    )
 
-    fused: list[ScoredPage] = []
-    for page_id, score in scores.items():
-        page = meta[page_id]
-        fused.append(
-            ScoredPage(
-                page_id=page.page_id,
-                title=page.title,
-                folder=page.folder,
-                updated=page.updated,
-                score=score,
-                status=page.status,
-                superseded_by=page.superseded_by,
-            )
+
+def _variant_pipeline_config(variant: str, *, top_n: int) -> tuple[PipelineConfig, bool]:
+    weights = dict(DEFAULT_FUSION_WEIGHTS)
+    if variant == "bm25":
+        return (
+            PipelineConfig(
+                top_n=top_n,
+                semantic=False,
+                fusion_weights=weights,
+                result_strategy="bm25",
+                graph_strategy="disabled",
+                usage_strategy="disabled",
+            ),
+            False,
         )
-    return sorted(fused, key=lambda page: page.score, reverse=True)
+    if variant == "semantic":
+        return (
+            PipelineConfig(
+                top_n=top_n,
+                semantic=True,
+                fusion_weights=weights,
+                result_strategy="semantic",
+                graph_strategy="disabled",
+                usage_strategy="disabled",
+            ),
+            False,
+        )
+    if variant == "hybrid-plain-rrf":
+        return (
+            PipelineConfig(
+                top_n=top_n,
+                semantic=True,
+                fusion_weights=weights,
+                result_strategy="plain_rrf",
+                graph_strategy="disabled",
+                usage_strategy="disabled",
+                plain_rrf_weights={"bm25": 1.0, "semantic": 1.0},
+            ),
+            False,
+        )
+    if variant == "hybrid-graph":
+        return (
+            PipelineConfig(
+                top_n=top_n,
+                semantic=True,
+                fusion_weights={**weights, "graph": 0.5, "usage_prior": 0.0},
+                result_strategy="weighted_fusion",
+                graph_strategy="fixed",
+                graph_decay=0.5,
+                usage_strategy="disabled",
+            ),
+            False,
+        )
+    if variant == "hybrid-usage":
+        return (
+            PipelineConfig(
+                top_n=top_n,
+                semantic=True,
+                fusion_weights={**weights, "graph": 0.0, "usage_prior": 0.2},
+                result_strategy="weighted_fusion",
+                graph_strategy="disabled",
+                usage_strategy="always",
+                usage_include_graph=False,
+            ),
+            False,
+        )
+    if variant == "hybrid-current":
+        return (
+            production_pipeline_config(top_n=top_n, fusion_weights=weights),
+            False,
+        )
+    if variant == "hybrid-rerank":
+        return (
+            replace(
+                production_pipeline_config(top_n=top_n, fusion_weights=weights),
+                apply_negative_feedback=False,
+                filter_results=False,
+                sort_results=False,
+                truncate_results=False,
+            ),
+            True,
+        )
+    raise ValueError(f"unknown search eval variant: {variant}")
 
 
 def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
-    fetch_n = max(top_n * 5, 100)
     started = time.perf_counter()
-
-    bm25 = get_bm25()
-    bm25.build()
-    bm25_results = bm25.query(query, top_n=fetch_n)
-    sem_results: list[ScoredPage] = []
-    graph_results: list[ScoredPage] = []
-    usage_results: list[ScoredPage] = []
-
-    if variant in {
-        "semantic",
-        "hybrid-current",
-        "hybrid-plain-rrf",
-        "hybrid-graph",
-        "hybrid-rerank",
-    }:
-        sem_results = semantic_search(query, top_n=fetch_n)
-    if variant == "hybrid-graph":
-        graph_results = graph_expand_results(
-            bm25_results + sem_results,
-            decay=0.5,
-            limit=fetch_n,
-        )
-    if variant == "hybrid-usage":
-        sem_results = semantic_search(query, top_n=fetch_n)
-        candidate_ids = {page.page_id for page in bm25_results + sem_results}
-        usage_results = usage_prior_results(candidate_ids, limit=fetch_n)
-
+    config, needs_rerank = _variant_pipeline_config(variant, top_n=top_n)
+    deps = _pipeline_dependencies()
+    pipeline_result = run_search_pipeline(query, config=config, deps=deps)
+    results = pipeline_result.results
     reranker_meta: dict[str, Any] = {"status": "not_requested"}
-
-    if variant == "bm25":
-        results = bm25_results
-    elif variant == "semantic":
-        results = sem_results
-    elif variant == "hybrid-plain-rrf":
-        results = _plain_rrf(
-            [("bm25", bm25_results), ("semantic", sem_results)],
-            weights={"bm25": 1.0, "semantic": 1.0},
-        )
-    elif variant == "hybrid-graph":
-        results = fuse_results(
-            bm25_results,
-            sem_results,
-            graph_results,
-            [],
-            weights={**DEFAULT_FUSION_WEIGHTS, "graph": 0.5, "usage_prior": 0.0},
-        )
-    elif variant == "hybrid-usage":
-        results = fuse_results(
-            bm25_results,
-            sem_results,
-            [],
-            usage_results,
-            weights={**DEFAULT_FUSION_WEIGHTS, "graph": 0.0, "usage_prior": 0.2},
-        )
-    elif variant == "hybrid-current":
-        results = fuse_results(
-            bm25_results,
-            sem_results,
-            [],
-            [],
-            weights=DEFAULT_FUSION_WEIGHTS,
-        )
-    elif variant == "hybrid-rerank":
-        results = fuse_results(
-            bm25_results,
-            sem_results,
-            [],
-            [],
-            weights=DEFAULT_FUSION_WEIGHTS,
-        )
+    negative_meta = pipeline_result.negative_feedback
+    if needs_rerank:
         rerank_outcome = rerank_results(
             query,
             apply_filters(results),
@@ -445,19 +453,7 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
         )
         results = rerank_outcome.results
         reranker_meta = rerank_outcome.metadata
-    else:
-        raise ValueError(f"unknown search eval variant: {variant}")
-
-    # Match production search(): query-conditioned negative feedback demotion.
-    negative_meta: dict[str, Any] = {"status": "disabled"}
-    negative_config = load_negative_feedback_config()
-    if negative_config.enabled:
-        penalties = penalties_for_query(query, negative_config)
-        if penalties:
-            results = apply_penalties(results, penalties)
-            negative_meta = {"status": "applied", "pages": sorted(penalties)}
-        else:
-            negative_meta = {"status": "no_match"}
+        results, negative_meta = apply_negative_feedback_stage(query, results, deps=deps)
 
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
     out = apply_filters(results)[:top_n]
@@ -466,10 +462,10 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
         "results": out,
         "latency_ms": elapsed_ms,
         "channels": {
-            "bm25": [page.page_id for page in bm25_results[:top_n]],
-            "semantic": [page.page_id for page in sem_results[:top_n]],
-            "graph": [page.page_id for page in graph_results[:top_n]],
-            "usage_prior": [page.page_id for page in usage_results[:top_n]],
+            "bm25": [page.page_id for page in pipeline_result.bm25_results[:top_n]],
+            "semantic": [page.page_id for page in pipeline_result.semantic_results[:top_n]],
+            "graph": [page.page_id for page in pipeline_result.graph_results[:top_n]],
+            "usage_prior": [page.page_id for page in pipeline_result.usage_results[:top_n]],
             "reranker": reranker_meta,
             "negative_feedback": negative_meta,
         },
@@ -1153,15 +1149,22 @@ def write_failure_index(debug_rows: list[dict[str, Any]], path: Path = FAILURE_I
 
 
 def run_weighted_hybrid(query: str, weights: dict[str, float], *, top_n: int = 20) -> dict[str, Any]:
-    fetch_n = max(top_n * 5, 100)
     started = time.perf_counter()
-    bm25 = get_bm25()
-    bm25.build()
-    bm25_results = bm25.query(query, top_n=fetch_n)
-    sem_results = semantic_search(query, top_n=fetch_n)
-    results = fuse_results(bm25_results, sem_results, [], [], weights=weights)
+    pipeline_result = run_search_pipeline(
+        query,
+        config=PipelineConfig(
+            top_n=top_n,
+            semantic=True,
+            fusion_weights=dict(weights),
+            result_strategy="weighted_fusion",
+            graph_strategy="disabled",
+            usage_strategy="disabled",
+            apply_negative_feedback=False,
+        ),
+        deps=_pipeline_dependencies(),
+    )
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
-    return {"results": apply_filters(results)[:top_n], "latency_ms": elapsed_ms}
+    return {"results": pipeline_result.results, "latency_ms": elapsed_ms}
 
 
 def _rows_for_weight_eval(examples: list[SearchExample], weights: dict[str, float]) -> list[dict[str, Any]]:
