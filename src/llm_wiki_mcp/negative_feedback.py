@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from llm_wiki_mcp.runtime_config import NegativeFeedbackConfig, load_negative_feedback_config
+from llm_wiki_mcp.search_types import ScoredPage, tokenize
 
 # Test seams: when set, bypass the recall_runtime/golden default paths.
 FEEDBACK_FILE_OVERRIDE: Path | None = None
@@ -62,8 +63,6 @@ def _golden_file() -> Path:
 
 
 def _tokenize(text: str) -> frozenset[str]:
-    from llm_wiki_mcp.search import tokenize
-
     return frozenset(tokenize(text))
 
 
@@ -234,7 +233,6 @@ def apply_penalties(results, penalties: dict[str, float]):
     """Demote penalized pages by scaling their fused score, then re-sort."""
     if not penalties:
         return results
-    from llm_wiki_mcp.search import ScoredPage
 
     adjusted = []
     for page in results:

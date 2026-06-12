@@ -5,7 +5,6 @@ import math
 import re
 import threading
 from collections import Counter, deque
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,77 +14,14 @@ from llm_wiki_mcp.runtime_config import (
     load_embedding_config,
     load_negative_feedback_config,
 )
+from llm_wiki_mcp.search_types import ScoredPage, _FRONTMATTER_RE, tokenize
 from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, SYSTEM_DIR, all_pages, page_id_from_path
 from llm_wiki_mcp.link_fix import atomic_write
-
-
-# ---------------------------------------------------------------------------
-# Data types
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ScoredPage:
-    page_id: str
-    title: str
-    folder: str
-    updated: str
-    score: float
-    snippet: str = ""
-    status: str = "active"
-    superseded_by: str = ""
-
-
-# ---------------------------------------------------------------------------
-# Tokenizer (no external dependency)
-# ---------------------------------------------------------------------------
-
-_CJK_RANGES = (
-    ("\u3040", "\u309f"),  # Hiragana
-    ("\u30a0", "\u30ff"),  # Katakana
-    ("\u4e00", "\u9fff"),  # CJK Unified Ideographs
-    ("\u3400", "\u4dbf"),  # CJK Extension A
-    ("\uff66", "\uff9f"),  # Halfwidth Katakana
-)
-
-_FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
 
 
 def searchable_pages() -> list[Path]:
     """Return normal pages plus system pages that are useful recall targets."""
     return all_pages() + sorted(SYSTEM_DIR.glob("*.md"))
-
-
-def _is_cjk(ch: str) -> bool:
-    for lo, hi in _CJK_RANGES:
-        if lo <= ch <= hi:
-            return True
-    return False
-
-
-def tokenize(text: str) -> list[str]:
-    """Tokenize text: ASCII words + CJK character bigrams (boundary-aware)."""
-    # Strip frontmatter
-    text = _FRONTMATTER_RE.sub("", text)
-    text_lower = text.lower()
-
-    tokens = []
-    # ASCII words
-    for m in re.finditer(r"[a-z0-9_]+", text_lower):
-        word = m.group()
-        if len(word) >= 2:
-            tokens.append(word)
-
-    # CJK bigrams — boundary-aware (don't cross non-CJK gaps)
-    cjk_runs = re.findall(r"[" + "".join(f"{lo}-{hi}" for lo, hi in _CJK_RANGES) + r"]+", text)
-    for run in cjk_runs:
-        # Single CJK character: include as unigram
-        if len(run) == 1:
-            tokens.append(run)
-        # Bigrams within each contiguous CJK run
-        for i in range(len(run) - 1):
-            tokens.append(run[i] + run[i + 1])
-
-    return tokens
 
 
 # ---------------------------------------------------------------------------
