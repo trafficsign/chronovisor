@@ -608,6 +608,46 @@ def run_pending(
     }
 
 
+def run_auto_apply_error_self_heal(
+    *,
+    threshold: int = 3,
+    max_packets: int = 3,
+    use_qwen: bool = True,
+    enable_frontier: bool = True,
+    execute_frontier_patch: bool = True,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    from llm_wiki_mcp.auto_apply_error_supervisor import (
+        pending_auto_apply_error_packets,
+        supervise_auto_apply_log,
+    )
+
+    supervision = supervise_auto_apply_log(
+        threshold=threshold,
+        start_background=False,
+        dry_run=dry_run,
+    )
+    created = [Path(path) for path in supervision.get("packets_created", []) if isinstance(path, str)]
+    packets = created or pending_auto_apply_error_packets()
+    packets = packets[:max_packets]
+    results = [
+        handle_packet(
+            packet,
+            use_qwen=use_qwen,
+            enable_frontier=enable_frontier,
+            execute_frontier_patch=execute_frontier_patch,
+            dry_run=dry_run,
+        )
+        for packet in packets
+    ]
+    return {
+        "status": "ok",
+        "supervision": supervision,
+        "packets_seen": len(packets),
+        "results": results,
+    }
+
+
 def start_background(packet_path: Path) -> None:
     """Launch self-heal asynchronously after quarantine."""
 
@@ -819,6 +859,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run LLM Wiki self-healing.")
     parser.add_argument("--packet", type=Path, help="Process one failure packet.")
     parser.add_argument("--max-packets", type=int, default=3)
+    parser.add_argument(
+        "--auto-apply-errors",
+        action="store_true",
+        help="Promote repeated recall auto-apply errors into self-heal packets.",
+    )
+    parser.add_argument("--auto-apply-error-threshold", type=int, default=3)
     parser.add_argument("--no-qwen", action="store_true")
     parser.add_argument("--no-frontier", action="store_true")
     parser.add_argument("--review-only", action="store_true", help="Frontier may review but not patch.")
@@ -846,6 +892,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.drill:
         print(json.dumps(run_drill(use_qwen=not args.no_qwen), ensure_ascii=False, indent=2))
+        return 0
+    if args.auto_apply_errors:
+        result = run_auto_apply_error_self_heal(
+            threshold=args.auto_apply_error_threshold,
+            max_packets=args.max_packets,
+            use_qwen=not args.no_qwen,
+            enable_frontier=not args.no_frontier,
+            execute_frontier_patch=not args.review_only,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
     if args.packet:
         result = handle_packet(

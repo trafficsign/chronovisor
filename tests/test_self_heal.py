@@ -95,6 +95,23 @@ def test_drill_returns_local_repair_decision(isolated_wiki: Path) -> None:
     assert result["decision"]["action"] == "resolve_update_target"
 
 
+def test_auto_apply_error_packet_escalates_to_frontier_deterministically(isolated_wiki: Path) -> None:
+    from llm_wiki_mcp.local_repair import propose_repair
+
+    packet = {
+        "failure_class": "recall.auto_apply_error",
+        "fingerprint": "recall.auto_apply_error:page_tag:invalid_page_tag",
+        "attempts": 425,
+        "auto_apply_error": {"error_kind": "page_tag:invalid_page_tag"},
+    }
+
+    decision = propose_repair(packet, use_qwen=False)
+
+    assert decision.status == "escalate"
+    assert decision.action == "escalate_to_frontier"
+    assert decision.confidence >= 0.85
+
+
 def test_sandbox_drill_runs_pending_raw_to_self_heal(monkeypatch: pytest.MonkeyPatch) -> None:
     from llm_wiki_mcp.self_heal import run_sandbox_drill
 

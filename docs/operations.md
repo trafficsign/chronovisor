@@ -53,12 +53,20 @@ weights, rewrite settings, or context style.
 ```sh
 llm-wiki-recall-audit --host codex --hook --audit-read
 llm-wiki-recall-auto-apply --dry-run
+llm-wiki-self-heal --auto-apply-errors --auto-apply-error-threshold 3 --dry-run
 ```
 
 Auditor feedback uses `kind = "missed_candidate"` and source `auditor` for
 false negatives. Precision labels use `kind = "injection_used"` or
 `kind = "injection_ignored"`. The Stop dispatcher passes `--audit-read` so read
 decisions can be precision-audited without changing the auditor CLI default.
+
+Repeated `recall/auto-apply.jsonl` errors are promoted into self-heal packets
+after the configured threshold. The live auto-apply path accumulates repeated
+errors across runs, starts the existing local Qwen repair loop, and requires the
+frontier reviewer before code or policy fixes are applied. The `--dry-run`
+self-heal command reads the log and reports candidate clusters without writing
+packets or state.
 
 ## Search Ranking Review
 

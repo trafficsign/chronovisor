@@ -152,6 +152,19 @@ def deterministic_repair(packet: dict[str, Any]) -> LocalRepairDecision:
             reason="single existing page candidate for missing update target",
             source="deterministic",
         )
+    if failure_class == "recall.auto_apply_error":
+        return LocalRepairDecision(
+            status="escalate",
+            action="escalate_to_frontier",
+            confidence=0.88,
+            requested_page_id=packet.get("requested_page_id"),
+            reason=(
+                "repeated recall auto-apply errors indicate a system-level "
+                "policy or code fix that requires frontier approval"
+            ),
+            notes="local deterministic path intentionally escalates auto-apply error clusters",
+            source="deterministic",
+        )
     return LocalRepairDecision(
         status="escalate",
         action="escalate_to_frontier",

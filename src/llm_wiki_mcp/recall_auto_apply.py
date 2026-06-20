@@ -358,6 +358,16 @@ def apply_feedback_records(
         if not dry_run:
             record_apply_log(entry, log_file)
             applied_keys.add(key)
+    if not dry_run:
+        errors = [action for action in actions if action.get("status") == "error"]
+        if errors:
+            try:
+                from llm_wiki_mcp.auto_apply_error_supervisor import supervise_error_records
+
+                supervisor = supervise_error_records(errors)
+            except Exception as exc:
+                supervisor = {"status": "error", "error": f"{exc.__class__.__name__}: {exc}"}
+            return {"status": "ok", "actions": actions, "auto_apply_self_heal": supervisor}
     return {"status": "ok", "actions": actions}
 
 
