@@ -119,6 +119,53 @@ def test_page_tag_auto_apply_patches_frontmatter(tmp_path, monkeypatch) -> None:
     assert "d/theory" in meta["tags"]
 
 
+def test_invalid_page_tag_falls_back_to_query_hint(tmp_path, monkeypatch) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "llm-wiki-recall-audit-architecture")
+    hints_file = tmp_path / "query-hints.json"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+
+    record = _candidate(
+        "page_tag",
+        page_id="llm-wiki-recall-audit-architecture",
+        payload={"tag": "Assistant wrote a prose reason instead of a taxonomy tag."},
+    )
+    result = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+    )
+
+    action = result["actions"][0]
+    assert action["status"] == "fallback_applied"
+    assert action["result"]["fallback_to"] == "query_hint"
+    assert hints_file.exists()
+
+
+def test_page_tag_without_target_is_skipped_not_error(tmp_path, monkeypatch) -> None:
+    pages_root = tmp_path / "wiki"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", tmp_path / "query-hints.json")
+
+    record = _candidate(
+        "page_tag",
+        page_id="",
+        payload={"tag": "Assistant wrote a prose reason instead of a taxonomy tag."},
+    )
+    result = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+    )
+
+    action = result["actions"][0]
+    assert action["status"] == "skipped"
+    assert action["result"]["fallback_to"] == "query_hint"
+
+
 def test_alias_auto_apply_uses_existing_alias_store(tmp_path, monkeypatch) -> None:
     from llm_wiki_mcp import alias_store
 
@@ -140,6 +187,88 @@ def test_alias_auto_apply_uses_existing_alias_store(tmp_path, monkeypatch) -> No
 
     assert result["actions"][0]["status"] == "applied"
     assert alias_store.load_aliases()["made-up-recall-page"] == "ai/canonical-recall-page"
+
+
+def test_invalid_alias_falls_back_to_query_hint(tmp_path, monkeypatch) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "canonical-recall-page")
+    hints_file = tmp_path / "query-hints.json"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+
+    record = _candidate(
+        "alias",
+        page_id="canonical-recall-page",
+        payload={"alias": "自然言語の説明は alias page_id ではない"},
+    )
+    result = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+    )
+
+    assert result["actions"][0]["status"] == "fallback_applied"
+    assert hints_file.exists()
+
+
+def test_invalid_alias_target_falls_back_to_expected_page_hint(tmp_path, monkeypatch) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "canonical-recall-page")
+    hints_file = tmp_path / "query-hints.json"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+
+    record = _candidate(
+        "alias",
+        page_id="canonical-recall-page",
+        payload={"alias": "missing-target", "target_page": "does-not-exist"},
+    )
+    result = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+    )
+
+    assert result["actions"][0]["status"] == "fallback_applied"
+    assert hints_file.exists()
+
+
+def test_error_apply_keys_are_retriable(tmp_path) -> None:
+    log_file = tmp_path / "auto-apply.jsonl"
+    log_file.write_text(
+        "\n".join(
+            [
+                json.dumps({"apply_key": "failed", "status": "error"}),
+                json.dumps({"apply_key": "ok", "status": "applied"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert recall_auto_apply.read_applied_keys(log_file) == {"ok"}
+
+
+def test_query_hint_accepts_system_pages(tmp_path, monkeypatch) -> None:
+    pages_root = tmp_path / "wiki"
+    system_dir = pages_root / "system"
+    system_dir.mkdir(parents=True)
+    (system_dir / "lessons-learned.md").write_text(
+        "---\ntitle: Lessons Learned\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    hints_file = tmp_path / "query-hints.json"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(wiki, "SYSTEM_DIR", system_dir)
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+
+    hint = recall_hints.add_query_hint(page_id="lessons-learned", query="反省ルール", path=hints_file)
+
+    assert hint["page_id"] == "lessons-learned"
+    assert hints_file.exists()
 
 
 def test_auditor_recording_invokes_auto_apply(tmp_path, monkeypatch, capsys) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -98,7 +99,11 @@ def read_applied_keys(path: Path | None = None, limit: int = 5000) -> set[str]:
             parsed = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict) and isinstance(parsed.get("apply_key"), str):
+        if (
+            isinstance(parsed, dict)
+            and isinstance(parsed.get("apply_key"), str)
+            and parsed.get("status") != "error"
+        ):
             keys.add(parsed["apply_key"])
     return keys
 
@@ -189,17 +194,80 @@ def apply_query_hint(record: dict[str, Any], *, dry_run: bool) -> dict[str, Any]
     return {"action": "query_hint", "status": "applied", "hint": hint}
 
 
+def valid_alias_candidate(value: str) -> bool:
+    text = value.strip()
+    if text.endswith(".md"):
+        text = text[:-3]
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return bool(re.fullmatch(r"[A-Za-z0-9._-]+", text))
+
+
+def fallback_to_query_hint(
+    record: dict[str, Any],
+    *,
+    dry_run: bool,
+    reason: str,
+) -> dict[str, Any]:
+    try:
+        result = apply_query_hint(record, dry_run=dry_run)
+    except Exception as exc:
+        return {
+            "action": str(record.get("action_type", "")),
+            "status": "skipped",
+            "fallback_to": "query_hint",
+            "reason": reason,
+            "fallback_error": f"{exc.__class__.__name__}: {exc}",
+        }
+    return {
+        "action": str(record.get("action_type", "")),
+        "status": "fallback_dry_run" if dry_run else "fallback_applied",
+        "fallback_to": "query_hint",
+        "reason": reason,
+        "result": result,
+    }
+
+
 def apply_alias(record: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
     payload = action_payload(record)
     pages = expected_pages(record)
     target = str(payload.get("target_page") or payload.get("page_id") or (pages[0] if pages else ""))
-    alias = str(payload.get("alias") or record.get("missing_signal") or "")
+    raw_alias = payload.get("alias") or record.get("missing_signal") or ""
+    if not isinstance(raw_alias, str):
+        return fallback_to_query_hint(
+            record,
+            dry_run=dry_run,
+            reason=f"alias payload is not a string: {type(raw_alias).__name__}",
+        )
+    alias = raw_alias.strip()
     if not alias:
         raise ValueError("alias action requires alias or missing_signal")
-    target_ref = _page_ref(target)
+    if not valid_alias_candidate(alias):
+        return fallback_to_query_hint(
+            record,
+            dry_run=dry_run,
+            reason=f"invalid alias page_id: {alias!r}",
+        )
+    try:
+        target_ref = _page_ref(target)
+    except ValueError as exc:
+        return fallback_to_query_hint(
+            record,
+            dry_run=dry_run,
+            reason=str(exc),
+        )
     if dry_run:
         return {"action": "alias", "status": "dry_run", "alias": alias, "target": target_ref}
-    add_alias(alias, target_ref, source=f"recall-auto-apply:{record.get('normalize_key', '')}")
+    try:
+        add_alias(alias, target_ref, source=f"recall-auto-apply:{record.get('normalize_key', '')}")
+    except ValueError as exc:
+        if "invalid alias page_id" in str(exc):
+            return fallback_to_query_hint(
+                record,
+                dry_run=dry_run,
+                reason=str(exc),
+            )
+        raise
     return {"action": "alias", "status": "applied", "alias": alias, "target": target_ref}
 
 
@@ -207,13 +275,28 @@ def apply_page_tag(record: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
     payload = action_payload(record)
     pages = expected_pages(record)
     page_id = str(payload.get("page_id") or (pages[0] if pages else ""))
-    tag = str(payload.get("tag") or record.get("missing_signal") or "")
-    valid, reason = validate_tag(tag)
-    if not valid:
-        raise ValueError(f"invalid page tag {tag!r}: {reason}")
     path = wiki.find_page(page_id)
     if path is None:
-        raise ValueError(f"page does not exist: {page_id!r}")
+        return fallback_to_query_hint(
+            record,
+            dry_run=dry_run,
+            reason=f"page_tag target page does not exist: {page_id!r}",
+        )
+    raw_tag = payload.get("tag") or record.get("missing_signal") or ""
+    if not isinstance(raw_tag, str):
+        return fallback_to_query_hint(
+            record,
+            dry_run=dry_run,
+            reason=f"page_tag payload is not a string: {type(raw_tag).__name__}",
+        )
+    tag = raw_tag.strip()
+    valid, reason = validate_tag(tag)
+    if not valid:
+        return fallback_to_query_hint(
+            record,
+            dry_run=dry_run,
+            reason=f"invalid page tag {tag!r}: {reason}",
+        )
     text = path.read_text(encoding="utf-8")
     meta, _body = parse_frontmatter(text)
     existing = meta.get("tags")

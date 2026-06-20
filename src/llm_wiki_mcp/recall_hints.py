@@ -112,7 +112,8 @@ def add_query_hint(
         raise ValueError("query hint page_id is required")
     if not query_text:
         raise ValueError("query hint query is required")
-    if wiki.find_page(page_ref) is None:
+    system_path = wiki.SYSTEM_DIR / f"{page_ref}.md"
+    if wiki.find_page(page_ref) is None and not system_path.exists():
         raise ValueError(f"query hint target page does not exist: {page_ref!r}")
 
     path = _hint_path(path)
