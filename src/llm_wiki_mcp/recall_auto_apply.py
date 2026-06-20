@@ -179,9 +179,23 @@ def _page_ref(page_id: str) -> str:
 def apply_query_hint(record: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
     payload = action_payload(record)
     pages = expected_pages(record)
-    page_id = str(payload.get("page_id") or (pages[0] if pages else ""))
-    query = str(payload.get("query") or record.get("prompt") or record.get("missing_signal") or "")
+    page_id = str(payload.get("page_id") or (pages[0] if pages else "")).strip()
+    query = str(payload.get("query") or record.get("prompt") or record.get("missing_signal") or "").strip()
     signal = str(payload.get("signal") or record.get("missing_signal") or "")
+    if not page_id:
+        return {
+            "action": "query_hint",
+            "status": "skipped",
+            "reason": "query_hint missing page_id",
+            "query": query,
+        }
+    if not query:
+        return {
+            "action": "query_hint",
+            "status": "skipped",
+            "reason": "query_hint missing query",
+            "page_id": page_id,
+        }
     if dry_run:
         return {"action": "query_hint", "status": "dry_run", "page_id": page_id, "query": query}
     hint = add_query_hint(
@@ -218,6 +232,14 @@ def fallback_to_query_hint(
             "fallback_to": "query_hint",
             "reason": reason,
             "fallback_error": f"{exc.__class__.__name__}: {exc}",
+        }
+    if result.get("status") == "skipped":
+        return {
+            "action": str(record.get("action_type", "")),
+            "status": "skipped",
+            "fallback_to": "query_hint",
+            "reason": reason,
+            "result": result,
         }
     return {
         "action": str(record.get("action_type", "")),

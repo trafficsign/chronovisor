@@ -166,6 +166,33 @@ def test_page_tag_without_target_is_skipped_not_error(tmp_path, monkeypatch) -> 
     assert action["result"]["fallback_to"] == "query_hint"
 
 
+def test_query_hint_without_target_is_skipped_not_error(tmp_path, monkeypatch) -> None:
+    pages_root = tmp_path / "wiki"
+    hints_file = tmp_path / "query-hints.json"
+    log_file = tmp_path / "auto-apply.jsonl"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+
+    record = _candidate("query_hint", page_id="", payload={"query": "specific missing context"})
+    result = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=log_file,
+    )
+
+    action = result["actions"][0]
+    assert action["status"] == "skipped"
+    assert action["result"]["reason"] == "query_hint missing page_id"
+    assert "auto_apply_self_heal" not in result
+    assert not hints_file.exists()
+    assert recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=log_file,
+    )["actions"] == []
+
+
 def test_alias_auto_apply_uses_existing_alias_store(tmp_path, monkeypatch) -> None:
     from llm_wiki_mcp import alias_store
 
