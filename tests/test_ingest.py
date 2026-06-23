@@ -1029,6 +1029,68 @@ class TestRunIngestPartialFailure:
         assert not (pages / "misc" / "p0.md").exists()
         assert not (pages / "misc" / "p1.md").exists()
 
+    def test_missing_update_target_is_generated_as_create(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A model can misclassify a brand-new topic as an update.
+
+        If the requested target is absent and the filename is safe for a new
+        page, normalize the op before generation instead of letting apply
+        quarantine the raw with update_target_not_found.
+        """
+
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {
+                "type": "update",
+                "filename": "career-transition-strategy-2026.md",
+                "summary": "Capture career transition strategy discussion",
+                "keywords": ["career", "strategy"],
+            }
+        ]
+        seen_ops: list[dict] = []
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+
+        def fake_generate(op: dict, _raw: str, **_kw) -> dict:
+            seen_ops.append(op)
+            return {
+                "type": op["type"],
+                "filename": op["filename"],
+                "content": (
+                    "---\n"
+                    "title: Career Transition Strategy 2026\n"
+                    "updated: 2026-06-23\n"
+                    "tags: [d/personal-strategy, t/analysis, s/2026]\n"
+                    "---\n"
+                    "body"
+                ),
+            }
+
+        monkeypatch.setattr(ingest, "_generate_one", fake_generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        on_complete_called = []
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "raw content",
+            job.job_id,
+            on_complete=lambda: on_complete_called.append(True),
+        )
+
+        assert seen_ops[0]["type"] == "create"
+        assert seen_ops[0]["title"] == "Career Transition Strategy 2026"
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED
+        assert finished.pages_created == ["career-transition-strategy-2026"]
+        assert finished.pages_updated == []
+        assert on_complete_called == [True]
+        assert (
+            isolated_wiki
+            / "pages"
+            / "career-transition-strategy-2026.md"
+        ).exists()
+
 
 # ---------------------------------------------------------------------------
 # Phase 3b: raw_keywords metadata propagation through run_ingest
@@ -1675,6 +1737,56 @@ class TestTriagePlanSchema:
             {"type": "update", "filename": "bar.md"},
         ]
         assert _validate_triage_plan(plan) == plan
+
+    def test_live_triage_missing_update_is_retyped_to_create(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        plan = [
+            {
+                "type": "update",
+                "filename": "career-transition-strategy-2026.md",
+                "summary": "Career transition strategy memory",
+            }
+        ]
+        monkeypatch.setattr(
+            ingest,
+            "_generate_with_progress",
+            lambda *_args, **_kwargs: json.dumps(plan),
+        )
+
+        out = ingest._triage("raw content")
+
+        assert out == [
+            {
+                "type": "create",
+                "filename": "career-transition-strategy-2026.md",
+                "summary": "Career transition strategy memory",
+                "title": "Career Transition Strategy 2026",
+                "keywords": ["career", "transition", "strategy", "2026"],
+            }
+        ]
+
+    def test_live_triage_existing_update_stays_update(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        _seed_page(
+            isolated_wiki,
+            "career-transition-strategy-2026.md",
+            "---\ntitle: Career\nupdated: 2026-01-01\n---\nold",
+        )
+        plan = [
+            {
+                "type": "update",
+                "filename": "career-transition-strategy-2026.md",
+                "summary": "Append new memory",
+            }
+        ]
+
+        assert _validate_triage_plan(plan, coerce_missing_updates=True) == plan
 
     def test_empty_plan_passes(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan

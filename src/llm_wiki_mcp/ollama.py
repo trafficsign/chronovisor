@@ -215,6 +215,7 @@ Rules:
 - Output valid JSON array only (no markdown fences, no explanation)
 - For new pages: choose folder and filename in kebab-case (English)
 - For updates: reference existing page ID
+- If the target page is not listed in the catalog, use create, not update
 - Skip ephemeral conversation, greetings, and filler
 - Include brief summary of what knowledge each page should contain
 - Include keywords for finding related existing pages

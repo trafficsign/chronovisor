@@ -244,7 +244,7 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
             f"ingest | triage parse failed (output preview: {output[:120]!r})"
         )
         return None
-    validated = _validate_triage_plan(raw_plan)
+    validated = _validate_triage_plan(raw_plan, coerce_missing_updates=True)
     if validated is None:
         _safe_log(
             f"ingest | triage schema invalid (preview: {str(raw_plan)[:120]!r})"
@@ -264,7 +264,11 @@ _FILENAME_PATTERN = re.compile(
 _MAX_FILENAME_LEN = 200
 
 
-def _validate_triage_plan(plan: list) -> list[dict] | None:
+def _validate_triage_plan(
+    plan: list,
+    *,
+    coerce_missing_updates: bool = False,
+) -> list[dict] | None:
     """Reject any plan that doesn't match the documented operation schema.
 
     Validation is **op-type aware**:
@@ -273,11 +277,15 @@ def _validate_triage_plan(plan: list) -> list[dict] | None:
       ≤200 chars, optional single folder segment, optional ``.md``).
       We're choosing the canonical id for a brand-new page, so strict
       hygiene is appropriate.
-    * ``update``: filename must resolve to an existing page in the
-      corpus. Legacy pages predating the kebab rule (e.g. ``Foo.md``,
-      ``snake_case.md``, non-ASCII titles) must remain updatable; the
-      strict regex would block them forever. We only reject control
-      characters and length blowups here.
+    * ``update``: filename may point at a legacy page predating the kebab
+      rule (e.g. ``Foo.md``, ``snake_case.md``, non-ASCII titles), so the
+      strict create regex would block valid updates forever. We only reject
+      control characters and length blowups here.
+    * When ``coerce_missing_updates`` is enabled for live triage, a model
+      "update" for a missing but create-safe page id is retyped to
+      ``create`` before generation. That avoids a later apply-stage
+      quarantine while still leaving legacy or ambiguous update targets
+      fail-closed.
 
     Anything else (string entries, nonsense types, missing filenames,
     control chars) returns ``None`` so the caller treats it as a triage
@@ -315,7 +323,79 @@ def _validate_triage_plan(plan: list) -> list[dict] | None:
         # via find_page() (case-insensitive on macOS APFS) and reject if
         # the target doesn't exist. That way legacy corpus stays updatable.
         cleaned.append(entry)
+    if coerce_missing_updates:
+        return _normalize_triage_plan(cleaned)
     return cleaned
+
+
+def _title_from_page_id(page_id: str) -> str:
+    words = re.sub(r"[^a-zA-Z0-9]+", " ", page_id).strip().split()
+    title = " ".join(word if word.isdigit() else word.capitalize() for word in words)
+    return title or page_id
+
+
+def _keyword_fallback_from_page_id(page_id: str) -> list[str]:
+    return [word for word in re.split(r"[^a-zA-Z0-9]+", page_id.strip()) if word]
+
+
+def _filename_allowed_for_create(filename: str) -> bool:
+    fn = filename.strip()
+    if not fn.endswith(".md"):
+        fn += ".md"
+    return bool(_FILENAME_PATTERN.fullmatch(fn))
+
+
+def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
+    """Repair safe triage op-type drift before generate/apply.
+
+    The triage prompt says updates must reference an existing page, but local
+    models sometimes choose ``update`` for a brand-new durable topic. Waiting
+    until apply turns that into a repeated raw quarantine. If the target is
+    definitely absent and the requested filename is valid for a new page, treat
+    it as a create; ambiguous or unsafe names still fail closed later.
+    """
+    normalized: list[dict] = []
+    for op in plan:
+        if op.get("type") != "update":
+            normalized.append(op)
+            continue
+
+        filename = op.get("filename")
+        if not isinstance(filename, str) or not _filename_allowed_for_create(filename):
+            normalized.append(op)
+            continue
+
+        try:
+            full_path = _safe_resolve_page_path(filename)
+            page_id = full_path.stem
+            existing_path = (
+                full_path if full_path.exists() else _find_page_resilient(page_id)
+            )
+        except IngestApplyError:
+            normalized.append(op)
+            continue
+
+        if existing_path is not None and existing_path.exists():
+            normalized.append(op)
+            continue
+
+        create_op = dict(op)
+        create_op["type"] = "create"
+        create_op.setdefault("title", _title_from_page_id(page_id))
+        keywords = create_op.get("keywords")
+        if not (
+            isinstance(keywords, list)
+            and all(isinstance(keyword, str) for keyword in keywords)
+            and keywords
+        ):
+            create_op["keywords"] = _keyword_fallback_from_page_id(page_id)
+        normalized.append(create_op)
+        _safe_log(
+            f"ingest | triage update target {page_id!r} missing; "
+            "converted to create"
+        )
+
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -1436,6 +1516,7 @@ def run_ingest(
                     _safe_log(f"ingest | on_complete callback failed: {cb_err}")
             return
 
+        plan = _normalize_triage_plan(plan)
         _safe_log(f"ingest | triage: {len(plan)} operations planned")
         job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
         runtime_status.safe_write_status(
