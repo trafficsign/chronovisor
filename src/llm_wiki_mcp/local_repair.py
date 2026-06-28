@@ -38,8 +38,15 @@ You are the local repair agent for LLM Wiki.
 Return JSON only. Choose only one whitelisted action.
 Prefer conservative repairs: if the packet has exactly one similar_existing_pages
 candidate for apply.update_target_not_found, resolve_update_target is allowed.
+If apply.update_target_not_found has no similar_existing_pages and the requested
+page id is safe ASCII kebab-case, retry_raw is allowed because ingest can
+retype a missing update into a create.
 If a code change is required, escalate_to_frontier.
 """
+
+
+_CREATE_SAFE_PAGE_ID = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+_MAX_PAGE_ID_LEN = 200
 
 
 @dataclass(frozen=True)
@@ -134,6 +141,17 @@ def _validate_decision(data: dict[str, Any], packet: dict[str, Any]) -> LocalRep
     )
 
 
+def _is_create_safe_page_id(page_id: str | None) -> bool:
+    if not isinstance(page_id, str):
+        return False
+    value = page_id.strip()
+    return bool(
+        value
+        and len(value) <= _MAX_PAGE_ID_LEN
+        and _CREATE_SAFE_PAGE_ID.fullmatch(value)
+    )
+
+
 def deterministic_repair(packet: dict[str, Any]) -> LocalRepairDecision:
     failure_class = packet.get("failure_class")
     candidates = packet.get("similar_existing_pages")
@@ -150,6 +168,24 @@ def deterministic_repair(packet: dict[str, Any]) -> LocalRepairDecision:
             requested_page_id=packet.get("requested_page_id"),
             target_page_id=candidates[0],
             reason="single existing page candidate for missing update target",
+            source="deterministic",
+        )
+    if (
+        failure_class == "apply.update_target_not_found"
+        and isinstance(candidates, list)
+        and len(candidates) == 0
+        and _is_create_safe_page_id(packet.get("requested_page_id"))
+    ):
+        return LocalRepairDecision(
+            status="resolved",
+            action="retry_raw",
+            confidence=0.9,
+            requested_page_id=packet.get("requested_page_id"),
+            reason=(
+                "missing update target has no existing-page candidates and uses "
+                "a create-safe page id; retry raw so ingest can normalize the "
+                "missing update into a create"
+            ),
             source="deterministic",
         )
     if failure_class == "recall.auto_apply_error":
@@ -190,6 +226,15 @@ def propose_repair(
 ) -> LocalRepairDecision:
     """Ask Qwen for a repair decision, falling back to deterministic rules."""
 
+    deterministic = deterministic_repair(packet)
+    if (
+        deterministic.status == "resolved"
+        and deterministic.action
+        in {"resolve_update_target", "retry_raw", "quarantine_raw"}
+        and deterministic.confidence >= 0.85
+    ):
+        return deterministic
+
     if use_qwen:
         try:
             if generator is None:
@@ -210,4 +255,4 @@ def propose_repair(
                     return decision
         except Exception:
             pass
-    return deterministic_repair(packet)
+    return deterministic

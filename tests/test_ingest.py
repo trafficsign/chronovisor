@@ -1052,9 +1052,9 @@ class TestRunIngestPartialFailure:
         seen_ops: list[dict] = []
         monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
 
-        def fake_generate(op: dict, _raw: str, **_kw) -> dict:
+        def fake_generate(op: dict, _raw: str, *, raw_keywords=None, **_kw) -> dict:
             seen_ops.append(op)
-            return {
+            generated = {
                 "type": op["type"],
                 "filename": op["filename"],
                 "content": (
@@ -1066,6 +1066,9 @@ class TestRunIngestPartialFailure:
                     "body"
                 ),
             }
+            if raw_keywords is not None:
+                generated["raw_keywords"] = raw_keywords
+            return generated
 
         monkeypatch.setattr(ingest, "_generate_one", fake_generate)
         monkeypatch.setattr(ingest, "is_available", lambda: True)
@@ -1090,6 +1093,75 @@ class TestRunIngestPartialFailure:
             / "pages"
             / "career-transition-strategy-2026.md"
         ).exists()
+
+    def test_failure_packet_missing_update_target_becomes_create(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {
+                "type": "update",
+                "filename": "claude-code-vs-claude-code-structural-analysis.md",
+                "summary": "Capture Claude Code and Cursor adoption analysis",
+            }
+        ]
+        seen_ops: list[dict] = []
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+
+        def fake_generate(op: dict, _raw: str, *, raw_keywords=None, **_kw) -> dict:
+            seen_ops.append(op)
+            generated = {
+                "type": op["type"],
+                "filename": op["filename"],
+                "content": (
+                    "---\n"
+                    "title: Claude Code Vs Claude Code Structural Analysis\n"
+                    "updated: 2026-06-28\n"
+                    "tags: [d/ai-tools, t/analysis, s/2026]\n"
+                    "---\n"
+                    "body"
+                ),
+            }
+            if raw_keywords is not None:
+                generated["raw_keywords"] = raw_keywords
+            return generated
+
+        monkeypatch.setattr(ingest, "_generate_one", fake_generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "raw content",
+            job.job_id,
+            metadata={"raw_keywords": ["Claude Code", "Cursor", "Mac Studio"]},
+        )
+
+        assert seen_ops[0]["type"] == "create"
+        assert seen_ops[0]["keywords"] == [
+            "claude",
+            "code",
+            "vs",
+            "claude",
+            "code",
+            "structural",
+            "analysis",
+        ]
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED
+        assert finished.pages_created == [
+            "claude-code-vs-claude-code-structural-analysis"
+        ]
+        assert finished.pages_updated == []
+        page = (
+            isolated_wiki
+            / "pages"
+            / "claude-code-vs-claude-code-structural-analysis.md"
+        )
+        assert page.exists()
+        assert (
+            "raw_keywords: [Claude Code, Cursor, Mac Studio]" in page.read_text()
+        )
 
 
 # ---------------------------------------------------------------------------

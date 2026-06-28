@@ -112,6 +112,115 @@ def test_auto_apply_error_packet_escalates_to_frontier_deterministically(isolate
     assert decision.confidence >= 0.85
 
 
+def test_missing_update_without_candidate_retries_create_safe_raw(
+    isolated_wiki: Path,
+) -> None:
+    from llm_wiki_mcp.local_repair import propose_repair
+
+    packet = {
+        "failure_class": "apply.update_target_not_found",
+        "fingerprint": (
+            "apply.update_target_not_found:"
+            "claude-code-vs-claude-code-structural-analysis"
+        ),
+        "attempts": 3,
+        "error": (
+            "update target not found for page_id "
+            "'claude-code-vs-claude-code-structural-analysis'"
+        ),
+        "requested_page_id": "claude-code-vs-claude-code-structural-analysis",
+        "similar_existing_pages": [],
+    }
+
+    def stale_qwen(*_args, **_kwargs) -> str:
+        raise AssertionError("deterministic safe repair should run before Qwen")
+
+    decision = propose_repair(packet, generator=stale_qwen, use_qwen=True)
+
+    assert decision.status == "resolved"
+    assert decision.action == "retry_raw"
+    assert (
+        decision.requested_page_id
+        == "claude-code-vs-claude-code-structural-analysis"
+    )
+    assert decision.confidence >= 0.85
+
+
+def test_missing_update_with_unsafe_page_id_still_escalates(
+    isolated_wiki: Path,
+) -> None:
+    from llm_wiki_mcp.local_repair import propose_repair
+
+    packet = {
+        "failure_class": "apply.update_target_not_found",
+        "requested_page_id": "Claude Code Structural Analysis",
+        "similar_existing_pages": [],
+    }
+
+    decision = propose_repair(packet, use_qwen=False)
+
+    assert decision.status == "escalate"
+    assert decision.action == "escalate_to_frontier"
+
+
+def test_missing_update_retry_raw_restores_raw_and_retries(
+    isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet = {
+        "failure_id": "f-no-candidate",
+        "raw_file": "new-topic.md",
+        "failure_class": "apply.update_target_not_found",
+        "fingerprint": (
+            "apply.update_target_not_found:"
+            "claude-code-vs-claude-code-structural-analysis"
+        ),
+        "attempts": 3,
+        "error": (
+            "update target not found for page_id "
+            "'claude-code-vs-claude-code-structural-analysis'"
+        ),
+        "requested_page_id": "claude-code-vs-claude-code-structural-analysis",
+        "similar_existing_pages": [],
+        "status": "pending_local_repair",
+    }
+    packet_path = (
+        isolated_wiki / "runtime" / "failures" / "packets" / "f-no-candidate.json"
+    )
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    quarantined = (
+        isolated_wiki
+        / "runtime"
+        / "failures"
+        / "quarantined-raw"
+        / "new-topic.md"
+    )
+    quarantined.parent.mkdir(parents=True, exist_ok=True)
+    quarantined.write_text("raw body", encoding="utf-8")
+
+    monkeypatch.setattr(
+        self_heal,
+        "_retry_ingest",
+        lambda *, dry_run: {"triggered": True, "files_processed": ["new-topic.md"]},
+    )
+
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=False,
+        dry_run=False,
+    )
+
+    assert result["status"] == "local_repair_applied"
+    assert result["action"]["action"] == "retry_raw"
+    assert not quarantined.exists()
+    assert (isolated_wiki / "raw" / "new-topic.md").exists()
+    updated_packet = json.loads(packet_path.read_text())
+    assert updated_packet["status"] == "local_repair_applied"
+
+
 def test_sandbox_drill_runs_pending_raw_to_self_heal(monkeypatch: pytest.MonkeyPatch) -> None:
     from llm_wiki_mcp.self_heal import run_sandbox_drill
 
