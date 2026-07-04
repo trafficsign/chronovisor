@@ -96,6 +96,28 @@ function timeLabel(value) {
   return String(value).slice(-8);
 }
 
+function axisTimeLabel(value) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (!Number.isNaN(date.getTime())) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return String(value).slice(-5);
+}
+
+function dateLabel(value) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (!Number.isNaN(date.getTime())) {
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+  return String(value).slice(0, 10);
+}
+
+function timestampFromMs(ms) {
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
 function ageLabel(value) {
   const ms = parseMs(value);
   if (ms === null) return "--";
@@ -152,32 +174,49 @@ function metricScore(row) {
 }
 
 function completedRows(rows) {
-  const byTransition = new Map();
-  rows.forEach((row) => {
-    if (!numeric(row.pending_after)) return;
-    if (row.kind !== "batch" && row.kind !== "drain_batch") return;
+  const candidates = rows
+    .filter((row) => numeric(row.pending_after) && (row.kind === "batch" || row.kind === "drain_batch"))
+    .sort((a, b) => (parseMs(a.timestamp) || 0) - (parseMs(b.timestamp) || 0));
+  const deduped = [];
+  candidates.forEach((row) => {
     const before = numeric(row.pending_before) ? row.pending_before : "?";
-    const key = `${before}->${row.pending_after}`;
-    const previous = byTransition.get(key);
-    if (!previous || metricScore(row) > metricScore(previous)) {
-      byTransition.set(key, row);
+    const transition = `${before}->${row.pending_after}`;
+    const timestamp = parseMs(row.timestamp);
+    const previous = deduped[deduped.length - 1];
+    const previousBefore = previous && numeric(previous.pending_before) ? previous.pending_before : "?";
+    const previousTransition = previous ? `${previousBefore}->${previous.pending_after}` : null;
+    const previousTimestamp = previous ? parseMs(previous.timestamp) : null;
+    const isSameOperation = previous
+      && transition === previousTransition
+      && timestamp !== null
+      && previousTimestamp !== null
+      && Math.abs(timestamp - previousTimestamp) <= 2_000;
+
+    if (isSameOperation) {
+      if (metricScore(row) > metricScore(previous)) {
+        deduped[deduped.length - 1] = row;
+      }
+    } else {
+      deduped.push(row);
     }
   });
-  return [...byTransition.values()].sort((a, b) => (parseMs(a.timestamp) || 0) - (parseMs(b.timestamp) || 0));
+  return deduped;
 }
 
 function latestCurrentMetric(rows) {
   return [...rows].reverse().find((row) => row.kind === "current" && numeric(row.pending_after));
 }
 
-function buildTrendPoints(rows) {
-  const completed = completedRows(rows);
+function buildTrendPoints(rows, completed = completedRows(rows)) {
   const points = [];
-  completed.forEach((row, index) => {
-    if (index === 0 && numeric(row.pending_before)) {
+  completed.forEach((row) => {
+    const endMs = parseMs(row.timestamp);
+    const elapsedMs = numeric(row.elapsed_seconds) ? Math.max(0, row.elapsed_seconds * 1000) : 0;
+    const startTimestamp = endMs !== null ? timestampFromMs(endMs - elapsedMs) : row.timestamp;
+    if (numeric(row.pending_before)) {
       points.push({
-        timestamp: row.timestamp,
-        label: "start",
+        timestamp: startTimestamp || row.timestamp,
+        label: "queued",
         value: row.pending_before,
       });
     }
@@ -189,7 +228,16 @@ function buildTrendPoints(rows) {
   });
 
   const current = latestCurrentMetric(rows);
-  if (current && (!points.length || points[points.length - 1].value !== current.pending_after)) {
+  const latestMs = points.length ? parseMs(points[points.length - 1].timestamp) : null;
+  const currentMs = current ? parseMs(current.timestamp) : null;
+  if (
+    current
+    && (
+      !points.length
+      || points[points.length - 1].value !== current.pending_after
+      || (currentMs !== null && latestMs !== null && currentMs - latestMs > 60_000)
+    )
+  ) {
     points.push({
       timestamp: current.timestamp,
       label: "now",
@@ -197,6 +245,29 @@ function buildTrendPoints(rows) {
     });
   }
   return points.slice(-24);
+}
+
+function trendCaption(points, completedCount) {
+  if (!points.length) return "waiting for data";
+  const first = points[0];
+  const last = points[points.length - 1];
+  const firstDate = dateLabel(first.timestamp);
+  const lastDate = dateLabel(last.timestamp);
+  const range = firstDate === lastDate
+    ? `${firstDate} ${axisTimeLabel(first.timestamp)}-${axisTimeLabel(last.timestamp)}`
+    : `${firstDate} ${axisTimeLabel(first.timestamp)} - ${lastDate} ${axisTimeLabel(last.timestamp)}`;
+  return `${range} · ${completedCount} ${completedCount === 1 ? "batch" : "batches"}`;
+}
+
+function completedRowsInPointRange(points, completed) {
+  if (!points.length) return [];
+  const firstMs = parseMs(points[0].timestamp);
+  const lastMs = parseMs(points[points.length - 1].timestamp);
+  if (firstMs === null || lastMs === null) return completed.slice(-Math.ceil(points.length / 2));
+  return completed.filter((row) => {
+    const rowMs = parseMs(row.timestamp);
+    return rowMs !== null && rowMs >= firstMs && rowMs <= lastMs;
+  });
 }
 
 function niceTicks(min, max, count = 4) {
@@ -216,23 +287,39 @@ function niceTicks(min, max, count = 4) {
   return ticks;
 }
 
-function measureTrend(points) {
+function measureTrend(points, completed = []) {
   if (!points.length) {
     return { current: null, drained: null, rate: null, etaSeconds: null };
   }
   const first = points[0];
   const last = points[points.length - 1];
-  const drained = first.value - last.value;
+  const drained = completed.reduce((sum, row) => {
+    if (numeric(row.pending_before) && numeric(row.pending_after)) {
+      return sum + Math.max(0, row.pending_before - row.pending_after);
+    }
+    return sum + intValue(row.files_processed);
+  }, 0);
   const firstMs = parseMs(first.timestamp);
   const lastMs = parseMs(last.timestamp);
   const hours = firstMs !== null && lastMs !== null ? Math.max(0, (lastMs - firstMs) / 3_600_000) : 0;
   const rate = drained > 0 && hours > 0 ? drained / hours : null;
   return {
     current: last.value,
-    drained,
+    drained: completed.length ? drained : null,
     rate,
-    etaSeconds: rate ? (last.value / rate) * 3600 : null,
+    etaSeconds: rate && last.value > 0 ? (last.value / rate) * 3600 : null,
   };
+}
+
+function axisTickIndexes(points, width) {
+  const maxTicks = width >= 900 ? 4 : 3;
+  const tickCount = Math.min(maxTicks, points.length);
+  if (tickCount <= 1) return [0];
+  const indexes = new Set();
+  for (let i = 0; i < tickCount; i += 1) {
+    indexes.add(Math.round(((points.length - 1) * i) / (tickCount - 1)));
+  }
+  return [...indexes].sort((a, b) => a - b);
 }
 
 function setState(state) {
@@ -360,21 +447,24 @@ function drawLineChart(canvas, rows) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  const pointsRaw = buildTrendPoints(rows);
-  const measure = measureTrend(pointsRaw);
+  const completed = completedRows(rows);
+  const pointsRaw = buildTrendPoints(rows, completed);
+  const visibleCompleted = completedRowsInPointRange(pointsRaw, completed);
+  const measure = measureTrend(pointsRaw, visibleCompleted);
   els.pendingCurrent.textContent = measure.current === null ? "--" : String(measure.current);
   els.pendingDelta.textContent = measure.drained === null ? "--" : measure.drained >= 0 ? String(measure.drained) : `+${Math.abs(measure.drained)}`;
   els.pendingRate.textContent = measure.rate ? `${measure.rate.toFixed(measure.rate < 10 ? 1 : 0)}/h` : "--";
   els.pendingEta.textContent = compactDuration(measure.etaSeconds);
+  els.trendCaption.textContent = trendCaption(pointsRaw, visibleCompleted.length);
 
-  const pad = { top: 24, right: 28, bottom: 42, left: 48 };
+  const pad = { top: 24, right: 28, bottom: 56, left: 48 };
   const plotWidth = width - pad.left - pad.right;
   const plotHeight = height - pad.top - pad.bottom;
 
   if (pointsRaw.length < 2) {
     ctx.fillStyle = "rgba(169,164,148,0.85)";
     ctx.font = "14px system-ui";
-    ctx.fillText("Waiting for completed batches", pad.left, height / 2);
+    ctx.fillText(pointsRaw.length ? `Only one queue sample · ${dateLabel(pointsRaw[0].timestamp)} ${axisTimeLabel(pointsRaw[0].timestamp)}` : "Waiting for completed batches", pad.left, height / 2);
     return;
   }
 
@@ -406,11 +496,22 @@ function drawLineChart(canvas, rows) {
   });
 
   ctx.textBaseline = "alphabetic";
-  ctx.textAlign = "left";
-  ctx.fillStyle = "rgba(169,164,148,0.85)";
-  ctx.fillText(timeLabel(points[0].timestamp), pad.left, height - 16);
-  ctx.textAlign = "right";
-  ctx.fillText(timeLabel(points[points.length - 1].timestamp), width - pad.right, height - 16);
+  axisTickIndexes(points, width).forEach((index) => {
+    const point = points[index];
+    const align = index === 0 ? "left" : index === points.length - 1 ? "right" : "center";
+    ctx.strokeStyle = "rgba(242,239,229,0.08)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(point.x, pad.top);
+    ctx.lineTo(point.x, pad.top + plotHeight);
+    ctx.stroke();
+    ctx.textAlign = align;
+    ctx.font = "11px system-ui";
+    ctx.fillStyle = "rgba(169,164,148,0.9)";
+    ctx.fillText(dateLabel(point.timestamp), point.x, height - 28);
+    ctx.fillStyle = "rgba(242,239,229,0.78)";
+    ctx.fillText(axisTimeLabel(point.timestamp), point.x, height - 12);
+  });
 
   const latest = points[points.length - 1];
   ctx.strokeStyle = "rgba(102,217,232,0.28)";
@@ -1088,7 +1189,6 @@ function render(snapshot) {
   renderLlm(status.llm);
   els.currentJob.textContent = fmt(status.current_job_id);
   els.lastSuccess.textContent = status.last_success ? `${fmt(status.last_success.raw)} -> ${[...(status.last_success.created || []), ...(status.last_success.updated || [])].join(", ") || "none"}` : "--";
-  els.trendCaption.textContent = metrics.length ? `${completedRows(metrics).length} batches` : "waiting for data";
   updateStageFlow(status.stage);
   renderSelfHeal(snapshot.self_heal || {});
   renderRecall(snapshot.recall || {});
