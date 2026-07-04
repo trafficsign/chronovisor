@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import re
+import time
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +26,24 @@ RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
 LOG_PAGE_CHANGE_RE = re.compile(
     r"^- \[(?P<time>[^\]]+)\] ingest \| (?P<kind>created|updated) (?P<page>.+)$"
 )
+SELF_HEAL_PENDING_STATUSES = {
+    "pending_local_repair",
+    "local_repairing",
+    "pending_frontier",
+    "frontier_running",
+    "frontier_retry",
+    "frontier_preflight_failed",
+    "pending_frontier_review",
+}
+SELF_HEAL_FAILED_STATUSES = {
+    "local_repair_failed",
+    "frontier_rejected",
+    "frontier_quarantined",
+    "human_required",
+}
+FRONTIER_PREFLIGHT_TTL_SECONDS = 300
+_FRONTIER_PREFLIGHT_CACHE: dict[str, Any] | None = None
+_FRONTIER_PREFLIGHT_CACHE_AT = 0.0
 
 
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
@@ -386,6 +405,100 @@ def _self_heal_packet_index() -> dict[str, dict[str, Any]]:
     return packets
 
 
+def _frontier_preflight_snapshot() -> dict[str, Any]:
+    global _FRONTIER_PREFLIGHT_CACHE, _FRONTIER_PREFLIGHT_CACHE_AT
+
+    now = time.time()
+    if (
+        _FRONTIER_PREFLIGHT_CACHE is not None
+        and now - _FRONTIER_PREFLIGHT_CACHE_AT < FRONTIER_PREFLIGHT_TTL_SECONDS
+    ):
+        return {**_FRONTIER_PREFLIGHT_CACHE, "cached": True}
+
+    checked_at = datetime.now().isoformat(timespec="seconds")
+    try:
+        from llm_wiki_mcp.frontier_review import run_frontier_preflight
+
+        result = run_frontier_preflight()
+        codex = result.get("codex") if isinstance(result.get("codex"), dict) else {}
+        failure = result.get("failure") if isinstance(result.get("failure"), dict) else None
+        summary = {
+            "ok": bool(result.get("ok")),
+            "checked_at": checked_at,
+            "cached": False,
+            "codex_home": result.get("codex_home"),
+            "codex_version_ok": bool((codex.get("version") or {}).get("ok")),
+            "exec_help_ok": bool((codex.get("exec_help") or {}).get("ok")),
+            "missing_exec_options": codex.get("missing_exec_options") or [],
+            "adaptive_required": bool(codex.get("adaptive_required")),
+            "failure": failure,
+        }
+    except Exception as exc:
+        summary = {
+            "ok": False,
+            "checked_at": checked_at,
+            "cached": False,
+            "error": str(exc),
+        }
+
+    _FRONTIER_PREFLIGHT_CACHE = summary
+    _FRONTIER_PREFLIGHT_CACHE_AT = now
+    return summary
+
+
+def _last_self_heal_check(limit: int = 400) -> dict[str, Any] | None:
+    logs_dir = WIKI_ROOT / "logs"
+    if not logs_dir.exists():
+        return None
+    for path in reversed(sorted(logs_dir.glob("ingest-drain-*.jsonl"))[-14:]):
+        for record in reversed(_read_jsonl_file(path, limit=limit)):
+            self_heal = record.get("self_heal")
+            if not isinstance(self_heal, dict):
+                continue
+            results = self_heal.get("results")
+            return {
+                "timestamp": record.get("timestamp"),
+                "status": self_heal.get("status"),
+                "packets_seen": self_heal.get("packets_seen"),
+                "results": len(results) if isinstance(results, list) else 0,
+                "log_file": str(path),
+            }
+    return None
+
+
+def _self_heal_watch_snapshot(packets: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    pending: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for packet in packets.values():
+        status = str(packet.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        item = {
+            "failure_id": packet.get("failure_id"),
+            "raw_file": packet.get("raw_file"),
+            "failure_class": packet.get("failure_class"),
+            "status": status,
+            "updated_at": packet.get("updated_at") or packet.get("created_at"),
+        }
+        if status in SELF_HEAL_PENDING_STATUSES:
+            pending.append(item)
+        elif status in SELF_HEAL_FAILED_STATUSES:
+            failed.append(item)
+
+    return {
+        "last_checked": _last_self_heal_check(),
+        "packets": {
+            "total": len(packets),
+            "pending": len(pending),
+            "failed": len(failed),
+            "status_counts": status_counts,
+            "pending_samples": pending[-5:],
+            "failed_samples": failed[-5:],
+        },
+        "frontier_preflight": _frontier_preflight_snapshot(),
+    }
+
+
 def _local_repair_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> dict[str, Any]:
     decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
     action = record.get("action") if isinstance(record.get("action"), dict) else {}
@@ -517,22 +630,13 @@ def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> 
 
 def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
     status = str(packet.get("status") or "unknown")
-    pending_statuses = {
-        "pending_local_repair",
-        "local_repairing",
-        "pending_frontier",
-        "frontier_running",
-        "frontier_retry",
-        "frontier_preflight_failed",
-        "pending_frontier_review",
-    }
-    failed_statuses = {
-        "local_repair_failed",
-        "frontier_rejected",
-        "frontier_quarantined",
-        "human_required",
-    }
-    state = "pending" if status in pending_statuses else "failed" if status in failed_statuses else "resolved"
+    state = (
+        "pending"
+        if status in SELF_HEAL_PENDING_STATUSES
+        else "failed"
+        if status in SELF_HEAL_FAILED_STATUSES
+        else "resolved"
+    )
     level = "info" if state == "pending" else "error" if state == "failed" else "success"
     title = {
         "pending_local_repair": "Repair queued",
@@ -612,6 +716,7 @@ def _self_heal_snapshot(limit: int = 12) -> dict[str, Any]:
         "latest": latest,
         "history": history,
         "counts": counts,
+        "watch": _self_heal_watch_snapshot(packets),
         "paths": {
             "failures_dir": str(failures_dir),
             "registry_file": str(failures_dir / "failure-registry.jsonl"),

@@ -36,6 +36,11 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json")
     monkeypatch.setattr(dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []})
+    monkeypatch.setattr(
+        dashboard,
+        "_frontier_preflight_snapshot",
+        lambda: {"ok": True, "checked_at": "2026-06-01T12:00:00"},
+    )
 
     runtime_status.write_status({"state": "running", "stage": "generate"})
     runtime_status.append_event("info", "ingest | stage 1: triage started")
@@ -86,6 +91,8 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     assert snapshot["self_heal"]["latest"]["details"]["failure"]["packet_status"] == "local_repair_applied"
     assert snapshot["self_heal"]["latest"]["details"]["decision"]["source"] == "qwen"
     assert snapshot["self_heal"]["latest"]["details"]["action"]["retry"]["files_processed"] == ["broken.md"]
+    assert snapshot["self_heal"]["watch"]["packets"]["total"] == 1
+    assert snapshot["self_heal"]["watch"]["frontier_preflight"]["ok"] is True
 
 
 def test_build_snapshot_surfaces_frontier_human_required(
@@ -116,6 +123,11 @@ def test_build_snapshot_surfaces_frontier_human_required(
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json")
     monkeypatch.setattr(dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []})
+    monkeypatch.setattr(
+        dashboard,
+        "_frontier_preflight_snapshot",
+        lambda: {"ok": False, "checked_at": "2026-06-04T22:00:00"},
+    )
 
     runtime_status.write_status({"state": "idle"})
     failures_dir = runtime_dir / "failures"
@@ -172,6 +184,68 @@ def test_build_snapshot_surfaces_frontier_human_required(
     assert self_heal["latest"]["details"]["frontier"]["access_repair"]["applied"] is True
     assert self_heal["latest"]["details"]["human_notification"]["delivery"]["sent"] is True
     assert self_heal["latest"]["details"]["pending_frontier_review_path"] == packet["pending_frontier_review_path"]
+    assert self_heal["watch"]["packets"]["failed"] == 1
+    assert self_heal["watch"]["frontier_preflight"]["ok"] is False
+
+
+def test_self_heal_snapshot_surfaces_watch_status(tmp_path: Path, monkeypatch) -> None:
+    wiki_root = tmp_path / "wiki"
+    failures_dir = wiki_root / "runtime" / "failures"
+    packets_dir = failures_dir / "packets"
+    logs_dir = wiki_root / "logs"
+    packets_dir.mkdir(parents=True)
+    logs_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(
+        dashboard,
+        "_frontier_preflight_snapshot",
+        lambda: {
+            "ok": True,
+            "checked_at": "2026-07-04T19:30:00",
+            "codex_version_ok": True,
+            "exec_help_ok": True,
+        },
+    )
+
+    pending_packet = {
+        "failure_id": "queued1",
+        "created_at": "2026-07-04T19:00:00",
+        "raw_file": "queued.md",
+        "failure_class": "triage.parse_failed",
+        "status": "pending_frontier",
+    }
+    approved_packet = {
+        "failure_id": "ok1",
+        "created_at": "2026-07-04T18:00:00",
+        "raw_file": "ok.md",
+        "failure_class": "apply.update_target_not_found",
+        "status": "frontier_approved",
+    }
+    (packets_dir / "queued1.json").write_text(json.dumps(pending_packet), encoding="utf-8")
+    (packets_dir / "ok1.json").write_text(json.dumps(approved_packet), encoding="utf-8")
+    (logs_dir / "ingest-drain-20260704.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-04T19:31:00",
+                "self_heal": {"status": "ok", "packets_seen": 1, "results": [{"status": "pending_frontier"}]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    self_heal = dashboard._self_heal_snapshot()
+
+    watch = self_heal["watch"]
+    assert watch["last_checked"]["timestamp"] == "2026-07-04T19:31:00"
+    assert watch["last_checked"]["packets_seen"] == 1
+    assert watch["last_checked"]["results"] == 1
+    assert watch["packets"]["total"] == 2
+    assert watch["packets"]["pending"] == 1
+    assert watch["packets"]["failed"] == 0
+    assert watch["packets"]["status_counts"]["pending_frontier"] == 1
+    assert watch["frontier_preflight"]["ok"] is True
 
 
 def test_recall_snapshot_reads_logs_and_eval(tmp_path: Path, monkeypatch) -> None:

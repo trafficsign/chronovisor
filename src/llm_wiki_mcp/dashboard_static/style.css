@@ -600,6 +600,64 @@ canvas {
   overflow-wrap: anywhere;
 }
 
+.self-heal-watch {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.self-heal-watch-card {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(235, 229, 210, 0.1);
+  border-radius: 8px;
+  background: rgba(9, 10, 8, 0.34);
+}
+
+.self-heal-watch-card.ready {
+  border-color: rgba(143, 214, 148, 0.28);
+  background:
+    linear-gradient(135deg, rgba(143, 214, 148, 0.1), transparent 52%),
+    rgba(9, 10, 8, 0.34);
+}
+
+.self-heal-watch-card.blocked {
+  border-color: rgba(255, 115, 105, 0.34);
+  background:
+    linear-gradient(135deg, rgba(255, 115, 105, 0.12), transparent 52%),
+    rgba(9, 10, 8, 0.34);
+}
+
+.self-heal-watch-card span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.self-heal-watch-card strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.self-heal-watch-card small {
+  display: block;
+  overflow: hidden;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .self-heal-counts {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -759,7 +817,8 @@ canvas {
     grid-column: auto;
   }
 
-  .self-heal-counts {
+  .self-heal-counts,
+  .self-heal-watch {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

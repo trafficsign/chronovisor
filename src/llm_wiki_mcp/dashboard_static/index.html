@@ -202,6 +202,23 @@
           <strong id="self-heal-latest">No repairs yet</strong>
           <p id="self-heal-detail">--</p>
         </div>
+        <div class="self-heal-watch" aria-label="Self-heal monitor status">
+          <div class="self-heal-watch-card">
+            <span>Last Check</span>
+            <strong id="self-heal-last-check">--</strong>
+            <small id="self-heal-last-status">waiting</small>
+          </div>
+          <div class="self-heal-watch-card">
+            <span>Pending Packets</span>
+            <strong id="self-heal-pending-packets">--</strong>
+            <small id="self-heal-packet-total">-- total</small>
+          </div>
+          <div class="self-heal-watch-card" id="self-heal-frontier-card">
+            <span>Frontier</span>
+            <strong id="self-heal-frontier-state">--</strong>
+            <small id="self-heal-frontier-detail">preflight</small>
+          </div>
+        </div>
         <div class="self-heal-counts" id="self-heal-counts"></div>
         <div class="self-heal-feed" id="self-heal-feed"></div>
       </article>

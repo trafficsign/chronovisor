@@ -24,6 +24,13 @@ const els = {
   selfHealState: document.getElementById("self-heal-state"),
   selfHealLatest: document.getElementById("self-heal-latest"),
   selfHealDetail: document.getElementById("self-heal-detail"),
+  selfHealLastCheck: document.getElementById("self-heal-last-check"),
+  selfHealLastStatus: document.getElementById("self-heal-last-status"),
+  selfHealPendingPackets: document.getElementById("self-heal-pending-packets"),
+  selfHealPacketTotal: document.getElementById("self-heal-packet-total"),
+  selfHealFrontierCard: document.getElementById("self-heal-frontier-card"),
+  selfHealFrontierState: document.getElementById("self-heal-frontier-state"),
+  selfHealFrontierDetail: document.getElementById("self-heal-frontier-detail"),
   selfHealCounts: document.getElementById("self-heal-counts"),
   selfHealFeed: document.getElementById("self-heal-feed"),
   trendCaption: document.getElementById("trend-caption"),
@@ -87,6 +94,13 @@ function timeLabel(value) {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
   return String(value).slice(-8);
+}
+
+function ageLabel(value) {
+  const ms = parseMs(value);
+  if (ms === null) return "--";
+  const ageSeconds = Math.max(0, (Date.now() - ms) / 1000);
+  return `${compactDuration(ageSeconds)} ago`;
 }
 
 function compactDuration(seconds) {
@@ -632,6 +646,10 @@ function renderSelfHeal(selfHeal) {
   const latest = data.latest || null;
   const history = Array.isArray(data.history) ? data.history : [];
   const counts = data.counts || {};
+  const watch = data.watch || {};
+  const lastChecked = watch.last_checked || {};
+  const packets = watch.packets || {};
+  const frontier = watch.frontier_preflight || {};
   const status = (data.status || "quiet").toLowerCase();
 
   els.selfHealPanel.classList.remove("resolved", "pending", "failed", "quiet");
@@ -642,6 +660,35 @@ function renderSelfHeal(selfHeal) {
   els.selfHealDetail.textContent = latest
     ? [latest.raw_file, latest.detail].filter(Boolean).join(" · ")
     : "--";
+
+  els.selfHealLastCheck.textContent = lastChecked.timestamp ? ageLabel(lastChecked.timestamp) : "--";
+  els.selfHealLastStatus.textContent = lastChecked.timestamp
+    ? `${lastChecked.status || "unknown"} · ${intValue(lastChecked.packets_seen)} packets`
+    : "no drain checks";
+  els.selfHealPendingPackets.textContent = String(intValue(packets.pending));
+  els.selfHealPacketTotal.textContent = `${intValue(packets.total)} total · ${intValue(packets.failed)} failed`;
+
+  els.selfHealFrontierCard.classList.remove("ready", "blocked", "unknown");
+  if (frontier.ok === true) {
+    els.selfHealFrontierCard.classList.add("ready");
+    els.selfHealFrontierState.textContent = "ready";
+  } else if (frontier.ok === false) {
+    els.selfHealFrontierCard.classList.add("blocked");
+    els.selfHealFrontierState.textContent = "blocked";
+  } else {
+    els.selfHealFrontierCard.classList.add("unknown");
+    els.selfHealFrontierState.textContent = "--";
+  }
+  const failure = frontier.failure || {};
+  const frontierDetails = [
+    frontier.checked_at ? `checked ${ageLabel(frontier.checked_at)}` : null,
+    frontier.cached ? "cached" : null,
+    frontier.missing_exec_options && frontier.missing_exec_options.length
+      ? `missing ${frontier.missing_exec_options.join(", ")}`
+      : null,
+    failure.failure_class || frontier.error || null,
+  ].filter(Boolean);
+  els.selfHealFrontierDetail.textContent = frontierDetails.join(" · ") || "preflight";
 
   const countItems = [
     ["resolved", counts.resolved || 0],
