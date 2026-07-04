@@ -325,9 +325,29 @@ function saveLoadRows(saveHistory, status) {
   const activeDate = rawDateKeyFromName(status?.current_raw);
   const hasActiveRaw = Boolean(status?.current_raw && status?.state !== "idle");
   return days.map((day) => {
-    const total = intValue(day.raw_bytes);
-    const processed = Math.min(total, intValue(day.processed_bytes));
-    const failed = Math.min(Math.max(0, total - processed), intValue(day.failed_bytes));
+    const rawSegments = Array.isArray(day.raw_segments) ? day.raw_segments : [];
+    let segments = rawSegments
+      .map((segment) => ({
+        name: fmt(segment.name, "raw"),
+        bytes: intValue(segment.bytes),
+        status: ["processed", "pending", "failed"].includes(segment.status) ? segment.status : "pending",
+        source: fmt(segment.source, "raw"),
+      }))
+      .filter((segment) => segment.bytes > 0);
+    if (!segments.length && intValue(day.raw_bytes)) {
+      [
+        ["processed", intValue(day.processed_bytes)],
+        ["failed", intValue(day.failed_bytes)],
+        ["pending", intValue(day.pending_bytes)],
+      ].forEach(([statusName, bytes]) => {
+        if (bytes > 0) {
+          segments.push({ name: statusName, bytes, status: statusName, source: "aggregate" });
+        }
+      });
+    }
+    const total = segments.reduce((sum, segment) => sum + segment.bytes, 0);
+    const processed = segments.filter((segment) => segment.status === "processed").reduce((sum, segment) => sum + segment.bytes, 0);
+    const failed = segments.filter((segment) => segment.status === "failed").reduce((sum, segment) => sum + segment.bytes, 0);
     const pending = Math.max(0, total - processed - failed);
     return {
       date: day.date,
@@ -335,9 +355,16 @@ function saveLoadRows(saveHistory, status) {
       processed,
       failed,
       pending,
+      segments,
       active: hasActiveRaw && day.date === activeDate,
     };
   });
+}
+
+function segmentColor(status, index) {
+  if (status === "failed") return "#f0bc62";
+  if (status === "pending") return index % 2 ? "rgba(102,217,232,0.22)" : "rgba(102,217,232,0.34)";
+  return index % 2 ? "rgba(143,214,148,0.74)" : "#8fd694";
 }
 
 function drawStackSegment(ctx, x, baseY, width, height, color, options = {}) {
@@ -345,6 +372,16 @@ function drawStackSegment(ctx, x, baseY, width, height, color, options = {}) {
   const y = baseY - height;
   ctx.fillStyle = color;
   ctx.fillRect(x, y, width, height);
+  if (options.separator && height >= 1) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(9, 10, 8, 0.58)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + width, y);
+    ctx.stroke();
+    ctx.restore();
+  }
   if (options.dashed) {
     ctx.save();
     ctx.strokeStyle = options.stroke || "rgba(102,217,232,0.72)";
@@ -449,17 +486,20 @@ function drawLineChart(canvas, saveHistory, status = {}) {
     ctx.fillStyle = "rgba(242,239,229,0.055)";
     roundRect(ctx, barX, baseline - Math.max(2, fullHeight), barWidth, Math.max(2, fullHeight), Math.min(5, barWidth / 2));
     ctx.fill();
-    y = drawStackSegment(ctx, barX, y, barWidth, (row.processed / maxTotal) * plotHeight, "#8fd694");
-    y = drawStackSegment(ctx, barX, y, barWidth, (row.failed / maxTotal) * plotHeight, "#f0bc62");
-    y = drawStackSegment(
-      ctx,
-      barX,
-      y,
-      barWidth,
-      (row.pending / maxTotal) * plotHeight,
-      "rgba(102,217,232,0.22)",
-      { dashed: row.pending > 0 }
-    );
+    row.segments.forEach((segment, segmentIndex) => {
+      y = drawStackSegment(
+        ctx,
+        barX,
+        y,
+        barWidth,
+        (segment.bytes / maxTotal) * plotHeight,
+        segmentColor(segment.status, segmentIndex),
+        {
+          dashed: segment.status === "pending",
+          separator: row.segments.length > 1 && segmentIndex > 0,
+        }
+      );
+    });
 
     if (row.active && fullHeight > 0) {
       ctx.save();

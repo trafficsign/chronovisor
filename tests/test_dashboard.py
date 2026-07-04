@@ -398,8 +398,23 @@ def test_save_history_snapshot_combines_raw_drain_and_log(tmp_path: Path, monkey
     assert by_date["2026-07-01"]["pending_bytes"] == 3
     assert by_date["2026-07-01"]["processed"] == 1
     assert by_date["2026-07-01"]["failed"] == 1
+    assert by_date["2026-07-01"]["raw_segments"] == [
+        {
+            "name": raw_names[0],
+            "bytes": 3,
+            "status": "processed",
+            "source": "codex",
+        },
+        {
+            "name": raw_names[1],
+            "bytes": 3,
+            "status": "pending",
+            "source": "claude-code",
+        },
+    ]
     assert by_date["2026-07-02"]["raw_saved"] == 1
     assert by_date["2026-07-02"]["pending_bytes"] == 3
+    assert by_date["2026-07-02"]["raw_segments"][0]["status"] == "pending"
     assert by_date["2026-07-02"]["pages_updated"] == 1
     assert by_date["2026-07-01"]["sources"] == [
         {"name": "claude-code", "count": 1},
@@ -424,3 +439,4 @@ def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
     assert history["totals"]["raw_saved"] == 0
     assert history["totals"]["raw_bytes"] == 0
     assert history["totals"]["pending_bytes"] == 0
+    assert history["days"][0]["raw_segments"] == []

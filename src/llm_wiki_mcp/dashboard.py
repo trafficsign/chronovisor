@@ -229,6 +229,7 @@ def _new_save_day(day: date) -> dict[str, Any]:
         "processed_bytes": 0,
         "pending_bytes": 0,
         "failed_bytes": 0,
+        "raw_segments": [],
         "processed": 0,
         "attempted": 0,
         "succeeded": 0,
@@ -264,11 +265,11 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
             if raw_date is None or raw_date < start or raw_date > end:
                 continue
             raw_bytes = path.stat().st_size
-            raw_files[path.name] = {"date": raw_date.isoformat(), "bytes": raw_bytes}
+            source = _raw_source_label(path.name)
+            raw_files[path.name] = {"date": raw_date.isoformat(), "bytes": raw_bytes, "source": source}
             row = rows[raw_date.isoformat()]
             row["raw_saved"] += 1
             row["raw_bytes"] += raw_bytes
-            source = _raw_source_label(path.name)
             row["sources"][source] = row["sources"].get(source, 0) + 1
             _add_sample(row, "raw_samples", path.name)
 
@@ -377,6 +378,15 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
             row["failed_bytes"] += raw_bytes
         else:
             row["pending_bytes"] += raw_bytes
+            status = "pending"
+        segments = row.setdefault("raw_segments", [])
+        if isinstance(segments, list):
+            segments.append({
+                "name": filename,
+                "bytes": raw_bytes,
+                "status": status,
+                "source": meta.get("source") or _raw_source_label(filename),
+            })
     for row in rows.values():
         sources = row.get("sources") if isinstance(row.get("sources"), dict) else {}
         for source, count in sources.items():
@@ -385,6 +395,9 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
             {"name": source, "count": count}
             for source, count in sorted(sources.items(), key=lambda item: (-item[1], item[0]))
         ]
+        raw_segments = row.get("raw_segments")
+        if isinstance(raw_segments, list):
+            raw_segments.sort(key=lambda item: str(item.get("name") or ""))
         if row["raw_saved"] or row["processed"] or row["pages_created"] or row["pages_updated"]:
             totals["days_with_saves"] += 1
         for key in (
