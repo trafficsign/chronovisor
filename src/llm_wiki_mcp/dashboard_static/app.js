@@ -35,6 +35,24 @@ const els = {
   batchOk: document.getElementById("batch-ok"),
   batchFailed: document.getElementById("batch-failed"),
   batchDuration: document.getElementById("batch-duration"),
+  saveTotal: document.getElementById("save-total"),
+  saveProcessed: document.getElementById("save-processed"),
+  savePages: document.getElementById("save-pages"),
+  saveFailed: document.getElementById("save-failed"),
+  saveMonths: document.getElementById("save-months"),
+  saveHeatmap: document.getElementById("save-heatmap"),
+  saveDetail: document.getElementById("save-detail"),
+  saveFeed: document.getElementById("save-feed"),
+  saveModeButtons: document.querySelectorAll("[data-save-mode]"),
+  recallPanel: document.getElementById("recall-panel"),
+  recallCaption: document.getElementById("recall-caption"),
+  recallR3: document.getElementById("recall-r3"),
+  recallWaste: document.getElementById("recall-waste"),
+  recallP50: document.getElementById("recall-p50"),
+  recallP95: document.getElementById("recall-p95"),
+  recallCounts: document.getElementById("recall-counts"),
+  recallCalibration: document.getElementById("recall-calibration"),
+  recallFeed: document.getElementById("recall-feed"),
   eventFeed: document.getElementById("event-feed"),
   pendingChart: document.getElementById("pending-chart"),
   batchChart: document.getElementById("batch-chart"),
@@ -46,6 +64,10 @@ const llmSignalHistory = {
   lastSeenMs: null,
   rates: Array(32).fill(0),
 };
+
+let saveHistoryMode = "daily";
+let latestSaveHistory = null;
+let selectedSaveDate = null;
 
 function fmt(value, fallback = "--") {
   if (value === null || value === undefined || value === "") return fallback;
@@ -90,6 +112,10 @@ function parseMs(value) {
 
 function numeric(value) {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function intValue(value) {
+  return numeric(value) ? value : 0;
 }
 
 function roundRect(ctx, x, y, width, height, radius) {
@@ -671,6 +697,328 @@ function renderSelfHeal(selfHeal) {
   });
 }
 
+function parseDateKey(value) {
+  if (!value) return null;
+  const parts = String(value).split("-").map((part) => Number(part));
+  if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return null;
+  return new Date(parts[0], parts[1] - 1, parts[2]);
+}
+
+function dateKeyFromDate(date) {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function startOfWeekKey(dateKey) {
+  const date = parseDateKey(dateKey);
+  if (!date) return dateKey;
+  date.setDate(date.getDate() - date.getDay());
+  return dateKeyFromDate(date);
+}
+
+function buildSaveModeValues(days) {
+  const weekly = new Map();
+  let cumulative = 0;
+  const cumulativeByDate = new Map();
+  days.forEach((day) => {
+    const rawSaved = intValue(day.raw_saved);
+    const week = startOfWeekKey(day.date);
+    weekly.set(week, (weekly.get(week) || 0) + rawSaved);
+    cumulative += rawSaved;
+    cumulativeByDate.set(day.date, cumulative);
+  });
+  return days.map((day) => {
+    const rawSaved = intValue(day.raw_saved);
+    if (saveHistoryMode === "weekly") {
+      return weekly.get(startOfWeekKey(day.date)) || 0;
+    }
+    if (saveHistoryMode === "cumulative") {
+      return cumulativeByDate.get(day.date) || 0;
+    }
+    return rawSaved;
+  });
+}
+
+function heatLevel(value, maxValue) {
+  if (!value || !maxValue) return 0;
+  const ratio = value / maxValue;
+  if (ratio >= 0.75) return 4;
+  if (ratio >= 0.45) return 3;
+  if (ratio >= 0.2) return 2;
+  return 1;
+}
+
+function formatSources(sources) {
+  if (!Array.isArray(sources) || !sources.length) return "none";
+  return sources.map((source) => `${source.name} ${source.count}`).join(", ");
+}
+
+function saveTooltip(day, value) {
+  const metric = saveHistoryMode === "weekly"
+    ? `${value} saved this week`
+    : saveHistoryMode === "cumulative"
+      ? `${value} saved cumulative`
+      : `${intValue(day.raw_saved)} saved`;
+  const pages = intValue(day.pages_created) + intValue(day.pages_updated);
+  return [
+    day.date,
+    metric,
+    `${intValue(day.processed)} processed`,
+    `${intValue(day.failed)} failed`,
+    `${pages} page changes`,
+    `sources: ${formatSources(day.sources)}`,
+  ].join(" · ");
+}
+
+function renderSaveMonths(days, startPad, columnCount) {
+  els.saveMonths.innerHTML = "";
+  els.saveMonths.style.gridTemplateColumns = `repeat(${columnCount}, 12px)`;
+  const labelsByColumn = new Map();
+  days.forEach((day, index) => {
+    const date = parseDateKey(day.date);
+    if (!date) return;
+    const monthKey = `${date.getFullYear()}-${date.getMonth()}`;
+    const previous = index > 0 ? parseDateKey(days[index - 1].date) : null;
+    const previousMonthKey = previous ? `${previous.getFullYear()}-${previous.getMonth()}` : null;
+    if (monthKey === previousMonthKey) return;
+    const column = Math.floor((index + startPad) / 7) + 1;
+    labelsByColumn.set(column, date.toLocaleDateString("ja-JP", { month: "short" }));
+  });
+  labelsByColumn.forEach((month, column) => {
+    const label = document.createElement("span");
+    label.textContent = month;
+    label.style.gridColumnStart = String(column);
+    els.saveMonths.appendChild(label);
+  });
+}
+
+function selectSaveDay(days) {
+  if (selectedSaveDate && days.some((day) => day.date === selectedSaveDate)) {
+    return days.find((day) => day.date === selectedSaveDate);
+  }
+  const active = [...days].reverse().find((day) =>
+    intValue(day.raw_saved) || intValue(day.processed) || intValue(day.pages_created) || intValue(day.pages_updated)
+  );
+  if (active) {
+    selectedSaveDate = active.date;
+    return active;
+  }
+  selectedSaveDate = days.length ? days[days.length - 1].date : null;
+  return days.length ? days[days.length - 1] : null;
+}
+
+function renderSaveDetail(day) {
+  els.saveDetail.innerHTML = "";
+  if (!day) {
+    els.saveDetail.textContent = "--";
+    return;
+  }
+  const title = document.createElement("strong");
+  title.textContent = day.date;
+  const stats = document.createElement("div");
+  stats.className = "save-detail-stats";
+  [
+    ["saved", intValue(day.raw_saved)],
+    ["processed", intValue(day.processed)],
+    ["created", intValue(day.pages_created)],
+    ["updated", intValue(day.pages_updated)],
+    ["failed", intValue(day.failed)],
+  ].forEach(([label, value]) => {
+    const item = document.createElement("span");
+    item.textContent = `${label} ${value}`;
+    stats.appendChild(item);
+  });
+
+  const sources = document.createElement("p");
+  sources.textContent = `sources: ${formatSources(day.sources)}`;
+  const samples = document.createElement("ul");
+  [...(day.raw_samples || []).slice(0, 3), ...(day.page_samples || []).slice(0, 3)].forEach((sample) => {
+    const item = document.createElement("li");
+    item.textContent = sample;
+    samples.appendChild(item);
+  });
+  if (!samples.childElementCount) {
+    const empty = document.createElement("p");
+    empty.textContent = "no saves";
+    els.saveDetail.append(title, stats, sources, empty);
+    return;
+  }
+  els.saveDetail.append(title, stats, sources, samples);
+}
+
+function renderSaveFeed(recent) {
+  els.saveFeed.innerHTML = "";
+  const rows = Array.isArray(recent) ? [...recent].slice(-8).reverse() : [];
+  if (!rows.length) {
+    els.saveFeed.innerHTML = "<div class=\"self-heal-empty\">No save records yet.</div>";
+    return;
+  }
+  rows.forEach((day) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "save-feed-row";
+    if (day.date === selectedSaveDate) row.classList.add("active");
+    const date = document.createElement("time");
+    date.textContent = day.date.slice(5);
+    const body = document.createElement("span");
+    const pages = intValue(day.pages_created) + intValue(day.pages_updated);
+    body.textContent = `${intValue(day.raw_saved)} saved · ${intValue(day.processed)} processed · ${pages} pages`;
+    row.append(date, body);
+    row.addEventListener("click", () => {
+      selectedSaveDate = day.date;
+      renderSaveHistory(latestSaveHistory);
+    });
+    els.saveFeed.appendChild(row);
+  });
+}
+
+function renderSaveHistory(saveHistory) {
+  const data = saveHistory || {};
+  latestSaveHistory = data;
+  const days = Array.isArray(data.days) ? data.days : [];
+  const totals = data.totals || {};
+  const pages = intValue(totals.pages_created) + intValue(totals.pages_updated);
+
+  els.saveTotal.textContent = intValue(totals.raw_saved).toLocaleString();
+  els.saveProcessed.textContent = intValue(totals.processed).toLocaleString();
+  els.savePages.textContent = pages.toLocaleString();
+  els.saveFailed.textContent = intValue(totals.failed).toLocaleString();
+  els.saveModeButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.saveMode === saveHistoryMode);
+  });
+
+  els.saveHeatmap.innerHTML = "";
+  if (!days.length) {
+    els.saveMonths.innerHTML = "";
+    renderSaveDetail(null);
+    renderSaveFeed([]);
+    return;
+  }
+
+  const firstDate = parseDateKey(days[0].date);
+  const startPad = firstDate ? firstDate.getDay() : 0;
+  const values = buildSaveModeValues(days);
+  const maxValue = Math.max(1, ...values);
+  const cellCount = startPad + days.length;
+  const columnCount = Math.ceil(cellCount / 7);
+  els.saveHeatmap.style.gridTemplateColumns = `repeat(${columnCount}, 12px)`;
+  renderSaveMonths(days, startPad, columnCount);
+
+  for (let index = 0; index < startPad; index += 1) {
+    const blank = document.createElement("span");
+    blank.className = "save-cell blank";
+    els.saveHeatmap.appendChild(blank);
+  }
+
+  const selectedDay = selectSaveDay(days);
+  days.forEach((day, index) => {
+    const value = values[index];
+    const level = heatLevel(value, maxValue);
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = `save-cell level-${level}`;
+    if (day.date === selectedSaveDate) cell.classList.add("selected");
+    if (intValue(day.failed)) cell.classList.add("has-failures");
+    cell.title = saveTooltip(day, value);
+    cell.setAttribute("aria-label", cell.title);
+    cell.addEventListener("click", () => {
+      selectedSaveDate = day.date;
+      renderSaveHistory(data);
+    });
+    els.saveHeatmap.appendChild(cell);
+  });
+
+  renderSaveDetail(selectedDay);
+  renderSaveFeed(data.recent || []);
+}
+
+function pctLabel(value) {
+  if (!numeric(value)) return "--";
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function msLabel(value) {
+  if (!numeric(value)) return "--";
+  return `${Math.round(value)}ms`;
+}
+
+function renderRecall(recall) {
+  const data = recall || {};
+  const decisions = data.decisions || {};
+  const latency = data.latency_ms || {};
+  const latestEval = data.latest_eval || null;
+  const evalMetricsLatency = latestEval && latestEval.latency_ms ? latestEval.latency_ms : {};
+  const calibration = data.calibration || {};
+  const pulls = data.pulls || {};
+
+  els.recallCaption.textContent = data.samples ? `${data.samples} decisions` : "quiet";
+  els.recallR3.textContent = latestEval ? pctLabel(latestEval.recall_at_3) : "--";
+  els.recallWaste.textContent = latestEval ? pctLabel(latestEval.waste_injection_rate) : "--";
+  els.recallP50.textContent = msLabel(numeric(latency.p50) ? latency.p50 : evalMetricsLatency.p50);
+  els.recallP95.textContent = msLabel(numeric(latency.p95) ? latency.p95 : evalMetricsLatency.p95);
+
+  const countItems = [
+    ["none", decisions.none || 0],
+    ["search", decisions.search || 0],
+    ["read", decisions.read || 0],
+    ["judge", data.judge_used || 0],
+    ["rewrite", data.rewrite_used || 0],
+    ["pulls", pulls.total || 0],
+  ];
+  els.recallCounts.innerHTML = "";
+  countItems.forEach(([label, value]) => {
+    const item = document.createElement("div");
+    item.className = "self-heal-count";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const count = document.createElement("strong");
+    count.textContent = String(value);
+    item.append(name, count);
+    els.recallCounts.appendChild(item);
+  });
+
+  const lastApplied = calibration.last_applied || null;
+  if (lastApplied) {
+    const when = timeLabel(lastApplied.ts || lastApplied.timestamp);
+    const note = lastApplied.reason || lastApplied.status || "applied";
+    els.recallCalibration.textContent = `calibration: ${note} · ${when} · ${(calibration.history || []).length} records`;
+  } else {
+    els.recallCalibration.textContent = "calibration: not yet applied";
+  }
+
+  els.recallFeed.innerHTML = "";
+  const recent = Array.isArray(data.recent) ? [...data.recent].slice(-6).reverse() : [];
+  if (!recent.length) {
+    const empty = document.createElement("div");
+    empty.className = "self-heal-empty";
+    empty.textContent = "No recall decisions yet.";
+    els.recallFeed.appendChild(empty);
+    return;
+  }
+  recent.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "event";
+    const time = document.createElement("time");
+    time.textContent = timeLabel(item.timestamp);
+    const badge = document.createElement("span");
+    const decision = String(item.decision || "none");
+    badge.className = `event-level ${decision === "read" ? "success" : decision === "search" ? "info" : "warn"}`;
+    badge.textContent = decision;
+    const message = document.createElement("span");
+    message.className = "event-message";
+    const extra = [
+      numeric(item.latency_ms) ? `${item.latency_ms}ms` : null,
+      item.pages ? `${item.pages}p` : null,
+      item.used_judge ? "judge" : null,
+    ].filter(Boolean).join(" ");
+    message.textContent = extra ? `${item.preview} · ${extra}` : fmt(item.preview);
+    row.append(time, badge, message);
+    els.recallFeed.appendChild(row);
+  });
+}
+
 function render(snapshot) {
   const status = snapshot.status || {};
   const metrics = snapshot.metrics || [];
@@ -696,6 +1044,8 @@ function render(snapshot) {
   els.trendCaption.textContent = metrics.length ? `${completedRows(metrics).length} batches` : "waiting for data";
   updateStageFlow(status.stage);
   renderSelfHeal(snapshot.self_heal || {});
+  renderRecall(snapshot.recall || {});
+  renderSaveHistory(snapshot.save_history || {});
   renderEvents(snapshot.events || []);
   drawLineChart(els.pendingChart, metrics);
   drawBatchChart(els.batchChart, metrics, status);
@@ -716,6 +1066,13 @@ async function refresh() {
     els.eventFeed.appendChild(message);
   }
 }
+
+els.saveModeButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    saveHistoryMode = button.dataset.saveMode || "daily";
+    renderSaveHistory(latestSaveHistory);
+  });
+});
 
 refresh();
 setInterval(refresh, 1000);

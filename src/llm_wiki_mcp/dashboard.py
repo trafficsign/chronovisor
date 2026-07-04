@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
+from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,6 +21,10 @@ from llm_wiki_mcp.wiki import LOG_FILE, WIKI_ROOT, init_wiki
 
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
 LOG_LINE_RE = re.compile(r"^- \[(?P<time>[^\]]+)\] (?P<message>.*)$")
+RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
+LOG_PAGE_CHANGE_RE = re.compile(
+    r"^- \[(?P<time>[^\]]+)\] ingest \| (?P<kind>created|updated) (?P<page>.+)$"
+)
 
 
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
@@ -144,6 +150,199 @@ def _basename(value: object) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     return Path(value).name
+
+
+def _int_value(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _date_from_value(value: object) -> date | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _raw_file_date(path: Path) -> date | None:
+    match = RAW_DATE_RE.search(path.name)
+    if match:
+        try:
+            return datetime.strptime(match.group("stamp"), "%Y%m%d").date()
+        except ValueError:
+            pass
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).date()
+    except OSError:
+        return None
+
+
+def _raw_source_label(filename: str) -> str:
+    lower = filename.lower()
+    if "claude-code" in lower:
+        return "claude-code"
+    if "codex" in lower:
+        return "codex"
+    if lower.startswith("vestige-"):
+        return "vestige"
+    if "ingest" in lower:
+        return "ingest"
+    return "manual"
+
+
+def _new_save_day(day: date) -> dict[str, Any]:
+    return {
+        "date": day.isoformat(),
+        "raw_saved": 0,
+        "processed": 0,
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "pages_created": 0,
+        "pages_updated": 0,
+        "sources": {},
+        "raw_samples": [],
+        "page_samples": [],
+    }
+
+
+def _add_sample(row: dict[str, Any], key: str, value: str, limit: int = 6) -> None:
+    samples = row.setdefault(key, [])
+    if isinstance(samples, list) and value not in samples and len(samples) < limit:
+        samples.append(value)
+
+
+def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[str, Any]:
+    end = today or datetime.now().date()
+    start = end - timedelta(days=max(1, days) - 1)
+    rows = {
+        (start + timedelta(days=offset)).isoformat(): _new_save_day(start + timedelta(days=offset))
+        for offset in range((end - start).days + 1)
+    }
+
+    raw_dir = WIKI_ROOT / "raw"
+    if raw_dir.exists():
+        for path in raw_dir.glob("*.md"):
+            raw_date = _raw_file_date(path)
+            if raw_date is None or raw_date < start or raw_date > end:
+                continue
+            row = rows[raw_date.isoformat()]
+            row["raw_saved"] += 1
+            source = _raw_source_label(path.name)
+            row["sources"][source] = row["sources"].get(source, 0) + 1
+            _add_sample(row, "raw_samples", path.name)
+
+    logs_dir = WIKI_ROOT / "logs"
+    if logs_dir.exists():
+        for path in sorted(logs_dir.glob("ingest-drain-*.jsonl")):
+            for record in _read_jsonl_file(path, limit=50_000):
+                record_date = _date_from_value(record.get("timestamp"))
+                if record_date is None or record_date < start or record_date > end:
+                    continue
+                row = rows[record_date.isoformat()]
+                result = record.get("result") if isinstance(record.get("result"), dict) else {}
+                attempted_files = result.get("files_attempted") if isinstance(result.get("files_attempted"), list) else []
+                processed_files = result.get("files_processed") if isinstance(result.get("files_processed"), list) else []
+                per_raw = result.get("per_raw") if isinstance(result.get("per_raw"), list) else []
+
+                processed = _int_value(record.get("files_processed")) or len(processed_files)
+                if per_raw:
+                    succeeded = sum(
+                        1 for item in per_raw if isinstance(item, dict) and item.get("succeeded") is True
+                    )
+                    attempted = len(per_raw)
+                    failed = sum(
+                        1 for item in per_raw if isinstance(item, dict) and item.get("succeeded") is False
+                    )
+                else:
+                    attempted = len(attempted_files) or processed
+                    succeeded = processed
+                    failed = max(0, attempted - succeeded)
+
+                row["processed"] += processed
+                row["attempted"] += attempted
+                row["succeeded"] += succeeded
+                row["failed"] += failed
+                for filename in processed_files[:3]:
+                    if isinstance(filename, str):
+                        _add_sample(row, "raw_samples", filename)
+
+    try:
+        log_lines = LOG_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        log_lines = []
+    for line in log_lines:
+        match = LOG_PAGE_CHANGE_RE.match(line)
+        if not match:
+            continue
+        changed_date = _date_from_value(match.group("time"))
+        if changed_date is None or changed_date < start or changed_date > end:
+            continue
+        row = rows[changed_date.isoformat()]
+        kind = match.group("kind")
+        if kind == "created":
+            row["pages_created"] += 1
+        else:
+            row["pages_updated"] += 1
+        _add_sample(row, "page_samples", f"{kind} {match.group('page')}")
+
+    days_list: list[dict[str, Any]] = []
+    totals = {
+        "raw_saved": 0,
+        "processed": 0,
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "pages_created": 0,
+        "pages_updated": 0,
+        "days_with_saves": 0,
+    }
+    source_totals: dict[str, int] = {}
+    for row in rows.values():
+        sources = row.get("sources") if isinstance(row.get("sources"), dict) else {}
+        for source, count in sources.items():
+            source_totals[source] = source_totals.get(source, 0) + int(count)
+        row["sources"] = [
+            {"name": source, "count": count}
+            for source, count in sorted(sources.items(), key=lambda item: (-item[1], item[0]))
+        ]
+        if row["raw_saved"] or row["processed"] or row["pages_created"] or row["pages_updated"]:
+            totals["days_with_saves"] += 1
+        for key in ("raw_saved", "processed", "attempted", "succeeded", "failed", "pages_created", "pages_updated"):
+            totals[key] += row[key]
+        days_list.append(row)
+
+    recent = [
+        row for row in days_list
+        if row["raw_saved"] or row["processed"] or row["pages_created"] or row["pages_updated"]
+    ][-14:]
+    return {
+        "range": {"start": start.isoformat(), "end": end.isoformat(), "days": len(days_list)},
+        "days": days_list,
+        "recent": recent,
+        "totals": totals,
+        "sources": [
+            {"name": source, "count": count}
+            for source, count in sorted(source_totals.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "paths": {
+            "raw_dir": str(raw_dir),
+            "drain_logs": str(logs_dir),
+            "log_file": str(LOG_FILE),
+        },
+    }
 
 
 def _failure_detail(packet: dict[str, Any] | None, record: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -420,6 +619,120 @@ def _self_heal_snapshot(limit: int = 12) -> dict[str, Any]:
     }
 
 
+def _latency_percentile(sorted_values: list[float], ratio: float) -> float | None:
+    if not sorted_values:
+        return None
+    index = max(0, math.ceil(len(sorted_values) * ratio) - 1)
+    return sorted_values[min(index, len(sorted_values) - 1)]
+
+
+def _recall_eval_history(limit: int = 12) -> list[dict[str, Any]]:
+    eval_dir = WIKI_ROOT / "runtime" / "eval"
+    if not eval_dir.exists():
+        return []
+    history: list[dict[str, Any]] = []
+    for path in sorted(eval_dir.glob("*.json"))[-limit:]:
+        data = _read_json_file(path)
+        metrics = (data or {}).get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        history.append(
+            {
+                "file": path.name,
+                "examples": metrics.get("examples"),
+                "recall_at_1": metrics.get("recall_at_1"),
+                "recall_at_3": metrics.get("recall_at_3"),
+                "waste_injection_rate": metrics.get("waste_injection_rate"),
+                "latency_ms": metrics.get("latency_ms"),
+                "policy": (data or {}).get("policy"),
+            }
+        )
+    return history
+
+
+def _recall_snapshot(limit: int = 400) -> dict[str, Any]:
+    recall_dir = WIKI_ROOT / "recall"
+    rows = _read_jsonl_file(recall_dir / "recall-log.jsonl", limit=limit)
+
+    decisions = {"none": 0, "search": 0, "read": 0}
+    latencies: list[float] = []
+    judge_used = 0
+    rewrite_used = 0
+    errors = 0
+    for row in rows:
+        decision = str(row.get("decision") or "")
+        if decision in decisions:
+            decisions[decision] += 1
+        latency = row.get("latency_ms")
+        if isinstance(latency, int | float):
+            latencies.append(float(latency))
+        if row.get("used_judge"):
+            judge_used += 1
+        features = row.get("evidence_features")
+        if isinstance(features, dict):
+            try:
+                if float(features.get("rewrite_confidence") or 0.0) > 0:
+                    rewrite_used += 1
+            except (TypeError, ValueError):
+                pass
+        if row.get("error") or row.get("status") == "error":
+            errors += 1
+    latencies.sort()
+
+    pulls = _read_jsonl_file(recall_dir / "pull-log.jsonl", limit=200)
+    pull_counts: dict[str, int] = {}
+    for pull in pulls:
+        kind = str(pull.get("type") or "unknown")
+        pull_counts[kind] = pull_counts.get(kind, 0) + 1
+
+    calibration = _read_json_file(recall_dir / "calibration.json")
+    calibration_history = _read_jsonl_file(recall_dir / "calibration-history.jsonl", limit=8)
+
+    recent: list[dict[str, Any]] = []
+    for row in rows[-12:]:
+        recent.append(
+            {
+                "timestamp": row.get("ts"),
+                "decision": row.get("decision"),
+                "latency_ms": row.get("latency_ms"),
+                "host": row.get("host"),
+                "pages": len(row.get("pages") or []),
+                "used_judge": bool(row.get("used_judge")),
+                "preview": _shorten(row.get("prompt_preview"), 90),
+            }
+        )
+
+    evals = _recall_eval_history()
+    latest_eval = evals[-1] if evals else None
+
+    return {
+        "decisions": decisions,
+        "samples": len(rows),
+        "latency_ms": {
+            "p50": _latency_percentile(latencies, 0.50),
+            "p95": _latency_percentile(latencies, 0.95),
+            "max": latencies[-1] if latencies else None,
+        },
+        "judge_used": judge_used,
+        "rewrite_used": rewrite_used,
+        "errors": errors,
+        "pulls": {"total": len(pulls), "counts": pull_counts},
+        "recent": recent,
+        "evals": evals,
+        "latest_eval": latest_eval,
+        "calibration": {
+            "current": calibration,
+            "history": calibration_history,
+            "last_applied": calibration_history[-1] if calibration_history else None,
+        },
+        "paths": {
+            "recall_log": str(recall_dir / "recall-log.jsonl"),
+            "pull_log": str(recall_dir / "pull-log.jsonl"),
+            "calibration_file": str(recall_dir / "calibration.json"),
+        },
+    }
+
+
 def build_snapshot() -> dict[str, Any]:
     init_wiki()
     status = runtime_status.read_status()
@@ -465,6 +778,8 @@ def build_snapshot() -> dict[str, Any]:
         "events": events,
         "metrics": metrics,
         "self_heal": _self_heal_snapshot(),
+        "recall": _recall_snapshot(),
+        "save_history": _save_history_snapshot(),
         "paths": {
             "wiki_root": str(WIKI_ROOT),
             "status_file": str(runtime_status.STATUS_FILE),
@@ -492,6 +807,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _json_response(self, {"metrics": build_snapshot()["metrics"]})
         elif path == "/api/self-heal":
             _json_response(self, {"self_heal": build_snapshot()["self_heal"]})
+        elif path == "/api/recall":
+            _json_response(self, {"recall": build_snapshot()["recall"]})
+        elif path == "/api/save-history":
+            _json_response(self, {"save_history": build_snapshot()["save_history"]})
         elif path.startswith("/static/"):
             rel = path.removeprefix("/static/").lstrip("/")
             target = (STATIC_DIR / rel).resolve()

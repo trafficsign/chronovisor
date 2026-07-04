@@ -55,6 +55,48 @@
     </section>
 
     <section class="dashboard-grid">
+      <article class="panel panel-wide save-history-panel" id="save-history-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Save History</h2>
+            <p>Raw captures, ingest batches, and page changes by day.</p>
+          </div>
+          <div class="segmented-control" aria-label="Save history mode">
+            <button type="button" data-save-mode="daily" class="active">Daily</button>
+            <button type="button" data-save-mode="weekly">Weekly</button>
+            <button type="button" data-save-mode="cumulative">Cumulative</button>
+          </div>
+        </div>
+        <div class="chart-summary compact save-summary" aria-label="Save history summary">
+          <div class="chart-stat">
+            <span>Saved</span>
+            <strong id="save-total">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Processed</span>
+            <strong id="save-processed">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Pages</span>
+            <strong id="save-pages">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Failed</span>
+            <strong id="save-failed">--</strong>
+          </div>
+        </div>
+        <div class="save-history-layout">
+          <div class="save-heatmap-wrap">
+            <div class="save-months" id="save-months" aria-hidden="true"></div>
+            <div class="save-heatmap" id="save-heatmap" aria-label="Daily save heatmap"></div>
+          </div>
+          <aside class="save-detail" id="save-detail">
+            <span>--</span>
+          </aside>
+        </div>
+        <div class="save-feed" id="save-feed"></div>
+      </article>
+
       <article class="panel panel-large">
         <div class="panel-head">
           <div>
@@ -162,6 +204,37 @@
         </div>
         <div class="self-heal-counts" id="self-heal-counts"></div>
         <div class="self-heal-feed" id="self-heal-feed"></div>
+      </article>
+
+      <article class="panel recall-panel" id="recall-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Recall</h2>
+            <p>Retrieval gate decisions and calibration loop.</p>
+          </div>
+          <span id="recall-caption">quiet</span>
+        </div>
+        <div class="chart-summary compact" aria-label="Recall quality summary">
+          <div class="chart-stat">
+            <span>recall@3</span>
+            <strong id="recall-r3">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Waste</span>
+            <strong id="recall-waste">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>p50</span>
+            <strong id="recall-p50">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>p95</span>
+            <strong id="recall-p95">--</strong>
+          </div>
+        </div>
+        <div class="self-heal-counts" id="recall-counts"></div>
+        <div class="recall-meta" id="recall-calibration">no calibration yet</div>
+        <div class="self-heal-feed" id="recall-feed"></div>
       </article>
 
       <article class="panel panel-large panel-wide">
