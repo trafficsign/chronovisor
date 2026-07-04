@@ -440,3 +440,26 @@ def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
     assert history["totals"]["raw_bytes"] == 0
     assert history["totals"]["pending_bytes"] == 0
     assert history["days"][0]["raw_segments"] == []
+
+
+def test_knowledge_mix_snapshot_groups_pages_by_category(tmp_path: Path, monkeypatch) -> None:
+    wiki_root = tmp_path / "wiki"
+    pages_dir = wiki_root / "pages"
+    (pages_dir / "ai").mkdir(parents=True)
+    (pages_dir / "macos").mkdir()
+    (pages_dir / "ai" / "agent-memory.md").write_text("a" * 20, encoding="utf-8")
+    (pages_dir / "ai" / "evals.md").write_text("b" * 10, encoding="utf-8")
+    (pages_dir / "macos" / "display.md").write_text("c" * 15, encoding="utf-8")
+
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+
+    mix = dashboard._knowledge_mix_snapshot()
+
+    assert mix["total_pages"] == 3
+    assert mix["total_bytes"] == 45
+    assert [row["id"] for row in mix["categories"]] == ["ai", "macos"]
+    assert mix["categories"][0]["label"] == "AI"
+    assert mix["categories"][0]["pages"] == 2
+    assert mix["categories"][0]["bytes"] == 30
+    assert round(mix["categories"][0]["share"], 3) == 0.667
+    assert "ai/agent-memory.md" in mix["categories"][0]["samples"]

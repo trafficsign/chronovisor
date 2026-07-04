@@ -51,6 +51,13 @@ const els = {
   saveDetail: document.getElementById("save-detail"),
   saveFeed: document.getElementById("save-feed"),
   saveModeButtons: document.querySelectorAll("[data-save-mode]"),
+  knowledgeCaption: document.getElementById("knowledge-caption"),
+  knowledgeChart: document.getElementById("knowledge-chart"),
+  knowledgeTotal: document.getElementById("knowledge-total"),
+  knowledgeBars: document.getElementById("knowledge-bars"),
+  knowledgePages: document.getElementById("knowledge-pages"),
+  knowledgeSize: document.getElementById("knowledge-size"),
+  knowledgeCategories: document.getElementById("knowledge-categories"),
   recallPanel: document.getElementById("recall-panel"),
   recallCaption: document.getElementById("recall-caption"),
   recallR3: document.getElementById("recall-r3"),
@@ -75,6 +82,17 @@ const llmSignalHistory = {
 let saveHistoryMode = "daily";
 let latestSaveHistory = null;
 let selectedSaveDate = null;
+
+const KNOWLEDGE_COLORS = [
+  "#66d9e8",
+  "#8fd694",
+  "#f0bc62",
+  "#c792ea",
+  "#ff8a80",
+  "#82aaff",
+  "#ffd166",
+  "#7bdcb5",
+];
 
 function fmt(value, fallback = "--") {
   if (value === null || value === undefined || value === "") return fallback;
@@ -124,6 +142,11 @@ function formatBytes(value) {
     return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
   }
   return `${bytes} B`;
+}
+
+function shareLabel(value) {
+  if (!Number.isFinite(value) || value <= 0) return "0%";
+  return `${(value * 100).toFixed(value < 0.1 ? 1 : 0)}%`;
 }
 
 function preciseDuration(seconds) {
@@ -1035,6 +1058,120 @@ function renderSaveHistory(saveHistory) {
   renderSaveFeed(data.recent || []);
 }
 
+function knowledgeColor(index) {
+  return KNOWLEDGE_COLORS[index % KNOWLEDGE_COLORS.length];
+}
+
+function donutSegments(categories, totalBytes) {
+  if (!totalBytes) return [];
+  const top = categories.slice(0, 7);
+  const otherBytes = categories.slice(7).reduce((sum, row) => sum + intValue(row.bytes), 0);
+  const segments = top.map((row, index) => ({
+    label: fmt(row.label || row.id),
+    bytes: intValue(row.bytes),
+    share: intValue(row.bytes) / totalBytes,
+    color: knowledgeColor(index),
+  }));
+  if (otherBytes > 0) {
+    segments.push({
+      label: "Other",
+      bytes: otherBytes,
+      share: otherBytes / totalBytes,
+      color: "rgba(169,164,148,0.72)",
+    });
+  }
+  return segments;
+}
+
+function drawKnowledgeDonut(canvas, categories, totalBytes) {
+  const ctx = canvas.getContext("2d");
+  const width = canvas.clientWidth || 220;
+  const height = Number(canvas.dataset.baseHeight || canvas.getAttribute("height") || 240);
+  canvas.dataset.baseHeight = String(height);
+  canvas.style.height = `${height}px`;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const radius = Math.max(52, Math.min(width, height) * 0.36);
+  const lineWidth = Math.max(18, radius * 0.26);
+  const cx = width / 2;
+  const cy = height / 2;
+
+  ctx.save();
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = "butt";
+  ctx.strokeStyle = "rgba(242,239,229,0.08)";
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  let start = -Math.PI / 2;
+  donutSegments(categories, totalBytes).forEach((segment) => {
+    const end = start + segment.share * Math.PI * 2;
+    ctx.strokeStyle = segment.color;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, start, end);
+    ctx.stroke();
+    start = end;
+  });
+  ctx.restore();
+}
+
+function renderKnowledgeMix(knowledgeMix) {
+  const data = knowledgeMix || {};
+  const categories = Array.isArray(data.categories) ? data.categories : [];
+  const totalPages = intValue(data.total_pages);
+  const totalBytes = intValue(data.total_bytes);
+  const top = categories.slice(0, 6);
+
+  els.knowledgeCaption.textContent = categories.length
+    ? `${categories.length} areas · ${formatBytes(totalBytes)}`
+    : "waiting";
+  els.knowledgeTotal.textContent = totalPages ? totalPages.toLocaleString() : "--";
+  els.knowledgePages.textContent = totalPages.toLocaleString();
+  els.knowledgeSize.textContent = formatBytes(totalBytes);
+  els.knowledgeCategories.textContent = String(categories.length);
+  drawKnowledgeDonut(els.knowledgeChart, categories, totalBytes);
+
+  els.knowledgeBars.innerHTML = "";
+  if (!top.length) {
+    els.knowledgeBars.innerHTML = "<div class=\"self-heal-empty\">No pages indexed yet.</div>";
+    return;
+  }
+
+  top.forEach((row, index) => {
+    const bytes = intValue(row.bytes);
+    const share = totalBytes ? bytes / totalBytes : 0;
+    const item = document.createElement("div");
+    item.className = "knowledge-bar";
+    item.style.setProperty("--bar-color", knowledgeColor(index));
+    const topLine = document.createElement("div");
+    topLine.className = "knowledge-bar-top";
+    const label = document.createElement("strong");
+    label.textContent = fmt(row.label || row.id);
+    const pct = document.createElement("span");
+    pct.textContent = shareLabel(share);
+    topLine.append(label, pct);
+
+    const track = document.createElement("div");
+    track.className = "knowledge-bar-track";
+    const fill = document.createElement("span");
+    fill.style.width = `${Math.max(2, share * 100)}%`;
+    track.appendChild(fill);
+
+    const meta = document.createElement("small");
+    meta.textContent = `${formatBytes(bytes)} · ${intValue(row.pages).toLocaleString()} pages`;
+    item.title = Array.isArray(row.samples) && row.samples.length
+      ? `${fmt(row.label || row.id)} · ${row.samples.join(", ")}`
+      : fmt(row.label || row.id);
+    item.append(topLine, track, meta);
+    els.knowledgeBars.appendChild(item);
+  });
+}
+
 function pctLabel(value) {
   if (!numeric(value)) return "--";
   return `${(value * 100).toFixed(1)}%`;
@@ -1146,6 +1283,7 @@ function render(snapshot) {
   renderSelfHeal(snapshot.self_heal || {});
   renderRecall(snapshot.recall || {});
   renderSaveHistory(snapshot.save_history || {});
+  renderKnowledgeMix(snapshot.knowledge_mix || {});
   renderEvents(snapshot.events || []);
   drawLineChart(els.pendingChart, snapshot.save_history || {}, status);
   drawBatchChart(els.batchChart, metrics, status);

@@ -221,6 +221,65 @@ def _raw_source_label(filename: str) -> str:
     return "manual"
 
 
+def _knowledge_category_label(category: str) -> str:
+    special = {
+        "ai": "AI",
+        "bom": "BOM",
+        "cad": "CAD",
+        "jt": "JT",
+        "jttok": "JTTOK",
+        "qmk": "QMK",
+        "vis": "VIS",
+    }
+    if category in special:
+        return special[category]
+    return category.replace("-", " ").replace("_", " ").title()
+
+
+def _knowledge_mix_snapshot() -> dict[str, Any]:
+    pages_dir = WIKI_ROOT / "pages"
+    categories: dict[str, dict[str, Any]] = {}
+    if pages_dir.exists():
+        for path in pages_dir.rglob("*.md"):
+            if not path.is_file():
+                continue
+            try:
+                rel = path.relative_to(pages_dir)
+                page_bytes = path.stat().st_size
+            except Exception:
+                continue
+            category = rel.parts[0] if len(rel.parts) > 1 else "root"
+            row = categories.setdefault(
+                category,
+                {
+                    "id": category,
+                    "label": _knowledge_category_label(category),
+                    "pages": 0,
+                    "bytes": 0,
+                    "samples": [],
+                },
+            )
+            row["pages"] += 1
+            row["bytes"] += page_bytes
+            _add_sample(row, "samples", str(rel), limit=4)
+
+    total_pages = sum(int(row["pages"]) for row in categories.values())
+    total_bytes = sum(int(row["bytes"]) for row in categories.values())
+    rows = sorted(categories.values(), key=lambda row: (-int(row["bytes"]), str(row["label"])))
+    for row in rows:
+        row["share"] = (int(row["bytes"]) / total_bytes) if total_bytes else 0.0
+
+    return {
+        "total_pages": total_pages,
+        "total_bytes": total_bytes,
+        "categories": rows,
+        "top": rows[:8],
+        "paths": {
+            "pages_dir": str(pages_dir),
+        },
+    }
+
+
 def _new_save_day(day: date) -> dict[str, Any]:
     return {
         "date": day.isoformat(),
@@ -958,6 +1017,7 @@ def build_snapshot() -> dict[str, Any]:
         "self_heal": _self_heal_snapshot(),
         "recall": _recall_snapshot(),
         "save_history": _save_history_snapshot(),
+        "knowledge_mix": _knowledge_mix_snapshot(),
         "paths": {
             "wiki_root": str(WIKI_ROOT),
             "status_file": str(runtime_status.STATUS_FILE),
@@ -989,6 +1049,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _json_response(self, {"recall": build_snapshot()["recall"]})
         elif path == "/api/save-history":
             _json_response(self, {"save_history": build_snapshot()["save_history"]})
+        elif path == "/api/knowledge-mix":
+            _json_response(self, {"knowledge_mix": build_snapshot()["knowledge_mix"]})
         elif path.startswith("/static/"):
             rel = path.removeprefix("/static/").lstrip("/")
             target = (STATIC_DIR / rel).resolve()
