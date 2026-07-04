@@ -96,28 +96,6 @@ function timeLabel(value) {
   return String(value).slice(-8);
 }
 
-function axisTimeLabel(value) {
-  if (!value) return "--";
-  const date = new Date(value);
-  if (!Number.isNaN(date.getTime())) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-  return String(value).slice(-5);
-}
-
-function dateLabel(value) {
-  if (!value) return "--";
-  const date = new Date(value);
-  if (!Number.isNaN(date.getTime())) {
-    return date.toLocaleDateString([], { month: "short", day: "numeric" });
-  }
-  return String(value).slice(0, 10);
-}
-
-function timestampFromMs(ms) {
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
-}
-
 function ageLabel(value) {
   const ms = parseMs(value);
   if (ms === null) return "--";
@@ -133,6 +111,19 @@ function compactDuration(seconds) {
   const hours = minutes / 60;
   if (hours < 48) return `${hours.toFixed(hours < 10 ? 1 : 0)}h`;
   return `${Math.round(hours / 24)}d`;
+}
+
+function formatBytes(value) {
+  const bytes = intValue(value);
+  if (bytes >= 1_000_000) {
+    const mb = bytes / 1_000_000;
+    return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+  }
+  if (bytes >= 1_000) {
+    const kb = bytes / 1_000;
+    return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
+  }
+  return `${bytes} B`;
 }
 
 function preciseDuration(seconds) {
@@ -201,125 +192,6 @@ function completedRows(rows) {
     }
   });
   return deduped;
-}
-
-function latestCurrentMetric(rows) {
-  return [...rows].reverse().find((row) => row.kind === "current" && numeric(row.pending_after));
-}
-
-function buildTrendPoints(rows, completed = completedRows(rows)) {
-  const points = [];
-  completed.forEach((row) => {
-    const endMs = parseMs(row.timestamp);
-    const elapsedMs = numeric(row.elapsed_seconds) ? Math.max(0, row.elapsed_seconds * 1000) : 0;
-    const startTimestamp = endMs !== null ? timestampFromMs(endMs - elapsedMs) : row.timestamp;
-    if (numeric(row.pending_before)) {
-      points.push({
-        timestamp: startTimestamp || row.timestamp,
-        label: "queued",
-        value: row.pending_before,
-      });
-    }
-    points.push({
-      timestamp: row.timestamp,
-      label: row.kind === "batch" ? "batch" : "drain",
-      value: row.pending_after,
-    });
-  });
-
-  const current = latestCurrentMetric(rows);
-  const latestMs = points.length ? parseMs(points[points.length - 1].timestamp) : null;
-  const currentMs = current ? parseMs(current.timestamp) : null;
-  if (
-    current
-    && (
-      !points.length
-      || points[points.length - 1].value !== current.pending_after
-      || (currentMs !== null && latestMs !== null && currentMs - latestMs > 60_000)
-    )
-  ) {
-    points.push({
-      timestamp: current.timestamp,
-      label: "now",
-      value: current.pending_after,
-    });
-  }
-  return points.slice(-24);
-}
-
-function trendCaption(points, completedCount) {
-  if (!points.length) return "waiting for data";
-  const first = points[0];
-  const last = points[points.length - 1];
-  const firstDate = dateLabel(first.timestamp);
-  const lastDate = dateLabel(last.timestamp);
-  const range = firstDate === lastDate
-    ? `${firstDate} ${axisTimeLabel(first.timestamp)}-${axisTimeLabel(last.timestamp)}`
-    : `${firstDate} ${axisTimeLabel(first.timestamp)} - ${lastDate} ${axisTimeLabel(last.timestamp)}`;
-  return `${range} · ${completedCount} ${completedCount === 1 ? "batch" : "batches"}`;
-}
-
-function completedRowsInPointRange(points, completed) {
-  if (!points.length) return [];
-  const firstMs = parseMs(points[0].timestamp);
-  const lastMs = parseMs(points[points.length - 1].timestamp);
-  if (firstMs === null || lastMs === null) return completed.slice(-Math.ceil(points.length / 2));
-  return completed.filter((row) => {
-    const rowMs = parseMs(row.timestamp);
-    return rowMs !== null && rowMs >= firstMs && rowMs <= lastMs;
-  });
-}
-
-function niceTicks(min, max, count = 4) {
-  if (min === max) {
-    return [min - 1, min, min + 1];
-  }
-  const rawStep = Math.max(1, (max - min) / count);
-  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
-  const normalized = rawStep / magnitude;
-  const step = (normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10) * magnitude;
-  const start = Math.floor(min / step) * step;
-  const end = Math.ceil(max / step) * step;
-  const ticks = [];
-  for (let value = start; value <= end + step / 2; value += step) {
-    ticks.push(Math.round(value * 100) / 100);
-  }
-  return ticks;
-}
-
-function measureTrend(points, completed = []) {
-  if (!points.length) {
-    return { current: null, drained: null, rate: null, etaSeconds: null };
-  }
-  const first = points[0];
-  const last = points[points.length - 1];
-  const drained = completed.reduce((sum, row) => {
-    if (numeric(row.pending_before) && numeric(row.pending_after)) {
-      return sum + Math.max(0, row.pending_before - row.pending_after);
-    }
-    return sum + intValue(row.files_processed);
-  }, 0);
-  const firstMs = parseMs(first.timestamp);
-  const lastMs = parseMs(last.timestamp);
-  const hours = firstMs !== null && lastMs !== null ? Math.max(0, (lastMs - firstMs) / 3_600_000) : 0;
-  const rate = drained > 0 && hours > 0 ? drained / hours : null;
-  return {
-    current: last.value,
-    drained: completed.length ? drained : null,
-    rate,
-    etaSeconds: rate && last.value > 0 ? (last.value / rate) * 3600 : null,
-  };
-}
-
-function axisTickIndexes(points, width) {
-  const maxTicks = width >= 900 ? 4 : 3;
-  const tickCount = Math.min(maxTicks, points.length);
-  if (tickCount <= 1) return [0];
-  const indexes = new Set();
-  for (let i = 0; i < tickCount; i += 1) {
-    indexes.add(Math.round(((points.length - 1) * i) / (tickCount - 1)));
-  }
-  return [...indexes].sort((a, b) => a - b);
 }
 
 function setState(state) {
@@ -435,7 +307,56 @@ function renderLlm(llm) {
   renderSparkline(kind);
 }
 
-function drawLineChart(canvas, rows) {
+function dateKeyLabel(dateKey) {
+  const date = parseDateKey(dateKey);
+  if (!date) return fmt(dateKey);
+  return date.toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" });
+}
+
+function rawDateKeyFromName(value) {
+  const match = String(value || "").match(/(?:^|[^0-9])(20\d{6})(?:[^0-9]|$)/);
+  if (!match) return null;
+  const stamp = match[1];
+  return `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}`;
+}
+
+function saveLoadRows(saveHistory, status) {
+  const days = Array.isArray(saveHistory?.days) ? saveHistory.days.slice(-30) : [];
+  const activeDate = rawDateKeyFromName(status?.current_raw);
+  const hasActiveRaw = Boolean(status?.current_raw && status?.state !== "idle");
+  return days.map((day) => {
+    const total = intValue(day.raw_bytes);
+    const processed = Math.min(total, intValue(day.processed_bytes));
+    const failed = Math.min(Math.max(0, total - processed), intValue(day.failed_bytes));
+    const pending = Math.max(0, total - processed - failed);
+    return {
+      date: day.date,
+      total,
+      processed,
+      failed,
+      pending,
+      active: hasActiveRaw && day.date === activeDate,
+    };
+  });
+}
+
+function drawStackSegment(ctx, x, baseY, width, height, color, options = {}) {
+  if (height <= 0) return baseY;
+  const y = baseY - height;
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, width, height);
+  if (options.dashed) {
+    ctx.save();
+    ctx.strokeStyle = options.stroke || "rgba(102,217,232,0.72)";
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1, width - 1), Math.max(1, height - 1));
+    ctx.restore();
+  }
+  return y;
+}
+
+function drawLineChart(canvas, saveHistory, status = {}) {
   const ctx = canvas.getContext("2d");
   const width = canvas.clientWidth || 640;
   const height = Number(canvas.dataset.baseHeight || canvas.getAttribute("height") || 300);
@@ -447,44 +368,46 @@ function drawLineChart(canvas, rows) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  const completed = completedRows(rows);
-  const pointsRaw = buildTrendPoints(rows, completed);
-  const visibleCompleted = completedRowsInPointRange(pointsRaw, completed);
-  const measure = measureTrend(pointsRaw, visibleCompleted);
-  els.pendingCurrent.textContent = measure.current === null ? "--" : String(measure.current);
-  els.pendingDelta.textContent = measure.drained === null ? "--" : measure.drained >= 0 ? String(measure.drained) : `+${Math.abs(measure.drained)}`;
-  els.pendingRate.textContent = measure.rate ? `${measure.rate.toFixed(measure.rate < 10 ? 1 : 0)}/h` : "--";
-  els.pendingEta.textContent = compactDuration(measure.etaSeconds);
-  els.trendCaption.textContent = trendCaption(pointsRaw, visibleCompleted.length);
+  const rows = saveLoadRows(saveHistory, status);
+  const totals = rows.reduce((acc, row) => {
+    acc.total += row.total;
+    acc.processed += row.processed;
+    acc.pending += row.pending;
+    acc.failed += row.failed;
+    return acc;
+  }, { total: 0, processed: 0, pending: 0, failed: 0 });
 
-  const pad = { top: 24, right: 28, bottom: 56, left: 48 };
+  els.pendingCurrent.textContent = formatBytes(totals.total);
+  els.pendingDelta.textContent = formatBytes(totals.processed);
+  els.pendingRate.textContent = formatBytes(totals.pending);
+  els.pendingEta.textContent = formatBytes(totals.failed);
+  els.trendCaption.textContent = rows.length
+    ? `${dateKeyLabel(rows[0].date)}-${dateKeyLabel(rows[rows.length - 1].date)} · ${formatBytes(totals.total)} saved`
+    : "waiting for data";
+
+  const pad = { top: 34, right: 24, bottom: 50, left: 58 };
   const plotWidth = width - pad.left - pad.right;
   const plotHeight = height - pad.top - pad.bottom;
 
-  if (pointsRaw.length < 2) {
+  if (!rows.length) {
     ctx.fillStyle = "rgba(169,164,148,0.85)";
     ctx.font = "14px system-ui";
-    ctx.fillText(pointsRaw.length ? `Only one queue sample · ${dateLabel(pointsRaw[0].timestamp)} ${axisTimeLabel(pointsRaw[0].timestamp)}` : "Waiting for completed batches", pad.left, height / 2);
+    ctx.fillText("Waiting for save history", pad.left, height / 2);
     return;
   }
 
-  const values = pointsRaw.map((point) => point.value);
-  const ticks = niceTicks(Math.min(...values), Math.max(...values), 4);
-  const yMin = ticks[0];
-  const yMax = ticks[ticks.length - 1];
-  const ySpan = Math.max(1, yMax - yMin);
-  const points = pointsRaw.map((point, index) => {
-    const x = pad.left + (plotWidth * index) / Math.max(1, pointsRaw.length - 1);
-    const y = pad.top + plotHeight - ((point.value - yMin) / ySpan) * plotHeight;
-    return { ...point, x, y };
-  });
+  const maxTotal = Math.max(1, ...rows.map((row) => row.total));
+  const ticks = [0, maxTotal / 2, maxTotal];
+  const slot = plotWidth / rows.length;
+  const barWidth = Math.max(5, Math.min(18, slot * 0.62));
+  const baseline = pad.top + plotHeight;
 
   ctx.save();
   ctx.font = "11px system-ui";
   ctx.textBaseline = "middle";
   ticks.forEach((tick) => {
-    const y = pad.top + plotHeight - ((tick - yMin) / ySpan) * plotHeight;
-    ctx.strokeStyle = tick === yMin ? "rgba(242,239,229,0.2)" : "rgba(242,239,229,0.1)";
+    const y = baseline - (tick / maxTotal) * plotHeight;
+    ctx.strokeStyle = tick === 0 ? "rgba(242,239,229,0.2)" : "rgba(242,239,229,0.1)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.left, y);
@@ -492,85 +415,73 @@ function drawLineChart(canvas, rows) {
     ctx.stroke();
     ctx.fillStyle = "rgba(169,164,148,0.9)";
     ctx.textAlign = "right";
-    ctx.fillText(String(tick), pad.left - 10, y);
+    ctx.fillText(formatBytes(tick), pad.left - 10, y);
   });
 
-  ctx.textBaseline = "alphabetic";
-  axisTickIndexes(points, width).forEach((index) => {
-    const point = points[index];
-    const align = index === 0 ? "left" : index === points.length - 1 ? "right" : "center";
-    ctx.strokeStyle = "rgba(242,239,229,0.08)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(point.x, pad.top);
-    ctx.lineTo(point.x, pad.top + plotHeight);
-    ctx.stroke();
-    ctx.textAlign = align;
-    ctx.font = "11px system-ui";
-    ctx.fillStyle = "rgba(169,164,148,0.9)";
-    ctx.fillText(dateLabel(point.timestamp), point.x, height - 28);
-    ctx.fillStyle = "rgba(242,239,229,0.78)";
-    ctx.fillText(axisTimeLabel(point.timestamp), point.x, height - 12);
-  });
-
-  const latest = points[points.length - 1];
-  ctx.strokeStyle = "rgba(102,217,232,0.28)";
-  ctx.setLineDash([5, 5]);
-  ctx.beginPath();
-  ctx.moveTo(pad.left, latest.y);
-  ctx.lineTo(width - pad.right, latest.y);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  const gradient = ctx.createLinearGradient(0, pad.top, 0, height - pad.bottom);
-  gradient.addColorStop(0, "rgba(102,217,232,0.34)");
-  gradient.addColorStop(0.62, "rgba(102,217,232,0.1)");
-  gradient.addColorStop(1, "rgba(102,217,232,0)");
-
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  for (let i = 1; i < points.length; i += 1) {
-    ctx.lineTo(points[i].x, points[i - 1].y);
-    ctx.lineTo(points[i].x, points[i].y);
-  }
-  ctx.lineTo(latest.x, pad.top + plotHeight);
-  ctx.lineTo(points[0].x, pad.top + plotHeight);
-  ctx.closePath();
-  ctx.fillStyle = gradient;
-  ctx.fill();
-
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  for (let i = 1; i < points.length; i += 1) {
-    ctx.lineTo(points[i].x, points[i - 1].y);
-    ctx.lineTo(points[i].x, points[i].y);
-  }
-  ctx.strokeStyle = "#66d9e8";
-  ctx.lineWidth = 3;
-  ctx.lineJoin = "round";
-  ctx.stroke();
-
-  points.forEach((point, index) => {
-    ctx.beginPath();
-    ctx.arc(point.x, point.y, index === points.length - 1 ? 5 : 3.5, 0, Math.PI * 2);
-    ctx.fillStyle = index === points.length - 1 ? "#66d9e8" : "#f2efe5";
-    ctx.fill();
-  });
-
-  const bubble = `${latest.value} now`;
-  ctx.font = "12px system-ui";
-  const bubbleWidth = ctx.measureText(bubble).width + 18;
-  const bubbleX = Math.min(width - pad.right - bubbleWidth, latest.x + 10);
-  const bubbleY = Math.max(pad.top + 8, latest.y - 18);
-  roundRect(ctx, bubbleX, bubbleY - 14, bubbleWidth, 24, 12);
-  ctx.fillStyle = "rgba(102,217,232,0.16)";
-  ctx.fill();
-  ctx.strokeStyle = "rgba(102,217,232,0.46)";
-  ctx.stroke();
-  ctx.fillStyle = "#f2efe5";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText(bubble, bubbleX + 9, bubbleY - 2);
+  ctx.fillStyle = "#8fd694";
+  roundRect(ctx, pad.left, 9, 16, 8, 4);
+  ctx.fill();
+  ctx.fillStyle = "rgba(169,164,148,0.9)";
+  ctx.fillText("processed", pad.left + 22, 13);
+  ctx.fillStyle = "rgba(102,217,232,0.34)";
+  roundRect(ctx, pad.left + 92, 9, 16, 8, 4);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(102,217,232,0.72)";
+  ctx.setLineDash([4, 4]);
+  roundRect(ctx, pad.left + 92, 9, 16, 8, 4);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(169,164,148,0.9)";
+  ctx.fillText("pending", pad.left + 114, 13);
+  ctx.fillStyle = "#f0bc62";
+  roundRect(ctx, pad.left + 176, 9, 16, 8, 4);
+  ctx.fill();
+  ctx.fillStyle = "rgba(169,164,148,0.9)";
+  ctx.fillText("failed", pad.left + 198, 13);
+
+  const pulse = 0.48 + 0.32 * Math.sin(Date.now() / 170);
+  rows.forEach((row, index) => {
+    const barX = pad.left + index * slot + (slot - barWidth) / 2;
+    const fullHeight = row.total ? Math.max(2, (row.total / maxTotal) * plotHeight) : 0;
+    let y = baseline;
+    ctx.fillStyle = "rgba(242,239,229,0.055)";
+    roundRect(ctx, barX, baseline - Math.max(2, fullHeight), barWidth, Math.max(2, fullHeight), Math.min(5, barWidth / 2));
+    ctx.fill();
+    y = drawStackSegment(ctx, barX, y, barWidth, (row.processed / maxTotal) * plotHeight, "#8fd694");
+    y = drawStackSegment(ctx, barX, y, barWidth, (row.failed / maxTotal) * plotHeight, "#f0bc62");
+    y = drawStackSegment(
+      ctx,
+      barX,
+      y,
+      barWidth,
+      (row.pending / maxTotal) * plotHeight,
+      "rgba(102,217,232,0.22)",
+      { dashed: row.pending > 0 }
+    );
+
+    if (row.active && fullHeight > 0) {
+      ctx.save();
+      ctx.globalAlpha = pulse;
+      ctx.strokeStyle = "#66d9e8";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      roundRect(ctx, barX - 3, baseline - fullHeight - 4, barWidth + 6, fullHeight + 8, 7);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    const showLabel = index === 0 || index === rows.length - 1 || index % 5 === 4 || row.active;
+    if (showLabel) {
+      const x = barX + barWidth / 2;
+      ctx.fillStyle = row.active ? "#66d9e8" : "rgba(169,164,148,0.86)";
+      ctx.font = row.active ? "700 10px system-ui" : "10px system-ui";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillText(dateKeyLabel(row.date), x, height - 14);
+    }
+  });
   ctx.restore();
 }
 
@@ -1194,7 +1105,7 @@ function render(snapshot) {
   renderRecall(snapshot.recall || {});
   renderSaveHistory(snapshot.save_history || {});
   renderEvents(snapshot.events || []);
-  drawLineChart(els.pendingChart, metrics);
+  drawLineChart(els.pendingChart, snapshot.save_history || {}, status);
   drawBatchChart(els.batchChart, metrics, status);
 }
 

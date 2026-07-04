@@ -382,6 +382,10 @@ def test_save_history_snapshot_combines_raw_drain_and_log(tmp_path: Path, monkey
     by_date = {row["date"]: row for row in history["days"]}
 
     assert history["totals"]["raw_saved"] == 3
+    assert history["totals"]["raw_bytes"] == 9
+    assert history["totals"]["processed_bytes"] == 3
+    assert history["totals"]["pending_bytes"] == 6
+    assert history["totals"]["failed_bytes"] == 0
     assert history["totals"]["processed"] == 1
     assert history["totals"]["attempted"] == 2
     assert history["totals"]["succeeded"] == 1
@@ -389,9 +393,13 @@ def test_save_history_snapshot_combines_raw_drain_and_log(tmp_path: Path, monkey
     assert history["totals"]["pages_created"] == 1
     assert history["totals"]["pages_updated"] == 2
     assert by_date["2026-07-01"]["raw_saved"] == 2
+    assert by_date["2026-07-01"]["raw_bytes"] == 6
+    assert by_date["2026-07-01"]["processed_bytes"] == 3
+    assert by_date["2026-07-01"]["pending_bytes"] == 3
     assert by_date["2026-07-01"]["processed"] == 1
     assert by_date["2026-07-01"]["failed"] == 1
     assert by_date["2026-07-02"]["raw_saved"] == 1
+    assert by_date["2026-07-02"]["pending_bytes"] == 3
     assert by_date["2026-07-02"]["pages_updated"] == 1
     assert by_date["2026-07-01"]["sources"] == [
         {"name": "claude-code", "count": 1},
@@ -414,3 +422,5 @@ def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
     assert [row["date"] for row in history["days"]] == ["2026-07-03", "2026-07-04"]
     assert history["recent"] == []
     assert history["totals"]["raw_saved"] == 0
+    assert history["totals"]["raw_bytes"] == 0
+    assert history["totals"]["pending_bytes"] == 0

@@ -100,29 +100,29 @@
       <article class="panel panel-large">
         <div class="panel-head">
           <div>
-            <h2>Pending Trend</h2>
-            <p>Queue depth by ingest event with dated ticks.</p>
+            <h2>Save Load</h2>
+            <p>Daily saved size by processing state.</p>
           </div>
           <span id="trend-caption">waiting for data</span>
         </div>
         <div class="chart-frame">
           <canvas id="pending-chart" height="300"></canvas>
         </div>
-        <div class="chart-summary" aria-label="Pending trend summary">
+        <div class="chart-summary" aria-label="Save load summary">
           <div class="chart-stat">
-            <span>Current</span>
+            <span>Saved</span>
             <strong id="pending-current">--</strong>
           </div>
           <div class="chart-stat">
-            <span>Drained</span>
+            <span>Processed</span>
             <strong id="pending-delta">--</strong>
           </div>
           <div class="chart-stat">
-            <span>Rate</span>
+            <span>Pending</span>
             <strong id="pending-rate">--</strong>
           </div>
           <div class="chart-stat">
-            <span>ETA</span>
+            <span>Failed</span>
             <strong id="pending-eta">--</strong>
           </div>
         </div>

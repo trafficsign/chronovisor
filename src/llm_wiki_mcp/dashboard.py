@@ -225,6 +225,10 @@ def _new_save_day(day: date) -> dict[str, Any]:
     return {
         "date": day.isoformat(),
         "raw_saved": 0,
+        "raw_bytes": 0,
+        "processed_bytes": 0,
+        "pending_bytes": 0,
+        "failed_bytes": 0,
         "processed": 0,
         "attempted": 0,
         "succeeded": 0,
@@ -252,13 +256,18 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
     }
 
     raw_dir = WIKI_ROOT / "raw"
+    raw_files: dict[str, dict[str, Any]] = {}
+    raw_status: dict[str, str] = {}
     if raw_dir.exists():
         for path in raw_dir.glob("*.md"):
             raw_date = _raw_file_date(path)
             if raw_date is None or raw_date < start or raw_date > end:
                 continue
+            raw_bytes = path.stat().st_size
+            raw_files[path.name] = {"date": raw_date.isoformat(), "bytes": raw_bytes}
             row = rows[raw_date.isoformat()]
             row["raw_saved"] += 1
+            row["raw_bytes"] += raw_bytes
             source = _raw_source_label(path.name)
             row["sources"][source] = row["sources"].get(source, 0) + 1
             _add_sample(row, "raw_samples", path.name)
@@ -294,6 +303,29 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
                 row["attempted"] += attempted
                 row["succeeded"] += succeeded
                 row["failed"] += failed
+                for filename in processed_files:
+                    if isinstance(filename, str):
+                        raw_status[filename] = "processed"
+                if per_raw:
+                    for item in per_raw:
+                        if not isinstance(item, dict):
+                            continue
+                        filename = item.get("filename") or item.get("raw_file")
+                        if not isinstance(filename, str):
+                            continue
+                        if item.get("succeeded") is True:
+                            raw_status[filename] = "processed"
+                        elif raw_status.get(filename) != "processed":
+                            raw_status[filename] = "failed"
+                else:
+                    processed_names = {name for name in processed_files if isinstance(name, str)}
+                    for filename in attempted_files:
+                        if (
+                            isinstance(filename, str)
+                            and filename not in processed_names
+                            and raw_status.get(filename) != "processed"
+                        ):
+                            raw_status[filename] = "failed"
                 for filename in processed_files[:3]:
                     if isinstance(filename, str):
                         _add_sample(row, "raw_samples", filename)
@@ -320,6 +352,10 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
     days_list: list[dict[str, Any]] = []
     totals = {
         "raw_saved": 0,
+        "raw_bytes": 0,
+        "processed_bytes": 0,
+        "pending_bytes": 0,
+        "failed_bytes": 0,
         "processed": 0,
         "attempted": 0,
         "succeeded": 0,
@@ -329,6 +365,18 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
         "days_with_saves": 0,
     }
     source_totals: dict[str, int] = {}
+    for filename, meta in raw_files.items():
+        row = rows.get(str(meta["date"]))
+        if not row:
+            continue
+        raw_bytes = int(meta["bytes"])
+        status = raw_status.get(filename)
+        if status == "processed":
+            row["processed_bytes"] += raw_bytes
+        elif status == "failed":
+            row["failed_bytes"] += raw_bytes
+        else:
+            row["pending_bytes"] += raw_bytes
     for row in rows.values():
         sources = row.get("sources") if isinstance(row.get("sources"), dict) else {}
         for source, count in sources.items():
@@ -339,7 +387,19 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
         ]
         if row["raw_saved"] or row["processed"] or row["pages_created"] or row["pages_updated"]:
             totals["days_with_saves"] += 1
-        for key in ("raw_saved", "processed", "attempted", "succeeded", "failed", "pages_created", "pages_updated"):
+        for key in (
+            "raw_saved",
+            "raw_bytes",
+            "processed_bytes",
+            "pending_bytes",
+            "failed_bytes",
+            "processed",
+            "attempted",
+            "succeeded",
+            "failed",
+            "pages_created",
+            "pages_updated",
+        ):
             totals[key] += row[key]
         days_list.append(row)
 
