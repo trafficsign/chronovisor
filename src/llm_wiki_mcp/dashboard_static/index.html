@@ -107,6 +107,7 @@
         </div>
         <div class="chart-frame">
           <canvas id="pending-chart" height="300"></canvas>
+          <div class="chart-tooltip" id="save-load-tooltip" hidden></div>
         </div>
         <div class="chart-summary" aria-label="Save load summary">
           <div class="chart-stat">
@@ -134,8 +135,12 @@
             <h2>Knowledge Mix</h2>
             <p>Stored page share by category and size.</p>
           </div>
-          <span id="knowledge-caption">waiting</span>
+          <div class="segmented-control compact-control" aria-label="Knowledge mix mode">
+            <button type="button" data-knowledge-mode="size" class="active">Size</button>
+            <button type="button" data-knowledge-mode="pages">Pages</button>
+          </div>
         </div>
+        <div class="panel-subhead" id="knowledge-caption">waiting</div>
         <div class="knowledge-layout">
           <div class="knowledge-donut-wrap">
             <canvas id="knowledge-chart" height="240"></canvas>

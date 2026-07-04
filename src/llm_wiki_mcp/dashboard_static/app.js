@@ -58,6 +58,7 @@ const els = {
   knowledgePages: document.getElementById("knowledge-pages"),
   knowledgeSize: document.getElementById("knowledge-size"),
   knowledgeCategories: document.getElementById("knowledge-categories"),
+  knowledgeModeButtons: document.querySelectorAll("[data-knowledge-mode]"),
   recallPanel: document.getElementById("recall-panel"),
   recallCaption: document.getElementById("recall-caption"),
   recallR3: document.getElementById("recall-r3"),
@@ -69,6 +70,7 @@ const els = {
   recallFeed: document.getElementById("recall-feed"),
   eventFeed: document.getElementById("event-feed"),
   pendingChart: document.getElementById("pending-chart"),
+  saveLoadTooltip: document.getElementById("save-load-tooltip"),
   batchChart: document.getElementById("batch-chart"),
 };
 
@@ -82,6 +84,9 @@ const llmSignalHistory = {
 let saveHistoryMode = "daily";
 let latestSaveHistory = null;
 let selectedSaveDate = null;
+let knowledgeMixMode = "size";
+let latestKnowledgeMix = null;
+let saveLoadHitRegions = [];
 
 const KNOWLEDGE_COLORS = [
   "#66d9e8",
@@ -418,6 +423,48 @@ function drawStackSegment(ctx, x, baseY, width, height, color, options = {}) {
   return y;
 }
 
+function hideSaveLoadTooltip() {
+  if (!els.saveLoadTooltip) return;
+  els.saveLoadTooltip.hidden = true;
+  els.pendingChart.style.cursor = "default";
+}
+
+function showSaveLoadTooltip(region, x, y) {
+  if (!els.saveLoadTooltip) return;
+  els.saveLoadTooltip.innerHTML = "";
+  const title = document.createElement("strong");
+  title.textContent = `${region.date} · ${formatBytes(region.bytes)}`;
+  const raw = document.createElement("span");
+  raw.textContent = region.name;
+  const meta = document.createElement("small");
+  meta.textContent = `${region.status} · ${region.source}`;
+  els.saveLoadTooltip.append(title, raw, meta);
+  const parent = els.pendingChart.parentElement;
+  const maxLeft = Math.max(0, (parent?.clientWidth || 0) - 220);
+  const maxTop = Math.max(0, (parent?.clientHeight || 0) - 86);
+  els.saveLoadTooltip.style.left = `${Math.min(maxLeft, x + 12)}px`;
+  els.saveLoadTooltip.style.top = `${Math.min(maxTop, y + 12)}px`;
+  els.saveLoadTooltip.hidden = false;
+  els.pendingChart.style.cursor = "crosshair";
+}
+
+function handleSaveLoadHover(event) {
+  const rect = els.pendingChart.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const region = saveLoadHitRegions.find((item) =>
+    x >= item.x
+    && x <= item.x + item.width
+    && y >= item.y
+    && y <= item.y + item.height
+  );
+  if (!region) {
+    hideSaveLoadTooltip();
+    return;
+  }
+  showSaveLoadTooltip(region, x, y);
+}
+
 function drawLineChart(canvas, saveHistory, status = {}) {
   const ctx = canvas.getContext("2d");
   const width = canvas.clientWidth || 640;
@@ -431,6 +478,7 @@ function drawLineChart(canvas, saveHistory, status = {}) {
   ctx.clearRect(0, 0, width, height);
 
   const rows = saveLoadRows(saveHistory, status);
+  saveLoadHitRegions = [];
   const totals = rows.reduce((acc, row) => {
     acc.total += row.total;
     acc.processed += row.processed;
@@ -513,17 +561,30 @@ function drawLineChart(canvas, saveHistory, status = {}) {
     roundRect(ctx, barX, baseline - Math.max(2, fullHeight), barWidth, Math.max(2, fullHeight), Math.min(5, barWidth / 2));
     ctx.fill();
     row.segments.forEach((segment, segmentIndex) => {
+      const segmentHeight = (segment.bytes / maxTotal) * plotHeight;
+      const segmentTop = y - segmentHeight;
       y = drawStackSegment(
         ctx,
         barX,
         y,
         barWidth,
-        (segment.bytes / maxTotal) * plotHeight,
+        segmentHeight,
         segmentColor(segment.status, segment.bytes, maxSegmentBytes),
         {
           dashed: segment.status === "pending",
         }
       );
+      saveLoadHitRegions.push({
+        x: barX - 2,
+        y: Math.min(segmentTop, y) - 2,
+        width: barWidth + 4,
+        height: Math.max(4, Math.abs(segmentHeight) + 4),
+        date: row.date,
+        name: segment.name,
+        bytes: segment.bytes,
+        status: segment.status,
+        source: segment.source,
+      });
     });
 
     if (row.active && fullHeight > 0) {
@@ -1062,28 +1123,42 @@ function knowledgeColor(index) {
   return KNOWLEDGE_COLORS[index % KNOWLEDGE_COLORS.length];
 }
 
-function donutSegments(categories, totalBytes) {
-  if (!totalBytes) return [];
+function knowledgeMetric(row, mode = knowledgeMixMode) {
+  return mode === "pages" ? intValue(row.pages) : intValue(row.bytes);
+}
+
+function knowledgeMetricLabel(value, mode = knowledgeMixMode) {
+  return mode === "pages" ? `${intValue(value).toLocaleString()} pages` : formatBytes(value);
+}
+
+function sortedKnowledgeCategories(categories, mode = knowledgeMixMode) {
+  return [...categories].sort((a, b) =>
+    knowledgeMetric(b, mode) - knowledgeMetric(a, mode) || fmt(a.label || a.id).localeCompare(fmt(b.label || b.id))
+  );
+}
+
+function donutSegments(categories, totalValue, mode = knowledgeMixMode) {
+  if (!totalValue) return [];
   const top = categories.slice(0, 7);
-  const otherBytes = categories.slice(7).reduce((sum, row) => sum + intValue(row.bytes), 0);
+  const otherValue = categories.slice(7).reduce((sum, row) => sum + knowledgeMetric(row, mode), 0);
   const segments = top.map((row, index) => ({
     label: fmt(row.label || row.id),
-    bytes: intValue(row.bytes),
-    share: intValue(row.bytes) / totalBytes,
+    value: knowledgeMetric(row, mode),
+    share: knowledgeMetric(row, mode) / totalValue,
     color: knowledgeColor(index),
   }));
-  if (otherBytes > 0) {
+  if (otherValue > 0) {
     segments.push({
       label: "Other",
-      bytes: otherBytes,
-      share: otherBytes / totalBytes,
+      value: otherValue,
+      share: otherValue / totalValue,
       color: "rgba(169,164,148,0.72)",
     });
   }
   return segments;
 }
 
-function drawKnowledgeDonut(canvas, categories, totalBytes) {
+function drawKnowledgeDonut(canvas, categories, totalValue, mode = knowledgeMixMode) {
   const ctx = canvas.getContext("2d");
   const width = canvas.clientWidth || 220;
   const height = Number(canvas.dataset.baseHeight || canvas.getAttribute("height") || 240);
@@ -1109,7 +1184,7 @@ function drawKnowledgeDonut(canvas, categories, totalBytes) {
   ctx.stroke();
 
   let start = -Math.PI / 2;
-  donutSegments(categories, totalBytes).forEach((segment) => {
+  donutSegments(categories, totalValue, mode).forEach((segment) => {
     const end = start + segment.share * Math.PI * 2;
     ctx.strokeStyle = segment.color;
     ctx.beginPath();
@@ -1122,19 +1197,25 @@ function drawKnowledgeDonut(canvas, categories, totalBytes) {
 
 function renderKnowledgeMix(knowledgeMix) {
   const data = knowledgeMix || {};
+  latestKnowledgeMix = data;
   const categories = Array.isArray(data.categories) ? data.categories : [];
   const totalPages = intValue(data.total_pages);
   const totalBytes = intValue(data.total_bytes);
-  const top = categories.slice(0, 6);
+  const sorted = sortedKnowledgeCategories(categories);
+  const totalValue = knowledgeMixMode === "pages" ? totalPages : totalBytes;
+  const top = sorted.slice(0, 6);
 
   els.knowledgeCaption.textContent = categories.length
-    ? `${categories.length} areas · ${formatBytes(totalBytes)}`
+    ? `${categories.length} areas · ${knowledgeMetricLabel(totalValue)} by ${knowledgeMixMode}`
     : "waiting";
   els.knowledgeTotal.textContent = totalPages ? totalPages.toLocaleString() : "--";
   els.knowledgePages.textContent = totalPages.toLocaleString();
   els.knowledgeSize.textContent = formatBytes(totalBytes);
   els.knowledgeCategories.textContent = String(categories.length);
-  drawKnowledgeDonut(els.knowledgeChart, categories, totalBytes);
+  els.knowledgeModeButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.knowledgeMode === knowledgeMixMode);
+  });
+  drawKnowledgeDonut(els.knowledgeChart, sorted, totalValue);
 
   els.knowledgeBars.innerHTML = "";
   if (!top.length) {
@@ -1143,8 +1224,8 @@ function renderKnowledgeMix(knowledgeMix) {
   }
 
   top.forEach((row, index) => {
-    const bytes = intValue(row.bytes);
-    const share = totalBytes ? bytes / totalBytes : 0;
+    const value = knowledgeMetric(row);
+    const share = totalValue ? value / totalValue : 0;
     const item = document.createElement("div");
     item.className = "knowledge-bar";
     item.style.setProperty("--bar-color", knowledgeColor(index));
@@ -1163,7 +1244,7 @@ function renderKnowledgeMix(knowledgeMix) {
     track.appendChild(fill);
 
     const meta = document.createElement("small");
-    meta.textContent = `${formatBytes(bytes)} · ${intValue(row.pages).toLocaleString()} pages`;
+    meta.textContent = `${formatBytes(row.bytes)} · ${intValue(row.pages).toLocaleString()} pages`;
     item.title = Array.isArray(row.samples) && row.samples.length
       ? `${fmt(row.label || row.id)} · ${row.samples.join(", ")}`
       : fmt(row.label || row.id);
@@ -1311,6 +1392,16 @@ els.saveModeButtons.forEach((button) => {
     renderSaveHistory(latestSaveHistory);
   });
 });
+
+els.knowledgeModeButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    knowledgeMixMode = button.dataset.knowledgeMode || "size";
+    renderKnowledgeMix(latestKnowledgeMix);
+  });
+});
+
+els.pendingChart.addEventListener("mousemove", handleSaveLoadHover);
+els.pendingChart.addEventListener("mouseleave", hideSaveLoadTooltip);
 
 refresh();
 setInterval(refresh, 1000);

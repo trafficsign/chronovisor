@@ -241,6 +241,14 @@ h2 {
   font-size: 13px;
 }
 
+.panel-subhead {
+  margin: -8px 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 canvas {
   display: block;
   width: 100%;
@@ -267,6 +275,43 @@ canvas {
     linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
   background-size: 42px 42px;
+}
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  gap: 4px;
+  width: min(220px, calc(100% - 16px));
+  padding: 9px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.78);
+  border-radius: 8px;
+  background: rgba(9, 10, 8, 0.94);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
+  color: var(--text);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.chart-tooltip[hidden] {
+  display: none;
+}
+
+.chart-tooltip strong,
+.chart-tooltip span,
+.chart-tooltip small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chart-tooltip strong {
+  font-size: 12px;
+}
+
+.chart-tooltip span,
+.chart-tooltip small {
+  color: var(--muted);
 }
 
 .chart-summary {
@@ -963,6 +1008,11 @@ canvas {
   background: var(--cyan);
 }
 
+.compact-control button {
+  min-height: 28px;
+  padding: 0 9px;
+}
+
 .save-summary.chart-summary.compact {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -1183,5 +1233,13 @@ canvas {
 
   .segmented-control button {
     flex: 1;
+  }
+
+  .segmented-control.compact-control {
+    width: auto;
+  }
+
+  .segmented-control.compact-control button {
+    flex: 0 0 auto;
   }
 }
