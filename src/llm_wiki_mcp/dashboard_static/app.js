@@ -361,10 +361,15 @@ function saveLoadRows(saveHistory, status) {
   });
 }
 
-function segmentColor(status, index) {
-  if (status === "failed") return "#f0bc62";
-  if (status === "pending") return index % 2 ? "rgba(102,217,232,0.22)" : "rgba(102,217,232,0.34)";
-  return index % 2 ? "rgba(143,214,148,0.74)" : "#8fd694";
+function segmentColor(status, bytes, maxBytes) {
+  const ratio = maxBytes > 0 ? Math.min(1, Math.sqrt(bytes / maxBytes)) : 0;
+  if (status === "failed") {
+    return `hsl(38, 84%, ${46 + ratio * 24}%)`;
+  }
+  if (status === "pending") {
+    return `hsl(187, 72%, ${32 + ratio * 28}%)`;
+  }
+  return `hsl(126, 43%, ${40 + ratio * 30}%)`;
 }
 
 function drawStackSegment(ctx, x, baseY, width, height, color, options = {}) {
@@ -372,14 +377,11 @@ function drawStackSegment(ctx, x, baseY, width, height, color, options = {}) {
   const y = baseY - height;
   ctx.fillStyle = color;
   ctx.fillRect(x, y, width, height);
-  if (options.separator && height >= 1) {
+  if (height >= 1) {
     ctx.save();
-    ctx.strokeStyle = "rgba(9, 10, 8, 0.58)";
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.78)";
     ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x + width, y);
-    ctx.stroke();
+    ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1, width - 1), Math.max(1, height - 1));
     ctx.restore();
   }
   if (options.dashed) {
@@ -434,6 +436,7 @@ function drawLineChart(canvas, saveHistory, status = {}) {
   }
 
   const maxTotal = Math.max(1, ...rows.map((row) => row.total));
+  const maxSegmentBytes = Math.max(1, ...rows.flatMap((row) => row.segments.map((segment) => segment.bytes)));
   const ticks = [0, maxTotal / 2, maxTotal];
   const slot = plotWidth / rows.length;
   const barWidth = Math.max(5, Math.min(18, slot * 0.62));
@@ -493,10 +496,9 @@ function drawLineChart(canvas, saveHistory, status = {}) {
         y,
         barWidth,
         (segment.bytes / maxTotal) * plotHeight,
-        segmentColor(segment.status, segmentIndex),
+        segmentColor(segment.status, segment.bytes, maxSegmentBytes),
         {
           dashed: segment.status === "pending",
-          separator: row.segments.length > 1 && segmentIndex > 0,
         }
       );
     });
