@@ -24,7 +24,7 @@ query_prefix = ""
 # feedback when the incoming query is lexically similar (Jaccard over search
 # tokens) to the feedback prompt. Pages confirmed relevant by reviewed golden
 # labels for a similar query are protected and never demoted.
-enabled = false
+enabled = true
 similarity_threshold = 0.35
 penalty = 0.85
 max_age_days = 180
@@ -38,8 +38,8 @@ backend = "transformers"
 model = "BAAI/bge-reranker-v2-m3"
 top_n = 20
 max_length = 1024
-batch_size = 8
-device = ""
+batch_size = 4
+device = "mps"
 weight = 0.25
 
 [recall.thresholds]
@@ -104,11 +104,23 @@ fail_silent_on_judge_unavailable = true
 
 [audit]
 enabled = true
-model = "qwen3.6:35b-a3b-q8_0"
+model = "qwen3.6:35b-a3b-mxfp8"
 think = false
 timeout_ms = 120000
+num_ctx = 32768
+num_predict = 1024
 top_k = 5
+semantic = true
 min_confidence = 0.70
+max_prompt_chars = 4000
+max_response_chars = 6000
+recent_log_limit = 500
+
+[recall_improvement]
+models = [
+  "qwen3.6:35b-a3b-mxfp8",
+  "gemma4:26b-mxfp8",
+]
 
 [auto_apply]
 enabled = true
@@ -135,10 +147,11 @@ The compatibility wrappers preserve the old environment behavior. Direct
 ## Optional Reranker
 
 Install the optional local reranker dependencies with `uv sync --extra reranker`
-before enabling `[search.reranker]`. The default backend uses Hugging Face
-Transformers with `BAAI/bge-reranker-v2-m3` and reranks only the MCP
-`wiki.search` top candidates (plus explicit search-eval reranker experiments).
-It is not called by the synchronous recall hook.
+before enabling `[search.reranker]`. The production profile keeps it disabled:
+BM25 + semantic fusion is the default ranking path, and the synchronous recall
+hook never calls the reranker. If enabled, the Hugging Face Transformers backend
+uses `BAAI/bge-reranker-v2-m3` only for MCP `wiki.search` top candidates and
+explicit search-eval reranker experiments.
 
 ## Recall Defaults
 

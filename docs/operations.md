@@ -20,6 +20,19 @@ llm-wiki doctor --json
 Runs lightweight operational checks for wiki directories, config, and detected
 host hooks.
 
+## Dashboard
+
+```sh
+llm-wiki-dashboard --host 127.0.0.1 --port 8765
+```
+
+The local dashboard is the primary live operations view. `Current Work` shows
+the active ingest stage (`Raw -> Triage -> Generate -> Apply -> Index`), the
+current raw/job if one is running, and the last completed raw while idle. `Model
+Fleet` combines configured roles with Ollama installed/loaded state, so unused
+local models should not appear once they are removed from config and from the
+local model store.
+
 ## Hook Install
 
 ```sh
@@ -82,6 +95,10 @@ llm-wiki-eval --self-tune
 records missed expected pages with channel candidates and a reason code.
 `--self-tune` is shadow-only: it searches dev-set weights and checks locked-test
 guardrails, but never edits config by itself.
+
+The optional Hugging Face reranker is disabled in the normal local profile.
+Ranking still runs through BM25 + semantic fusion; enable `[search.reranker]`
+only for explicit MCP `wiki.search` or search-eval reranker experiments.
 
 ## Calibration
 

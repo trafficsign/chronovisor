@@ -49,6 +49,8 @@ Nightly / manual
 - **Auto-apply**: applies additive actions only (`query_hint`, `alias`, `page_tag`).
 - **Calibration**: pure-Python logistic calibration on recall-log features and
   feedback labels, applied as `validated-auto` only after time-ordered holdout.
+- **Dashboard**: local browser observability for ingest work, self-heal status,
+  recall improvement runs, save history, knowledge mix, and model fleet roles.
 
 `few_shot` and `threshold` actions are review-lane only because they alter the
 gate's decision behavior globally.
@@ -70,9 +72,9 @@ BM25
 ```
 
 The MCP `wiki.search` tool adds one post-search stage: exact tag filtering,
-then `apply_rerank_stage()` when the reranker is enabled for relevance-sorted
-queries. The synchronous recall hook keeps using the faster fused search path
-and does not call the reranker.
+then `apply_rerank_stage()` only when the optional reranker is enabled for
+relevance-sorted queries. The synchronous recall hook keeps using the faster
+fused search path and does not call the reranker.
 
 ## Host Boundary
 
