@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from llm_wiki_mcp.recall_runtime import (
     ContextItem,
     RecallPolicy,
@@ -24,6 +26,11 @@ from llm_wiki_mcp.recall_runtime import (
     warm_recall_model,
 )
 from llm_wiki_mcp.search import ScoredPage
+
+
+@pytest.fixture(autouse=True)
+def disable_live_recall_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_WIKI_RECALL_IMPROVEMENT_POLICY", "0")
 
 
 def test_explicit_past_project_prompt_crosses_read_threshold() -> None:
