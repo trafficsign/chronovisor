@@ -711,6 +711,18 @@ canvas {
   text-transform: uppercase;
 }
 
+.self-heal-badge.success {
+  background: var(--green);
+}
+
+.self-heal-badge.info {
+  background: var(--cyan);
+}
+
+.self-heal-badge.warn {
+  background: var(--amber);
+}
+
 .self-heal-panel.resolved .self-heal-badge {
   background: var(--green);
 }
@@ -978,6 +990,11 @@ canvas {
 }
 
 .recall-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.recall-lab-panel {
   display: flex;
   flex-direction: column;
 }

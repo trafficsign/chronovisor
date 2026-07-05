@@ -52,7 +52,9 @@ class EvalMetrics:
     false_positives: int
     recall_at_1: float
     recall_at_3: float
+    mrr: float
     waste_injection_rate: float
+    avg_pages: float
     decision_counts: dict[str, int]
     latency_ms: dict[str, float]
 
@@ -181,6 +183,8 @@ def evaluate_examples(
     false_positives = 0
     hits = {k: 0 for k in k_values}
     waste = 0
+    reciprocal_ranks: list[float] = []
+    page_counts: list[int] = []
     replay_rows: list[dict[str, Any]] = []
 
     eval_policy = RecallPolicy(**{**policy.__dict__, "log_decisions": False})
@@ -204,12 +208,15 @@ def evaluate_examples(
 
         decision_counts[decision] = decision_counts.get(decision, 0) + 1
         latencies.append(latency)
+        page_counts.append(len(pages))
         if example.is_positive:
             positives += 1
             expected = set(example.expected_pages)
             for k in k_values:
                 if expected & set(pages[:k]):
                     hits[k] += 1
+            rank = next((idx + 1 for idx, page in enumerate(pages) if page in expected), 0)
+            reciprocal_ranks.append((1.0 / rank) if rank else 0.0)
         if example.is_false_positive:
             false_positives += 1
             if decision != "none" and pages:
@@ -231,7 +238,9 @@ def evaluate_examples(
         false_positives=false_positives,
         recall_at_1=(hits.get(1, 0) / positives) if positives else 0.0,
         recall_at_3=(hits.get(3, 0) / positives) if positives else 0.0,
+        mrr=(sum(reciprocal_ranks) / positives) if positives else 0.0,
         waste_injection_rate=(waste / false_positives) if false_positives else 0.0,
+        avg_pages=(sum(page_counts) / len(page_counts)) if page_counts else 0.0,
         decision_counts=decision_counts,
         latency_ms={
             "p50": float(statistics.median(latencies)) if latencies else 0.0,

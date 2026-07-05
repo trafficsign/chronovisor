@@ -68,6 +68,17 @@ const els = {
   recallCounts: document.getElementById("recall-counts"),
   recallCalibration: document.getElementById("recall-calibration"),
   recallFeed: document.getElementById("recall-feed"),
+  recallLabPanel: document.getElementById("recall-lab-panel"),
+  recallLabCaption: document.getElementById("recall-lab-caption"),
+  recallLabState: document.getElementById("recall-lab-state"),
+  recallLabLatest: document.getElementById("recall-lab-latest"),
+  recallLabDetail: document.getElementById("recall-lab-detail"),
+  recallLabActive: document.getElementById("recall-lab-active"),
+  recallLabDev: document.getElementById("recall-lab-dev"),
+  recallLabHoldout: document.getElementById("recall-lab-holdout"),
+  recallLabModels: document.getElementById("recall-lab-models"),
+  recallLabPolicy: document.getElementById("recall-lab-policy"),
+  recallLabFeed: document.getElementById("recall-lab-feed"),
   eventFeed: document.getElementById("event-feed"),
   pendingChart: document.getElementById("pending-chart"),
   saveLoadTooltip: document.getElementById("save-load-tooltip"),
@@ -1338,6 +1349,79 @@ function renderRecall(recall) {
   });
 }
 
+function renderRecallImprovement(lab) {
+  const data = lab || {};
+  const active = data.active || null;
+  const latest = data.latest || null;
+  const status = String(data.status || "quiet");
+  const configuredModels = Array.isArray(data.models) ? data.models : [];
+  const models = latest && Array.isArray(latest.models) ? latest.models : configuredModels;
+  const best = latest && latest.best ? latest.best : null;
+  const bestDev = best && best.dev ? best.dev : {};
+  const bestHoldout = best && best.holdout ? best.holdout : {};
+  const baseline = latest && latest.baseline ? latest.baseline : {};
+  const baselineDev = baseline.dev || {};
+  const baselineHoldout = baseline.holdout || {};
+  const activeOverrides = active && active.overrides ? active.overrides : {};
+  const statusKind = status === "active" || status === "applied"
+    ? "success"
+    : status === "rejected" || status === "blocked" || status === "error"
+      ? "warn"
+      : "info";
+
+  els.recallLabCaption.textContent = latest ? `${(data.history || []).length} runs` : "quiet";
+  els.recallLabState.textContent = status;
+  els.recallLabState.className = `self-heal-badge ${statusKind}`;
+  els.recallLabLatest.textContent = latest
+    ? `${fmt(latest.status)} · ${fmt(latest.run_id)}`
+    : "No runs yet";
+  els.recallLabDetail.textContent = latest
+    ? fmt(latest.reason)
+    : "Run llm-wiki recall-improve run to start the local proposal tournament.";
+  els.recallLabActive.textContent = active ? "on" : "off";
+  const devScore = numeric(bestDev.score) ? bestDev.score : baselineDev.score;
+  const holdoutScore = numeric(bestHoldout.score) ? bestHoldout.score : baselineHoldout.score;
+  els.recallLabDev.textContent = numeric(devScore) ? devScore.toFixed(3) : "--";
+  els.recallLabHoldout.textContent = numeric(holdoutScore) ? holdoutScore.toFixed(3) : "--";
+  els.recallLabModels.textContent = models.length ? String(models.length) : "--";
+  const overrideText = Object.entries(activeOverrides)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" · ");
+  els.recallLabPolicy.textContent = overrideText
+    ? `active policy: ${overrideText}`
+    : "active policy: baseline";
+
+  els.recallLabFeed.innerHTML = "";
+  const history = Array.isArray(data.history) ? [...data.history].slice(-5).reverse() : [];
+  if (!history.length) {
+    const empty = document.createElement("div");
+    empty.className = "self-heal-empty";
+    empty.textContent = "No improvement runs yet.";
+    els.recallLabFeed.appendChild(empty);
+    return;
+  }
+  history.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "event";
+    const time = document.createElement("time");
+    time.textContent = timeLabel(item.ts);
+    const badge = document.createElement("span");
+    const itemStatus = String(item.status || "unknown");
+    badge.className = `event-level ${
+      itemStatus === "applied" ? "success" : itemStatus === "shadow_pass" ? "info" : "warn"
+    }`;
+    badge.textContent = itemStatus;
+    const message = document.createElement("span");
+    message.className = "event-message";
+    const rowBest = item.best || {};
+    const proposal = rowBest.proposal || {};
+    const score = rowBest.dev && numeric(rowBest.dev.score) ? ` · dev ${rowBest.dev.score.toFixed(3)}` : "";
+    message.textContent = `${fmt(proposal.summary || item.reason)}${score}`;
+    row.append(time, badge, message);
+    els.recallLabFeed.appendChild(row);
+  });
+}
+
 function render(snapshot) {
   const status = snapshot.status || {};
   const metrics = snapshot.metrics || [];
@@ -1363,6 +1447,7 @@ function render(snapshot) {
   updateStageFlow(status.stage);
   renderSelfHeal(snapshot.self_heal || {});
   renderRecall(snapshot.recall || {});
+  renderRecallImprovement(snapshot.recall_improvement || {});
   renderSaveHistory(snapshot.save_history || {});
   renderKnowledgeMix(snapshot.knowledge_mix || {});
   renderEvents(snapshot.events || []);

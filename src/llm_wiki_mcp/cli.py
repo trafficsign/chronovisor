@@ -508,6 +508,22 @@ def main(argv: list[str] | None = None) -> int:
     recall_eval_parser.add_argument("--save-baseline", action="store_true")
     recall_eval_parser.add_argument("--config-override", action="append", default=[])
     recall_eval_parser.add_argument("--json", action="store_true")
+    recall_improve_parser = sub.add_parser("recall-improve", help="Run self-improving recall policy loop.")
+    recall_improve_sub = recall_improve_parser.add_subparsers(dest="recall_improve_command", required=True)
+    recall_improve_run = recall_improve_sub.add_parser("run", help="Propose, replay-evaluate, and adopt a policy patch.")
+    recall_improve_run.add_argument("--config")
+    recall_improve_run.add_argument("--log-file", default=str(RECALL_LOG_FILE))
+    recall_improve_run.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))
+    recall_improve_run.add_argument("--models", help="Comma-separated Ollama proposer models.")
+    recall_improve_run.add_argument("--no-apply", dest="apply", action="store_false", default=True)
+    recall_improve_run.add_argument("--no-heuristic", dest="include_heuristic", action="store_false", default=True)
+    recall_improve_run.add_argument("--min-improvement", type=float, default=0.05)
+    recall_improve_run.add_argument("--max-examples", type=int, default=120)
+    recall_improve_run.add_argument("--json", action="store_true")
+    recall_improve_status = recall_improve_sub.add_parser("status", help="Show active recall improvement policy.")
+    recall_improve_status.add_argument("--json", action="store_true")
+    recall_improve_rollback = recall_improve_sub.add_parser("rollback", help="Rollback accepted recall policy.")
+    recall_improve_rollback.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     if args.command == "status":
@@ -569,6 +585,49 @@ def main(argv: list[str] | None = None) -> int:
             print(f"waste_injection_rate\t{metrics['waste_injection_rate']:.3f}")
             print(f"latency_p95_ms\t{metrics['latency_ms']['p95']:.1f}")
         return 0
+    if args.command == "recall-improve":
+        from llm_wiki_mcp import recall_improvement
+
+        if args.recall_improve_command == "run":
+            data = recall_improvement.run_improvement(
+                config_file=Path(args.config).expanduser() if args.config else None,
+                log_file=Path(args.log_file).expanduser(),
+                feedback_file=Path(args.feedback_file).expanduser(),
+                models=args.models,
+                apply=args.apply,
+                include_heuristic=args.include_heuristic,
+                min_improvement=max(0.0, args.min_improvement),
+                max_examples=max(1, args.max_examples),
+            )
+            if args.json:
+                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+            else:
+                print(f"run\t{data['run_id']}")
+                print(f"status\t{data['status']}")
+                print(f"applied\t{data['applied']}")
+                print(f"reason\t{data['reason']}")
+            return 0
+        if args.recall_improve_command == "status":
+            data = recall_improvement.improvement_snapshot()
+            if args.json:
+                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+            else:
+                active = data.get("active") or {}
+                latest = data.get("latest") or {}
+                print(f"status\t{data.get('status')}")
+                print(f"active\t{active.get('run_id') or '--'}")
+                print(f"latest\t{latest.get('run_id') or '--'}\t{latest.get('status') or '--'}")
+            return 0
+        if args.recall_improve_command == "rollback":
+            data = recall_improvement.rollback_policy()
+            if args.json:
+                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+            else:
+                print(
+                    f"rollback\t{data['reason']}\t"
+                    f"{data.get('from_run_id') or '--'} -> {data.get('to_run_id') or '--'}"
+                )
+            return 0
     return 0
 
 

@@ -259,6 +259,13 @@ def load_policy(path: Path = RECALL_CONFIG_FILE) -> RecallPolicy:
             data = {}
         _apply_config(policy, data)
 
+    try:
+        from llm_wiki_mcp.recall_policy_store import apply_active_policy
+
+        apply_active_policy(policy)
+    except Exception:
+        pass
+
     enabled_env = os.environ.get("LLM_WIKI_RECALL_ENABLED")
     if enabled_env is not None:
         policy.enabled = enabled_env not in {"0", "false", "False", "no", "NO"}

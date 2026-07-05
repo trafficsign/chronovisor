@@ -970,6 +970,22 @@ def _recall_snapshot(limit: int = 400) -> dict[str, Any]:
     }
 
 
+def _recall_improvement_snapshot() -> dict[str, Any]:
+    try:
+        from llm_wiki_mcp.recall_improvement import improvement_snapshot
+
+        return improvement_snapshot()
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": exc.__class__.__name__,
+            "active": None,
+            "latest": None,
+            "history": [],
+            "counts": {},
+        }
+
+
 def build_snapshot() -> dict[str, Any]:
     init_wiki()
     status = runtime_status.read_status()
@@ -1016,6 +1032,7 @@ def build_snapshot() -> dict[str, Any]:
         "metrics": metrics,
         "self_heal": _self_heal_snapshot(),
         "recall": _recall_snapshot(),
+        "recall_improvement": _recall_improvement_snapshot(),
         "save_history": _save_history_snapshot(),
         "knowledge_mix": _knowledge_mix_snapshot(),
         "paths": {
@@ -1047,6 +1064,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _json_response(self, {"self_heal": build_snapshot()["self_heal"]})
         elif path == "/api/recall":
             _json_response(self, {"recall": build_snapshot()["recall"]})
+        elif path == "/api/recall-improvement":
+            _json_response(self, {"recall_improvement": build_snapshot()["recall_improvement"]})
         elif path == "/api/save-history":
             _json_response(self, {"save_history": build_snapshot()["save_history"]})
         elif path == "/api/knowledge-mix":
