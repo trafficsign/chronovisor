@@ -54,8 +54,8 @@ from llm_wiki_mcp.runtime_status import safe_append_event, safe_append_metric
 
 
 DEFAULT_IMPROVEMENT_MODELS = (
-    "qwen3.6:35b-a3b-q8_0",
-    "hf.co/douyamv/Gemma-4-31B-JANG_4M-CRACK-GGUF:latest",
+    "qwen3.6:35b-a3b-mxfp8",
+    "gemma4:26b-mxfp8",
 )
 
 FRONTIER_AUDIT_MODES = {"off", "auto", "always"}

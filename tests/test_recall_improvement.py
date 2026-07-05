@@ -7,6 +7,16 @@ from llm_wiki_mcp.recall_improvement import PolicyProposal
 from llm_wiki_mcp.recall_runtime import RecallPolicy
 
 
+def test_default_improvement_models_use_mlx_moe_pair(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_WIKI_RECALL_IMPROVEMENT_MODELS", raising=False)
+    monkeypatch.setattr(recall_improvement, "load_toml_file", lambda: {})
+
+    assert recall_improvement.configured_models() == (
+        "qwen3.6:35b-a3b-mxfp8",
+        "gemma4:26b-mxfp8",
+    )
+
+
 def _write_feedback(log_file, feedback_file) -> None:
     log_file.write_text(
         json.dumps(
