@@ -16,8 +16,12 @@ from urllib.parse import urlparse
 
 import httpx
 
-from llm_wiki_mcp import orchestrator, runtime_status
-from llm_wiki_mcp.ollama import OLLAMA_URL
+from llm_wiki_mcp import orchestrator, recall_runtime, runtime_status
+from llm_wiki_mcp.ollama import MODEL as INGEST_MODEL
+from llm_wiki_mcp.ollama import OLLAMA_URL, embedding_model
+from llm_wiki_mcp.recall_auditor import load_audit_policy
+from llm_wiki_mcp.recall_improvement import configured_models
+from llm_wiki_mcp.runtime_config import load_reranker_config
 from llm_wiki_mcp.wiki import LOG_FILE, WIKI_ROOT, init_wiki
 
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
@@ -86,6 +90,228 @@ def _ollama_snapshot() -> dict[str, Any]:
         return {"available": True, "models": models}
     except Exception as exc:
         return {"available": False, "models": [], "error": str(exc)}
+
+
+def _ollama_tags_snapshot() -> dict[str, Any]:
+    try:
+        resp = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=1.5)
+        resp.raise_for_status()
+        data = resp.json()
+        models = data.get("models", [])
+        if not isinstance(models, list):
+            models = []
+        return {"available": True, "models": models}
+    except Exception as exc:
+        return {"available": False, "models": [], "error": str(exc)}
+
+
+def _model_name(row: dict[str, Any] | None) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for key in ("model", "name"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _numeric_bytes(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int | float):
+        return max(0, int(value))
+    return 0
+
+
+def _add_model_role(roles: dict[str, set[str]], model: str | None, role: str) -> None:
+    if not isinstance(model, str):
+        return
+    model = model.strip()
+    if not model:
+        return
+    roles.setdefault(model, set()).add(role)
+
+
+def _configured_model_roles() -> dict[str, set[str]]:
+    roles: dict[str, set[str]] = {}
+    _add_model_role(roles, INGEST_MODEL, "ingest")
+
+    try:
+        audit_policy = load_audit_policy()
+        if getattr(audit_policy, "enabled", True):
+            _add_model_role(roles, getattr(audit_policy, "model", ""), "audit")
+    except Exception:
+        pass
+
+    try:
+        recall_policy = recall_runtime.load_policy()
+        if getattr(recall_policy, "judge_mode", "auto") != "off":
+            _add_model_role(roles, getattr(recall_policy, "judge_model", ""), "gate")
+        if getattr(recall_policy, "rewrite_enabled", False):
+            _add_model_role(roles, getattr(recall_policy, "rewrite_model", ""), "rewrite")
+    except Exception:
+        pass
+
+    try:
+        for model in configured_models(None):
+            _add_model_role(roles, model, "improve")
+    except Exception:
+        pass
+
+    try:
+        _add_model_role(roles, embedding_model(), "embed")
+    except Exception:
+        pass
+
+    try:
+        reranker = load_reranker_config()
+        if reranker.enabled:
+            _add_model_role(roles, reranker.model, "rerank")
+    except Exception:
+        pass
+
+    return roles
+
+
+def _role_sort_key(role: str) -> int:
+    order = {
+        "ingest": 0,
+        "audit": 1,
+        "improve": 2,
+        "gate": 3,
+        "rewrite": 4,
+        "embed": 5,
+        "rerank": 6,
+    }
+    return order.get(role, 99)
+
+
+def _resolve_model_name(
+    name: str,
+    installed_by_name: dict[str, dict[str, Any]],
+    running_by_name: dict[str, dict[str, Any]],
+) -> str:
+    candidates = [name]
+    if ":" not in name:
+        candidates.append(f"{name}:latest")
+    if name.endswith(":latest"):
+        candidates.append(name.removesuffix(":latest"))
+    for candidate in candidates:
+        if candidate in running_by_name or candidate in installed_by_name:
+            return candidate
+    return name
+
+
+def _external_configured_model(name: str, roles: set[str]) -> bool:
+    if roles == {"rerank"} and "/" in name and not name.startswith("hf.co/"):
+        return True
+    return False
+
+
+def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, Any]:
+    running_snapshot = ollama or _ollama_snapshot()
+    installed_snapshot = _ollama_tags_snapshot()
+    running_models = running_snapshot.get("models", [])
+    installed_models = installed_snapshot.get("models", [])
+    if not isinstance(running_models, list):
+        running_models = []
+    if not isinstance(installed_models, list):
+        installed_models = []
+
+    running_by_name = {_model_name(row): row for row in running_models if _model_name(row)}
+    installed_by_name = {_model_name(row): row for row in installed_models if _model_name(row)}
+    roles_by_name: dict[str, set[str]] = {}
+    for name, roles in _configured_model_roles().items():
+        resolved = _resolve_model_name(name, installed_by_name, running_by_name)
+        roles_by_name.setdefault(resolved, set()).update(roles)
+    names = sorted(set(running_by_name) | set(installed_by_name) | set(roles_by_name))
+    rows: list[dict[str, Any]] = []
+    missing = 0
+    external = 0
+    loaded_size = 0
+    installed_size = 0
+
+    for name in names:
+        installed = installed_by_name.get(name)
+        running = running_by_name.get(name)
+        roles = roles_by_name.get(name, set())
+        configured = bool(roles)
+        installed_size += _numeric_bytes(installed.get("size") if installed else 0)
+        loaded_size += _numeric_bytes(
+            (running.get("size_vram") if isinstance(running, dict) else 0)
+            or (running.get("size") if isinstance(running, dict) else 0)
+        )
+        is_external = configured and not installed and not running and _external_configured_model(name, roles)
+        if running:
+            status = "loaded"
+        elif installed:
+            status = "ready"
+        elif is_external:
+            status = "external"
+            external += 1
+        elif configured:
+            status = "missing"
+            missing += 1
+        else:
+            status = "unknown"
+        details = {}
+        capabilities: list[str] = []
+        for source in (installed, running):
+            if isinstance(source, dict):
+                if isinstance(source.get("details"), dict):
+                    details = dict(source["details"])
+                if isinstance(source.get("capabilities"), list):
+                    capabilities = [str(item) for item in source["capabilities"]]
+        rows.append(
+            {
+                "name": name,
+                "status": status,
+                "installed": installed is not None,
+                "running": running is not None,
+                "configured": configured,
+                "roles": sorted(roles, key=_role_sort_key),
+                "size_bytes": _numeric_bytes(installed.get("size") if installed else None),
+                "loaded_size_bytes": _numeric_bytes(
+                    (running.get("size_vram") if isinstance(running, dict) else None)
+                    or (running.get("size") if isinstance(running, dict) else None)
+                ),
+                "context_length": running.get("context_length") if isinstance(running, dict) else details.get("context_length"),
+                "expires_at": running.get("expires_at") if isinstance(running, dict) else None,
+                "modified_at": installed.get("modified_at") if isinstance(installed, dict) else None,
+                "digest": (
+                    (installed.get("digest") if isinstance(installed, dict) else None)
+                    or (running.get("digest") if isinstance(running, dict) else None)
+                ),
+                "processor": running.get("processor") if isinstance(running, dict) else None,
+                "details": details,
+                "capabilities": capabilities,
+            }
+        )
+
+    status_order = {"loaded": 0, "missing": 1, "ready": 2, "external": 3, "unknown": 4}
+    rows.sort(
+        key=lambda row: (
+            0 if row["configured"] else 1,
+            status_order.get(str(row["status"]), 9),
+            str(row["name"]),
+        )
+    )
+    return {
+        "available": bool(running_snapshot.get("available") or installed_snapshot.get("available")),
+        "running_available": bool(running_snapshot.get("available")),
+        "installed_available": bool(installed_snapshot.get("available")),
+        "error": running_snapshot.get("error") or installed_snapshot.get("error"),
+        "models": rows,
+        "summary": {
+            "installed": len(installed_by_name),
+            "loaded": len(running_by_name),
+            "configured": len(roles_by_name),
+            "missing": missing,
+            "external": external,
+            "installed_size_bytes": installed_size,
+            "loaded_size_bytes": loaded_size,
+        },
+    }
 
 
 def _drain_history(limit: int = 200) -> list[dict[str, Any]]:
@@ -1020,6 +1246,7 @@ def build_snapshot() -> dict[str, Any]:
     )
     events = (runtime_status.read_events(limit=120) + _recent_log_events(limit=80))[-160:]
     ollama = _ollama_snapshot()
+    model_status = _model_status_snapshot(ollama)
     return {
         "status": status,
         "orchestrator": {
@@ -1028,6 +1255,7 @@ def build_snapshot() -> dict[str, Any]:
             "triage_failure_count": orch_state.get("triage_failure_count", 0),
         },
         "ollama": ollama,
+        "model_status": model_status,
         "events": events,
         "metrics": metrics,
         "self_heal": _self_heal_snapshot(),
@@ -1070,6 +1298,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _json_response(self, {"save_history": build_snapshot()["save_history"]})
         elif path == "/api/knowledge-mix":
             _json_response(self, {"knowledge_mix": build_snapshot()["knowledge_mix"]})
+        elif path == "/api/model-status":
+            snapshot = build_snapshot()
+            _json_response(self, {"model_status": snapshot["model_status"], "ollama": snapshot["ollama"]})
         elif path.startswith("/static/"):
             rel = path.removeprefix("/static/").lstrip("/")
             target = (STATIC_DIR / rel).resolve()

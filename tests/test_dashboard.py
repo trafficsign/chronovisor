@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 from llm_wiki_mcp import dashboard, runtime_status
 
@@ -36,6 +37,11 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json")
     monkeypatch.setattr(dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []})
+    monkeypatch.setattr(
+        dashboard,
+        "_model_status_snapshot",
+        lambda ollama=None: {"available": False, "models": [], "summary": {"installed": 0, "loaded": 0}},
+    )
     monkeypatch.setattr(
         dashboard,
         "_frontier_preflight_snapshot",
@@ -125,6 +131,11 @@ def test_build_snapshot_surfaces_frontier_human_required(
     monkeypatch.setattr(dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []})
     monkeypatch.setattr(
         dashboard,
+        "_model_status_snapshot",
+        lambda ollama=None: {"available": False, "models": [], "summary": {"installed": 0, "loaded": 0}},
+    )
+    monkeypatch.setattr(
+        dashboard,
         "_frontier_preflight_snapshot",
         lambda: {"ok": False, "checked_at": "2026-06-04T22:00:00"},
     )
@@ -186,6 +197,108 @@ def test_build_snapshot_surfaces_frontier_human_required(
     assert self_heal["latest"]["details"]["pending_frontier_review_path"] == packet["pending_frontier_review_path"]
     assert self_heal["watch"]["packets"]["failed"] == 1
     assert self_heal["watch"]["frontier_preflight"]["ok"] is False
+
+
+def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
+    monkeypatch.setattr(dashboard, "INGEST_MODEL", "qwen3.6:35b-a3b-mxfp8")
+    monkeypatch.setattr(
+        dashboard,
+        "_ollama_snapshot",
+        lambda: {
+            "available": True,
+            "models": [
+                {
+                    "name": "qwen3.6:35b-a3b-mxfp8",
+                    "model": "qwen3.6:35b-a3b-mxfp8",
+                    "size": 39_000,
+                    "size_vram": 39_000,
+                    "context_length": 32768,
+                    "expires_at": "2026-07-05T20:11:28+09:00",
+                    "details": {"format": "safetensors", "quantization_level": "mxfp8"},
+                },
+                {
+                    "name": "bge-m3:latest",
+                    "model": "bge-m3:latest",
+                    "size": 664,
+                    "size_vram": 664,
+                    "context_length": 8192,
+                    "details": {"format": "gguf", "quantization_level": "F16"},
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_ollama_tags_snapshot",
+        lambda: {
+            "available": True,
+            "models": [
+                {
+                    "name": "qwen3.6:35b-a3b-mxfp8",
+                    "model": "qwen3.6:35b-a3b-mxfp8",
+                    "size": 37_000,
+                    "modified_at": "2026-07-05T18:04:01+09:00",
+                    "details": {"format": "safetensors", "quantization_level": "mxfp8"},
+                    "capabilities": ["completion", "tools"],
+                },
+                {
+                    "name": "gemma4:26b-mxfp8",
+                    "model": "gemma4:26b-mxfp8",
+                    "size": 27_000,
+                    "details": {"format": "safetensors", "quantization_level": "mxfp8"},
+                    "capabilities": ["completion"],
+                },
+                {
+                    "name": "bge-m3:latest",
+                    "model": "bge-m3:latest",
+                    "size": 1_157,
+                    "details": {"format": "gguf", "quantization_level": "F16"},
+                    "capabilities": ["embedding"],
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "load_audit_policy",
+        lambda: SimpleNamespace(enabled=True, model="qwen3.6:35b-a3b-mxfp8"),
+    )
+    monkeypatch.setattr(
+        dashboard.recall_runtime,
+        "load_policy",
+        lambda: SimpleNamespace(
+            judge_mode="auto",
+            judge_model="qwen3.5:4b",
+            rewrite_enabled=True,
+            rewrite_model="qwen3.5:4b",
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "configured_models",
+        lambda models=None: ("qwen3.6:35b-a3b-mxfp8", "gemma4:26b-mxfp8"),
+    )
+    monkeypatch.setattr(dashboard, "embedding_model", lambda: "bge-m3")
+    monkeypatch.setattr(
+        dashboard,
+        "load_reranker_config",
+        lambda: SimpleNamespace(enabled=False, model="BAAI/bge-reranker-v2-m3"),
+    )
+
+    snapshot = dashboard._model_status_snapshot()
+    by_name = {row["name"]: row for row in snapshot["models"]}
+
+    assert snapshot["summary"]["installed"] == 3
+    assert snapshot["summary"]["loaded"] == 2
+    assert snapshot["summary"]["configured"] == 4
+    assert by_name["qwen3.6:35b-a3b-mxfp8"]["status"] == "loaded"
+    assert by_name["qwen3.6:35b-a3b-mxfp8"]["roles"] == ["ingest", "audit", "improve"]
+    assert by_name["gemma4:26b-mxfp8"]["status"] == "ready"
+    assert by_name["gemma4:26b-mxfp8"]["roles"] == ["improve"]
+    assert by_name["bge-m3:latest"]["roles"] == ["embed"]
+    assert "bge-m3" not in by_name
+    assert by_name["qwen3.5:4b"]["status"] == "missing"
+    assert by_name["qwen3.5:4b"]["roles"] == ["gate", "rewrite"]
 
 
 def test_self_heal_snapshot_surfaces_watch_status(tmp_path: Path, monkeypatch) -> None:

@@ -167,6 +167,35 @@
         </div>
       </article>
 
+      <article class="panel panel-wide model-panel" id="model-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Model Fleet</h2>
+            <p>Configured roles, installed models, and live Ollama residency.</p>
+          </div>
+          <span id="model-caption">waiting</span>
+        </div>
+        <div class="chart-summary compact model-summary" aria-label="Model fleet summary">
+          <div class="chart-stat">
+            <span>Installed</span>
+            <strong id="model-installed">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Loaded</span>
+            <strong id="model-loaded">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Configured</span>
+            <strong id="model-configured">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Missing</span>
+            <strong id="model-missing">--</strong>
+          </div>
+        </div>
+        <div class="model-grid" id="model-grid"></div>
+      </article>
+
       <article class="panel">
         <div class="panel-head">
           <div>

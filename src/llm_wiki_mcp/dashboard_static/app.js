@@ -59,6 +59,12 @@ const els = {
   knowledgeSize: document.getElementById("knowledge-size"),
   knowledgeCategories: document.getElementById("knowledge-categories"),
   knowledgeModeButtons: document.querySelectorAll("[data-knowledge-mode]"),
+  modelCaption: document.getElementById("model-caption"),
+  modelInstalled: document.getElementById("model-installed"),
+  modelLoaded: document.getElementById("model-loaded"),
+  modelConfigured: document.getElementById("model-configured"),
+  modelMissing: document.getElementById("model-missing"),
+  modelGrid: document.getElementById("model-grid"),
   recallPanel: document.getElementById("recall-panel"),
   recallCaption: document.getElementById("recall-caption"),
   recallR3: document.getElementById("recall-r3"),
@@ -149,6 +155,10 @@ function compactDuration(seconds) {
 
 function formatBytes(value) {
   const bytes = intValue(value);
+  if (bytes >= 1_000_000_000) {
+    const gb = bytes / 1_000_000_000;
+    return `${gb.toFixed(gb < 10 ? 1 : 0)} GB`;
+  }
   if (bytes >= 1_000_000) {
     const mb = bytes / 1_000_000;
     return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
@@ -1264,6 +1274,102 @@ function renderKnowledgeMix(knowledgeMix) {
   });
 }
 
+const MODEL_ROLE_LABELS = {
+  ingest: "Ingest",
+  audit: "Audit",
+  improve: "Improve",
+  gate: "Gate",
+  rewrite: "Rewrite",
+  embed: "Embed",
+  rerank: "Rerank",
+  installed: "Installed",
+  configured: "Configured",
+};
+
+function modelStatusRank(row) {
+  const order = { loaded: 0, missing: 1, ready: 2, external: 3, unknown: 4 };
+  return order[row.status] ?? 9;
+}
+
+function modelRoleLabel(role) {
+  return MODEL_ROLE_LABELS[role] || fmt(role);
+}
+
+function renderModelStatus(modelStatus) {
+  const data = modelStatus || {};
+  const summary = data.summary || {};
+  const models = Array.isArray(data.models) ? [...data.models] : [];
+  const installed = intValue(summary.installed);
+  const loaded = intValue(summary.loaded);
+  const configured = intValue(summary.configured);
+  const missing = intValue(summary.missing);
+
+  els.modelInstalled.textContent = String(installed);
+  els.modelLoaded.textContent = String(loaded);
+  els.modelConfigured.textContent = String(configured);
+  els.modelMissing.textContent = String(missing);
+  els.modelCaption.textContent = data.available
+    ? `${formatBytes(summary.loaded_size_bytes)} loaded · ${formatBytes(summary.installed_size_bytes)} installed`
+    : shortName(data.error || "Ollama offline");
+
+  els.modelGrid.innerHTML = "";
+  if (!models.length) {
+    els.modelGrid.innerHTML = "<div class=\"self-heal-empty\">No model records yet.</div>";
+    return;
+  }
+
+  models
+    .sort((a, b) => {
+      const configuredRank = Number(Boolean(b.configured)) - Number(Boolean(a.configured));
+      if (configuredRank !== 0) return configuredRank;
+      return modelStatusRank(a) - modelStatusRank(b) || fmt(a.name).localeCompare(fmt(b.name));
+    })
+    .forEach((row) => {
+      const details = row.details || {};
+      const roles = Array.isArray(row.roles) ? row.roles : [];
+      const item = document.createElement("div");
+      item.className = `model-row ${fmt(row.status, "unknown")}`;
+
+      const main = document.createElement("div");
+      main.className = "model-main";
+      const state = document.createElement("span");
+      state.className = "model-state";
+      const stateDot = document.createElement("span");
+      state.append(stateDot, document.createTextNode(fmt(row.status, "unknown")));
+      const name = document.createElement("strong");
+      name.className = "model-name";
+      name.textContent = fmt(row.name);
+      main.append(state, name);
+
+      const roleWrap = document.createElement("div");
+      roleWrap.className = "model-roles";
+      const roleList = roles.length ? roles : row.installed ? ["installed"] : ["configured"];
+      roleList.forEach((role) => {
+        const chip = document.createElement("span");
+        chip.className = `model-role role-${String(role).replace(/[^a-z0-9_-]/gi, "-").toLowerCase()}`;
+        chip.textContent = modelRoleLabel(role);
+        roleWrap.appendChild(chip);
+      });
+
+      const metaPieces = [];
+      if (row.size_bytes) metaPieces.push(`disk ${formatBytes(row.size_bytes)}`);
+      if (row.loaded_size_bytes) metaPieces.push(`loaded ${formatBytes(row.loaded_size_bytes)}`);
+      if (row.context_length !== null && row.context_length !== undefined && Number(row.context_length) > 0) {
+        metaPieces.push(`${Number(row.context_length).toLocaleString()} ctx`);
+      }
+      if (details.parameter_size) metaPieces.push(details.parameter_size);
+      if (details.quantization_level) metaPieces.push(details.quantization_level);
+      if (details.format) metaPieces.push(details.format);
+      if (row.expires_at) metaPieces.push(`until ${timeLabel(row.expires_at)}`);
+      const meta = document.createElement("div");
+      meta.className = "model-meta";
+      meta.textContent = metaPieces.join(" · ") || "configured outside local Ollama";
+
+      item.append(main, roleWrap, meta);
+      els.modelGrid.appendChild(item);
+    });
+}
+
 function pctLabel(value) {
   if (!numeric(value)) return "--";
   return `${(value * 100).toFixed(1)}%`;
@@ -1456,6 +1562,8 @@ function render(snapshot) {
   const metrics = snapshot.metrics || [];
   const batch = status.batch || {};
   const ollama = snapshot.ollama || {};
+  const modelStatus = snapshot.model_status || {};
+  const modelSummary = modelStatus.summary || {};
   const models = ollama.models || [];
   const model = models.find((item) => !String(item.name || item.model || "").includes("embed")) || models[0] || {};
 
@@ -1466,8 +1574,10 @@ function render(snapshot) {
   els.raw.textContent = shortName(status.current_raw || "no active raw");
   els.batch.textContent = batch.total ? `${batch.index || 0}/${batch.total}` : "--";
   els.batchSub.textContent = batch.total ? `${batch.succeeded || 0} ok / ${batch.failed || 0} miss` : "waiting";
-  els.ollama.textContent = ollama.available ? "online" : "offline";
-  els.ollamaSub.textContent = model.name || model.model || "no model";
+  els.ollama.textContent = modelStatus.available || ollama.available ? "online" : "offline";
+  els.ollamaSub.textContent = modelSummary.installed !== undefined
+    ? `${intValue(modelSummary.loaded)} loaded · ${intValue(modelSummary.installed)} installed`
+    : model.name || model.model || "no model";
   els.currentRaw.textContent = fmt(status.current_raw);
   els.currentOp.textContent = fmt(status.current_op);
   renderLlm(status.llm);
@@ -1479,6 +1589,7 @@ function render(snapshot) {
   renderRecallImprovement(snapshot.recall_improvement || {});
   renderSaveHistory(snapshot.save_history || {});
   renderKnowledgeMix(snapshot.knowledge_mix || {});
+  renderModelStatus(modelStatus);
   renderEvents(snapshot.events || []);
   drawLineChart(els.pendingChart, snapshot.save_history || {}, status);
   drawBatchChart(els.batchChart, metrics, status);
