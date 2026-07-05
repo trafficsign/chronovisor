@@ -227,7 +227,22 @@
         <div class="panel-head">
           <div>
             <h2>Current Work</h2>
-            <p>Live raw and generated page target.</p>
+            <p>Active ingest step, LLM stream, and latest completed raw.</p>
+          </div>
+        </div>
+        <div class="work-overview" id="work-overview">
+          <div class="work-status-line">
+            <span class="work-dot" aria-hidden="true"></span>
+            <strong id="work-summary">Waiting for work</strong>
+            <span id="work-updated">--</span>
+          </div>
+          <p id="work-detail">No active raw is being processed.</p>
+          <div class="work-steps" aria-label="Current work stage">
+            <span data-work-step="raw">Raw</span>
+            <span data-work-step="triage">Triage</span>
+            <span data-work-step="generate">Generate</span>
+            <span data-work-step="apply">Apply</span>
+            <span data-work-step="index">Index</span>
           </div>
         </div>
         <dl class="work-list">

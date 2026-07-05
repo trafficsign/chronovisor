@@ -9,6 +9,11 @@ const els = {
   batchSub: document.getElementById("batch-sub"),
   ollama: document.getElementById("ollama-value"),
   ollamaSub: document.getElementById("ollama-sub"),
+  workOverview: document.getElementById("work-overview"),
+  workSummary: document.getElementById("work-summary"),
+  workUpdated: document.getElementById("work-updated"),
+  workDetail: document.getElementById("work-detail"),
+  workSteps: document.querySelectorAll("[data-work-step]"),
   currentRaw: document.getElementById("current-raw"),
   currentOp: document.getElementById("current-op"),
   llmSignal: document.getElementById("llm-signal"),
@@ -96,6 +101,25 @@ const llmSignalHistory = {
   lastChars: null,
   lastSeenMs: null,
   rates: Array(32).fill(0),
+};
+
+const WORK_STAGE_ORDER = ["raw", "triage", "generate", "apply", "index"];
+const WORK_STAGE_ALIASES = {
+  idle: "idle",
+  queued: "raw",
+  raw: "raw",
+  triage: "triage",
+  classify: "triage",
+  generate: "generate",
+  generating: "generate",
+  llm: "generate",
+  apply: "apply",
+  applying: "apply",
+  write: "apply",
+  index: "index",
+  indexing: "index",
+  complete: "index",
+  done: "index",
 };
 
 let saveHistoryMode = "daily";
@@ -256,6 +280,72 @@ function setLlmSignalClass(kind) {
   els.llmSignal.classList.add(kind);
 }
 
+function lastSuccessTargets(lastSuccess) {
+  if (!lastSuccess) return "";
+  const targets = [...(lastSuccess.created || []), ...(lastSuccess.updated || [])].filter(Boolean);
+  return targets.length ? targets.join(", ") : "no page changes";
+}
+
+function inferWorkStage(status, llm) {
+  const rawStage = String(status.stage || status.current_op || "").toLowerCase();
+  if (llm && llm.active) return "generate";
+  return WORK_STAGE_ALIASES[rawStage] || (status.current_raw ? "raw" : "idle");
+}
+
+function setWorkStage(stage, stateKind) {
+  const activeIndex = WORK_STAGE_ORDER.indexOf(stage);
+  els.workSteps.forEach((step) => {
+    const key = step.dataset.workStep;
+    const index = WORK_STAGE_ORDER.indexOf(key);
+    step.classList.toggle("active", index === activeIndex);
+    step.classList.toggle("done", activeIndex >= 0 && index >= 0 && index < activeIndex);
+  });
+  els.workOverview.classList.remove("idle", "running", "complete", "warning", "stalled");
+  els.workOverview.classList.add(stateKind);
+}
+
+function renderWorkStatus(status) {
+  const llm = status.llm || null;
+  const active = Boolean(status.current_raw || status.current_job_id || (llm && llm.active));
+  const lastSuccess = status.last_success || null;
+  let stage = inferWorkStage(status, llm);
+  if (!active && lastSuccess) stage = "index";
+  const lastTargets = lastSuccessTargets(lastSuccess);
+  const updated = status.updated_at ? `updated ${timeLabel(status.updated_at)}` : "--";
+  const stageLabels = {
+    raw: "Reading raw capture",
+    triage: "Choosing page action",
+    generate: "Generating wiki page",
+    apply: "Writing page update",
+    index: "Indexing completed work",
+  };
+
+  let stateKind = "idle";
+  let summary = "Waiting for new raw";
+  let detail = "No active raw is being processed.";
+
+  if (active) {
+    stateKind = "running";
+    summary = stageLabels[stage] || "Processing raw";
+    const current = shortName(status.current_raw || (llm && (llm.raw || llm.target)) || status.current_job_id);
+    const op = fmt(status.current_op || stage, "work");
+    detail = `${op} on ${current}`;
+  } else if (lastSuccess) {
+    stateKind = "complete";
+    summary = "Completed last raw";
+    detail = `${shortName(lastSuccess.raw)} -> ${shortName(lastTargets || "none")}. Waiting for the next raw.`;
+  } else if (status.last_problem) {
+    stateKind = "warning";
+    summary = "Idle after warning";
+    detail = shortName(status.last_problem.message || status.last_error || "Check latest event.");
+  }
+
+  els.workSummary.textContent = summary;
+  els.workUpdated.textContent = updated;
+  els.workDetail.textContent = detail;
+  setWorkStage(stage, stateKind);
+}
+
 function llmSignalKey(llm) {
   return [llm.job_id || "", llm.phase || "", llm.target || ""].join("|");
 }
@@ -294,17 +384,21 @@ function renderSparkline(kind) {
   });
 }
 
-function renderLlm(llm) {
+function renderLlm(llm, status = {}) {
   if (!llm) {
-    setLlmSignalClass("idle");
+    const lastSuccess = status.last_success || null;
+    const waitingForLlm = Boolean(status.current_raw || status.current_job_id);
+    setLlmSignalClass(waitingForLlm ? "waiting" : "idle");
     llmSignalHistory.key = null;
     llmSignalHistory.lastChars = null;
     llmSignalHistory.lastSeenMs = null;
     llmSignalHistory.rates = Array(32).fill(0);
-    els.llmState.textContent = "idle";
-    els.llmAge.textContent = "--";
-    els.llmTarget.textContent = "--";
-    els.llmStats.textContent = "--";
+    els.llmState.textContent = waitingForLlm ? "waiting" : "idle";
+    els.llmAge.textContent = status.updated_at ? `status ${ageLabel(status.updated_at)}` : "--";
+    els.llmTarget.textContent = waitingForLlm ? shortName(status.current_raw || status.current_job_id) : "No active LLM call";
+    els.llmStats.textContent = lastSuccess
+      ? `Last success ${ageLabel(status.updated_at)}`
+      : "Waiting for ingest work";
     renderSparkline("idle");
     return;
   }
@@ -1578,11 +1672,14 @@ function render(snapshot) {
   els.ollamaSub.textContent = modelSummary.installed !== undefined
     ? `${intValue(modelSummary.loaded)} loaded · ${intValue(modelSummary.installed)} installed`
     : model.name || model.model || "no model";
-  els.currentRaw.textContent = fmt(status.current_raw);
-  els.currentOp.textContent = fmt(status.current_op);
-  renderLlm(status.llm);
-  els.currentJob.textContent = fmt(status.current_job_id);
-  els.lastSuccess.textContent = status.last_success ? `${fmt(status.last_success.raw)} -> ${[...(status.last_success.created || []), ...(status.last_success.updated || [])].join(", ") || "none"}` : "--";
+  els.currentRaw.textContent = status.current_raw ? shortName(status.current_raw) : "waiting";
+  els.currentOp.textContent = status.current_op ? fmt(status.current_op) : fmt(status.stage || "idle");
+  renderWorkStatus(status);
+  renderLlm(status.llm, status);
+  els.currentJob.textContent = status.current_job_id ? fmt(status.current_job_id) : "none";
+  els.lastSuccess.textContent = status.last_success
+    ? `${shortName(status.last_success.raw)} -> ${shortName(lastSuccessTargets(status.last_success) || "none")}`
+    : "--";
   updateStageFlow(status.stage);
   renderSelfHeal(snapshot.self_heal || {});
   renderRecall(snapshot.recall || {});

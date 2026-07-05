@@ -594,11 +594,109 @@ canvas {
   line-height: 1.35;
 }
 
+.work-overview {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 12px;
+  border: 1px solid rgba(235, 229, 210, 0.11);
+  border-radius: 8px;
+  background: rgba(9, 10, 8, 0.32);
+}
+
+.work-status-line {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.work-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--dim);
+  box-shadow: 0 0 0 4px rgba(112, 109, 99, 0.08);
+}
+
+.work-status-line strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 820;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-status-line span:last-child,
+.work-detail {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.work-detail {
+  min-height: 34px;
+  overflow-wrap: anywhere;
+}
+
+.work-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.work-steps span {
+  min-width: 0;
+  padding: 6px 4px;
+  border: 1px solid rgba(235, 229, 210, 0.08);
+  border-radius: 6px;
+  background: rgba(235, 229, 210, 0.035);
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.work-overview.running .work-dot {
+  background: var(--cyan);
+  box-shadow: 0 0 18px rgba(102, 217, 232, 0.78), 0 0 0 4px rgba(102, 217, 232, 0.12);
+  animation: signalBeat 0.9s ease-out infinite;
+}
+
+.work-overview.complete .work-dot {
+  background: var(--green);
+  box-shadow: 0 0 16px rgba(143, 214, 148, 0.58), 0 0 0 4px rgba(143, 214, 148, 0.11);
+}
+
+.work-overview.warning .work-dot,
+.work-overview.stalled .work-dot {
+  background: var(--amber);
+  box-shadow: 0 0 14px rgba(240, 188, 98, 0.55), 0 0 0 4px rgba(240, 188, 98, 0.1);
+}
+
+.work-overview.running .work-steps span.active {
+  border-color: rgba(102, 217, 232, 0.42);
+  background: rgba(102, 217, 232, 0.14);
+  color: var(--cyan);
+}
+
+.work-overview.complete .work-steps span.done,
+.work-overview.complete .work-steps span.active,
+.work-steps span.done {
+  border-color: rgba(143, 214, 148, 0.32);
+  background: rgba(143, 214, 148, 0.1);
+  color: var(--green);
+}
+
 .work-list {
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr);
   gap: 14px 16px;
-  margin: 18px 0 0;
+  margin: 16px 0 0;
   font-size: 14px;
 }
 
