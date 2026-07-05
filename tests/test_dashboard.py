@@ -275,9 +275,9 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
         "load_policy",
         lambda: SimpleNamespace(
             judge_mode="auto",
-            judge_model="qwen3.5:4b",
+            judge_model="qwen3.5:4b-mlx",
             rewrite_enabled=True,
-            rewrite_model="qwen3.5:4b",
+            rewrite_model="qwen3.5:4b-mlx",
         ),
     )
     monkeypatch.setattr(
@@ -307,8 +307,8 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     assert by_name["bge-m3:latest"]["roles"] == ["embed"]
     assert "bge-m3" not in by_name
     assert "gpt-oss:20b" not in by_name
-    assert by_name["qwen3.5:4b"]["status"] == "missing"
-    assert by_name["qwen3.5:4b"]["roles"] == ["gate", "rewrite"]
+    assert by_name["qwen3.5:4b-mlx"]["status"] == "missing"
+    assert by_name["qwen3.5:4b-mlx"]["roles"] == ["gate", "rewrite"]
 
 
 def test_self_heal_snapshot_surfaces_watch_status(tmp_path: Path, monkeypatch) -> None:

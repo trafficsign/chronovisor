@@ -36,7 +36,7 @@ def test_normalize_recall_config_maps_nested_unified_shape() -> None:
                 "semantic": False,
                 "judge_mode": "auto",
                 "thresholds": {"search": 0.2, "read": 0.8},
-                "gate": {"model": "qwen3.5:4b", "timeout_ms": 1000},
+                "gate": {"model": "qwen3.5:4b-mlx", "timeout_ms": 1000},
                 "policy": {"fail_silent_on_judge_unavailable": True},
             }
         }
@@ -44,7 +44,7 @@ def test_normalize_recall_config_maps_nested_unified_shape() -> None:
 
     assert normalized["enabled"] is True
     assert normalized["thresholds"]["read"] == 0.8
-    assert normalized["gate"]["model"] == "qwen3.5:4b"
+    assert normalized["gate"]["model"] == "qwen3.5:4b-mlx"
     assert normalized["recall"] == {"semantic": False, "judge_mode": "auto"}
 
 

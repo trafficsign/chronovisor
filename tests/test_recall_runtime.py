@@ -248,7 +248,7 @@ model = "legacy-local-model"
 judge_timeout_ms = 4000
 
 [gate]
-model = "qwen3.5:4b"
+model = "qwen3.5:4b-mlx"
 think = false
 timeout_ms = 1200
 num_ctx = 2048
@@ -263,7 +263,7 @@ timeout_ms = 1400
 
     policy = load_policy(config)
 
-    assert policy.judge_model == "qwen3.5:4b"
+    assert policy.judge_model == "qwen3.5:4b-mlx"
     assert policy.judge_think is False
     assert policy.judge_timeout_ms == 1200
     assert policy.judge_num_ctx == 2048
@@ -352,7 +352,7 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
 
     monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
     policy = RecallPolicy(
-        judge_model="qwen3.5:4b",
+        judge_model="qwen3.5:4b-mlx",
         judge_think=False,
         judge_timeout_ms=1200,
         judge_num_ctx=2048,
@@ -371,7 +371,7 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
     assert queries == []
     assert reason == "不要"
     assert captured["path"] == "/api/generate"
-    assert payload["model"] == "qwen3.5:4b"
+    assert payload["model"] == "qwen3.5:4b-mlx"
     assert payload["think"] is False
     assert payload["options"] == {
         "temperature": 0,
@@ -409,7 +409,7 @@ def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
             return FakeResponse()
 
     monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
-    policy = RecallPolicy(judge_model="qwen3.5:4b", judge_timeout_ms=2000)
+    policy = RecallPolicy(judge_model="qwen3.5:4b-mlx", judge_timeout_ms=2000)
 
     score, _queries, reason = run_local_judge(
         RecallRequest(host="test", event="UserPromptSubmit", prompt="LLM Wiki の運用どうする?"),

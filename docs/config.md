@@ -47,7 +47,7 @@ search = 0.35
 read = 0.65
 
 [recall.gate]
-model = "qwen3.5:4b"
+model = "qwen3.5:4b-mlx"
 think = false
 timeout_ms = 2000
 num_ctx = 4096
@@ -73,7 +73,7 @@ session_ttl_seconds = 604800
 
 [recall.rewrite]
 enabled = true
-model = "qwen3.5:4b"
+model = "qwen3.5:4b-mlx"
 timeout_ms = 3000
 
 [recall.fusion]
