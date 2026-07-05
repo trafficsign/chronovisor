@@ -242,7 +242,7 @@ def test_gate_config_overrides_legacy_model_and_budget(tmp_path) -> None:
     config.write_text(
         """
 enabled = true
-model = "qwen3.6:35b-a3b-q8_0"
+model = "legacy-local-model"
 
 [budgets]
 judge_timeout_ms = 4000

@@ -95,7 +95,7 @@ AUDITOR_SCHEMA: dict[str, Any] = {
 @dataclass(frozen=True)
 class AuditPolicy:
     enabled: bool = True
-    model: str = "qwen3.6:35b-a3b-q8_0"
+    model: str = "qwen3.6:35b-a3b-mxfp8"
     think: bool = False
     timeout_ms: int = 120_000
     num_ctx: int = 32_768
