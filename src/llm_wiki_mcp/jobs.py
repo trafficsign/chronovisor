@@ -18,7 +18,7 @@ class JobStatus(Enum):
 class Job:
     job_id: str
     status: JobStatus
-    processor: str  # "ollama" or "sonnet"
+    processor: str  # "ollama" or "unavailable"
     created_at: str
     completed_at: str | None = None
     result: dict | None = None

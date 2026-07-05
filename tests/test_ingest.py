@@ -347,7 +347,15 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    from llm_wiki_mcp import wiki, ingest, index_store, orchestrator, runtime_status
+    from llm_wiki_mcp import (
+        wiki,
+        ingest,
+        index_store,
+        ollama,
+        orchestrator,
+        runtime_status,
+        search,
+    )
 
     monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
     monkeypatch.setattr(wiki, "PAGES_DIR", pages)
@@ -377,6 +385,8 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         index_store, "BACKLINKS_INDEX_FILE", index_dir / "backlinks.json"
     )
     monkeypatch.setattr(index_store, "_store", None)
+    monkeypatch.setattr(ollama, "is_available", lambda: False)
+    monkeypatch.setattr(search, "update_embeddings", lambda page_ids=None: 0)
 
     return wiki_root
 
@@ -1657,6 +1667,60 @@ class TestPerRawOrchestrator:
             "ai/opus-4.7-evaluation-and-industry-geopolitics"
         ]
         assert orchestrator.get_pending_raw_files() == []
+
+    def test_ollama_unavailable_stays_pending_without_self_heal_packet(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A local model outage is infrastructure state, not a bad raw.
+
+        It must not accumulate per-raw attempts or quarantine otherwise valid
+        source material into the self-heal queue.
+        """
+        from llm_wiki_mcp import orchestrator, ingest as ingest_mod
+
+        raw_path = isolated_wiki / "raw" / "model-memory.md"
+        raw_path.write_text("body")
+
+        monkeypatch.setattr(orchestrator, "is_available", lambda: False)
+        monkeypatch.setattr(ingest_mod, "is_available", lambda: False)
+
+        result = {}
+        for _ in range(3):
+            result = orchestrator.run_pending_ingest(force=True)
+
+        supervision = result["per_raw"][0]["supervision"]
+        assert supervision["failure_class"] == "ingest.ollama_unavailable"
+        assert supervision["attempts"] == 0
+        assert supervision["tracked"] is False
+        assert supervision["transient"] is True
+        assert supervision["quarantined"] is False
+        assert raw_path.exists()
+        assert orchestrator.get_pending_raw_files() == [raw_path]
+        packets_dir = isolated_wiki / "runtime" / "failures" / "packets"
+        assert not packets_dir.exists() or list(packets_dir.iterdir()) == []
+
+    def test_legacy_sonnet_fallback_error_is_not_tracked_as_raw_failure(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor
+
+        raw_path = isolated_wiki / "raw" / "legacy.md"
+        raw_path.write_text("body")
+
+        result = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error="Sonnet fallback not yet implemented",
+            raw_text="body",
+        )
+
+        assert result.failure_class == "ingest.ollama_unavailable"
+        assert result.attempts == 0
+        assert result.tracked is False
+        assert result.transient is True
+        assert raw_path.exists()
+        assert not (
+            isolated_wiki / "runtime" / "failures" / "state.json"
+        ).exists()
 
     def test_serial_execution_no_concurrent_threads(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

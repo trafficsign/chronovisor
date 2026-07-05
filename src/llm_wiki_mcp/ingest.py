@@ -1439,10 +1439,10 @@ def run_ingest(
             source_raw = source_candidate
 
     try:
-        processor = "ollama" if is_available() else "sonnet"
-        if processor == "sonnet":
-            raise NotImplementedError("Sonnet fallback not yet implemented")
+        processor = "ollama" if is_available() else "unavailable"
         job_store.update(job_id, processor=processor)
+        if processor == "unavailable":
+            raise RuntimeError("ollama unavailable; no fallback processor configured")
 
         # Stage 1: Triage. Every log call here is _safe_log so a wedged
         # log file can't promote a successful triage into a FAILED job.
@@ -1775,7 +1775,7 @@ def start_ingest(
     resulting operations can pass it through without changing positional
     argument order.
     """
-    processor = "ollama" if is_available() else "sonnet"
+    processor = "ollama" if is_available() else "unavailable"
     job = job_store.create(processor=processor)
 
     thread = threading.Thread(

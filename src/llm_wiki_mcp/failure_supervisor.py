@@ -42,6 +42,13 @@ class SupervisionResult:
     quarantined: bool = False
     packet_path: str | None = None
     quarantine_path: str | None = None
+    tracked: bool = True
+    transient: bool = False
+
+
+TRANSIENT_FAILURE_CLASSES = {
+    "ingest.ollama_unavailable",
+}
 
 
 def _runtime_failures_dir() -> Path:
@@ -113,6 +120,17 @@ def classify_failure(message: str | None) -> FailureRecord:
         return FailureRecord(
             failure_class="apply.index_store_unavailable",
             fingerprint="apply.index_store_unavailable",
+            message=msg,
+        )
+
+    msg_lower = msg.casefold()
+    if (
+        "sonnet fallback not yet implemented" in msg_lower
+        or "ollama unavailable" in msg_lower
+    ):
+        return FailureRecord(
+            failure_class="ingest.ollama_unavailable",
+            fingerprint="ingest.ollama_unavailable",
             message=msg,
         )
 
@@ -213,6 +231,27 @@ def record_raw_failure(
 
     record = classify_failure(error)
     raw_file = raw_path.name
+    if record.failure_class in TRANSIENT_FAILURE_CLASSES:
+        runtime_status.safe_append_event(
+            "warn",
+            (
+                "failure-supervisor | transient ingest failure for "
+                f"{raw_file}; raw left pending"
+            ),
+            source="failure-supervisor",
+            raw_file=raw_file,
+            failure_class=record.failure_class,
+            fingerprint=record.fingerprint,
+        )
+        return SupervisionResult(
+            raw_file=raw_file,
+            failure_class=record.failure_class,
+            fingerprint=record.fingerprint,
+            attempts=0,
+            tracked=False,
+            transient=True,
+        )
+
     state = _load_state()
     failures = state.setdefault("failures", {})
     if not isinstance(failures, dict):

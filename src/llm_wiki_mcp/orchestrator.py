@@ -1,7 +1,7 @@
 """Orchestrator - deterministic control flow for Ingest/Lint scheduling.
 
-NOT an LLM. Pure code logic. Sonnet handles content structuring,
-this module handles when to trigger it.
+NOT an LLM. Pure code logic. Local Ollama models handle content structuring;
+this module handles when to trigger them.
 """
 
 import json
@@ -256,7 +256,7 @@ def get_ollama_status() -> dict:
     available = is_available()
     return {
         "available": available,
-        "processor": "ollama" if available else "sonnet",
+        "processor": "ollama" if available else "unavailable",
     }
 
 
@@ -454,7 +454,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                 if raw_keywords is None:
                     raw_keywords = _coerce_str_list(meta.get("keywords")) or []
 
-                processor = "ollama" if is_available() else "sonnet"
+                processor = "ollama" if is_available() else "unavailable"
                 job = job_store.create(processor=processor)
                 job_ids.append(job.job_id)
                 runtime_status.safe_write_status(
