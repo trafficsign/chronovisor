@@ -74,6 +74,26 @@ def test_hooks_inspect_json_handles_missing_host_files(tmp_path, monkeypatch, ca
     assert output["hook_policy"]["stop_audit"] is True
 
 
+def test_recall_improve_run_due_cli_forwards_scheduler_args(tmp_path, monkeypatch, capsys) -> None:
+    patch_wiki(tmp_path, monkeypatch)
+    from llm_wiki_mcp import recall_improvement
+
+    seen: dict[str, object] = {}
+
+    def fake_run_due(**kwargs):
+        seen.update(kwargs)
+        return {"status": "due", "dry_run": kwargs["dry_run"]}
+
+    monkeypatch.setattr(recall_improvement, "run_due", fake_run_due)
+
+    assert cli.main(["recall-improve", "run-due", "--dry-run", "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert output == {"status": "due", "dry_run": True}
+    assert seen["dry_run"] is True
+    assert str(seen["log_file"]).endswith("recall-log.jsonl")
+
+
 def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeypatch) -> None:
     patch_wiki(tmp_path, monkeypatch)
     hooks_file = tmp_path / "codex/hooks.json"

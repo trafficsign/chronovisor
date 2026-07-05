@@ -1591,6 +1591,13 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "error": result.error,
     }
     append_jsonl(RECALL_LOG_FILE, record)
+    try:
+        from llm_wiki_mcp.recall_policy_store import append_live_episode
+
+        live_path = RECALL_LOG_FILE.parent.parent / "runtime" / "recall-improvement" / "live-episodes.jsonl"
+        append_live_episode(record, path=live_path)
+    except Exception:
+        pass
 
 
 def recall_log_snapshot(record: dict[str, Any]) -> dict[str, Any]:

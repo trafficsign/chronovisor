@@ -1355,6 +1355,11 @@ function renderRecallImprovement(lab) {
   const latest = data.latest || null;
   const status = String(data.status || "quiet");
   const configuredModels = Array.isArray(data.models) ? data.models : [];
+  const schedule = data.schedule || {};
+  const scheduleDecision = schedule.last_decision || {};
+  const scheduleStatus = scheduleDecision.dry_run && schedule.last_status
+    ? `dry-run ${schedule.last_status}`
+    : schedule.last_status;
   const models = latest && Array.isArray(latest.models) ? latest.models : configuredModels;
   const best = latest && latest.best ? latest.best : null;
   const bestDev = best && best.dev ? best.dev : {};
@@ -1365,19 +1370,33 @@ function renderRecallImprovement(lab) {
   const activeOverrides = active && active.overrides ? active.overrides : {};
   const statusKind = status === "active" || status === "applied"
     ? "success"
-    : status === "rejected" || status === "blocked" || status === "error"
+    : status === "rejected" || status === "blocked" || status === "error" || status === "frontier_rejected"
       ? "warn"
       : "info";
 
-  els.recallLabCaption.textContent = latest ? `${(data.history || []).length} runs` : "quiet";
+  const scheduleLabel = scheduleStatus ? ` · schedule ${scheduleStatus}` : "";
+  els.recallLabCaption.textContent = latest
+    ? `${(data.history || []).length} runs${scheduleLabel}`
+    : schedule.last_checked_at
+      ? `schedule ${fmt(scheduleStatus)}`
+      : "quiet";
   els.recallLabState.textContent = status;
   els.recallLabState.className = `self-heal-badge ${statusKind}`;
   els.recallLabLatest.textContent = latest
     ? `${fmt(latest.status)} · ${fmt(latest.run_id)}`
     : "No runs yet";
-  els.recallLabDetail.textContent = latest
-    ? fmt(latest.reason)
-    : "Run llm-wiki recall-improve run to start the local proposal tournament.";
+  const detailParts = latest
+    ? [fmt(latest.reason)]
+    : ["Run llm-wiki recall-improve run to start the local proposal tournament."];
+  if (latest && latest.frontier_audit_recommended) {
+    const audit = latest.frontier_audit || {};
+    detailParts.push(`frontier ${fmt(audit.decision || "recommended")}`);
+  }
+  if (latest && latest.live_telemetry && numeric(latest.live_telemetry.episodes)) {
+    detailParts.push(`${latest.live_telemetry.episodes} live episodes`);
+  }
+  if (schedule.last_checked_at) detailParts.push(`checked ${ageLabel(schedule.last_checked_at)}`);
+  els.recallLabDetail.textContent = detailParts.filter(Boolean).join(" · ");
   els.recallLabActive.textContent = active ? "on" : "off";
   const devScore = numeric(bestDev.score) ? bestDev.score : baselineDev.score;
   const holdoutScore = numeric(bestHoldout.score) ? bestHoldout.score : baselineHoldout.score;
@@ -1387,9 +1406,15 @@ function renderRecallImprovement(lab) {
   const overrideText = Object.entries(activeOverrides)
     .map(([key, value]) => `${key}=${value}`)
     .join(" · ");
-  els.recallLabPolicy.textContent = overrideText
-    ? `active policy: ${overrideText}`
-    : "active policy: baseline";
+  const policyParts = [
+    overrideText ? `active policy: ${overrideText}` : "active policy: baseline",
+  ];
+  if (schedule.last_run_id) {
+    policyParts.push(`scheduler: ${fmt(scheduleStatus)} ${shortName(schedule.last_run_id)}`);
+  } else if (scheduleStatus) {
+    policyParts.push(`scheduler: ${fmt(scheduleStatus)}`);
+  }
+  els.recallLabPolicy.textContent = policyParts.join(" · ");
 
   els.recallLabFeed.innerHTML = "";
   const history = Array.isArray(data.history) ? [...data.history].slice(-5).reverse() : [];
@@ -1408,7 +1433,9 @@ function renderRecallImprovement(lab) {
     const badge = document.createElement("span");
     const itemStatus = String(item.status || "unknown");
     badge.className = `event-level ${
-      itemStatus === "applied" ? "success" : itemStatus === "shadow_pass" ? "info" : "warn"
+      itemStatus === "applied" ? "success"
+        : itemStatus === "shadow_pass" || itemStatus === "pending_frontier_review" ? "info"
+          : "warn"
     }`;
     badge.textContent = itemStatus;
     const message = document.createElement("span");
@@ -1416,7 +1443,9 @@ function renderRecallImprovement(lab) {
     const rowBest = item.best || {};
     const proposal = rowBest.proposal || {};
     const score = rowBest.dev && numeric(rowBest.dev.score) ? ` · dev ${rowBest.dev.score.toFixed(3)}` : "";
-    message.textContent = `${fmt(proposal.summary || item.reason)}${score}`;
+    const audit = item.frontier_audit || {};
+    const auditText = audit.decision ? ` · frontier ${audit.decision}` : "";
+    message.textContent = `${fmt(proposal.summary || item.reason)}${score}${auditText}`;
     row.append(time, badge, message);
     els.recallLabFeed.appendChild(row);
   });

@@ -773,6 +773,48 @@ def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None
     assert "past reference term" in record["reasons"]
 
 
+def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    wiki_root = tmp_path / "wiki"
+    log_file = wiki_root / "recall" / "recall-log.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
+    result = RecallResult(
+        status="ok",
+        decision="read",
+        confidence=0.8,
+        queries=["llm wiki recall"],
+        reasons=["test"],
+        matched_terms={},
+        decision_id="d1",
+        context_items=[
+            ContextItem(
+                page_id="page-a",
+                title="Page A",
+                updated="2026-07-05",
+                score=1.0,
+            )
+        ],
+    )
+
+    recall_runtime.append_recall_log(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="LLM Wiki recall",
+            cwd="/repo",
+            session_id="s1",
+        ),
+        result,
+    )
+
+    live_file = wiki_root / "runtime" / "recall-improvement" / "live-episodes.jsonl"
+    live = json.loads(live_file.read_text(encoding="utf-8"))
+    assert live["decision_id"] == "d1"
+    assert live["quality"]["usefulness"] == "unknown"
+    assert live["pages"] == ["page-a"]
+
+
 def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 

@@ -109,6 +109,16 @@ def audit_enabled(explicit_config: Path | None = None) -> bool:
     return active_config_file(explicit_config).name == "config.toml"
 
 
+def recall_improve_enabled(explicit_config: Path | None = None) -> bool:
+    policy = load_hook_policy(explicit_config)
+    if not policy.stop_recall_improve:
+        return False
+    flag = env_flag("LLM_WIKI_RECALL_IMPROVE_ENABLED")
+    if flag is not None:
+        return flag
+    return active_config_file(explicit_config).name == "config.toml"
+
+
 def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
     host = normalize_host(args.host)
     if not recall_enabled() or not load_hook_policy(args.config).user_prompt_recall:
@@ -173,6 +183,7 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
     tasks: list[BackgroundTask] = []
     run_save = args.only in {None, "save"}
     run_audit = args.only in {None, "audit"}
+    run_improve = args.only in {None, "improve"}
     if run_save and save_enabled(host, config):
         if host == "codex":
             model = os.environ.get("CODEX_WIKI_SAVE_MODEL", CODEX_DEFAULT_MEMORY_MODEL)
@@ -206,6 +217,16 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                 log_prefix=f"{host}-recall-audit",
             )
         )
+    if run_improve and recall_improve_enabled(config) and host in {"codex", "claude-code"}:
+        tasks.append(
+            BackgroundTask(
+                name=f"{host}-recall-improve",
+                module="llm_wiki_mcp.recall_improvement",
+                args=["run-due", "--config", str(config)],
+                env={"LLM_WIKI_RECALL_IMPROVE_ENABLED": "1"},
+                log_prefix=f"{host}-recall-improve",
+            )
+        )
     return tasks
 
 
@@ -237,7 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id")
     parser.add_argument("--no-search", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--only", choices=["save", "audit"], help="Limit Stop dispatch for legacy wrappers.")
+    parser.add_argument("--only", choices=["save", "audit", "improve"], help="Limit Stop dispatch for legacy wrappers.")
     return parser
 
 

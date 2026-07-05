@@ -15,7 +15,10 @@ IMPROVEMENT_DIR = WIKI_ROOT / "runtime" / "recall-improvement"
 ACTIVE_POLICY_FILE = IMPROVEMENT_DIR / "active-policy.json"
 REGISTRY_FILE = IMPROVEMENT_DIR / "policy-registry.jsonl"
 EPISODES_FILE = IMPROVEMENT_DIR / "recall-episodes.jsonl"
+LIVE_EPISODES_FILE = IMPROVEMENT_DIR / "live-episodes.jsonl"
+SCHEDULE_FILE = IMPROVEMENT_DIR / "schedule-state.json"
 RUNS_DIR = IMPROVEMENT_DIR / "runs"
+FRONTIER_AUDIT_DIR = IMPROVEMENT_DIR / "frontier-audits"
 
 FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 
@@ -169,3 +172,35 @@ def read_jsonl(path: Path, *, limit: int | None = None) -> list[dict[str, Any]]:
         if isinstance(parsed, dict):
             rows.append(parsed)
     return rows
+
+
+def append_live_episode(record: dict[str, Any], *, path: Path = LIVE_EPISODES_FILE) -> None:
+    episode = {
+        "schema_version": 1,
+        "ts": record.get("ts"),
+        "decision_id": record.get("decision_id"),
+        "host": record.get("host"),
+        "event": record.get("event"),
+        "cwd": record.get("cwd"),
+        "session_id": record.get("session_id"),
+        "prompt_hash": record.get("prompt_hash"),
+        "prompt_chars": record.get("prompt_chars"),
+        "prompt_preview": record.get("prompt_preview"),
+        "decision": record.get("decision"),
+        "confidence": record.get("confidence"),
+        "queries": record.get("queries") if isinstance(record.get("queries"), list) else [],
+        "pages": record.get("pages") if isinstance(record.get("pages"), list) else [],
+        "used_judge": bool(record.get("used_judge")),
+        "search_mode": record.get("search_mode"),
+        "context_style": record.get("context_style"),
+        "latency_ms": record.get("latency_ms"),
+        "status": record.get("status"),
+        "error": record.get("error"),
+        "quality": {
+            "expected_pages": [],
+            "negative_pages": [],
+            "source": "unlabeled-live",
+            "usefulness": "unknown",
+        },
+    }
+    append_jsonl(path, episode)

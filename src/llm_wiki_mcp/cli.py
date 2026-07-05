@@ -519,7 +519,25 @@ def main(argv: list[str] | None = None) -> int:
     recall_improve_run.add_argument("--no-heuristic", dest="include_heuristic", action="store_false", default=True)
     recall_improve_run.add_argument("--min-improvement", type=float, default=0.05)
     recall_improve_run.add_argument("--max-examples", type=int, default=120)
+    recall_improve_run.add_argument("--frontier", choices=["always", "auto", "off"], default="auto")
+    recall_improve_run.add_argument("--frontier-timeout", type=int)
     recall_improve_run.add_argument("--json", action="store_true")
+    recall_improve_due = recall_improve_sub.add_parser("run-due", help="Run only when schedule/feedback gates are due.")
+    recall_improve_due.add_argument("--config")
+    recall_improve_due.add_argument("--log-file", default=str(RECALL_LOG_FILE))
+    recall_improve_due.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))
+    recall_improve_due.add_argument("--models", help="Comma-separated Ollama proposer models.")
+    recall_improve_due.add_argument("--no-apply", dest="apply", action="store_false", default=True)
+    recall_improve_due.add_argument("--no-heuristic", dest="include_heuristic", action="store_false", default=True)
+    recall_improve_due.add_argument("--min-improvement", type=float, default=0.05)
+    recall_improve_due.add_argument("--max-examples", type=int, default=80)
+    recall_improve_due.add_argument("--min-interval-hours", type=float, default=24.0)
+    recall_improve_due.add_argument("--min-new-feedback", type=int, default=5)
+    recall_improve_due.add_argument("--min-total-feedback", type=int, default=3)
+    recall_improve_due.add_argument("--frontier", choices=["always", "auto", "off"], default="auto")
+    recall_improve_due.add_argument("--frontier-timeout", type=int)
+    recall_improve_due.add_argument("--dry-run", action="store_true")
+    recall_improve_due.add_argument("--json", action="store_true")
     recall_improve_status = recall_improve_sub.add_parser("status", help="Show active recall improvement policy.")
     recall_improve_status.add_argument("--json", action="store_true")
     recall_improve_rollback = recall_improve_sub.add_parser("rollback", help="Rollback accepted recall policy.")
@@ -598,6 +616,8 @@ def main(argv: list[str] | None = None) -> int:
                 include_heuristic=args.include_heuristic,
                 min_improvement=max(0.0, args.min_improvement),
                 max_examples=max(1, args.max_examples),
+                frontier_mode=args.frontier,
+                frontier_timeout=args.frontier_timeout,
             )
             if args.json:
                 print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
@@ -606,6 +626,30 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"status\t{data['status']}")
                 print(f"applied\t{data['applied']}")
                 print(f"reason\t{data['reason']}")
+            return 0
+        if args.recall_improve_command == "run-due":
+            data = recall_improvement.run_due(
+                config_file=Path(args.config).expanduser() if args.config else None,
+                log_file=Path(args.log_file).expanduser(),
+                feedback_file=Path(args.feedback_file).expanduser(),
+                models=args.models,
+                apply=args.apply,
+                include_heuristic=args.include_heuristic,
+                min_improvement=max(0.0, args.min_improvement),
+                max_examples=max(1, args.max_examples),
+                min_interval_hours=max(0.0, args.min_interval_hours),
+                min_new_feedback=max(0, args.min_new_feedback),
+                min_total_feedback=max(0, args.min_total_feedback),
+                frontier_mode=args.frontier,
+                frontier_timeout=args.frontier_timeout,
+                dry_run=args.dry_run,
+            )
+            if args.json:
+                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+            else:
+                print(f"status\t{data.get('status')}")
+                if data.get("result"):
+                    print(f"run\t{data['result'].get('run_id')}\t{data['result'].get('status')}")
             return 0
         if args.recall_improve_command == "status":
             data = recall_improvement.improvement_snapshot()

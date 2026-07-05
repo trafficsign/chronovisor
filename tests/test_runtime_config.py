@@ -58,6 +58,7 @@ recall = false
 [hooks.stop]
 save = true
 audit = false
+recall_improve = false
 """,
         encoding="utf-8",
     )
@@ -67,6 +68,7 @@ audit = false
     assert policy.user_prompt_recall is False
     assert policy.stop_save is True
     assert policy.stop_audit is False
+    assert policy.stop_recall_improve is False
 
 
 def test_embedding_config_reads_model_and_prefixes(tmp_path: Path, monkeypatch) -> None:

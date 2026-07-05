@@ -28,6 +28,7 @@ class HookPolicy:
     user_prompt_recall: bool = True
     stop_save: bool = True
     stop_audit: bool = True
+    stop_recall_improve: bool = True
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,7 @@ def load_hook_policy(path: Path | str | None = None) -> HookPolicy:
         user_prompt_recall=nested_bool(data, ("hooks", "user_prompt", "recall"), True),
         stop_save=nested_bool(data, ("hooks", "stop", "save"), True),
         stop_audit=nested_bool(data, ("hooks", "stop", "audit"), True),
+        stop_recall_improve=nested_bool(data, ("hooks", "stop", "recall_improve"), True),
     )
 
 

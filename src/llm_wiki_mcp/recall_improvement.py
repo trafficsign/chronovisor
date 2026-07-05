@@ -28,9 +28,12 @@ from llm_wiki_mcp.recall_policy_store import (
     ACTIVE_POLICY_FILE,
     ALLOWED_POLICY_FIELDS,
     EPISODES_FILE,
+    FRONTIER_AUDIT_DIR,
     IMPROVEMENT_DIR,
+    LIVE_EPISODES_FILE,
     REGISTRY_FILE,
     RUNS_DIR,
+    SCHEDULE_FILE,
     append_jsonl,
     apply_policy_overrides,
     atomic_write_json,
@@ -47,13 +50,15 @@ from llm_wiki_mcp.recall_runtime import (
     load_policy,
 )
 from llm_wiki_mcp.runtime_config import load_toml_file
-from llm_wiki_mcp.runtime_status import safe_append_event
+from llm_wiki_mcp.runtime_status import safe_append_event, safe_append_metric
 
 
 DEFAULT_IMPROVEMENT_MODELS = (
     "qwen3.6:35b-a3b-q8_0",
     "hf.co/douyamv/Gemma-4-31B-JANG_4M-CRACK-GGUF:latest",
 )
+
+FRONTIER_AUDIT_MODES = {"off", "auto", "always"}
 
 
 @dataclass(frozen=True)
@@ -174,6 +179,41 @@ def _evaluate(
     return payload
 
 
+def _policy_hash(policy: RecallPolicy) -> str:
+    data = json.dumps(policy_snapshot(policy), ensure_ascii=False, sort_keys=True, default=_json_default)
+    return hashlib.sha1(data.encode("utf-8")).hexdigest()[:12]
+
+
+def _examples_hash(examples: list[RecallExample]) -> str:
+    data = json.dumps(
+        [
+            {
+                "prompt": example.prompt,
+                "kind": example.kind,
+                "expected_pages": list(example.expected_pages),
+                "injected_pages": list(example.injected_pages),
+                "ref": example.ref,
+            }
+            for example in examples
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha1(data.encode("utf-8")).hexdigest()[:12]
+
+
+def _evaluate_cached(
+    examples: list[RecallExample],
+    *,
+    policy: RecallPolicy,
+    cache: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    key = (_policy_hash(policy), _examples_hash(examples))
+    if key not in cache:
+        cache[key] = _evaluate(examples, policy=policy)
+    return cache[key]
+
+
 def _clone_policy(policy: RecallPolicy) -> RecallPolicy:
     return RecallPolicy(**dict(policy.__dict__))
 
@@ -208,6 +248,59 @@ def _failure_samples(eval_payload: dict[str, Any], *, limit: int = 10) -> list[d
         if len(samples) >= limit:
             break
     return samples
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = int(round((len(ordered) - 1) * pct))
+    return float(ordered[max(0, min(idx, len(ordered) - 1))])
+
+
+def live_episode_summary(path: Path = LIVE_EPISODES_FILE, *, limit: int = 200) -> dict[str, Any]:
+    rows = read_jsonl(path, limit=limit)
+    decisions: dict[str, int] = {}
+    statuses: dict[str, int] = {}
+    hosts: dict[str, int] = {}
+    latencies: list[float] = []
+    page_counts: list[int] = []
+    samples: list[dict[str, Any]] = []
+    for row in rows:
+        decision = str(row.get("decision") or "unknown")
+        status = str(row.get("status") or "unknown")
+        host = str(row.get("host") or "unknown")
+        decisions[decision] = decisions.get(decision, 0) + 1
+        statuses[status] = statuses.get(status, 0) + 1
+        hosts[host] = hosts.get(host, 0) + 1
+        latency = row.get("latency_ms")
+        if isinstance(latency, int | float):
+            latencies.append(float(latency))
+        pages = row.get("pages")
+        if isinstance(pages, list):
+            page_counts.append(len(pages))
+        if len(samples) < 5:
+            samples.append(
+                {
+                    "ts": row.get("ts"),
+                    "decision": decision,
+                    "pages": pages[:5] if isinstance(pages, list) else [],
+                    "prompt_preview": str(row.get("prompt_preview") or "")[:160],
+                }
+            )
+    return {
+        "episodes": len(rows),
+        "latest_ts": rows[-1].get("ts") if rows else None,
+        "decisions": decisions,
+        "statuses": statuses,
+        "hosts": hosts,
+        "avg_pages": round((sum(page_counts) / len(page_counts)) if page_counts else 0.0, 3),
+        "latency_ms": {
+            "p50": round(_percentile(latencies, 0.50), 3),
+            "p95": round(_percentile(latencies, 0.95), 3),
+        },
+        "samples": samples,
+    }
 
 
 def _allowed_field_summary() -> dict[str, dict[str, Any]]:
@@ -255,6 +348,7 @@ def _proposal_prompt(
     baseline_policy: RecallPolicy,
     baseline_eval: dict[str, Any],
     failure_samples: list[dict[str, Any]],
+    live_summary: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "task": "Propose one small recall policy patch for LLM Wiki.",
@@ -271,6 +365,7 @@ def _proposal_prompt(
         "baseline_metrics": baseline_eval.get("metrics", {}),
         "baseline_score": baseline_eval.get("score"),
         "failure_samples": failure_samples,
+        "live_traffic": live_summary,
         "output": {
             "summary": "short title",
             "rationale": "why this should improve replay eval",
@@ -287,6 +382,7 @@ def _call_ollama_proposer(
     baseline_policy: RecallPolicy,
     baseline_eval: dict[str, Any],
     failure_samples: list[dict[str, Any]],
+    live_summary: dict[str, Any],
     timeout_seconds: float = 180.0,
 ) -> PolicyProposal:
     from llm_wiki_mcp.ollama import OLLAMA_URL
@@ -296,6 +392,7 @@ def _call_ollama_proposer(
         baseline_policy=baseline_policy,
         baseline_eval=baseline_eval,
         failure_samples=failure_samples,
+        live_summary=live_summary,
     )
     timeout = httpx.Timeout(connect=10.0, read=timeout_seconds, write=10.0, pool=10.0)
     started = time.perf_counter()
@@ -379,6 +476,7 @@ def propose_with_models(
     baseline_policy: RecallPolicy,
     baseline_eval: dict[str, Any],
     failure_samples: list[dict[str, Any]],
+    live_summary: dict[str, Any],
 ) -> list[PolicyProposal]:
     return [
         _call_ollama_proposer(
@@ -386,6 +484,7 @@ def propose_with_models(
             baseline_policy=baseline_policy,
             baseline_eval=baseline_eval,
             failure_samples=failure_samples,
+            live_summary=live_summary,
         )
         for model in models
     ]
@@ -509,6 +608,7 @@ def _proposal_record(
     baseline_dev: dict[str, Any],
     baseline_holdout: dict[str, Any],
     min_improvement: float,
+    eval_cache: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
     candidate_policy = _clone_policy(baseline_policy)
     applied_fields = apply_policy_overrides(candidate_policy, proposal.overrides)
@@ -518,8 +618,8 @@ def _proposal_record(
             "status": "invalid",
             "reason": "no valid policy fields",
         }
-    candidate_dev = _evaluate(dev_examples, policy=candidate_policy)
-    candidate_holdout = _evaluate(holdout_examples, policy=candidate_policy)
+    candidate_dev = _evaluate_cached(dev_examples, policy=candidate_policy, cache=eval_cache)
+    candidate_holdout = _evaluate_cached(holdout_examples, policy=candidate_policy, cache=eval_cache)
     accepted, checks = _gate_candidate(
         baseline_dev=baseline_dev,
         baseline_holdout=baseline_holdout,
@@ -557,6 +657,105 @@ def _best_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
     )
 
 
+def _frontier_audit_needed(best: dict[str, Any], *, mode: str) -> tuple[bool, list[str]]:
+    if mode == "off":
+        return False, []
+    if mode == "always":
+        return True, ["frontier mode is always"]
+    proposal = best.get("proposal") if isinstance(best.get("proposal"), dict) else {}
+    checks = best.get("checks") if isinstance(best.get("checks"), dict) else {}
+    overrides = proposal.get("overrides") if isinstance(proposal.get("overrides"), dict) else {}
+    reasons: list[str] = []
+    if proposal.get("audit_recommended"):
+        reasons.append("proposal requested audit")
+    if proposal.get("risk") == "high":
+        reasons.append("proposal risk is high")
+    if len(overrides) >= 4:
+        reasons.append("proposal changes four or more fields")
+    if any(field in overrides for field in ("semantic", "rewrite_enabled")):
+        reasons.append("proposal toggles search strategy")
+    if "search_threshold" in overrides and abs(float(overrides.get("search_threshold", 0.0)) - 0.35) > 0.15:
+        reasons.append("proposal makes a large search threshold move")
+    if "read_threshold" in overrides and abs(float(overrides.get("read_threshold", 0.0)) - 0.65) > 0.15:
+        reasons.append("proposal makes a large read threshold move")
+    relative_gain = checks.get("relative_gain")
+    if isinstance(relative_gain, int | float) and relative_gain < 0.08:
+        reasons.append("eval gain is close to adoption threshold")
+    return bool(reasons), reasons
+
+
+def build_frontier_audit_prompt(record: dict[str, Any], best: dict[str, Any], reasons: list[str]) -> str:
+    excerpt = {
+        "run_id": record.get("run_id"),
+        "status": record.get("status"),
+        "dataset": record.get("dataset"),
+        "baseline": record.get("baseline"),
+        "best": best,
+        "audit_reasons": reasons,
+        "failure_samples": record.get("failure_samples", [])[:5],
+    }
+    return f"""\
+You are the frontier auditor for LLM Wiki recall self-improvement.
+
+Review whether the proposed recall policy patch is safe to adopt.
+Do not edit files. Do not run commands. Return JSON only with this exact shape:
+{{
+  "decision": "approved|rejected|quarantined|needs_retry",
+  "summary": "...",
+  "tests_run": ["reviewed replay eval payload"],
+  "commit": null,
+  "committed": false,
+  "pushed": false,
+  "risk": "low|medium|high",
+  "notes": "..."
+}}
+
+Approval criteria:
+- The replay eval improved dev score and did not degrade holdout recall, waste, or latency.
+- The policy patch is small and rollback-safe.
+- It does not increase stale/noisy recall risk.
+- If evidence is insufficient, return needs_retry.
+
+Payload:
+{json.dumps(excerpt, ensure_ascii=False, indent=2, default=_json_default)}
+"""
+
+
+def run_frontier_policy_audit(
+    record: dict[str, Any],
+    best: dict[str, Any],
+    *,
+    reasons: list[str],
+    repo_root: Path | None = None,
+    timeout: int | None = None,
+    audit_dir: Path = FRONTIER_AUDIT_DIR,
+) -> dict[str, Any]:
+    from llm_wiki_mcp import frontier_review
+
+    repo = repo_root or Path(__file__).resolve().parents[2]
+    timeout_seconds = timeout or int(os.environ.get("LLM_WIKI_RECALL_IMPROVE_FRONTIER_TIMEOUT", "1800"))
+    prompt = build_frontier_audit_prompt(record, best, reasons)
+    result = frontier_review._run_codex(
+        prompt,
+        repo_root=repo,
+        timeout=timeout_seconds,
+        execute_patch=False,
+    )
+    payload = result.to_dict()
+    payload["audit_reasons"] = reasons
+    payload["run_id"] = record.get("run_id")
+    payload["ts"] = _now_iso()
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(audit_dir / f"{record.get('run_id', 'unknown')}.json", payload)
+    return payload
+
+
+def _frontier_blocks_adoption(audit: dict[str, Any] | None) -> bool:
+    if not audit:
+        return False
+    return audit.get("decision") != "approved"
+
+
 def run_improvement(
     *,
     config_file: Path | None = None,
@@ -567,10 +766,13 @@ def run_improvement(
     include_heuristic: bool = True,
     min_improvement: float = 0.05,
     max_examples: int = 120,
+    frontier_mode: str = "auto",
+    frontier_timeout: int | None = None,
     active_file: Path = ACTIVE_POLICY_FILE,
     registry_file: Path = REGISTRY_FILE,
     runs_dir: Path = RUNS_DIR,
     episodes_file: Path = EPISODES_FILE,
+    live_episodes_file: Path = LIVE_EPISODES_FILE,
 ) -> dict[str, Any]:
     run_id = _run_id()
     started = _now_iso()
@@ -578,7 +780,9 @@ def run_improvement(
     if max_examples > 0:
         examples = examples[-max_examples:]
     write_episode_snapshot(examples, path=episodes_file)
+    live_telemetry = live_episode_summary(live_episodes_file)
     model_list = configured_models(models)
+    frontier_mode = frontier_mode if frontier_mode in FRONTIER_AUDIT_MODES else "auto"
     if not examples:
         record = {
             "schema_version": 1,
@@ -588,6 +792,7 @@ def run_improvement(
             "applied": False,
             "reason": "no recall feedback examples available",
             "dataset": {"examples": 0, "log_file": str(log_file), "feedback_file": str(feedback_file)},
+            "live_telemetry": live_telemetry,
             "models": list(model_list),
         }
         _persist_run(record, runs_dir=runs_dir, registry_file=registry_file)
@@ -595,8 +800,9 @@ def run_improvement(
 
     dev_examples, holdout_examples = split_examples(examples)
     baseline_policy = load_policy(config_file) if config_file else load_policy()
-    baseline_dev = _evaluate(dev_examples, policy=baseline_policy)
-    baseline_holdout = _evaluate(holdout_examples, policy=baseline_policy)
+    eval_cache: dict[tuple[str, str], dict[str, Any]] = {}
+    baseline_dev = _evaluate_cached(dev_examples, policy=baseline_policy, cache=eval_cache)
+    baseline_holdout = _evaluate_cached(holdout_examples, policy=baseline_policy, cache=eval_cache)
     failures = _failure_samples(baseline_dev)
 
     proposals = propose_with_models(
@@ -604,6 +810,7 @@ def run_improvement(
         baseline_policy=baseline_policy,
         baseline_eval=baseline_dev,
         failure_samples=failures,
+        live_summary=live_telemetry,
     )
     if include_heuristic:
         proposals.extend(heuristic_proposals(baseline_policy=baseline_policy, baseline_eval=baseline_dev))
@@ -617,6 +824,7 @@ def run_improvement(
             baseline_dev=baseline_dev,
             baseline_holdout=baseline_holdout,
             min_improvement=min_improvement,
+            eval_cache=eval_cache,
         )
         for proposal in proposals
         if proposal.overrides
@@ -626,6 +834,8 @@ def run_improvement(
     applied = False
     status = "rejected"
     reason = "no candidate passed adoption gate"
+    frontier_audit: dict[str, Any] | None = None
+    frontier_audit_reasons: list[str] = []
     if best:
         status = "applied" if apply else "shadow_pass"
         reason = "candidate passed adoption gate"
@@ -642,7 +852,44 @@ def run_improvement(
             "dev": best.get("dev", {}),
             "holdout": best.get("holdout", {}),
         }
-        if apply:
+        audit_needed, frontier_audit_reasons = _frontier_audit_needed(best, mode=frontier_mode)
+        if apply and audit_needed:
+            provisional = {
+                "schema_version": 1,
+                "run_id": run_id,
+                "ts": started,
+                "status": status,
+                "applied": False,
+                "reason": reason,
+                "dataset": {
+                    "examples": len(examples),
+                    "dev": len(dev_examples),
+                    "holdout": len(holdout_examples),
+                    "log_file": str(log_file),
+                    "feedback_file": str(feedback_file),
+                    "episodes_file": str(episodes_file),
+                },
+                "baseline": {
+                    "dev": {"score": baseline_dev["score"], "metrics": baseline_dev["metrics"]},
+                    "holdout": {"score": baseline_holdout["score"], "metrics": baseline_holdout["metrics"]},
+                },
+                "failure_samples": failures,
+            }
+            frontier_audit = run_frontier_policy_audit(
+                provisional,
+                best,
+                reasons=frontier_audit_reasons,
+                timeout=frontier_timeout,
+            )
+            if _frontier_blocks_adoption(frontier_audit):
+                status = (
+                    "pending_frontier_review"
+                    if frontier_audit.get("human_required") or frontier_audit.get("rescue_status") == "pending_frontier_review"
+                    else "frontier_rejected"
+                )
+                reason = f"frontier audit did not approve: {frontier_audit.get('summary') or frontier_audit.get('decision')}"
+                active_policy = None
+        if apply and active_policy:
             atomic_write_json(active_file, active_policy)
             applied = True
 
@@ -660,6 +907,7 @@ def run_improvement(
             "log_file": str(log_file),
             "feedback_file": str(feedback_file),
             "episodes_file": str(episodes_file),
+            "live_episodes_file": str(live_episodes_file),
         },
         "models": list(model_list),
         "baseline_policy": policy_snapshot(baseline_policy),
@@ -668,11 +916,15 @@ def run_improvement(
             "holdout": {"score": baseline_holdout["score"], "metrics": baseline_holdout["metrics"]},
         },
         "failure_samples": failures,
+        "live_telemetry": live_telemetry,
         "proposals": [asdict(proposal) for proposal in proposals],
         "candidates": candidates,
         "best": best,
         "active_policy": active_policy,
-        "frontier_audit_recommended": bool(best and best["proposal"].get("audit_recommended")),
+        "frontier_audit_recommended": bool(best and frontier_audit_reasons),
+        "frontier_audit_reasons": frontier_audit_reasons,
+        "frontier_audit": frontier_audit,
+        "eval_cache_entries": len(eval_cache),
     }
     _persist_run(record, runs_dir=runs_dir, registry_file=registry_file)
     level = "info" if applied or status == "shadow_pass" else "warn"
@@ -701,6 +953,10 @@ def _compact_registry_record(record: dict[str, Any]) -> dict[str, Any]:
         "best": best,
         "active_policy": record.get("active_policy"),
         "frontier_audit_recommended": record.get("frontier_audit_recommended", False),
+        "frontier_audit_reasons": record.get("frontier_audit_reasons", []),
+        "frontier_audit": record.get("frontier_audit"),
+        "eval_cache_entries": record.get("eval_cache_entries"),
+        "live_telemetry": record.get("live_telemetry"),
     }
 
 
@@ -745,6 +1001,118 @@ def rollback_policy(
     return record
 
 
+def _parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _feedback_count(path: Path = RECALL_FEEDBACK_FILE) -> int:
+    return len(read_jsonl(path))
+
+
+def run_due(
+    *,
+    config_file: Path | None = None,
+    log_file: Path = RECALL_LOG_FILE,
+    feedback_file: Path = RECALL_FEEDBACK_FILE,
+    models: str | list[str] | tuple[str, ...] | None = None,
+    apply: bool = True,
+    include_heuristic: bool = True,
+    min_improvement: float = 0.05,
+    max_examples: int = 80,
+    min_interval_hours: float = 24.0,
+    min_new_feedback: int = 5,
+    min_total_feedback: int = 3,
+    frontier_mode: str = "auto",
+    frontier_timeout: int | None = None,
+    dry_run: bool = False,
+    schedule_file: Path = SCHEDULE_FILE,
+) -> dict[str, Any]:
+    now = datetime.now()
+    state = read_json_file(schedule_file)
+    feedback_count = _feedback_count(feedback_file)
+    last_run = _parse_ts(state.get("last_run_at"))
+    last_feedback_count = int(state.get("last_feedback_count") or 0)
+    age_hours = ((now - last_run).total_seconds() / 3600.0) if last_run else None
+    new_feedback = max(0, feedback_count - last_feedback_count)
+    enough_total = feedback_count >= min_total_feedback
+    interval_due = last_run is None or (age_hours is not None and age_hours >= min_interval_hours)
+    feedback_due = new_feedback >= min_new_feedback
+    due = enough_total and (interval_due or feedback_due)
+    decision = {
+        "schema_version": 1,
+        "checked_at": _now_iso(),
+        "status": "due" if due else "skipped",
+        "dry_run": dry_run,
+        "feedback_count": feedback_count,
+        "last_feedback_count": last_feedback_count,
+        "new_feedback": new_feedback,
+        "age_hours": round(age_hours, 3) if age_hours is not None else None,
+        "min_interval_hours": min_interval_hours,
+        "min_new_feedback": min_new_feedback,
+        "min_total_feedback": min_total_feedback,
+        "reasons": {
+            "enough_total": enough_total,
+            "interval_due": interval_due,
+            "feedback_due": feedback_due,
+        },
+    }
+    if dry_run:
+        preview_decision = dict(decision)
+        decision["would_update_schedule"] = {
+            **state,
+            "last_checked_at": decision["checked_at"],
+            "last_status": decision["status"],
+            "last_decision": preview_decision,
+        }
+        return decision
+
+    if not due:
+        next_state = {
+            **state,
+            "last_checked_at": decision["checked_at"],
+            "last_status": decision["status"],
+            "last_decision": decision,
+        }
+        atomic_write_json(schedule_file, next_state)
+        return decision
+
+    result = run_improvement(
+        config_file=config_file,
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=models,
+        apply=apply,
+        include_heuristic=include_heuristic,
+        min_improvement=min_improvement,
+        max_examples=max_examples,
+        frontier_mode=frontier_mode,
+        frontier_timeout=frontier_timeout,
+    )
+    next_state = {
+        **state,
+        "last_checked_at": decision["checked_at"],
+        "last_run_at": result.get("ts") or decision["checked_at"],
+        "last_run_id": result.get("run_id"),
+        "last_status": result.get("status"),
+        "last_feedback_count": feedback_count,
+        "last_decision": decision,
+    }
+    atomic_write_json(schedule_file, next_state)
+    safe_append_metric(
+        "recall_improve",
+        status=result.get("status"),
+        applied=bool(result.get("applied")),
+        examples=(result.get("dataset") or {}).get("examples"),
+        eval_cache_entries=result.get("eval_cache_entries"),
+    )
+    return {"status": "ran", "decision": decision, "result": result, "schedule_state": next_state}
+
+
 def improvement_snapshot(
     *,
     active_file: Path = ACTIVE_POLICY_FILE,
@@ -753,6 +1121,7 @@ def improvement_snapshot(
 ) -> dict[str, Any]:
     active = read_json_file(active_file)
     history = read_jsonl(registry_file, limit=limit)
+    schedule = read_json_file(SCHEDULE_FILE)
     latest = history[-1] if history else None
     counts: dict[str, int] = {}
     for row in history:
@@ -768,11 +1137,15 @@ def improvement_snapshot(
         "history": history,
         "counts": counts,
         "models": list(configured_models(None)),
+        "schedule": schedule or None,
         "paths": {
             "active_policy": str(active_file),
             "registry": str(registry_file),
             "episodes": str(EPISODES_FILE),
+            "live_episodes": str(LIVE_EPISODES_FILE),
             "runs": str(RUNS_DIR),
+            "schedule": str(SCHEDULE_FILE),
+            "frontier_audits": str(FRONTIER_AUDIT_DIR),
         },
     }
 
@@ -789,7 +1162,26 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-heuristic", dest="include_heuristic", action="store_false", default=True)
     run.add_argument("--min-improvement", type=float, default=0.05)
     run.add_argument("--max-examples", type=int, default=120)
+    run.add_argument("--frontier", choices=sorted(FRONTIER_AUDIT_MODES), default="auto")
+    run.add_argument("--frontier-timeout", type=int)
     run.add_argument("--json", action="store_true")
+
+    due = sub.add_parser("run-due", help="Run the improvement loop only when schedule/feedback gates are due.")
+    due.add_argument("--config")
+    due.add_argument("--log-file", default=str(RECALL_LOG_FILE))
+    due.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))
+    due.add_argument("--models", help="Comma-separated Ollama proposer models.")
+    due.add_argument("--no-apply", dest="apply", action="store_false", default=True)
+    due.add_argument("--no-heuristic", dest="include_heuristic", action="store_false", default=True)
+    due.add_argument("--min-improvement", type=float, default=0.05)
+    due.add_argument("--max-examples", type=int, default=80)
+    due.add_argument("--min-interval-hours", type=float, default=24.0)
+    due.add_argument("--min-new-feedback", type=int, default=5)
+    due.add_argument("--min-total-feedback", type=int, default=3)
+    due.add_argument("--frontier", choices=sorted(FRONTIER_AUDIT_MODES), default="auto")
+    due.add_argument("--frontier-timeout", type=int)
+    due.add_argument("--dry-run", action="store_true")
+    due.add_argument("--json", action="store_true")
 
     status = sub.add_parser("status", help="Show active policy and recent improvement runs.")
     status.add_argument("--json", action="store_true")
@@ -832,12 +1224,38 @@ def main(argv: list[str] | None = None) -> int:
             include_heuristic=args.include_heuristic,
             min_improvement=max(0.0, args.min_improvement),
             max_examples=max(1, args.max_examples),
+            frontier_mode=args.frontier,
+            frontier_timeout=args.frontier_timeout,
         )
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
         else:
             _print_run(payload)
         return 0 if payload["status"] in {"applied", "shadow_pass", "rejected", "blocked"} else 1
+    if args.command == "run-due":
+        payload = run_due(
+            config_file=Path(args.config).expanduser() if args.config else None,
+            log_file=Path(args.log_file).expanduser(),
+            feedback_file=Path(args.feedback_file).expanduser(),
+            models=args.models,
+            apply=args.apply,
+            include_heuristic=args.include_heuristic,
+            min_improvement=max(0.0, args.min_improvement),
+            max_examples=max(1, args.max_examples),
+            min_interval_hours=max(0.0, args.min_interval_hours),
+            min_new_feedback=max(0, args.min_new_feedback),
+            min_total_feedback=max(0, args.min_total_feedback),
+            frontier_mode=args.frontier,
+            frontier_timeout=args.frontier_timeout,
+            dry_run=args.dry_run,
+        )
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+        else:
+            print(f"status\t{payload.get('status')}")
+            if payload.get("result"):
+                print(f"run\t{payload['result'].get('run_id')}\t{payload['result'].get('status')}")
+        return 0
     if args.command == "status":
         payload = improvement_snapshot()
         if args.json:
