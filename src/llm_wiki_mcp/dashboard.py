@@ -224,7 +224,8 @@ def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, An
     for name, roles in _configured_model_roles().items():
         resolved = _resolve_model_name(name, installed_by_name, running_by_name)
         roles_by_name.setdefault(resolved, set()).update(roles)
-    names = sorted(set(running_by_name) | set(installed_by_name) | set(roles_by_name))
+    names = sorted(set(running_by_name) | set(roles_by_name))
+    unused_installed = set(installed_by_name) - set(names)
     rows: list[dict[str, Any]] = []
     missing = 0
     external = 0
@@ -303,11 +304,13 @@ def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, An
         "error": running_snapshot.get("error") or installed_snapshot.get("error"),
         "models": rows,
         "summary": {
-            "installed": len(installed_by_name),
+            "installed": sum(1 for row in rows if row["installed"]),
             "loaded": len(running_by_name),
             "configured": len(roles_by_name),
             "missing": missing,
             "external": external,
+            "all_installed": len(installed_by_name),
+            "unused_installed": len(unused_installed),
             "installed_size_bytes": installed_size,
             "loaded_size_bytes": loaded_size,
         },

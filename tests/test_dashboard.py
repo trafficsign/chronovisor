@@ -255,6 +255,13 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
                     "details": {"format": "gguf", "quantization_level": "F16"},
                     "capabilities": ["embedding"],
                 },
+                {
+                    "name": "gpt-oss:20b",
+                    "model": "gpt-oss:20b",
+                    "size": 13_000,
+                    "details": {"format": "gguf", "quantization_level": "MXFP4"},
+                    "capabilities": ["completion"],
+                },
             ],
         },
     )
@@ -289,6 +296,8 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     by_name = {row["name"]: row for row in snapshot["models"]}
 
     assert snapshot["summary"]["installed"] == 3
+    assert snapshot["summary"]["all_installed"] == 4
+    assert snapshot["summary"]["unused_installed"] == 1
     assert snapshot["summary"]["loaded"] == 2
     assert snapshot["summary"]["configured"] == 4
     assert by_name["qwen3.6:35b-a3b-mxfp8"]["status"] == "loaded"
@@ -297,6 +306,7 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     assert by_name["gemma4:26b-mxfp8"]["roles"] == ["improve"]
     assert by_name["bge-m3:latest"]["roles"] == ["embed"]
     assert "bge-m3" not in by_name
+    assert "gpt-oss:20b" not in by_name
     assert by_name["qwen3.5:4b"]["status"] == "missing"
     assert by_name["qwen3.5:4b"]["roles"] == ["gate", "rewrite"]
 
