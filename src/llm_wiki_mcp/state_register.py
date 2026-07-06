@@ -14,6 +14,9 @@ from llm_wiki_mcp.wiki import SYSTEM_DIR
 STATE_PAGE_ID = "current-state"
 STATE_PAGE = SYSTEM_DIR / f"{STATE_PAGE_ID}.md"
 STALE_AFTER_DAYS = 30
+_PLACEHOLDER_IDS = {"foo", "bar", "baz", "alpha", "beta", "target", "sample", "test"}
+_PLACEHOLDER_VALUES = {"body", "test", "placeholder", "sample"}
+
 
 
 def _strip_heading_noise(text: str) -> str:
@@ -37,6 +40,38 @@ def _parse_date(value: object) -> date | None:
         return date.fromisoformat(value[:10])
     except ValueError:
         return None
+
+
+def _looks_like_placeholder_state_candidate(meta: dict[str, Any]) -> bool:
+    page_id = str(meta.get("page_id") or "").strip().casefold()
+    title = str(meta.get("title") or "").strip().casefold()
+    summary = str(meta.get("summary") or "").strip().casefold()
+    if page_id in _PLACEHOLDER_IDS or re.fullmatch(r"p\d+", page_id):
+        return True
+    if title in _PLACEHOLDER_IDS and summary in _PLACEHOLDER_VALUES:
+        return True
+    if summary == "body" and title in _PLACEHOLDER_IDS:
+        return True
+    return False
+
+
+def _is_state_candidate(meta: dict[str, Any]) -> bool:
+    page_id = str(meta.get("page_id") or "")
+    if not page_id or page_id == STATE_PAGE_ID:
+        return False
+    status = str(meta.get("status") or "active")
+    if status != "active":
+        return False
+    page_type = str(meta.get("page_type") or "knowledge")
+    if page_type == "reference":
+        return False
+    path_value = meta.get("path")
+    if isinstance(path_value, str) and not Path(path_value).exists():
+        return False
+    folder = Path(path_value).parent.name if isinstance(path_value, str) else ""
+    if folder in {"hubs", "insights"} or page_id.startswith("folder-"):
+        return False
+    return not _looks_like_placeholder_state_candidate(meta)
 
 
 def _state_payload(path: Path = STATE_PAGE, *, max_chars: int = 1600) -> dict[str, Any]:
@@ -134,18 +169,12 @@ def refresh_state_register(
 
     for meta in candidates:
         page_id = str(meta.get("page_id") or "")
-        if not page_id or page_id == STATE_PAGE_ID:
-            continue
         full = store.meta(page_id)
         if isinstance(full, dict):
             meta = {**meta, **full}
+        if not _is_state_candidate(meta):
+            continue
         page_type = str(meta.get("page_type") or "knowledge")
-        if page_type == "reference":
-            continue
-        path_value = meta.get("path")
-        folder = Path(path_value).parent.name if isinstance(path_value, str) else ""
-        if folder in {"hubs", "insights"} or page_id.startswith("folder-"):
-            continue
         title = str(meta.get("title") or page_id)
         summary = str(meta.get("summary") or "").strip()
         selected.append(

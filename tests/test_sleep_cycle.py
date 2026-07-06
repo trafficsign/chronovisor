@@ -5,6 +5,7 @@ from llm_wiki_mcp import sleep_cycle
 
 def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     monkeypatch.setattr("llm_wiki_mcp.wiki_snapshot.snapshot_wiki", lambda reason: {"status": "clean", "reason": reason})
+    monkeypatch.setattr("llm_wiki_mcp.health.health_snapshot", lambda: {"memory_integrity": {"capture_rate": 0.5}, "queues": {}})
     monkeypatch.setattr("llm_wiki_mcp.cofire.build_cofire_graph", lambda write=True: {"edges": 2, "nodes": 2, "graph": {}})
     monkeypatch.setattr("llm_wiki_mcp.prefetch.build_prefetch_cache", lambda write=True: {"status": "ok", "episodes": 1, "buckets": {"a": []}, "tokens": {"b": []}})
     monkeypatch.setattr("llm_wiki_mcp.retention.build_retention_scores", lambda write=True: {"counts": {"pages": 2}, "pages": {}})
@@ -18,6 +19,8 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     monkeypatch.setattr("llm_wiki_mcp.raw_replay.build_queue", lambda limit: {"count": limit})
     monkeypatch.setattr("llm_wiki_mcp.duplicate_review.build_duplicate_review_queue", lambda limit: [{"id": "a"}])
     monkeypatch.setattr("llm_wiki_mcp.duplicate_review.write_review_queue", lambda records: "/tmp/dupes.jsonl")
+    monkeypatch.setattr("llm_wiki_mcp.recall_improvement.run_due", lambda **kwargs: {"status": "skipped", "dry_run": kwargs["dry_run"]})
+    monkeypatch.setattr("llm_wiki_mcp.autonomy.run_autonomy_cycle", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
     monkeypatch.setattr(sleep_cycle, "_append_history", lambda row: None)
 
     payload = sleep_cycle.run_sleep_cycle(raw_limit=3, eval_limit=4, duplicate_limit=5)
@@ -34,3 +37,6 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     assert payload["memory_integrity"]["capture_rate"] == 0.5
     assert payload["raw_replay"]["count"] == 3
     assert payload["duplicates"]["count"] == 1
+    assert payload["recall_improve"]["status"] == "skipped"
+    assert payload["autonomy"]["status"] == "ok"
+    assert payload["wiki_snapshot_after"]["status"] == "clean"

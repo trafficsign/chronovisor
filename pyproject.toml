@@ -43,6 +43,7 @@ llm-wiki-golden-expand = "llm_wiki_mcp.golden_expand:main"
 llm-wiki-retention = "llm_wiki_mcp.retention:main"
 llm-wiki-reflect = "llm_wiki_mcp.reflection:main"
 llm-wiki-hubs = "llm_wiki_mcp.hubs:main"
+llm-wiki-autonomy = "llm_wiki_mcp.autonomy:main"
 llm-wiki-distill = "llm_wiki_mcp.distill:main"
 llm-wiki-oracle = "llm_wiki_mcp.oracle:main"
 

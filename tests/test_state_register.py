@@ -65,3 +65,77 @@ def test_refresh_state_register_writes_recent_pages(tmp_path: Path, monkeypatch)
 
     assert payload["pages"] == ["recent-page"]
     assert "[[recent-page]]" in path.read_text(encoding="utf-8")
+
+
+def test_refresh_state_register_skips_placeholder_pages(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "current-state.md"
+    real = tmp_path / "real.md"
+    real.write_text("---\ntitle: Real\nupdated: 2026-07-06\nsummary: Useful\n---\nBody\n", encoding="utf-8")
+
+    class FakeStore:
+        def refresh(self) -> None:
+            pass
+
+        def meta(self, page_id: str):
+            if page_id == "baz":
+                return {
+                    "page_id": "baz",
+                    "title": "Baz",
+                    "summary": "body",
+                    "updated": "2026-04-28",
+                    "page_type": "knowledge",
+                }
+            return {"page_id": page_id, "title": "Real", "summary": "Useful", "updated": "2026-07-06", "page_type": "knowledge", "path": str(real)}
+
+        def all_pages_meta(self, include_system: bool = False):
+            return [{"page_id": "baz"}, {"page_id": "real"}]
+
+    monkeypatch.setattr("llm_wiki_mcp.index_store.get_store", lambda: FakeStore())
+
+    payload = state_register.refresh_state_register(path=path)
+
+    assert payload["pages"] == ["real"]
+    assert "[[baz]]" not in path.read_text(encoding="utf-8")
+
+
+def test_refresh_state_register_skips_deprecated_pages(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "current-state.md"
+    deprecated = tmp_path / "old.md"
+    active = tmp_path / "active.md"
+    deprecated.write_text("---\ntitle: Old\nupdated: 2026-07-06\n---\nOld\n", encoding="utf-8")
+    active.write_text("---\ntitle: Active\nupdated: 2026-07-06\n---\nActive\n", encoding="utf-8")
+
+    class FakeStore:
+        def refresh(self) -> None:
+            pass
+
+        def meta(self, page_id: str):
+            if page_id == "old":
+                return {
+                    "page_id": "old",
+                    "title": "Old",
+                    "summary": "Deprecated duplicate",
+                    "updated": "2026-07-06",
+                    "status": "deprecated",
+                    "page_type": "knowledge",
+                    "path": str(deprecated),
+                }
+            return {
+                "page_id": "active",
+                "title": "Active",
+                "summary": "Current",
+                "updated": "2026-07-06",
+                "status": "active",
+                "page_type": "knowledge",
+                "path": str(active),
+            }
+
+        def all_pages_meta(self, include_system: bool = False):
+            return [{"page_id": "old"}, {"page_id": "active"}]
+
+    monkeypatch.setattr("llm_wiki_mcp.index_store.get_store", lambda: FakeStore())
+
+    payload = state_register.refresh_state_register(path=path)
+
+    assert payload["pages"] == ["active"]
+    assert "[[old]]" not in path.read_text(encoding="utf-8")

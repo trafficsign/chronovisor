@@ -574,6 +574,19 @@ def main(argv: list[str] | None = None) -> int:
     hubs_parser.add_argument("--no-write", action="store_true")
     hubs_parser.add_argument("--json", action="store_true")
     distill_parser = sub.add_parser("distill", help="Export wiki QA pairs for distillation.")
+    autonomy_parser = sub.add_parser("autonomy", help="Run/install autonomous operation loops.")
+    autonomy_sub = autonomy_parser.add_subparsers(dest="autonomy_command", required=True)
+    autonomy_status = autonomy_sub.add_parser("status")
+    autonomy_status.add_argument("--json", action="store_true")
+    autonomy_watchdog = autonomy_sub.add_parser("watchdog")
+    autonomy_watchdog.add_argument("--notify", action="store_true")
+    autonomy_watchdog.add_argument("--json", action="store_true")
+    autonomy_digest = autonomy_sub.add_parser("digest")
+    autonomy_digest.add_argument("--json", action="store_true")
+    autonomy_install = autonomy_sub.add_parser("install-launchd")
+    autonomy_install.add_argument("--dry-run", action="store_true")
+    autonomy_install.add_argument("--load", action="store_true")
+    autonomy_install.add_argument("--json", action="store_true")
     distill_parser.add_argument("--limit", type=int, default=0)
     distill_parser.add_argument("--include-reference", action="store_true")
     distill_parser.add_argument("--no-write", action="store_true")
@@ -861,6 +874,25 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"hubs\t{data['hubs']}")
         return 0
+    if args.command == "autonomy":
+        from llm_wiki_mcp import autonomy
+
+        if args.autonomy_command == "status":
+            data = autonomy.status()
+        elif args.autonomy_command == "watchdog":
+            data = autonomy.watchdog_snapshot(notify=args.notify)
+        elif args.autonomy_command == "digest":
+            data = autonomy.build_digest(autonomy._read_json(autonomy.LATEST_FILE))
+        else:
+            data = autonomy.install_launchd(dry_run=args.dry_run, load=args.load)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            for key, value in data.items():
+                if key in {"latest"}:
+                    continue
+                print(f"{key}\t{value}")
+        return 0 if data.get("status") in {"ok", "alert"} else 1
     if args.command == "distill":
         from llm_wiki_mcp.distill import export_distill_dataset
 

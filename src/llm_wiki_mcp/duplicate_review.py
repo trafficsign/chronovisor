@@ -34,7 +34,7 @@ class DuplicateCandidate:
     def to_record(self) -> dict:
         return {
             "type": "duplicate_candidate",
-            "lane": "review",
+            "lane": "autonomous",
             "left": self.left,
             "right": self.right,
             "left_title": self.left_title,
@@ -42,8 +42,8 @@ class DuplicateCandidate:
             "score": round(self.score, 4),
             "method": self.method,
             "recommendation": (
-                "Review and merge manually; if merged, mark the losing page "
-                "with status: deprecated and superseded_by: <winner>."
+                "Autonomy cycle will supersede only exact, high-confidence, reversible pairs; "
+                "uncertain pairs are deferred and re-evaluated on the next sleep cycle."
             ),
         }
 

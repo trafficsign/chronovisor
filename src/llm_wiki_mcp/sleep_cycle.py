@@ -1,8 +1,7 @@
 """Nightly consolidation runner for LLM Wiki.
 
-The sleep cycle is deliberately a coordinator, not a new intelligence layer:
-it snapshots first, refreshes cheap eval/graph queues, and leaves destructive
-merge or re-ingest work behind explicit flags.
+The sleep cycle snapshots first, refreshes cheap eval/graph artifacts, then
+hands reversible maintenance decisions to the autonomy layer.
 """
 
 from __future__ import annotations
@@ -34,6 +33,7 @@ def run_sleep_cycle(
     from llm_wiki_mcp.claims import rebuild_claim_index
     from llm_wiki_mcp.distill import export_distill_dataset
     from llm_wiki_mcp.duplicate_review import build_duplicate_review_queue, write_review_queue
+    from llm_wiki_mcp.health import health_snapshot
     from llm_wiki_mcp.golden_expand import expand_golden_from_recall_questions
     from llm_wiki_mcp.hubs import build_hub_pages
     from llm_wiki_mcp.memory_integrity import run_eval
@@ -41,10 +41,13 @@ def run_sleep_cycle(
     from llm_wiki_mcp.raw_replay import QUEUE_FILE, build_queue, select_raws
     from llm_wiki_mcp.reflection import write_reflection_page
     from llm_wiki_mcp.retention import build_retention_scores
+    from llm_wiki_mcp import recall_improvement
     from llm_wiki_mcp.state_register import refresh_state_register
+    from llm_wiki_mcp.autonomy import run_autonomy_cycle
     from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
 
     started = datetime.now().isoformat(timespec="seconds")
+    before_health = health_snapshot()
     snapshot = (
         {"status": "skipped", "reason": "dry_run"}
         if dry_run
@@ -73,6 +76,15 @@ def run_sleep_cycle(
     duplicate_path = ""
     if not dry_run:
         duplicate_path = str(write_review_queue(duplicates))
+    recall_improve = recall_improvement.run_due(
+        apply=not dry_run,
+        min_interval_hours=24.0,
+        min_new_feedback=5,
+        min_total_feedback=3,
+        max_examples=80,
+        frontier_mode="auto",
+        dry_run=dry_run,
+    )
     payload = {
         "status": "ok",
         "started_at": started,
@@ -98,7 +110,17 @@ def run_sleep_cycle(
             "count": len(duplicates),
             "path": duplicate_path,
         },
+        "recall_improve": recall_improve,
     }
+    payload["autonomy"] = run_autonomy_cycle(
+        duplicates=duplicates,
+        retention=retention,
+        before_health=before_health,
+        wiki_snapshot=snapshot,
+        dry_run=dry_run,
+    )
+    if not dry_run:
+        payload["wiki_snapshot_after"] = snapshot_wiki("after sleep cycle")
     if not dry_run:
         _append_history(payload)
     return payload
@@ -130,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"distill_rows\t{payload['distill']['rows']}")
         print(f"hubs\t{payload['hubs']['hubs']}")
         print(f"duplicates\t{payload['duplicates']['count']}")
+        print(f"recall_improve\t{payload['recall_improve'].get('status')}")
+        print(f"autonomy\t{payload['autonomy']['status']}")
     return 0
 
 
