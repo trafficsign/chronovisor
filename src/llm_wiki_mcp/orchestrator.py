@@ -644,11 +644,20 @@ def run_lint_if_due() -> dict:
     if not should:
         return {"triggered": False, "reason": reason}
 
-    from llm_wiki_mcp.lint import check, apply_safe_fixes
+    from llm_wiki_mcp.lint import (
+        apply_safe_fixes,
+        check,
+        summarize_issues,
+        write_repair_queue,
+    )
 
     issues = check()
     actions = apply_safe_fixes(issues)
     remaining = [i for i in issues if not i.get("auto_fixable")]
+    try:
+        repair_queue = str(write_repair_queue(remaining))
+    except Exception:
+        repair_queue = None
 
     mark_lint_complete()
 
@@ -656,8 +665,10 @@ def run_lint_if_due() -> dict:
         "triggered": True,
         "reason": reason,
         "total_issues": len(issues),
+        "summary": summarize_issues(issues),
         "actions_taken": actions,
         "remaining_issues": len(remaining),
+        "repair_queue": repair_queue,
     }
 
 

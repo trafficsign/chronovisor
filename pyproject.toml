@@ -30,6 +30,7 @@ llm-wiki-recall-eval = "llm_wiki_mcp.recall_eval:main"
 llm-wiki-recall-calibrate = "llm_wiki_mcp.recall_calibration:main"
 llm-wiki-recall-improve = "llm_wiki_mcp.recall_improvement:main"
 llm-wiki-eval = "llm_wiki_mcp.search_eval:main"
+llm-wiki-duplicate-review = "llm_wiki_mcp.duplicate_review:main"
 
 [build-system]
 requires = ["hatchling"]

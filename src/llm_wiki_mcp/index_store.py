@@ -25,11 +25,12 @@ from llm_wiki_mcp.link_fix import atomic_write, extract_targets
 from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR, WIKI_ROOT
 
 
-SCHEMA_VERSION = 5  # bumped for lifecycle status/superseded_by
+SCHEMA_VERSION = 6  # bumped for page_type
 INDEX_DIR = WIKI_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
 VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
+VALID_PAGE_TYPES = {"knowledge", "reference"}
 
 
 def _normalize_lifecycle_status(value: object) -> str:
@@ -39,6 +40,20 @@ def _normalize_lifecycle_status(value: object) -> str:
     if normalized in VALID_LIFECYCLE_STATUSES:
         return normalized
     return "active"
+
+
+def _normalize_page_type(value: object, *, path: Path | None = None) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in VALID_PAGE_TYPES:
+            return normalized
+    if path is not None:
+        try:
+            if path.parent.name == "car-spec":
+                return "reference"
+        except OSError:
+            pass
+    return "knowledge"
 
 
 def _parse_frontmatter(text: str) -> dict:
@@ -99,6 +114,7 @@ class PageEntry:
     recall_questions: list[str] = field(default_factory=list)
     status: str = "active"
     superseded_by: str = ""
+    page_type: str = "knowledge"
 
     def to_dict(self) -> dict:
         return {
@@ -116,6 +132,7 @@ class PageEntry:
             "recall_questions": list(self.recall_questions),
             "status": self.status,
             "superseded_by": self.superseded_by,
+            "page_type": self.page_type,
         }
 
     @classmethod
@@ -143,6 +160,7 @@ class PageEntry:
             recall_questions=_coerce_str_list(d.get("recall_questions")),
             status=_normalize_lifecycle_status(d.get("status")),
             superseded_by=d.get("superseded_by", "") if isinstance(d.get("superseded_by", ""), str) else "",
+            page_type=_normalize_page_type(d.get("page_type")),
         )
 
 
@@ -363,6 +381,7 @@ class IndexStore:
                 if isinstance(fm.get("superseded_by", ""), str)
                 else ""
             ),
+            page_type=_normalize_page_type(fm.get("type"), path=path),
         )
 
     def _rebuild_backlinks(self) -> None:
@@ -421,6 +440,7 @@ class IndexStore:
                 "recall_questions": list(entry.recall_questions),
                 "status": entry.status,
                 "superseded_by": entry.superseded_by,
+                "page_type": entry.page_type,
             }
 
     def outlinks(self, page_id: str) -> list[str]:
@@ -499,9 +519,15 @@ class IndexStore:
                     "updated": e.updated,
                     "status": e.status,
                     "superseded_by": e.superseded_by,
+                    "page_type": e.page_type,
                 }
                 for e in items
             ]
+
+    def page_type(self, page_id: str) -> str:
+        with self._lock:
+            entry = self._entries.get(page_id)
+            return entry.page_type if entry else "knowledge"
 
     def orphans(self, include_system: bool = False) -> list[str]:
         """Page IDs with no inbound backlinks (excluding self-links)."""

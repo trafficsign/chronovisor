@@ -16,6 +16,7 @@ class ScoredPage:
     snippet: str = ""
     status: str = "active"
     superseded_by: str = ""
+    page_type: str = "knowledge"
 
 
 _CJK_RANGES = (

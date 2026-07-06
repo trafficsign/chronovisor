@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import date
+from difflib import SequenceMatcher
 from inspect import Parameter, signature
 from pathlib import Path
 from typing import Any, Callable
@@ -396,6 +397,188 @@ def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
         )
 
     return normalized
+
+
+def _normalize_match_text(text: object) -> str:
+    if not isinstance(text, str):
+        return ""
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    normalized = re.sub(r"[\W_]+", " ", normalized, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _op_title_or_slug(op: dict) -> str:
+    title = op.get("title")
+    if isinstance(title, str) and title.strip():
+        return title
+    filename = op.get("filename")
+    if isinstance(filename, str) and filename.strip():
+        try:
+            return _title_from_page_id(_safe_resolve_page_path(filename).stem)
+        except IngestApplyError:
+            return Path(filename).stem
+    return ""
+
+
+def _relative_page_filename(path: Path) -> str:
+    try:
+        return str(path.relative_to(PAGES_DIR))
+    except ValueError:
+        return path.name
+
+
+def _existing_candidate_metas() -> list[dict]:
+    try:
+        from llm_wiki_mcp.index_store import get_store
+
+        store = get_store()
+        store.refresh()
+        metas: list[dict] = []
+        for item in store.all_pages_meta(include_system=False):
+            if item.get("page_type") == "reference":
+                continue
+            if item.get("status") not in (None, "active"):
+                continue
+            meta = store.meta(str(item.get("page_id", "")))
+            if meta is not None:
+                metas.append(meta)
+        return metas
+    except Exception:
+        return []
+
+
+def _candidate_score_for_create(op: dict, meta: dict) -> tuple[float, str]:
+    requested_title = _normalize_match_text(_op_title_or_slug(op))
+    existing_title = _normalize_match_text(meta.get("title"))
+    requested_filename = op.get("filename")
+    requested_slug = ""
+    if isinstance(requested_filename, str):
+        try:
+            requested_slug = _normalize_for_loose_page_id(
+                _safe_resolve_page_path(requested_filename).stem
+            )
+        except IngestApplyError:
+            requested_slug = _normalize_for_loose_page_id(Path(requested_filename).stem)
+    existing_slug = _normalize_for_loose_page_id(str(meta.get("page_id", "")))
+
+    if requested_slug and requested_slug == existing_slug:
+        return 1.0, "same-page-id"
+    if requested_title and existing_title and requested_title == existing_title:
+        return 1.0, "same-title"
+
+    title_score = (
+        SequenceMatcher(None, requested_title, existing_title).ratio()
+        if requested_title and existing_title
+        else 0.0
+    )
+    slug_score = (
+        SequenceMatcher(None, requested_slug, existing_slug).ratio()
+        if requested_slug and existing_slug
+        else 0.0
+    )
+    if title_score >= 0.92:
+        return title_score, "near-title"
+    if slug_score >= 0.95:
+        return slug_score, "near-page-id"
+    return max(title_score, slug_score), "below-threshold"
+
+
+def _search_candidate_metas(op: dict) -> list[dict]:
+    query_parts = [
+        _op_title_or_slug(op),
+        op.get("summary") if isinstance(op.get("summary"), str) else "",
+    ]
+    keywords = op.get("keywords")
+    if isinstance(keywords, list):
+        query_parts.extend(str(k) for k in keywords if isinstance(k, str))
+    query = " ".join(part for part in query_parts if part).strip()
+    if not query:
+        return []
+
+    try:
+        from llm_wiki_mcp.index_store import get_store
+        from llm_wiki_mcp.search import search
+
+        results, _mode = search(query, top_n=5, semantic=True)
+        store = get_store()
+        metas: list[dict] = []
+        for result in results:
+            meta = store.meta(result.page_id)
+            if meta is not None and meta.get("page_type") != "reference":
+                metas.append(meta)
+        return metas
+    except Exception:
+        return []
+
+
+def _find_existing_create_target(op: dict) -> tuple[Path, str, float] | None:
+    filename = op.get("filename")
+    if not isinstance(filename, str):
+        return None
+    try:
+        requested_path = _safe_resolve_page_path(filename)
+        existing = _find_page_resilient(requested_path.stem)
+        if existing is not None and existing.exists():
+            return existing, "same-page-id", 1.0
+    except IngestApplyError:
+        return None
+
+    best_path: Path | None = None
+    best_reason = ""
+    best_score = 0.0
+    for meta in _existing_candidate_metas():
+        score, reason = _candidate_score_for_create(op, meta)
+        if score > best_score:
+            try:
+                best_path = Path(str(meta["path"]))
+            except (KeyError, TypeError):
+                best_path = None
+            best_reason = reason
+            best_score = score
+
+    if best_path is not None and best_score >= 0.92:
+        return best_path, best_reason, best_score
+
+    for meta in _search_candidate_metas(op):
+        score, reason = _candidate_score_for_create(op, meta)
+        if score >= 0.88:
+            try:
+                return Path(str(meta["path"])), f"search-{reason}", score
+            except (KeyError, TypeError):
+                continue
+    return None
+
+
+def _dedupe_create_ops_with_existing(plan: list[dict], raw_content: str) -> list[dict]:
+    """Convert high-confidence duplicate create ops into updates before generation."""
+    del raw_content  # Reserved for a future content-similarity gate.
+    rewritten: list[dict] = []
+    for op in plan:
+        if op.get("type") != "create":
+            rewritten.append(op)
+            continue
+
+        match = _find_existing_create_target(op)
+        if match is None:
+            rewritten.append(op)
+            continue
+
+        existing_path, reason, score = match
+        update_op = dict(op)
+        update_op["type"] = "update"
+        update_op["filename"] = _relative_page_filename(existing_path)
+        update_op["existing_page_id"] = existing_path.stem
+        update_op["dedupe_reason"] = reason
+        rewritten.append(update_op)
+        _safe_log(
+            "ingest | search-before-create: create "
+            f"{op.get('filename', '?')!r} -> update "
+            f"{_relative_page_filename(existing_path)!r} "
+            f"({reason}, score={score:.2f})"
+        )
+    return rewritten
 
 
 # ---------------------------------------------------------------------------
@@ -1382,6 +1565,92 @@ def _safe_log(message: str) -> None:
     )
 
 
+def _read_back_failure_log() -> Path:
+    return PAGES_DIR.parent / "runtime" / "ingest-read-back-failures.jsonl"
+
+
+def _read_back_query(meta: dict, page_id: str) -> str:
+    questions = meta.get("recall_questions")
+    if isinstance(questions, list):
+        for question in questions:
+            if isinstance(question, str) and question.strip():
+                return question.strip()
+    summary = meta.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    title = meta.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return page_id
+
+
+def _verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> dict:
+    if not page_ids:
+        return {"checked": 0, "passed": 0, "failed": []}
+    try:
+        from llm_wiki_mcp.index_store import get_store
+        from llm_wiki_mcp.search import search
+
+        store = get_store()
+        store.refresh()
+    except Exception as e:
+        _safe_log(f"ingest | read-back unavailable: {e}")
+        return {"checked": 0, "passed": 0, "failed": [{"error": str(e)}]}
+
+    checked = 0
+    passed = 0
+    failed: list[dict] = []
+    for page_id in page_ids:
+        meta = store.meta(page_id)
+        if meta is None:
+            failed.append({"page_id": page_id, "reason": "missing-meta"})
+            continue
+        query = _read_back_query(meta, page_id)
+        if not query:
+            failed.append({"page_id": page_id, "reason": "empty-query"})
+            continue
+        checked += 1
+        try:
+            results, mode = search(query, top_n=top_n, semantic=True)
+        except Exception as e:
+            failed.append({"page_id": page_id, "reason": "search-error", "error": str(e)})
+            continue
+        rank = next(
+            (idx + 1 for idx, result in enumerate(results) if result.page_id == page_id),
+            None,
+        )
+        if rank is None:
+            failed.append({
+                "page_id": page_id,
+                "reason": "not-in-top-results",
+                "query": query[:180],
+                "mode": mode,
+                "top": [result.page_id for result in results[:5]],
+            })
+        else:
+            passed += 1
+
+    if failed:
+        record = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "checked": checked,
+            "passed": passed,
+            "failed": failed,
+        }
+        try:
+            log_path = _read_back_failure_log()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+        _safe_log(f"ingest | read-back: {len(failed)} failed of {checked} checked")
+    elif checked:
+        _safe_log(f"ingest | read-back: {checked} checked ok")
+
+    return {"checked": checked, "passed": passed, "failed": failed}
+
+
 # ---------------------------------------------------------------------------
 # Main entry point — two-stage pipeline
 # ---------------------------------------------------------------------------
@@ -1517,6 +1786,7 @@ def run_ingest(
             return
 
         plan = _normalize_triage_plan(plan)
+        plan = _dedupe_create_ops_with_existing(plan, content)
         _safe_log(f"ingest | triage: {len(plan)} operations planned")
         job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
         runtime_status.safe_write_status(
@@ -1680,6 +1950,7 @@ def run_ingest(
                 update_embeddings(page_ids=changed_pages)
             except Exception:
                 pass
+        read_back_result = _verify_changed_pages_read_back(changed_pages)
 
         # Build job result. For partial runs, surface the failed op specs
         # so a human can `wiki_jobs <id>` to see what was dropped.
@@ -1689,6 +1960,9 @@ def run_ingest(
                 "partial": True,
                 "failed_ops": failed_op_specs,
             }
+        if read_back_result["failed"]:
+            job_result = job_result or {}
+            job_result["read_back"] = read_back_result
 
         job_store.update(
             job_id,
@@ -1727,6 +2001,7 @@ def run_ingest(
                 "created": created,
                 "updated": updated,
                 "failed_ops": failed_op_specs,
+                "read_back": read_back_result,
             },
         )
 

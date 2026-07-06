@@ -1,11 +1,13 @@
 """Lint engine - detect and fix wiki quality issues."""
 
+import json
 import re
 import threading
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
-from llm_wiki_mcp.wiki import SYSTEM_DIR, all_pages, find_page
+from llm_wiki_mcp.wiki import SYSTEM_DIR, WIKI_ROOT, all_pages, find_page
 from llm_wiki_mcp.index_store import get_store
 from llm_wiki_mcp.link_fix import (
     WIKI_LINK_RE,
@@ -66,9 +68,10 @@ def check() -> list[dict]:
     # themselves linted (they're treated as a fixed reference set).
     all_page_ids = store.all_page_ids(include_system=True)
     pages_meta = store.all_pages_meta(include_system=False)
-    page_count = len(pages_meta)
+    lintable_pages_meta = [m for m in pages_meta if m.get("page_type") != "reference"]
+    page_count = len(lintable_pages_meta)
 
-    for meta in pages_meta:
+    for meta in lintable_pages_meta:
         page_id = meta["page_id"]
 
         # 1. Broken links — outlinks come pre-normalized + code-fence-stripped
@@ -157,7 +160,7 @@ def check() -> list[dict]:
 
     # 4. Duplicate detection (pages with very similar titles)
     titles: dict[str, str] = {}
-    for meta in pages_meta:
+    for meta in lintable_pages_meta:
         title = meta["title"].lower().strip()
         page_id = meta["page_id"]
         if title in titles:
@@ -181,6 +184,70 @@ def check() -> list[dict]:
         _CHECK_CACHE_RESULT = [dict(i) for i in issues]
 
     return issues
+
+
+def summarize_issues(issues: list[dict]) -> dict:
+    """Return a compact, MCP-friendly summary for potentially huge lint output."""
+    by_type = Counter(str(issue.get("type", "unknown")) for issue in issues)
+    by_severity = Counter(str(issue.get("severity", "unknown")) for issue in issues)
+    auto_fixable = sum(1 for issue in issues if issue.get("auto_fixable"))
+    lanes = {
+        "safe_auto_fix": auto_fixable,
+        "heavy_model_batch": by_type.get("tag_missing", 0) + by_type.get("tag_count_violation", 0),
+        "review": by_type.get("duplicate", 0) + by_type.get("orphan", 0),
+        "monitor": by_type.get("stale", 0),
+    }
+    top_pages = Counter(str(issue.get("page", "")) for issue in issues if issue.get("page"))
+    return {
+        "total": len(issues),
+        "by_type": dict(sorted(by_type.items())),
+        "by_severity": dict(sorted(by_severity.items())),
+        "lanes": lanes,
+        "top_pages": [
+            {"page": page, "issues": count}
+            for page, count in top_pages.most_common(10)
+        ],
+    }
+
+
+def issue_lane(issue: dict) -> str:
+    issue_type = issue.get("type")
+    if issue.get("auto_fixable"):
+        return "safe_auto_fix"
+    if issue_type in {"tag_missing", "tag_count_violation"}:
+        return "heavy_model_batch"
+    if issue_type in {"duplicate", "orphan"}:
+        return "review"
+    return "monitor"
+
+
+def repair_queue_records(issues: list[dict]) -> list[dict]:
+    records: list[dict] = []
+    for issue in issues:
+        lane = issue_lane(issue)
+        records.append({
+            "type": "lint_repair_candidate",
+            "lane": lane,
+            "issue_type": issue.get("type"),
+            "severity": issue.get("severity"),
+            "page": issue.get("page"),
+            "detail": issue.get("detail"),
+            "auto_fixable": bool(issue.get("auto_fixable")),
+        })
+    return records
+
+
+def write_repair_queue(
+    issues: list[dict],
+    path: Path | None = None,
+) -> Path:
+    queue_path = path or WIKI_ROOT / "review" / "lint-repair-queue.jsonl"
+    records = repair_queue_records(issues)
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    with queue_path.open("w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return queue_path
 
 
 def _broken_link_target(issue: dict) -> str | None:

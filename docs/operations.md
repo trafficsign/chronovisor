@@ -69,6 +69,39 @@ client automatically grows the request context up to `max_num_ctx` when a raw
 transcript is unusually long. Changing the ingest model does not require a
 semantic reindex unless `[embedding].model` also changes.
 
+Before generation, ingest now runs a conservative search-before-create gate.
+High-confidence duplicate `create` ops are rewritten to `update` ops when an
+existing active knowledge page has the same page id, same title, near-identical
+title/page id, or a matching search result. Reference pages are not considered
+update targets.
+
+After apply and embedding refresh, ingest read-backs changed pages with their
+`recall_questions`, `summary`, or title. Failures are non-fatal and are logged
+to `~/.wiki/runtime/ingest-read-back-failures.jsonl`.
+
+## Knowledge Quality Queues
+
+```sh
+llm-wiki-duplicate-review --write
+wiki_check
+wiki_apply
+```
+
+Pages with `type: reference` are excluded from default search, lint, duplicate
+review, and recall metadata backfill. `car-spec/` pages infer this type even if
+older files are missing the field; explicit `folder="car-spec"` searches still
+include them.
+
+`wiki_check` returns a compact issue summary plus a bounded sample instead of
+dumping every issue. `wiki_apply` writes remaining non-auto-fixable lint work to
+`~/.wiki/review/lint-repair-queue.jsonl`, split into safe-auto-fix,
+heavy-model-batch, review, and monitor lanes.
+
+`llm-wiki-duplicate-review --write` builds
+`~/.wiki/review/duplicate-candidates.jsonl` from title and embedding similarity.
+The queue is review-only; merge decisions should mark the losing page with
+`status: deprecated` and `superseded_by: <winner>`.
+
 ## Audit and Auto-Apply
 
 ```sh
@@ -130,8 +163,9 @@ llm-wiki-reindex
 ```
 
 The backfill adds `summary` and `recall_questions` frontmatter to existing
-pages. Re-run `llm-wiki-reindex` after a large backfill so semantic search sees
-question vectors.
+knowledge pages and skips reference pages unless `--include-reference` is
+passed. Re-run `llm-wiki-reindex` after a large backfill so semantic search
+sees question vectors.
 
 ## Troubleshooting
 

@@ -31,9 +31,11 @@ def searchable_pages() -> list[Path]:
 # ---------------------------------------------------------------------------
 
 _BM25_CACHE_FILE = WIKI_ROOT / ".index" / "bm25.json"
-_BM25_CACHE_SCHEMA = 2
+_BM25_CACHE_SCHEMA = 3
 _ACTIVE_STATUS = "active"
 _VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
+_REFERENCE_PAGE_TYPE = "reference"
+_VALID_PAGE_TYPES = {"knowledge", _REFERENCE_PAGE_TYPE}
 
 
 def _normalize_lifecycle_status(value: object) -> str:
@@ -45,8 +47,36 @@ def _normalize_lifecycle_status(value: object) -> str:
     return _ACTIVE_STATUS
 
 
+def _normalize_page_type(value: object, *, folder: str = "") -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _VALID_PAGE_TYPES:
+            return normalized
+    if folder == "car-spec":
+        return _REFERENCE_PAGE_TYPE
+    return "knowledge"
+
+
 def _is_active_result(result: ScoredPage) -> bool:
     return _normalize_lifecycle_status(result.status) == _ACTIVE_STATUS
+
+
+def _is_reference_result(result: ScoredPage) -> bool:
+    return _normalize_page_type(result.page_type, folder=result.folder) == _REFERENCE_PAGE_TYPE
+
+
+def _folder_from_meta(meta: dict) -> str:
+    try:
+        parent = Path(meta["path"]).parent
+        if parent != PAGES_DIR:
+            return parent.name
+    except (KeyError, TypeError):
+        pass
+    return ""
+
+
+def _meta_page_type(meta: dict, *, folder: str = "") -> str:
+    return _normalize_page_type(meta.get("page_type"), folder=folder)
 
 
 class BM25Index:
@@ -206,6 +236,7 @@ class BM25Index:
                 else ""
             )
             folder = path.parent.name if path.parent != PAGES_DIR else ""
+            page_type = _normalize_page_type(fm.get("type"), folder=folder)
 
             title_tokens = tokenize(title) * 3
             body_tokens = tokenize(content)
@@ -225,6 +256,7 @@ class BM25Index:
                 "updated": updated,
                 "status": status,
                 "superseded_by": superseded_by,
+                "page_type": page_type,
                 "doc_len": doc_len,
                 "tf_map": tf_map,
             }
@@ -255,7 +287,13 @@ class BM25Index:
 
     # -- query ------------------------------------------------------------
 
-    def query(self, query_text: str, top_n: int = 20) -> list[ScoredPage]:
+    def query(
+        self,
+        query_text: str,
+        top_n: int = 20,
+        *,
+        include_reference: bool = False,
+    ) -> list[ScoredPage]:
         """Search the index."""
         with self._lock:
             if not self._cache:
@@ -274,6 +312,9 @@ class BM25Index:
 
             results = []
             for pid, doc in self._cache.items():
+                page_type = _normalize_page_type(doc.get("page_type"), folder=doc.get("folder", ""))
+                if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
+                    continue
                 tf_map = doc["tf_map"]
                 dl = doc["doc_len"]
                 score = 0.0
@@ -297,6 +338,7 @@ class BM25Index:
                         superseded_by=doc.get("superseded_by", "")
                         if isinstance(doc.get("superseded_by", ""), str)
                         else "",
+                        page_type=page_type,
                     ))
 
             results.sort(key=lambda x: x.score, reverse=True)
@@ -951,7 +993,12 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
     return updated_count
 
 
-def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
+def semantic_search(
+    query: str,
+    top_n: int = 20,
+    *,
+    include_reference: bool = False,
+) -> list[ScoredPage]:
     """Search using embedding similarity.
 
     Page metadata is read from the IndexStore (no per-page disk reads),
@@ -989,15 +1036,10 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
         meta = store.meta(pid)
         if meta is None:
             continue
-        # Recover folder from the stored path (parent dir name relative
-        # to PAGES_DIR), preserving legacy ScoredPage semantics.
-        folder = ""
-        try:
-            parent = Path(meta["path"]).parent
-            if parent != PAGES_DIR:
-                folder = parent.name
-        except (KeyError, TypeError):
-            folder = ""
+        folder = _folder_from_meta(meta)
+        page_type = _meta_page_type(meta, folder=folder)
+        if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
+            continue
 
         dot = 0.0
         for x, y in zip(q_vec, vec):
@@ -1013,6 +1055,7 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
             superseded_by=meta.get("superseded_by", "")
             if isinstance(meta.get("superseded_by", ""), str)
             else "",
+            page_type=page_type,
         )
 
     for _key, pid, _idx, vec, _mtime, norm in _iter_all_question_embeddings():
@@ -1021,13 +1064,10 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
         meta = store.meta(pid)
         if meta is None:
             continue
-        folder = ""
-        try:
-            parent = Path(meta["path"]).parent
-            if parent != PAGES_DIR:
-                folder = parent.name
-        except (KeyError, TypeError):
-            folder = ""
+        folder = _folder_from_meta(meta)
+        page_type = _meta_page_type(meta, folder=folder)
+        if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
+            continue
         dot = 0.0
         for x, y in zip(q_vec, vec):
             dot += x * y
@@ -1044,6 +1084,7 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
                 superseded_by=meta.get("superseded_by", "")
                 if isinstance(meta.get("superseded_by", ""), str)
                 else "",
+                page_type=page_type,
             )
 
     if _should_scan_chunks([page.score for page in by_page.values()]):
@@ -1053,13 +1094,10 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
             meta = store.meta(pid)
             if meta is None:
                 continue
-            folder = ""
-            try:
-                parent = Path(meta["path"]).parent
-                if parent != PAGES_DIR:
-                    folder = parent.name
-            except (KeyError, TypeError):
-                folder = ""
+            folder = _folder_from_meta(meta)
+            page_type = _meta_page_type(meta, folder=folder)
+            if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
+                continue
             dot = 0.0
             for x, y in zip(q_vec, vec):
                 dot += x * y
@@ -1077,6 +1115,7 @@ def semantic_search(query: str, top_n: int = 20) -> list[ScoredPage]:
                     superseded_by=meta.get("superseded_by", "")
                     if isinstance(meta.get("superseded_by", ""), str)
                     else "",
+                    page_type=page_type,
                 )
 
     results = list(by_page.values())
@@ -1165,6 +1204,7 @@ def fuse_results(
             page_id=p.page_id, title=p.title, folder=p.folder,
             updated=p.updated, score=score,
             status=p.status, superseded_by=p.superseded_by,
+            page_type=p.page_type,
         ))
 
     fused.sort(key=lambda x: x.score, reverse=True)
@@ -1192,13 +1232,7 @@ def graph_expand_results(results: list[ScoredPage], *, decay: float = 0.5, limit
             existing = expanded.get(page_id)
             if existing is not None and existing.score >= score:
                 continue
-            folder = ""
-            try:
-                parent = Path(meta["path"]).parent
-                if parent != PAGES_DIR:
-                    folder = parent.name
-            except (KeyError, TypeError):
-                folder = ""
+            folder = _folder_from_meta(meta)
             expanded[page_id] = ScoredPage(
                 page_id=page_id,
                 title=meta["title"],
@@ -1209,6 +1243,7 @@ def graph_expand_results(results: list[ScoredPage], *, decay: float = 0.5, limit
                 superseded_by=meta.get("superseded_by", "")
                 if isinstance(meta.get("superseded_by", ""), str)
                 else "",
+                page_type=_meta_page_type(meta, folder=folder),
             )
             if len(expanded) >= limit:
                 break
@@ -1257,13 +1292,7 @@ def usage_prior_results(
         meta = store.meta(page_id)
         if meta is None:
             continue
-        folder = ""
-        try:
-            parent = Path(meta["path"]).parent
-            if parent != PAGES_DIR:
-                folder = parent.name
-        except (KeyError, TypeError):
-            folder = ""
+        folder = _folder_from_meta(meta)
         out.append(
             ScoredPage(
                 page_id=page_id,
@@ -1275,6 +1304,7 @@ def usage_prior_results(
                 superseded_by=meta.get("superseded_by", "")
                 if isinstance(meta.get("superseded_by", ""), str)
                 else "",
+                page_type=_meta_page_type(meta, folder=folder),
             )
         )
     return out
@@ -1288,6 +1318,8 @@ def apply_filters(
 ) -> list[ScoredPage]:
     """Filter results by folder and date range."""
     filtered = [r for r in results if _is_active_result(r)]
+    if not folder:
+        filtered = [r for r in filtered if not _is_reference_result(r)]
     if folder:
         filtered = [r for r in filtered if r.folder.startswith(folder)]
     if updated_after:
@@ -1347,6 +1379,7 @@ def search(
             sort_by=sort_by,
             semantic=semantic,
             fusion_weights=weights,
+            include_reference=folder is not None,
         ),
         deps=_pipeline_dependencies(),
     )

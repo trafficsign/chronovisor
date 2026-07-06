@@ -13,6 +13,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Backfill LLM Wiki recall_questions.")
     parser.add_argument("--limit", type=int, default=0, help="Maximum pages to update. 0 means no limit.")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--include-reference",
+        action="store_true",
+        help="Also process type: reference pages such as car-spec sheets.",
+    )
     args = parser.parse_args(argv)
 
     from llm_wiki_mcp.frontmatter import parse, patch
@@ -22,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
 
     scanned = 0
     updated = 0
+    skipped_reference = 0
     changed: list[str] = []
     for path in all_pages():
         scanned += 1
@@ -30,6 +36,14 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, UnicodeDecodeError):
             continue
         page_id = page_id_from_path(path)
+        meta, _body = parse(text)
+        page_type = meta.get("type")
+        if (
+            not args.include_reference
+            and (page_type == "reference" or path.parent.name == "car-spec")
+        ):
+            skipped_reference += 1
+            continue
         new_text = _ensure_recall_metadata_frontmatter(text, page_id, parse, patch)
         if new_text == text:
             continue
@@ -46,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
                 "status": "ok",
                 "dry_run": args.dry_run,
                 "scanned": scanned,
+                "skipped_reference": skipped_reference,
                 "updated": updated,
                 "pages": changed,
             },

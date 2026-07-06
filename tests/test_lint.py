@@ -100,6 +100,17 @@ class TestTagMissing:
         issues = check()
         assert _by_type(issues, "tag_missing", "q")
 
+    def test_reference_pages_are_not_linted(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp.lint import check
+
+        _seed(
+            isolated_wiki,
+            "car-spec/123.md",
+            "---\ntitle: 123\nupdated: 2020-01-01\ntype: reference\n---\n[[missing]]\n",
+        )
+        issues = check()
+        assert [issue for issue in issues if issue["page"] == "123"] == []
+
     def test_complete_tag_set_not_flagged(self, isolated_wiki: Path) -> None:
         from llm_wiki_mcp.lint import check
 

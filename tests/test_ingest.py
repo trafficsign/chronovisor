@@ -1859,6 +1859,74 @@ class TestPhase6Compatibility:
         assert captured_kw == [["fm-only"]]
 
 
+class TestSearchBeforeCreate:
+    def test_create_with_existing_title_is_rewritten_to_update(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        _seed_page(
+            isolated_wiki,
+            "work/workplace-stress-and-mentoring.md",
+            "---\n"
+            "title: Workplace Stress and Mentoring\n"
+            "updated: 2026-07-01\n"
+            "tags: [d/career, t/analysis, s/2026]\n"
+            "---\n"
+            "Existing body.\n",
+        )
+        plan = [
+            {
+                "type": "create",
+                "filename": "work/workplace-stress-mentoring.md",
+                "title": "Workplace Stress and Mentoring",
+                "summary": "Mentoring and workplace stress notes.",
+            }
+        ]
+
+        rewritten = ingest._dedupe_create_ops_with_existing(plan, "raw")
+
+        assert rewritten[0]["type"] == "update"
+        assert rewritten[0]["filename"] == "work/workplace-stress-and-mentoring.md"
+        assert rewritten[0]["existing_page_id"] == "workplace-stress-and-mentoring"
+
+
+class TestReadBackVerification:
+    def test_changed_page_passes_when_search_returns_page(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import index_store, ingest, search
+        from llm_wiki_mcp.search_types import ScoredPage
+
+        class Store:
+            def refresh(self) -> None:
+                pass
+
+            def meta(self, page_id: str) -> dict:
+                return {
+                    "page_id": page_id,
+                    "title": "P",
+                    "updated": "2026-07-06",
+                    "path": str(isolated_wiki / "pages" / "p.md"),
+                    "summary": "Durable test summary",
+                    "recall_questions": ["How do we recall P?"],
+                }
+
+        monkeypatch.setattr(index_store, "get_store", lambda: Store())
+        monkeypatch.setattr(
+            search,
+            "search",
+            lambda _query, top_n=10, semantic=True: (
+                [ScoredPage("p", "P", "", "2026-07-06", 1.0)],
+                "hybrid",
+            ),
+        )
+
+        result = ingest._verify_changed_pages_read_back(["p"])
+
+        assert result == {"checked": 1, "passed": 1, "failed": []}
+
+
 # ---------------------------------------------------------------------------
 # Triage plan schema validation (R3-High)
 # ---------------------------------------------------------------------------

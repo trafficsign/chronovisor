@@ -10,14 +10,22 @@ from llm_wiki_mcp.runtime_config import EmbeddingConfig
 from llm_wiki_mcp.search import ScoredPage, apply_filters, fuse_results, usage_prior_results
 
 
-def page(page_id: str, score: float, *, status: str = "active") -> ScoredPage:
+def page(
+    page_id: str,
+    score: float,
+    *,
+    status: str = "active",
+    folder: str = "",
+    page_type: str = "knowledge",
+) -> ScoredPage:
     return ScoredPage(
         page_id=page_id,
         title=page_id,
-        folder="",
+        folder=folder,
         updated="2026-06-11",
         score=score,
         status=status,
+        page_type=page_type,
     )
 
 
@@ -102,6 +110,29 @@ def test_apply_filters_excludes_deprecated_and_archived_pages() -> None:
     )
 
     assert [result.page_id for result in results] == ["active"]
+
+
+def test_apply_filters_excludes_reference_pages_by_default() -> None:
+    results = apply_filters(
+        [
+            page("knowledge", 1.0),
+            page("car", 2.0, folder="car-spec", page_type="reference"),
+        ]
+    )
+
+    assert [result.page_id for result in results] == ["knowledge"]
+
+
+def test_apply_filters_allows_reference_pages_when_folder_requested() -> None:
+    results = apply_filters(
+        [
+            page("knowledge", 1.0),
+            page("car", 2.0, folder="car-spec", page_type="reference"),
+        ],
+        folder="car-spec",
+    )
+
+    assert [result.page_id for result in results] == ["car"]
 
 
 def test_fusion_preserves_lifecycle_status_for_filtering() -> None:

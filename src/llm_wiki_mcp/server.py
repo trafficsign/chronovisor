@@ -665,11 +665,14 @@ def wiki_check() -> str:
     Issues include: broken links, stale pages, orphan pages, duplicates.
     Does NOT auto-fix anything.
     """
-    from llm_wiki_mcp.lint import check
+    from llm_wiki_mcp.lint import check, summarize_issues
     issues = check()
+    issue_limit = 200
     return json.dumps({
         "total_issues": len(issues),
-        "issues": issues,
+        "summary": summarize_issues(issues),
+        "issues": issues[:issue_limit],
+        "omitted_issues": max(0, len(issues) - issue_limit),
     }, ensure_ascii=False)
 
 
@@ -686,13 +689,26 @@ def wiki_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
         dry_run: True なら実際には書き込まず actions のプレビューだけ返す。
         fuzzy: False にすると broken_link の自動書き換えを無効化する (より保守的)。
     """
-    from llm_wiki_mcp.lint import check, apply_safe_fixes
+    from llm_wiki_mcp.lint import (
+        apply_safe_fixes,
+        check,
+        summarize_issues,
+        write_repair_queue,
+    )
     issues = check()
     actions = apply_safe_fixes(issues, dry_run=dry_run, fuzzy=fuzzy)
     remaining = [i for i in issues if not i.get("auto_fixable")]
+    try:
+        repair_queue = str(write_repair_queue(remaining))
+    except Exception:
+        repair_queue = None
+    issue_limit = 200
     return json.dumps({
         "actions_taken": actions,
-        "remaining_issues": remaining,
+        "summary": summarize_issues(remaining),
+        "remaining_issues": remaining[:issue_limit],
+        "omitted_remaining_issues": max(0, len(remaining) - issue_limit),
+        "repair_queue": repair_queue,
         "dry_run": dry_run,
         "fuzzy": fuzzy,
     }, ensure_ascii=False)

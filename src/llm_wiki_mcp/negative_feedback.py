@@ -249,6 +249,7 @@ def apply_penalties(results, penalties: dict[str, float]):
                 score=float(page.score) * max(0.0, 1.0 - penalty),
                 status=page.status,
                 superseded_by=page.superseded_by,
+                page_type=page.page_type,
             )
         )
     adjusted.sort(key=lambda x: x.score, reverse=True)

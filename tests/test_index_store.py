@@ -189,6 +189,28 @@ class TestBuildEntryRawKeywords:
         assert entry is not None
         assert entry.status == "active"
 
+    def test_car_spec_infers_reference_page_type(self, isolated_index: Path) -> None:
+        path = _seed(
+            isolated_index,
+            "car-spec/123.md",
+            "---\ntitle: 123\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        st = path.stat()
+        entry = IndexStore._build_entry("123", path, False, st.st_mtime_ns, st.st_size)
+        assert entry is not None
+        assert entry.page_type == "reference"
+
+    def test_explicit_page_type_is_indexed(self, isolated_index: Path) -> None:
+        path = _seed(
+            isolated_index,
+            "refs/p.md",
+            "---\ntitle: P\nupdated: 2026-01-01\ntype: reference\n---\nbody\n",
+        )
+        st = path.stat()
+        entry = IndexStore._build_entry("p", path, False, st.st_mtime_ns, st.st_size)
+        assert entry is not None
+        assert entry.page_type == "reference"
+
 
 # ---------------------------------------------------------------------------
 # Public accessor
@@ -245,6 +267,19 @@ class TestRawKeywordsAccessor:
         assert meta is not None
         assert meta["status"] == "archived"
         assert meta["superseded_by"] == "new-page"
+
+    def test_meta_exposes_page_type(self, isolated_index: Path) -> None:
+        _seed(
+            isolated_index,
+            "refs/p.md",
+            "---\ntitle: P\nupdated: 2026-01-01\ntype: reference\n---\nbody\n",
+        )
+        store = IndexStore()
+        store.refresh()
+        meta = store.meta("p")
+        assert meta is not None
+        assert meta["page_type"] == "reference"
+        assert store.page_type("p") == "reference"
 
 
 # ---------------------------------------------------------------------------

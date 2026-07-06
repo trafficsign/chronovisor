@@ -29,6 +29,7 @@ class PipelineConfig:
     filter_results: bool = True
     sort_results: bool = True
     truncate_results: bool = True
+    include_reference: bool = False
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ def production_pipeline_config(
     sort_by: str = "relevance",
     semantic: bool = True,
     fusion_weights: dict[str, float] | None = None,
+    include_reference: bool = False,
 ) -> PipelineConfig:
     return PipelineConfig(
         top_n=top_n,
@@ -84,6 +86,7 @@ def production_pipeline_config(
         result_strategy="production",
         graph_strategy="production",
         usage_strategy="production",
+        include_reference=include_reference,
     )
 
 
@@ -116,6 +119,7 @@ def plain_rrf(
                 score=score,
                 status=page.status,
                 superseded_by=page.superseded_by,
+                page_type=page.page_type,
             )
         )
     return sorted(fused, key=lambda page: page.score, reverse=True)
@@ -277,12 +281,26 @@ def run_search_pipeline(
 
     bm25 = deps.get_bm25()
     bm25.build()
-    bm25_results = bm25.query(query, top_n=fetch_n)
+    try:
+        bm25_results = bm25.query(
+            query,
+            top_n=fetch_n,
+            include_reference=config.include_reference,
+        )
+    except TypeError:
+        bm25_results = bm25.query(query, top_n=fetch_n)
 
     search_mode = "bm25"
     sem_results: list[ScoredPage] = []
     if config.semantic:
-        sem_results = deps.semantic_search(query, top_n=fetch_n)
+        try:
+            sem_results = deps.semantic_search(
+                query,
+                top_n=fetch_n,
+                include_reference=config.include_reference,
+            )
+        except TypeError:
+            sem_results = deps.semantic_search(query, top_n=fetch_n)
         if sem_results:
             search_mode = "hybrid"
 
