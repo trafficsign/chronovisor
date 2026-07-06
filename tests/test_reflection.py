@@ -1,0 +1,20 @@
+from __future__ import annotations
+
+from datetime import date
+
+from llm_wiki_mcp import reflection
+
+
+def test_build_reflection_markdown_includes_health_signals() -> None:
+    doc = reflection.build_reflection_markdown(
+        {
+            "coverage": {"knowledge_pages": 10, "summary_coverage": 0.5},
+            "memory_integrity": {"capture_rate": 0.75},
+            "queues": {"duplicate_candidates": 2, "search_golden": 3},
+        },
+        today=date(2026, 7, 6),
+    )
+
+    assert "Memory Reflection 2026-07-06" in doc
+    assert "Summary coverage: 0.500" in doc
+

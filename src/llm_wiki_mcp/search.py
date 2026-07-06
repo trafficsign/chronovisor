@@ -842,10 +842,23 @@ def _recall_questions_from_content(content: str) -> list[str]:
 
 
 def _markdown_chunks(content: str, title: str) -> list[str]:
-    body = _FRONTMATTER_RE.sub("", content)
+    meta, body = parse_frontmatter(content)
     chunks: list[str] = []
     heading = title
     buffer: list[str] = []
+
+    summary = meta.get("summary") if isinstance(meta.get("summary"), str) else ""
+    entities = meta.get("entities") if isinstance(meta.get("entities"), list) else []
+    page_type = meta.get("type") if isinstance(meta.get("type"), str) else ""
+    updated = meta.get("updated") if isinstance(meta.get("updated"), str) else ""
+    context_lines = [f"Page: {title}"]
+    if summary.strip():
+        context_lines.append(f"Summary: {summary.strip()}")
+    if entities:
+        context_lines.append("Entities: " + ", ".join(str(item) for item in entities[:8]))
+    if page_type or updated:
+        context_lines.append(f"Metadata: type={page_type or 'knowledge'} updated={updated or 'unknown'}")
+    context = "\n".join(context_lines)
 
     def flush() -> None:
         nonlocal buffer
@@ -853,7 +866,7 @@ def _markdown_chunks(content: str, title: str) -> list[str]:
         buffer = []
         if not text:
             return
-        prefix = f"{title}\n{heading}" if heading and heading != title else title
+        prefix = f"{context}\nHeading: {heading}" if heading and heading != title else context
         while text:
             piece = text[:MAX_CHUNK_CHARS].strip()
             if len(text) > MAX_CHUNK_CHARS and " " in piece:
@@ -1173,6 +1186,7 @@ DEFAULT_FUSION_WEIGHTS: dict[str, float] = {
     "semantic_low_confidence_weight": 0.25,
     "usage_prior_decay": 0.98,
     "usage_prior_cap": 3.0,
+    "retention_prior": 0.015,
 }
 
 
@@ -1229,6 +1243,18 @@ def fuse_results(
     add_results(semantic_results, "semantic")
     add_results(graph_results or [], "graph")
     add_results(usage_results or [], "usage_prior")
+
+    retention_weight = max(0.0, float(weights.get("retention_prior", 0.0)))
+    if retention_weight:
+        try:
+            from llm_wiki_mcp.retention import retention_score
+
+            for page_id in list(scores):
+                prior = retention_score(page_id)
+                if prior > 0:
+                    scores[page_id] = scores.get(page_id, 0.0) + (retention_weight * prior)
+        except Exception:
+            pass
 
     fused = []
     for pid, score in scores.items():

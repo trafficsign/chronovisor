@@ -298,7 +298,7 @@ def build_candidates(
     return positive_examples[:positive_quota] + negative_examples[:negative_quota]
 
 
-def load_examples(path: Path = GOLDEN_FILE) -> list[SearchExample]:
+def load_examples(path: Path = GOLDEN_FILE, *, limit: int = 0) -> list[SearchExample]:
     examples: list[SearchExample] = []
     for row in read_jsonl(path):
         query = str(row.get("query", "")).strip()
@@ -324,6 +324,8 @@ def load_examples(path: Path = GOLDEN_FILE) -> list[SearchExample]:
                 reviewed=bool(row.get("reviewed", False)),
             )
         )
+        if limit > 0 and len(examples) >= limit:
+            break
     return examples
 
 
@@ -1248,11 +1250,12 @@ def run_report(
     golden_file: Path = GOLDEN_FILE,
     variants: tuple[str, ...] = DEFAULT_VARIANTS,
     top_n: int = 20,
+    limit: int = 0,
     save: bool = False,
     debug_dump: Path | None = None,
     failure_index: Path | None = None,
 ) -> dict[str, Any]:
-    examples = load_examples(golden_file)
+    examples = load_examples(golden_file, limit=max(0, limit))
     result = evaluate_examples(examples, variants=variants, top_n=top_n)
     payload = {
         "status": "ok",
@@ -1458,6 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
         golden_file=Path(args.golden_file).expanduser(),
         variants=_parse_variants(args.variants),
         top_n=args.top_n,
+        limit=args.limit,
         save=args.save_baseline,
         debug_dump=Path(args.debug_dump).expanduser() if args.debug_dump else None,
         failure_index=Path(args.failure_index).expanduser() if args.failure_index else None,

@@ -139,6 +139,30 @@ def test_ci_gate_fails_when_threshold_missed() -> None:
     assert gate["failures"] == ["recall_at_5"]
 
 
+def test_run_report_respects_limit(tmp_path, monkeypatch) -> None:
+    golden_file = tmp_path / "golden.jsonl"
+    write_jsonl(
+        golden_file,
+        [
+            {"query": "q1", "expected_pages": ["a"]},
+            {"query": "q2", "expected_pages": ["b"]},
+            {"query": "q3", "expected_pages": ["c"]},
+        ],
+    )
+    seen = {}
+
+    def fake_evaluate(examples, variants, top_n):
+        seen["count"] = len(examples)
+        return {"variants": {"bm25": {"metrics": {"examples": len(examples)}, "by_bucket": {}}}, "debug_rows": []}
+
+    monkeypatch.setattr(search_eval, "evaluate_examples", fake_evaluate)
+
+    payload = search_eval.run_report(golden_file=golden_file, variants=("bm25",), limit=2)
+
+    assert seen["count"] == 2
+    assert payload["dataset"]["examples"] == 2
+
+
 def test_run_variant_filters_lifecycle_pages(monkeypatch) -> None:
     class FakeBM25:
         def build(self) -> None:

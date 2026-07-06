@@ -157,6 +157,29 @@ def prefetch_kpi() -> dict[str, Any]:
     }
 
 
+def derived_memory_kpi() -> dict[str, Any]:
+    retention_path = WIKI_ROOT / "recall" / "retention.json"
+    try:
+        retention = json.loads(retention_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        retention = {}
+    retention_counts = retention.get("counts") if isinstance(retention, dict) else {}
+    return {
+        "claims": _jsonl_count(WIKI_ROOT / "claims" / "claims-index.jsonl"),
+        "golden": _jsonl_count(WIKI_ROOT / "recall" / "search-golden.jsonl"),
+        "distill_rows": _jsonl_count(WIKI_ROOT / "distill" / "wiki-qa.jsonl"),
+        "retention_pages": int(retention_counts.get("pages") or 0)
+        if isinstance(retention_counts, dict)
+        else 0,
+        "archive_candidates": int(retention_counts.get("archive_candidates") or 0)
+        if isinstance(retention_counts, dict)
+        else 0,
+        "hubs": len(list((WIKI_ROOT / "pages" / "hubs").glob("*.md")))
+        if (WIKI_ROOT / "pages" / "hubs").exists()
+        else 0,
+    }
+
+
 def read_back_kpi() -> dict[str, Any]:
     rows = _read_jsonl(WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl", limit=200)
     failures = 0
@@ -207,6 +230,7 @@ def health_snapshot() -> dict[str, Any]:
         "memory_integrity": latest_memory_integrity(),
         "cofire": cofire_kpi(),
         "prefetch": prefetch_kpi(),
+        "derived": derived_memory_kpi(),
         "read_back": read_back_kpi(),
         "recall_feedback": recall_feedback_kpi(),
         "queues": {

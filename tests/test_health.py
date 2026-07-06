@@ -59,3 +59,28 @@ def test_cofire_kpi_reads_graph_summary(tmp_path: Path, monkeypatch) -> None:
 
     assert payload["nodes"] == 3
     assert payload["edges"] == 4
+
+
+def test_derived_memory_kpi_counts_generated_artifacts(tmp_path: Path, monkeypatch) -> None:
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "claims").mkdir(parents=True)
+    (wiki_root / "recall").mkdir(parents=True)
+    (wiki_root / "distill").mkdir(parents=True)
+    (wiki_root / "pages" / "hubs").mkdir(parents=True)
+    (wiki_root / "claims" / "claims-index.jsonl").write_text("{}\n{}\n", encoding="utf-8")
+    (wiki_root / "recall" / "search-golden.jsonl").write_text("{}\n", encoding="utf-8")
+    (wiki_root / "recall" / "retention.json").write_text(
+        json.dumps({"counts": {"pages": 5, "archive_candidates": 1}}),
+        encoding="utf-8",
+    )
+    (wiki_root / "distill" / "wiki-qa.jsonl").write_text("{}\n{}\n{}\n", encoding="utf-8")
+    (wiki_root / "pages" / "hubs" / "ai-hub.md").write_text("hub", encoding="utf-8")
+    monkeypatch.setattr(health, "WIKI_ROOT", wiki_root)
+
+    payload = health.derived_memory_kpi()
+
+    assert payload["claims"] == 2
+    assert payload["golden"] == 1
+    assert payload["retention_pages"] == 5
+    assert payload["distill_rows"] == 3
+    assert payload["hubs"] == 1

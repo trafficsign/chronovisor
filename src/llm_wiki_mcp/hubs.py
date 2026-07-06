@@ -1,0 +1,145 @@
+"""Auto-maintained map-of-content hub pages."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+from collections import Counter, defaultdict
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+
+from llm_wiki_mcp.index_store import get_store
+from llm_wiki_mcp.link_fix import atomic_write
+from llm_wiki_mcp.wiki import PAGES_DIR
+
+HUBS_DIR = PAGES_DIR / "hubs"
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    if slug:
+        return slug
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:10]
+    return f"hub-{digest}"
+
+
+def _folder_for_meta(meta: dict[str, Any]) -> str:
+    path = meta.get("path")
+    if isinstance(path, str):
+        parent = Path(path).parent
+        if parent != PAGES_DIR:
+            return parent.name
+    return ""
+
+
+def _hub_markdown(kind: str, name: str, pages: list[dict[str, Any]], *, today: date) -> str:
+    title = f"{name} Hub"
+    links = []
+    for meta in pages[:80]:
+        page_id = str(meta.get("page_id") or "")
+        page_title = str(meta.get("title") or page_id)
+        updated = str(meta.get("updated") or "unknown")
+        links.append(f"- [[{page_id}]] - {page_title} ({updated})")
+    return "\n".join(
+        [
+            "---",
+            f"title: {title}",
+            f"updated: {today.isoformat()}",
+            "type: semantic",
+            "tags: [d/llm-wiki, t/hub]",
+            f"summary: Auto-maintained {kind} map of content for {name}.",
+            "---",
+            "",
+            f"# {title}",
+            "",
+            f"Auto-maintained {kind} hub. Regenerate with `llm-wiki hubs`.",
+            "",
+            "## Pages",
+            *links,
+            "",
+        ]
+    )
+
+
+def build_hub_pages(
+    *,
+    output_dir: Path = HUBS_DIR,
+    min_pages: int = 3,
+    max_hubs: int = 20,
+    write: bool = True,
+) -> dict[str, Any]:
+    store = get_store()
+    store.refresh()
+    metas = [
+        meta
+        for meta in store.all_pages_meta(include_system=False)
+        if meta.get("page_type") != "reference"
+    ]
+    folders: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    entities: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    entity_counts: Counter[str] = Counter()
+    for meta in metas:
+        page_id = str(meta.get("page_id") or "")
+        full = store.meta(page_id) if page_id and hasattr(store, "meta") else None
+        if isinstance(full, dict):
+            meta = {**meta, **full}
+        folder = _folder_for_meta(meta)
+        if folder and folder != "hubs":
+            folders[folder].append(meta)
+        for entity in meta.get("entities", []) or []:
+            if isinstance(entity, str) and entity.strip():
+                entities[entity].append(meta)
+                entity_counts[entity] += 1
+
+    selected: list[tuple[str, str, list[dict[str, Any]]]] = []
+    for folder, pages in sorted(folders.items(), key=lambda item: len(item[1]), reverse=True):
+        if len(pages) >= min_pages:
+            selected.append(("folder", folder, pages))
+    for entity, _count in entity_counts.most_common(max_hubs):
+        pages = entities[entity]
+        if len(pages) >= min_pages:
+            selected.append(("entity", entity, pages))
+    selected = selected[:max_hubs]
+
+    written: list[str] = []
+    today = date.today()
+    if write:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    for kind, name, pages in selected:
+        path = output_dir / f"{kind}-{_slug(name)}-hub.md"
+        if write:
+            atomic_write(path, _hub_markdown(kind, name, pages, today=today))
+        written.append(str(path))
+    return {
+        "status": "ok",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "write": write,
+        "hubs": len(selected),
+        "paths": written,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate auto-maintained hub pages.")
+    parser.add_argument("--min-pages", type=int, default=3)
+    parser.add_argument("--max-hubs", type=int, default=20)
+    parser.add_argument("--no-write", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    data = build_hub_pages(
+        min_pages=max(1, args.min_pages),
+        max_hubs=max(1, args.max_hubs),
+        write=not args.no_write,
+    )
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    else:
+        print(f"hubs\t{data['hubs']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

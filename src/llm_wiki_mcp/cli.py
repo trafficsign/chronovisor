@@ -544,6 +544,43 @@ def main(argv: list[str] | None = None) -> int:
     sleep_parser.add_argument("--duplicate-limit", type=int, default=200)
     sleep_parser.add_argument("--dry-run", action="store_true")
     sleep_parser.add_argument("--json", action="store_true")
+    claims_parser = sub.add_parser("claims", help="Build/search derived claim index.")
+    claims_sub = claims_parser.add_subparsers(dest="claims_command", required=True)
+    claims_rebuild = claims_sub.add_parser("rebuild")
+    claims_rebuild.add_argument("--limit", type=int, default=0)
+    claims_rebuild.add_argument("--json", action="store_true")
+    claims_search = claims_sub.add_parser("search")
+    claims_search.add_argument("query")
+    claims_search.add_argument("--limit", type=int, default=10)
+    claims_search.add_argument("--json", action="store_true")
+    golden_parser = sub.add_parser("golden-expand", help="Expand search golden set from recall_questions.")
+    golden_parser.add_argument("--limit", type=int, default=0)
+    golden_parser.add_argument("--include-reference", action="store_true")
+    golden_parser.add_argument("--no-write", action="store_true")
+    golden_parser.add_argument("--json", action="store_true")
+    retention_parser = sub.add_parser("retention", help="Build retention/time-prior scores.")
+    retention_parser.add_argument("--limit", type=int, default=5000)
+    retention_parser.add_argument("--no-write", action="store_true")
+    retention_parser.add_argument("--json", action="store_true")
+    reflect_parser = sub.add_parser("reflect", help="Generate a memory reflection page.")
+    reflect_parser.add_argument("--no-write", action="store_true")
+    reflect_parser.add_argument("--json", action="store_true")
+    hubs_parser = sub.add_parser("hubs", help="Generate auto-maintained hub pages.")
+    hubs_parser.add_argument("--min-pages", type=int, default=3)
+    hubs_parser.add_argument("--max-hubs", type=int, default=20)
+    hubs_parser.add_argument("--no-write", action="store_true")
+    hubs_parser.add_argument("--json", action="store_true")
+    distill_parser = sub.add_parser("distill", help="Export wiki QA pairs for distillation.")
+    distill_parser.add_argument("--limit", type=int, default=0)
+    distill_parser.add_argument("--include-reference", action="store_true")
+    distill_parser.add_argument("--no-write", action="store_true")
+    distill_parser.add_argument("--json", action="store_true")
+    oracle_parser = sub.add_parser("oracle", help="Return cited wiki oracle evidence bundle.")
+    oracle_parser.add_argument("query")
+    oracle_parser.add_argument("--top-n", type=int, default=8)
+    oracle_parser.add_argument("--claim-limit", type=int, default=12)
+    oracle_parser.add_argument("--no-index-build", action="store_true")
+    oracle_parser.add_argument("--json", action="store_true")
     recall_eval_parser = sub.add_parser("recall-eval", help="Replay-evaluate recall decisions.")
     recall_eval_parser.add_argument("--config")
     recall_eval_parser.add_argument("--log-file", default=str(RECALL_LOG_FILE))
@@ -637,12 +674,16 @@ def main(argv: list[str] | None = None) -> int:
             capture = data["capture"]
             memory_integrity = data["memory_integrity"]
             cofire = data["cofire"]
+            derived = data.get("derived", {})
             queues = data["queues"]
             print(f"summary_coverage\t{coverage['summary_coverage']:.3f}")
             print(f"recall_question_coverage\t{coverage['recall_question_coverage']:.3f}")
             print(f"claim_coverage\t{capture['claim_coverage']}")
             print(f"memory_integrity_capture\t{memory_integrity.get('capture_rate')}")
             print(f"cofire_edges\t{cofire.get('edges', 0)}")
+            print(f"claim_index_claims\t{derived.get('claims', 0)}")
+            print(f"distill_rows\t{derived.get('distill_rows', 0)}")
+            print(f"retention_pages\t{derived.get('retention_pages', 0)}")
             print(f"sensitivity_high\t{coverage.get('sensitivity', {}).get('high', 0)}")
             print(f"duplicate_candidates\t{queues['duplicate_candidates']}")
             print(f"lint_repair\t{queues['lint_repair']}")
@@ -742,7 +783,107 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"cofire_edges\t{data['cofire']['edges']}")
             print(f"capture_rate\t{data['memory_integrity']['capture_rate']}")
+            print(f"retention_pages\t{data['retention']['counts']['pages']}")
+            print(f"claim_index_claims\t{data['claims']['claims']}")
+            print(f"golden_added\t{data['golden']['added']}")
+            print(f"distill_rows\t{data['distill']['rows']}")
+            print(f"hubs\t{data['hubs']['hubs']}")
             print(f"duplicates\t{data['duplicates']['count']}")
+        return 0
+    if args.command == "claims":
+        from llm_wiki_mcp.claims import rebuild_claim_index, search_claims
+
+        if args.claims_command == "rebuild":
+            data = rebuild_claim_index(limit=max(0, args.limit))
+        else:
+            data = {"claims": search_claims(args.query, limit=max(1, args.limit))}
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        elif args.claims_command == "rebuild":
+            print(f"claims\t{data['claims']}")
+            print(f"path\t{data['path']}")
+        else:
+            for row in data["claims"]:
+                print(f"{row.get('score')}\t{row.get('claim_id')}\t{row.get('value')}")
+        return 0
+    if args.command == "golden-expand":
+        from llm_wiki_mcp.golden_expand import expand_golden_from_recall_questions
+
+        data = expand_golden_from_recall_questions(
+            limit=max(0, args.limit),
+            include_reference=args.include_reference,
+            write=not args.no_write,
+        )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"added\t{data['added']}")
+            print(f"path\t{data['path']}")
+        return 0
+    if args.command == "retention":
+        from llm_wiki_mcp.retention import build_retention_scores
+
+        data = build_retention_scores(limit=max(1, args.limit), write=not args.no_write)
+        public = {key: value for key, value in data.items() if key != "pages"}
+        if args.json:
+            print(json.dumps(public, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"pages\t{public['counts']['pages']}")
+            print(f"archive_candidates\t{public['counts']['archive_candidates']}")
+        return 0
+    if args.command == "reflect":
+        from llm_wiki_mcp.reflection import write_reflection_page
+
+        data = write_reflection_page(write=not args.no_write)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"path\t{data['path']}")
+        return 0
+    if args.command == "hubs":
+        from llm_wiki_mcp.hubs import build_hub_pages
+
+        data = build_hub_pages(
+            min_pages=max(1, args.min_pages),
+            max_hubs=max(1, args.max_hubs),
+            write=not args.no_write,
+        )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"hubs\t{data['hubs']}")
+        return 0
+    if args.command == "distill":
+        from llm_wiki_mcp.distill import export_distill_dataset
+
+        data = export_distill_dataset(
+            limit=max(0, args.limit),
+            include_reference=args.include_reference,
+            write=not args.no_write,
+        )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"rows\t{data['rows']}")
+            print(f"path\t{data['path']}")
+        return 0
+    if args.command == "oracle":
+        from llm_wiki_mcp.oracle import oracle_bundle
+
+        data = oracle_bundle(
+            args.query,
+            top_n=max(1, args.top_n),
+            claim_limit=max(1, args.claim_limit),
+            ensure_claim_index=not args.no_index_build,
+        )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"search_mode\t{data['search_mode']}")
+            for page in data["pages"]:
+                print(f"page\t{page['page_id']}\t{page['title']}")
+            for claim in data["claims"]:
+                print(f"claim\t{claim['claim_id']}\t{claim['value']}")
         return 0
     if args.command == "recall-eval":
         from llm_wiki_mcp.recall_eval import run_eval

@@ -71,6 +71,9 @@ const els = {
   healthSensitive: document.getElementById("health-sensitive"),
   healthDupes: document.getElementById("health-dupes"),
   healthGolden: document.getElementById("health-golden"),
+  healthGoldenSet: document.getElementById("health-golden-set"),
+  healthRetention: document.getElementById("health-retention"),
+  healthDistill: document.getElementById("health-distill"),
   modelCaption: document.getElementById("model-caption"),
   modelInstalled: document.getElementById("model-installed"),
   modelLoaded: document.getElementById("model-loaded"),
@@ -1385,6 +1388,7 @@ function renderHealth(health) {
   const capture = data.capture || {};
   const integrity = data.memory_integrity || {};
   const cofire = data.cofire || {};
+  const derived = data.derived || {};
   const readBack = data.read_back || {};
   const queues = data.queues || {};
   const sensitivity = coverage.sensitivity || {};
@@ -1403,7 +1407,10 @@ function renderHealth(health) {
     : "--";
   els.healthSensitive.textContent = intValue(sensitivity.high).toLocaleString();
   els.healthDupes.textContent = intValue(queues.duplicate_candidates).toLocaleString();
-  els.healthGolden.textContent = intValue(cofire.edges || queues.search_golden).toLocaleString();
+  els.healthGolden.textContent = intValue(derived.claims).toLocaleString();
+  els.healthGoldenSet.textContent = intValue(derived.golden || queues.search_golden).toLocaleString();
+  els.healthRetention.textContent = intValue(derived.retention_pages || cofire.edges).toLocaleString();
+  els.healthDistill.textContent = intValue(derived.distill_rows).toLocaleString();
 }
 
 const MODEL_ROLE_LABELS = {
