@@ -549,6 +549,9 @@ def main(argv: list[str] | None = None) -> int:
     claims_rebuild = claims_sub.add_parser("rebuild")
     claims_rebuild.add_argument("--limit", type=int, default=0)
     claims_rebuild.add_argument("--json", action="store_true")
+    claims_sanitize = claims_sub.add_parser("sanitize")
+    claims_sanitize.add_argument("--no-write", action="store_true")
+    claims_sanitize.add_argument("--json", action="store_true")
     claims_search = claims_sub.add_parser("search")
     claims_search.add_argument("query")
     claims_search.add_argument("--limit", type=int, default=10)
@@ -791,10 +794,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"duplicates\t{data['duplicates']['count']}")
         return 0
     if args.command == "claims":
-        from llm_wiki_mcp.claims import rebuild_claim_index, search_claims
+        from llm_wiki_mcp.claims import rebuild_claim_index, sanitize_claim_ledger, search_claims
 
         if args.claims_command == "rebuild":
             data = rebuild_claim_index(limit=max(0, args.limit))
+        elif args.claims_command == "sanitize":
+            data = sanitize_claim_ledger(write=not args.no_write)
         else:
             data = {"claims": search_claims(args.query, limit=max(1, args.limit))}
         if args.json:
@@ -802,6 +807,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.claims_command == "rebuild":
             print(f"claims\t{data['claims']}")
             print(f"path\t{data['path']}")
+        elif args.claims_command == "sanitize":
+            print(f"kept\t{data['kept']}")
+            print(f"dropped\t{data['dropped']}")
         else:
             for row in data["claims"]:
                 print(f"{row.get('score')}\t{row.get('claim_id')}\t{row.get('value')}")

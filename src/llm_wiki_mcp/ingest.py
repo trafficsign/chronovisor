@@ -1961,6 +1961,11 @@ def run_ingest(
                 append_page_claims(changed_pages, source_raw=source_raw or "", op="ingest")
             except Exception as e:
                 _safe_log(f"ingest | claim ledger failed (non-fatal): {e}")
+            try:
+                from llm_wiki_mcp.state_register import refresh_state_register
+                refresh_state_register(changed_pages, source_raw=source_raw or "")
+            except Exception as e:
+                _safe_log(f"ingest | state register refresh failed (non-fatal): {e}")
         read_back_result = _verify_changed_pages_read_back(changed_pages)
 
         # Build job result. For partial runs, surface the failed op specs

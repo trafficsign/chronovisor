@@ -41,6 +41,7 @@ def run_sleep_cycle(
     from llm_wiki_mcp.raw_replay import QUEUE_FILE, build_queue, select_raws
     from llm_wiki_mcp.reflection import write_reflection_page
     from llm_wiki_mcp.retention import build_retention_scores
+    from llm_wiki_mcp.state_register import refresh_state_register
     from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
 
     started = datetime.now().isoformat(timespec="seconds")
@@ -57,6 +58,7 @@ def run_sleep_cycle(
     distill = export_distill_dataset(write=not dry_run)
     hubs = build_hub_pages(write=not dry_run)
     reflection = write_reflection_page(write=not dry_run)
+    state_register = refresh_state_register(write=not dry_run)
     integrity = run_eval(limit=max(0, eval_limit), write=not dry_run)
     raw_replay = (
         {
@@ -90,6 +92,7 @@ def run_sleep_cycle(
         "distill": distill,
         "hubs": {k: v for k, v in hubs.items() if k != "paths"},
         "reflection": reflection,
+        "state_register": state_register,
         "raw_replay": raw_replay,
         "duplicates": {
             "count": len(duplicates),

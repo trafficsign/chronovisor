@@ -676,14 +676,29 @@ def wiki_check() -> str:
     Issues include: broken links, stale pages, orphan pages, duplicates.
     Does NOT auto-fix anything.
     """
-    from llm_wiki_mcp.lint import check, summarize_issues
+    from llm_wiki_mcp.lint import check, issue_lane, summarize_issues
     issues = check()
-    issue_limit = 200
+    issue_limit = 40
+
+    def compact(issue: dict) -> dict:
+        detail = str(issue.get("detail") or "")
+        if len(detail) > 180:
+            detail = detail[:177].rstrip() + "..."
+        return {
+            "type": issue.get("type"),
+            "severity": issue.get("severity"),
+            "lane": issue_lane(issue),
+            "page": issue.get("page"),
+            "detail": detail,
+            "auto_fixable": bool(issue.get("auto_fixable")),
+        }
+
     return json.dumps({
         "total_issues": len(issues),
         "summary": summarize_issues(issues),
-        "issues": issues[:issue_limit],
+        "issues": [compact(issue) for issue in issues[:issue_limit]],
         "omitted_issues": max(0, len(issues) - issue_limit),
+        "output_budget": {"issue_limit": issue_limit, "detail_chars": 180},
     }, ensure_ascii=False)
 
 
@@ -703,6 +718,7 @@ def wiki_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
     from llm_wiki_mcp.lint import (
         apply_safe_fixes,
         check,
+        issue_lane,
         summarize_issues,
         write_repair_queue,
     )
@@ -720,13 +736,28 @@ def wiki_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
         repair_queue = str(write_repair_queue(remaining))
     except Exception:
         repair_queue = None
-    issue_limit = 200
+    issue_limit = 40
+
+    def compact(issue: dict) -> dict:
+        detail = str(issue.get("detail") or "")
+        if len(detail) > 180:
+            detail = detail[:177].rstrip() + "..."
+        return {
+            "type": issue.get("type"),
+            "severity": issue.get("severity"),
+            "lane": issue_lane(issue),
+            "page": issue.get("page"),
+            "detail": detail,
+            "auto_fixable": bool(issue.get("auto_fixable")),
+        }
+
     return json.dumps({
         "actions_taken": actions,
         "wiki_snapshot": snapshot,
         "summary": summarize_issues(remaining),
-        "remaining_issues": remaining[:issue_limit],
+        "remaining_issues": [compact(issue) for issue in remaining[:issue_limit]],
         "omitted_remaining_issues": max(0, len(remaining) - issue_limit),
+        "output_budget": {"issue_limit": issue_limit, "detail_chars": 180},
         "repair_queue": repair_queue,
         "dry_run": dry_run,
         "fuzzy": fuzzy,

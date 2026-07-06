@@ -114,6 +114,7 @@ def build_retention_scores(
         page_id = str(meta.get("page_id") or "")
         if not page_id:
             continue
+        full = store.meta(page_id) or {}
         page_type = str(meta.get("page_type") or "knowledge")
         age = _age_days(meta.get("updated"), today=today)
         half_life = TYPE_DECAY_DAYS.get(page_type, TYPE_DECAY_DAYS["knowledge"])
@@ -121,12 +122,36 @@ def build_retention_scores(
         use = success[page_id]
         miss = lapse[page_id]
         seen = exposures[page_id]
+        backlinks = len(store.backlinks(page_id))
+        outlinks = len(store.outlinks(page_id))
+        link_count = backlinks + outlinks
+        summary_present = bool(str(full.get("summary") or "").strip())
+        questions = full.get("recall_questions")
+        question_count = len(questions) if isinstance(questions, list) else 0
         stability = 1.0 + math.log1p(use) - (0.25 * miss)
         retrievability = max(0.0, min(1.0, recency * (1.0 + 0.15 * use) / (1.0 + 0.1 * miss)))
         score = max(0.0, min(1.5, (0.55 * retrievability) + (0.45 * min(1.0, stability / 3.0))))
+        cold_start = min(
+            0.55,
+            (0.08 * math.log1p(link_count))
+            + (0.08 if summary_present else 0.0)
+            + (0.08 if question_count else 0.0)
+            + (0.08 if age <= 90 else 0.0),
+        )
+        if seen == 0:
+            score = max(score, cold_start)
         if page_type == "reference":
             score = 0.0
-        if score < 0.18 and page_type in {"episodic", "knowledge"}:
+        archive_ready = (
+            score < 0.18
+            and age > 365
+            and seen == 0
+            and link_count == 0
+            and not summary_present
+            and not question_count
+            and page_type in {"episodic", "knowledge"}
+        )
+        if archive_ready:
             archive_candidates.append(page_id)
         pages[page_id] = {
             "page_id": page_id,
@@ -136,6 +161,9 @@ def build_retention_scores(
             "review_count": int(use),
             "lapse_count": int(miss),
             "exposure_count": int(seen),
+            "backlinks": backlinks,
+            "outlinks": outlinks,
+            "cold_start_prior": round(cold_start, 4),
             "stability": round(stability, 4),
             "retrievability": round(retrievability, 4),
             "score": round(score, 4),

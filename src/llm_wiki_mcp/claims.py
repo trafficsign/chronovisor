@@ -56,15 +56,24 @@ def claim_from_page(page_id: str, *, source_raw: str = "", op: str = "upsert") -
 
 
 def append_page_claims(page_ids: list[str], *, source_raw: str = "", op: str = "upsert") -> dict[str, Any]:
+    if not source_raw.strip():
+        return {
+            "status": "skipped",
+            "reason": "source_raw required for append-only claim ledger",
+            "claims_file": str(CLAIMS_FILE),
+            "written": 0,
+            "skipped": list(page_ids),
+        }
     written = 0
     skipped: list[str] = []
     for page_id in page_ids:
-        claim = claim_from_page(page_id, source_raw=source_raw, op=op)
-        if claim is None:
+        rows = page_claims(page_id, source_raw=source_raw, op=op)
+        if not rows:
             skipped.append(page_id)
             continue
-        _append_jsonl(CLAIMS_FILE, claim)
-        written += 1
+        for claim in rows:
+            _append_jsonl(CLAIMS_FILE, claim)
+            written += 1
     return {
         "status": "ok",
         "claims_file": str(CLAIMS_FILE),
@@ -197,12 +206,56 @@ def search_claims(query: str, *, limit: int = 10, path: Path = CLAIM_INDEX_FILE)
     return [{**row, "score": score} for score, row in scored[:limit]]
 
 
+def _is_placeholder_claim(row: dict[str, Any]) -> bool:
+    source_raw = row.get("source_raw")
+    source_page = row.get("source_page")
+    value = str(row.get("value") or "").strip().lower()
+    if not isinstance(source_raw, str) or not source_raw.strip():
+        return True
+    if not isinstance(source_page, str) or not source_page.strip():
+        return True
+    if re.fullmatch(r"p\d*|foo|bar|baz", source_page.strip()):
+        return True
+    if value in {"", "body", "test", "placeholder"}:
+        return True
+    if find_page(source_page) is None:
+        return True
+    return False
+
+
+def sanitize_claim_ledger(*, path: Path = CLAIMS_FILE, write: bool = True) -> dict[str, Any]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {"status": "missing", "path": str(path), "kept": 0, "dropped": 0, "write": write}
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            dropped += 1
+            continue
+        if not isinstance(row, dict) or _is_placeholder_claim(row):
+            dropped += 1
+            continue
+        kept.append(row)
+    if write:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n" for row in kept)
+        path.write_text(payload, encoding="utf-8")
+    return {"status": "ok", "path": str(path), "kept": len(kept), "dropped": dropped, "write": write}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build or search the LLM Wiki claim index.")
     sub = parser.add_subparsers(dest="command", required=True)
     rebuild = sub.add_parser("rebuild", help="Rebuild derived claims from current pages.")
     rebuild.add_argument("--limit", type=int, default=0)
     rebuild.add_argument("--json", action="store_true")
+    sanitize = sub.add_parser("sanitize", help="Drop placeholder or source-less ledger claims.")
+    sanitize.add_argument("--no-write", action="store_true")
+    sanitize.add_argument("--json", action="store_true")
     query = sub.add_parser("search", help="Search derived claims.")
     query.add_argument("query")
     query.add_argument("--limit", type=int, default=10)
@@ -216,6 +269,15 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"claims\t{data['claims']}")
             print(f"path\t{data['path']}")
+        return 0
+
+    if args.command == "sanitize":
+        data = sanitize_claim_ledger(write=not args.no_write)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print(f"kept\t{data['kept']}")
+            print(f"dropped\t{data['dropped']}")
         return 0
 
     rows = search_claims(args.query, limit=max(1, args.limit))

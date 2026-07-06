@@ -163,6 +163,29 @@ def test_run_report_respects_limit(tmp_path, monkeypatch) -> None:
     assert payload["dataset"]["examples"] == 2
 
 
+def test_run_report_can_filter_auto_golden_sources(tmp_path, monkeypatch) -> None:
+    golden_file = tmp_path / "golden.jsonl"
+    write_jsonl(
+        golden_file,
+        [
+            {"query": "manual", "expected_pages": ["a"], "source": "manual-curated-from-feedback"},
+            {"query": "auto", "expected_pages": ["b"], "source": "recall_questions"},
+        ],
+    )
+    seen = {}
+
+    def fake_evaluate(examples, variants, top_n):
+        seen["queries"] = [example.query for example in examples]
+        return {"variants": {"bm25": {"metrics": {"examples": len(examples)}, "by_bucket": {}}}, "debug_rows": []}
+
+    monkeypatch.setattr(search_eval, "evaluate_examples", fake_evaluate)
+
+    payload = search_eval.run_report(golden_file=golden_file, variants=("bm25",), source_filter="manual")
+
+    assert seen["queries"] == ["manual"]
+    assert payload["dataset"]["sources"] == {"manual-curated-from-feedback": 1}
+
+
 def test_run_variant_filters_lifecycle_pages(monkeypatch) -> None:
     class FakeBM25:
         def build(self) -> None:

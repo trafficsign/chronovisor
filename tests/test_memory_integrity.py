@@ -24,6 +24,23 @@ def test_evaluate_raw_passes_when_search_finds_page(tmp_path: Path, monkeypatch)
     assert row["top_pages"][0]["page_id"] == "target"
 
 
+def test_evaluate_raw_does_not_pass_from_claim_presence_only(tmp_path: Path, monkeypatch) -> None:
+    raw = tmp_path / "20260706-codex-target.md"
+    raw.write_text(
+        "---\nraw_keywords: [target]\nentities: [target]\n---\n"
+        "Independent body fact that search will miss.",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(memory_integrity, "run_search", lambda **kwargs: ([], "hybrid"))
+
+    row = memory_integrity.evaluate_raw(raw, claimed={raw.name})
+
+    assert row["claim_present"] is True
+    assert row["claim_present_is_audit_only"] is True
+    assert row["status"] == "miss"
+    assert "target" not in row["terms"]
+
+
 def test_claimed_raw_names_strips_replay_prefix(tmp_path: Path, monkeypatch) -> None:
     wiki_root = tmp_path / "wiki"
     claims = wiki_root / "claims"

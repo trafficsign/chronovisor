@@ -13,6 +13,7 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     monkeypatch.setattr("llm_wiki_mcp.distill.export_distill_dataset", lambda write=True: {"rows": 5})
     monkeypatch.setattr("llm_wiki_mcp.hubs.build_hub_pages", lambda write=True: {"hubs": 6, "paths": []})
     monkeypatch.setattr("llm_wiki_mcp.reflection.write_reflection_page", lambda write=True: {"path": "/tmp/reflection.md"})
+    monkeypatch.setattr("llm_wiki_mcp.state_register.refresh_state_register", lambda write=True: {"pages": ["p"]})
     monkeypatch.setattr("llm_wiki_mcp.memory_integrity.run_eval", lambda limit, write=True: {"capture_rate": 0.5, "rows": []})
     monkeypatch.setattr("llm_wiki_mcp.raw_replay.build_queue", lambda limit: {"count": limit})
     monkeypatch.setattr("llm_wiki_mcp.duplicate_review.build_duplicate_review_queue", lambda limit: [{"id": "a"}])
@@ -29,6 +30,7 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     assert payload["golden"]["added"] == 4
     assert payload["distill"]["rows"] == 5
     assert payload["hubs"]["hubs"] == 6
+    assert payload["state_register"]["pages"] == ["p"]
     assert payload["memory_integrity"]["capture_rate"] == 0.5
     assert payload["raw_replay"]["count"] == 3
     assert payload["duplicates"]["count"] == 1

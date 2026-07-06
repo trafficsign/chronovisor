@@ -1,9 +1,9 @@
 """Write-side memory integrity evaluation.
 
 This is intentionally deterministic: it gives the sleep cycle a cheap signal
-for raw captures that have no obvious claim/page/search footprint yet. A
-frontier/heavy reviewer can be layered on top later without changing the
-output shape.
+for raw captures that have no obvious independent search footprint yet. Claim
+presence is recorded as audit evidence, but it does not make the row pass; the
+expected terms are extracted from raw body text rather than ingest metadata.
 """
 
 from __future__ import annotations
@@ -83,12 +83,12 @@ def expected_terms_from_raw(path: Path, *, limit: int = 10) -> list[str]:
     except Exception:
         meta, body = {}, text
     seeds: list[str] = []
-    for key in ("keywords", "raw_keywords", "entities"):
-        value = meta.get(key)
-        if isinstance(value, list):
-            seeds.extend(str(item) for item in value if isinstance(item, str))
-    seeds.extend(_tokens(path.stem.replace("-", " "), limit=limit))
+    # Do not use frontmatter keywords/raw_keywords/entities here: those are
+    # produced by the same ingest path we are trying to audit, so they make the
+    # metric circular. Body text is a weaker but independent signal.
     seeds.extend(_tokens(body[:6000], limit=limit * 2))
+    if not seeds:
+        seeds.extend(_tokens(path.stem.replace("-", " "), limit=limit))
     deduped: list[str] = []
     seen: set[str] = set()
     for term in seeds:
@@ -157,7 +157,7 @@ def evaluate_raw(path: Path, *, claimed: set[str] | None = None) -> dict[str, An
     claim_present = path.name in claimed
     top_score = max((float(item.get("score") or 0.0) for item in evidence), default=0.0)
     search_present = top_score >= SEARCH_PASS_THRESHOLD
-    status = "pass" if claim_present or search_present else "miss"
+    status = "pass" if search_present else "miss"
     return {
         "raw": path.name,
         "path": str(path),
@@ -168,6 +168,7 @@ def evaluate_raw(path: Path, *, claimed: set[str] | None = None) -> dict[str, An
         "query": query,
         "claim_present": claim_present,
         "search_present": search_present,
+        "claim_present_is_audit_only": True,
         "top_score": round(top_score, 4),
         "search_pass_threshold": SEARCH_PASS_THRESHOLD,
         "top_pages": evidence,
@@ -196,6 +197,7 @@ def run_eval(
             bucket["missed"] += 1
     payload = {
         "status": "ok",
+        "method": "independent_raw_body_search",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "total": total,
         "passed": passed,

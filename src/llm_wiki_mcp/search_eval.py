@@ -298,11 +298,30 @@ def build_candidates(
     return positive_examples[:positive_quota] + negative_examples[:negative_quota]
 
 
-def load_examples(path: Path = GOLDEN_FILE, *, limit: int = 0) -> list[SearchExample]:
+def _source_allowed(source: str, source_filter: str) -> bool:
+    if source_filter == "all":
+        return True
+    is_auto = source in {"recall_questions", "auto", "generated"}
+    if source_filter == "auto":
+        return is_auto
+    if source_filter == "manual":
+        return not is_auto
+    return True
+
+
+def load_examples(
+    path: Path = GOLDEN_FILE,
+    *,
+    limit: int = 0,
+    source_filter: str = "all",
+) -> list[SearchExample]:
     examples: list[SearchExample] = []
     for row in read_jsonl(path):
         query = str(row.get("query", "")).strip()
         if not query:
+            continue
+        source = str(row.get("source") or "manual")
+        if not _source_allowed(source, source_filter):
             continue
         expected = _str_tuple(row.get("expected_pages"))
         negative = _str_tuple(row.get("negative_pages"))
@@ -318,7 +337,7 @@ def load_examples(path: Path = GOLDEN_FILE, *, limit: int = 0) -> list[SearchExa
                 split=str(row.get("split") or assign_split(query)),
                 language=str(row.get("language") or language_bucket(query)),
                 kind=str(row.get("kind") or query_kind(query)),
-                source=str(row.get("source") or "manual"),
+                source=source,
                 ref=str(row.get("ref") or ""),
                 ts=str(row.get("ts") or ""),
                 reviewed=bool(row.get("reviewed", False)),
@@ -1251,11 +1270,12 @@ def run_report(
     variants: tuple[str, ...] = DEFAULT_VARIANTS,
     top_n: int = 20,
     limit: int = 0,
+    source_filter: str = "all",
     save: bool = False,
     debug_dump: Path | None = None,
     failure_index: Path | None = None,
 ) -> dict[str, Any]:
-    examples = load_examples(golden_file, limit=max(0, limit))
+    examples = load_examples(golden_file, limit=max(0, limit), source_filter=source_filter)
     result = evaluate_examples(examples, variants=variants, top_n=top_n)
     payload = {
         "status": "ok",
@@ -1266,6 +1286,8 @@ def run_report(
             "splits": _count_by(examples, "split"),
             "languages": _count_by(examples, "language"),
             "kinds": _count_by(examples, "kind"),
+            "sources": _count_by(examples, "source"),
+            "source_filter": source_filter,
         },
         "top_n": top_n,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -1364,6 +1386,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-file", default=str(RECALL_LOG_FILE))
     parser.add_argument("--output-file", default=str(GOLDEN_FILE))
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--source-filter", choices=("all", "manual", "auto"), default="all")
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--variants", help="Comma-separated variants to evaluate.")
     parser.add_argument("--debug-dump", help="Write per-query channel/result rows as JSONL.")
@@ -1462,6 +1485,7 @@ def main(argv: list[str] | None = None) -> int:
         variants=_parse_variants(args.variants),
         top_n=args.top_n,
         limit=args.limit,
+        source_filter="manual" if args.ci and args.source_filter == "all" else args.source_filter,
         save=args.save_baseline,
         debug_dump=Path(args.debug_dump).expanduser() if args.debug_dump else None,
         failure_index=Path(args.failure_index).expanduser() if args.failure_index else None,
