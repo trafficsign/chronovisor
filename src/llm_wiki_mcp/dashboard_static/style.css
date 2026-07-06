@@ -325,6 +325,10 @@ canvas {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.health-summary.chart-summary.compact {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
 .chart-stat {
   min-width: 0;
   padding: 10px 12px;
@@ -1501,6 +1505,7 @@ canvas {
   }
 
   .save-summary.chart-summary.compact,
+  .health-summary.chart-summary.compact,
   .model-summary.chart-summary.compact,
   .save-feed {
     grid-template-columns: repeat(2, minmax(0, 1fr));

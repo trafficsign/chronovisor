@@ -222,6 +222,28 @@ class TestBuildEntryRawKeywords:
         assert entry is not None
         assert entry.entities == ["llm-wiki", "qwen"]
 
+    def test_extracts_sensitivity_frontmatter(self, isolated_index: Path) -> None:
+        path = _seed(
+            isolated_index,
+            "p.md",
+            "---\ntitle: P\nupdated: 2026-01-01\nsensitivity: high\n---\nbody\n",
+        )
+        st = path.stat()
+        entry = IndexStore._build_entry("p", path, False, st.st_mtime_ns, st.st_size)
+        assert entry is not None
+        assert entry.sensitivity == "high"
+
+    def test_career_folder_infers_high_sensitivity(self, isolated_index: Path) -> None:
+        path = _seed(
+            isolated_index,
+            "career/interview.md",
+            "---\ntitle: Interview\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        st = path.stat()
+        entry = IndexStore._build_entry("interview", path, False, st.st_mtime_ns, st.st_size)
+        assert entry is not None
+        assert entry.sensitivity == "high"
+
 
 # ---------------------------------------------------------------------------
 # Public accessor
@@ -291,7 +313,21 @@ class TestRawKeywordsAccessor:
         assert meta is not None
         assert meta["page_type"] == "decision"
         assert meta["entities"] == ["qwen"]
+        assert meta["sensitivity"] == "normal"
         assert store.page_type("p") == "decision"
+
+    def test_meta_exposes_sensitivity(self, isolated_index: Path) -> None:
+        _seed(
+            isolated_index,
+            "career/interview.md",
+            "---\ntitle: Interview\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        store = IndexStore()
+        store.refresh()
+        meta = store.meta("interview")
+        assert meta is not None
+        assert meta["sensitivity"] == "high"
+        assert store.sensitivity("interview") == "high"
 
 
 # ---------------------------------------------------------------------------

@@ -250,6 +250,7 @@ def apply_penalties(results, penalties: dict[str, float]):
                 status=page.status,
                 superseded_by=page.superseded_by,
                 page_type=page.page_type,
+                sensitivity=page.sensitivity,
             )
         )
     adjusted.sort(key=lambda x: x.score, reverse=True)

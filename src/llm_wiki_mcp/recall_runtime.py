@@ -227,6 +227,7 @@ class ContextItem:
     updated: str
     score: float
     snippets: list[str] = field(default_factory=list)
+    sensitivity: str = "normal"
 
 
 @dataclass
@@ -1084,6 +1085,7 @@ def collect_context(
                 updated=result.updated,
                 score=round(result.score, 4),
                 snippets=snippets,
+                sensitivity=getattr(result, "sensitivity", "normal") or "normal",
             )
         )
         if len(items) >= policy.max_pages:
@@ -1106,6 +1108,7 @@ def context_item_from_page_id(page_id: str, queries: list[str], decision: str, *
         return None
     title = page_id
     updated = ""
+    sensitivity = "normal"
     try:
         from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 
@@ -1114,6 +1117,10 @@ def context_item_from_page_id(page_id: str, queries: list[str], decision: str, *
             title = meta["title"]
         if isinstance(meta.get("updated"), str):
             updated = meta["updated"]
+        if isinstance(meta.get("sensitivity"), str):
+            sensitivity = meta["sensitivity"].strip().lower() or "normal"
+        elif path.parent.name == "career":
+            sensitivity = "high"
     except OSError:
         return None
     except Exception:
@@ -1129,6 +1136,7 @@ def context_item_from_page_id(page_id: str, queries: list[str], decision: str, *
         updated=updated,
         score=score,
         snippets=snippets,
+        sensitivity=sensitivity,
     )
 
 
@@ -1257,6 +1265,15 @@ def _trim_text(text: str, max_chars: int) -> str:
     return text[:max_chars].rstrip() + "..."
 
 
+def context_item_annotations(item: ContextItem) -> str:
+    parts: list[str] = []
+    if item.updated:
+        parts.append(f"updated: {item.updated}")
+    if item.sensitivity == "high":
+        parts.append("sensitivity: high")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
     if result.decision == "none" or not result.context_items:
         return ""
@@ -1277,7 +1294,7 @@ def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
         for item in result.context_items:
             summary = item.snippets[0] if item.snippets else page_summary(item.page_id)
             suffix = f" — {_one_line(summary, limit=160)}" if summary else ""
-            lines.append(f"- {item.page_id}: {item.title}{suffix}")
+            lines.append(f"- {item.page_id}: {item.title}{context_item_annotations(item)}{suffix}")
         lines.append("詳細が必要なページは wiki.read(page_id) で取得。")
         lines.append("[/RECALL_CONTEXT]")
         context = "\n".join(lines)
@@ -1298,7 +1315,11 @@ def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
         lines.append("queries: " + " | ".join(result.queries))
     lines.append("pages:")
     for item in result.context_items:
-        lines.append(f"- {item.page_id}: {item.title} (updated: {item.updated}, score: {item.score})")
+        annotations = context_item_annotations(item)
+        score_note = f", score: {item.score}" if annotations else f" (score: {item.score})"
+        if annotations:
+            annotations = annotations[:-1] + score_note + ")"
+        lines.append(f"- {item.page_id}: {item.title}{annotations or score_note}")
         for snippet in item.snippets[:1]:
             lines.append("  evidence: " + _one_line(snippet))
     lines.append("[/RECALL_CONTEXT]")

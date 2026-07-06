@@ -17,6 +17,7 @@ class ScoredPage:
     status: str = "active"
     superseded_by: str = ""
     page_type: str = "knowledge"
+    sensitivity: str = "normal"
 
 
 _CJK_RANGES = (

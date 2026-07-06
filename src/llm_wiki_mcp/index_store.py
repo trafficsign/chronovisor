@@ -25,7 +25,7 @@ from llm_wiki_mcp.link_fix import atomic_write, extract_targets
 from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR, WIKI_ROOT
 
 
-SCHEMA_VERSION = 7  # bumped for page_type/entities
+SCHEMA_VERSION = 8  # bumped for sensitivity
 INDEX_DIR = WIKI_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
@@ -40,6 +40,7 @@ VALID_PAGE_TYPES = {
     "lesson",
     "decision",
 }
+VALID_SENSITIVITY_TIERS = {"normal", "high"}
 
 
 def _normalize_lifecycle_status(value: object) -> str:
@@ -68,6 +69,20 @@ def _normalize_page_type(value: object, *, path: Path | None = None) -> str:
         except OSError:
             pass
     return "knowledge"
+
+
+def _normalize_sensitivity(value: object, *, path: Path | None = None) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in VALID_SENSITIVITY_TIERS:
+            return normalized
+    if path is not None:
+        try:
+            if path.parent.name == "career":
+                return "high"
+        except OSError:
+            pass
+    return "normal"
 
 
 def _parse_frontmatter(text: str) -> dict:
@@ -130,6 +145,7 @@ class PageEntry:
     superseded_by: str = ""
     page_type: str = "knowledge"
     entities: list[str] = field(default_factory=list)
+    sensitivity: str = "normal"
 
     def to_dict(self) -> dict:
         return {
@@ -149,6 +165,7 @@ class PageEntry:
             "superseded_by": self.superseded_by,
             "page_type": self.page_type,
             "entities": list(self.entities),
+            "sensitivity": self.sensitivity,
         }
 
     @classmethod
@@ -178,6 +195,7 @@ class PageEntry:
             superseded_by=d.get("superseded_by", "") if isinstance(d.get("superseded_by", ""), str) else "",
             page_type=_normalize_page_type(d.get("page_type")),
             entities=_coerce_str_list(d.get("entities")),
+            sensitivity=_normalize_sensitivity(d.get("sensitivity")),
         )
 
 
@@ -400,6 +418,7 @@ class IndexStore:
             ),
             page_type=_normalize_page_type(fm.get("type"), path=path),
             entities=_coerce_str_list(fm.get("entities")),
+            sensitivity=_normalize_sensitivity(fm.get("sensitivity"), path=path),
         )
 
     def _rebuild_backlinks(self) -> None:
@@ -460,6 +479,7 @@ class IndexStore:
                 "superseded_by": entry.superseded_by,
                 "page_type": entry.page_type,
                 "entities": list(entry.entities),
+                "sensitivity": entry.sensitivity,
             }
 
     def outlinks(self, page_id: str) -> list[str]:
@@ -540,6 +560,7 @@ class IndexStore:
                     "superseded_by": e.superseded_by,
                     "page_type": e.page_type,
                     "entities": list(e.entities),
+                    "sensitivity": e.sensitivity,
                 }
                 for e in items
             ]
@@ -548,6 +569,11 @@ class IndexStore:
         with self._lock:
             entry = self._entries.get(page_id)
             return entry.page_type if entry else "knowledge"
+
+    def sensitivity(self, page_id: str) -> str:
+        with self._lock:
+            entry = self._entries.get(page_id)
+            return entry.sensitivity if entry else "normal"
 
     def orphans(self, include_system: bool = False) -> list[str]:
         """Page IDs with no inbound backlinks (excluding self-links)."""

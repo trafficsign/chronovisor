@@ -120,6 +120,7 @@ def plain_rrf(
                 status=page.status,
                 superseded_by=page.superseded_by,
                 page_type=page.page_type,
+                sensitivity=page.sensitivity,
             )
         )
     return sorted(fused, key=lambda page: page.score, reverse=True)

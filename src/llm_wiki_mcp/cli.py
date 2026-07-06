@@ -614,9 +614,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         else:
             coverage = data["coverage"]
+            capture = data["capture"]
             queues = data["queues"]
             print(f"summary_coverage\t{coverage['summary_coverage']:.3f}")
             print(f"recall_question_coverage\t{coverage['recall_question_coverage']:.3f}")
+            print(f"claim_coverage\t{capture['claim_coverage']}")
+            print(f"sensitivity_high\t{coverage.get('sensitivity', {}).get('high', 0)}")
             print(f"duplicate_candidates\t{queues['duplicate_candidates']}")
             print(f"lint_repair\t{queues['lint_repair']}")
             print(f"search_golden\t{queues['search_golden']}")

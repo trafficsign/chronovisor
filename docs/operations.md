@@ -10,8 +10,9 @@ llm-wiki health
 
 Shows wiki counts, active config, recall decision counts, feedback counts, and
 runtime status. `health` focuses on knowledge KPIs: summary coverage,
-recall-question coverage, read-back pass rate, duplicate candidates, lint
-repair queue size, and golden-set size.
+recall-question coverage, raw-to-claim capture coverage, sensitivity-tier
+distribution, read-back pass rate, duplicate candidates, lint repair queue
+size, and golden-set size.
 
 ## Doctor
 
@@ -93,6 +94,13 @@ machine-checkable trail.
 prompt hooks inject it as a small `[WORKING_MEMORY]` block even when the normal
 recall gate decides `none`. System notifications and internal prompts remain
 filtered before this path.
+
+## Sensitivity Tiers
+
+Pages can set `sensitivity: high` in frontmatter. Career-folder pages infer
+`high` in the index even before frontmatter is backfilled. Recall cards show
+the sensitivity annotation next to the freshness annotation, and `llm-wiki
+health` reports the tier distribution.
 
 ## Entity Registry
 

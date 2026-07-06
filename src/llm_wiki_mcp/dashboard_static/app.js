@@ -64,6 +64,13 @@ const els = {
   knowledgeSize: document.getElementById("knowledge-size"),
   knowledgeCategories: document.getElementById("knowledge-categories"),
   knowledgeModeButtons: document.querySelectorAll("[data-knowledge-mode]"),
+  healthCaption: document.getElementById("health-caption"),
+  healthSummaryCoverage: document.getElementById("health-summary-coverage"),
+  healthCapture: document.getElementById("health-capture"),
+  healthReadback: document.getElementById("health-readback"),
+  healthSensitive: document.getElementById("health-sensitive"),
+  healthDupes: document.getElementById("health-dupes"),
+  healthGolden: document.getElementById("health-golden"),
   modelCaption: document.getElementById("model-caption"),
   modelInstalled: document.getElementById("model-installed"),
   modelLoaded: document.getElementById("model-loaded"),
@@ -1368,6 +1375,35 @@ function renderKnowledgeMix(knowledgeMix) {
   });
 }
 
+function healthPercent(value) {
+  return numeric(value) ? shareLabel(value) : "--";
+}
+
+function renderHealth(health) {
+  const data = health || {};
+  const coverage = data.coverage || {};
+  const capture = data.capture || {};
+  const readBack = data.read_back || {};
+  const queues = data.queues || {};
+  const sensitivity = coverage.sensitivity || {};
+  const rawFiles = intValue(capture.raw_files);
+  const claimed = intValue(capture.claimed_raw_files);
+  const checked = intValue(readBack.checked);
+  const passed = intValue(readBack.passed);
+
+  els.healthCaption.textContent = rawFiles
+    ? `${claimed.toLocaleString()} / ${rawFiles.toLocaleString()} raw claimed`
+    : "waiting";
+  els.healthSummaryCoverage.textContent = healthPercent(coverage.summary_coverage);
+  els.healthCapture.textContent = healthPercent(capture.claim_coverage);
+  els.healthReadback.textContent = checked
+    ? `${passed.toLocaleString()}/${checked.toLocaleString()}`
+    : "--";
+  els.healthSensitive.textContent = intValue(sensitivity.high).toLocaleString();
+  els.healthDupes.textContent = intValue(queues.duplicate_candidates).toLocaleString();
+  els.healthGolden.textContent = intValue(queues.search_golden).toLocaleString();
+}
+
 const MODEL_ROLE_LABELS = {
   ingest: "Ingest",
   audit: "Audit",
@@ -1686,6 +1722,7 @@ function render(snapshot) {
   renderRecallImprovement(snapshot.recall_improvement || {});
   renderSaveHistory(snapshot.save_history || {});
   renderKnowledgeMix(snapshot.knowledge_mix || {});
+  renderHealth(snapshot.health || {});
   renderModelStatus(modelStatus);
   renderEvents(snapshot.events || []);
   drawLineChart(els.pendingChart, snapshot.save_history || {}, status);

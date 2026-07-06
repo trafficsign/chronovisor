@@ -744,6 +744,7 @@ def test_recall_context_includes_decision_id() -> None:
                 title="LLM Wiki Recall Configuration",
                 updated="2026-06-02",
                 score=1.0,
+                sensitivity="high",
             )
         ],
     )
@@ -751,6 +752,8 @@ def test_recall_context_includes_decision_id() -> None:
     context = format_recall_context(result, RecallPolicy())
 
     assert "decision_id=20260602T120000-deadbeef" in context
+    assert "updated: 2026-06-02" in context
+    assert "sensitivity: high" in context
 
 
 def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None:

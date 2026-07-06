@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.index_store import get_store
-from llm_wiki_mcp.wiki import WIKI_ROOT
+from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT
 
 
 def _jsonl_count(path: Path) -> int:
@@ -41,8 +41,11 @@ def summary_coverage() -> dict[str, Any]:
     with_summary = 0
     with_questions = 0
     typed: dict[str, int] = {}
+    sensitivity: dict[str, int] = {}
     for meta in knowledge:
         typed[str(meta.get("page_type") or "knowledge")] = typed.get(str(meta.get("page_type") or "knowledge"), 0) + 1
+        tier = str(meta.get("sensitivity") or "normal")
+        sensitivity[tier] = sensitivity.get(tier, 0) + 1
         full = store.meta(str(meta.get("page_id", ""))) or {}
         if isinstance(full.get("summary"), str) and full["summary"].strip():
             with_summary += 1
@@ -57,6 +60,42 @@ def summary_coverage() -> dict[str, Any]:
         "summary_coverage": (with_summary / total) if total else 0.0,
         "recall_question_coverage": (with_questions / total) if total else 0.0,
         "page_types": typed,
+        "sensitivity": sensitivity,
+    }
+
+
+def _raw_host(path: Path) -> str:
+    name = path.name.lower()
+    if "codex" in name:
+        return "codex"
+    if "claude" in name:
+        return "claude"
+    if "cowork" in name:
+        return "cowork"
+    return "unknown"
+
+
+def capture_kpi() -> dict[str, Any]:
+    raws = sorted(RAW_DIR.glob("*.md")) if RAW_DIR.exists() else []
+    by_host: dict[str, int] = {}
+    for path in raws:
+        host = _raw_host(path)
+        by_host[host] = by_host.get(host, 0) + 1
+
+    claims = _read_jsonl(WIKI_ROOT / "claims" / "claims.jsonl", limit=100000)
+    claimed_raws = {
+        str(row.get("source_raw"))
+        for row in claims
+        if isinstance(row.get("source_raw"), str) and row.get("source_raw")
+    }
+    raw_names = {path.name for path in raws}
+    covered = raw_names & claimed_raws
+    return {
+        "raw_files": len(raws),
+        "claimed_raw_files": len(covered),
+        "claim_coverage": (len(covered) / len(raws)) if raws else None,
+        "raw_by_host": by_host,
+        "claim_rows": len(claims),
     }
 
 
@@ -106,6 +145,7 @@ def health_snapshot() -> dict[str, Any]:
     return {
         "status": "ok",
         "coverage": coverage,
+        "capture": capture_kpi(),
         "read_back": read_back_kpi(),
         "recall_feedback": recall_feedback_kpi(),
         "queues": {

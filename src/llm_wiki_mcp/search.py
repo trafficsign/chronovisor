@@ -31,7 +31,7 @@ def searchable_pages() -> list[Path]:
 # ---------------------------------------------------------------------------
 
 _BM25_CACHE_FILE = WIKI_ROOT / ".index" / "bm25.json"
-_BM25_CACHE_SCHEMA = 3
+_BM25_CACHE_SCHEMA = 4
 _ACTIVE_STATUS = "active"
 _VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
 _REFERENCE_PAGE_TYPE = "reference"
@@ -45,6 +45,7 @@ _VALID_PAGE_TYPES = {
     "lesson",
     "decision",
 }
+_VALID_SENSITIVITY_TIERS = {"normal", "high"}
 
 
 def _normalize_lifecycle_status(value: object) -> str:
@@ -64,6 +65,16 @@ def _normalize_page_type(value: object, *, folder: str = "") -> str:
     if folder == "car-spec":
         return _REFERENCE_PAGE_TYPE
     return "knowledge"
+
+
+def _normalize_sensitivity(value: object, *, folder: str = "") -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _VALID_SENSITIVITY_TIERS:
+            return normalized
+    if folder == "career":
+        return "high"
+    return "normal"
 
 
 def _is_active_result(result: ScoredPage) -> bool:
@@ -86,6 +97,10 @@ def _folder_from_meta(meta: dict) -> str:
 
 def _meta_page_type(meta: dict, *, folder: str = "") -> str:
     return _normalize_page_type(meta.get("page_type"), folder=folder)
+
+
+def _meta_sensitivity(meta: dict, *, folder: str = "") -> str:
+    return _normalize_sensitivity(meta.get("sensitivity"), folder=folder)
 
 
 class BM25Index:
@@ -246,6 +261,7 @@ class BM25Index:
             )
             folder = path.parent.name if path.parent != PAGES_DIR else ""
             page_type = _normalize_page_type(fm.get("type"), folder=folder)
+            sensitivity = _normalize_sensitivity(fm.get("sensitivity"), folder=folder)
 
             title_tokens = tokenize(title) * 3
             body_tokens = tokenize(content)
@@ -266,6 +282,7 @@ class BM25Index:
                 "status": status,
                 "superseded_by": superseded_by,
                 "page_type": page_type,
+                "sensitivity": sensitivity,
                 "doc_len": doc_len,
                 "tf_map": tf_map,
             }
@@ -348,6 +365,7 @@ class BM25Index:
                         if isinstance(doc.get("superseded_by", ""), str)
                         else "",
                         page_type=page_type,
+                        sensitivity=_normalize_sensitivity(doc.get("sensitivity"), folder=doc.get("folder", "")),
                     ))
 
             results.sort(key=lambda x: x.score, reverse=True)
@@ -1047,6 +1065,7 @@ def semantic_search(
             continue
         folder = _folder_from_meta(meta)
         page_type = _meta_page_type(meta, folder=folder)
+        sensitivity = _meta_sensitivity(meta, folder=folder)
         if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
             continue
 
@@ -1065,6 +1084,7 @@ def semantic_search(
             if isinstance(meta.get("superseded_by", ""), str)
             else "",
             page_type=page_type,
+            sensitivity=sensitivity,
         )
 
     for _key, pid, _idx, vec, _mtime, norm in _iter_all_question_embeddings():
@@ -1075,6 +1095,7 @@ def semantic_search(
             continue
         folder = _folder_from_meta(meta)
         page_type = _meta_page_type(meta, folder=folder)
+        sensitivity = _meta_sensitivity(meta, folder=folder)
         if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
             continue
         dot = 0.0
@@ -1094,6 +1115,7 @@ def semantic_search(
                 if isinstance(meta.get("superseded_by", ""), str)
                 else "",
                 page_type=page_type,
+                sensitivity=sensitivity,
             )
 
     if _should_scan_chunks([page.score for page in by_page.values()]):
@@ -1105,6 +1127,7 @@ def semantic_search(
                 continue
             folder = _folder_from_meta(meta)
             page_type = _meta_page_type(meta, folder=folder)
+            sensitivity = _meta_sensitivity(meta, folder=folder)
             if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
                 continue
             dot = 0.0
@@ -1125,6 +1148,7 @@ def semantic_search(
                     if isinstance(meta.get("superseded_by", ""), str)
                     else "",
                     page_type=page_type,
+                    sensitivity=sensitivity,
                 )
 
     results = list(by_page.values())
@@ -1214,6 +1238,7 @@ def fuse_results(
             updated=p.updated, score=score,
             status=p.status, superseded_by=p.superseded_by,
             page_type=p.page_type,
+            sensitivity=p.sensitivity,
         ))
 
     fused.sort(key=lambda x: x.score, reverse=True)
@@ -1253,6 +1278,7 @@ def graph_expand_results(results: list[ScoredPage], *, decay: float = 0.5, limit
                 if isinstance(meta.get("superseded_by", ""), str)
                 else "",
                 page_type=_meta_page_type(meta, folder=folder),
+                sensitivity=_meta_sensitivity(meta, folder=folder),
             )
             if len(expanded) >= limit:
                 break
@@ -1314,6 +1340,7 @@ def usage_prior_results(
                 if isinstance(meta.get("superseded_by", ""), str)
                 else "",
                 page_type=_meta_page_type(meta, folder=folder),
+                sensitivity=_meta_sensitivity(meta, folder=folder),
             )
         )
     return out
