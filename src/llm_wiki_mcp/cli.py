@@ -524,6 +524,26 @@ def main(argv: list[str] | None = None) -> int:
     raw_replay_parser.add_argument("--limit", type=int, default=0)
     raw_replay_parser.add_argument("--run", action="store_true")
     raw_replay_parser.add_argument("--json", action="store_true")
+    memory_eval_parser = sub.add_parser("memory-integrity", help="Evaluate raw-to-memory capture integrity.")
+    memory_eval_parser.add_argument("--since", default="")
+    memory_eval_parser.add_argument("--limit", type=int, default=100)
+    memory_eval_parser.add_argument("--no-write", action="store_true")
+    memory_eval_parser.add_argument("--json", action="store_true")
+    cofire_parser = sub.add_parser("cofire", help="Build recall co-fire graph.")
+    cofire_parser.add_argument("--limit", type=int, default=5000)
+    cofire_parser.add_argument("--min-count", type=int, default=2)
+    cofire_parser.add_argument("--no-write", action="store_true")
+    cofire_parser.add_argument("--json", action="store_true")
+    prefetch_parser = sub.add_parser("prefetch", help="Build speculative recall prefetch cache.")
+    prefetch_parser.add_argument("--limit", type=int, default=5000)
+    prefetch_parser.add_argument("--no-write", action="store_true")
+    prefetch_parser.add_argument("--json", action="store_true")
+    sleep_parser = sub.add_parser("sleep", help="Run sleep-cycle consolidation.")
+    sleep_parser.add_argument("--raw-limit", type=int, default=100)
+    sleep_parser.add_argument("--eval-limit", type=int, default=100)
+    sleep_parser.add_argument("--duplicate-limit", type=int, default=200)
+    sleep_parser.add_argument("--dry-run", action="store_true")
+    sleep_parser.add_argument("--json", action="store_true")
     recall_eval_parser = sub.add_parser("recall-eval", help="Replay-evaluate recall decisions.")
     recall_eval_parser.add_argument("--config")
     recall_eval_parser.add_argument("--log-file", default=str(RECALL_LOG_FILE))
@@ -615,10 +635,14 @@ def main(argv: list[str] | None = None) -> int:
         else:
             coverage = data["coverage"]
             capture = data["capture"]
+            memory_integrity = data["memory_integrity"]
+            cofire = data["cofire"]
             queues = data["queues"]
             print(f"summary_coverage\t{coverage['summary_coverage']:.3f}")
             print(f"recall_question_coverage\t{coverage['recall_question_coverage']:.3f}")
             print(f"claim_coverage\t{capture['claim_coverage']}")
+            print(f"memory_integrity_capture\t{memory_integrity.get('capture_rate')}")
+            print(f"cofire_edges\t{cofire.get('edges', 0)}")
             print(f"sensitivity_high\t{coverage.get('sensitivity', {}).get('high', 0)}")
             print(f"duplicate_candidates\t{queues['duplicate_candidates']}")
             print(f"lint_repair\t{queues['lint_repair']}")
@@ -662,6 +686,63 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         else:
             print("\t".join(f"{key}={value}" for key, value in data.items() if key != "runs"))
+        return 0
+    if args.command == "memory-integrity":
+        from llm_wiki_mcp.memory_integrity import run_eval
+
+        data = run_eval(since=args.since, limit=max(0, args.limit), write=not args.no_write)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"capture_rate\t{data['capture_rate']}")
+            print(f"passed\t{data['passed']}")
+            print(f"missed\t{data['missed']}")
+        return 0
+    if args.command == "cofire":
+        from llm_wiki_mcp.cofire import build_cofire_graph
+
+        data = build_cofire_graph(
+            limit=max(1, args.limit),
+            min_count=max(1, args.min_count),
+            write=not args.no_write,
+        )
+        public = {key: value for key, value in data.items() if key != "graph"}
+        if args.json:
+            print(json.dumps(public, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"episodes\t{public['episodes']}")
+            print(f"nodes\t{public['nodes']}")
+            print(f"edges\t{public['edges']}")
+        return 0
+    if args.command == "prefetch":
+        from llm_wiki_mcp.prefetch import build_prefetch_cache
+
+        data = build_prefetch_cache(limit=max(1, args.limit), write=not args.no_write)
+        public = {key: value for key, value in data.items() if key not in {"buckets", "tokens"}}
+        public["bucket_count"] = len(data.get("buckets", {}))
+        public["token_count"] = len(data.get("tokens", {}))
+        if args.json:
+            print(json.dumps(public, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"episodes\t{public['episodes']}")
+            print(f"buckets\t{public['bucket_count']}")
+            print(f"tokens\t{public['token_count']}")
+        return 0
+    if args.command == "sleep":
+        from llm_wiki_mcp.sleep_cycle import run_sleep_cycle
+
+        data = run_sleep_cycle(
+            raw_limit=max(0, args.raw_limit),
+            eval_limit=max(0, args.eval_limit),
+            duplicate_limit=max(0, args.duplicate_limit),
+            dry_run=args.dry_run,
+        )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"cofire_edges\t{data['cofire']['edges']}")
+            print(f"capture_rate\t{data['memory_integrity']['capture_rate']}")
+            print(f"duplicates\t{data['duplicates']['count']}")
         return 0
     if args.command == "recall-eval":
         from llm_wiki_mcp.recall_eval import run_eval

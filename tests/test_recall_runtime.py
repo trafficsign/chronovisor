@@ -105,6 +105,67 @@ def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
     assert [result.page_id for result in results[:2]] == ["target", "generic"]
 
 
+def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    def fake_search(
+        *,
+        query: str,
+        top_n: int,
+        semantic: bool,
+        fusion_weights: dict[str, float],
+    ) -> tuple[list[ScoredPage], str]:
+        del query, top_n, semantic, fusion_weights
+        return [
+            ScoredPage("career-note", "Career Note", "career", "", 1.0, sensitivity="high"),
+            ScoredPage("work-note", "Work Note", "ai", "", 0.5),
+        ], "hybrid"
+
+    monkeypatch.setattr(recall_runtime, "run_search", fake_search)
+
+    results, _mode = search_candidates(
+        ["query"],
+        RecallPolicy(),
+        request=RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="project status",
+            cwd="/Users/trafficsign/projects/work/client",
+        ),
+    )
+
+    assert [result.page_id for result in results] == ["work-note"]
+
+
+def test_search_candidates_allows_sensitive_pages_when_prompt_requests_it(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    def fake_search(
+        *,
+        query: str,
+        top_n: int,
+        semantic: bool,
+        fusion_weights: dict[str, float],
+    ) -> tuple[list[ScoredPage], str]:
+        del query, top_n, semantic, fusion_weights
+        return [ScoredPage("career-note", "Career Note", "career", "", 1.0, sensitivity="high")], "hybrid"
+
+    monkeypatch.setattr(recall_runtime, "run_search", fake_search)
+
+    results, _mode = search_candidates(
+        ["query"],
+        RecallPolicy(),
+        request=RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="面接の話を思い出して",
+            cwd="/Users/trafficsign/projects/work/client",
+        ),
+    )
+
+    assert [result.page_id for result in results] == ["career-note"]
+
+
 def test_best_excerpt_index_prefers_dense_query_terms() -> None:
     body = (
         "LLM Wiki was mentioned near the top.\n"

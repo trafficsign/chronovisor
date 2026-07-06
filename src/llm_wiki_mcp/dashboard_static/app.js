@@ -1383,6 +1383,8 @@ function renderHealth(health) {
   const data = health || {};
   const coverage = data.coverage || {};
   const capture = data.capture || {};
+  const integrity = data.memory_integrity || {};
+  const cofire = data.cofire || {};
   const readBack = data.read_back || {};
   const queues = data.queues || {};
   const sensitivity = coverage.sensitivity || {};
@@ -1395,13 +1397,13 @@ function renderHealth(health) {
     ? `${claimed.toLocaleString()} / ${rawFiles.toLocaleString()} raw claimed`
     : "waiting";
   els.healthSummaryCoverage.textContent = healthPercent(coverage.summary_coverage);
-  els.healthCapture.textContent = healthPercent(capture.claim_coverage);
+  els.healthCapture.textContent = healthPercent(numeric(integrity.capture_rate) ? integrity.capture_rate : capture.claim_coverage);
   els.healthReadback.textContent = checked
     ? `${passed.toLocaleString()}/${checked.toLocaleString()}`
     : "--";
   els.healthSensitive.textContent = intValue(sensitivity.high).toLocaleString();
   els.healthDupes.textContent = intValue(queues.duplicate_candidates).toLocaleString();
-  els.healthGolden.textContent = intValue(queues.search_golden).toLocaleString();
+  els.healthGolden.textContent = intValue(cofire.edges || queues.search_golden).toLocaleString();
 }
 
 const MODEL_ROLE_LABELS = {

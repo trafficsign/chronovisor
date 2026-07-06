@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from llm_wiki_mcp import memory_integrity
+
+
+class _Result:
+    page_id = "target"
+    title = "Target"
+    score = 1.0
+
+
+def test_evaluate_raw_passes_when_search_finds_page(tmp_path: Path, monkeypatch) -> None:
+    raw = tmp_path / "20260706-codex-target.md"
+    raw.write_text("Target project decision about qwen mlx", encoding="utf-8")
+    monkeypatch.setattr(memory_integrity, "run_search", lambda **kwargs: ([_Result()], "hybrid"))
+
+    row = memory_integrity.evaluate_raw(raw, claimed=set())
+
+    assert row["status"] == "pass"
+    assert row["search_present"] is True
+    assert row["top_pages"][0]["page_id"] == "target"
+
+
+def test_claimed_raw_names_strips_replay_prefix(tmp_path: Path, monkeypatch) -> None:
+    wiki_root = tmp_path / "wiki"
+    claims = wiki_root / "claims"
+    claims.mkdir(parents=True)
+    (claims / "claims.jsonl").write_text(
+        json.dumps({"source_raw": "replay:20260706-codex-a.md"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(memory_integrity, "WIKI_ROOT", wiki_root)
+
+    assert memory_integrity.claimed_raw_names() == {"20260706-codex-a.md"}

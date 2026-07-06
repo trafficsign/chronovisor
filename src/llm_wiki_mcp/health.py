@@ -99,6 +99,64 @@ def capture_kpi() -> dict[str, Any]:
     }
 
 
+def latest_memory_integrity() -> dict[str, Any]:
+    path = WIKI_ROOT / "eval" / "memory-integrity-latest.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"status": "missing", "path": str(path)}
+    if not isinstance(payload, dict):
+        return {"status": "invalid", "path": str(path)}
+    return {
+        "status": payload.get("status", "ok"),
+        "path": str(path),
+        "generated_at": payload.get("generated_at"),
+        "total": payload.get("total", 0),
+        "passed": payload.get("passed", 0),
+        "missed": payload.get("missed", 0),
+        "capture_rate": payload.get("capture_rate"),
+        "by_host": payload.get("by_host", {}),
+    }
+
+
+def cofire_kpi() -> dict[str, Any]:
+    path = WIKI_ROOT / "recall" / "cofire.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"status": "missing", "path": str(path), "nodes": 0, "edges": 0}
+    if not isinstance(payload, dict):
+        return {"status": "invalid", "path": str(path), "nodes": 0, "edges": 0}
+    return {
+        "status": payload.get("status", "ok"),
+        "path": str(path),
+        "generated_at": payload.get("generated_at"),
+        "episodes": payload.get("episodes", 0),
+        "nodes": payload.get("nodes", 0),
+        "edges": payload.get("edges", 0),
+    }
+
+
+def prefetch_kpi() -> dict[str, Any]:
+    path = WIKI_ROOT / "recall" / "prefetch.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"status": "missing", "path": str(path), "buckets": 0, "tokens": 0}
+    if not isinstance(payload, dict):
+        return {"status": "invalid", "path": str(path), "buckets": 0, "tokens": 0}
+    buckets = payload.get("buckets")
+    tokens = payload.get("tokens")
+    return {
+        "status": payload.get("status", "ok"),
+        "path": str(path),
+        "generated_at": payload.get("generated_at"),
+        "episodes": payload.get("episodes", 0),
+        "buckets": len(buckets) if isinstance(buckets, dict) else 0,
+        "tokens": len(tokens) if isinstance(tokens, dict) else 0,
+    }
+
+
 def read_back_kpi() -> dict[str, Any]:
     rows = _read_jsonl(WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl", limit=200)
     failures = 0
@@ -146,6 +204,9 @@ def health_snapshot() -> dict[str, Any]:
         "status": "ok",
         "coverage": coverage,
         "capture": capture_kpi(),
+        "memory_integrity": latest_memory_integrity(),
+        "cofire": cofire_kpi(),
+        "prefetch": prefetch_kpi(),
         "read_back": read_back_kpi(),
         "recall_feedback": recall_feedback_kpi(),
         "queues": {

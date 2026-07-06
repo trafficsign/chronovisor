@@ -994,7 +994,68 @@ def evidence_score(features: dict[str, Any], policy: RecallPolicy) -> float:
     return max(0.0, min(1.0, score))
 
 
-def search_candidates(queries: list[str], policy: RecallPolicy) -> tuple[list[Any], str]:
+def request_context_terms(request: RecallRequest | None) -> set[str]:
+    if request is None:
+        return set()
+    parts = [request.cwd, Path(request.cwd).name if request.cwd else "", request.host]
+    text = " ".join(part for part in parts if part).lower()
+    terms = set(re.findall(r"[a-z0-9][a-z0-9_.+-]{2,}", text))
+    if "llm-wiki-mcp" in text:
+        terms.update({"llm-wiki", "wiki", "mcp"})
+    return terms
+
+
+def context_boost(result: Any, request: RecallRequest | None) -> float:
+    terms = request_context_terms(request)
+    if not terms:
+        return 1.0
+    haystack = " ".join(
+        str(getattr(result, attr, "") or "").lower()
+        for attr in ("page_id", "title", "folder")
+    )
+    hits = sum(1 for term in terms if term in haystack)
+    if hits <= 0:
+        return 1.0
+    return min(1.35, 1.0 + (0.08 * hits))
+
+
+def is_work_context(request: RecallRequest | None) -> bool:
+    if request is None:
+        return False
+    cwd = (request.cwd or "").lower()
+    return "/projects/work/" in cwd or cwd.endswith("/projects/work")
+
+
+def prompt_allows_sensitive_context(request: RecallRequest | None) -> bool:
+    if request is None:
+        return True
+    prompt = (request.prompt or "").lower()
+    allow_terms = (
+        "career",
+        "interview",
+        "転職",
+        "面接",
+        "退職",
+        "職務",
+        "キャリア",
+        "mental",
+        "sensitive",
+    )
+    return any(term in prompt for term in allow_terms)
+
+
+def should_filter_sensitive_result(result: Any, request: RecallRequest | None) -> bool:
+    if getattr(result, "sensitivity", "normal") != "high":
+        return False
+    return is_work_context(request) and not prompt_allows_sensitive_context(request)
+
+
+def search_candidates(
+    queries: list[str],
+    policy: RecallPolicy,
+    *,
+    request: RecallRequest | None = None,
+) -> tuple[list[Any], str]:
     if not queries:
         return [], ""
     merged: dict[str, Any] = {}
@@ -1023,7 +1084,9 @@ def search_candidates(queries: list[str], policy: RecallPolicy) -> tuple[list[An
             mode = search_mode
         query_weight = max(0.50, 1.0 - (0.25 * query_index))
         for result in results:
-            adjusted = replace(result, score=float(result.score) * query_weight)
+            if should_filter_sensitive_result(result, request):
+                continue
+            adjusted = replace(result, score=float(result.score) * query_weight * context_boost(result, request))
             existing = merged.get(result.page_id)
             if existing is None or adjusted.score > existing.score:
                 merged[result.page_id] = adjusted
@@ -1036,6 +1099,7 @@ def collect_context(
     decision: str,
     policy: RecallPolicy,
     *,
+    request: RecallRequest | None = None,
     session_state: Any | None = None,
     pre_results: list[Any] | None = None,
 ) -> list[ContextItem]:
@@ -1054,18 +1118,36 @@ def collect_context(
         hinted = context_item_from_page_id(page_id, queries, decision, score=1.0)
         if hinted is None:
             continue
+        if should_filter_sensitive_result(hinted, request):
+            continue
         seen.add(page_id)
         items.append(hinted)
         if len(items) >= policy.max_pages:
             return items
 
+    for page_id in prefetch_page_ids_for_request(request, queries, limit=policy.max_pages):
+        if page_id in seen:
+            continue
+        prefetched = context_item_from_page_id(page_id, queries, decision, score=0.95)
+        if prefetched is None:
+            continue
+        if should_filter_sensitive_result(prefetched, request):
+            continue
+        seen.add(page_id)
+        items.append(prefetched)
+        if len(items) >= policy.max_pages:
+            return items
+
     results = pre_results
     if results is None:
-        results, _mode = search_candidates(queries, policy)
+        results, _mode = search_candidates(queries, policy, request=request)
     for result in results:
         if result.page_id in seen:
             continue
         if should_skip_session_page(session_state, result.page_id, result.updated):
+            seen.add(result.page_id)
+            continue
+        if should_filter_sensitive_result(result, request):
             seen.add(result.page_id)
             continue
         seen.add(result.page_id)
@@ -1098,6 +1180,23 @@ def query_hint_page_ids(queries: list[str], *, limit: int) -> list[str]:
         from llm_wiki_mcp.recall_hints import matching_hint_page_ids
 
         return matching_hint_page_ids(queries, limit=limit)
+    except Exception:
+        return []
+
+
+def prefetch_page_ids_for_request(request: RecallRequest | None, queries: list[str], *, limit: int) -> list[str]:
+    if request is None:
+        return []
+    try:
+        from llm_wiki_mcp.prefetch import prefetch_page_ids
+
+        return prefetch_page_ids(
+            host=request.host,
+            cwd=request.cwd,
+            queries=queries,
+            prompt=request.prompt,
+            limit=limit,
+        )
     except Exception:
         return []
 
@@ -1439,7 +1538,7 @@ def run_recall(
             cleanup_sessions(policy.session_ttl_seconds)
             session_state = load_session_state(active_request.session_id)
             initial_queries = build_queries(active_request, matched, [], policy, session_state=session_state)
-            pre_results, search_mode = search_candidates(initial_queries, policy)
+            pre_results, search_mode = search_candidates(initial_queries, policy, request=active_request)
             evidence_features = build_evidence_features(
                 request=active_request,
                 matched=matched,
@@ -1485,7 +1584,7 @@ def run_recall(
                         session_state=session_state,
                         rewrite_queries=rewrite_queries,
                     )
-                    pre_results, search_mode = search_candidates(queries_for_search, policy)
+                    pre_results, search_mode = search_candidates(queries_for_search, policy, request=active_request)
                     evidence_features = build_evidence_features(
                         request=active_request,
                         matched=matched,
@@ -1553,6 +1652,7 @@ def run_recall(
                 queries,
                 decision,
                 policy,
+                request=active_request,
                 session_state=session_state,
                 pre_results=pre_results or None,
             )

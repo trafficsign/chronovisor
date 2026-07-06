@@ -34,6 +34,10 @@ llm-wiki-duplicate-review = "llm_wiki_mcp.duplicate_review:main"
 llm-wiki-entities = "llm_wiki_mcp.entities:main"
 llm-wiki-snapshot = "llm_wiki_mcp.wiki_snapshot:main"
 llm-wiki-raw-replay = "llm_wiki_mcp.raw_replay:main"
+llm-wiki-memory-integrity = "llm_wiki_mcp.memory_integrity:main"
+llm-wiki-cofire = "llm_wiki_mcp.cofire:main"
+llm-wiki-prefetch = "llm_wiki_mcp.prefetch:main"
+llm-wiki-sleep = "llm_wiki_mcp.sleep_cycle:main"
 
 [build-system]
 requires = ["hatchling"]

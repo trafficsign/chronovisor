@@ -1255,14 +1255,26 @@ def graph_expand_results(results: list[ScoredPage], *, decay: float = 0.5, limit
     seen = {result.page_id for result in results}
     expanded: dict[str, ScoredPage] = {}
     for result in results[:10]:
-        linked = store.outlinks(result.page_id) + store.backlinks(result.page_id)
-        for page_id in linked:
+        linked: list[tuple[str, float]] = [(page_id, 1.0) for page_id in (store.outlinks(result.page_id) + store.backlinks(result.page_id))]
+        try:
+            from llm_wiki_mcp.cofire import neighbors as cofire_neighbors
+
+            linked.extend(
+                (
+                    str(edge["page_id"]),
+                    max(0.05, min(1.0, float(edge.get("weight") or 0.0))),
+                )
+                for edge in cofire_neighbors(result.page_id, limit=8)
+            )
+        except Exception:
+            pass
+        for page_id, edge_weight in linked:
             if page_id in seen:
                 continue
             meta = store.meta(page_id)
             if meta is None:
                 continue
-            score = result.score * decay
+            score = result.score * decay * edge_weight
             existing = expanded.get(page_id)
             if existing is not None and existing.score >= score:
                 continue

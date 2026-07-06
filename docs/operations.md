@@ -100,7 +100,9 @@ filtered before this path.
 Pages can set `sensitivity: high` in frontmatter. Career-folder pages infer
 `high` in the index even before frontmatter is backfilled. Recall cards show
 the sensitivity annotation next to the freshness annotation, and `llm-wiki
-health` reports the tier distribution.
+health` reports the tier distribution. In work-project CWDs, high-sensitivity
+pages are filtered unless the prompt explicitly asks for career/interview style
+context.
 
 ## Entity Registry
 
@@ -148,6 +150,45 @@ llm-wiki raw-replay --since 2026-07-01 --limit 1 --run
 Without `--run`, replay writes `~/.wiki/review/raw-replay-queue.jsonl`.
 With `--run`, selected raw files go back through the normal ingest path, so
 search-before-create and read-back verification still apply.
+
+## Memory Integrity Eval
+
+```sh
+llm-wiki memory-integrity --limit 100
+llm-wiki-memory-integrity --limit 100 --json
+```
+
+This is the first E1/W7 write-side eval. It samples raw captures, derives a
+deterministic expected-term query, checks the claim ledger and search footprint,
+and writes `~/.wiki/eval/memory-integrity-latest.json`. The dashboard health
+panel uses this when available.
+
+## Cofire Graph
+
+```sh
+llm-wiki cofire --limit 5000
+llm-wiki-cofire --min-count 2 --json
+llm-wiki prefetch --limit 5000
+```
+
+Recall logs now build a co-fire graph at `~/.wiki/recall/cofire.json`.
+Search graph expansion consumes those edges alongside wikilinks/backlinks, so
+pages that repeatedly appear together can reinforce each other before a
+human-curated graph exists. Prefetch cache writes
+`~/.wiki/recall/prefetch.json` from recent recall episodes and is checked
+before normal search context assembly.
+
+## Sleep Cycle
+
+```sh
+llm-wiki sleep --dry-run --json
+llm-wiki-sleep --raw-limit 100 --eval-limit 100
+```
+
+The sleep cycle snapshots `~/.wiki`, rebuilds co-fire and prefetch caches, runs
+memory integrity eval, refreshes raw replay candidates, and writes duplicate
+review candidates. It does not re-ingest or merge pages unless those explicit
+lanes are run separately.
 
 ## Wiki Snapshots
 
