@@ -25,12 +25,21 @@ from llm_wiki_mcp.link_fix import atomic_write, extract_targets
 from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR, WIKI_ROOT
 
 
-SCHEMA_VERSION = 6  # bumped for page_type
+SCHEMA_VERSION = 7  # bumped for page_type/entities
 INDEX_DIR = WIKI_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
 VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
-VALID_PAGE_TYPES = {"knowledge", "reference"}
+VALID_PAGE_TYPES = {
+    "knowledge",
+    "reference",
+    "episodic",
+    "semantic",
+    "procedural",
+    "state",
+    "lesson",
+    "decision",
+}
 
 
 def _normalize_lifecycle_status(value: object) -> str:
@@ -49,6 +58,11 @@ def _normalize_page_type(value: object, *, path: Path | None = None) -> str:
             return normalized
     if path is not None:
         try:
+            if path.parent == SYSTEM_DIR:
+                if path.stem == "current-state":
+                    return "state"
+                if path.stem == "lessons-learned":
+                    return "lesson"
             if path.parent.name == "car-spec":
                 return "reference"
         except OSError:
@@ -115,6 +129,7 @@ class PageEntry:
     status: str = "active"
     superseded_by: str = ""
     page_type: str = "knowledge"
+    entities: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -133,6 +148,7 @@ class PageEntry:
             "status": self.status,
             "superseded_by": self.superseded_by,
             "page_type": self.page_type,
+            "entities": list(self.entities),
         }
 
     @classmethod
@@ -161,6 +177,7 @@ class PageEntry:
             status=_normalize_lifecycle_status(d.get("status")),
             superseded_by=d.get("superseded_by", "") if isinstance(d.get("superseded_by", ""), str) else "",
             page_type=_normalize_page_type(d.get("page_type")),
+            entities=_coerce_str_list(d.get("entities")),
         )
 
 
@@ -382,6 +399,7 @@ class IndexStore:
                 else ""
             ),
             page_type=_normalize_page_type(fm.get("type"), path=path),
+            entities=_coerce_str_list(fm.get("entities")),
         )
 
     def _rebuild_backlinks(self) -> None:
@@ -441,6 +459,7 @@ class IndexStore:
                 "status": entry.status,
                 "superseded_by": entry.superseded_by,
                 "page_type": entry.page_type,
+                "entities": list(entry.entities),
             }
 
     def outlinks(self, page_id: str) -> list[str]:
@@ -520,6 +539,7 @@ class IndexStore:
                     "status": e.status,
                     "superseded_by": e.superseded_by,
                     "page_type": e.page_type,
+                    "entities": list(e.entities),
                 }
                 for e in items
             ]

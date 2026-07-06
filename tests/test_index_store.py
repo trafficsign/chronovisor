@@ -204,12 +204,23 @@ class TestBuildEntryRawKeywords:
         path = _seed(
             isolated_index,
             "refs/p.md",
-            "---\ntitle: P\nupdated: 2026-01-01\ntype: reference\n---\nbody\n",
+            "---\ntitle: P\nupdated: 2026-01-01\ntype: procedural\n---\nbody\n",
         )
         st = path.stat()
         entry = IndexStore._build_entry("p", path, False, st.st_mtime_ns, st.st_size)
         assert entry is not None
-        assert entry.page_type == "reference"
+        assert entry.page_type == "procedural"
+
+    def test_extracts_entities_frontmatter(self, isolated_index: Path) -> None:
+        path = _seed(
+            isolated_index,
+            "p.md",
+            "---\ntitle: P\nupdated: 2026-01-01\nentities: [llm-wiki, qwen]\n---\nbody\n",
+        )
+        st = path.stat()
+        entry = IndexStore._build_entry("p", path, False, st.st_mtime_ns, st.st_size)
+        assert entry is not None
+        assert entry.entities == ["llm-wiki", "qwen"]
 
 
 # ---------------------------------------------------------------------------
@@ -272,14 +283,15 @@ class TestRawKeywordsAccessor:
         _seed(
             isolated_index,
             "refs/p.md",
-            "---\ntitle: P\nupdated: 2026-01-01\ntype: reference\n---\nbody\n",
+            "---\ntitle: P\nupdated: 2026-01-01\ntype: decision\nentities: [qwen]\n---\nbody\n",
         )
         store = IndexStore()
         store.refresh()
         meta = store.meta("p")
         assert meta is not None
-        assert meta["page_type"] == "reference"
-        assert store.page_type("p") == "reference"
+        assert meta["page_type"] == "decision"
+        assert meta["entities"] == ["qwen"]
+        assert store.page_type("p") == "decision"
 
 
 # ---------------------------------------------------------------------------

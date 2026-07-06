@@ -35,7 +35,16 @@ _BM25_CACHE_SCHEMA = 3
 _ACTIVE_STATUS = "active"
 _VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
 _REFERENCE_PAGE_TYPE = "reference"
-_VALID_PAGE_TYPES = {"knowledge", _REFERENCE_PAGE_TYPE}
+_VALID_PAGE_TYPES = {
+    "knowledge",
+    _REFERENCE_PAGE_TYPE,
+    "episodic",
+    "semantic",
+    "procedural",
+    "state",
+    "lesson",
+    "decision",
+}
 
 
 def _normalize_lifecycle_status(value: object) -> str:

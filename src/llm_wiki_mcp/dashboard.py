@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import httpx
 
 from llm_wiki_mcp import orchestrator, recall_runtime, runtime_status
+from llm_wiki_mcp.health import health_snapshot
 from llm_wiki_mcp.ollama import OLLAMA_URL, embedding_model, ingest_model
 from llm_wiki_mcp.recall_auditor import load_audit_policy
 from llm_wiki_mcp.recall_improvement import configured_models
@@ -1265,6 +1266,7 @@ def build_snapshot() -> dict[str, Any]:
         "recall_improvement": _recall_improvement_snapshot(),
         "save_history": _save_history_snapshot(),
         "knowledge_mix": _knowledge_mix_snapshot(),
+        "health": health_snapshot(),
         "paths": {
             "wiki_root": str(WIKI_ROOT),
             "status_file": str(runtime_status.STATUS_FILE),
@@ -1300,6 +1302,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _json_response(self, {"save_history": build_snapshot()["save_history"]})
         elif path == "/api/knowledge-mix":
             _json_response(self, {"knowledge_mix": build_snapshot()["knowledge_mix"]})
+        elif path == "/api/health":
+            _json_response(self, {"health": build_snapshot()["health"]})
         elif path == "/api/model-status":
             snapshot = build_snapshot()
             _json_response(self, {"model_status": snapshot["model_status"], "ollama": snapshot["ollama"]})

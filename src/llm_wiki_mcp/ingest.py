@@ -19,6 +19,7 @@ from llm_wiki_mcp.ollama import (
     GENERATE_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT,
 )
 from llm_wiki_mcp import runtime_status
+from llm_wiki_mcp.entities import patch_entities_frontmatter
 
 
 # ---------------------------------------------------------------------------
@@ -1206,6 +1207,11 @@ def _ensure_recall_metadata_frontmatter(text: str, page_id: str, parse, patch) -
     return patch(text, updates)
 
 
+def _ensure_page_metadata_frontmatter(text: str, page_id: str, parse, patch) -> str:
+    text = _ensure_recall_metadata_frontmatter(text, page_id, parse, patch)
+    return patch_entities_frontmatter(text)
+
+
 def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     """Apply page operations and return (created, updated) lists.
 
@@ -1356,7 +1362,7 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                 # ``patch`` will splice raw_keywords into it without
                 # synthesizing a new block.
                 body = _frontmatter_patch(body, {"raw_keywords": op_raw_keywords})
-            body = _ensure_recall_metadata_frontmatter(
+            body = _ensure_page_metadata_frontmatter(
                 body,
                 page_id,
                 _frontmatter_parse,
@@ -1412,7 +1418,7 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
                 count=1,
             )
             new_body = stamped.rstrip() + "\n\n" + body + "\n"
-            new_body = _ensure_recall_metadata_frontmatter(
+            new_body = _ensure_page_metadata_frontmatter(
                 new_body,
                 page_id,
                 _frontmatter_parse,
@@ -1950,6 +1956,11 @@ def run_ingest(
                 update_embeddings(page_ids=changed_pages)
             except Exception:
                 pass
+            try:
+                from llm_wiki_mcp.claims import append_page_claims
+                append_page_claims(changed_pages, source_raw=source_raw or "", op="ingest")
+            except Exception as e:
+                _safe_log(f"ingest | claim ledger failed (non-fatal): {e}")
         read_back_result = _verify_changed_pages_read_back(changed_pages)
 
         # Build job result. For partial runs, surface the failed op specs

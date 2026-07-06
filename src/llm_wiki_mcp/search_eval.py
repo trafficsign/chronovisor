@@ -1311,6 +1311,48 @@ def print_report(payload: dict[str, Any]) -> None:
         print(f"baseline\t{payload['baseline_file']}")
 
 
+def ci_gate(
+    payload: dict[str, Any],
+    *,
+    variant: str = "hybrid-current",
+    min_recall_at_5: float = 0.0,
+    min_mrr_at_10: float = 0.0,
+    max_negative_hit_rate_at_20: float = 1.0,
+) -> dict[str, Any]:
+    variants = payload.get("variants") if isinstance(payload.get("variants"), dict) else {}
+    selected = variants.get(variant) if isinstance(variants, dict) else None
+    if selected is None and variants:
+        variant, selected = next(iter(variants.items()))
+    if not isinstance(selected, dict):
+        return {"status": "failed", "reason": "no variant metrics", "variant": variant}
+    metrics = selected.get("metrics")
+    if not isinstance(metrics, dict):
+        return {"status": "failed", "reason": "missing metrics", "variant": variant}
+    def metric(name: str, default: float) -> float:
+        try:
+            return float(metrics.get(name, default))
+        except (TypeError, ValueError):
+            return default
+    failures = []
+    if metric("recall_at_5", 0.0) < min_recall_at_5:
+        failures.append("recall_at_5")
+    if metric("mrr_at_10", 0.0) < min_mrr_at_10:
+        failures.append("mrr_at_10")
+    if metric("negative_hit_rate_at_20", 1.0) > max_negative_hit_rate_at_20:
+        failures.append("negative_hit_rate_at_20")
+    return {
+        "status": "passed" if not failures else "failed",
+        "variant": variant,
+        "failures": failures,
+        "thresholds": {
+            "min_recall_at_5": min_recall_at_5,
+            "min_mrr_at_10": min_mrr_at_10,
+            "max_negative_hit_rate_at_20": max_negative_hit_rate_at_20,
+        },
+        "metrics": metrics,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate LLM Wiki search ranking quality.")
     parser.add_argument("--golden-file", default=str(GOLDEN_FILE))
@@ -1333,6 +1375,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--self-tune-history", default=str(SELF_TUNE_HISTORY_FILE))
     parser.add_argument("--report", action="store_true")
     parser.add_argument("--save-baseline", action="store_true")
+    parser.add_argument("--ci", action="store_true", help="Fail non-zero when metrics miss thresholds.")
+    parser.add_argument("--ci-variant", default="hybrid-current")
+    parser.add_argument("--min-recall-at-5", type=float, default=0.0)
+    parser.add_argument("--min-mrr-at-10", type=float, default=0.0)
+    parser.add_argument("--max-negative-hit-rate-at-20", type=float, default=1.0)
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -1415,10 +1462,22 @@ def main(argv: list[str] | None = None) -> int:
         debug_dump=Path(args.debug_dump).expanduser() if args.debug_dump else None,
         failure_index=Path(args.failure_index).expanduser() if args.failure_index else None,
     )
+    if args.ci:
+        payload["ci_gate"] = ci_gate(
+            payload,
+            variant=args.ci_variant,
+            min_recall_at_5=max(0.0, args.min_recall_at_5),
+            min_mrr_at_10=max(0.0, args.min_mrr_at_10),
+            max_negative_hit_rate_at_20=max(0.0, args.max_negative_hit_rate_at_20),
+        )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:
         print_report(payload)
+        if args.ci:
+            print(f"ci_gate\t{payload['ci_gate']['status']}")
+    if args.ci and payload["ci_gate"]["status"] != "passed":
+        return 1
     return 0
 
 

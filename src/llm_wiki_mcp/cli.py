@@ -60,6 +60,8 @@ def count_files(path: Path) -> int:
 
 
 def build_status() -> dict[str, Any]:
+    from llm_wiki_mcp.health import health_snapshot
+
     return {
         "wiki": {
             "root": str(wiki.WIKI_ROOT),
@@ -76,6 +78,7 @@ def build_status() -> dict[str, Any]:
             "auto_apply_log": str(RECALL_DIR / "auto-apply.jsonl"),
         },
         "runtime": runtime_status.read_status(),
+        "health": health_snapshot(),
     }
 
 
@@ -501,6 +504,26 @@ def main(argv: list[str] | None = None) -> int:
     hooks_install.add_argument("--command-prefix", help="Override the llm-wiki-hook command prefix.")
     hooks_install.add_argument("--dry-run", action="store_true")
     hooks_install.add_argument("--json", action="store_true")
+    health_parser = sub.add_parser("health", help="Show knowledge health KPIs.")
+    health_parser.add_argument("--json", action="store_true")
+    snapshot_parser = sub.add_parser("wiki-snapshot", help="Commit ~/.wiki into its own git history.")
+    snapshot_parser.add_argument("reason", nargs="?", default="manual")
+    snapshot_parser.add_argument("--allow-empty", action="store_true")
+    snapshot_parser.add_argument("--json", action="store_true")
+    entities_parser = sub.add_parser("entities", help="Maintain entity registry and frontmatter.")
+    entities_sub = entities_parser.add_subparsers(dest="entities_command", required=True)
+    entities_init = entities_sub.add_parser("init")
+    entities_init.add_argument("--json", action="store_true")
+    entities_backfill = entities_sub.add_parser("backfill")
+    entities_backfill.add_argument("--limit", type=int, default=0)
+    entities_backfill.add_argument("--dry-run", action="store_true")
+    entities_backfill.add_argument("--include-reference", action="store_true")
+    entities_backfill.add_argument("--json", action="store_true")
+    raw_replay_parser = sub.add_parser("raw-replay", help="Plan or run retroactive raw re-ingestion.")
+    raw_replay_parser.add_argument("--since", default="")
+    raw_replay_parser.add_argument("--limit", type=int, default=0)
+    raw_replay_parser.add_argument("--run", action="store_true")
+    raw_replay_parser.add_argument("--json", action="store_true")
     recall_eval_parser = sub.add_parser("recall-eval", help="Replay-evaluate recall decisions.")
     recall_eval_parser.add_argument("--config")
     recall_eval_parser.add_argument("--log-file", default=str(RECALL_LOG_FILE))
@@ -582,6 +605,60 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{action}\t{result['host']}")
                 for event_name, command in result["commands"].items():
                     print(f"{event_name}\t{command}")
+        return 0
+    if args.command == "health":
+        from llm_wiki_mcp.health import health_snapshot
+
+        data = health_snapshot()
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            coverage = data["coverage"]
+            queues = data["queues"]
+            print(f"summary_coverage\t{coverage['summary_coverage']:.3f}")
+            print(f"recall_question_coverage\t{coverage['recall_question_coverage']:.3f}")
+            print(f"duplicate_candidates\t{queues['duplicate_candidates']}")
+            print(f"lint_repair\t{queues['lint_repair']}")
+            print(f"search_golden\t{queues['search_golden']}")
+        return 0
+    if args.command == "wiki-snapshot":
+        from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
+
+        data = snapshot_wiki(args.reason, allow_empty=args.allow_empty)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print("\t".join(f"{key}={value}" for key, value in data.items()))
+        return 0 if data.get("status") in {"clean", "committed"} else 1
+    if args.command == "entities":
+        from llm_wiki_mcp import entities
+
+        if args.entities_command == "init":
+            path = entities.write_default_registry()
+            data = {"status": "ok", "path": str(path)}
+        else:
+            data = entities.backfill_entities(
+                limit=max(0, args.limit),
+                dry_run=args.dry_run,
+                include_reference=args.include_reference,
+            )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print("\t".join(f"{key}={value}" for key, value in data.items() if key != "pages"))
+        return 0
+    if args.command == "raw-replay":
+        from llm_wiki_mcp import raw_replay
+
+        data = (
+            raw_replay.run_replay(since=args.since, limit=max(1, args.limit or 1))
+            if args.run
+            else raw_replay.build_queue(since=args.since, limit=max(0, args.limit))
+        )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print("\t".join(f"{key}={value}" for key, value in data.items() if key != "runs"))
         return 0
     if args.command == "recall-eval":
         from llm_wiki_mcp.recall_eval import run_eval

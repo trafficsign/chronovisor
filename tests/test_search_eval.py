@@ -120,6 +120,25 @@ def test_evaluate_examples_reports_ranking_metrics(monkeypatch) -> None:
     assert payload["variants"]["bm25"]["by_bucket"]["split:dev"]["examples"] == 1
 
 
+def test_ci_gate_fails_when_threshold_missed() -> None:
+    payload = {
+        "variants": {
+            "hybrid-current": {
+                "metrics": {
+                    "recall_at_5": 0.4,
+                    "mrr_at_10": 0.8,
+                    "negative_hit_rate_at_20": 0.1,
+                }
+            }
+        }
+    }
+
+    gate = search_eval.ci_gate(payload, min_recall_at_5=0.5)
+
+    assert gate["status"] == "failed"
+    assert gate["failures"] == ["recall_at_5"]
+
+
 def test_run_variant_filters_lifecycle_pages(monkeypatch) -> None:
     class FakeBM25:
         def build(self) -> None:

@@ -652,6 +652,11 @@ def run_lint_if_due() -> dict:
     )
 
     issues = check()
+    try:
+        from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
+        snapshot = snapshot_wiki("before scheduled lint auto-fix")
+    except Exception as exc:
+        snapshot = {"status": "error", "error": str(exc)}
     actions = apply_safe_fixes(issues)
     remaining = [i for i in issues if not i.get("auto_fixable")]
     try:
@@ -666,6 +671,7 @@ def run_lint_if_due() -> dict:
         "reason": reason,
         "total_issues": len(issues),
         "summary": summarize_issues(issues),
+        "wiki_snapshot": snapshot,
         "actions_taken": actions,
         "remaining_issues": len(remaining),
         "repair_queue": repair_queue,

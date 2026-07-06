@@ -5,10 +5,13 @@
 ```sh
 llm-wiki status
 llm-wiki status --json
+llm-wiki health
 ```
 
 Shows wiki counts, active config, recall decision counts, feedback counts, and
-runtime status.
+runtime status. `health` focuses on knowledge KPIs: summary coverage,
+recall-question coverage, read-back pass rate, duplicate candidates, lint
+repair queue size, and golden-set size.
 
 ## Doctor
 
@@ -79,6 +82,31 @@ After apply and embedding refresh, ingest read-backs changed pages with their
 `recall_questions`, `summary`, or title. Failures are non-fatal and are logged
 to `~/.wiki/runtime/ingest-read-back-failures.jsonl`.
 
+Successful ingest also appends a lightweight claim seed to
+`~/.wiki/claims/claims.jsonl`. The current page files remain the source of
+truth, but the append-only ledger gives future event-sourced memory work a
+machine-checkable trail.
+
+## Working Memory
+
+`system/current-state.md` is treated as a state register. Codex/Claude Code
+prompt hooks inject it as a small `[WORKING_MEMORY]` block even when the normal
+recall gate decides `none`. System notifications and internal prompts remain
+filtered before this path.
+
+## Entity Registry
+
+```sh
+llm-wiki entities init
+llm-wiki entities backfill --dry-run
+llm-wiki entities backfill --limit 100
+```
+
+The registry lives at `~/.wiki/entities/registry.json`. Ingest patches
+`entities: [...]` frontmatter on created/updated knowledge pages using known
+aliases such as MHI/三菱重工, KHI/川崎重工, Codex, Ollama, Qwen, and Gemma.
+Entity backfill skips reference pages by default.
+
 ## Knowledge Quality Queues
 
 ```sh
@@ -101,6 +129,28 @@ heavy-model-batch, review, and monitor lanes.
 `~/.wiki/review/duplicate-candidates.jsonl` from title and embedding similarity.
 The queue is review-only; merge decisions should mark the losing page with
 `status: deprecated` and `superseded_by: <winner>`.
+
+## Raw Replay
+
+```sh
+llm-wiki raw-replay --since 2026-07-01 --limit 100
+llm-wiki raw-replay --since 2026-07-01 --limit 1 --run
+```
+
+Without `--run`, replay writes `~/.wiki/review/raw-replay-queue.jsonl`.
+With `--run`, selected raw files go back through the normal ingest path, so
+search-before-create and read-back verification still apply.
+
+## Wiki Snapshots
+
+```sh
+llm-wiki wiki-snapshot "before manual repair"
+llm-wiki-snapshot "before manual repair"
+```
+
+`~/.wiki` is initialized as its own git repository on first snapshot. Scheduled
+lint auto-fix and MCP `wiki_apply` snapshot before changing files, giving
+self-heal and repair work a rollback point independent of the code repository.
 
 ## Audit and Auto-Apply
 
@@ -128,6 +178,7 @@ packets or state.
 llm-wiki-eval --build-label-queue
 llm-wiki-eval --report --failure-index
 llm-wiki-eval --self-tune
+llm-wiki-eval --ci --ci-variant hybrid-current --min-recall-at-5 0.80
 ```
 
 `--build-label-queue` writes auditor/search candidates to

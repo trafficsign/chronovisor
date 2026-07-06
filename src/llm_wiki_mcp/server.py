@@ -180,12 +180,23 @@ def wiki_status() -> str:
 
     # Orphan count: pages with no inbound backlinks.
     orphan_count = len(store.orphans(include_system=False))
+    page_types: dict[str, int] = {}
+    for meta in store.all_pages_meta(include_system=False):
+        page_type = str(meta.get("page_type") or "knowledge")
+        page_types[page_type] = page_types.get(page_type, 0) + 1
+    try:
+        from llm_wiki_mcp.health import health_snapshot
+        health = health_snapshot()
+    except Exception:
+        health = {}
 
     return json.dumps({
         "page_count": page_count,
         "raw_total": raw_total,
         "raw_pending": raw_pending,
         "orphan_count": orphan_count,
+        "page_types": page_types,
+        "health": health,
         "ollama_status": ollama_status,
         "oldest_page": oldest,
         "newest_page": newest,
@@ -696,6 +707,13 @@ def wiki_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
         write_repair_queue,
     )
     issues = check()
+    snapshot = {"status": "skipped", "reason": "dry_run"} if dry_run else None
+    if snapshot is None:
+        try:
+            from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
+            snapshot = snapshot_wiki("before wiki_apply")
+        except Exception as exc:
+            snapshot = {"status": "error", "error": str(exc)}
     actions = apply_safe_fixes(issues, dry_run=dry_run, fuzzy=fuzzy)
     remaining = [i for i in issues if not i.get("auto_fixable")]
     try:
@@ -705,6 +723,7 @@ def wiki_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
     issue_limit = 200
     return json.dumps({
         "actions_taken": actions,
+        "wiki_snapshot": snapshot,
         "summary": summarize_issues(remaining),
         "remaining_issues": remaining[:issue_limit],
         "omitted_remaining_issues": max(0, len(remaining) - issue_limit),

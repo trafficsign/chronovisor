@@ -31,6 +31,7 @@ from llm_wiki_mcp.runtime_config import (
 )
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 from llm_wiki_mcp.search import search as run_search
+from llm_wiki_mcp.state_register import format_state_context, should_inject_state
 from llm_wiki_mcp.wiki import WIKI_ROOT, SYSTEM_DIR, find_page, init_wiki
 
 
@@ -239,6 +240,7 @@ class RecallResult:
     decision_id: str = field(default_factory=lambda: new_decision_id())
     context_items: list[ContextItem] = field(default_factory=list)
     context: str = ""
+    state_context: str = ""
     used_judge: bool = False
     judge_confidence: float | None = None
     judge_reason: str = ""
@@ -1307,6 +1309,20 @@ def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
     return context
 
 
+def merge_context_blocks(*blocks: str, max_chars: int) -> str:
+    context = "\n\n".join(block for block in blocks if block.strip())
+    if len(context) <= max_chars:
+        return context
+    return context[:max_chars].rstrip()
+
+
+def state_context_for_request(request: RecallRequest, policy: RecallPolicy) -> str:
+    del policy
+    if not should_inject_state(request.host):
+        return ""
+    return format_state_context(host=request.host, cwd=request.cwd)
+
+
 def _one_line(text: str, limit: int = 420) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= limit:
@@ -1542,7 +1558,15 @@ def run_recall(
         latency_ms=_elapsed_ms(started),
         error=error,
     )
-    result.context = format_recall_context(result, policy)
+    recall_context = format_recall_context(result, policy)
+    result.state_context = state_context_for_request(active_request, policy)
+    result.context = merge_context_blocks(
+        result.state_context,
+        recall_context,
+        max_chars=policy.max_context_chars,
+    )
+    if result.state_context:
+        result.reasons.append("state register injected")
     if session_state is not None:
         try:
             from llm_wiki_mcp.recall_session import update_session_after_recall
@@ -1724,7 +1748,7 @@ def result_to_dict(result: RecallResult) -> dict[str, Any]:
 def render_output(result: RecallResult, output_format: str) -> str:
     if output_format == "json":
         return json.dumps(result_to_dict(result), ensure_ascii=False)
-    if result.decision == "none" or not result.context:
+    if not result.context:
         return "{}" if output_format in {"codex", "hook-json"} else ""
     if output_format == "claude":
         return result.context
