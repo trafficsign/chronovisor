@@ -93,6 +93,36 @@ query_prefix = "検索クエリ: "
     assert cfg.query_prefix == "検索クエリ: "
 
 
+def test_ingest_config_reads_ollama_generation_knobs(tmp_path: Path, monkeypatch) -> None:
+    config = tmp_path / "config.toml"
+    legacy = tmp_path / "recall.toml"
+    config.write_text(
+        """
+[ingest]
+model = "qwen3.6:35b-a3b-mxfp8"
+keep_alive = "10m"
+temperature = 0.1
+num_ctx = 32768
+max_num_ctx = 131072
+num_predict = 4096
+read_timeout_ms = 120000
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
+    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", legacy)
+
+    cfg = runtime_config.load_ingest_config()
+
+    assert cfg.model == "qwen3.6:35b-a3b-mxfp8"
+    assert cfg.keep_alive == "10m"
+    assert cfg.temperature == 0.1
+    assert cfg.num_ctx == 32768
+    assert cfg.max_num_ctx == 131072
+    assert cfg.num_predict == 4096
+    assert cfg.read_timeout_ms == 120000
+
+
 def test_reranker_config_reads_nested_search_section(tmp_path: Path, monkeypatch) -> None:
     config = tmp_path / "config.toml"
     legacy = tmp_path / "recall.toml"

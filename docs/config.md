@@ -19,6 +19,18 @@ model = "bge-m3"
 document_prefix = ""
 query_prefix = ""
 
+[ingest]
+# Heavy page generation model. The default context is kept below the model's
+# ceiling for faster MLX warm runs, and grows automatically for unusually long
+# raw transcripts up to max_num_ctx.
+model = "qwen3.6:35b-a3b-mxfp8"
+keep_alive = "5m"
+temperature = 0.3
+num_ctx = 65536
+max_num_ctx = 262144
+num_predict = 8192
+read_timeout_ms = 660000
+
 [search.negative_feedback]
 # Optional. Demotes pages recorded as injection_ignored / false-positive
 # feedback when the incoming query is lexically similar (Jaccard over search

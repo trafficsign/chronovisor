@@ -21,6 +21,7 @@ LEGACY_RECALL_CONFIG_FILE = WIKI_ROOT / "recall.toml"
 FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
+DEFAULT_INGEST_MODEL = "qwen3.6:35b-a3b-mxfp8"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,17 @@ class RerankerConfig:
     batch_size: int = 8
     device: str = ""
     weight: float = 0.25
+
+
+@dataclass(frozen=True)
+class IngestConfig:
+    model: str = DEFAULT_INGEST_MODEL
+    keep_alive: str = "5m"
+    temperature: float = 0.3
+    num_ctx: int = 65_536
+    max_num_ctx: int = 262_144
+    num_predict: int = 8_192
+    read_timeout_ms: int = 660_000
 
 
 def active_config_file(path: Path | str | None = None) -> Path:
@@ -128,6 +140,39 @@ def _nonnegative_float(value: Any, default: float) -> float:
     if isinstance(value, (int, float)):
         return float(value) if value >= 0 else default
     return default
+
+
+def _bounded_float(value: Any, default: float, *, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if minimum <= number <= maximum else default
+    return default
+
+
+def load_ingest_config(path: Path | str | None = None) -> IngestConfig:
+    data = load_toml_file(path)
+    section = data.get("ingest")
+    if not isinstance(section, dict):
+        return IngestConfig()
+
+    model = section.get("model")
+    keep_alive = section.get("keep_alive")
+    max_num_ctx = _positive_int(section.get("max_num_ctx"), IngestConfig.max_num_ctx, minimum=2_048)
+    num_ctx = _positive_int(section.get("num_ctx"), IngestConfig.num_ctx, minimum=2_048)
+    if num_ctx > max_num_ctx:
+        num_ctx = max_num_ctx
+
+    return IngestConfig(
+        model=model if isinstance(model, str) and model.strip() else IngestConfig.model,
+        keep_alive=keep_alive if isinstance(keep_alive, str) and keep_alive.strip() else IngestConfig.keep_alive,
+        temperature=_bounded_float(section.get("temperature"), IngestConfig.temperature, minimum=0.0, maximum=2.0),
+        num_ctx=num_ctx,
+        max_num_ctx=max_num_ctx,
+        num_predict=_positive_int(section.get("num_predict"), IngestConfig.num_predict, minimum=128),
+        read_timeout_ms=_positive_int(section.get("read_timeout_ms"), IngestConfig.read_timeout_ms, minimum=1_000),
+    )
 
 
 def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:

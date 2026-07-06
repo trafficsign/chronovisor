@@ -200,7 +200,7 @@ def test_build_snapshot_surfaces_frontier_human_required(
 
 
 def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
-    monkeypatch.setattr(dashboard, "INGEST_MODEL", "qwen3.6:35b-a3b-mxfp8")
+    monkeypatch.setattr(dashboard, "ingest_model", lambda: "qwen3.6:35b-a3b-mxfp8")
     monkeypatch.setattr(
         dashboard,
         "_ollama_snapshot",

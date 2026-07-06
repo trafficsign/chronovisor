@@ -61,6 +61,14 @@ observe confidently.
 decision logs. Use it before and after changing recall thresholds, fusion
 weights, rewrite settings, or context style.
 
+## Ingest Model
+
+The page-generation path reads `[ingest]` from `~/.wiki/config.toml`. Keep the
+default `num_ctx` smaller than the model ceiling for faster MLX warm runs; the
+client automatically grows the request context up to `max_num_ctx` when a raw
+transcript is unusually long. Changing the ingest model does not require a
+semantic reindex unless `[embedding].model` also changes.
+
 ## Audit and Auto-Apply
 
 ```sh

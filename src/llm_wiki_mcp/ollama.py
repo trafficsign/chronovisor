@@ -8,10 +8,16 @@ from typing import Any
 
 import httpx
 
-from llm_wiki_mcp.runtime_config import DEFAULT_EMBEDDING_MODEL, load_embedding_config
+from llm_wiki_mcp.runtime_config import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_INGEST_MODEL,
+    IngestConfig,
+    load_embedding_config,
+    load_ingest_config,
+)
 
 OLLAMA_URL = "http://localhost:11434"
-MODEL = "qwen3.6:35b-a3b-mxfp8"
+MODEL = DEFAULT_INGEST_MODEL
 
 # Health check cache
 _health_cache: dict = {"status": None, "checked_at": 0.0}
@@ -65,6 +71,19 @@ def _emit_progress(callback: Callable[[dict[str, Any]], None] | None, payload: d
         pass
 
 
+def ingest_model() -> str:
+    return load_ingest_config().model
+
+
+def _num_ctx_for_prompt(prompt: str, system: str | None, config: IngestConfig) -> int:
+    # Keep ordinary saves on a smaller MLX context, but grow for unusually long
+    # raw transcripts so the old 262K ceiling remains available when needed.
+    prompt_chars = len(prompt) + (len(system) if system else 0)
+    estimated_prompt_tokens = max(1, (prompt_chars + 1) // 2)
+    needed = estimated_prompt_tokens + config.num_predict + 1024
+    return min(max(config.num_ctx, needed), config.max_num_ctx)
+
+
 def generate(
     prompt: str,
     system: str | None = None,
@@ -82,16 +101,17 @@ def generate(
     response and periodically emits lightweight progress dictionaries while
     still returning the final response string for existing callers.
     """
+    config = load_ingest_config()
     payload = {
-        "model": MODEL,
+        "model": config.model,
         "prompt": prompt,
         "stream": progress_callback is not None,
         "think": False,
-        "keep_alive": "5m",
+        "keep_alive": config.keep_alive,
         "options": {
-            "temperature": 0.3,
-            "num_predict": 8192,
-            "num_ctx": 262144,
+            "temperature": config.temperature,
+            "num_predict": config.num_predict,
+            "num_ctx": _num_ctx_for_prompt(prompt, system, config),
         },
     }
     if system:
@@ -100,7 +120,7 @@ def generate(
         payload["format"] = format
 
     # Timeout: 60s for model load + 600s for generation
-    timeout = httpx.Timeout(connect=10.0, read=660.0, write=10.0, pool=10.0)
+    timeout = httpx.Timeout(connect=10.0, read=config.read_timeout_ms / 1000, write=10.0, pool=10.0)
     if progress_callback is not None:
         chunks = 0
         chars = 0
@@ -199,7 +219,7 @@ def unload_model() -> None:
     try:
         _client().post(
             "/api/generate",
-            json={"model": MODEL, "keep_alive": 0, "prompt": ""},
+            json={"model": ingest_model(), "keep_alive": 0, "prompt": ""},
             timeout=10,
         )
     except Exception:

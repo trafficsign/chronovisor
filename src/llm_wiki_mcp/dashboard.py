@@ -17,8 +17,7 @@ from urllib.parse import urlparse
 import httpx
 
 from llm_wiki_mcp import orchestrator, recall_runtime, runtime_status
-from llm_wiki_mcp.ollama import MODEL as INGEST_MODEL
-from llm_wiki_mcp.ollama import OLLAMA_URL, embedding_model
+from llm_wiki_mcp.ollama import OLLAMA_URL, embedding_model, ingest_model
 from llm_wiki_mcp.recall_auditor import load_audit_policy
 from llm_wiki_mcp.recall_improvement import configured_models
 from llm_wiki_mcp.runtime_config import load_reranker_config
@@ -134,7 +133,7 @@ def _add_model_role(roles: dict[str, set[str]], model: str | None, role: str) ->
 
 def _configured_model_roles() -> dict[str, set[str]]:
     roles: dict[str, set[str]] = {}
-    _add_model_role(roles, INGEST_MODEL, "ingest")
+    _add_model_role(roles, ingest_model(), "ingest")
 
     try:
         audit_policy = load_audit_policy()
