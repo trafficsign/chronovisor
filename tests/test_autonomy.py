@@ -99,3 +99,7 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     labels = {item["label"] for item in payload["plists"]}
     assert autonomy.SLEEP_LABEL in labels
     assert autonomy.WATCHDOG_LABEL in labels
+    programs = {item["label"]: item["program"] for item in payload["plists"]}
+    assert Path(programs[autonomy.SLEEP_LABEL][0]).name == "llm-wiki-sleep"
+    assert Path(programs[autonomy.WATCHDOG_LABEL][0]).name == "llm-wiki-watchdog"
+    assert payload["wrappers"][0]["command"][0] == "/opt/homebrew/bin/uv"

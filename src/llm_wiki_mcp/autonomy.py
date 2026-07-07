@@ -13,6 +13,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import subprocess
 from datetime import datetime, timedelta
@@ -35,6 +36,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SLEEP_LABEL = "com.trafficsign.llm-wiki-sleep"
 WATCHDOG_LABEL = "com.trafficsign.llm-wiki-watchdog"
 LAUNCH_AGENT_DIR = Path.home() / "Library" / "LaunchAgents"
+WRAPPER_DIR = WIKI_ROOT / "bin"
 
 
 def _now() -> str:
@@ -524,45 +526,56 @@ def _write_plist(path: Path, data: dict[str, Any]) -> None:
     path.write_bytes(buf.getvalue())
 
 
+def _write_wrapper(path: Path, command: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    script = "#!/bin/sh\nexec " + shlex.join(command) + "\n"
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+
+
 def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, Any]:
     logs = WIKI_ROOT / "logs"
     uv = _uv_path()
     sleep_path = LAUNCH_AGENT_DIR / f"{SLEEP_LABEL}.plist"
     watchdog_path = LAUNCH_AGENT_DIR / f"{WATCHDOG_LABEL}.plist"
+    sleep_wrapper = WRAPPER_DIR / "llm-wiki-sleep"
+    watchdog_wrapper = WRAPPER_DIR / "llm-wiki-watchdog"
+    sleep_command = [
+        uv,
+        "run",
+        "--project",
+        str(PROJECT_ROOT),
+        "llm-wiki",
+        "sleep",
+        "--raw-limit",
+        "200",
+        "--eval-limit",
+        "150",
+        "--duplicate-limit",
+        "300",
+        "--json",
+    ]
+    watchdog_command = [
+        uv,
+        "run",
+        "--project",
+        str(PROJECT_ROOT),
+        "llm-wiki",
+        "autonomy",
+        "watchdog",
+        "--notify",
+        "--json",
+    ]
     sleep_plist = _plist(
         SLEEP_LABEL,
-        [
-            uv,
-            "run",
-            "--project",
-            str(PROJECT_ROOT),
-            "llm-wiki",
-            "sleep",
-            "--raw-limit",
-            "200",
-            "--eval-limit",
-            "150",
-            "--duplicate-limit",
-            "300",
-            "--json",
-        ],
+        [str(sleep_wrapper)],
         stdout=logs / "sleep-cycle.launchd.out.log",
         stderr=logs / "sleep-cycle.launchd.err.log",
         calendar={"Hour": 3, "Minute": 40},
     )
     watchdog_plist = _plist(
         WATCHDOG_LABEL,
-        [
-            uv,
-            "run",
-            "--project",
-            str(PROJECT_ROOT),
-            "llm-wiki",
-            "autonomy",
-            "watchdog",
-            "--notify",
-            "--json",
-        ],
+        [str(watchdog_wrapper)],
         stdout=logs / "watchdog.launchd.out.log",
         stderr=logs / "watchdog.launchd.err.log",
         start_interval=900,
@@ -575,9 +588,15 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
             {"label": SLEEP_LABEL, "path": str(sleep_path), "program": sleep_plist["ProgramArguments"]},
             {"label": WATCHDOG_LABEL, "path": str(watchdog_path), "program": watchdog_plist["ProgramArguments"]},
         ],
+        "wrappers": [
+            {"path": str(sleep_wrapper), "command": sleep_command},
+            {"path": str(watchdog_wrapper), "command": watchdog_command},
+        ],
     }
     if not dry_run:
         logs.mkdir(parents=True, exist_ok=True)
+        _write_wrapper(sleep_wrapper, sleep_command)
+        _write_wrapper(watchdog_wrapper, watchdog_command)
         _write_plist(sleep_path, sleep_plist)
         _write_plist(watchdog_path, watchdog_plist)
     if load and not dry_run:
