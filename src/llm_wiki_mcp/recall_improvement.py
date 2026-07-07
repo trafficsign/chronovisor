@@ -376,6 +376,19 @@ def _proposal_prompt(
     }
 
 
+def _proposal_overrides(parsed: Any) -> tuple[dict[str, Any], bool]:
+    """Return normalized overrides and whether the model skipped the wrapper."""
+    if not isinstance(parsed, dict):
+        return {}, False
+    overrides = normalize_policy_overrides(parsed.get("overrides"))
+    if overrides:
+        return overrides, False
+    direct = normalize_policy_overrides(parsed)
+    if direct:
+        return direct, True
+    return {}, False
+
+
 def _call_ollama_proposer(
     *,
     model: str,
@@ -417,17 +430,20 @@ def _call_ollama_proposer(
             resp.raise_for_status()
         raw = resp.json().get("response", "{}")
         parsed = json.loads(_strip_json_fence(str(raw)))
-        overrides = normalize_policy_overrides(parsed.get("overrides"))
+        overrides, direct_overrides = _proposal_overrides(parsed)
         if not overrides:
             raise ValueError("proposal contained no valid overrides")
+        rationale = str(parsed.get("rationale") or "")[:1200] if isinstance(parsed, dict) else ""
+        if direct_overrides and not rationale:
+            rationale = "Model returned allowed policy fields directly; accepted as overrides."
         return PolicyProposal(
             source="ollama",
             model=model,
             proposal_id=f"{model}:{hashlib.sha1(json.dumps(overrides, sort_keys=True).encode()).hexdigest()[:8]}",
-            summary=str(parsed.get("summary") or "policy patch")[:160],
-            rationale=str(parsed.get("rationale") or "")[:1200],
-            risk=str(parsed.get("risk") or "medium"),
-            audit_recommended=bool(parsed.get("audit_recommended")),
+            summary=str(parsed.get("summary") or "policy patch")[:160] if isinstance(parsed, dict) else "policy patch",
+            rationale=rationale,
+            risk=str(parsed.get("risk") or "medium") if isinstance(parsed, dict) else "medium",
+            audit_recommended=bool(parsed.get("audit_recommended")) if isinstance(parsed, dict) else False,
             overrides=overrides,
         )
     except Exception as exc:
@@ -437,7 +453,7 @@ def _call_ollama_proposer(
             model=model,
             proposal_id=f"{model}:error",
             summary="proposal failed",
-            rationale=f"{exc.__class__.__name__} after {elapsed_ms}ms",
+            rationale=f"{exc.__class__.__name__}: {str(exc)[:200]} after {elapsed_ms}ms",
             overrides={},
             risk="high",
             audit_recommended=True,

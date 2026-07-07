@@ -17,6 +17,47 @@ def test_default_improvement_models_use_mlx_moe_pair(monkeypatch) -> None:
     )
 
 
+def test_ollama_proposer_accepts_direct_override_response(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self):
+            return {
+                "response": "```json\n"
+                + json.dumps({"search_threshold": 0.25, "read_threshold": 0.7, "top_k": 8})
+                + "\n```"
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            pass
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(recall_improvement.httpx, "Client", FakeClient)
+
+    proposal = recall_improvement._call_ollama_proposer(
+        model="gemma4:26b-mxfp8",
+        baseline_policy=RecallPolicy(log_decisions=False),
+        baseline_eval={"score": 0.0, "metrics": {}},
+        failure_samples=[],
+        live_summary={},
+    )
+
+    assert proposal.error == ""
+    assert proposal.model == "gemma4:26b-mxfp8"
+    assert proposal.overrides == {"search_threshold": 0.25, "read_threshold": 0.7}
+    assert "directly" in proposal.rationale
+
+
 def _write_feedback(log_file, feedback_file) -> None:
     log_file.write_text(
         json.dumps(
