@@ -58,6 +58,55 @@ def test_ollama_proposer_accepts_direct_override_response(monkeypatch) -> None:
     assert "directly" in proposal.rationale
 
 
+def test_proposal_prompt_includes_adoption_gate_and_rejection_blockers() -> None:
+    prompt = recall_improvement._proposal_prompt(
+        model="qwen",
+        baseline_policy=RecallPolicy(log_decisions=False),
+        baseline_eval={
+            "score": 0.0,
+            "metrics": {"recall_at_3": 0.1, "waste_injection_rate": 0.8},
+        },
+        baseline_holdout={
+            "score": 0.08,
+            "metrics": {
+                "recall_at_3": 0.16,
+                "waste_injection_rate": 0.5,
+                "latency_ms": {"p95": 3000.0},
+            },
+        },
+        failure_samples=[],
+        live_summary={},
+        min_improvement=0.05,
+        recent_rejection_blockers={
+            "counts": {"latency_ok": 3, "holdout_recall_ok": 2},
+            "runs": [],
+        },
+    )
+
+    gate = prompt["adoption_gate"]
+    assert "Your patch is rejected" in " ".join(prompt["rules"])
+    assert "relative_gain >= 0.050" in gate["candidate_must_pass_all"]["dev_improved"]
+    assert gate["baseline_for_gate"]["holdout_score"] == 0.08
+    assert gate["baseline_for_gate"]["holdout_latency_p95_ceiling_ms"] == 5000.0
+    assert prompt["recent_rejection_blockers"]["counts"]["latency_ok"] == 3
+
+
+def test_candidate_blocker_summary_counts_failed_gate_checks() -> None:
+    summary = recall_improvement._candidate_blocker_summary(
+        [
+            {"checks": {"dev_improved": False, "latency_ok": False, "holdout_score_ok": True}},
+            {"checks": {"dev_improved": True, "latency_ok": False, "holdout_recall_ok": False}},
+        ]
+    )
+
+    assert summary["blocked_candidates"] == 2
+    assert summary["counts"] == {
+        "latency_ok": 2,
+        "dev_improved": 1,
+        "holdout_recall_ok": 1,
+    }
+
+
 def _write_feedback(log_file, feedback_file) -> None:
     log_file.write_text(
         json.dumps(

@@ -347,8 +347,11 @@ def _proposal_prompt(
     model: str,
     baseline_policy: RecallPolicy,
     baseline_eval: dict[str, Any],
+    baseline_holdout: dict[str, Any] | None = None,
     failure_samples: list[dict[str, Any]],
     live_summary: dict[str, Any],
+    min_improvement: float = 0.05,
+    recent_rejection_blockers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "task": "Propose one small recall policy patch for LLM Wiki.",
@@ -358,14 +361,24 @@ def _proposal_prompt(
             "Prefer one to four field changes.",
             "Do not propose graph-heavy changes; graph is not the primary strategy.",
             "Optimize recall quality without increasing false-positive memory injection.",
+            "Your patch is rejected unless it passes every adoption_gate check.",
+            "Do not repeat recent rejected patterns unless your rationale explains why the blocker will not recur.",
             "Output JSON only.",
         ],
         "allowed_fields": _allowed_field_summary(),
+        "adoption_gate": _adoption_gate_summary(
+            baseline_dev=baseline_eval,
+            baseline_holdout=baseline_holdout or {},
+            min_improvement=min_improvement,
+        ),
         "baseline_policy": policy_snapshot(baseline_policy),
         "baseline_metrics": baseline_eval.get("metrics", {}),
+        "baseline_holdout_metrics": (baseline_holdout or {}).get("metrics", {}),
         "baseline_score": baseline_eval.get("score"),
+        "baseline_holdout_score": (baseline_holdout or {}).get("score"),
         "failure_samples": failure_samples,
         "live_traffic": live_summary,
+        "recent_rejection_blockers": recent_rejection_blockers or {"counts": {}, "runs": []},
         "output": {
             "summary": "short title",
             "rationale": "why this should improve replay eval",
@@ -394,8 +407,11 @@ def _call_ollama_proposer(
     model: str,
     baseline_policy: RecallPolicy,
     baseline_eval: dict[str, Any],
+    baseline_holdout: dict[str, Any] | None = None,
     failure_samples: list[dict[str, Any]],
     live_summary: dict[str, Any],
+    min_improvement: float = 0.05,
+    recent_rejection_blockers: dict[str, Any] | None = None,
     timeout_seconds: float = 180.0,
 ) -> PolicyProposal:
     from llm_wiki_mcp.ollama import OLLAMA_URL
@@ -404,8 +420,11 @@ def _call_ollama_proposer(
         model=model,
         baseline_policy=baseline_policy,
         baseline_eval=baseline_eval,
+        baseline_holdout=baseline_holdout,
         failure_samples=failure_samples,
         live_summary=live_summary,
+        min_improvement=min_improvement,
+        recent_rejection_blockers=recent_rejection_blockers,
     )
     timeout = httpx.Timeout(connect=10.0, read=timeout_seconds, write=10.0, pool=10.0)
     started = time.perf_counter()
@@ -491,16 +510,22 @@ def propose_with_models(
     models: tuple[str, ...],
     baseline_policy: RecallPolicy,
     baseline_eval: dict[str, Any],
+    baseline_holdout: dict[str, Any],
     failure_samples: list[dict[str, Any]],
     live_summary: dict[str, Any],
+    min_improvement: float,
+    recent_rejection_blockers: dict[str, Any],
 ) -> list[PolicyProposal]:
     return [
         _call_ollama_proposer(
             model=model,
             baseline_policy=baseline_policy,
             baseline_eval=baseline_eval,
+            baseline_holdout=baseline_holdout,
             failure_samples=failure_samples,
             live_summary=live_summary,
+            min_improvement=min_improvement,
+            recent_rejection_blockers=recent_rejection_blockers,
         )
         for model in models
     ]
@@ -574,6 +599,107 @@ def _latency_p95(metrics: dict[str, Any]) -> float:
     return float((latency or {}).get("p95") or 0.0)
 
 
+def _adoption_gate_summary(
+    *,
+    baseline_dev: dict[str, Any],
+    baseline_holdout: dict[str, Any],
+    min_improvement: float,
+) -> dict[str, Any]:
+    base_dev_score = float(baseline_dev.get("score") or 0.0)
+    holdout_metrics = baseline_holdout.get("metrics", {}) if isinstance(baseline_holdout, dict) else {}
+    holdout_score = float(baseline_holdout.get("score") or 0.0) if isinstance(baseline_holdout, dict) else 0.0
+    holdout_recall_at_3 = float(holdout_metrics.get("recall_at_3") or 0.0)
+    holdout_waste = float(holdout_metrics.get("waste_injection_rate") or 0.0)
+    holdout_p95 = _latency_p95(holdout_metrics)
+    return {
+        "candidate_must_pass_all": {
+            "dev_improved": (
+                f"relative_gain >= {min_improvement:.3f} "
+                "or absolute_gain >= 0.030 against baseline dev score"
+            ),
+            "holdout_score_ok": "candidate holdout score >= baseline holdout score - 0.010",
+            "holdout_recall_ok": "candidate holdout recall_at_3 >= baseline holdout recall_at_3 - 0.001",
+            "holdout_waste_ok": "candidate holdout waste_injection_rate <= baseline holdout waste + 0.020",
+            "latency_ok": "candidate holdout p95 latency <= baseline holdout p95 * 1.5 + 500ms",
+        },
+        "baseline_for_gate": {
+            "dev_score": base_dev_score,
+            "holdout_score": holdout_score,
+            "holdout_recall_at_3": holdout_recall_at_3,
+            "holdout_waste_injection_rate": holdout_waste,
+            "holdout_latency_p95_ms": holdout_p95,
+            "holdout_latency_p95_ceiling_ms": round(holdout_p95 * 1.5 + 500.0, 3),
+        },
+        "advice": [
+            "A patch that broadens search but hurts holdout recall/score or p95 latency will be rejected.",
+            "Prefer targeted changes supported by failure_samples, not broad max_pages/threshold moves by default.",
+        ],
+    }
+
+
+def _candidate_blockers(checks: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    if checks.get("dev_improved") is False:
+        blockers.append("dev_improved")
+    for key in ("holdout_score_ok", "holdout_recall_ok", "holdout_waste_ok", "latency_ok"):
+        if checks.get(key) is False:
+            blockers.append(key)
+    return blockers
+
+
+def _candidate_blocker_summary(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    total_blocked = 0
+    for candidate in candidates:
+        blockers = candidate.get("blockers")
+        if not isinstance(blockers, list):
+            checks = candidate.get("checks") if isinstance(candidate.get("checks"), dict) else {}
+            blockers = _candidate_blockers(checks)
+        if blockers:
+            total_blocked += 1
+        for blocker in blockers:
+            key = str(blocker)
+            counts[key] = counts.get(key, 0) + 1
+    top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "total_candidates": len(candidates),
+        "blocked_candidates": total_blocked,
+        "counts": dict(top),
+        "top": [{"name": name, "count": count} for name, count in top[:4]],
+    }
+
+
+def _recent_rejection_blockers(*, runs_dir: Path, limit: int = 5) -> dict[str, Any]:
+    runs: list[dict[str, Any]] = []
+    aggregate: dict[str, int] = {}
+    for path in sorted(runs_dir.glob("*.json"), reverse=True):
+        record = read_json_file(path)
+        if record.get("status") != "rejected":
+            continue
+        summary = _candidate_blocker_summary(record.get("candidates") or [])
+        if not summary["counts"]:
+            continue
+        runs.append(
+            {
+                "run_id": record.get("run_id") or path.stem,
+                "ts": record.get("ts"),
+                "reason": record.get("reason"),
+                "counts": summary["counts"],
+                "top": summary["top"],
+            }
+        )
+        for key, count in summary["counts"].items():
+            aggregate[key] = aggregate.get(key, 0) + int(count)
+        if len(runs) >= limit:
+            break
+    top = sorted(aggregate.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "counts": dict(top),
+        "top": [{"name": name, "count": count} for name, count in top[:5]],
+        "runs": runs,
+    }
+
+
 def _gate_candidate(
     *,
     baseline_dev: dict[str, Any],
@@ -643,6 +769,7 @@ def _proposal_record(
         candidate_holdout=candidate_holdout,
         min_improvement=min_improvement,
     )
+    blockers = _candidate_blockers(checks)
     return {
         "proposal": asdict(proposal),
         "status": "candidate_pass" if accepted else "candidate_blocked",
@@ -657,6 +784,7 @@ def _proposal_record(
             "metrics": candidate_holdout["metrics"],
         },
         "checks": checks,
+        "blockers": blockers,
     }
 
 
@@ -820,13 +948,17 @@ def run_improvement(
     baseline_dev = _evaluate_cached(dev_examples, policy=baseline_policy, cache=eval_cache)
     baseline_holdout = _evaluate_cached(holdout_examples, policy=baseline_policy, cache=eval_cache)
     failures = _failure_samples(baseline_dev)
+    recent_blockers = _recent_rejection_blockers(runs_dir=runs_dir)
 
     proposals = propose_with_models(
         models=model_list,
         baseline_policy=baseline_policy,
         baseline_eval=baseline_dev,
+        baseline_holdout=baseline_holdout,
         failure_samples=failures,
         live_summary=live_telemetry,
+        min_improvement=min_improvement,
+        recent_rejection_blockers=recent_blockers,
     )
     if include_heuristic:
         proposals.extend(heuristic_proposals(baseline_policy=baseline_policy, baseline_eval=baseline_dev))
@@ -845,6 +977,7 @@ def run_improvement(
         for proposal in proposals
         if proposal.overrides
     ]
+    blocker_summary = _candidate_blocker_summary(candidates)
     best = _best_candidate(candidates)
     active_policy: dict[str, Any] | None = None
     applied = False
@@ -933,6 +1066,13 @@ def run_improvement(
         },
         "failure_samples": failures,
         "live_telemetry": live_telemetry,
+        "adoption_gate": _adoption_gate_summary(
+            baseline_dev=baseline_dev,
+            baseline_holdout=baseline_holdout,
+            min_improvement=min_improvement,
+        ),
+        "recent_rejection_blockers": recent_blockers,
+        "candidate_blockers": blocker_summary,
         "proposals": [asdict(proposal) for proposal in proposals],
         "candidates": candidates,
         "best": best,
@@ -968,6 +1108,9 @@ def _compact_registry_record(record: dict[str, Any]) -> dict[str, Any]:
         "baseline": record.get("baseline"),
         "best": best,
         "active_policy": record.get("active_policy"),
+        "adoption_gate": record.get("adoption_gate"),
+        "candidate_blockers": record.get("candidate_blockers"),
+        "recent_rejection_blockers": record.get("recent_rejection_blockers"),
         "frontier_audit_recommended": record.get("frontier_audit_recommended", False),
         "frontier_audit_reasons": record.get("frontier_audit_reasons", []),
         "frontier_audit": record.get("frontier_audit"),
@@ -1136,7 +1279,19 @@ def improvement_snapshot(
     limit: int = 12,
 ) -> dict[str, Any]:
     active = read_json_file(active_file)
-    history = read_jsonl(registry_file, limit=limit)
+    history = []
+    for row in read_jsonl(registry_file, limit=limit):
+        hydrated = dict(row)
+        run_id = hydrated.get("run_id")
+        if isinstance(run_id, str) and not hydrated.get("candidate_blockers"):
+            full = read_json_file(RUNS_DIR / f"{run_id}.json")
+            if full:
+                hydrated["candidate_blockers"] = full.get("candidate_blockers") or _candidate_blocker_summary(
+                    full.get("candidates") or []
+                )
+                hydrated["adoption_gate"] = full.get("adoption_gate")
+                hydrated["recent_rejection_blockers"] = full.get("recent_rejection_blockers")
+        history.append(hydrated)
     schedule = read_json_file(SCHEDULE_FILE)
     latest = history[-1] if history else None
     counts: dict[str, int] = {}

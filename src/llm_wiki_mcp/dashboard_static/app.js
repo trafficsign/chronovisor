@@ -1594,6 +1594,22 @@ function renderRecall(recall) {
   });
 }
 
+function blockerSummaryText(summary) {
+  const top = summary && Array.isArray(summary.top) ? summary.top : [];
+  if (!top.length) return "";
+  const labels = {
+    dev_improved: "dev no-gain",
+    holdout_score_ok: "holdout score",
+    holdout_recall_ok: "holdout recall",
+    holdout_waste_ok: "waste",
+    latency_ok: "latency",
+  };
+  return top
+    .slice(0, 3)
+    .map((item) => `${labels[item.name] || item.name} ${item.count}`)
+    .join(", ");
+}
+
 function renderRecallImprovement(lab) {
   const data = lab || {};
   const active = data.active || null;
@@ -1640,6 +1656,8 @@ function renderRecallImprovement(lab) {
   if (latest && latest.live_telemetry && numeric(latest.live_telemetry.episodes)) {
     detailParts.push(`${latest.live_telemetry.episodes} live episodes`);
   }
+  const latestBlockers = blockerSummaryText(latest && latest.candidate_blockers);
+  if (latestBlockers) detailParts.push(`blocked by ${latestBlockers}`);
   if (schedule.last_checked_at) detailParts.push(`checked ${ageLabel(schedule.last_checked_at)}`);
   els.recallLabDetail.textContent = detailParts.filter(Boolean).join(" · ");
   els.recallLabActive.textContent = active ? "on" : "off";
@@ -1690,7 +1708,9 @@ function renderRecallImprovement(lab) {
     const score = rowBest.dev && numeric(rowBest.dev.score) ? ` · dev ${rowBest.dev.score.toFixed(3)}` : "";
     const audit = item.frontier_audit || {};
     const auditText = audit.decision ? ` · frontier ${audit.decision}` : "";
-    message.textContent = `${fmt(proposal.summary || item.reason)}${score}${auditText}`;
+    const blockers = blockerSummaryText(item.candidate_blockers);
+    const blockerText = blockers ? ` · blocked by ${blockers}` : "";
+    message.textContent = `${fmt(proposal.summary || item.reason)}${score}${auditText}${blockerText}`;
     row.append(time, badge, message);
     els.recallLabFeed.appendChild(row);
   });
