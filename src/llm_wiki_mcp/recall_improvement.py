@@ -59,6 +59,7 @@ DEFAULT_IMPROVEMENT_MODELS = (
 )
 
 FRONTIER_AUDIT_MODES = {"off", "auto", "always"}
+PROPOSER_VISIBLE_BLOCKERS = {"dev_improved", "latency_ok"}
 
 
 @dataclass(frozen=True)
@@ -366,19 +367,19 @@ def _proposal_prompt(
             "Output JSON only.",
         ],
         "allowed_fields": _allowed_field_summary(),
-        "adoption_gate": _adoption_gate_summary(
+        "adoption_gate": _proposer_adoption_gate_summary(
             baseline_dev=baseline_eval,
-            baseline_holdout=baseline_holdout or {},
+            live_summary=live_summary,
             min_improvement=min_improvement,
         ),
         "baseline_policy": policy_snapshot(baseline_policy),
         "baseline_metrics": baseline_eval.get("metrics", {}),
-        "baseline_holdout_metrics": (baseline_holdout or {}).get("metrics", {}),
         "baseline_score": baseline_eval.get("score"),
-        "baseline_holdout_score": (baseline_holdout or {}).get("score"),
         "failure_samples": failure_samples,
         "live_traffic": live_summary,
-        "recent_rejection_blockers": recent_rejection_blockers or {"counts": {}, "runs": []},
+        "recent_rejection_blockers": _proposer_visible_rejection_blockers(
+            recent_rejection_blockers or {"counts": {}, "runs": []}
+        ),
         "output": {
             "summary": "short title",
             "rationale": "why this should improve replay eval",
@@ -637,6 +638,37 @@ def _adoption_gate_summary(
     }
 
 
+def _proposer_adoption_gate_summary(
+    *,
+    baseline_dev: dict[str, Any],
+    live_summary: dict[str, Any],
+    min_improvement: float,
+) -> dict[str, Any]:
+    base_dev_score = float(baseline_dev.get("score") or 0.0)
+    live_latency = live_summary.get("latency_ms") if isinstance(live_summary.get("latency_ms"), dict) else {}
+    return {
+        "candidate_must_pass_public_checks": {
+            "dev_improved": (
+                f"relative_gain >= {min_improvement:.3f} "
+                "or absolute_gain >= 0.030 against baseline dev score"
+            ),
+            "latency_ok": "avoid broad changes that materially increase p95 latency",
+            "private_stability_checks": (
+                "withheld rotating stability checks must show no quality regression; "
+                "their exact examples, scores, and failure reasons are not exposed to proposers"
+            ),
+        },
+        "baseline_for_public_gate": {
+            "dev_score": base_dev_score,
+            "live_latency_p95_ms": live_latency.get("p95"),
+        },
+        "objective": [
+            "Optimize durable recall quality, not merely passing the public gate.",
+            "Propose a real improvement with a falsifiable rationale tied to failure_samples.",
+        ],
+    }
+
+
 def _candidate_blockers(checks: dict[str, Any]) -> list[str]:
     blockers: list[str] = []
     if checks.get("dev_improved") is False:
@@ -666,6 +698,49 @@ def _candidate_blocker_summary(candidates: list[dict[str, Any]]) -> dict[str, An
         "blocked_candidates": total_blocked,
         "counts": dict(top),
         "top": [{"name": name, "count": count} for name, count in top[:4]],
+    }
+
+
+def _filter_blocker_counts(counts: dict[str, Any]) -> dict[str, int]:
+    filtered: dict[str, int] = {}
+    for key, value in counts.items():
+        if key not in PROPOSER_VISIBLE_BLOCKERS:
+            continue
+        try:
+            filtered[key] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return dict(sorted(filtered.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _top_blocker_rows(counts: dict[str, int], *, limit: int = 5) -> list[dict[str, Any]]:
+    return [{"name": name, "count": count} for name, count in list(counts.items())[:limit]]
+
+
+def _proposer_visible_rejection_blockers(blockers: dict[str, Any]) -> dict[str, Any]:
+    public_counts = _filter_blocker_counts(blockers.get("counts") if isinstance(blockers.get("counts"), dict) else {})
+    public_runs: list[dict[str, Any]] = []
+    raw_runs = blockers.get("runs") if isinstance(blockers.get("runs"), list) else []
+    for run in raw_runs:
+        if not isinstance(run, dict):
+            continue
+        run_counts = _filter_blocker_counts(run.get("counts") if isinstance(run.get("counts"), dict) else {})
+        if not run_counts:
+            continue
+        public_runs.append(
+            {
+                "run_id": run.get("run_id"),
+                "ts": run.get("ts"),
+                "reason": run.get("reason"),
+                "counts": run_counts,
+                "top": _top_blocker_rows(run_counts, limit=4),
+            }
+        )
+    return {
+        "counts": public_counts,
+        "top": _top_blocker_rows(public_counts),
+        "runs": public_runs,
+        "withheld": "private stability blockers are intentionally hidden from proposers",
     }
 
 
@@ -949,6 +1024,7 @@ def run_improvement(
     baseline_holdout = _evaluate_cached(holdout_examples, policy=baseline_policy, cache=eval_cache)
     failures = _failure_samples(baseline_dev)
     recent_blockers = _recent_rejection_blockers(runs_dir=runs_dir)
+    proposer_blockers = _proposer_visible_rejection_blockers(recent_blockers)
 
     proposals = propose_with_models(
         models=model_list,
@@ -958,7 +1034,7 @@ def run_improvement(
         failure_samples=failures,
         live_summary=live_telemetry,
         min_improvement=min_improvement,
-        recent_rejection_blockers=recent_blockers,
+        recent_rejection_blockers=proposer_blockers,
     )
     if include_heuristic:
         proposals.extend(heuristic_proposals(baseline_policy=baseline_policy, baseline_eval=baseline_dev))
@@ -1072,6 +1148,7 @@ def run_improvement(
             min_improvement=min_improvement,
         ),
         "recent_rejection_blockers": recent_blockers,
+        "proposer_visible_rejection_blockers": proposer_blockers,
         "candidate_blockers": blocker_summary,
         "proposals": [asdict(proposal) for proposal in proposals],
         "candidates": candidates,
@@ -1111,6 +1188,7 @@ def _compact_registry_record(record: dict[str, Any]) -> dict[str, Any]:
         "adoption_gate": record.get("adoption_gate"),
         "candidate_blockers": record.get("candidate_blockers"),
         "recent_rejection_blockers": record.get("recent_rejection_blockers"),
+        "proposer_visible_rejection_blockers": record.get("proposer_visible_rejection_blockers"),
         "frontier_audit_recommended": record.get("frontier_audit_recommended", False),
         "frontier_audit_reasons": record.get("frontier_audit_reasons", []),
         "frontier_audit": record.get("frontier_audit"),
@@ -1291,6 +1369,7 @@ def improvement_snapshot(
                 )
                 hydrated["adoption_gate"] = full.get("adoption_gate")
                 hydrated["recent_rejection_blockers"] = full.get("recent_rejection_blockers")
+                hydrated["proposer_visible_rejection_blockers"] = full.get("proposer_visible_rejection_blockers")
         history.append(hydrated)
     schedule = read_json_file(SCHEDULE_FILE)
     latest = history[-1] if history else None

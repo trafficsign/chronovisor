@@ -85,10 +85,40 @@ def test_proposal_prompt_includes_adoption_gate_and_rejection_blockers() -> None
 
     gate = prompt["adoption_gate"]
     assert "Your patch is rejected" in " ".join(prompt["rules"])
-    assert "relative_gain >= 0.050" in gate["candidate_must_pass_all"]["dev_improved"]
-    assert gate["baseline_for_gate"]["holdout_score"] == 0.08
-    assert gate["baseline_for_gate"]["holdout_latency_p95_ceiling_ms"] == 5000.0
+    assert "relative_gain >= 0.050" in gate["candidate_must_pass_public_checks"]["dev_improved"]
+    assert gate["baseline_for_public_gate"]["dev_score"] == 0.0
+    assert gate["candidate_must_pass_public_checks"]["private_stability_checks"]
+    assert "holdout" not in json.dumps(gate, ensure_ascii=False)
+    assert "baseline_holdout_metrics" not in prompt
+    assert "baseline_holdout_score" not in prompt
     assert prompt["recent_rejection_blockers"]["counts"]["latency_ok"] == 3
+    assert "holdout_recall_ok" not in prompt["recent_rejection_blockers"]["counts"]
+
+
+def test_proposer_visible_rejection_blockers_hide_private_quality_signals() -> None:
+    visible = recall_improvement._proposer_visible_rejection_blockers(
+        {
+            "counts": {
+                "dev_improved": 4,
+                "holdout_recall_ok": 3,
+                "holdout_score_ok": 2,
+                "latency_ok": 1,
+            },
+            "runs": [
+                {
+                    "run_id": "r1",
+                    "counts": {
+                        "holdout_recall_ok": 3,
+                        "latency_ok": 1,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert visible["counts"] == {"dev_improved": 4, "latency_ok": 1}
+    assert visible["runs"][0]["counts"] == {"latency_ok": 1}
+    assert "holdout" not in json.dumps(visible, ensure_ascii=False)
 
 
 def test_candidate_blocker_summary_counts_failed_gate_checks() -> None:
