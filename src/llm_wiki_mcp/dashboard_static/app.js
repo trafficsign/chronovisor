@@ -1657,7 +1657,12 @@ function renderRecallImprovement(lab) {
     detailParts.push(`${latest.live_telemetry.episodes} live episodes`);
   }
   const latestBlockers = blockerSummaryText(latest && latest.candidate_blockers);
-  if (latestBlockers) detailParts.push(`blocked by ${latestBlockers}`);
+  if (latestBlockers) {
+    const label = latest.status === "applied" || latest.status === "shadow_pass"
+      ? "other candidates blocked by"
+      : "blocked by";
+    detailParts.push(`${label} ${latestBlockers}`);
+  }
   if (schedule.last_checked_at) detailParts.push(`checked ${ageLabel(schedule.last_checked_at)}`);
   els.recallLabDetail.textContent = detailParts.filter(Boolean).join(" · ");
   els.recallLabActive.textContent = active ? "on" : "off";
@@ -1709,7 +1714,10 @@ function renderRecallImprovement(lab) {
     const audit = item.frontier_audit || {};
     const auditText = audit.decision ? ` · frontier ${audit.decision}` : "";
     const blockers = blockerSummaryText(item.candidate_blockers);
-    const blockerText = blockers ? ` · blocked by ${blockers}` : "";
+    const blockerLabel = itemStatus === "applied" || itemStatus === "shadow_pass"
+      ? "other candidates blocked by"
+      : "blocked by";
+    const blockerText = blockers ? ` · ${blockerLabel} ${blockers}` : "";
     message.textContent = `${fmt(proposal.summary || item.reason)}${score}${auditText}${blockerText}`;
     row.append(time, badge, message);
     els.recallLabFeed.appendChild(row);
