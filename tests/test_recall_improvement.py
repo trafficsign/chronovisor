@@ -402,6 +402,78 @@ def test_run_due_executes_and_updates_schedule_when_due(tmp_path, monkeypatch) -
     assert seen["models"] == ("qwen", "gemma")
 
 
+def test_run_due_respects_interval_even_with_new_feedback(tmp_path, monkeypatch) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        "\n".join(json.dumps({"kind": "missed_candidate", "prompt": str(i)}) for i in range(20)) + "\n",
+        encoding="utf-8",
+    )
+    schedule_file = tmp_path / "schedule-state.json"
+    schedule_file.write_text(
+        json.dumps(
+            {
+                "last_run_at": recall_improvement._now_iso(),
+                "last_feedback_count": 0,
+                "last_status": "applied",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_run(**_kwargs):
+        raise AssertionError("cooldown should prevent improvement run")
+
+    monkeypatch.setattr(recall_improvement, "run_improvement", fail_run)
+
+    payload = recall_improvement.run_due(
+        log_file=tmp_path / "recall-log.jsonl",
+        feedback_file=feedback_file,
+        min_total_feedback=1,
+        min_new_feedback=1,
+        min_interval_hours=24.0,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+
+    state = json.loads(schedule_file.read_text(encoding="utf-8"))
+    assert payload["status"] == "skipped"
+    assert payload["reasons"]["feedback_due"] is True
+    assert payload["reasons"]["interval_due"] is False
+    assert state["last_feedback_count"] == 0
+
+
+def test_run_due_skips_when_another_run_holds_lock(tmp_path, monkeypatch) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        json.dumps({"kind": "missed_candidate", "prompt": "x"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    lock_file = tmp_path / "run-due.lock"
+    lock_handle = recall_improvement._try_acquire_run_due_lock(lock_file)
+    assert lock_handle is not None
+
+    def fail_run(**_kwargs):
+        raise AssertionError("locked run_due must not execute improvement")
+
+    monkeypatch.setattr(recall_improvement, "run_improvement", fail_run)
+
+    try:
+        payload = recall_improvement.run_due(
+            log_file=tmp_path / "recall-log.jsonl",
+            feedback_file=feedback_file,
+            min_total_feedback=1,
+            min_new_feedback=1,
+            schedule_file=tmp_path / "schedule-state.json",
+            lock_file=lock_file,
+        )
+    finally:
+        lock_handle.close()
+
+    assert payload["status"] == "skipped"
+    assert payload["locked"] is True
+    assert "already in progress" in payload["reason"]
+
+
 def test_live_episode_summary_compacts_unlabeled_traffic(tmp_path) -> None:
     path = tmp_path / "live-episodes.jsonl"
     path.write_text(

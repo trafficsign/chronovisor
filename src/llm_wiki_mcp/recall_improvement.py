@@ -7,6 +7,7 @@ but replay evaluation is the only adoption judge.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -60,6 +61,7 @@ DEFAULT_IMPROVEMENT_MODELS = (
 
 FRONTIER_AUDIT_MODES = {"off", "auto", "always"}
 PROPOSER_VISIBLE_BLOCKERS = {"dev_improved", "latency_ok"}
+RUN_DUE_LOCK_FILE = IMPROVEMENT_DIR / "run-due.lock"
 
 
 @dataclass(frozen=True)
@@ -1251,7 +1253,80 @@ def _feedback_count(path: Path = RECALL_FEEDBACK_FILE) -> int:
     return len(read_jsonl(path))
 
 
+def _try_acquire_run_due_lock(lock_file: Path = RUN_DUE_LOCK_FILE):
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_file.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(json.dumps({"pid": os.getpid(), "ts": _now_iso()}, ensure_ascii=False) + "\n")
+    handle.flush()
+    return handle
+
+
 def run_due(
+    *,
+    config_file: Path | None = None,
+    log_file: Path = RECALL_LOG_FILE,
+    feedback_file: Path = RECALL_FEEDBACK_FILE,
+    models: str | list[str] | tuple[str, ...] | None = None,
+    apply: bool = True,
+    include_heuristic: bool = True,
+    min_improvement: float = 0.05,
+    max_examples: int = 80,
+    min_interval_hours: float = 24.0,
+    min_new_feedback: int = 5,
+    min_total_feedback: int = 3,
+    frontier_mode: str = "auto",
+    frontier_timeout: int | None = None,
+    dry_run: bool = False,
+    schedule_file: Path = SCHEDULE_FILE,
+    lock_file: Path = RUN_DUE_LOCK_FILE,
+) -> dict[str, Any]:
+    lock_handle = None
+    if not dry_run:
+        lock_handle = _try_acquire_run_due_lock(lock_file)
+        if lock_handle is None:
+            return {
+                "schema_version": 1,
+                "checked_at": _now_iso(),
+                "status": "skipped",
+                "reason": "recall improvement run already in progress",
+                "dry_run": dry_run,
+                "locked": True,
+                "lock_file": str(lock_file),
+            }
+    try:
+        return _run_due_locked(
+            config_file=config_file,
+            log_file=log_file,
+            feedback_file=feedback_file,
+            models=models,
+            apply=apply,
+            include_heuristic=include_heuristic,
+            min_improvement=min_improvement,
+            max_examples=max_examples,
+            min_interval_hours=min_interval_hours,
+            min_new_feedback=min_new_feedback,
+            min_total_feedback=min_total_feedback,
+            frontier_mode=frontier_mode,
+            frontier_timeout=frontier_timeout,
+            dry_run=dry_run,
+            schedule_file=schedule_file,
+        )
+    finally:
+        if lock_handle is not None:
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_handle.close()
+
+
+def _run_due_locked(
     *,
     config_file: Path | None = None,
     log_file: Path = RECALL_LOG_FILE,
@@ -1276,10 +1351,11 @@ def run_due(
     last_feedback_count = int(state.get("last_feedback_count") or 0)
     age_hours = ((now - last_run).total_seconds() / 3600.0) if last_run else None
     new_feedback = max(0, feedback_count - last_feedback_count)
+    first_run = last_run is None
     enough_total = feedback_count >= min_total_feedback
     interval_due = last_run is None or (age_hours is not None and age_hours >= min_interval_hours)
     feedback_due = new_feedback >= min_new_feedback
-    due = enough_total and (interval_due or feedback_due)
+    due = enough_total and interval_due and (feedback_due or first_run)
     decision = {
         "schema_version": 1,
         "checked_at": _now_iso(),
@@ -1296,6 +1372,7 @@ def run_due(
             "enough_total": enough_total,
             "interval_due": interval_due,
             "feedback_due": feedback_due,
+            "first_run": first_run,
         },
     }
     if dry_run:
