@@ -94,6 +94,46 @@ def test_recall_improve_run_due_cli_forwards_scheduler_args(tmp_path, monkeypatc
     assert str(seen["log_file"]).endswith("recall-log.jsonl")
 
 
+def test_sleep_cli_non_json_handles_partial_cycle(monkeypatch, capsys) -> None:
+    from llm_wiki_mcp import sleep_cycle
+
+    monkeypatch.setattr(
+        sleep_cycle,
+        "run_sleep_cycle",
+        lambda **_kwargs: {
+            "status": "partial",
+            "lane_errors": ["cofire"],
+            "cofire": {"status": "error", "error": "boom"},
+            "autonomy": {"status": "ok"},
+        },
+    )
+
+    assert cli.main(["sleep"]) == 0
+    output = capsys.readouterr().out
+    assert "sleep_cycle\tpartial" in output
+    assert "cofire_edges\tunavailable" in output
+    assert "lane_errors\tcofire" in output
+
+
+def test_sleep_cli_non_json_handles_locked_cycle(monkeypatch, capsys) -> None:
+    from llm_wiki_mcp import sleep_cycle
+
+    monkeypatch.setattr(
+        sleep_cycle,
+        "run_sleep_cycle",
+        lambda **_kwargs: {
+            "status": "skipped",
+            "locked": True,
+            "reason": "sleep cycle already in progress",
+        },
+    )
+
+    assert cli.main(["sleep"]) == 0
+    output = capsys.readouterr().out
+    assert "sleep_cycle\tskipped" in output
+    assert "reason\tsleep cycle already in progress" in output
+
+
 def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeypatch) -> None:
     patch_wiki(tmp_path, monkeypatch)
     hooks_file = tmp_path / "codex/hooks.json"

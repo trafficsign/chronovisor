@@ -1154,27 +1154,72 @@ def _watchdog_history_summary(payload: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     alerts = payload.get("alerts") if isinstance(payload.get("alerts"), list) else []
-    alert_types = [
-        str(alert.get("type") or "unknown")
-        for alert in alerts
-        if isinstance(alert, dict)
-    ]
-    return {
-        "ts": payload.get("ts"),
-        "status": payload.get("status"),
-        "alert_count": len(alerts),
-        "alert_types": alert_types,
-        "capture_rate": _capture_rate(health),
-        "queues": {
+    if alerts:
+        alert_types = [
+            str(alert.get("type") or "unknown")[:200]
+            for alert in alerts[:32]
+            if isinstance(alert, dict)
+        ]
+    else:
+        existing_types = payload.get("alert_types")
+        alert_types = (
+            [str(value)[:200] for value in existing_types[:32]]
+            if isinstance(existing_types, list)
+            else []
+        )
+    if health:
+        capture_rate = _capture_rate(health)
+        queues = {
             "duplicate_candidates": _queue_value(health, "duplicate_candidates"),
             "lint_repair": _queue_value(health, "lint_repair"),
-        },
-        "latest_sleep": {
-            "status": latest_sleep.get("status"),
-            "started_at": latest_sleep.get("started_at"),
-            "finished_at": latest_sleep.get("finished_at"),
-            "run_id": latest_sleep.get("run_id"),
-        },
+        }
+    else:
+        try:
+            capture_rate = float(payload.get("capture_rate"))
+        except (TypeError, ValueError):
+            capture_rate = None
+        existing_queues = payload.get("queues")
+        existing_queues = existing_queues if isinstance(existing_queues, dict) else {}
+        compact_health = {"queues": existing_queues}
+        queues = {
+            "duplicate_candidates": _queue_value(compact_health, "duplicate_candidates"),
+            "lint_repair": _queue_value(compact_health, "lint_repair"),
+        }
+    try:
+        alert_count = max(0, int(payload.get("alert_count") or 0))
+    except (TypeError, ValueError):
+        alert_count = 0
+    return {
+        "ts": str(payload.get("ts"))[:200] if payload.get("ts") is not None else None,
+        "status": (
+            str(payload.get("status"))[:200]
+            if payload.get("status") is not None
+            else None
+        ),
+        "alert_count": len(alerts) if alerts else alert_count,
+        "alert_types": alert_types,
+        "capture_rate": capture_rate,
+        "queues": queues,
+        "latest_sleep": _sleep_run_summary(latest_sleep),
+    }
+
+
+def _sleep_run_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    if not payload:
+        return {}
+    return {
+        "status": str(payload.get("status"))[:200] if payload.get("status") is not None else None,
+        "started_at": (
+            str(payload.get("started_at"))[:200]
+            if payload.get("started_at") is not None
+            else None
+        ),
+        "finished_at": (
+            str(payload.get("finished_at"))[:200]
+            if payload.get("finished_at") is not None
+            else None
+        ),
+        "run_id": str(payload.get("run_id"))[:200] if payload.get("run_id") is not None else None,
     }
 
 
@@ -1200,22 +1245,7 @@ def _write_watchdog_history(
             continue
         if not isinstance(row, dict):
             continue
-        previous.append(
-            _watchdog_history_summary(row)
-            if "health" in row or "alerts" in row
-            else {
-                key: row.get(key)
-                for key in (
-                    "ts",
-                    "status",
-                    "alert_count",
-                    "alert_types",
-                    "capture_rate",
-                    "queues",
-                    "latest_sleep",
-                )
-            }
-        )
+        previous.append(_watchdog_history_summary(row))
     rows = [*previous, _watchdog_history_summary(payload)][-max_lines:]
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
@@ -1271,7 +1301,7 @@ def watchdog_snapshot(
         "ts": _now(),
         "alerts": alerts,
         "health": health,
-        "latest_sleep": latest_sleep,
+        "latest_sleep": _sleep_run_summary(latest_sleep),
     }
     if write:
         _write_json(WATCHDOG_FILE, payload)
@@ -1465,7 +1495,6 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "150",
         "--duplicate-limit",
         "300",
-        "--json",
     ]
     watchdog_command = [
         uv,
@@ -1488,7 +1517,7 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
     watchdog_plist = _plist(
         WATCHDOG_LABEL,
         [str(watchdog_wrapper)],
-        stdout=logs / "watchdog.launchd.out.log",
+        stdout=Path(os.devnull),
         stderr=logs / "watchdog.launchd.err.log",
         start_interval=900,
     )
@@ -1497,8 +1526,18 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "dry_run": dry_run,
         "load": load,
         "plists": [
-            {"label": SLEEP_LABEL, "path": str(sleep_path), "program": sleep_plist["ProgramArguments"]},
-            {"label": WATCHDOG_LABEL, "path": str(watchdog_path), "program": watchdog_plist["ProgramArguments"]},
+            {
+                "label": SLEEP_LABEL,
+                "path": str(sleep_path),
+                "program": sleep_plist["ProgramArguments"],
+                "stdout": sleep_plist["StandardOutPath"],
+            },
+            {
+                "label": WATCHDOG_LABEL,
+                "path": str(watchdog_path),
+                "program": watchdog_plist["ProgramArguments"],
+                "stdout": watchdog_plist["StandardOutPath"],
+            },
         ],
         "wrappers": [
             {"path": str(sleep_wrapper), "command": sleep_command},

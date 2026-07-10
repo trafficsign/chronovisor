@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+
+import pytest
 
 from llm_wiki_mcp import sleep_cycle
 
@@ -18,6 +21,81 @@ def test_sleep_lock_is_single_flight(tmp_path: Path, monkeypatch) -> None:
     reader = sleep_cycle._try_acquire_read_lock()
     assert reader not in (None, False)
     reader.close()
+
+
+def test_sleep_history_compacts_recursive_rows_and_bounds_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    history = tmp_path / "sleep-cycle-history.jsonl"
+    legacy_rows = [
+        {
+            "status": "ok",
+            "started_at": f"2026-07-{(index % 9) + 1:02d}T03:40:00",
+            "autonomy": {
+                "watchdog": {
+                    "latest_sleep": {
+                        "autonomy": {"watchdog": {"blob": "x" * 1000}}
+                    }
+                }
+            },
+        }
+        for index in range(12)
+    ]
+    history.write_text(
+        "".join(json.dumps(row) + "\n" for row in legacy_rows),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sleep_cycle, "HISTORY_FILE", history)
+
+    sleep_cycle._append_history(
+        {
+            "status": "ok",
+            "run_id": "run-11",
+            "started_at": "2026-07-11T03:40:00",
+            "finished_at": "2026-07-11T03:43:00",
+            "dry_run": False,
+            "lint_repair": {"status": "ok", "processed": 5, "applied": 3},
+            "convergence_budget": {
+                "used": {"frontier": 1},
+                "limits": {"frontier": 9},
+            },
+        },
+        max_lines=10,
+    )
+
+    rows = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 10
+    assert all("autonomy" not in row for row in rows)
+    assert rows[-1]["run_id"] == "run-11"
+    assert rows[-1]["finished_at"] == "2026-07-11T03:43:00"
+    assert rows[-1]["work"]["lint_repair"] == {"applied": 3, "processed": 5}
+    assert rows[-1]["convergence_budget"] == {
+        "limits": {"frontier": 9},
+        "used": {"frontier": 1},
+    }
+    assert sleep_cycle._sleep_history_summary(rows[-1]) == rows[-1]
+    assert history.stat().st_size < 20_000
+
+
+def test_atomic_sleep_history_failure_preserves_previous_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    history = tmp_path / "sleep-cycle-history.jsonl"
+    history.write_text('{"status":"old"}\n', encoding="utf-8")
+    before = history.read_bytes()
+    monkeypatch.setattr(
+        sleep_cycle.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+
+    with pytest.raises(OSError, match="replace failed"):
+        sleep_cycle._atomic_write_history(history, [{"status": "new"}])
+
+    assert history.read_bytes() == before
+    assert list(tmp_path.glob(".sleep-cycle-history.jsonl.*.tmp")) == []
 
 
 def _patch_sleep_dependencies(monkeypatch) -> None:
@@ -66,6 +144,7 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     payload = sleep_cycle.run_sleep_cycle(raw_limit=3, eval_limit=4, duplicate_limit=5)
 
     assert payload["wiki_snapshot"]["status"] == "clean"
+    assert len(payload["run_id"]) == 32
     assert payload["cofire"]["edges"] == 2
     assert payload["prefetch"]["buckets"] == 1
     assert payload["retention"]["counts"]["pages"] == 2

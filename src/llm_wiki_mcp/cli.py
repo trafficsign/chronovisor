@@ -786,7 +786,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"tokens\t{public['token_count']}")
         return 0
     if args.command == "sleep":
-        from llm_wiki_mcp.sleep_cycle import run_sleep_cycle
+        from llm_wiki_mcp.sleep_cycle import render_summary, run_sleep_cycle
 
         data = run_sleep_cycle(
             raw_limit=max(0, args.raw_limit),
@@ -797,14 +797,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         else:
-            print(f"cofire_edges\t{data['cofire']['edges']}")
-            print(f"capture_rate\t{data['memory_integrity']['capture_rate']}")
-            print(f"retention_pages\t{data['retention']['counts']['pages']}")
-            print(f"claim_index_claims\t{data['claims']['claims']}")
-            print(f"golden_added\t{data['golden']['added']}")
-            print(f"distill_rows\t{data['distill']['rows']}")
-            print(f"hubs\t{data['hubs']['hubs']}")
-            print(f"duplicates\t{data['duplicates']['count']}")
+            print(render_summary(data))
         return 0
     if args.command == "claims":
         from llm_wiki_mcp.claims import rebuild_claim_index, sanitize_claim_ledger, search_claims

@@ -10,20 +10,190 @@ import argparse
 import fcntl
 import json
 import os
+import tempfile
 import time
+import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 HISTORY_FILE = WIKI_ROOT / "runtime" / "sleep-cycle-history.jsonl"
 LOCK_FILE = WIKI_ROOT / "runtime" / "sleep-cycle.lock"
+HISTORY_SCHEMA_VERSION = 1
+HISTORY_MAX_LINES = 1000
 
 
-def _append_history(row: dict[str, Any]) -> None:
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with HISTORY_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+def _compact_scalar(value: object, *, limit: int = 200) -> object:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:limit]
+
+
+def _compact_numeric_map(value: object, *, limit: int = 32) -> dict[str, int | float]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key)[:100]: number
+        for key, number in sorted(value.items(), key=lambda pair: str(pair[0]))[:limit]
+        if isinstance(number, (int, float)) and not isinstance(number, bool)
+    }
+
+
+def _sleep_history_summary(row: dict[str, Any]) -> dict[str, Any]:
+    """Project a full cycle result into bounded, non-recursive history."""
+
+    lane_statuses = {
+        str(name)[:100]: str(value.get("status") or "unknown")[:100]
+        for name, value in row.items()
+        if isinstance(value, dict) and "status" in value
+    }
+    if not lane_statuses and isinstance(row.get("lane_statuses"), dict):
+        lane_statuses = {
+            str(name)[:100]: str(status)[:100]
+            for name, status in sorted(
+                row["lane_statuses"].items(), key=lambda pair: str(pair[0])
+            )[:64]
+            if isinstance(status, (str, int, float, bool)) or status is None
+        }
+    budget = row.get("convergence_budget")
+    budget = budget if isinstance(budget, dict) else {}
+    raw = row.get("raw_replay") if isinstance(row.get("raw_replay"), dict) else {}
+    raw_drain = raw.get("drain") if isinstance(raw.get("drain"), dict) else {}
+
+    work: dict[str, dict[str, Any]] = {}
+    count_fields = {
+        "lint_repair": (
+            "processed",
+            "applied",
+            "routed",
+            "rejected",
+            "quarantined",
+            "human_required",
+            "deferred",
+        ),
+        "read_back_repair": (
+            "processed",
+            "applied",
+            "already_present",
+            "retry_scheduled",
+            "quarantined",
+            "human_required",
+            "budget_deferred",
+        ),
+        "search_label_review": (
+            "reviewed",
+            "approved",
+            "rejected",
+            "retry",
+            "quarantined",
+            "human_required",
+        ),
+        "self_heal": ("packets_seen",),
+        "duplicate_frontier": (
+            "frontier_calls",
+            "applied",
+            "kept_both",
+        ),
+        "orphan_links": ("work_items", "orphans_seen", "orphans_total"),
+    }
+    for lane, fields in count_fields.items():
+        value = row.get(lane)
+        if not isinstance(value, dict):
+            continue
+        counts = {
+            field: _compact_scalar(value.get(field))
+            for field in fields
+            if field in value
+        }
+        if counts:
+            work[lane] = counts
+    if not work and isinstance(row.get("work"), dict):
+        existing_work = row["work"]
+        for lane, fields in count_fields.items():
+            counts = existing_work.get(lane)
+            if not isinstance(counts, dict):
+                continue
+            filtered = {
+                field: _compact_scalar(counts.get(field))
+                for field in fields
+                if field in counts
+            }
+            if filtered:
+                work[lane] = filtered
+        existing_raw = existing_work.get("raw_replay")
+        if isinstance(existing_raw, dict):
+            status_counts = existing_raw.get("status_counts")
+            work["raw_replay"] = {
+                "runs": _compact_scalar(existing_raw.get("runs")),
+                "status_counts": _compact_numeric_map(status_counts),
+            }
+    if raw_drain:
+        work["raw_replay"] = {
+            "runs": _compact_scalar(raw_drain.get("count")),
+            "status_counts": _compact_numeric_map(raw_drain.get("status_counts")),
+        }
+
+    lane_errors = row.get("lane_errors")
+    return {
+        "schema_version": HISTORY_SCHEMA_VERSION,
+        "run_id": _compact_scalar(row.get("run_id")),
+        "status": _compact_scalar(row.get("status")),
+        "started_at": _compact_scalar(row.get("started_at")),
+        "finished_at": _compact_scalar(row.get("finished_at")),
+        "dry_run": bool(row.get("dry_run")),
+        "lane_errors": (
+            [str(error)[:200] for error in lane_errors[:32]]
+            if isinstance(lane_errors, list)
+            else []
+        ),
+        "lane_statuses": dict(sorted(lane_statuses.items())),
+        "work": work,
+        "convergence_budget": {
+            "used": _compact_numeric_map(budget.get("used"), limit=16),
+            "limits": _compact_numeric_map(budget.get("limits"), limit=16),
+        },
+    }
+
+
+def _atomic_write_history(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _append_history(row: dict[str, Any], *, max_lines: int = HISTORY_MAX_LINES) -> None:
+    """Store compact history and normalize legacy recursive rows on every write."""
+
+    max_lines = max(1, int(max_lines))
+    try:
+        lines = HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    previous: list[dict[str, Any]] = []
+    keep_previous = max_lines - 1
+    for line in (lines[-keep_previous:] if keep_previous else []):
+        try:
+            existing = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(existing, dict):
+            previous.append(_sleep_history_summary(existing))
+    rows = [*previous, _sleep_history_summary(row)][-max_lines:]
+    _atomic_write_history(HISTORY_FILE, rows)
 
 
 def _try_acquire_lock():
@@ -64,6 +234,43 @@ def _run_lane(name: str, fn) -> dict[str, Any]:
     if isinstance(result, dict):
         return result
     return {"status": "error", "lane": name, "error": "lane returned a non-object result"}
+
+
+def render_summary(payload: dict[str, Any]) -> str:
+    """Render a compact status report that tolerates partial/skipped cycles."""
+
+    def field(lane: str, *keys: str, default: object = "unavailable") -> object:
+        value: object = payload.get(lane, {})
+        for key in keys:
+            if not isinstance(value, dict) or key not in value:
+                return default
+            value = value[key]
+        return value
+
+    lines = [f"sleep_cycle\t{payload.get('status', 'unknown')}"]
+    if payload.get("locked"):
+        lines.append(f"reason\t{payload.get('reason', 'sleep cycle already in progress')}")
+        return "\n".join(lines)
+    lines.extend(
+        [
+            f"cofire_edges\t{field('cofire', 'edges')}",
+            f"prefetch_buckets\t{field('prefetch', 'buckets')}",
+            f"capture_rate\t{field('memory_integrity', 'capture_rate')}",
+            f"retention_pages\t{field('retention', 'counts', 'pages')}",
+            f"claim_index_claims\t{field('claims', 'claims')}",
+            f"golden_added\t{field('golden', 'added')}",
+            f"distill_rows\t{field('distill', 'rows')}",
+            f"hubs\t{field('hubs', 'hubs')}",
+            f"duplicates\t{field('duplicates', 'count')}",
+            f"recall_improve\t{field('recall_improve', 'status')}",
+            f"autonomy\t{field('autonomy', 'status')}",
+        ]
+    )
+    if payload.get("lane_errors"):
+        lines.append(
+            f"lane_errors\t{','.join(str(item) for item in payload['lane_errors'])}"
+        )
+    return "\n".join(lines)
 
 
 def run_sleep_cycle(
@@ -163,6 +370,7 @@ def _run_sleep_cycle(
         return _run_lane(name, fn)
 
     started = datetime.now().isoformat(timespec="seconds")
+    run_id = uuid.uuid4().hex
     before_health_result = artifact_lane("health_before", health_snapshot, mutates=False)
     before_health = (
         before_health_result if before_health_result.get("status") != "error" else {}
@@ -381,6 +589,7 @@ def _run_sleep_cycle(
     )
     payload = {
         "status": "ok",
+        "run_id": run_id,
         "started_at": started,
         "dry_run": dry_run,
         "wiki_snapshot": snapshot,
@@ -460,6 +669,7 @@ def _run_sleep_cycle(
     if lane_errors:
         payload["status"] = "partial"
         payload["lane_errors"] = lane_errors
+    payload["finished_at"] = datetime.now().isoformat(timespec="seconds")
     if not dry_run:
         history_allowed, history_reason = artifact_budget.consume("mutation")
         payload["convergence_budget"] = cycle_budget.snapshot()
@@ -492,31 +702,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-    elif payload.get("locked"):
-        print(f"sleep_cycle\t{payload['status']}\t{payload['reason']}")
     else:
-        def field(lane: str, *keys: str, default: object = "unavailable") -> object:
-            value: object = payload.get(lane, {})
-            for key in keys:
-                if not isinstance(value, dict) or key not in value:
-                    return default
-                value = value[key]
-            return value
-
-        print(f"sleep_cycle\t{payload.get('status', 'unknown')}")
-        print(f"cofire_edges\t{field('cofire', 'edges')}")
-        print(f"prefetch_buckets\t{field('prefetch', 'buckets')}")
-        print(f"capture_rate\t{field('memory_integrity', 'capture_rate')}")
-        print(f"retention_pages\t{field('retention', 'counts', 'pages')}")
-        print(f"claim_index_claims\t{field('claims', 'claims')}")
-        print(f"golden_added\t{field('golden', 'added')}")
-        print(f"distill_rows\t{field('distill', 'rows')}")
-        print(f"hubs\t{field('hubs', 'hubs')}")
-        print(f"duplicates\t{field('duplicates', 'count')}")
-        print(f"recall_improve\t{field('recall_improve', 'status')}")
-        print(f"autonomy\t{field('autonomy', 'status')}")
-        if payload.get("lane_errors"):
-            print(f"lane_errors\t{','.join(str(item) for item in payload['lane_errors'])}")
+        print(render_summary(payload))
     return 0
 
 

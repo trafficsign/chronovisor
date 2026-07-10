@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -894,7 +895,7 @@ def test_watchdog_history_is_compact_and_bounded_to_1000_lines(monkeypatch, tmp_
         lambda path: {"status": "ok", "started_at": "2026-07-10T03:40:00", "payload": "q" * 5000},
     )
 
-    autonomy.watchdog_snapshot(write=True)
+    payload = autonomy.watchdog_snapshot(write=True)
 
     rows = [json.loads(line) for line in history_file.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 1000
@@ -907,6 +908,10 @@ def test_watchdog_history_is_compact_and_bounded_to_1000_lines(monkeypatch, tmp_
         "finished_at": None,
         "run_id": None,
     }
+    assert payload["latest_sleep"] == rows[-1]["latest_sleep"]
+    assert "payload" not in payload["latest_sleep"]
+    persisted = json.loads((tmp_path / "watchdog-latest.json").read_text(encoding="utf-8"))
+    assert persisted["latest_sleep"] == rows[-1]["latest_sleep"]
 
 
 def test_regression_guard_quarantines_cycle_without_global_git_reset(monkeypatch, tmp_path: Path) -> None:
@@ -961,4 +966,9 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     programs = {item["label"]: item["program"] for item in payload["plists"]}
     assert Path(programs[autonomy.SLEEP_LABEL][0]).name == "llm-wiki-sleep"
     assert Path(programs[autonomy.WATCHDOG_LABEL][0]).name == "llm-wiki-watchdog"
+    watchdog_plist = next(
+        item for item in payload["plists"] if item["label"] == autonomy.WATCHDOG_LABEL
+    )
+    assert watchdog_plist["stdout"] == os.devnull
     assert payload["wrappers"][0]["command"][0] == "/opt/homebrew/bin/uv"
+    assert "--json" not in payload["wrappers"][0]["command"]

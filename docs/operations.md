@@ -214,6 +214,11 @@ read-only, including search indexes and caches, and does not invoke frontier
 reviewers. A zero `--eval-limit` skips integrity and label evaluation instead
 of expanding to an unbounded corpus scan.
 
+Sleep history is stored as a non-recursive, 1,000-row summary rather than full
+nested cycle payloads. Scheduled sleep writes a compact text report, while the
+15-minute watchdog keeps its latest state and bounded history in `autonomy/`
+and sends routine stdout to `/dev/null`; stderr remains logged.
+
 ## Wiki Snapshots
 
 ```sh
