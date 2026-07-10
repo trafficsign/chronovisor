@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping
 
 from llm_wiki_mcp import recall_hints, wiki
 from llm_wiki_mcp.convergence import HUMAN_REQUIRED_FAILURE_CLASSES
+from llm_wiki_mcp.runtime_config import runtime_repo_root
 
 
 FAILURE_FILE = wiki.WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl"
@@ -30,7 +31,7 @@ TERMINAL_STATUSES = frozenset(
 )
 DEFAULT_QUARANTINE_COOLDOWN_SECONDS = 6 * 60 * 60
 DEFAULT_FRONTIER_CONFIDENCE_THRESHOLD = 0.8
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = runtime_repo_root()
 READ_BACK_FRONTIER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,

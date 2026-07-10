@@ -2,7 +2,8 @@
 set -eu
 
 PROJECT_DIR="/Users/trafficsign/projects/personal/llm-wiki-mcp"
+RUNTIME_SOURCE="${LLM_WIKI_RUNTIME_SOURCE:-git+ssh://git@github.com/trafficsign/llm-wiki-mcp}"
 PATH="/Users/trafficsign/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/sbin:/usr/sbin:/sbin"
-export PATH
+export PATH LLM_WIKI_REPO_ROOT="${LLM_WIKI_REPO_ROOT:-$PROJECT_DIR}"
 
-exec uv run --project "$PROJECT_DIR" llm-wiki-ingest-drain "$@"
+exec uvx --refresh-package llm-wiki-mcp --from "$RUNTIME_SOURCE" llm-wiki-ingest-drain "$@"

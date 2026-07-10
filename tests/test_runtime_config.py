@@ -5,6 +5,38 @@ from pathlib import Path
 from llm_wiki_mcp import runtime_config
 
 
+def test_uvx_runtime_command_uses_pushed_github_source(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_WIKI_RUNTIME_SOURCE", raising=False)
+
+    command = runtime_config.uvx_runtime_command(
+        "llm-wiki-sleep",
+        executable="/opt/homebrew/bin/uvx",
+        refresh=True,
+    )
+
+    assert command == [
+        "/opt/homebrew/bin/uvx",
+        "--refresh-package",
+        "llm-wiki-mcp",
+        "--from",
+        "git+ssh://git@github.com/trafficsign/llm-wiki-mcp",
+        "llm-wiki-sleep",
+    ]
+
+
+def test_runtime_source_override_is_explicit(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_WIKI_RUNTIME_SOURCE", "git+ssh://example.invalid/fork")
+
+    assert runtime_config.runtime_source() == "git+ssh://example.invalid/fork"
+
+
+def test_runtime_repo_root_honors_explicit_checkout(tmp_path, monkeypatch) -> None:
+    checkout = tmp_path / "llm-wiki-mcp"
+    monkeypatch.setenv("LLM_WIKI_REPO_ROOT", str(checkout))
+
+    assert runtime_config.runtime_repo_root() == checkout
+
+
 def test_active_config_prefers_unified_config(tmp_path: Path, monkeypatch) -> None:
     config = tmp_path / "config.toml"
     legacy = tmp_path / "recall.toml"

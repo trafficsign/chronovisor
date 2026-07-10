@@ -58,10 +58,11 @@ from llm_wiki_mcp.recall_runtime import (
     append_feedback,
     recall_log_snapshot,
 )
+from llm_wiki_mcp.runtime_config import runtime_repo_root
 from llm_wiki_mcp.wiki import WIKI_ROOT, find_page, init_wiki
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = runtime_repo_root()
 LANE = "content_correction"
 RESOLVER_VERSION = "2"
 HOOK_ENABLE_ENV = "LLM_WIKI_CONTENT_CORRECTION_ENABLED"

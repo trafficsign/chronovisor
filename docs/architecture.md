@@ -89,6 +89,11 @@ Nightly sleep
 - **Dashboard**: local browser observability for ingest work, self-heal status,
   recall improvement runs, save history, knowledge mix, and model fleet roles.
 
+Production entry points load `llm-wiki-mcp` from the pushed GitHub source via
+`uvx`. The checkout selected by `LLM_WIKI_REPO_ROOT` is only frontier-review
+context and the destination for an approved code-repair patch, so an unpushed
+worktree cannot silently become the running memory policy.
+
 `few_shot` feedback is materialized through safe query hints and the
 frontier-reviewed golden-label path. `threshold` feedback is routed into Recall
 Lab, where replay/holdout gates and a frontier veto decide adoption; neither

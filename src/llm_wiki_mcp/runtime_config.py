@@ -22,6 +22,42 @@ FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
 DEFAULT_INGEST_MODEL = "qwen3.6:35b-a3b-mxfp8"
+DEFAULT_RUNTIME_SOURCE = "git+ssh://git@github.com/trafficsign/llm-wiki-mcp"
+RUNTIME_PACKAGE = "llm-wiki-mcp"
+
+
+def runtime_source() -> str:
+    """Return the pushed package source used by production entry points."""
+
+    configured = os.environ.get("LLM_WIKI_RUNTIME_SOURCE", "").strip()
+    return configured or DEFAULT_RUNTIME_SOURCE
+
+
+def runtime_repo_root() -> Path:
+    """Return the explicit checkout used only for reviewed code repair/context."""
+
+    configured = os.environ.get("LLM_WIKI_REPO_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    checkout = Path.home() / "projects" / "personal" / RUNTIME_PACKAGE
+    if (checkout / ".git").exists():
+        return checkout
+    return Path(__file__).resolve().parents[2]
+
+
+def uvx_runtime_command(
+    entrypoint: str,
+    *,
+    executable: str = "uvx",
+    refresh: bool = False,
+) -> list[str]:
+    """Build a production command that cannot import an unpushed worktree."""
+
+    command = [executable]
+    if refresh:
+        command.extend(["--refresh-package", RUNTIME_PACKAGE])
+    command.extend(["--from", runtime_source(), entrypoint])
+    return command
 
 
 @dataclass(frozen=True)

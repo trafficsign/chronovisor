@@ -25,6 +25,7 @@ from llm_wiki_mcp.link_fix import (
     protected_spans,
 )
 from llm_wiki_mcp.page_mutation import wiki_mutation_lock
+from llm_wiki_mcp.runtime_config import runtime_repo_root
 from llm_wiki_mcp.tags import (
     parse_tags,
     validate_axis_counts,
@@ -33,7 +34,7 @@ from llm_wiki_mcp.tags import (
 
 
 STALE_DAYS = 90  # Pages not updated in this many days are flagged
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = runtime_repo_root()
 
 StructuredReviewer = Callable[[str, dict[str, Any]], Mapping[str, Any] | str]
 

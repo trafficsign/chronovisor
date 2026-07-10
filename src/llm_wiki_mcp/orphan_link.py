@@ -41,10 +41,11 @@ from llm_wiki_mcp.wiki import find_page
 from llm_wiki_mcp.wiki import WIKI_ROOT
 from llm_wiki_mcp.link_fix import atomic_write, protected_spans
 from llm_wiki_mcp.page_mutation import wiki_mutation_lock
+from llm_wiki_mcp.runtime_config import runtime_repo_root
 
 
 DECISIONS_FILE = WIKI_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = runtime_repo_root()
 RESOLVER_VERSION = "orphan-link-v1"
 DEFAULT_FRONTIER_CONFIDENCE_THRESHOLD = 0.8
 

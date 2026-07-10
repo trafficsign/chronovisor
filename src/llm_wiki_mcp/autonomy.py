@@ -33,6 +33,7 @@ from llm_wiki_mcp.convergence import (
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.frontmatter import patch as patch_frontmatter
 from llm_wiki_mcp.page_mutation import wiki_mutation_lock
+from llm_wiki_mcp.runtime_config import runtime_repo_root, uvx_runtime_command
 from llm_wiki_mcp.wiki import WIKI_ROOT, find_page
 
 
@@ -43,7 +44,7 @@ WATCHDOG_FILE = AUTONOMY_DIR / "watchdog-latest.json"
 WATCHDOG_HISTORY = AUTONOMY_DIR / "watchdog-history.jsonl"
 DIGEST_FILE = AUTONOMY_DIR / "digest-latest.md"
 QUARANTINE_FILE = AUTONOMY_DIR / "quarantine.json"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = runtime_repo_root()
 
 SLEEP_LABEL = "com.trafficsign.llm-wiki-sleep"
 WATCHDOG_LABEL = "com.trafficsign.llm-wiki-watchdog"
@@ -2051,8 +2052,8 @@ def run_autonomy_cycle(
     return payload
 
 
-def _uv_path() -> str:
-    return shutil.which("uv") or "/opt/homebrew/bin/uv"
+def _uvx_path() -> str:
+    return shutil.which("uvx") or str(Path.home() / ".local/bin/uvx")
 
 
 def _plist(label: str, args: list[str], *, stdout: Path, stderr: Path, start_interval: int | None = None, calendar: dict[str, int] | None = None) -> dict[str, Any]:
@@ -2066,6 +2067,7 @@ def _plist(label: str, args: list[str], *, stdout: Path, stderr: Path, start_int
         "EnvironmentVariables": {
             "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "PYTHONUNBUFFERED": "1",
+            "LLM_WIKI_REPO_ROOT": str(PROJECT_ROOT),
         },
     }
     if start_interval is not None:
@@ -2091,17 +2093,13 @@ def _write_wrapper(path: Path, command: list[str]) -> None:
 
 def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, Any]:
     logs = WIKI_ROOT / "logs"
-    uv = _uv_path()
+    uvx = _uvx_path()
     sleep_path = LAUNCH_AGENT_DIR / f"{SLEEP_LABEL}.plist"
     watchdog_path = LAUNCH_AGENT_DIR / f"{WATCHDOG_LABEL}.plist"
     sleep_wrapper = WRAPPER_DIR / "llm-wiki-sleep"
     watchdog_wrapper = WRAPPER_DIR / "llm-wiki-watchdog"
     sleep_command = [
-        uv,
-        "run",
-        "--project",
-        str(PROJECT_ROOT),
-        "llm-wiki",
+        *uvx_runtime_command("llm-wiki", executable=uvx, refresh=True),
         "sleep",
         "--raw-limit",
         "200",
@@ -2111,11 +2109,7 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "300",
     ]
     watchdog_command = [
-        uv,
-        "run",
-        "--project",
-        str(PROJECT_ROOT),
-        "llm-wiki",
+        *uvx_runtime_command("llm-wiki", executable=uvx, refresh=True),
         "autonomy",
         "watchdog",
         "--notify",

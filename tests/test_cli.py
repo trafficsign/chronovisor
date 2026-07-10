@@ -316,3 +316,13 @@ def test_hooks_install_cli_dry_run_json(tmp_path, monkeypatch, capsys) -> None:
     assert all(result["dry_run"] for result in output["results"])
     assert not (tmp_path / "codex/hooks.json").exists()
     assert not (tmp_path / "claude/settings.json").exists()
+
+
+def test_default_hook_prefix_uses_pushed_github_runtime(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_WIKI_RUNTIME_SOURCE", raising=False)
+
+    prefix = cli.default_hook_command_prefix()
+
+    assert prefix.startswith("uvx --from ")
+    assert "git+ssh://git@github.com/trafficsign/llm-wiki-mcp" in prefix
+    assert "uv run --project" not in prefix

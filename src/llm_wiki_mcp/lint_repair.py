@@ -36,11 +36,12 @@ from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.frontmatter import patch as patch_frontmatter
 from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.page_mutation import wiki_mutation_lock
+from llm_wiki_mcp.runtime_config import runtime_repo_root
 from llm_wiki_mcp.tags import SEED_TAGS, parse_tags, validate_axis_counts, validate_tag
 
 
 REPAIR_RESOLVER_VERSION = "lint-repair-v1"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = runtime_repo_root()
 
 TAG_REPAIR_SCHEMA: dict[str, Any] = {
     "type": "object",

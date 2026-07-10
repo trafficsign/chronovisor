@@ -52,7 +52,7 @@ from llm_wiki_mcp.recall_runtime import (
     RecallPolicy,
     load_policy,
 )
-from llm_wiki_mcp.runtime_config import load_toml_file
+from llm_wiki_mcp.runtime_config import load_toml_file, runtime_repo_root
 from llm_wiki_mcp.runtime_status import safe_append_event, safe_append_metric
 
 
@@ -1086,7 +1086,7 @@ def run_frontier_policy_audit(
     if reused is not None:
         return reused
 
-    repo = repo_root or Path(__file__).resolve().parents[2]
+    repo = repo_root or runtime_repo_root()
     timeout_seconds = timeout or int(os.environ.get("LLM_WIKI_RECALL_IMPROVE_FRONTIER_TIMEOUT", "1800"))
     prompt = build_frontier_audit_prompt(record, best, reasons)
     if reviewer is None:

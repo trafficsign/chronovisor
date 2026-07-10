@@ -218,6 +218,11 @@ read-only, including search indexes and caches, and does not invoke frontier
 reviewers. A zero `--eval-limit` skips integrity and label evaluation instead
 of expanding to an unbounded corpus scan.
 
+Installed MCP, hook, dashboard, ingest-drain, sleep, and watchdog entry points
+resolve the pushed GitHub package through `uvx`; the local checkout remains the
+explicit code-repair target, not an implicit production import path. Long-lived
+services refresh the package on restart.
+
 Sleep history is stored as a non-recursive, 1,000-row summary rather than full
 nested cycle payloads. Scheduled sleep writes a compact text report, while the
 15-minute watchdog keeps its latest state and bounded history in `autonomy/`

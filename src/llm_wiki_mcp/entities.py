@@ -19,12 +19,13 @@ from llm_wiki_mcp.lint import (
 )
 from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.page_mutation import wiki_mutation_lock
+from llm_wiki_mcp.runtime_config import runtime_repo_root
 from llm_wiki_mcp.wiki import WIKI_ROOT, all_pages, page_id_from_path
 
 ENTITY_DIR = WIKI_ROOT / "entities"
 ENTITY_REGISTRY_FILE = ENTITY_DIR / "registry.json"
 ENTITY_REVIEW_DIR = WIKI_ROOT / "runtime" / "entity-backfill"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = runtime_repo_root()
 
 DEFAULT_ALIASES: dict[str, list[str]] = {
     "llm-wiki": ["LLM Wiki", "llm wiki", "LLMウィキ", "ウィキ"],

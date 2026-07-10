@@ -61,10 +61,9 @@ MAC_NOTIFICATION_COOLDOWN_SECONDS = 3600
 
 
 def _repo_root() -> Path:
-    configured = os.environ.get("LLM_WIKI_REPO_ROOT")
-    if configured:
-        return Path(configured)
-    return Path(__file__).resolve().parents[2]
+    from llm_wiki_mcp.runtime_config import runtime_repo_root
+
+    return runtime_repo_root()
 
 
 def _failures_dir() -> Path:

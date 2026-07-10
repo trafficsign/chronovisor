@@ -170,6 +170,12 @@ remain supported.
 - `LLM_WIKI_HUMAN_REQUIRED_RECHECK_SECONDS`: interval for automatically
   rechecking external-authority failures such as expired authentication,
   billing/quota, or keychain access (default: `3600`).
+- `LLM_WIKI_RUNTIME_SOURCE`: explicit override for the production `uvx`
+  package source. The default is the pushed GitHub repository; local worktrees
+  are never selected implicitly.
+- `LLM_WIKI_REPO_ROOT`: checkout used as frontier-review context and as the
+  target of approved self-heal code patches. It does not control imported
+  runtime code.
 
 The compatibility wrappers preserve the old environment behavior. Direct
 `llm-wiki-hook --event Stop` deployments can rely on `config.toml`.

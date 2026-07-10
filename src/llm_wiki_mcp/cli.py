@@ -6,18 +6,22 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp import runtime_status, wiki
 from llm_wiki_mcp.recall_runtime import RECALL_DIR, RECALL_FEEDBACK_FILE, RECALL_LOG_FILE
-from llm_wiki_mcp.runtime_config import config_summary, load_hook_policy
+from llm_wiki_mcp.runtime_config import (
+    config_summary,
+    load_hook_policy,
+    uvx_runtime_command,
+)
 
 CODEX_HOOKS_FILE = Path.home() / ".config/codex/hooks.json"
 CODEX_CONFIG_FILE = Path.home() / ".config/codex/config.toml"
 CLAUDE_SETTINGS_FILE = Path.home() / "dotfiles/claude/settings.json"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -137,9 +141,7 @@ def _codex_state_index(event: str, group_i: int, hook_i: int) -> str:
 
 
 def default_hook_command_prefix() -> str:
-    if (PROJECT_ROOT / "pyproject.toml").exists():
-        return f"uv run --project {PROJECT_ROOT} llm-wiki-hook"
-    return "llm-wiki-hook"
+    return shlex.join(uvx_runtime_command("llm-wiki-hook"))
 
 
 def _is_llm_wiki_command(command: object) -> bool:

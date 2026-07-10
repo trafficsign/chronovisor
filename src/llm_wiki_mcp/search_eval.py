@@ -43,11 +43,15 @@ from llm_wiki_mcp.pipeline import (
     production_pipeline_config,
     run_search_pipeline,
 )
-from llm_wiki_mcp.runtime_config import load_negative_feedback_config, load_reranker_config
+from llm_wiki_mcp.runtime_config import (
+    load_negative_feedback_config,
+    load_reranker_config,
+    runtime_repo_root,
+)
 from llm_wiki_mcp.wiki import SYSTEM_DIR, WIKI_ROOT, find_page
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = runtime_repo_root()
 RECALL_DIR = WIKI_ROOT / "recall"
 RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"

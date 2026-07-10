@@ -1423,7 +1423,7 @@ def test_regression_guard_quarantines_cycle_without_global_git_reset(monkeypatch
 
 
 def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -> None:
-    monkeypatch.setattr(autonomy, "_uv_path", lambda: "/opt/homebrew/bin/uv")
+    monkeypatch.setattr(autonomy, "_uvx_path", lambda: "/opt/homebrew/bin/uvx")
 
     payload = autonomy.install_launchd(dry_run=True, load=False)
 
@@ -1439,5 +1439,8 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
         item for item in payload["plists"] if item["label"] == autonomy.WATCHDOG_LABEL
     )
     assert watchdog_plist["stdout"] == os.devnull
-    assert payload["wrappers"][0]["command"][0] == "/opt/homebrew/bin/uv"
+    command = payload["wrappers"][0]["command"]
+    assert command[0] == "/opt/homebrew/bin/uvx"
+    assert "--refresh-package" in command
+    assert "git+ssh://git@github.com/trafficsign/llm-wiki-mcp" in command
     assert "--json" not in payload["wrappers"][0]["command"]
