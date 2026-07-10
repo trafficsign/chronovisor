@@ -5,6 +5,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from llm_wiki_mcp import recall_auto_apply, recall_hints, wiki
+from llm_wiki_mcp.convergence import CycleBudget
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.recall_runtime import RecallPolicy, collect_context
 
@@ -276,6 +277,134 @@ def test_error_apply_keys_are_retriable(tmp_path) -> None:
     )
 
     assert recall_auto_apply.read_applied_keys(log_file) == {"ok"}
+
+
+def test_full_apply_history_does_not_resurrect_old_terminal_keys(tmp_path) -> None:
+    log_file = tmp_path / "auto-apply.jsonl"
+    rows = [{"apply_key": "old", "status": "applied", "convergence_status": "applied"}]
+    rows.extend(
+        {
+            "apply_key": f"retry-{index}",
+            "status": "error",
+            "convergence_status": "retry_wait",
+            "attempt": 1,
+        }
+        for index in range(5_100)
+    )
+    log_file.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    assert "old" in recall_auto_apply.read_applied_keys(log_file)
+    assert recall_auto_apply.read_apply_states(log_file)["old"]["convergence_status"] == "applied"
+
+
+def test_pull_log_candidate_is_consumed_by_validated_auto_lane(tmp_path, monkeypatch) -> None:
+    record = _candidate("query_hint", page_id="target")
+    record["source"] = "pull-log"
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "apply_record",
+        lambda _record, dry_run=False: {"status": "applied"},
+    )
+
+    result = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+    )
+
+    assert result["actions"][0]["status"] == "applied"
+
+
+def test_apply_feedback_budget_defers_without_burning_attempt(tmp_path, monkeypatch) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file = tmp_path / "auto-apply.jsonl"
+    feedback_file.write_text(json.dumps(_candidate("query_hint", page_id="target")) + "\n")
+    monkeypatch.setattr(recall_auto_apply, "AUTO_APPLY_LOG_FILE", log_file)
+    calls = []
+
+    def apply(_record, dry_run=False):
+        calls.append(dry_run)
+        return {"status": "applied"}
+
+    monkeypatch.setattr(recall_auto_apply, "apply_record", apply)
+    deferred = recall_auto_apply.apply_feedback_file(
+        feedback_file=feedback_file,
+        config_file=tmp_path / "missing.toml",
+        budget=CycleBudget(max_mutations=0),
+    )
+
+    assert deferred["status"] == "budget_deferred"
+    assert deferred["actions"][0]["attempt"] == 0
+    assert calls == []
+    assert not log_file.exists()
+
+    applied = recall_auto_apply.apply_feedback_file(
+        feedback_file=feedback_file,
+        config_file=tmp_path / "missing.toml",
+        budget=CycleBudget(max_mutations=1),
+    )
+    assert applied["actions"][0]["attempt"] == 1
+    assert calls == [False]
+
+
+def test_existing_query_hint_is_terminal_without_incrementing_evidence_count(tmp_path, monkeypatch) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target")
+    hints_file = tmp_path / "query-hints.json"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    recall_hints.add_query_hint(page_id="target", query="exact query", path=hints_file)
+    record = _candidate(
+        "query_hint",
+        page_id="target",
+        payload={"page_id": "target", "query": "exact query"},
+    )
+
+    result = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+    )
+
+    assert result["actions"][0]["status"] == "already_applied"
+    assert recall_hints.load_query_hints(hints_file)[0]["count"] == 1
+
+
+def test_skipped_auto_apply_is_bounded_not_permanently_consumed(tmp_path, monkeypatch) -> None:
+    log_file = tmp_path / "auto-apply.jsonl"
+    record = _candidate("query_hint", page_id="missing", payload={"query": "q", "page_id": "missing"})
+    monkeypatch.setattr(recall_auto_apply, "apply_record", lambda _record, dry_run=False: {"status": "skipped"})
+    policy = recall_auto_apply.AutoApplyPolicy(min_count=1)
+
+    first = recall_auto_apply.apply_feedback_records(
+        [record], policy=policy, log_file=log_file, max_attempts=2, backoff_base_seconds=0
+    )
+    second = recall_auto_apply.apply_feedback_records(
+        [record], policy=policy, log_file=log_file, max_attempts=2, backoff_base_seconds=0
+    )
+
+    assert first["actions"][0]["convergence_status"] == "retry_wait"
+    assert second["actions"][0]["convergence_status"] == "quarantined"
+    assert recall_auto_apply.read_applied_keys(log_file) == set()
+
+
+def test_threshold_review_action_routes_to_recall_lab(tmp_path) -> None:
+    log_file = tmp_path / "auto-apply.jsonl"
+    record = {
+        "kind": "missed_candidate",
+        "source": "auditor",
+        "lane": "review",
+        "action_type": "threshold",
+        "normalize_key": "threshold:systemic",
+        "missing_signal": "systemic false positives",
+        "ref": "d1",
+    }
+
+    result = recall_auto_apply.apply_review_feedback_records([record], log_file=log_file)
+
+    assert result["actions"][0]["status"] == "routed_to_recall_lab"
+    assert result["actions"][0]["convergence_status"] == "applied"
 
 
 def test_query_hint_accepts_system_pages(tmp_path, monkeypatch) -> None:

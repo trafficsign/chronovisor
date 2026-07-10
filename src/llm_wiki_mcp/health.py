@@ -218,11 +218,58 @@ def recall_feedback_kpi() -> dict[str, Any]:
     }
 
 
+def convergence_kpi() -> dict[str, Any]:
+    path = WIKI_ROOT / "runtime" / "convergence" / "state.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"status": "missing", "path": str(path), "items": 0, "by_status": {}, "by_lane": {}}
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, dict):
+        return {"status": "invalid", "path": str(path), "items": 0, "by_status": {}, "by_lane": {}}
+    by_status: dict[str, int] = {}
+    by_lane: dict[str, dict[str, int]] = {}
+    for item in items.values():
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "unknown")
+        lane = str(item.get("lane") or "unknown")
+        by_status[status] = by_status.get(status, 0) + 1
+        lane_counts = by_lane.setdefault(lane, {})
+        lane_counts[status] = lane_counts.get(status, 0) + 1
+    return {
+        "status": "ok",
+        "path": str(path),
+        "items": sum(by_status.values()),
+        "by_status": dict(sorted(by_status.items())),
+        "by_lane": {lane: dict(sorted(counts.items())) for lane, counts in sorted(by_lane.items())},
+        "actionable": sum(
+            count
+            for status, count in by_status.items()
+            if status in {"pending_local", "local_retry", "pending_frontier", "frontier_retry"}
+        ),
+        "quarantined": by_status.get("quarantined", 0),
+        "human_required": by_status.get("human_required", 0),
+    }
+
+
+def _queue_status_counts(path: Path, field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in _read_jsonl(path, limit=100000):
+        status = str(row.get(field) or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def health_snapshot() -> dict[str, Any]:
     coverage = summary_coverage()
     duplicate_queue = WIKI_ROOT / "review" / "duplicate-candidates.jsonl"
     lint_queue = WIKI_ROOT / "review" / "lint-repair-queue.jsonl"
     golden = WIKI_ROOT / "recall" / "search-golden.jsonl"
+    label_queue = WIKI_ROOT / "recall" / "search-label-queue.jsonl"
+    raw_replay_queue = WIKI_ROOT / "review" / "raw-replay-queue.jsonl"
+    label_statuses = _queue_status_counts(label_queue, "queue_status")
+    replay_statuses = _queue_status_counts(raw_replay_queue, "status")
     return {
         "status": "ok",
         "coverage": coverage,
@@ -233,14 +280,31 @@ def health_snapshot() -> dict[str, Any]:
         "derived": derived_memory_kpi(),
         "read_back": read_back_kpi(),
         "recall_feedback": recall_feedback_kpi(),
+        "convergence": convergence_kpi(),
         "queues": {
             "duplicate_candidates": _jsonl_count(duplicate_queue),
             "lint_repair": _jsonl_count(lint_queue),
             "search_golden": _jsonl_count(golden),
+            "search_labels": _jsonl_count(label_queue),
+            "search_labels_pending": sum(
+                count
+                for status, count in label_statuses.items()
+                if status in {"unknown", "pending_review", "pending_frontier_review", "frontier_retry", "frontier_uncertain"}
+            ),
+            "raw_replay": _jsonl_count(raw_replay_queue),
+            "raw_replay_pending": sum(
+                count
+                for status, count in replay_statuses.items()
+                if status in {"unknown", "pending", "failed", "retry", "retry_wait"}
+            ),
+            "search_label_statuses": label_statuses,
+            "raw_replay_statuses": replay_statuses,
         },
         "paths": {
             "duplicate_queue": str(duplicate_queue),
             "lint_queue": str(lint_queue),
             "search_golden": str(golden),
+            "search_label_queue": str(label_queue),
+            "raw_replay_queue": str(raw_replay_queue),
         },
     }

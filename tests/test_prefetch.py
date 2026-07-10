@@ -12,9 +12,9 @@ def test_prefetch_cache_matches_project_bucket_and_tokens(tmp_path: Path) -> Non
     row = {
         "host": "codex",
         "cwd": "/Users/trafficsign/projects/personal/llm-wiki-mcp",
-        "prompt": "recall hook",
+        "prompt_preview": "recall hook",
         "queries": ["recall runtime"],
-        "context_items": [{"page_id": "recall-runtime"}],
+        "pages": ["recall-runtime"],
     }
     log_file.write_text(json.dumps(row) + "\n", encoding="utf-8")
 

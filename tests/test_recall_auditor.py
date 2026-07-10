@@ -339,3 +339,144 @@ def test_auditor_single_flight_skips_when_lock_is_held(tmp_path, monkeypatch) ->
 
     assert result["status"] == "skipped"
     assert result["reason"] == "another recall audit is already running"
+
+
+def test_pull_events_are_after_decision_and_exact_once(tmp_path, monkeypatch) -> None:
+    pull_log = tmp_path / "pull-log.jsonl"
+    consumed = tmp_path / "consumed.jsonl"
+    rows = [
+        {"ts": "2026-07-10T10:00:00", "session_id": "s1", "type": "read", "page_id": "old"},
+        {"ts": "2026-07-10T10:02:00", "session_id": "s1", "type": "search", "query": "q", "direct_pages": ["new"]},
+    ]
+    pull_log.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    monkeypatch.setattr(recall_auditor, "RECALL_PULL_LOG_FILE", pull_log)
+    turn = recall_auditor.TurnContext(host="codex", prompt="p", assistant_response="a", session_id="s1")
+    snapshot = {"ts": "2026-07-10T10:01:00", "pages": [], "decision_id": "d1"}
+
+    first = recall_auditor.matching_pull_events(turn, snapshot, consumed_file=consumed)
+    assert [event["missed_pages"] for event in first] == [["new"]]
+    consumed.write_text(json.dumps({"event_key": first[0]["event_key"]}) + "\n", encoding="utf-8")
+    assert recall_auditor.matching_pull_events(turn, snapshot, consumed_file=consumed) == []
+
+
+def test_record_pull_candidate_marks_event_consumed_after_feedback(tmp_path, monkeypatch) -> None:
+    consumed = tmp_path / "consumed.jsonl"
+    monkeypatch.setattr(recall_auditor, "append_feedback", lambda *args, **kwargs: {"ref": kwargs.get("ref", "")})
+    turn = recall_auditor.TurnContext(host="codex", prompt="p", assistant_response="a", session_id="s1")
+    event = {
+        "ts": "2026-07-10T10:02:00",
+        "session_id": "s1",
+        "type": "search",
+        "query": "q",
+        "direct_pages": ["new"],
+        "missed_pages": ["new"],
+    }
+    event["event_key"] = recall_auditor.pull_event_key(event)
+
+    records = recall_auditor.record_pull_missed_candidates(
+        turn=turn,
+        recall_snapshot={"decision_id": "d1"},
+        pull_events=[event],
+        host="codex",
+        consumed_file=consumed,
+    )
+
+    assert len(records) == 1
+    assert json.loads(consumed.read_text())["event_key"] == event["event_key"]
+
+
+def test_pull_event_matching_is_bounded_to_exact_session_turn(tmp_path, monkeypatch) -> None:
+    pull_log = tmp_path / "pull-log.jsonl"
+    recall_log = tmp_path / "recall-log.jsonl"
+    feedback_file = tmp_path / "feedback.jsonl"
+    consumed = tmp_path / "consumed.jsonl"
+    pull_rows = [
+        {
+            "ts": "2026-07-10T12:02:00+02:00",
+            "session_id": "s1",
+            "type": "search",
+            "query": "inside",
+            "direct_pages": ["inside-page"],
+        },
+        {"ts": "2026-07-10T10:02:10Z", "session_id": "", "type": "read", "page_id": "blank"},
+        {"ts": "2026-07-10T10:02:20Z", "session_id": "s2", "type": "read", "page_id": "other"},
+        {"ts": "2026-07-10T10:04:00Z", "session_id": "s1", "type": "read", "page_id": "next-turn"},
+        {"ts": "malformed", "session_id": "s1", "type": "read", "page_id": "malformed"},
+    ]
+    pull_log.write_text("".join(json.dumps(row) + "\n" for row in pull_rows), encoding="utf-8")
+    recall_log.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in [
+                {"ts": "2026-07-10T10:01:00Z", "session_id": "s1", "decision_id": "d1"},
+                {"ts": "2026-07-10T10:03:00Z", "session_id": "s1", "decision_id": "d2"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(recall_auditor, "RECALL_PULL_LOG_FILE", pull_log)
+    monkeypatch.setattr(recall_auditor, "RECALL_LOG_FILE", recall_log)
+    turn = recall_auditor.TurnContext(
+        host="codex", prompt="p", assistant_response="a", session_id="s1"
+    )
+
+    events = recall_auditor.matching_pull_events(
+        turn,
+        {"ts": "2026-07-10T10:01:00Z", "pages": [], "decision_id": "d1"},
+        consumed_file=consumed,
+        feedback_file=feedback_file,
+    )
+
+    assert [event["missed_pages"] for event in events] == [["inside-page"]]
+    no_identity = recall_auditor.TurnContext(
+        host="codex", prompt="p", assistant_response="a", session_id=""
+    )
+    assert recall_auditor.matching_pull_events(no_identity, {"ts": "2026-07-10T10:01:00Z"}) == []
+
+
+def test_feedback_commit_suppresses_pull_duplicate_and_heals_consumed_index(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    pull_log = tmp_path / "pull-log.jsonl"
+    feedback_file = tmp_path / "feedback.jsonl"
+    consumed = tmp_path / "consumed.jsonl"
+    event = {
+        "ts": "2026-07-10T10:02:00Z",
+        "session_id": "s1",
+        "type": "read",
+        "page_id": "target",
+        "missed_pages": ["target"],
+    }
+    event["event_key"] = recall_auditor.pull_event_key(event)
+    pull_log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    feedback_file.write_text(
+        json.dumps({"kind": "missed_candidate", "pull_event_key": event["event_key"]}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(recall_auditor, "RECALL_PULL_LOG_FILE", pull_log)
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+    monkeypatch.setattr(
+        recall_auditor,
+        "append_feedback",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not append twice")),
+    )
+    turn = recall_auditor.TurnContext(
+        host="codex", prompt="p", assistant_response="a", session_id="s1"
+    )
+
+    assert (
+        recall_auditor.record_pull_missed_candidates(
+            turn=turn,
+            recall_snapshot={"decision_id": "d1"},
+            pull_events=[event],
+            host="codex",
+            consumed_file=consumed,
+        )
+        == []
+    )
+    recovered = json.loads(consumed.read_text(encoding="utf-8"))
+    assert recovered["event_key"] == event["event_key"]
+    assert recovered["recovered_from_feedback"] is True

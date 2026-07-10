@@ -10,6 +10,38 @@ from llm_wiki_mcp.runtime_config import EmbeddingConfig
 from llm_wiki_mcp.search import ScoredPage, apply_filters, fuse_results, usage_prior_results
 
 
+def test_read_only_embedding_probe_does_not_create_missing_database(
+    tmp_path, monkeypatch
+) -> None:
+    database = tmp_path / "missing" / "embeddings.sqlite"
+    monkeypatch.setattr(search, "EMBEDDINGS_DB", database)
+    monkeypatch.setattr(search, "LEGACY_EMBEDDINGS_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr(search, "_legacy_migration_done", False)
+    monkeypatch.setenv("LLM_WIKI_READ_ONLY", "1")
+
+    assert search._embedding_count() == 0
+    assert not database.exists()
+
+
+def test_bm25_read_only_refresh_persists_dirty_cache_on_next_normal_build(
+    tmp_path, monkeypatch
+) -> None:
+    page_path = tmp_path / "page.md"
+    page_path.write_text("---\ntitle: Page\nupdated: 2026-01-01\n---\nsearchable body\n")
+    cache_path = tmp_path / ".index" / "bm25.json"
+    monkeypatch.setattr(search, "_BM25_CACHE_FILE", cache_path)
+    monkeypatch.setattr(search, "searchable_pages", lambda: [page_path])
+    monkeypatch.setenv("LLM_WIKI_READ_ONLY", "1")
+    index = search.BM25Index()
+
+    index.build()
+
+    assert not cache_path.exists()
+    monkeypatch.delenv("LLM_WIKI_READ_ONLY")
+    index.build()
+    assert cache_path.exists()
+
+
 def page(
     page_id: str,
     score: float,
@@ -413,3 +445,57 @@ def test_usage_prior_applies_recency_decay_and_cap(tmp_path, monkeypatch) -> Non
     assert len(results) == 1
     assert results[0].page_id == "p"
     assert results[0].score == 1.2
+
+
+def test_active_fusion_policy_fails_closed_on_partial_or_invalid_weights(tmp_path) -> None:
+    policy = tmp_path / "search-policy.json"
+    policy.write_text(
+        json.dumps({"weights": {"semantic": 0.7, "graph": -1, "unknown": 99, "bm25": "bad"}}),
+        encoding="utf-8",
+    )
+
+    weights = search.load_active_fusion_weights(policy)
+
+    assert weights == search.DEFAULT_FUSION_WEIGHTS
+
+
+def test_active_fusion_policy_accepts_complete_versioned_artifact(tmp_path) -> None:
+    policy = tmp_path / "search-policy.json"
+    expected = {**search.DEFAULT_FUSION_WEIGHTS, "semantic": 0.7}
+    policy.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source": "search_eval.self_tune",
+                "holdout": {"mrr": 0.8},
+                "weights": expected,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert search.load_active_fusion_weights(policy) == expected
+
+
+def test_active_fusion_policy_rejects_all_zero_retrieval_channels(tmp_path) -> None:
+    policy = tmp_path / "search-policy.json"
+    weights = {
+        **search.DEFAULT_FUSION_WEIGHTS,
+        "bm25": 0.0,
+        "semantic": 0.0,
+        "graph": 0.0,
+        "usage_prior": 0.0,
+    }
+    policy.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source": "search_eval.self_tune",
+                "holdout": {},
+                "weights": weights,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert search.load_active_fusion_weights(policy) == search.DEFAULT_FUSION_WEIGHTS

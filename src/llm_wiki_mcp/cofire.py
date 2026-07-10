@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.recall_log_schema import page_ids_from_record
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
@@ -35,25 +36,6 @@ def _read_recent_jsonl(path: Path, *, limit: int = 5000) -> list[dict[str, Any]]
         if isinstance(row, dict):
             rows.append(row)
     return rows
-
-
-def page_ids_from_record(row: dict[str, Any]) -> list[str]:
-    out: list[str] = []
-    for item in row.get("context_items", []) or []:
-        if isinstance(item, dict) and isinstance(item.get("page_id"), str):
-            out.append(item["page_id"])
-    for key in ("injected_pages", "expected_pages"):
-        for page_id in row.get(key, []) or []:
-            if isinstance(page_id, str):
-                out.append(page_id)
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for page_id in out:
-        if page_id in seen:
-            continue
-        seen.add(page_id)
-        deduped.append(page_id)
-    return deduped
 
 
 def build_cofire_graph(

@@ -1,6 +1,10 @@
-"""Orphan link suggestion (plan-2).
+"""Orphan link proposal and autonomous convergence.
 
-Generates a *dry-run* report listing, for every orphan page, the existing
+The legacy report API generates a *dry-run* listing for every orphan page. The
+nightly API uses the same candidate/scoring path, then applies only a
+frontier-approved suggestion with a content compare-and-swap.
+
+The report lists the existing
 ``source`` pages most likely to benefit from gaining an inbound
 ``[[orphan]]`` link. Direction matters: this module proposes
 ``source_page → orphan_page`` edges, NOT the reverse — adding outbound
@@ -19,20 +23,40 @@ The pipeline is:
        Page IDs never appear in the LLM output (they're held in the
        caller's context, fabrication is impossible).
     5. Drop any candidate below ``confidence_threshold``.
-    6. Write a human-reviewable Markdown report. Pages on disk are NOT
-       modified.
+    6. Either write a diagnostic Markdown report without page mutations, or
+       pass the best proposal through bounded frontier review and CAS apply.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 from llm_wiki_mcp.wiki import find_page
+from llm_wiki_mcp.wiki import WIKI_ROOT
+from llm_wiki_mcp.link_fix import atomic_write, protected_spans
+
+
+DECISIONS_FILE = WIKI_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RESOLVER_VERSION = "orphan-link-v1"
+DEFAULT_FRONTIER_CONFIDENCE_THRESHOLD = 0.8
+
+ORPHAN_FRONTIER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["decision", "confidence", "summary"],
+    "properties": {
+        "decision": {"type": "string", "enum": ["approved", "rejected", "needs_retry"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string"},
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +148,9 @@ def parse_llm_response(raw: str) -> dict | None:
         return None
     if not _ALLOWED_FIELDS.issubset(obj.keys()):
         return None
-    if not isinstance(obj["confidence"], (int, float)):
+    if isinstance(obj["confidence"], bool) or not isinstance(
+        obj["confidence"], (int, float)
+    ):
         return None
     confidence = float(obj["confidence"])
     if not (0.0 <= confidence <= 1.0):
@@ -244,12 +270,33 @@ def score_candidate(
 ) -> dict | None:
     """Ask the LLM to score one (source, orphan) pair. None on any failure
     (LLM down, malformed response, schema violation)."""
+    outcome = _score_candidate_outcome(source_id, orphan_id, store, generate_fn)
+    score = outcome.get("score")
+    return score if isinstance(score, dict) else None
+
+
+def _score_candidate_outcome(
+    source_id: str,
+    orphan_id: str,
+    store,
+    generate_fn: Callable[..., str],
+) -> dict[str, Any]:
+    """Keep transient model failures distinct from a valid low score."""
     prompt = _build_prompt(source_id, orphan_id, store)
     try:
         raw = generate_fn(prompt, system=SUGGESTION_SYSTEM_PROMPT)
-    except Exception:
-        return None
-    return parse_llm_response(raw)
+    except Exception as exc:
+        return {
+            "status": "call_error",
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+    parsed = parse_llm_response(raw)
+    if parsed is None:
+        return {
+            "status": "schema_error",
+            "error": "local suggestion did not match the required schema",
+        }
+    return {"status": "ok", "score": parsed}
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +389,551 @@ def run_dry_run(
     }
 
 
+def _content_hash(page_id: str) -> str:
+    path = find_page(page_id)
+    if path is None:
+        return "missing"
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "unreadable"
+
+
+def _wiki_link_spans(text: str) -> list[tuple[int, int]]:
+    """Return spans for complete and dangling wiki links.
+
+    Anchors inside an existing ``[[...]]`` must never be wrapped again: doing
+    so creates nested markup that the wiki-link parser cannot recover from.
+    """
+    spans: list[tuple[int, int]] = []
+    offset = 0
+    while True:
+        start = text.find("[[", offset)
+        if start < 0:
+            break
+        end = text.find("]]", start + 2)
+        if end < 0:
+            line_end = text.find("\n", start + 2)
+            spans.append((start, len(text) if line_end < 0 else line_end))
+            offset = len(text) if line_end < 0 else line_end + 1
+            continue
+        spans.append((start, end + 2))
+        offset = end + 2
+    return spans
+
+
+def _sanitize_section_heading(value: object) -> str:
+    """Reduce an untrusted model heading to one plain single-line label."""
+    first_line = str(value or "").splitlines()[0].strip() if str(value or "") else ""
+    first_line = first_line.lstrip("#").strip()
+    cleaned = "".join(
+        char
+        for char in first_line
+        if char.isalnum() or char in {" ", "-", "_", "/", "&", "・", "／"}
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()[:80]
+    return cleaned or "Related"
+
+
+def apply_suggestion(
+    orphan_id: str,
+    suggestion: Suggestion,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Apply one frontier-approved inbound link with a content CAS."""
+    source_path = find_page(suggestion.source_page_id)
+    target_path = find_page(orphan_id)
+    if source_path is None or target_path is None:
+        return {"status": "error", "reason": "source_or_target_missing"}
+    try:
+        original = source_path.read_text(encoding="utf-8")
+        target_preimage = target_path.read_bytes()
+    except OSError as exc:
+        return {"status": "error", "reason": f"read_error:{exc}"}
+    link = f"[[{orphan_id}]]"
+    if re.search(r"\[\[" + re.escape(orphan_id) + r"(?:[#|\]])", original):
+        return {"status": "already_applied", "source": suggestion.source_page_id, "target": orphan_id}
+
+    updated = original
+    anchor = suggestion.suggested_anchor.strip()
+    if (
+        "\n" in anchor
+        or "\r" in anchor
+        or "[[" in anchor
+        or "]]" in anchor
+        or len(anchor) > 200
+    ):
+        anchor = ""
+    if anchor:
+        spans = sorted([*protected_spans(original), *_wiki_link_spans(original)])
+        positions = [match.start() for match in re.finditer(re.escape(anchor), original)]
+        position = next(
+            (
+                pos
+                for pos in positions
+                if not any(
+                    pos < protected_end and pos + len(anchor) > protected_start
+                    for protected_start, protected_end in spans
+                )
+            ),
+            None,
+        )
+        if position is not None:
+            replacement = f"[[{orphan_id}|{anchor}]]"
+            updated = original[:position] + replacement + original[position + len(anchor):]
+    if updated == original:
+        section = _sanitize_section_heading(suggestion.suggested_section)
+        suffix = "" if original.endswith("\n") else "\n"
+        updated = f"{original}{suffix}\n## {section}\n\n- {link}\n"
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "source": suggestion.source_page_id,
+            "target": orphan_id,
+            "changed": updated != original,
+        }
+    wrote_source = False
+    try:
+        if source_path.read_text(encoding="utf-8") != original:
+            return {"status": "retry", "reason": "source_changed_before_apply"}
+        if target_path.read_bytes() != target_preimage:
+            return {"status": "retry", "reason": "target_changed_before_apply"}
+        atomic_write(source_path, updated)
+        wrote_source = True
+        written = source_path.read_text(encoding="utf-8")
+        target_after = target_path.read_bytes()
+    except OSError as exc:
+        if wrote_source:
+            try:
+                if source_path.read_text(encoding="utf-8") == updated:
+                    atomic_write(source_path, original)
+            except OSError:
+                pass
+        return {"status": "error", "reason": f"write_error:{exc}"}
+    if f"[[{orphan_id}" not in written or target_after != target_preimage:
+        # Roll back only our exact write; never overwrite a concurrent writer.
+        try:
+            if source_path.read_text(encoding="utf-8") == updated:
+                atomic_write(source_path, original)
+        except OSError:
+            pass
+        return {"status": "error", "reason": "post_write_verification_failed"}
+    return {"status": "applied", "source": suggestion.source_page_id, "target": orphan_id}
+
+
+def _frontier_failure_class(review: dict[str, Any]) -> str | None:
+    failure = review.get("frontier_failure")
+    if isinstance(failure, dict) and isinstance(failure.get("failure_class"), str):
+        return failure["failure_class"]
+    return None
+
+
+def _normalize_frontier_review(value: object) -> dict[str, Any]:
+    """Fail closed for custom reviewers that bypass Codex output-schema."""
+    if not isinstance(value, Mapping):
+        return {
+            "decision": "needs_retry",
+            "confidence": 0.0,
+            "summary": "frontier result is not an object",
+            "valid": False,
+        }
+    review = dict(value)
+    decision = review.get("decision")
+    summary = review.get("summary")
+    confidence = review.get("confidence")
+    errors: list[str] = []
+    if decision not in {"approved", "rejected", "needs_retry"}:
+        errors.append("invalid decision")
+        decision = "needs_retry"
+    if not isinstance(summary, str) or not summary.strip():
+        errors.append("summary is required")
+        summary = str(summary or "frontier result is missing a summary")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        errors.append("confidence must be numeric")
+        numeric_confidence = 0.0
+    else:
+        numeric_confidence = float(confidence)
+        if not 0.0 <= numeric_confidence <= 1.0:
+            errors.append("confidence is outside [0, 1]")
+            numeric_confidence = 0.0
+    return {
+        **review,
+        "decision": decision if not errors else "needs_retry",
+        "confidence": numeric_confidence,
+        "summary": summary.strip(),
+        "valid": not errors,
+        "validation_errors": errors,
+    }
+
+
+def _review_orphan_suggestion(
+    orphan_id: str,
+    suggestion: Suggestion,
+    *,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    candidate = {
+        "orphan_page_id": orphan_id,
+        "source_page_id": suggestion.source_page_id,
+        "confidence": suggestion.confidence,
+        "reason": suggestion.reason,
+        "suggested_anchor": suggestion.suggested_anchor,
+        "suggested_section": suggestion.suggested_section,
+        "source_excerpt": _page_head(suggestion.source_page_id, max_chars=1200),
+        "target_excerpt": _page_head(orphan_id, max_chars=1200),
+    }
+    if reviewer is not None:
+        return reviewer(candidate)
+    from llm_wiki_mcp.frontier_review import run_structured_review
+
+    prompt = f"""\
+You are the final autonomous reviewer for an LLM Wiki orphan-link proposal.
+Approve only if the SOURCE naturally benefits from linking to the TARGET and
+the proposed placement is not misleading. Reject forced or weak links. Do not
+edit files and do not ask a human. Return JSON matching the schema.
+
+Candidate:
+{json.dumps(candidate, ensure_ascii=False, indent=2)}
+"""
+    return run_structured_review(prompt, ORPHAN_FRONTIER_SCHEMA, repo_root=PROJECT_ROOT)
+
+
+def run_autonomous(
+    *,
+    orphan_limit: int = 3,
+    max_candidates: int = 3,
+    confidence_threshold: float = 0.75,
+    store=None,
+    generate_fn: Callable[..., str] | None = None,
+    semantic_search_fn: Callable[[str, int], list] | None = None,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    convergence_store=None,
+    budget=None,
+    frontier_confidence_threshold: float = DEFAULT_FRONTIER_CONFIDENCE_THRESHOLD,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Boundedly drain orphan proposals through local + frontier review."""
+    from llm_wiki_mcp.convergence import (
+        ConvergenceStore,
+        CycleBudget,
+        TERMINAL_STATUSES,
+        stable_item_key,
+    )
+
+    if store is None:
+        from llm_wiki_mcp.index_store import get_store
+
+        store = get_store()
+        store.refresh()
+    if generate_fn is None:
+        from llm_wiki_mcp.ollama import generate
+
+        generate_fn = generate
+    state = convergence_store or ConvergenceStore()
+    cycle_budget = budget or CycleBudget(max_local_calls=max(1, orphan_limit * max_candidates), max_frontier_calls=2, max_mutations=2)
+    orphans = store.orphans(include_system=False)
+    retired_absent = state.retire_absent_sources(
+        lane="orphan_link",
+        active_source_ids={f"orphan:{page_id}" for page_id in orphans},
+        reason="page_is_no_longer_orphaned",
+        dry_run=dry_run,
+    )
+    retired_stale = state.retire_stale(
+        lane="orphan_link",
+        reason="orphan_candidate_expired",
+        dry_run=dry_run,
+    )
+    work_limit = max(0, int(orphan_limit))
+    frontier_confidence_threshold = max(0.0, min(1.0, float(frontier_confidence_threshold)))
+    results: list[dict[str, Any]] = []
+    work_items = 0
+    scanned = 0
+
+    for orphan_id in orphans:
+        scanned += 1
+        discovery_error: str | None = None
+        try:
+            candidates = gather_candidates(
+                orphan_id,
+                store,
+                max_candidates=max_candidates,
+                semantic_search_fn=semantic_search_fn,
+            )
+        except Exception as exc:
+            candidates = []
+            discovery_error = f"{exc.__class__.__name__}: {exc}"
+        # The production semantic path returns [] both for an empty result and
+        # for unavailable/missing embeddings. Treat that ambiguous condition as
+        # retryable. Injected search functions in tests/tools can explicitly
+        # establish a deterministic empty result.
+        if not candidates and semantic_search_fn is None and discovery_error is None:
+            discovery_error = "production semantic search returned no candidates"
+        source_id = candidates[0] if candidates else ""
+        input_data = {
+            "orphan": orphan_id,
+            "orphan_hash": _content_hash(orphan_id),
+            "candidates": [
+                {"source": candidate_id, "source_hash": _content_hash(candidate_id)}
+                for candidate_id in candidates
+            ],
+        }
+        key = stable_item_key(
+            "orphan_link",
+            f"orphan:{orphan_id}",
+            input_data,
+            resolver_version=RESOLVER_VERSION,
+        )
+        existing = state.get(key)
+        if existing is not None and existing.get("status") in TERMINAL_STATUSES:
+            results.append(
+                {
+                    "orphan": orphan_id,
+                    "source": source_id,
+                    "status": existing.get("status"),
+                    "cached": True,
+                    "key": key,
+                }
+            )
+            continue
+
+        # Candidate discovery with no result is resolved/retried durably below,
+        # but it performs no model review and therefore must not consume the
+        # bounded model-work allowance or starve later actionable orphans.
+        if candidates and work_items >= work_limit:
+            break
+        if existing is None:
+            merged = state.merge_item(
+                lane="orphan_link",
+                source_id=f"orphan:{orphan_id}",
+                input_data=input_data,
+                resolver_version=RESOLVER_VERSION,
+                metadata={
+                    "orphan": orphan_id,
+                    "source": source_id,
+                    "candidate_discovery_error": discovery_error,
+                },
+                dry_run=dry_run,
+            )
+            item = merged["item"]
+        else:
+            # In particular, retain the locally-approved suggestion while a
+            # frontier retry/backoff is pending.  Re-merging observational
+            # metadata here would otherwise replace that durable hand-off.
+            item = existing
+        key = item["key"]
+        # A concurrent worker may have completed the item after the preflight
+        # read but before the merge lock was acquired.
+        if item.get("status") in TERMINAL_STATUSES:
+            results.append(
+                {
+                    "orphan": orphan_id,
+                    "source": source_id,
+                    "status": item.get("status"),
+                    "cached": True,
+                    "key": key,
+                }
+            )
+            continue
+        if dry_run:
+            if candidates:
+                work_items += 1
+            status = (
+                "would_retry_candidate_discovery"
+                if discovery_error
+                else "would_reject_no_candidate"
+                if not candidates
+                else "would_process"
+            )
+            results.append({"orphan": orphan_id, "source": source_id, "status": status, "key": key})
+            continue
+        if not candidates:
+            if discovery_error:
+                claim = state.claim_attempt(key, "local", budget=cycle_budget)
+                if not claim["claimed"]:
+                    results.append({"orphan": orphan_id, "status": claim["reason"], "key": key})
+                    continue
+                failed = state.fail_attempt(
+                    key,
+                    "local",
+                    error=discovery_error,
+                    failure_class="candidate_discovery_error",
+                    allow_frontier=False,
+                    owner=claim["owner"],
+                )
+                results.append(
+                    {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
+                )
+            else:
+                completed = state.complete(
+                    key,
+                    "rejected",
+                    result={"reason": "no_semantic_candidate"},
+                )
+                results.append(
+                    {"orphan": orphan_id, "status": completed["item"]["status"], "key": key}
+                )
+            continue
+
+        item_counted = False
+        if item["status"] == "pending_local" or item["status"] == "local_retry":
+            claim = state.claim_attempt(key, "local", budget=cycle_budget)
+            if not claim["claimed"]:
+                results.append({"orphan": orphan_id, "status": claim["reason"], "key": key})
+                continue
+            work_items += 1
+            item_counted = True
+            local_suggestion: Suggestion | None = None
+            valid_scores: list[dict[str, Any]] = []
+            local_errors: list[dict[str, Any]] = []
+            for index, candidate_id in enumerate(candidates):
+                if index:
+                    allowed, budget_reason = cycle_budget.consume("local")
+                    if not allowed:
+                        local_errors.append({"status": "budget_deferred", "error": budget_reason})
+                        break
+                outcome = _score_candidate_outcome(candidate_id, orphan_id, store, generate_fn)
+                scored = outcome.get("score")
+                if isinstance(scored, dict):
+                    valid_scores.append(scored)
+                else:
+                    local_errors.append(
+                        {"source": candidate_id, "status": outcome.get("status"), "error": outcome.get("error")}
+                    )
+                    continue
+                if scored["confidence"] >= confidence_threshold:
+                    local_suggestion = Suggestion(source_page_id=candidate_id, **scored)
+                    break
+            if local_suggestion is None:
+                if valid_scores and not local_errors:
+                    completed = state.complete(
+                        key,
+                        "rejected",
+                        result={
+                            "reason": "all_local_candidates_below_confidence_threshold",
+                            "max_confidence": max(float(score["confidence"]) for score in valid_scores),
+                            "local_errors": local_errors,
+                        },
+                        owner=claim["owner"],
+                    )
+                    results.append({"orphan": orphan_id, "status": completed["item"]["status"], "key": key})
+                else:
+                    failed = state.fail_attempt(
+                        key,
+                        "local",
+                        error="; ".join(str(error.get("error") or error.get("status")) for error in local_errors)
+                        or "all local candidate reviews failed",
+                        failure_class="local_model_or_schema_error",
+                        allow_frontier=False,
+                        owner=claim["owner"],
+                    )
+                    results.append({"orphan": orphan_id, "status": failed["item"]["status"], "key": key})
+                continue
+            state.merge_item(
+                lane="orphan_link",
+                source_id=f"orphan:{orphan_id}",
+                input_data=input_data,
+                resolver_version=RESOLVER_VERSION,
+                metadata={
+                    "orphan": orphan_id,
+                    "source": source_id,
+                    "candidate_discovery_error": None,
+                    "suggestion": local_suggestion.__dict__,
+                },
+            )
+            state.escalate(key, reason="local suggestion requires frontier final review", owner=claim["owner"])
+            item = state.get(key) or item
+
+        if item.get("status") not in {"pending_frontier", "frontier_retry"}:
+            results.append({"orphan": orphan_id, "status": item.get("status"), "key": key})
+            continue
+        claim = state.claim_attempt(key, "frontier", budget=cycle_budget)
+        if not claim["claimed"]:
+            results.append({"orphan": orphan_id, "status": claim["reason"], "key": key})
+            continue
+        if not item_counted:
+            work_items += 1
+        metadata = (state.get(key) or {}).get("metadata") or {}
+        raw_suggestion = metadata.get("suggestion") if isinstance(metadata, dict) else None
+        if not isinstance(raw_suggestion, dict):
+            state.fail_attempt(key, "frontier", error="local suggestion missing", owner=claim["owner"])
+            results.append({"orphan": orphan_id, "status": "frontier_retry", "key": key})
+            continue
+        try:
+            suggestion = Suggestion(**raw_suggestion)
+        except (TypeError, ValueError) as exc:
+            failed = state.fail_attempt(
+                key,
+                "frontier",
+                error=f"invalid persisted suggestion: {exc}",
+                owner=claim["owner"],
+            )
+            results.append({"orphan": orphan_id, "status": failed["item"]["status"], "key": key})
+            continue
+        try:
+            raw_review = _review_orphan_suggestion(orphan_id, suggestion, reviewer=reviewer)
+        except Exception as exc:
+            raw_review = {
+                "decision": "needs_retry",
+                "confidence": 0.0,
+                "summary": f"{exc.__class__.__name__}: {exc}",
+            }
+        review = _normalize_frontier_review(raw_review)
+        decision = review.get("decision")
+        if decision == "rejected":
+            state.complete(key, "rejected", result={"frontier": review}, owner=claim["owner"])
+            results.append({"orphan": orphan_id, "status": "rejected", "key": key})
+            continue
+        if decision != "approved":
+            failed = state.fail_attempt(
+                key,
+                "frontier",
+                error=str(review.get("summary") or "frontier needs retry"),
+                failure_class=_frontier_failure_class(review),
+                owner=claim["owner"],
+            )
+            results.append({"orphan": orphan_id, "status": failed["item"]["status"], "key": key})
+            continue
+        if float(review.get("confidence") or 0.0) < frontier_confidence_threshold:
+            completed = state.complete(
+                key,
+                "rejected",
+                result={
+                    "reason": "frontier_confidence_below_threshold",
+                    "required_confidence": frontier_confidence_threshold,
+                    "frontier": review,
+                },
+                owner=claim["owner"],
+            )
+            results.append({"orphan": orphan_id, "status": completed["item"]["status"], "key": key})
+            continue
+        allowed, reason = cycle_budget.consume("mutation")
+        if not allowed:
+            state.fail_attempt(key, "frontier", error=reason, owner=claim["owner"])
+            results.append({"orphan": orphan_id, "status": reason, "key": key})
+            continue
+        applied = apply_suggestion(orphan_id, suggestion)
+        if applied["status"] in {"applied", "already_applied"}:
+            state.complete(key, "applied", result={"frontier": review, "apply": applied}, owner=claim["owner"])
+        else:
+            state.fail_attempt(key, "frontier", error=str(applied.get("reason") or applied["status"]), owner=claim["owner"])
+        results.append({"orphan": orphan_id, "status": (state.get(key) or {}).get("status"), "key": key})
+
+    return {
+        "status": "ok",
+        "orphans_seen": scanned,
+        "orphans_total": len(orphans),
+        "work_items": work_items,
+        "results": results,
+        "retired": sorted(
+            set(retired_absent.get("retired", []))
+            | set(retired_stale.get("retired", []))
+        ),
+        "budget": cycle_budget.snapshot(),
+        "dry_run": dry_run,
+    }
+
+
 def format_report(
     reports: list[OrphanReport],
     *,
@@ -371,7 +963,7 @@ def format_report(
     lines.append("# Orphan Link Suggestions (dry-run)")
     lines.append("")
     lines.append("Direction: each suggestion proposes `source_page → orphan_page`.")
-    lines.append("Pages on disk are NOT modified by this report — review and apply by hand.")
+    lines.append("Pages are not modified by this diagnostic report; nightly convergence reviews and applies bounded proposals.")
     lines.append("")
     lines.append("## Run statistics")
     lines.append(f"- generated_at: {datetime.now().isoformat(timespec='seconds')}")

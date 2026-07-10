@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from llm_wiki_mcp import search_eval
+from llm_wiki_mcp.convergence import CycleBudget
 from llm_wiki_mcp.reranker import RerankOutcome
 from llm_wiki_mcp.runtime_config import RerankerConfig
 from llm_wiki_mcp.search import ScoredPage
@@ -355,6 +356,114 @@ def test_frontier_review_promotes_trusted_label_queue_rows(tmp_path) -> None:
     assert golden_rows[0]["expected_pages"] == ["target"]
 
 
+def test_frontier_review_commits_golden_before_queue_ack(tmp_path, monkeypatch) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "query",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+    writes = []
+    original_write = search_eval.write_jsonl
+
+    def recording_write(path, rows):
+        writes.append(path)
+        original_write(path, rows)
+
+    monkeypatch.setattr(search_eval, "write_jsonl", recording_write)
+    search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "expected_pages": ["target"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "trusted",
+            "notes": None,
+        },
+    )
+
+    assert writes == [golden_file, queue_file]
+
+
+def test_frontier_review_recovers_either_cross_file_crash_window(tmp_path) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    trusted_review = {
+        "decision": "approved",
+        "confidence": 0.94,
+        "expected_pages": ["target"],
+        "negative_pages": [],
+        "stale_pages": [],
+        "summary": "trusted",
+        "notes": None,
+        "reviewer": "frontier:test",
+    }
+
+    # Legacy queue-first crash: acknowledgement exists but golden is absent.
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "legacy",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "frontier_approved",
+                "promoted_to_golden": True,
+                "frontier_review": trusted_review,
+            }
+        ],
+    )
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: (_ for _ in ()).throw(AssertionError("must not review again")),
+    )
+    assert result["recovered"] == 1
+    assert json.loads(golden_file.read_text().splitlines()[0])["query"] == "legacy"
+
+    # Golden-first crash: trusted golden exists but the queue is still pending.
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "legacy",
+                "expected_pages": ["old-candidate"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "ref": "r1",
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+    golden_row = json.loads(golden_file.read_text().splitlines()[0])
+    golden_row["ref"] = "r1"
+    write_jsonl(golden_file, [golden_row])
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: (_ for _ in ()).throw(AssertionError("must not review again")),
+    )
+    queue_row = json.loads(queue_file.read_text().splitlines()[0])
+    assert result["recovered"] == 1
+    assert result["attempted"] == 0
+    assert queue_row["queue_status"] == "frontier_approved"
+    assert queue_row["promoted_to_golden"] is True
+
+
 def test_frontier_review_keeps_low_confidence_rows_out_of_golden(tmp_path) -> None:
     queue_file = tmp_path / "label-queue.jsonl"
     golden_file = tmp_path / "search-golden.jsonl"
@@ -607,3 +716,168 @@ def test_self_tune_shadow_blocks_when_locked_regresses(tmp_path, monkeypatch) ->
     assert result["status"] == "blocked"
     assert result["applied"] is False
     assert history_file.exists()
+
+
+def test_self_tune_runtime_budget_defers_without_history_mutation(tmp_path, monkeypatch) -> None:
+    golden_file = tmp_path / "golden.jsonl"
+    history_file = tmp_path / "self-tune.jsonl"
+    write_jsonl(
+        golden_file,
+        [
+            {"query": "dev", "expected_pages": ["target"], "split": "dev", "reviewed": True},
+            {
+                "query": "locked",
+                "expected_pages": ["target"],
+                "split": "locked-test",
+                "reviewed": True,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        search_eval,
+        "_rows_for_weight_eval",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("budget must stop evaluation")),
+    )
+
+    result = search_eval.self_tune(
+        golden_file=golden_file,
+        history_file=history_file,
+        max_elapsed_seconds=0,
+    )
+
+    assert result["status"] == "budget_deferred"
+    assert not history_file.exists()
+
+
+def test_build_label_queue_preserves_terminal_decisions(tmp_path) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file = tmp_path / "log.jsonl"
+    queue_file = tmp_path / "queue.jsonl"
+    write_jsonl(
+        feedback_file,
+        [{"kind": "missed_candidate", "prompt": "query", "expected_pages": ["target"], "ref": "r1"}],
+    )
+    write_jsonl(log_file, [])
+    search_eval.build_label_queue(feedback_file=feedback_file, log_file=log_file, output_file=queue_file)
+    row = json.loads(queue_file.read_text().splitlines()[0])
+    row.update({"queue_status": "frontier_rejected", "frontier_attempts": 1, "review_note": "wrong"})
+    write_jsonl(queue_file, [row])
+
+    search_eval.build_label_queue(feedback_file=feedback_file, log_file=log_file, output_file=queue_file)
+
+    refreshed = json.loads(queue_file.read_text().splitlines()[0])
+    assert refreshed["queue_status"] == "frontier_rejected"
+    assert refreshed["frontier_attempts"] == 1
+    assert refreshed["review_note"] == "wrong"
+
+
+def test_frontier_label_retry_quarantines_after_bound(tmp_path) -> None:
+    queue_file = tmp_path / "queue.jsonl"
+    golden_file = tmp_path / "golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [{"query": "q", "expected_pages": ["p"], "queue_status": "frontier_retry", "frontier_attempts": 2}],
+    )
+
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        max_attempts=3,
+        backoff_base_seconds=0,
+        reviewer=lambda _row: {
+            "decision": "needs_retry",
+            "confidence": 0,
+            "expected_pages": [],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "temporary",
+            "notes": None,
+        },
+    )
+
+    row = json.loads(queue_file.read_text().splitlines()[0])
+    assert result["status_counts"] == {"frontier_quarantined": 1}
+    assert row["queue_status"] == "frontier_quarantined"
+
+
+def test_self_tune_applies_frontier_approved_policy(tmp_path, monkeypatch) -> None:
+    golden_file = tmp_path / "golden.jsonl"
+    history_file = tmp_path / "history.jsonl"
+    policy_file = tmp_path / "search-policy.json"
+    write_jsonl(
+        golden_file,
+        [
+            {"query": "dev", "expected_pages": ["target"], "split": "dev", "reviewed": True},
+            {"query": "locked", "expected_pages": ["target"], "split": "locked-test", "reviewed": True},
+        ],
+    )
+
+    def fake_rows(examples, weights):
+        rows = []
+        for example in examples:
+            hit = example.query == "locked" or float(weights["semantic"]) >= 0.7
+            rows.append(
+                {
+                    "expected_pages": list(example.expected_pages),
+                    "negative_pages": [],
+                    "stale_pages": [],
+                    "result_pages": ["target"] if hit else ["other"],
+                    "latency_ms": 1,
+                }
+            )
+        return rows
+
+    monkeypatch.setattr(search_eval, "_rows_for_weight_eval", fake_rows)
+    apply_budget = CycleBudget(max_mutations=1)
+    result = search_eval.self_tune(
+        golden_file=golden_file,
+        history_file=history_file,
+        policy_file=policy_file,
+        apply=True,
+        frontier_mode="auto",
+        frontier_reviewer=lambda _record: {"decision": "approved", "summary": "safe"},
+        budget=apply_budget,
+    )
+
+    assert result["status"] == "applied"
+    assert result["applied"] is True
+    assert json.loads(policy_file.read_text())["weights"]["semantic"] == 0.7
+    assert apply_budget.snapshot()["used"]["mutation"] == 1
+
+    deferred_policy = tmp_path / "deferred-policy.json"
+    deferred_policy.write_text(
+        json.dumps({"weights": dict(search_eval.DEFAULT_FUSION_WEIGHTS)}) + "\n",
+        encoding="utf-8",
+    )
+    before = deferred_policy.read_bytes()
+    deferred_history = tmp_path / "deferred-history.jsonl"
+    denied_budget = CycleBudget(max_mutations=0)
+    deferred = search_eval.self_tune(
+        golden_file=golden_file,
+        history_file=deferred_history,
+        policy_file=deferred_policy,
+        apply=True,
+        frontier_mode="auto",
+        frontier_reviewer=lambda _record: {"decision": "approved", "summary": "safe"},
+        budget=denied_budget,
+    )
+    assert deferred["status"] == "budget_deferred"
+    assert deferred_policy.read_bytes() == before
+    assert not deferred_history.exists()
+    assert denied_budget.snapshot()["used"]["mutation"] == 0
+
+    rejected_policy = tmp_path / "rejected-policy.json"
+    rejected_policy.write_bytes(before)
+    rejected_budget = CycleBudget(max_mutations=0)
+    rejected = search_eval.self_tune(
+        golden_file=golden_file,
+        history_file=tmp_path / "rejected-history.jsonl",
+        policy_file=rejected_policy,
+        apply=True,
+        frontier_mode="auto",
+        frontier_reviewer=lambda _record: {"decision": "rejected", "summary": "unsafe"},
+        budget=rejected_budget,
+    )
+    assert rejected["status"] == "frontier_rejected"
+    assert rejected_policy.read_bytes() == before
+    assert rejected_budget.snapshot()["used"]["mutation"] == 0

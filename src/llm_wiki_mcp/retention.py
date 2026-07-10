@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.index_store import get_store
+from llm_wiki_mcp.recall_log_schema import page_ids_from_record
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 
 RETENTION_FILE = RECALL_DIR / "retention.json"
@@ -46,18 +47,6 @@ def _read_recent_jsonl(path: Path, *, limit: int) -> list[dict[str, Any]]:
     return rows
 
 
-def _page_ids(row: dict[str, Any]) -> list[str]:
-    out: list[str] = []
-    for key in ("expected_pages", "injected_pages"):
-        values = row.get(key)
-        if isinstance(values, list):
-            out.extend(str(item) for item in values if isinstance(item, str))
-    for item in row.get("context_items", []) or []:
-        if isinstance(item, dict) and isinstance(item.get("page_id"), str):
-            out.append(item["page_id"])
-    return list(dict.fromkeys(out))
-
-
 def _parse_date(value: object) -> date | None:
     if not isinstance(value, str) or not value:
         return None
@@ -90,7 +79,7 @@ def build_retention_scores(
 
     for row in _read_recent_jsonl(feedback_file, limit=limit):
         kind = str(row.get("kind") or "")
-        page_ids = _page_ids(row)
+        page_ids = page_ids_from_record(row)
         if not page_ids:
             continue
         if kind == "injection_used":
@@ -100,7 +89,7 @@ def build_retention_scores(
         exposures.update(page_ids)
 
     for row in _read_recent_jsonl(recall_log_file, limit=limit):
-        page_ids = _page_ids(row)
+        page_ids = page_ids_from_record(row)
         exposures.update(page_ids)
         decision = str(row.get("decision") or "")
         if decision in {"inject", "allow"}:
@@ -150,6 +139,7 @@ def build_retention_scores(
             and not summary_present
             and not question_count
             and page_type in {"episodic", "knowledge"}
+            and str(meta.get("status") or "active") == "active"
         )
         if archive_ready:
             archive_candidates.append(page_id)

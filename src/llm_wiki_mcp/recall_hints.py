@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import fcntl
+import os
 import re
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from llm_wiki_mcp import wiki
 
@@ -74,6 +78,18 @@ def _hint_path(path: Path | None = None) -> Path:
     return path or QUERY_HINTS_FILE
 
 
+@contextmanager
+def _hint_lock(path: Path) -> Iterator[None]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def load_query_hints(path: Path | None = None) -> list[dict[str, Any]]:
     path = _hint_path(path)
     try:
@@ -88,13 +104,36 @@ def load_query_hints(path: Path | None = None) -> list[dict[str, Any]]:
     return [hint for hint in hints if isinstance(hint, dict)]
 
 
-def save_query_hints(hints: list[dict[str, Any]], path: Path | None = None) -> None:
-    path = _hint_path(path)
+def _save_query_hints_unlocked(hints: list[dict[str, Any]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"version": 1, "hints": hints}
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp = Path(handle.name)
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def save_query_hints(hints: list[dict[str, Any]], path: Path | None = None) -> None:
+    path = _hint_path(path)
+    with _hint_lock(path):
+        _save_query_hints_unlocked(hints, path)
 
 
 def add_query_hint(
@@ -105,6 +144,7 @@ def add_query_hint(
     source: str = "recall-auto-apply",
     normalize_key: str = "",
     path: Path | None = None,
+    increment_existing: bool = True,
 ) -> dict[str, Any]:
     page_ref = page_id.strip()
     query_text = query.strip()
@@ -117,33 +157,35 @@ def add_query_hint(
         raise ValueError(f"query hint target page does not exist: {page_ref!r}")
 
     path = _hint_path(path)
-    hints = load_query_hints(path)
-    key = normalize_query_text(query_text)
-    now = datetime.now().isoformat(timespec="seconds")
-    for hint in hints:
-        if hint.get("page_id") == page_ref and hint.get("query_key") == key:
-            hint["count"] = int(hint.get("count", 1) or 1) + 1
-            hint["updated_at"] = now
-            if normalize_key:
-                hint["normalize_key"] = normalize_key
-            save_query_hints(hints, path)
-            return hint
+    with _hint_lock(path):
+        hints = load_query_hints(path)
+        key = normalize_query_text(query_text)
+        now = datetime.now().isoformat(timespec="seconds")
+        for hint in hints:
+            if hint.get("page_id") == page_ref and hint.get("query_key") == key:
+                if increment_existing:
+                    hint["count"] = int(hint.get("count", 1) or 1) + 1
+                    hint["updated_at"] = now
+                    if normalize_key:
+                        hint["normalize_key"] = normalize_key
+                    _save_query_hints_unlocked(hints, path)
+                return hint
 
-    record = {
-        "page_id": page_ref,
-        "query": query_text,
-        "query_key": key,
-        "tokens": sorted(query_tokens(query_text) | query_tokens(signal)),
-        "signal": signal,
-        "source": source,
-        "normalize_key": normalize_key,
-        "count": 1,
-        "created_at": now,
-        "updated_at": now,
-    }
-    hints.append(record)
-    save_query_hints(hints, path)
-    return record
+        record = {
+            "page_id": page_ref,
+            "query": query_text,
+            "query_key": key,
+            "tokens": sorted(query_tokens(query_text) | query_tokens(signal)),
+            "signal": signal,
+            "source": source,
+            "normalize_key": normalize_key,
+            "count": 1,
+            "created_at": now,
+            "updated_at": now,
+        }
+        hints.append(record)
+        _save_query_hints_unlocked(hints, path)
+        return record
 
 
 def hint_matches_query(hint: dict[str, Any], query: str) -> bool:

@@ -15,6 +15,7 @@ The store is a process-wide singleton accessed via :func:`get_store`.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -221,6 +222,7 @@ class IndexStore:
         self._page_order: list[str] = []  # rglob scan order, preserved for parity
         self._backlinks: dict[str, list[str]] = {}
         self._loaded = False
+        self._persistence_dirty = False
 
     # -- persistence ------------------------------------------------------
 
@@ -368,13 +370,18 @@ class IndexStore:
 
             if changed:
                 self._rebuild_backlinks()
+                self._persistence_dirty = True
+            if self._persistence_dirty and os.environ.get("LLM_WIKI_READ_ONLY") != "1":
                 generation = self._next_generation()
                 try:
                     self._persist(generation)
                 except OSError:
                     # Persistence failure is non-fatal; in-memory index is
-                    # still consistent for the rest of this process.
+                    # still consistent and the next refresh retries the same
+                    # snapshot even if disk content has not changed again.
                     pass
+                else:
+                    self._persistence_dirty = False
 
     @staticmethod
     def _build_entry(

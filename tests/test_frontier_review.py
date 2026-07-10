@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from llm_wiki_mcp import frontier_review
 
@@ -18,6 +21,13 @@ Options:
       --output-schema <FILE>
   -o, --output-last-message <FILE>
 """
+
+
+def test_frontier_timeout_is_capped_by_sleep_cycle_deadline(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_WIKI_CYCLE_DEADLINE_MONOTONIC", "112.9")
+    monkeypatch.setattr(frontier_review.time, "monotonic", lambda: 100.0)
+
+    assert frontier_review._bounded_timeout(3600) == 12
 
 
 def _preflight_response(cmd: list[str]) -> SimpleNamespace | None:
@@ -342,3 +352,111 @@ def test_frontier_rescue_falls_back_to_claude_code(
     ]
     assert calls[0][0] == "/bin/codex"
     assert calls[1][0] == "/bin/claude"
+
+
+@pytest.mark.parametrize("use_custom_command", [True, False])
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_class", "expected_human_required"),
+    [
+        ("timeout", "network_transient", False),
+        ("missing_executable", "frontier_tool_unavailable", True),
+    ],
+)
+def test_structured_review_normalizes_subprocess_exceptions(
+    tmp_path: Path,
+    monkeypatch,
+    use_custom_command: bool,
+    failure_kind: str,
+    expected_class: str,
+    expected_human_required: bool,
+) -> None:
+    command_env = "LLM_WIKI_TEST_STRUCTURED_REVIEW_CMD"
+    if use_custom_command:
+        monkeypatch.setenv(command_env, "/missing/frontier-review")
+    else:
+        monkeypatch.delenv(command_env, raising=False)
+        monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
+        monkeypatch.setattr(
+            frontier_review,
+            "run_frontier_preflight",
+            lambda: {
+                "ok": True,
+                "codex": {"exec_help": {"output": CODEX_EXEC_HELP}},
+                "repairs": [],
+            },
+        )
+
+    def fail_run(cmd, **kwargs):
+        if failure_kind == "timeout":
+            raise subprocess.TimeoutExpired(
+                cmd=cmd,
+                timeout=kwargs["timeout"],
+                output="partial output",
+                stderr="401 Unauthorized from stale child output",
+            )
+        raise FileNotFoundError(2, "No such file or directory", str(cmd[0]))
+
+    monkeypatch.setattr(frontier_review.subprocess, "run", fail_run)
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["decision"],
+        "properties": {"decision": {"type": "string"}},
+    }
+
+    result = frontier_review.run_structured_review(
+        "review this",
+        schema,
+        repo_root=tmp_path,
+        timeout=1,
+        command_env=command_env,
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["frontier_failure"]["failure_class"] == expected_class
+    assert result["frontier_failure"]["human_required"] is expected_human_required
+    assert result["human_required"] is expected_human_required
+    if failure_kind == "timeout":
+        assert result["frontier_failure"]["rescue_status"] == "frontier_retry"
+        assert result["frontier_failure"]["notify_user"] is False
+
+
+def test_structured_review_rejects_incomplete_approved_json(
+    tmp_path: Path, monkeypatch
+) -> None:
+    command_env = "LLM_WIKI_TEST_STRUCTURED_REVIEW_CMD"
+    monkeypatch.setenv(command_env, "/bin/reviewer")
+    monkeypatch.setattr(
+        frontier_review.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout='{"decision":"approved"}',
+            stderr="",
+        ),
+    )
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["decision", "confidence", "summary"],
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": ["approved", "rejected", "needs_retry"],
+            },
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "summary": {"type": "string"},
+        },
+    }
+
+    result = frontier_review.run_structured_review(
+        "review this",
+        schema,
+        repo_root=tmp_path,
+        command_env=command_env,
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["confidence"] == 0.0
+    assert result["frontier_failure"]["failure_class"] == "schema_invalid"
+    assert result["human_required"] is False

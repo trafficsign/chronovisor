@@ -1,6 +1,7 @@
 """Lint engine - detect and fix wiki quality issues."""
 
 import json
+import hashlib
 import re
 import threading
 from collections import Counter
@@ -225,8 +226,17 @@ def repair_queue_records(issues: list[dict]) -> list[dict]:
     records: list[dict] = []
     for issue in issues:
         lane = issue_lane(issue)
+        identity = {
+            "issue_type": issue.get("type"),
+            "page": issue.get("page"),
+            "detail": issue.get("detail"),
+        }
+        issue_key = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
         records.append({
             "type": "lint_repair_candidate",
+            "issue_key": issue_key,
             "lane": lane,
             "issue_type": issue.get("type"),
             "severity": issue.get("severity"),
@@ -244,9 +254,11 @@ def write_repair_queue(
     queue_path = path or WIKI_ROOT / "review" / "lint-repair-queue.jsonl"
     records = repair_queue_records(issues)
     queue_path.parent.mkdir(parents=True, exist_ok=True)
-    with queue_path.open("w", encoding="utf-8") as f:
+    tmp = queue_path.with_name(f".{queue_path.name}.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    tmp.replace(queue_path)
     return queue_path
 
 
@@ -373,9 +385,9 @@ def apply_safe_fixes(
 
         elif issue["type"] == "tag_invalid":
             # Drop malformed tags from frontmatter. Count violations are NOT
-            # auto-fixed (need a human or LLM to decide which tag to add /
-            # which to remove); only obviously-broken individual tags are
-            # safe to silently strip.
+            # auto-fixed here; lint_repair routes count decisions through a
+            # validated local proposal and bounded frontier review. Only
+            # obviously-broken individual tags are safe to silently strip.
             page_id = issue["page"]
             path = find_page(page_id)
             if not path:

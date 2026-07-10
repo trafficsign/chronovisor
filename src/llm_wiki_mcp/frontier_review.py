@@ -1,13 +1,16 @@
 """Frontier-model review and autonomous patch execution."""
 from __future__ import annotations
 
+import errno
 import json
+import math
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from html import unescape
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -42,6 +45,18 @@ FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
         "notes": {"type": ["string", "null"]},
     },
 }
+
+
+def _bounded_timeout(timeout: int | None) -> int:
+    requested = timeout or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600"))
+    deadline_raw = os.environ.get("LLM_WIKI_CYCLE_DEADLINE_MONOTONIC")
+    if not deadline_raw:
+        return max(1, requested)
+    try:
+        remaining = max(1, int(float(deadline_raw) - time.monotonic()))
+    except ValueError:
+        return max(1, requested)
+    return max(1, min(requested, remaining))
 
 OFFICIAL_DOC_DOMAINS = {
     "platform.openai.com",
@@ -621,6 +636,202 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _structured_subprocess_failure(
+    exc: subprocess.TimeoutExpired | OSError,
+    *,
+    reviewer: str,
+    schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize process-launch failures at the structured-review boundary."""
+
+    if isinstance(exc, subprocess.TimeoutExpired):
+        # A timeout is always retryable even when partial stderr happens to
+        # contain stale auth-like text from the child process.
+        failure = _frontier_failure(
+            "network_transient",
+            "frontier_retry",
+            "frontier call timed out and can be retried automatically",
+            human_required=False,
+        )
+    else:
+        detail = redact_sensitive_text(f"{exc.__class__.__name__}: {exc}")
+        failure = classify_frontier_failure(detail)
+        lower = detail.lower()
+        unavailable_errnos = {errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.ENOEXEC}
+        unavailable_markers = (
+            "no such file or directory",
+            "executable not found",
+            "permission denied",
+            "exec format error",
+        )
+        if failure.failure_class == "unknown_frontier_failure" and (
+            getattr(exc, "errno", None) in unavailable_errnos
+            or any(marker in lower for marker in unavailable_markers)
+        ):
+            failure = _frontier_failure(
+                "frontier_tool_unavailable",
+                "human_required",
+                f"{reviewer} executable could not be started",
+            )
+    return _structured_failure_payload(
+        schema,
+        summary=failure.summary,
+        failure=failure,
+        reviewer=reviewer,
+    )
+
+
+def _schema_type_matches(value: Any, expected: str) -> bool:
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    return True
+
+
+def _structured_validation_error(
+    value: Any,
+    schema: dict[str, Any],
+    *,
+    path: str = "$",
+) -> str | None:
+    expected = schema.get("type")
+    allowed_types = expected if isinstance(expected, list) else [expected]
+    allowed_types = [item for item in allowed_types if isinstance(item, str)]
+    if allowed_types and not any(_schema_type_matches(value, item) for item in allowed_types):
+        return f"{path}: expected {'|'.join(allowed_types)}"
+    if "enum" in schema and value not in schema.get("enum", []):
+        return f"{path}: value is outside enum"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not math.isfinite(float(value)):
+            return f"{path}: number must be finite"
+        if "minimum" in schema and value < schema["minimum"]:
+            return f"{path}: below minimum"
+        if "maximum" in schema and value > schema["maximum"]:
+            return f"{path}: above maximum"
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < int(schema["minItems"]):
+            return f"{path}: too few items"
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            return f"{path}: too many items"
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                error = _structured_validation_error(item, item_schema, path=f"{path}[{index}]")
+                if error:
+                    return error
+    if isinstance(value, dict):
+        properties = schema.get("properties")
+        properties = properties if isinstance(properties, dict) else {}
+        required = schema.get("required")
+        required = required if isinstance(required, list) else []
+        missing = [name for name in required if name not in value]
+        if missing:
+            return f"{path}: missing required fields: {', '.join(str(name) for name in missing)}"
+        if schema.get("additionalProperties") is False:
+            extras = sorted(set(value) - set(properties))
+            if extras:
+                return f"{path}: unexpected fields: {', '.join(extras)}"
+        for name, child_schema in properties.items():
+            if name not in value or not isinstance(child_schema, dict):
+                continue
+            error = _structured_validation_error(value[name], child_schema, path=f"{path}.{name}")
+            if error:
+                return error
+    return None
+
+
+def _failure_default(name: str, schema: dict[str, Any], summary: str) -> Any:
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        if "needs_retry" in enum:
+            return "needs_retry"
+        return enum[0]
+    expected = schema.get("type")
+    types = expected if isinstance(expected, list) else [expected]
+    if "null" in types:
+        return None
+    if name == "decision" and "string" in types:
+        return "needs_retry"
+    if name in {"summary", "reason", "notes"} and "string" in types:
+        return summary
+    if name == "confidence" and "number" in types:
+        return 0.0
+    if "string" in types:
+        return ""
+    if "number" in types or "integer" in types:
+        return 0
+    if "boolean" in types:
+        return False
+    if "array" in types:
+        return []
+    if "object" in types:
+        return {}
+    return None
+
+
+def _structured_failure_payload(
+    schema: dict[str, Any],
+    *,
+    summary: str,
+    failure: FrontierFailure,
+    reviewer: str,
+) -> dict[str, Any]:
+    strict_schema, _repair = _strict_schema_with_repair(schema)
+    properties = strict_schema.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    payload = {
+        name: _failure_default(name, field_schema, summary)
+        for name, field_schema in properties.items()
+        if isinstance(field_schema, dict)
+    }
+    payload["frontier_failure"] = failure.to_dict()
+    payload["human_required"] = failure.human_required
+    payload["reviewer"] = reviewer
+    return payload
+
+
+def _validated_structured_result(
+    parsed: dict[str, Any] | None,
+    schema: dict[str, Any],
+    *,
+    reviewer: str,
+) -> dict[str, Any]:
+    strict_schema, _repair = _strict_schema_with_repair(schema)
+    if parsed is None:
+        failure = _frontier_failure(
+            "schema_invalid",
+            "pending_frontier_review",
+            "frontier output did not contain JSON",
+        )
+        return _structured_failure_payload(
+            schema, summary=failure.summary, failure=failure, reviewer=reviewer
+        )
+    error = _structured_validation_error(parsed, strict_schema)
+    if error:
+        failure = _frontier_failure(
+            "schema_invalid",
+            "pending_frontier_review",
+            f"frontier output failed schema validation: {error}",
+        )
+        return _structured_failure_payload(
+            schema, summary=failure.summary, failure=failure, reviewer=reviewer
+        )
+    result = dict(parsed)
+    result["reviewer"] = reviewer
+    return result
+
+
 def _parse_result(text: str) -> FrontierResult:
     parsed = _extract_json_object(text)
     if parsed is None:
@@ -1020,6 +1231,138 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
         return replace(_parse_result(output_text), access_repair=access_repair)
 
 
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text or ""):
+        if char != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def run_structured_review(
+    prompt: str,
+    schema: dict[str, Any],
+    *,
+    repo_root: Path,
+    timeout: int | None = None,
+    execute_patch: bool = False,
+    command_env: str = "LLM_WIKI_STRUCTURED_REVIEW_CMD",
+) -> dict[str, Any]:
+    """Run one bounded frontier review without rescue fan-out.
+
+    Routine queue decisions must not silently multiply one budgeted call into
+    Codex + rescue Codex + Claude. Code-repair packets keep the richer rescue
+    path in :func:`run_frontier_review`; content-policy lanes use this helper.
+    """
+    timeout_seconds = _bounded_timeout(timeout)
+    command = os.environ.get(command_env)
+    if command:
+        try:
+            completed = subprocess.run(
+                shlex.split(command),
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                env=_frontier_env(),
+                cwd=str(repo_root),
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return _structured_subprocess_failure(
+                exc, reviewer="frontier command", schema=schema
+            )
+        output = redact_sensitive_text((completed.stdout or "") + "\n" + (completed.stderr or ""))
+        if completed.returncode != 0:
+            failure = classify_frontier_failure(output)
+            return _structured_failure_payload(
+                schema,
+                summary=f"frontier command failed with exit {completed.returncode}",
+                failure=failure,
+                reviewer="frontier command",
+            )
+        parsed = _extract_json_object(output)
+        return _validated_structured_result(
+            parsed, schema, reviewer="frontier command"
+        )
+
+    codex = shutil.which("codex")
+    if codex is None:
+        failure = _frontier_failure(
+            "frontier_tool_unavailable",
+            "human_required",
+            "codex executable not found",
+        )
+        return _structured_failure_payload(
+            schema,
+            summary=failure.summary,
+            failure=failure,
+            reviewer="codex",
+        )
+    preflight = run_frontier_preflight()
+    if not preflight.get("ok"):
+        failure_payload = preflight.get("failure") if isinstance(preflight.get("failure"), dict) else {}
+        failure = FrontierFailure(
+            failure_class=str(failure_payload.get("failure_class") or "unknown_frontier_failure"),
+            rescue_status=str(failure_payload.get("rescue_status") or "frontier_retry"),
+            summary=str(failure_payload.get("summary") or "frontier preflight failed"),
+            human_required=bool(failure_payload.get("human_required")),
+            notify_user=bool(failure_payload.get("notify_user")),
+        )
+        return _structured_failure_payload(
+            schema,
+            summary=failure.summary,
+            failure=failure,
+            reviewer="codex",
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        schema_path = Path(td) / "structured-review.schema.json"
+        output_path = Path(td) / "structured-review-output.json"
+        strict_schema, _repair = _strict_schema_with_repair(schema)
+        schema_path.write_text(json.dumps(strict_schema, indent=2) + "\n", encoding="utf-8")
+        invocation = _build_codex_exec_invocation(
+            codex,
+            repo_root=repo_root,
+            schema_path=schema_path,
+            output_path=output_path,
+            execute_patch=execute_patch,
+            preflight=preflight,
+        )
+        try:
+            completed = subprocess.run(
+                invocation["cmd"],
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                env=_frontier_env(),
+                cwd=invocation.get("cwd") or None,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return _structured_subprocess_failure(exc, reviewer="codex", schema=schema)
+        output = ""
+        if output_path.exists():
+            output += output_path.read_text(encoding="utf-8", errors="replace")
+        output += "\n" + (completed.stdout or "") + "\n" + (completed.stderr or "")
+        output = redact_sensitive_text(output)
+        if completed.returncode != 0:
+            failure = classify_frontier_failure(output)
+            return _structured_failure_payload(
+                schema,
+                summary=f"codex structured review failed with exit {completed.returncode}",
+                failure=failure,
+                reviewer="codex",
+            )
+        parsed = _extract_json_object(output)
+        return _validated_structured_result(parsed, schema, reviewer="frontier")
+
+
 def run_frontier_review(
     packet: dict[str, Any],
     local_decision: dict[str, Any] | None,
@@ -1028,7 +1371,7 @@ def run_frontier_review(
     execute_patch: bool = True,
     timeout: int | None = None,
 ) -> FrontierResult:
-    timeout_seconds = timeout or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600"))
+    timeout_seconds = _bounded_timeout(timeout)
     prompt = build_frontier_prompt(packet, local_decision, execute_patch=execute_patch)
     command = os.environ.get("LLM_WIKI_FRONTIER_CMD")
     if command:

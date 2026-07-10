@@ -10,7 +10,7 @@ def test_build_cofire_graph_counts_repeated_context_pairs(tmp_path: Path) -> Non
     log_file = tmp_path / "recall-log.jsonl"
     out_file = tmp_path / "cofire.json"
     rows = [
-        {"context_items": [{"page_id": "a"}, {"page_id": "b"}]},
+        {"pages": ["a", "b"]},
         {"context_items": [{"page_id": "a"}, {"page_id": "b"}, {"page_id": "c"}]},
     ]
     log_file.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")

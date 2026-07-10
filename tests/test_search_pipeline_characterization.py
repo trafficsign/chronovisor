@@ -218,19 +218,28 @@ def test_eval_hybrid_rerank_applies_negative_feedback_after_rerank(monkeypatch) 
     assert payload["channels"]["negative_feedback"] == {"status": "applied", "pages": ["a"]}
 
 
-def test_run_weighted_hybrid_uses_bm25_and_semantic_only(monkeypatch) -> None:
+def test_run_weighted_hybrid_uses_production_graph_call_and_usage_gate(monkeypatch) -> None:
     bm25 = FakeBM25([page("bm25-a", 10.0)])
+    graph_calls: list[dict[str, object]] = []
 
-    def fail_graph(*args, **kwargs):
-        raise AssertionError("run_weighted_hybrid currently has no graph channel")
+    def fake_graph(results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50):
+        graph_calls.append(
+            {
+                "page_ids": [result.page_id for result in results],
+                "decay": decay,
+                "limit": limit,
+            }
+        )
+        return []
 
     def fail_usage(*args, **kwargs):
-        raise AssertionError("run_weighted_hybrid currently has no usage-prior channel")
+        raise AssertionError("usage prior must stay gated while its weight is zero")
 
     monkeypatch.setattr(search_eval, "get_bm25", lambda: bm25)
     monkeypatch.setattr(search_eval, "semantic_search", lambda query, top_n=20: [page("sem-a", 0.8)])
-    monkeypatch.setattr(search_eval, "graph_expand_results", fail_graph)
+    monkeypatch.setattr(search_eval, "graph_expand_results", fake_graph)
     monkeypatch.setattr(search_eval, "usage_prior_results", fail_usage)
+    monkeypatch.setattr(search_eval, "load_negative_feedback_config", disabled_negative_feedback)
 
     payload = search_eval.run_weighted_hybrid(
         "query",
@@ -238,4 +247,7 @@ def test_run_weighted_hybrid_uses_bm25_and_semantic_only(monkeypatch) -> None:
         top_n=2,
     )
 
+    assert graph_calls == [
+        {"page_ids": ["bm25-a", "sem-a"], "decay": 0.0, "limit": 100}
+    ]
     assert [result.page_id for result in payload["results"]] == ["bm25-a", "sem-a"]

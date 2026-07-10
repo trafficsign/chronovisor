@@ -8,7 +8,7 @@ import re
 import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,15 +18,20 @@ from llm_wiki_mcp import wiki
 from llm_wiki_mcp.alias_store import add_alias
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.frontmatter import patch as patch_frontmatter
-from llm_wiki_mcp.recall_hints import QUERY_HINTS_FILE, add_query_hint
+from llm_wiki_mcp.recall_hints import add_query_hint, load_query_hints, normalize_query_text
 from llm_wiki_mcp.recall_runtime import RECALL_CONFIG_FILE, RECALL_DIR, RECALL_FEEDBACK_FILE, append_jsonl
 from llm_wiki_mcp.runtime_config import active_config_file
 from llm_wiki_mcp.tags import record_new_tag, validate_tag
 
 
 AUTO_ACTIONS = frozenset({"alias", "query_hint", "page_tag"})
+REVIEW_ACTIONS = frozenset({"few_shot", "threshold"})
 VALIDATED_AUTO_LANE = "validated-auto"
 AUTO_APPLY_LOG_FILE = RECALL_DIR / "auto-apply.jsonl"
+TERMINAL_SUCCESS_STATUSES = frozenset(
+    {"applied", "already_applied", "fallback_applied", "routed_to_recall_lab"}
+)
+TERMINAL_CONVERGENCE_STATUSES = frozenset({"applied", "rejected", "quarantined", "human_required"})
 
 
 @dataclass(frozen=True)
@@ -86,26 +91,65 @@ def _auto_apply_log_file(path: Path | None = None) -> Path:
     return path or AUTO_APPLY_LOG_FILE
 
 
-def read_applied_keys(path: Path | None = None, limit: int = 5000) -> set[str]:
+def read_applied_keys(path: Path | None = None, limit: int = 0) -> set[str]:
     path = _auto_apply_log_file(path)
+    keys: set[str] = set()
     try:
         with path.open(encoding="utf-8") as f:
-            lines = deque(f, maxlen=limit)
+            lines = deque(f, maxlen=limit) if limit > 0 else f
+            for line in lines:
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(parsed, dict)
+                    and isinstance(parsed.get("apply_key"), str)
+                    and (
+                        parsed.get("status") in TERMINAL_SUCCESS_STATUSES
+                        or parsed.get("convergence_status") == "applied"
+                    )
+                ):
+                    keys.add(parsed["apply_key"])
     except OSError:
         return set()
-    keys: set[str] = set()
-    for line in lines:
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if (
-            isinstance(parsed, dict)
-            and isinstance(parsed.get("apply_key"), str)
-            and parsed.get("status") != "error"
-        ):
-            keys.add(parsed["apply_key"])
     return keys
+
+
+def read_apply_states(path: Path | None = None, limit: int = 0) -> dict[str, dict[str, Any]]:
+    """Return the latest convergence record per apply key."""
+    states: dict[str, dict[str, Any]] = {}
+    try:
+        with _auto_apply_log_file(path).open(encoding="utf-8") as handle:
+            lines = deque(handle, maxlen=limit) if limit > 0 else handle
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                key = record.get("apply_key")
+                if isinstance(key, str) and key:
+                    states[key] = record
+    except OSError:
+        return {}
+    return states
+
+
+def _retry_ready(state: dict[str, Any] | None, *, now: datetime) -> bool:
+    if not state:
+        return True
+    convergence_status = str(state.get("convergence_status") or "")
+    if convergence_status in TERMINAL_CONVERGENCE_STATUSES:
+        return False
+    raw = state.get("next_attempt_at")
+    if not isinstance(raw, str) or not raw:
+        return True
+    try:
+        return datetime.fromisoformat(raw) <= now
+    except ValueError:
+        return True
 
 
 def record_apply_log(record: dict[str, Any], path: Path | None = None) -> None:
@@ -145,7 +189,7 @@ def eligible_records(
     for record in records:
         if record.get("kind") != "missed_candidate":
             continue
-        if record.get("source") != "auditor":
+        if record.get("source") not in {"auditor", "pull-log"}:
             continue
         action = record.get("action_type")
         if action not in allowed_actions:
@@ -196,6 +240,20 @@ def apply_query_hint(record: dict[str, Any], *, dry_run: bool) -> dict[str, Any]
             "reason": "query_hint missing query",
             "page_id": page_id,
         }
+    query_key = normalize_query_text(query)
+    for existing in load_query_hints():
+        existing_key = str(
+            existing.get("query_key")
+            or normalize_query_text(str(existing.get("query") or ""))
+        )
+        if str(existing.get("page_id") or "") == page_id and existing_key == query_key:
+            return {
+                "action": "query_hint",
+                "status": "already_applied",
+                "page_id": page_id,
+                "query": query,
+                "hint": existing,
+            }
     if dry_run:
         return {"action": "query_hint", "status": "dry_run", "page_id": page_id, "query": query}
     hint = add_query_hint(
@@ -204,6 +262,7 @@ def apply_query_hint(record: dict[str, Any], *, dry_run: bool) -> dict[str, Any]
         signal=signal,
         source="recall-auto-apply",
         normalize_key=str(record.get("normalize_key", "")),
+        increment_existing=False,
     )
     return {"action": "query_hint", "status": "applied", "hint": hint}
 
@@ -353,19 +412,56 @@ def apply_feedback_records(
     policy: AutoApplyPolicy,
     dry_run: bool = False,
     log_file: Path | None = None,
+    max_attempts: int = 3,
+    backoff_base_seconds: int = 6 * 60 * 60,
+    budget: Any | None = None,
 ) -> dict[str, Any]:
     if not policy.enabled:
         return {"status": "disabled", "actions": []}
     applied_keys = read_applied_keys(log_file)
+    states = read_apply_states(log_file)
     actions: list[dict[str, Any]] = []
+    now = datetime.now()
     for record in eligible_records(records, policy=policy, applied_keys=applied_keys):
         key = apply_key_for(record)
+        prior = states.get(key)
+        if not _retry_ready(prior, now=now):
+            continue
+        if budget is not None and not dry_run:
+            allowed, reason = budget.consume("mutation")
+            if not allowed:
+                actions.append(
+                    {
+                        "ts": now.isoformat(timespec="seconds"),
+                        "apply_key": key,
+                        "normalize_key": record.get("normalize_key", ""),
+                        "action_type": record.get("action_type", ""),
+                        "source_ref": record.get("ref", ""),
+                        "dry_run": False,
+                        "status": "budget_deferred",
+                        "convergence_status": str(
+                            (prior or {}).get("convergence_status") or "pending"
+                        ),
+                        "attempt": int((prior or {}).get("attempt") or 0),
+                        "reason": reason,
+                    }
+                )
+                continue
+        attempt = int((prior or {}).get("attempt") or 0) + 1
         try:
             result = apply_record(record, dry_run=dry_run)
             status = result.get("status", "applied")
         except Exception as exc:
             result = {"status": "error", "error": f"{exc.__class__.__name__}: {exc}"}
             status = "error"
+        convergence_status = "applied" if status in TERMINAL_SUCCESS_STATUSES else "retry_wait"
+        next_attempt_at: str | None = None
+        if convergence_status == "retry_wait":
+            if attempt >= max(1, max_attempts):
+                convergence_status = "quarantined"
+            else:
+                delay = max(0, backoff_base_seconds) * (2 ** max(0, attempt - 1))
+                next_attempt_at = (now + timedelta(seconds=delay)).isoformat(timespec="seconds")
         entry = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "apply_key": key,
@@ -374,12 +470,17 @@ def apply_feedback_records(
             "source_ref": record.get("ref", ""),
             "dry_run": dry_run,
             "status": status,
+            "convergence_status": convergence_status,
+            "attempt": attempt,
+            "next_attempt_at": next_attempt_at,
             "result": result,
         }
         actions.append(entry)
         if not dry_run:
             record_apply_log(entry, log_file)
-            applied_keys.add(key)
+            states[key] = entry
+            if convergence_status == "applied":
+                applied_keys.add(key)
     if not dry_run:
         errors = [action for action in actions if action.get("status") == "error"]
         if errors:
@@ -389,8 +490,138 @@ def apply_feedback_records(
                 supervisor = supervise_error_records(errors)
             except Exception as exc:
                 supervisor = {"status": "error", "error": f"{exc.__class__.__name__}: {exc}"}
-            return {"status": "ok", "actions": actions, "auto_apply_self_heal": supervisor}
-    return {"status": "ok", "actions": actions}
+            return {
+                "status": (
+                    "budget_deferred"
+                    if any(action.get("status") == "budget_deferred" for action in actions)
+                    else "ok"
+                ),
+                "actions": actions,
+                "auto_apply_self_heal": supervisor,
+            }
+    return {
+        "status": (
+            "budget_deferred"
+            if any(action.get("status") == "budget_deferred" for action in actions)
+            else "ok"
+        ),
+        "actions": actions,
+    }
+
+
+def apply_review_feedback_records(
+    records: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
+    log_file: Path | None = None,
+    max_attempts: int = 3,
+    backoff_base_seconds: int = 6 * 60 * 60,
+    budget: Any | None = None,
+) -> dict[str, Any]:
+    """Close auditor review actions without creating a human queue.
+
+    ``few_shot`` is materialized as the already-safe query-hint primitive;
+    the same feedback is also picked up by the frontier-reviewed search label
+    queue. ``threshold`` is routed into Recall Lab's replay/adoption loop and
+    is never applied directly.
+    """
+    candidates_by_key: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if (
+            record.get("kind") != "missed_candidate"
+            or record.get("source") != "auditor"
+            or record.get("action_type") not in REVIEW_ACTIONS
+            or record.get("lane") != "review"
+        ):
+            continue
+        key = apply_key_for(record)
+        candidates_by_key[key] = record
+
+    states = read_apply_states(log_file)
+    now = datetime.now()
+    actions: list[dict[str, Any]] = []
+    for record in candidates_by_key.values():
+        key = apply_key_for(record)
+        prior = states.get(key)
+        if not _retry_ready(prior, now=now):
+            continue
+        if budget is not None and not dry_run:
+            allowed, reason = budget.consume("mutation")
+            if not allowed:
+                actions.append(
+                    {
+                        "ts": now.isoformat(timespec="seconds"),
+                        "apply_key": key,
+                        "normalize_key": record.get("normalize_key", ""),
+                        "action_type": record.get("action_type", ""),
+                        "source_ref": record.get("ref", ""),
+                        "dry_run": False,
+                        "status": "budget_deferred",
+                        "convergence_status": str(
+                            (prior or {}).get("convergence_status") or "pending"
+                        ),
+                        "attempt": int((prior or {}).get("attempt") or 0),
+                        "reason": reason,
+                    }
+                )
+                continue
+        attempt = int((prior or {}).get("attempt") or 0) + 1
+        action = str(record.get("action_type") or "")
+        if action == "threshold":
+            result = {
+                "action": action,
+                "status": "routed_to_recall_lab",
+                "reason": "threshold changes are replay-gated by recall_improvement",
+            }
+        else:
+            converted = {
+                **record,
+                "action_type": "query_hint",
+                "action_payload": {
+                    **action_payload(record),
+                    "query": action_payload(record).get("query")
+                    or record.get("prompt")
+                    or record.get("missing_signal"),
+                },
+            }
+            try:
+                result = apply_query_hint(converted, dry_run=dry_run)
+            except Exception as exc:
+                result = {"status": "error", "error": f"{exc.__class__.__name__}: {exc}"}
+        status = str(result.get("status") or "error")
+        convergence_status = "applied" if status in TERMINAL_SUCCESS_STATUSES or status == "dry_run" else "retry_wait"
+        next_attempt_at: str | None = None
+        if convergence_status == "retry_wait":
+            if attempt >= max(1, max_attempts):
+                convergence_status = "quarantined"
+            else:
+                delay = max(0, backoff_base_seconds) * (2 ** max(0, attempt - 1))
+                next_attempt_at = (now + timedelta(seconds=delay)).isoformat(timespec="seconds")
+        entry = {
+            "ts": now.isoformat(timespec="seconds"),
+            "apply_key": key,
+            "normalize_key": record.get("normalize_key", ""),
+            "action_type": action,
+            "source_ref": record.get("ref", ""),
+            "dry_run": dry_run,
+            "status": status,
+            "convergence_status": convergence_status,
+            "attempt": attempt,
+            "next_attempt_at": next_attempt_at,
+            "result": result,
+        }
+        actions.append(entry)
+        if not dry_run:
+            record_apply_log(entry, log_file)
+            states[key] = entry
+    return {
+        "status": (
+            "budget_deferred"
+            if any(action.get("status") == "budget_deferred" for action in actions)
+            else "ok"
+        ),
+        "actions": actions,
+    }
 
 
 def apply_feedback_file(
@@ -399,6 +630,7 @@ def apply_feedback_file(
     config_file: Path = RECALL_CONFIG_FILE,
     min_count: int | None = None,
     dry_run: bool = False,
+    budget: Any | None = None,
 ) -> dict[str, Any]:
     policy = load_auto_apply_policy(config_file)
     if min_count is not None:
@@ -407,7 +639,21 @@ def apply_feedback_file(
             min_count=max(1, min_count),
             actions=policy.actions,
         )
-    return apply_feedback_records(read_jsonl(_feedback_file(feedback_file)), policy=policy, dry_run=dry_run)
+    records = read_jsonl(_feedback_file(feedback_file))
+    auto = apply_feedback_records(records, policy=policy, dry_run=dry_run, budget=budget)
+    review = apply_review_feedback_records(records, dry_run=dry_run, budget=budget)
+    actions = [*(auto.get("actions") or []), *(review.get("actions") or [])]
+    status = "ok"
+    if auto.get("status") == "disabled":
+        status = "disabled"
+    elif any(action.get("status") == "budget_deferred" for action in actions):
+        status = "budget_deferred"
+    return {
+        "status": status,
+        "actions": actions,
+        "auto": auto,
+        "review": review,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:

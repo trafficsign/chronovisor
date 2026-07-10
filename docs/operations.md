@@ -57,8 +57,9 @@ llm-wiki recall-eval --json
 llm-wiki recall-eval --save-baseline
 ```
 
-Manual feedback remains useful for false negatives that the auditor cannot
-observe confidently.
+Explicit feedback is an optional diagnostic input, not an operating gate. The
+auditor, pull-log attribution, and frontier-reviewed label path discover and
+close normal false negatives automatically.
 
 `recall-eval` builds a replay dataset from `recall/recall-log.jsonl` and
 `recall/feedback.jsonl`, then reruns the current gate without writing new
@@ -137,8 +138,10 @@ heavy-model-batch, review, and monitor lanes.
 
 `llm-wiki-duplicate-review --write` builds
 `~/.wiki/review/duplicate-candidates.jsonl` from title and embedding similarity.
-The queue is review-only; merge decisions should mark the losing page with
-`status: deprecated` and `superseded_by: <winner>`.
+The file is an observable candidate ledger. Sleep first handles deterministic
+safe cases, then sends ambiguous pairs to the frontier model; approved
+supersession atomically marks the loser `status: deprecated` with
+`superseded_by: <winner>`. No human review queue is required.
 
 ## Raw Replay
 
@@ -150,6 +153,18 @@ llm-wiki raw-replay --since 2026-07-01 --limit 1 --run
 Without `--run`, replay writes `~/.wiki/review/raw-replay-queue.jsonl`.
 With `--run`, selected raw files go back through the normal ingest path, so
 search-before-create and read-back verification still apply.
+Read-back misses caused only by ranking (`not-in-top-results`) stay in the
+lighter query-hint repair lane; raw replay is reserved for structural ingest,
+metadata, quarantine, and integrity failures.
+
+Before ingest starts, replay durably records a `running` row with job,
+attempt, content hash, and start time. The ingest `on_complete` callback then
+fsyncs a whole-raw completion journal before queue acknowledgement. Partial
+ingest is terminal `completed_partial` so already-successful operations are
+never replayed. If a process dies in the narrow unprovable window, the row
+becomes `indeterminate`: the frontier model must choose processed, safe replay,
+or quarantine. It is never blindly retried and never becomes a human content
+decision.
 
 ## Memory Integrity Eval
 
@@ -185,10 +200,19 @@ llm-wiki sleep --dry-run --json
 llm-wiki-sleep --raw-limit 100 --eval-limit 100
 ```
 
-The sleep cycle snapshots `~/.wiki`, rebuilds co-fire and prefetch caches, runs
-memory integrity eval, refreshes raw replay candidates, and writes duplicate
-review candidates. It does not re-ingest or merge pages unless those explicit
-lanes are run separately.
+The sleep cycle is the single bounded convergence driver. It snapshots
+`~/.wiki`, rebuilds co-fire/prefetch/retention artifacts, runs memory integrity,
+and then drains small batches from lint repair, raw replay, read-back repair,
+search-label review, recall auto-apply/self-heal, duplicate, and orphan-link
+lanes. Weekly calibration and search self-tune also run here. Every decision or
+queue lane has a stable key, retry/backoff limits, a terminal quarantine, and a
+shared cycle budget with a reserved frontier slot per decision lane; artifact
+writes are charged to the same mutation/time budget. One lane failure
+produces `status=partial` while the others continue. A single-flight lock
+prevents overlapping scheduled/manual cycles. `--dry-run` is byte-for-byte
+read-only, including search indexes and caches, and does not invoke frontier
+reviewers. A zero `--eval-limit` skips integrity and label evaluation instead
+of expanding to an unbounded corpus scan.
 
 ## Wiki Snapshots
 
@@ -232,10 +256,13 @@ llm-wiki-eval --ci --ci-variant hybrid-current --min-recall-at-5 0.80
 
 `--build-label-queue` writes auditor/search candidates to
 `recall/search-label-queue.jsonl`; it does not promote rows into
-`search-golden.jsonl`. Promote only after human review. `--failure-index`
-records missed expected pages with channel candidates and a reason code.
-`--self-tune` is shadow-only: it searches dev-set weights and checks locked-test
-guardrails, but never edits config by itself.
+`search-golden.jsonl`. Sleep sends a bounded batch to a frontier reviewer;
+approved labels are promoted automatically, rejections are terminal, and
+uncertain/retry results back off before quarantine after three passes.
+`--failure-index` records missed expected pages with channel candidates and a
+reason code. Weekly self-tune evaluates dev weights against an independent
+locked-test set, asks the frontier model for the final veto, and atomically
+writes `recall/search-policy.json` only after both gates pass.
 
 The optional Hugging Face reranker is disabled in the normal local profile.
 Ranking still runs through BM25 + semantic fusion; enable `[search.reranker]`
@@ -252,7 +279,16 @@ llm-wiki-recall-calibrate --rollback
 Calibration trains on older labeled rows and validates on the newest holdout
 slice. It writes `recall/calibration.json` only when holdout improvement exceeds
 the configured minimum, and records the old artifact in
-`recall/calibration-history.jsonl` for rollback.
+`recall/calibration-history.jsonl` for rollback. Sleep schedules this weekly
+with bounded samples/recomputed features and a frontier final veto.
+
+## Human Boundary
+
+Normal content, ranking, repair, and policy decisions converge without a human.
+`human_required` is reserved for deterministic external-authority failures:
+OAuth/authentication, billing or quota changes, Keychain permission, or a
+missing frontier tool. Ambiguity, low confidence, schema errors, and model
+disagreement use bounded retry and terminal quarantine instead.
 
 ## Recall Question Backfill
 

@@ -635,7 +635,7 @@ def _coerce_str_list(value: object) -> list[str] | None:
     return None
 
 
-def run_lint_if_due() -> dict:
+def run_lint_if_due(*, dry_run: bool = False) -> dict:
     """Run lint check + safe apply if due.
 
     Returns result dict with status and details.
@@ -654,17 +654,25 @@ def run_lint_if_due() -> dict:
     issues = check()
     try:
         from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
-        snapshot = snapshot_wiki("before scheduled lint auto-fix")
+        snapshot = (
+            {"status": "skipped", "reason": "dry_run"}
+            if dry_run
+            else snapshot_wiki("before scheduled lint auto-fix")
+        )
     except Exception as exc:
         snapshot = {"status": "error", "error": str(exc)}
-    actions = apply_safe_fixes(issues)
+    actions = apply_safe_fixes(issues, dry_run=dry_run)
     remaining = [i for i in issues if not i.get("auto_fixable")]
-    try:
-        repair_queue = str(write_repair_queue(remaining))
-    except Exception:
-        repair_queue = None
+    if dry_run:
+        repair_queue = str(WIKI_ROOT / "review" / "lint-repair-queue.jsonl")
+    else:
+        try:
+            repair_queue = str(write_repair_queue(remaining))
+        except Exception:
+            repair_queue = None
 
-    mark_lint_complete()
+    if not dry_run:
+        mark_lint_complete()
 
     return {
         "triggered": True,
@@ -675,6 +683,7 @@ def run_lint_if_due() -> dict:
         "actions_taken": actions,
         "remaining_issues": len(remaining),
         "repair_queue": repair_queue,
+        "dry_run": dry_run,
     }
 
 

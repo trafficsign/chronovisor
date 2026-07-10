@@ -21,6 +21,8 @@ from llm_wiki_mcp.orphan_link import (
     parse_llm_response,
     run_dry_run,
     score_candidate,
+    apply_suggestion,
+    run_autonomous,
 )
 
 
@@ -86,6 +88,69 @@ class _FakeStore:
 
     def refresh(self) -> None:
         pass
+
+
+def test_apply_suggestion_inserts_frontier_approved_link(isolated_pages: Path) -> None:
+    _seed_page(isolated_pages, "source", "The durable anchor belongs here.")
+    _seed_page(isolated_pages, "target", "Target body")
+    suggestion = Suggestion(
+        source_page_id="source",
+        confidence=0.9,
+        reason="related",
+        suggested_anchor="durable anchor",
+        suggested_section="Related",
+    )
+
+    result = apply_suggestion("target", suggestion)
+
+    assert result["status"] == "applied"
+    assert "[[target|durable anchor]]" in (isolated_pages / "source.md").read_text()
+
+
+def test_autonomous_orphan_lane_applies_once(tmp_path: Path, isolated_pages: Path) -> None:
+    from llm_wiki_mcp.convergence import ConvergenceStore, RetryPolicy
+
+    _seed_page(isolated_pages, "source", "durable anchor")
+    _seed_page(isolated_pages, "target", "target topic")
+    store = _FakeStore()
+    store.add_page("source")
+    store.add_page("target")
+    store.link("other", "source")
+    state = ConvergenceStore(
+        tmp_path / "state.json",
+        policy=RetryPolicy(local_base_delay_seconds=0, frontier_base_delay_seconds=0),
+    )
+    semantic = lambda _query, _top_n: [_ScoredPage("source", 0.9)]
+    generated = json.dumps(
+        {
+            "confidence": 0.92,
+            "reason": "related",
+            "suggested_anchor": "durable anchor",
+            "suggested_section": "Related",
+        }
+    )
+    reviewer = lambda _candidate: {"decision": "approved", "confidence": 0.95, "summary": "ok"}
+
+    first = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: generated,
+        semantic_search_fn=semantic,
+        reviewer=reviewer,
+        convergence_store=state,
+    )
+    second = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: generated,
+        semantic_search_fn=semantic,
+        reviewer=reviewer,
+        convergence_store=state,
+    )
+
+    assert first["results"][0]["status"] == "applied"
+    assert second["results"][0]["status"] == "applied"
+    assert (isolated_pages / "source.md").read_text().count("[[target") == 1
 
 
 @pytest.fixture()
@@ -449,3 +514,288 @@ class TestFormatReport:
         assert "- [ ]" in text
         assert "src" in text
         assert "0.91" in text
+
+
+def test_apply_suggestion_never_nests_inside_existing_wiki_link(
+    isolated_pages: Path,
+) -> None:
+    _seed_page(isolated_pages, "source", "Existing [[other|durable anchor]].")
+    _seed_page(isolated_pages, "target", "Target body")
+    suggestion = Suggestion(
+        source_page_id="source",
+        confidence=0.9,
+        reason="related",
+        suggested_anchor="durable anchor",
+        suggested_section="Related\n\n## injected",
+    )
+
+    result = apply_suggestion("target", suggestion)
+    text = (isolated_pages / "source.md").read_text(encoding="utf-8")
+
+    assert result["status"] == "applied"
+    assert "[[other|durable anchor]]" in text
+    assert "[[target|durable anchor]]" not in text
+    assert "## Related\n\n- [[target]]" in text
+    assert "injected" not in text
+
+
+def _autonomous_state(tmp_path: Path, *, max_local_attempts: int = 2):
+    from llm_wiki_mcp.convergence import ConvergenceStore, RetryPolicy
+
+    return ConvergenceStore(
+        tmp_path / "state.json",
+        policy=RetryPolicy(
+            max_local_attempts=max_local_attempts,
+            local_base_delay_seconds=0,
+            frontier_base_delay_seconds=0,
+        ),
+    )
+
+
+def _autonomous_fixture(isolated_pages: Path) -> tuple[_FakeStore, object]:
+    store = _FakeStore()
+    store.add_page("source")
+    store.add_page("target")
+    store.link("other", "source")
+    _seed_page(isolated_pages, "source", "durable anchor")
+    _seed_page(isolated_pages, "target", "target topic")
+    semantic = lambda _query, _top_n: [_ScoredPage("source", 0.9)]
+    return store, semantic
+
+
+def _high_local_suggestion() -> str:
+    return json.dumps(
+        {
+            "confidence": 0.92,
+            "reason": "related",
+            "suggested_anchor": "durable anchor",
+            "suggested_section": "Related",
+        }
+    )
+
+
+def test_frontier_approval_below_confidence_gate_is_terminally_rejected(
+    tmp_path: Path,
+    isolated_pages: Path,
+) -> None:
+    store, semantic = _autonomous_fixture(isolated_pages)
+    state = _autonomous_state(tmp_path)
+
+    result = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: _high_local_suggestion(),
+        semantic_search_fn=semantic,
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.2,
+            "summary": "weak relation",
+        },
+        convergence_store=state,
+    )
+
+    assert result["results"][0]["status"] == "rejected"
+    assert state.list_items()[0]["result"]["reason"] == "frontier_confidence_below_threshold"
+    assert "[[target" not in (isolated_pages / "source.md").read_text(encoding="utf-8")
+
+
+def test_malformed_frontier_approval_retries_without_mutation(
+    tmp_path: Path,
+    isolated_pages: Path,
+) -> None:
+    store, semantic = _autonomous_fixture(isolated_pages)
+    state = _autonomous_state(tmp_path)
+
+    result = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: _high_local_suggestion(),
+        semantic_search_fn=semantic,
+        reviewer=lambda _candidate: {"decision": "approved", "summary": "missing confidence"},
+        convergence_store=state,
+    )
+
+    assert result["results"][0]["status"] == "frontier_retry"
+    assert state.list_items()[0]["status"] == "frontier_retry"
+    assert "[[target" not in (isolated_pages / "source.md").read_text(encoding="utf-8")
+
+
+def test_local_model_error_retries_but_valid_low_score_rejects(
+    tmp_path: Path,
+    isolated_pages: Path,
+) -> None:
+    store, semantic = _autonomous_fixture(isolated_pages)
+    retry_state = _autonomous_state(tmp_path / "retry")
+
+    retry = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+        semantic_search_fn=semantic,
+        convergence_store=retry_state,
+    )
+
+    low_state = _autonomous_state(tmp_path / "low")
+    low = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: json.dumps(
+            {
+                "confidence": 0.1,
+                "reason": "weak",
+                "suggested_anchor": "",
+                "suggested_section": "Related",
+            }
+        ),
+        semantic_search_fn=semantic,
+        convergence_store=low_state,
+    )
+
+    assert retry["results"][0]["status"] == "local_retry"
+    assert retry_state.list_items()[0]["last_failure_class"] == "local_model_or_schema_error"
+    assert low["results"][0]["status"] == "rejected"
+    assert low_state.list_items()[0]["result"]["reason"].startswith("all_local_candidates")
+
+
+def test_no_candidate_does_not_starve_later_real_work(
+    tmp_path: Path,
+    isolated_pages: Path,
+) -> None:
+    store = _FakeStore()
+    for page_id in ("a-empty", "b-target", "source"):
+        store.add_page(page_id)
+        _seed_page(isolated_pages, page_id, "durable anchor")
+    store.link("other", "source")
+
+    def semantic(query: str, _top_n: int):
+        return [] if "a-empty" in query else [_ScoredPage("source", 0.9)]
+
+    state = _autonomous_state(tmp_path)
+    result = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: _high_local_suggestion(),
+        semantic_search_fn=semantic,
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "good",
+        },
+        convergence_store=state,
+    )
+
+    assert [entry["status"] for entry in result["results"]] == ["rejected", "applied"]
+    assert result["work_items"] == 1
+    assert "[[b-target" in (isolated_pages / "source.md").read_text(encoding="utf-8")
+
+
+def test_frontier_retry_keeps_durable_local_suggestion(
+    tmp_path: Path,
+    isolated_pages: Path,
+) -> None:
+    from llm_wiki_mcp.convergence import CycleBudget
+
+    store, semantic = _autonomous_fixture(isolated_pages)
+    state = _autonomous_state(tmp_path)
+    first_budget = CycleBudget(
+        max_local_calls=1,
+        max_frontier_calls=0,
+        max_mutations=1,
+        max_elapsed_seconds=60,
+    )
+
+    first = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: _high_local_suggestion(),
+        semantic_search_fn=semantic,
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("frontier should be deferred")
+        ),
+        convergence_store=state,
+        budget=first_budget,
+    )
+    second = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local suggestion should be reused")
+        ),
+        semantic_search_fn=semantic,
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "good",
+        },
+        convergence_store=state,
+    )
+
+    assert first["results"][0]["status"] == "frontier_budget_exhausted"
+    assert second["results"][0]["status"] == "applied"
+    assert "[[target" in (isolated_pages / "source.md").read_text(encoding="utf-8")
+
+
+def test_no_candidate_terminal_decision_is_durable(
+    tmp_path: Path,
+    isolated_pages: Path,
+) -> None:
+    store = _FakeStore()
+    store.add_page("target")
+    _seed_page(isolated_pages, "target", "target topic")
+    state = _autonomous_state(tmp_path)
+
+    first = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        semantic_search_fn=lambda _query, _top_n: [],
+        generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("no candidate means no local model call")
+        ),
+        convergence_store=state,
+    )
+    second = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        semantic_search_fn=lambda _query, _top_n: [],
+        generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal decision must be reused")
+        ),
+        convergence_store=state,
+    )
+
+    assert first["results"][0]["status"] == "rejected"
+    assert first["work_items"] == 0
+    assert second["results"][0]["status"] == "rejected"
+    assert second["results"][0]["cached"] is True
+    assert len(state.list_items()) == 1
+
+
+def test_candidate_discovery_error_retries_then_quarantines(
+    tmp_path: Path,
+    isolated_pages: Path,
+) -> None:
+    store = _FakeStore()
+    store.add_page("target")
+    _seed_page(isolated_pages, "target", "target topic")
+    state = _autonomous_state(tmp_path, max_local_attempts=2)
+
+    def unavailable(_query: str, _top_n: int):
+        raise RuntimeError("embedding service unavailable")
+
+    first = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        semantic_search_fn=unavailable,
+        convergence_store=state,
+    )
+    second = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        semantic_search_fn=unavailable,
+        convergence_store=state,
+    )
+
+    assert first["results"][0]["status"] == "local_retry"
+    assert second["results"][0]["status"] == "quarantined"
+    assert first["work_items"] == second["work_items"] == 0
+    assert state.list_items()[0]["last_failure_class"] == "candidate_discovery_error"

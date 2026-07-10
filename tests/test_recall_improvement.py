@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from llm_wiki_mcp import recall_improvement
+from llm_wiki_mcp.convergence import CycleBudget
 from llm_wiki_mcp.recall_improvement import PolicyProposal
 from llm_wiki_mcp.recall_runtime import RecallPolicy
 
@@ -226,6 +227,7 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     episodes_file = tmp_path / "episodes.jsonl"
     live_file = tmp_path / "live-episodes.jsonl"
+    apply_budget = CycleBudget(max_mutations=1)
     payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
@@ -237,6 +239,7 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
         runs_dir=runs_dir,
         episodes_file=episodes_file,
         live_episodes_file=live_file,
+        frontier_budget=apply_budget,
     )
 
     assert payload["status"] == "applied"
@@ -246,6 +249,30 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
     assert registry_file.exists()
     assert episodes_file.exists()
     assert list(runs_dir.glob("*.json"))
+    assert apply_budget.snapshot()["used"]["mutation"] == 1
+
+    preserved_active = tmp_path / "preserved-active-policy.json"
+    preserved_active.write_text('{"run_id":"old","overrides":{"max_pages":3}}\n')
+    before = preserved_active.read_bytes()
+    denied_budget = CycleBudget(max_mutations=0)
+    deferred = recall_improvement.run_improvement(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=("qwen", "gemma"),
+        include_heuristic=False,
+        frontier_mode="off",
+        active_file=preserved_active,
+        registry_file=tmp_path / "deferred-registry.jsonl",
+        runs_dir=tmp_path / "deferred-runs",
+        episodes_file=tmp_path / "deferred-episodes.jsonl",
+        live_episodes_file=live_file,
+        frontier_budget=denied_budget,
+    )
+    assert deferred["status"] == "budget_deferred"
+    assert deferred["applied"] is False
+    assert deferred["active_policy"] is None
+    assert preserved_active.read_bytes() == before
+    assert denied_budget.snapshot()["used"]["mutation"] == 0
 
 
 def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monkeypatch) -> None:
@@ -314,6 +341,7 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monke
     )
 
     active_file = tmp_path / "active-policy.json"
+    reject_budget = CycleBudget(max_frontier_calls=1, max_mutations=0)
     payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
@@ -325,6 +353,7 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monke
         runs_dir=tmp_path / "runs",
         episodes_file=tmp_path / "episodes.jsonl",
         live_episodes_file=tmp_path / "live-episodes.jsonl",
+        frontier_budget=reject_budget,
     )
 
     assert payload["status"] == "frontier_rejected"
@@ -332,6 +361,104 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monke
     assert payload["active_policy"] is None
     assert payload["frontier_audit"]["decision"] == "rejected"
     assert not active_file.exists()
+    assert reject_budget.snapshot()["used"] == {
+        "local": 0,
+        "frontier": 1,
+        "mutation": 0,
+        "raw_bytes": 0,
+    }
+
+    monkeypatch.setattr(
+        recall_improvement,
+        "run_frontier_policy_audit",
+        lambda *_args, **_kwargs: {
+            "decision": "needs_retry",
+            "summary": "frontier temporarily unavailable",
+            "rescue_status": "pending_frontier_review",
+            "human_required": False,
+        },
+    )
+    retry_payload = recall_improvement.run_improvement(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=("qwen",),
+        include_heuristic=False,
+        frontier_mode="always",
+        active_file=tmp_path / "retry-active-policy.json",
+        registry_file=tmp_path / "retry-policy-registry.jsonl",
+        runs_dir=tmp_path / "retry-runs",
+        episodes_file=tmp_path / "retry-episodes.jsonl",
+        live_episodes_file=tmp_path / "retry-live-episodes.jsonl",
+    )
+    assert retry_payload["status"] == "pending_frontier_review"
+    assert retry_payload["applied"] is False
+    assert retry_payload["active_policy"] is None
+
+    preserved_active = tmp_path / "approved-but-deferred-active.json"
+    preserved_active.write_text('{"run_id":"old","overrides":{"max_pages":3}}\n')
+    before = preserved_active.read_bytes()
+    monkeypatch.setattr(
+        recall_improvement,
+        "run_frontier_policy_audit",
+        lambda *_args, **_kwargs: {
+            "decision": "approved",
+            "summary": "safe",
+            "human_required": False,
+        },
+    )
+    mutation_denied = CycleBudget(max_frontier_calls=1, max_mutations=0)
+    deferred_payload = recall_improvement.run_improvement(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=("qwen",),
+        include_heuristic=False,
+        frontier_mode="always",
+        active_file=preserved_active,
+        registry_file=tmp_path / "approved-deferred-registry.jsonl",
+        runs_dir=tmp_path / "approved-deferred-runs",
+        episodes_file=tmp_path / "approved-deferred-episodes.jsonl",
+        live_episodes_file=tmp_path / "approved-deferred-live-episodes.jsonl",
+        frontier_budget=mutation_denied,
+    )
+    assert deferred_payload["status"] == "budget_deferred"
+    assert deferred_payload["active_policy"] is None
+    assert preserved_active.read_bytes() == before
+    assert mutation_denied.snapshot()["used"] == {
+        "local": 0,
+        "frontier": 1,
+        "mutation": 0,
+        "raw_bytes": 0,
+    }
+
+    monkeypatch.setattr(
+        recall_improvement,
+        "run_frontier_policy_audit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("frontier budget must defer before review")
+        ),
+    )
+    frontier_denied = CycleBudget(max_frontier_calls=0, max_mutations=1)
+    frontier_deferred = recall_improvement.run_improvement(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=("qwen",),
+        include_heuristic=False,
+        frontier_mode="always",
+        active_file=preserved_active,
+        registry_file=tmp_path / "frontier-deferred-registry.jsonl",
+        runs_dir=tmp_path / "frontier-deferred-runs",
+        episodes_file=tmp_path / "frontier-deferred-episodes.jsonl",
+        live_episodes_file=tmp_path / "frontier-deferred-live-episodes.jsonl",
+        frontier_budget=frontier_denied,
+    )
+    assert frontier_deferred["status"] == "budget_deferred"
+    assert preserved_active.read_bytes() == before
+    assert frontier_denied.snapshot()["used"] == {
+        "local": 0,
+        "frontier": 0,
+        "mutation": 0,
+        "raw_bytes": 0,
+    }
 
 
 def test_run_due_dry_run_is_read_only(tmp_path, monkeypatch) -> None:
@@ -440,6 +567,98 @@ def test_run_due_respects_interval_even_with_new_feedback(tmp_path, monkeypatch)
     assert payload["reasons"]["feedback_due"] is True
     assert payload["reasons"]["interval_due"] is False
     assert state["last_feedback_count"] == 0
+
+
+def test_run_due_preserves_pending_frontier_state_during_backoff(tmp_path, monkeypatch) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        json.dumps({"kind": "missed_candidate", "prompt": "x"}) + "\n",
+        encoding="utf-8",
+    )
+    schedule_file = tmp_path / "schedule-state.json"
+    future = (recall_improvement.datetime.now() + recall_improvement.timedelta(hours=1)).isoformat(
+        timespec="seconds"
+    )
+    schedule_file.write_text(
+        json.dumps(
+            {
+                "last_status": "pending_frontier_review",
+                "last_feedback_count": 0,
+                "frontier_retry_candidate": "candidate",
+                "frontier_retry_attempts": 1,
+                "frontier_next_retry_at": future,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        recall_improvement,
+        "run_improvement",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("backoff must suppress retry")),
+    )
+    result = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=1,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+
+    state = json.loads(schedule_file.read_text(encoding="utf-8"))
+    assert result["status"] == "skipped"
+    assert state["last_status"] == "pending_frontier_review"
+    assert state["frontier_retry_attempts"] == 1
+    assert state["frontier_next_retry_at"] == future
+
+
+def test_run_due_budget_defer_keeps_schedule_byte_for_byte(tmp_path, monkeypatch) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        json.dumps({"kind": "missed_candidate", "prompt": "x"}) + "\n",
+        encoding="utf-8",
+    )
+    schedule_file = tmp_path / "schedule-state.json"
+    schedule_file.write_text(
+        json.dumps(
+            {
+                "last_run_at": "2026-01-01T00:00:00",
+                "last_feedback_count": 0,
+                "last_status": "applied",
+                "sentinel": "unchanged",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    before = schedule_file.read_bytes()
+    monkeypatch.setattr(
+        recall_improvement,
+        "run_improvement",
+        lambda **_kwargs: {
+            "ts": "2026-07-10T12:00:00",
+            "run_id": "deferred",
+            "status": "budget_deferred",
+            "applied": False,
+            "dataset": {"examples": 1},
+        },
+    )
+    monkeypatch.setattr(recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None)
+
+    result = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=1,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+
+    assert result["status"] == "budget_deferred"
+    assert result["result"]["status"] == "budget_deferred"
+    assert schedule_file.read_bytes() == before
 
 
 def test_run_due_skips_when_another_run_holds_lock(tmp_path, monkeypatch) -> None:

@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +29,13 @@ SELF_HEAL_STATUSES = {
     "pending_frontier_review",
 }
 
+RUNNING_STATUSES = {
+    "local_repairing",
+    "frontier_running",
+}
+
+DEFAULT_RUNNING_LEASE_SECONDS = 2 * 60 * 60
+
 HUMAN_REQUIRED_STATUSES = {
     "human_required",
 }
@@ -33,6 +43,14 @@ HUMAN_REQUIRED_STATUSES = {
 PENDING_REVIEW_STATUSES = {
     "frontier_preflight_failed",
     "pending_frontier_review",
+}
+
+FRONTIER_ONLY_STATUSES = {
+    "pending_frontier",
+    "frontier_retry",
+    "frontier_preflight_failed",
+    "pending_frontier_review",
+    "frontier_running",
 }
 
 MAC_NOTIFICATION_TITLE = "LLM Wiki 自己修復"
@@ -92,7 +110,44 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False, default=str)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+@contextmanager
+def _packet_lock(packet_path: Path):
+    """Acquire a non-blocking process lock for one failure packet."""
+
+    lock_dir = _failures_dir() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{packet_path.name}.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _append_registry(record: dict[str, Any]) -> None:
@@ -124,6 +179,59 @@ def _parse_iso(value: object) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _comparable_datetimes(left: datetime, right: datetime) -> tuple[datetime, datetime]:
+    """Normalize legacy naive timestamps against newer aware timestamps."""
+
+    if left.tzinfo is not None and right.tzinfo is None:
+        left = left.replace(tzinfo=None)
+    elif left.tzinfo is None and right.tzinfo is not None:
+        right = right.replace(tzinfo=None)
+    return left, right
+
+
+def _running_lease_seconds() -> int:
+    try:
+        return max(
+            0,
+            int(
+                os.environ.get(
+                    "LLM_WIKI_SELF_HEAL_RUNNING_LEASE_SECONDS",
+                    DEFAULT_RUNNING_LEASE_SECONDS,
+                )
+            ),
+        )
+    except ValueError:
+        return DEFAULT_RUNNING_LEASE_SECONDS
+
+
+def _lease_updates(owner: str, *, now: datetime | None = None) -> dict[str, Any]:
+    current = now or datetime.now()
+    return {
+        "lease_owner": owner,
+        "lease_expires_at": (
+            current + timedelta(seconds=_running_lease_seconds())
+        ).isoformat(timespec="seconds"),
+    }
+
+
+def _running_lease_expired(
+    packet: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    current = now or datetime.now()
+    expiry = _parse_iso(packet.get("lease_expires_at"))
+    if expiry is None:
+        started = _parse_iso(packet.get("updated_at")) or _parse_iso(
+            packet.get("last_attempt_at")
+        )
+        if started is None:
+            return True
+        expiry = started + timedelta(seconds=_running_lease_seconds())
+    expiry, current = _comparable_datetimes(expiry, current)
+    return expiry <= current
 
 
 def _notification_cooldown_seconds() -> int:
@@ -243,21 +351,34 @@ def maybe_notify_human_required(
 
 
 def _update_packet(path: Path, packet: dict[str, Any], **updates: Any) -> None:
+    next_status = updates.get("status", packet.get("status"))
+    if next_status not in RUNNING_STATUSES:
+        updates.setdefault("lease_owner", None)
+        updates.setdefault("lease_expires_at", None)
     packet.update(updates)
     packet["updated_at"] = datetime.now().isoformat()
     _write_json(path, packet)
 
 
-def pending_packets() -> list[Path]:
+def pending_packets(*, now: datetime | None = None) -> list[Path]:
     if not _packet_dir().exists():
         return []
+    current = now or datetime.now()
     out: list[Path] = []
     for path in sorted(_packet_dir().glob("*.json")):
         try:
             packet = _read_json(path)
         except Exception:
             continue
-        if packet.get("status") in SELF_HEAL_STATUSES:
+        next_attempt = _parse_iso(packet.get("next_attempt_at"))
+        due = True
+        if next_attempt is not None:
+            next_attempt, comparable_now = _comparable_datetimes(next_attempt, current)
+            due = next_attempt <= comparable_now
+        status = packet.get("status")
+        if status in SELF_HEAL_STATUSES and due:
+            out.append(path)
+        elif status in RUNNING_STATUSES and _running_lease_expired(packet, now=current):
             out.append(path)
     return out
 
@@ -390,7 +511,7 @@ def _run_frontier(
 def _save_pending_frontier_review(
     packet_path: Path,
     packet: dict[str, Any],
-    local_decision: dict[str, Any],
+    local_decision: dict[str, Any] | None,
     frontier_result: dict[str, Any],
     *,
     status: str,
@@ -410,6 +531,28 @@ def _save_pending_frontier_review(
     return path
 
 
+def _budget_deferred_result(
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    kind: str,
+    reason: str,
+    local_decision: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a no-progress budget deferral for pre-attempt gates."""
+
+    result: dict[str, Any] = {
+        "packet": str(packet_path),
+        "failure_id": packet.get("failure_id"),
+        "status": "budget_deferred",
+        "budget_kind": kind,
+        "reason": reason,
+    }
+    if local_decision is not None:
+        result["local_decision"] = local_decision
+    return result
+
+
 def _frontier_final_status(frontier_result: dict[str, Any]) -> str:
     if frontier_result.get("decision") == "approved":
         return "frontier_approved"
@@ -425,104 +568,304 @@ def _frontier_final_status(frontier_result: dict[str, Any]) -> str:
     return "frontier_rejected"
 
 
-def handle_packet(
+def _handle_packet_unlocked(
     packet_path: Path,
     *,
     use_qwen: bool = True,
     enable_frontier: bool = True,
     execute_frontier_patch: bool = True,
     dry_run: bool = False,
+    max_attempts: int = 3,
+    backoff_base_seconds: int = 6 * 60 * 60,
+    frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
     packet = _read_json(packet_path)
-    _update_packet(packet_path, packet, status="local_repairing")
-    decision = propose_repair(packet, use_qwen=use_qwen)
-    decision_path = _save_local_decision(packet_path, decision)
+    frontier_only = packet.get("status") in FRONTIER_ONLY_STATUSES
+    decision: LocalRepairDecision | None = None
+    persisted_decision = packet.get("local_decision")
+    local_decision = dict(persisted_decision) if isinstance(persisted_decision, dict) else None
+    prior_frontier_attempts = int(
+        packet.get("frontier_attempts")
+        if packet.get("frontier_attempts") is not None
+        else packet.get("self_heal_attempts")
+        or 0
+    )
+    max_frontier_attempts = max(1, max_attempts)
+    will_apply_local = False
+    frontier_reserved = False
+    mutation_reserved = False
 
-    result: dict[str, Any] = {
-        "packet": str(packet_path),
-        "failure_id": packet.get("failure_id"),
-        "local_decision": decision.to_dict(),
-        "local_decision_path": str(decision_path),
-    }
+    if frontier_only:
+        if dry_run:
+            return {
+                "packet": str(packet_path),
+                "failure_id": packet.get("failure_id"),
+                "status": "dry_run",
+                "local_decision": local_decision,
+                "frontier_only": True,
+            }
+    else:
+        if not dry_run and frontier_budget is not None:
+            allowed, reason = frontier_budget.consume("local")
+            if not allowed:
+                return _budget_deferred_result(
+                    packet_path,
+                    packet,
+                    kind="local",
+                    reason=reason,
+                )
+        decision = propose_repair(packet, use_qwen=use_qwen)
+        local_decision = decision.to_dict()
+        if dry_run:
+            return {
+                "packet": str(packet_path),
+                "failure_id": packet.get("failure_id"),
+                "status": "dry_run",
+                "local_decision": local_decision,
+            }
 
-    try:
-        if decision.status == "resolved" and decision.action in {
+        will_apply_local = decision.status == "resolved" and decision.action in {
             "resolve_update_target",
             "retry_raw",
             "quarantine_raw",
-        }:
-            action = apply_local_decision(packet, decision, dry_run=dry_run)
-            action_path = _save_action(packet_path, action, applied=True)
+        }
+        if will_apply_local and frontier_budget is not None:
+            allowed, reason = frontier_budget.consume("mutation")
+            if not allowed:
+                return _budget_deferred_result(
+                    packet_path,
+                    packet,
+                    kind="mutation",
+                    reason=reason,
+                    local_decision=local_decision,
+                )
+            mutation_reserved = True
+
+    routes_directly_to_frontier = frontier_only or not will_apply_local
+    if (
+        routes_directly_to_frontier
+        and enable_frontier
+        and prior_frontier_attempts < max_frontier_attempts
+        and frontier_budget is not None
+    ):
+        frontier_allowed, frontier_reason = frontier_budget.can_consume("frontier")
+        needs_mutation = execute_frontier_patch and not dry_run and not mutation_reserved
+        mutation_allowed, mutation_reason = (
+            frontier_budget.can_consume("mutation")
+            if needs_mutation
+            else (True, "ok")
+        )
+        if not frontier_allowed or not mutation_allowed:
+            return _budget_deferred_result(
+                packet_path,
+                packet,
+                kind="frontier" if not frontier_allowed else "mutation",
+                reason=frontier_reason if not frontier_allowed else mutation_reason,
+                local_decision=local_decision,
+            )
+        frontier_budget.consume("frontier")
+        if needs_mutation:
+            frontier_budget.consume("mutation")
+            mutation_reserved = True
+        frontier_reserved = True
+
+    lease_owner = uuid.uuid4().hex
+    result: dict[str, Any] = {
+        "packet": str(packet_path),
+        "failure_id": packet.get("failure_id"),
+        "local_decision": local_decision,
+    }
+
+    if not frontier_only:
+        assert decision is not None
+        local_attempt = int(packet.get("local_repair_attempts") or 0) + 1
+        _update_packet(
+            packet_path,
+            packet,
+            status="local_repairing",
+            local_repair_attempts=local_attempt,
+            local_decision=local_decision,
+            last_attempt_at=datetime.now().isoformat(timespec="seconds"),
+            next_attempt_at=None,
+            **_lease_updates(lease_owner),
+        )
+        decision_path = _save_local_decision(packet_path, decision)
+        result["local_decision_path"] = str(decision_path)
+
+        try:
+            if will_apply_local:
+                action = apply_local_decision(packet, decision, dry_run=False)
+                action_path = _save_action(packet_path, action, applied=True)
+                _update_packet(
+                    packet_path,
+                    packet,
+                    status="local_repair_applied",
+                    local_decision=local_decision,
+                    applied_action_path=str(action_path),
+                )
+                _append_registry({
+                    "timestamp": datetime.now().isoformat(),
+                    "failure_id": packet.get("failure_id"),
+                    "raw_file": packet.get("raw_file"),
+                    "failure_class": packet.get("failure_class"),
+                    "fingerprint": packet.get("fingerprint"),
+                    "resolution": "local",
+                    "decision": local_decision,
+                    "action": action,
+                })
+                runtime_status.safe_append_event(
+                    "success",
+                    f"self-heal | local repair applied for {packet.get('raw_file')}",
+                    source="self-heal",
+                    packet=str(packet_path),
+                    action=decision.action,
+                )
+                result["status"] = "local_repair_applied"
+                result["action"] = action
+                return result
+        except Exception as exc:
+            action = {
+                "action": decision.action,
+                "error": str(exc),
+                "decision": local_decision,
+            }
+            _save_action(packet_path, action, applied=False)
             _update_packet(
                 packet_path,
                 packet,
-                status="local_repair_applied" if not dry_run else "local_repair_dry_run",
-                local_decision=decision.to_dict(),
-                applied_action_path=str(action_path),
+                status="local_repair_failed",
+                local_decision=local_decision,
+                local_error=str(exc),
             )
-            _append_registry({
+            result["local_error"] = str(exc)
+
+    queue_path = _queue_frontier(packet_path, packet, local_decision)
+    result["frontier_queue_path"] = str(queue_path)
+    if not enable_frontier:
+        delay = max(0, backoff_base_seconds) * (2 ** max(0, prior_frontier_attempts))
+        _update_packet(
+            packet_path,
+            packet,
+            status="pending_frontier",
+            local_decision=local_decision,
+            frontier_queue_path=str(queue_path),
+            next_attempt_at=(datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds"),
+        )
+        result["status"] = "pending_frontier"
+        return result
+
+    if prior_frontier_attempts >= max_frontier_attempts:
+        _update_packet(
+            packet_path,
+            packet,
+            status="frontier_quarantined",
+            local_decision=local_decision,
+            frontier_queue_path=str(queue_path),
+            next_attempt_at=None,
+            frontier_error="frontier attempt limit reached before execution",
+        )
+        result["status"] = "frontier_quarantined"
+        result["reason"] = "frontier_attempt_limit_reached"
+        return result
+
+    if frontier_budget is not None and not frontier_reserved:
+        frontier_allowed, frontier_reason = frontier_budget.can_consume("frontier")
+        needs_mutation = execute_frontier_patch and not dry_run and not mutation_reserved
+        mutation_allowed, mutation_reason = (
+            frontier_budget.can_consume("mutation")
+            if needs_mutation
+            else (True, "ok")
+        )
+        if not frontier_allowed or not mutation_allowed:
+            return _budget_deferred_result(
+                packet_path,
+                packet,
+                kind="frontier" if not frontier_allowed else "mutation",
+                reason=frontier_reason if not frontier_allowed else mutation_reason,
+                local_decision=local_decision,
+            )
+        frontier_budget.consume("frontier")
+        if needs_mutation:
+            frontier_budget.consume("mutation")
+            mutation_reserved = True
+
+    attempt = prior_frontier_attempts + 1
+    _update_packet(
+        packet_path,
+        packet,
+        status="frontier_running",
+        frontier_attempts=attempt,
+        # Keep the legacy aggregate field in sync for old dashboards and
+        # packets, but never increment it before a real frontier execution.
+        self_heal_attempts=attempt,
+        local_decision=local_decision,
+        frontier_queue_path=str(queue_path),
+        **_lease_updates(lease_owner),
+    )
+    try:
+        frontier_result = _run_frontier(
+            packet_path,
+            packet,
+            local_decision,
+            execute_patch=execute_frontier_patch and not dry_run,
+        )
+    except Exception as exc:
+        final_status = (
+            "frontier_quarantined"
+            if attempt >= max_frontier_attempts
+            else "frontier_retry"
+        )
+        delay = max(0, backoff_base_seconds) * (2 ** max(0, attempt - 1))
+        next_attempt_at = (
+            None
+            if final_status == "frontier_quarantined"
+            else (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds")
+        )
+        frontier_error = {
+            "exception_type": exc.__class__.__name__,
+            "message": str(exc),
+        }
+        _update_packet(
+            packet_path,
+            packet,
+            status=final_status,
+            local_decision=local_decision,
+            frontier_queue_path=str(queue_path),
+            frontier_error=frontier_error,
+            next_attempt_at=next_attempt_at,
+        )
+        _append_registry(
+            {
                 "timestamp": datetime.now().isoformat(),
                 "failure_id": packet.get("failure_id"),
                 "raw_file": packet.get("raw_file"),
                 "failure_class": packet.get("failure_class"),
                 "fingerprint": packet.get("fingerprint"),
-                "resolution": "local",
-                "decision": decision.to_dict(),
-                "action": action,
-            })
-            runtime_status.safe_append_event(
-                "success",
-                f"self-heal | local repair applied for {packet.get('raw_file')}",
-                source="self-heal",
-                packet=str(packet_path),
-                action=decision.action,
-            )
-            result["status"] = "local_repair_applied"
-            result["action"] = action
-            return result
-    except Exception as exc:
-        action = {
-            "action": decision.action,
-            "error": str(exc),
-            "decision": decision.to_dict(),
-        }
-        _save_action(packet_path, action, applied=False)
-        _update_packet(
-            packet_path,
-            packet,
-            status="local_repair_failed",
-            local_decision=decision.to_dict(),
-            local_error=str(exc),
+                "resolution": "frontier_error",
+                "decision": local_decision,
+                "frontier_error": frontier_error,
+                "status": final_status,
+            }
         )
-        result["local_error"] = str(exc)
-
-    queue_path = _queue_frontier(packet_path, packet, decision.to_dict())
-    result["frontier_queue_path"] = str(queue_path)
-    if not enable_frontier:
-        _update_packet(
-            packet_path,
-            packet,
-            status="pending_frontier",
-            local_decision=decision.to_dict(),
-            frontier_queue_path=str(queue_path),
+        runtime_status.safe_append_event(
+            "warn",
+            f"self-heal | frontier exception for {packet.get('raw_file')}",
+            source="self-heal",
+            packet=str(packet_path),
+            frontier_status=final_status,
+            frontier_error=frontier_error,
         )
-        result["status"] = "pending_frontier"
+        result["status"] = final_status
+        result["frontier_error"] = frontier_error
         return result
-
-    _update_packet(
-        packet_path,
-        packet,
-        status="frontier_running",
-        local_decision=decision.to_dict(),
-        frontier_queue_path=str(queue_path),
-    )
-    frontier_result = _run_frontier(
-        packet_path,
-        packet,
-        decision.to_dict(),
-        execute_patch=execute_frontier_patch and not dry_run,
-    )
     final_status = _frontier_final_status(frontier_result)
+    next_attempt_at = None
+    if final_status in {"frontier_retry", *PENDING_REVIEW_STATUSES}:
+        if attempt >= max(1, max_attempts):
+            final_status = "frontier_quarantined"
+        else:
+            delay = max(0, backoff_base_seconds) * (2 ** max(0, attempt - 1))
+            next_attempt_at = (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds")
     human_notification = None
     pending_review_path = None
     if final_status == "human_required" and not dry_run:
@@ -531,7 +874,7 @@ def handle_packet(
         pending_review_path = _save_pending_frontier_review(
             packet_path,
             packet,
-            decision.to_dict(),
+            local_decision,
             frontier_result,
             status=final_status,
         )
@@ -542,6 +885,7 @@ def handle_packet(
         frontier_result=frontier_result,
         human_notification=human_notification,
         pending_frontier_review_path=str(pending_review_path) if pending_review_path else None,
+        next_attempt_at=next_attempt_at,
     )
     _append_registry({
         "timestamp": datetime.now().isoformat(),
@@ -550,7 +894,7 @@ def handle_packet(
         "failure_class": packet.get("failure_class"),
         "fingerprint": packet.get("fingerprint"),
         "resolution": "frontier",
-        "decision": decision.to_dict(),
+        "decision": local_decision,
         "frontier": frontier_result,
         "human_notification": human_notification,
         "pending_frontier_review_path": str(pending_review_path) if pending_review_path else None,
@@ -582,6 +926,69 @@ def handle_packet(
     return result
 
 
+def handle_packet(
+    packet_path: Path,
+    *,
+    use_qwen: bool = True,
+    enable_frontier: bool = True,
+    execute_frontier_patch: bool = True,
+    dry_run: bool = False,
+    max_attempts: int = 3,
+    backoff_base_seconds: int = 6 * 60 * 60,
+    frontier_budget: Any | None = None,
+) -> dict[str, Any]:
+    """Handle one packet with process-safe single-flight execution.
+
+    Dry runs intentionally avoid even creating the sidecar lock file, keeping
+    the established byte-for-byte read-only contract. ``frontier_budget``
+    retains its public name for compatibility but is the shared cycle budget
+    for local, frontier, and mutation work.
+    """
+
+    kwargs = {
+        "use_qwen": use_qwen,
+        "enable_frontier": enable_frontier,
+        "execute_frontier_patch": execute_frontier_patch,
+        "dry_run": dry_run,
+        "max_attempts": max_attempts,
+        "backoff_base_seconds": backoff_base_seconds,
+        "frontier_budget": frontier_budget,
+    }
+    if dry_run:
+        return _handle_packet_unlocked(packet_path, **kwargs)
+    with _packet_lock(packet_path) as acquired:
+        if not acquired:
+            return {
+                "packet": str(packet_path),
+                "status": "busy",
+                "reason": "packet_already_running",
+            }
+        current = _read_json(packet_path)
+        current_status = current.get("status")
+        if current_status in RUNNING_STATUSES and not _running_lease_expired(current):
+            return {
+                "packet": str(packet_path),
+                "failure_id": current.get("failure_id"),
+                "status": "busy",
+                "reason": "running_lease_active",
+            }
+        if (
+            current_status
+            and current_status not in SELF_HEAL_STATUSES
+            and current_status not in RUNNING_STATUSES
+        ):
+            return {
+                "packet": str(packet_path),
+                "failure_id": current.get("failure_id"),
+                "status": current_status,
+                "cached": True,
+            }
+        # The packet is read inside the lock by the implementation.  This is
+        # the CAS boundary that prevents a stale pre-lock snapshot from being
+        # applied after another worker completes.
+        return _handle_packet_unlocked(packet_path, **kwargs)
+
+
 def run_pending(
     *,
     max_packets: int = 3,
@@ -589,18 +996,33 @@ def run_pending(
     enable_frontier: bool = True,
     execute_frontier_patch: bool = True,
     dry_run: bool = False,
+    max_attempts: int = 3,
+    backoff_base_seconds: int = 6 * 60 * 60,
+    frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
     packets = pending_packets()[:max_packets]
-    results = [
-        handle_packet(
-            packet,
-            use_qwen=use_qwen,
-            enable_frontier=enable_frontier,
-            execute_frontier_patch=execute_frontier_patch,
-            dry_run=dry_run,
-        )
-        for packet in packets
-    ]
+    results: list[dict[str, Any]] = []
+    for packet in packets:
+        try:
+            result = handle_packet(
+                packet,
+                use_qwen=use_qwen,
+                enable_frontier=enable_frontier,
+                execute_frontier_patch=execute_frontier_patch,
+                dry_run=dry_run,
+                max_attempts=max_attempts,
+                backoff_base_seconds=backoff_base_seconds,
+                frontier_budget=frontier_budget,
+            )
+        except Exception as exc:
+            # One corrupt or externally-failing packet must not abort the
+            # bounded drain of unrelated packets.
+            result = {
+                "packet": str(packet),
+                "status": "error",
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        results.append(result)
     return {
         "status": "ok",
         "packets_seen": len(packets),
@@ -630,16 +1052,23 @@ def run_auto_apply_error_self_heal(
     created = [Path(path) for path in supervision.get("packets_created", []) if isinstance(path, str)]
     packets = created or pending_auto_apply_error_packets()
     packets = packets[:max_packets]
-    results = [
-        handle_packet(
-            packet,
-            use_qwen=use_qwen,
-            enable_frontier=enable_frontier,
-            execute_frontier_patch=execute_frontier_patch,
-            dry_run=dry_run,
-        )
-        for packet in packets
-    ]
+    results: list[dict[str, Any]] = []
+    for packet in packets:
+        try:
+            result = handle_packet(
+                packet,
+                use_qwen=use_qwen,
+                enable_frontier=enable_frontier,
+                execute_frontier_patch=execute_frontier_patch,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            result = {
+                "packet": str(packet),
+                "status": "error",
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        results.append(result)
     return {
         "status": "ok",
         "supervision": supervision,

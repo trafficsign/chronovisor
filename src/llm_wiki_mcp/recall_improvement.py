@@ -14,7 +14,7 @@ import os
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -956,13 +956,13 @@ def run_frontier_policy_audit(
     repo = repo_root or Path(__file__).resolve().parents[2]
     timeout_seconds = timeout or int(os.environ.get("LLM_WIKI_RECALL_IMPROVE_FRONTIER_TIMEOUT", "1800"))
     prompt = build_frontier_audit_prompt(record, best, reasons)
-    result = frontier_review._run_codex(
+    payload = frontier_review.run_structured_review(
         prompt,
+        frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=repo,
         timeout=timeout_seconds,
         execute_patch=False,
     )
-    payload = result.to_dict()
     payload["audit_reasons"] = reasons
     payload["run_id"] = record.get("run_id")
     payload["ts"] = _now_iso()
@@ -994,6 +994,7 @@ def run_improvement(
     runs_dir: Path = RUNS_DIR,
     episodes_file: Path = EPISODES_FILE,
     live_episodes_file: Path = LIVE_EPISODES_FILE,
+    frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
     run_id = _run_id()
     started = _now_iso()
@@ -1102,23 +1103,55 @@ def run_improvement(
                 },
                 "failure_samples": failures,
             }
-            frontier_audit = run_frontier_policy_audit(
-                provisional,
-                best,
-                reasons=frontier_audit_reasons,
-                timeout=frontier_timeout,
+            allowed = True
+            budget_reason = "ok"
+            if frontier_budget is not None:
+                allowed, budget_reason = frontier_budget.consume("frontier")
+            frontier_audit = (
+                run_frontier_policy_audit(
+                    provisional,
+                    best,
+                    reasons=frontier_audit_reasons,
+                    timeout=frontier_timeout,
+                )
+                if allowed
+                else {
+                    "decision": "needs_retry",
+                    "summary": budget_reason,
+                    "rescue_status": "pending_frontier_review",
+                    "human_required": False,
+                }
             )
             if _frontier_blocks_adoption(frontier_audit):
-                status = (
-                    "pending_frontier_review"
-                    if frontier_audit.get("human_required") or frontier_audit.get("rescue_status") == "pending_frontier_review"
-                    else "frontier_rejected"
+                if not allowed:
+                    status = "budget_deferred"
+                elif frontier_audit.get("human_required"):
+                    status = "human_required"
+                elif (
+                    frontier_audit.get("decision") == "needs_retry"
+                    or frontier_audit.get("rescue_status") == "pending_frontier_review"
+                ):
+                    status = "pending_frontier_review"
+                else:
+                    status = "frontier_rejected"
+                reason = (
+                    budget_reason
+                    if not allowed
+                    else f"frontier audit did not approve: {frontier_audit.get('summary') or frontier_audit.get('decision')}"
                 )
-                reason = f"frontier audit did not approve: {frontier_audit.get('summary') or frontier_audit.get('decision')}"
                 active_policy = None
         if apply and active_policy:
-            atomic_write_json(active_file, active_policy)
-            applied = True
+            mutation_allowed = True
+            mutation_reason = "ok"
+            if frontier_budget is not None:
+                mutation_allowed, mutation_reason = frontier_budget.consume("mutation")
+            if not mutation_allowed:
+                status = "budget_deferred"
+                reason = mutation_reason
+                active_policy = None
+            else:
+                atomic_write_json(active_file, active_policy)
+                applied = True
 
     record = {
         "schema_version": 1,
@@ -1286,6 +1319,7 @@ def run_due(
     dry_run: bool = False,
     schedule_file: Path = SCHEDULE_FILE,
     lock_file: Path = RUN_DUE_LOCK_FILE,
+    frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
     lock_handle = None
     if not dry_run:
@@ -1317,6 +1351,7 @@ def run_due(
             frontier_timeout=frontier_timeout,
             dry_run=dry_run,
             schedule_file=schedule_file,
+            frontier_budget=frontier_budget,
         )
     finally:
         if lock_handle is not None:
@@ -1343,6 +1378,7 @@ def _run_due_locked(
     frontier_timeout: int | None = None,
     dry_run: bool = False,
     schedule_file: Path = SCHEDULE_FILE,
+    frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
     now = datetime.now()
     state = read_json_file(schedule_file)
@@ -1355,7 +1391,13 @@ def _run_due_locked(
     enough_total = feedback_count >= min_total_feedback
     interval_due = last_run is None or (age_hours is not None and age_hours >= min_interval_hours)
     feedback_due = new_feedback >= min_new_feedback
-    due = enough_total and interval_due and (feedback_due or first_run)
+    retry_pending = state.get("last_status") == "pending_frontier_review"
+    retry_at = _parse_ts(state.get("frontier_next_retry_at"))
+    retry_due = retry_at is None or retry_at <= now
+    due = enough_total and (
+        (retry_pending and retry_due)
+        or (not retry_pending and interval_due and (feedback_due or first_run))
+    )
     decision = {
         "schema_version": 1,
         "checked_at": _now_iso(),
@@ -1373,6 +1415,8 @@ def _run_due_locked(
             "interval_due": interval_due,
             "feedback_due": feedback_due,
             "first_run": first_run,
+            "frontier_retry_pending": retry_pending,
+            "frontier_retry_due": retry_due,
         },
     }
     if dry_run:
@@ -1389,7 +1433,10 @@ def _run_due_locked(
         next_state = {
             **state,
             "last_checked_at": decision["checked_at"],
-            "last_status": decision["status"],
+            # A backoff check is not a terminal decision. Preserve the pending
+            # frontier state so the next cycle still uses frontier_next_retry_at
+            # instead of silently falling back to the ordinary daily gate.
+            "last_status": state.get("last_status") if retry_pending else decision["status"],
             "last_decision": decision,
         }
         atomic_write_json(schedule_file, next_state)
@@ -1406,16 +1453,84 @@ def _run_due_locked(
         max_examples=max_examples,
         frontier_mode=frontier_mode,
         frontier_timeout=frontier_timeout,
+        frontier_budget=frontier_budget,
     )
-    next_state = {
-        **state,
-        "last_checked_at": decision["checked_at"],
-        "last_run_at": result.get("ts") or decision["checked_at"],
-        "last_run_id": result.get("run_id"),
-        "last_status": result.get("status"),
-        "last_feedback_count": feedback_count,
-        "last_decision": decision,
-    }
+    result_status = str(result.get("status") or "")
+    if result_status == "budget_deferred":
+        # A cycle budget is ephemeral and must not acknowledge durable
+        # progress. Leaving the schedule byte-for-byte unchanged makes this
+        # exact candidate immediately eligible in a later funded cycle.
+        safe_append_metric(
+            "recall_improve",
+            status=result_status,
+            applied=False,
+            examples=(result.get("dataset") or {}).get("examples"),
+            eval_cache_entries=result.get("eval_cache_entries"),
+        )
+        return {
+            "status": "budget_deferred",
+            "decision": decision,
+            "result": result,
+            "schedule_state": state,
+        }
+    if result_status == "pending_frontier_review":
+        audit = result.get("frontier_audit") if isinstance(result.get("frontier_audit"), dict) else {}
+        budget_retry = str(audit.get("summary") or "") == "frontier cycle budget exhausted"
+        candidate_payload = {
+            "overrides": ((result.get("best") or {}).get("proposal") or {}).get("overrides", {}),
+            "examples": (result.get("dataset") or {}).get("examples"),
+            "feedback_count": feedback_count,
+        }
+        candidate_hash = hashlib.sha256(
+            json.dumps(candidate_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        previous_hash = str(state.get("frontier_retry_candidate") or "")
+        attempts = int(state.get("frontier_retry_attempts") or 0) if previous_hash == candidate_hash else 0
+        if not budget_retry:
+            attempts += 1
+        if not budget_retry and attempts >= 3:
+            result = {
+                **result,
+                "status": "frontier_quarantined",
+                "reason": f"{result.get('reason', '')}; frontier retry limit exhausted",
+            }
+            next_state = {
+                **state,
+                "last_checked_at": decision["checked_at"],
+                "last_run_at": result.get("ts") or decision["checked_at"],
+                "last_run_id": result.get("run_id"),
+                "last_status": "frontier_quarantined",
+                "last_feedback_count": feedback_count,
+                "last_decision": decision,
+                "frontier_retry_candidate": candidate_hash,
+                "frontier_retry_attempts": attempts,
+                "frontier_next_retry_at": None,
+            }
+        else:
+            delay_seconds = 5 * 60 if budget_retry else min(6 * 60 * 60, 15 * 60 * (2 ** max(0, attempts - 1)))
+            next_state = {
+                **state,
+                "last_checked_at": decision["checked_at"],
+                "last_run_id": result.get("run_id"),
+                "last_status": "pending_frontier_review",
+                "last_decision": decision,
+                "frontier_retry_candidate": candidate_hash,
+                "frontier_retry_attempts": attempts,
+                "frontier_next_retry_at": (now + timedelta(seconds=delay_seconds)).isoformat(timespec="seconds"),
+            }
+    else:
+        next_state = {
+            **state,
+            "last_checked_at": decision["checked_at"],
+            "last_run_at": result.get("ts") or decision["checked_at"],
+            "last_run_id": result.get("run_id"),
+            "last_status": result_status,
+            "last_feedback_count": feedback_count,
+            "last_decision": decision,
+            "frontier_retry_candidate": None,
+            "frontier_retry_attempts": 0,
+            "frontier_next_retry_at": None,
+        }
     atomic_write_json(schedule_file, next_state)
     safe_append_metric(
         "recall_improve",

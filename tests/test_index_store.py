@@ -251,6 +251,25 @@ class TestBuildEntryRawKeywords:
 
 
 class TestRawKeywordsAccessor:
+    def test_read_only_refresh_rebuilds_memory_without_persisting(
+        self, isolated_index: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(isolated_index, "p.md", "---\ntitle: P\n---\nbody\n")
+        monkeypatch.setenv("LLM_WIKI_READ_ONLY", "1")
+        store = IndexStore()
+
+        store.refresh()
+
+        assert store.meta("p") is not None
+        assert not index_store_mod.PAGES_INDEX_FILE.exists()
+        assert not index_store_mod.BACKLINKS_INDEX_FILE.exists()
+
+        monkeypatch.delenv("LLM_WIKI_READ_ONLY")
+        store.refresh()
+
+        assert index_store_mod.PAGES_INDEX_FILE.exists()
+        assert index_store_mod.BACKLINKS_INDEX_FILE.exists()
+
     def test_round_trip_via_refresh(self, isolated_index: Path) -> None:
         _seed(
             isolated_index,

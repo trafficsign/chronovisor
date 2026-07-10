@@ -8,10 +8,13 @@ after a holdout check passes and records the old artifact for rollback.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
+import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +25,8 @@ from llm_wiki_mcp.recall_runtime import (
     RecallPolicy,
     RecallRequest,
     append_jsonl,
+    evidence_score,
+    load_policy,
     run_recall,
 )
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
@@ -29,6 +34,7 @@ from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 
 CALIBRATION_FILE = RECALL_DIR / "calibration.json"
 CALIBRATION_HISTORY_FILE = RECALL_DIR / "calibration-history.jsonl"
+CALIBRATION_RUN_HISTORY_FILE = RECALL_DIR / "calibration-run-history.jsonl"
 
 FEATURE_KEYS = (
     "top1_score_norm",
@@ -41,6 +47,31 @@ FEATURE_KEYS = (
 )
 
 
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp = Path(handle.name)
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+
+
 @dataclass(frozen=True)
 class CalibrationPolicy:
     enabled: bool = True
@@ -49,6 +80,9 @@ class CalibrationPolicy:
     min_improvement: float = 0.02
     learning_rate: float = 0.15
     epochs: int = 180
+    min_class_samples: int = 25
+    search_threshold: float = 0.35
+    read_threshold: float = 0.65
 
 
 def load_calibration(path: Path = CALIBRATION_FILE) -> dict[str, Any] | None:
@@ -124,6 +158,28 @@ def score_rows(rows: list[tuple[list[float], int]], weights: list[float], bias: 
     }
 
 
+def score_probabilities(rows: list[tuple[float, int]], *, threshold: float) -> dict[str, float]:
+    if not rows:
+        return {"accuracy": 0.0, "precision": 0.0, "recall": 0.0}
+    tp = fp = tn = fn = 0
+    for probability, label in rows:
+        pred = probability >= threshold
+        if pred and label:
+            tp += 1
+        elif pred and not label:
+            fp += 1
+        elif not pred and label:
+            fn += 1
+        else:
+            tn += 1
+    total = tp + fp + tn + fn
+    return {
+        "accuracy": (tp + tn) / total if total else 0.0,
+        "precision": tp / (tp + fp) if (tp + fp) else 0.0,
+        "recall": tp / (tp + fn) if (tp + fn) else 0.0,
+    }
+
+
 def _label_for_feedback(record: dict[str, Any]) -> int | None:
     kind = record.get("kind")
     if kind in {"missed", "missed_candidate", "injection_used"}:
@@ -137,6 +193,8 @@ def load_labeled_rows(
     *,
     log_file: Path = RECALL_LOG_FILE,
     feedback_file: Path = RECALL_FEEDBACK_FILE,
+    limit: int = 2000,
+    max_recomputed_features: int = 100,
 ) -> list[dict[str, Any]]:
     logs = {
         str(record.get("decision_id", "")): record
@@ -144,7 +202,11 @@ def load_labeled_rows(
         if record.get("decision_id")
     }
     rows: list[dict[str, Any]] = []
-    for feedback in read_jsonl(feedback_file):
+    feedback_rows = read_jsonl(feedback_file)
+    if limit > 0:
+        feedback_rows = feedback_rows[-limit:]
+    recomputed = 0
+    for feedback in feedback_rows:
         label = _label_for_feedback(feedback)
         if label is None:
             continue
@@ -154,7 +216,8 @@ def load_labeled_rows(
         features = source.get("evidence_features") or source.get("features")
         if not isinstance(features, dict):
             prompt = str(feedback.get("prompt") or source.get("prompt_preview") or "")
-            if prompt:
+            if prompt and recomputed < max(0, max_recomputed_features):
+                recomputed += 1
                 policy = RecallPolicy(
                     log_decisions=False,
                     semantic=False,
@@ -206,21 +269,74 @@ def calibrate(
     log_file: Path = RECALL_LOG_FILE,
     feedback_file: Path = RECALL_FEEDBACK_FILE,
     dry_run: bool = False,
+    max_samples: int = 2000,
+    max_recomputed_features: int = 100,
+    frontier_mode: str = "off",
+    frontier_reviewer: Any | None = None,
+    budget: Any | None = None,
 ) -> dict[str, Any]:
-    rows = load_labeled_rows(log_file=log_file, feedback_file=feedback_file)
+    if not policy.enabled:
+        return {"status": "disabled", "reason": "recall calibration is disabled"}
+    rows = load_labeled_rows(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        limit=max_samples,
+        max_recomputed_features=max_recomputed_features,
+    )
     if len(rows) < policy.min_samples:
         return {
             "status": "skipped",
             "reason": f"not enough labeled samples ({len(rows)} < {policy.min_samples})",
             "samples": len(rows),
         }
+    label_counts = {
+        0: sum(1 for row in rows if int(row["label"]) == 0),
+        1: sum(1 for row in rows if int(row["label"]) == 1),
+    }
+    if min(label_counts.values()) < max(1, policy.min_class_samples):
+        return {
+            "status": "skipped",
+            "reason": "both positive and negative calibration classes require sufficient support",
+            "samples": len(rows),
+            "label_counts": label_counts,
+        }
     train_rows_raw, holdout_raw = split_holdout(rows, holdout_ratio=policy.holdout_ratio)
+    split_label_counts = {
+        "train": {
+            0: sum(1 for row in train_rows_raw if int(row["label"]) == 0),
+            1: sum(1 for row in train_rows_raw if int(row["label"]) == 1),
+        },
+        "holdout": {
+            0: sum(1 for row in holdout_raw if int(row["label"]) == 0),
+            1: sum(1 for row in holdout_raw if int(row["label"]) == 1),
+        },
+    }
+    if any(min(counts.values()) < 1 for counts in split_label_counts.values()):
+        return {
+            "status": "skipped",
+            "reason": "temporal train and holdout splits must each contain both calibration classes",
+            "samples": len(rows),
+            "label_counts": label_counts,
+            "split_label_counts": split_label_counts,
+        }
     train_rows = [(feature_vector(row["features"]), int(row["label"])) for row in train_rows_raw]
     holdout_rows = [(feature_vector(row["features"]), int(row["label"])) for row in holdout_raw]
     weights, bias = train_logistic(train_rows, policy)
-    baseline_weights = [1.0 if key == "top1_score_norm" else 0.0 for key in FEATURE_KEYS]
-    baseline = score_rows(holdout_rows, baseline_weights, 0.0)
-    candidate = score_rows(holdout_rows, weights, bias)
+    baseline_policy = RecallPolicy(calibration_enabled=False)
+    baseline = score_probabilities(
+        [
+            (evidence_score(dict(row["features"]), baseline_policy), int(row["label"]))
+            for row in holdout_raw
+        ],
+        threshold=policy.search_threshold,
+    )
+    candidate = score_probabilities(
+        [
+            (predict(weights, bias, feature_vector(row["features"])), int(row["label"]))
+            for row in holdout_raw
+        ],
+        threshold=policy.search_threshold,
+    )
     improvement = candidate["accuracy"] - baseline["accuracy"]
     artifact = {
         "version": 1,
@@ -230,8 +346,8 @@ def calibrate(
         "weights": {key: weights[i] for i, key in enumerate(FEATURE_KEYS)},
         "bias": bias,
         "thresholds": {
-            "search": 0.45,
-            "read": 0.72,
+            "search": policy.search_threshold,
+            "read": policy.read_threshold,
         },
         "samples": len(rows),
         "train_samples": len(train_rows),
@@ -248,12 +364,57 @@ def calibrate(
             "reason": f"holdout improvement below threshold ({improvement:.4f} < {policy.min_improvement:.4f})",
             "candidate": artifact,
         }
+    if candidate["precision"] < baseline["precision"] or candidate["recall"] < baseline["recall"]:
+        return {
+            "status": "skipped",
+            "reason": "candidate precision or recall regressed on the temporal holdout",
+            "candidate": artifact,
+        }
+    frontier: dict[str, Any] | None = None
+    if frontier_mode == "auto" and not dry_run:
+        allowed = True
+        if budget is not None:
+            allowed, _reason = budget.consume("frontier")
+        if not allowed:
+            return {
+                "status": "budget_deferred",
+                "reason": "frontier cycle budget exhausted",
+                "candidate": artifact,
+            }
+        frontier = (
+            frontier_reviewer(artifact)
+            if callable(frontier_reviewer)
+            else review_calibration_with_frontier(artifact)
+        )
+        if frontier.get("human_required"):
+            return {
+                "status": "human_required",
+                "reason": str(frontier.get("summary") or "frontier access requires external authority"),
+                "candidate": artifact,
+                "frontier_review": frontier,
+            }
+        if frontier.get("decision") != "approved":
+            return {
+                "status": (
+                    "frontier_rejected"
+                    if frontier.get("decision") in {"rejected", "quarantined"}
+                    else "frontier_retry"
+                ),
+                "reason": str(frontier.get("summary") or "frontier did not approve calibration"),
+                "candidate": artifact,
+                "frontier_review": frontier,
+            }
     old = load_calibration() or {}
     if not dry_run:
-        CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = CALIBRATION_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(CALIBRATION_FILE)
+        if budget is not None:
+            mutation_allowed, mutation_reason = budget.consume("mutation")
+            if not mutation_allowed:
+                return {
+                    "status": "budget_deferred",
+                    "reason": mutation_reason,
+                    "candidate": artifact,
+                }
+        _atomic_write_json(CALIBRATION_FILE, artifact)
         append_jsonl(
             CALIBRATION_HISTORY_FILE,
             {
@@ -264,7 +425,138 @@ def calibrate(
                 "new": artifact,
             },
         )
-    return {"status": "dry_run" if dry_run else "applied", "calibration": artifact}
+    result = {"status": "dry_run" if dry_run else "applied", "calibration": artifact}
+    if frontier is not None:
+        result["frontier_review"] = frontier
+    return result
+
+
+def review_calibration_with_frontier(
+    artifact: dict[str, Any],
+    *,
+    timeout: int | None = None,
+) -> dict[str, Any]:
+    from llm_wiki_mcp import frontier_review
+
+    prompt = f"""\
+You are the final autonomous reviewer for an LLM Wiki recall calibration.
+Approve only if the independent holdout evidence supports applying this
+artifact without weakening precision or recall safety. Do not edit files,
+commit, push, or ask a human. Return JSON matching the supplied frontier
+decision schema.
+
+Candidate calibration:
+{json.dumps(artifact, ensure_ascii=False, indent=2)}
+"""
+    repo_root = Path(__file__).resolve().parents[2]
+    return frontier_review.run_structured_review(
+        prompt,
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=repo_root,
+        timeout=timeout or 3600,
+        execute_patch=False,
+    )
+
+
+def run_due(
+    *,
+    policy: CalibrationPolicy | None = None,
+    log_file: Path = RECALL_LOG_FILE,
+    feedback_file: Path = RECALL_FEEDBACK_FILE,
+    run_history_file: Path = CALIBRATION_RUN_HISTORY_FILE,
+    min_interval_hours: float = 7 * 24,
+    max_samples: int = 2000,
+    max_recomputed_features: int = 100,
+    dry_run: bool = False,
+    frontier_mode: str = "auto",
+    budget: Any | None = None,
+) -> dict[str, Any]:
+    if policy is None:
+        runtime_policy = load_policy()
+        policy = CalibrationPolicy(
+            enabled=runtime_policy.calibration_enabled,
+            min_samples=runtime_policy.calibration_min_samples,
+            holdout_ratio=runtime_policy.calibration_holdout_ratio,
+            min_improvement=runtime_policy.calibration_min_improvement,
+            search_threshold=runtime_policy.search_threshold,
+            read_threshold=runtime_policy.read_threshold,
+        )
+    history = read_jsonl(run_history_file)
+    latest = history[-1] if history else {}
+    last_ts = str(latest.get("ts") or "")
+    retry_pending = latest.get("status") == "frontier_retry"
+    retry_at = str(latest.get("next_retry_at") or "")
+    if retry_pending and retry_at:
+        try:
+            retry_time = datetime.fromisoformat(retry_at)
+            retry_now = datetime.now(retry_time.tzinfo) if retry_time.tzinfo is not None else datetime.now()
+            if retry_now < retry_time:
+                return {"status": "skipped", "reason": "frontier_retry_backoff", "next_retry_at": retry_at}
+        except ValueError:
+            pass
+    if last_ts and not retry_pending:
+        try:
+            last_time = datetime.fromisoformat(last_ts)
+            current_time = datetime.now(last_time.tzinfo) if last_time.tzinfo is not None else datetime.now()
+            if current_time - last_time < timedelta(hours=max(0.0, min_interval_hours)):
+                return {"status": "skipped", "reason": "interval_not_due", "last_run_at": last_ts}
+        except ValueError:
+            pass
+    result = calibrate(
+        policy=policy,
+        log_file=log_file,
+        feedback_file=feedback_file,
+        dry_run=dry_run,
+        max_samples=max_samples,
+        max_recomputed_features=max_recomputed_features,
+        frontier_mode=frontier_mode,
+        budget=budget,
+    )
+    artifact = result.get("calibration") or result.get("candidate") or {}
+    candidate_payload = {
+        key: artifact.get(key)
+        for key in ("weights", "bias", "thresholds", "samples", "holdout")
+        if isinstance(artifact, dict)
+    }
+    candidate_hash = (
+        hashlib.sha256(
+            json.dumps(candidate_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        if candidate_payload
+        else ""
+    )
+    frontier_attempts = 0
+    next_retry_at: str | None = None
+    if result.get("status") == "frontier_retry":
+        frontier_attempts = (
+            int(latest.get("frontier_attempts") or 0) + 1
+            if latest.get("candidate_hash") == candidate_hash
+            else 1
+        )
+        if frontier_attempts >= 3:
+            result = {
+                **result,
+                "status": "frontier_quarantined",
+                "reason": f"{result.get('reason', '')}; frontier retry limit exhausted",
+            }
+        else:
+            next_retry_at = (
+                datetime.now() + timedelta(minutes=15 * (2 ** max(0, frontier_attempts - 1)))
+            ).isoformat(timespec="seconds")
+    if not dry_run and result.get("status") != "budget_deferred":
+        append_jsonl(
+            run_history_file,
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "status": result.get("status"),
+                "samples": (result.get("calibration") or result.get("candidate") or {}).get("samples", 0),
+                "reason": result.get("reason", ""),
+                "candidate_hash": candidate_hash,
+                "frontier_attempts": frontier_attempts,
+                "next_retry_at": next_retry_at,
+            },
+        )
+    return result
 
 
 def rollback_last() -> dict[str, Any]:

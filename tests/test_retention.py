@@ -37,7 +37,10 @@ def test_build_retention_scores_strengthens_used_pages(tmp_path: Path, monkeypat
         encoding="utf-8",
     )
     recall_log = tmp_path / "recall.jsonl"
-    recall_log.write_text("", encoding="utf-8")
+    recall_log.write_text(
+        json.dumps({"decision": "read", "pages": ["used"]}) + "\n",
+        encoding="utf-8",
+    )
     output = tmp_path / "retention.json"
     monkeypatch.setattr(retention, "get_store", lambda: FakeStore())
 
@@ -49,6 +52,7 @@ def test_build_retention_scores_strengthens_used_pages(tmp_path: Path, monkeypat
     )
 
     assert payload["pages"]["used"]["score"] > 0
+    assert payload["pages"]["used"]["exposure_count"] == 2
     assert payload["pages"]["linked"]["cold_start_prior"] > 0
     assert "linked" not in payload["archive_candidates"]
     assert payload["pages"]["ref"]["score"] == 0.0

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,7 @@ from llm_wiki_mcp.search import search as run_search
 
 DEFAULT_STATE_FILE = RECALL_DIR / "audit-state.json"
 DEFAULT_LOCK_FILE = RECALL_DIR / "audit.lock"
+DEFAULT_PULL_CONSUMED_FILE = RECALL_DIR / "pull-consumed.jsonl"
 HOOK_ENABLE_ENV = "LLM_WIKI_RECALL_AUDIT_ENABLED"
 
 AUTO_ACTIONS = frozenset({"alias", "query_hint", "page_tag"})
@@ -365,8 +367,9 @@ def build_auditor_prompt(
         "- the recall gate decision was none/search or no useful page was injected, and\n"
         "- the user prompt or assistant response shows that past/project wiki memory was actually useful.\n\n"
         "Do not propose runtime threshold changes unless the evidence is systemic. Prefer additive, local actions.\n"
-        "Safe automatic action types are alias, query_hint, and page_tag. Risky review-only action types are "
-        "few_shot and threshold. Use action_type=none when no improvement action is clear.\n\n"
+        "Safe direct action types are alias, query_hint, and page_tag. System-wide action types few_shot "
+        "and threshold are routed to automated replay, holdout, and frontier gates. Use action_type=none "
+        "when no improvement action is clear.\n\n"
         "Use page_tag only when action_payload.tag is an actual tag that satisfies the taxonomy form "
         "d/<kebab>, t/<kebab>, or s/<kebab>. Do not put a prose reason in action_payload.tag; "
         "use query_hint for prose evidence. Use alias only for ASCII page-id aliases, not natural-language "
@@ -692,13 +695,126 @@ def feedback_extra(
     }
 
 
-def matching_pull_events(turn: TurnContext, recall_snapshot: dict[str, Any] | None, *, limit: int = 200) -> list[dict[str, Any]]:
+def pull_event_key(record: dict[str, Any]) -> str:
+    identity = {
+        key: record.get(key)
+        for key in (
+            "ts",
+            "session_id",
+            "type",
+            "page_id",
+            "query",
+            "direct_pages",
+            "expanded_pages",
+        )
+    }
+    raw = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _consumed_pull_keys(path: Path = DEFAULT_PULL_CONSUMED_FILE) -> set[str]:
+    keys: set[str] = set()
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                key = row.get("event_key") if isinstance(row, dict) else None
+                if isinstance(key, str) and key:
+                    keys.add(key)
+    except OSError:
+        return set()
+    return keys
+
+
+def _feedback_pull_keys(path: Path | None = None) -> set[str]:
+    """Treat feedback as the commit record for pull-event consumption.
+
+    The consumed ledger is an index, not the source of truth. If a process
+    exits after appending feedback but before appending the ledger row, this
+    scan prevents duplicate feedback and lets the ledger heal on demand.
+    """
+    if path is None:
+        from llm_wiki_mcp import recall_runtime
+
+        path = recall_runtime.RECALL_FEEDBACK_FILE
+    keys: set[str] = set()
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                key = row.get("pull_event_key") if isinstance(row, dict) else None
+                if isinstance(key, str) and key:
+                    keys.add(key)
+    except OSError:
+        return set()
+    return keys
+
+
+def _normalized_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.astimezone(timezone.utc)
+
+
+def _next_recall_time(session_id: str, after: datetime | None) -> datetime | None:
+    if not session_id or after is None:
+        return None
+    next_time: datetime | None = None
+    try:
+        with RECALL_LOG_FILE.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict) or row.get("session_id") != session_id:
+                    continue
+                timestamp = _normalized_time(row.get("ts"))
+                if timestamp is not None and timestamp > after and (
+                    next_time is None or timestamp < next_time
+                ):
+                    next_time = timestamp
+    except OSError:
+        return None
+    return next_time
+
+
+def matching_pull_events(
+    turn: TurnContext,
+    recall_snapshot: dict[str, Any] | None,
+    *,
+    limit: int = 200,
+    consumed_file: Path = DEFAULT_PULL_CONSUMED_FILE,
+    feedback_file: Path | None = None,
+) -> list[dict[str, Any]]:
+    # Pull events are global telemetry. Without both an exact session identity
+    # and a recall timestamp there is no safe way to assign them to this turn.
+    if not turn.session_id:
+        return []
+    recall_ts = str((recall_snapshot or {}).get("ts") or "")
+    recall_time = _normalized_time(recall_ts)
+    if recall_time is None:
+        return []
     try:
         with RECALL_PULL_LOG_FILE.open(encoding="utf-8") as f:
             lines = deque(f, maxlen=limit)
     except OSError:
         return []
     injected = set((recall_snapshot or {}).get("pages", []) or [])
+    consumed = _consumed_pull_keys(consumed_file) | _feedback_pull_keys(feedback_file)
+    turn_end = _next_recall_time(turn.session_id, recall_time)
     out: list[dict[str, Any]] = []
     for line in reversed(lines):
         try:
@@ -707,7 +823,18 @@ def matching_pull_events(turn: TurnContext, recall_snapshot: dict[str, Any] | No
             continue
         if not isinstance(record, dict):
             continue
-        if turn.session_id and record.get("session_id") and record.get("session_id") != turn.session_id:
+        if turn.session_id and record.get("session_id") != turn.session_id:
+            continue
+        event_key = pull_event_key(record)
+        if event_key in consumed:
+            continue
+        event_ts = str(record.get("ts") or "")
+        event_time = _normalized_time(event_ts)
+        if event_time is None:
+            continue
+        if event_time <= recall_time:
+            continue
+        if turn_end is not None and event_time is not None and event_time >= turn_end:
             continue
         pages: list[str] = []
         if record.get("type") == "read" and isinstance(record.get("page_id"), str):
@@ -720,6 +847,7 @@ def matching_pull_events(turn: TurnContext, recall_snapshot: dict[str, Any] | No
         missed_pages = [page for page in pages if page and page not in injected]
         if missed_pages:
             event = dict(record)
+            event["event_key"] = event_key
             event["missed_pages"] = list(dict.fromkeys(missed_pages))
             out.append(event)
     return out[:5]
@@ -731,13 +859,35 @@ def record_pull_missed_candidates(
     recall_snapshot: dict[str, Any] | None,
     pull_events: list[dict[str, Any]],
     host: str,
+    consumed_file: Path = DEFAULT_PULL_CONSUMED_FILE,
 ) -> list[dict[str, Any]]:
     if not pull_events:
         return []
     recorded: list[dict[str, Any]] = []
+    committed = _feedback_pull_keys()
+    indexed = _consumed_pull_keys(consumed_file)
     for event in pull_events:
         pages = event.get("missed_pages")
         if not isinstance(pages, list) or not pages:
+            continue
+        event_key = str(event.get("event_key") or pull_event_key(event))
+        if event_key in committed:
+            if event_key not in indexed:
+                consumed_file.parent.mkdir(parents=True, exist_ok=True)
+                with consumed_file.open("a", encoding="utf-8") as f:
+                    f.write(
+                        json.dumps(
+                            {
+                                "ts": datetime.now().isoformat(timespec="seconds"),
+                                "event_key": event_key,
+                                "turn_ref": turn.turn_ref(),
+                                "recovered_from_feedback": True,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                indexed.add(event_key)
             continue
         record = append_feedback(
             "missed_candidate",
@@ -749,6 +899,7 @@ def record_pull_missed_candidates(
             ref=recall_snapshot.get("decision_id", "") if recall_snapshot else "",
             extra={
                 "source": "pull-log",
+                "pull_event_key": event_key,
                 "turn_ref": turn.turn_ref(),
                 "pull_event": event,
                 "reason_code": "gate_missed",
@@ -768,6 +919,22 @@ def record_pull_missed_candidates(
             },
         )
         recorded.append(record)
+        committed.add(event_key)
+        consumed_file.parent.mkdir(parents=True, exist_ok=True)
+        with consumed_file.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "event_key": event_key,
+                        "turn_ref": turn.turn_ref(),
+                        "feedback_ref": record.get("ref", "") if isinstance(record, dict) else "",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        indexed.add(event_key)
     return recorded
 
 

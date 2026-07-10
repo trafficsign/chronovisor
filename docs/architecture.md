@@ -19,10 +19,12 @@ Stop
   -> record missed_candidate and injection_used/injection_ignored feedback
   -> auto-apply safe additive actions
 
-Nightly / manual
-  -> llm-wiki recall-eval --save-baseline
-  -> llm-wiki-recall-calibrate
-  -> apply validated-auto calibration only after holdout improvement
+Nightly sleep
+  -> refresh derived recall/search artifacts and integrity signals
+  -> bounded consumers drain lint/raw/read-back/label/self-heal queues
+  -> local proposal -> deterministic gate -> frontier final veto when risky
+  -> apply atomically or reach rejected/quarantined/human_required terminal state
+  -> weekly search self-tune and recall calibration with locked holdouts
 ```
 
 ## Store
@@ -37,6 +39,7 @@ Nightly / manual
 - `recall/pull-log.jsonl`: wiki.search/wiki.read calls used as implicit pull feedback.
 - `recall/calibration.json`: validated evidence-gate weights.
 - `runtime/`: status, events, and metrics for observability.
+- `runtime/convergence/`: exact-once state, leases, retry/backoff, and terminal decisions.
 
 ## Runtime Roles
 
@@ -48,12 +51,22 @@ Nightly / manual
   injected pages were used.
 - **Auto-apply**: applies additive actions only (`query_hint`, `alias`, `page_tag`).
 - **Calibration**: pure-Python logistic calibration on recall-log features and
-  feedback labels, applied as `validated-auto` only after time-ordered holdout.
+  feedback labels, applied only after time-ordered holdout and frontier veto.
+- **Sleep convergence driver**: gives every autonomous lane a shared time/call/
+  mutation budget, reserves one frontier slot per decision lane, uses a
+  single-flight process lock, and isolates lane failures so unrelated work
+  keeps draining. Dry-run also suppresses index/cache persistence.
 - **Dashboard**: local browser observability for ingest work, self-heal status,
   recall improvement runs, save history, knowledge mix, and model fleet roles.
 
-`few_shot` and `threshold` actions are review-lane only because they alter the
-gate's decision behavior globally.
+`few_shot` feedback is materialized through safe query hints and the
+frontier-reviewed golden-label path. `threshold` feedback is routed into Recall
+Lab, where replay/holdout gates and a frontier veto decide adoption; neither
+action waits for a human review queue.
+
+The only human boundary is external authority: authentication/OAuth, billing or
+quota, Keychain permission, or installing/restoring a missing frontier tool.
+All other uncertainty ends through bounded retry, rejection, or quarantine.
 
 ## Search Pipeline
 

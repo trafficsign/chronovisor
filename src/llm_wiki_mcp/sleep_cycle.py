@@ -7,13 +7,17 @@ hands reversible maintenance decisions to the autonomy layer.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
+import time
 from datetime import datetime
 from typing import Any
 
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 HISTORY_FILE = WIKI_ROOT / "runtime" / "sleep-cycle-history.jsonl"
+LOCK_FILE = WIKI_ROOT / "runtime" / "sleep-cycle.lock"
 
 
 def _append_history(row: dict[str, Any]) -> None:
@@ -22,7 +26,100 @@ def _append_history(row: dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
 
+def _try_acquire_lock():
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle = LOCK_FILE.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
+def _try_acquire_read_lock():
+    """Join an existing lock without creating state during dry-run."""
+    try:
+        handle = LOCK_FILE.open("r", encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
+def _run_lane(name: str, fn) -> dict[str, Any]:
+    """Isolate one maintenance lane so the remaining queues still drain."""
+    try:
+        result = fn()
+    except Exception as exc:
+        return {
+            "status": "error",
+            "lane": name,
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+    if isinstance(result, dict):
+        return result
+    return {"status": "error", "lane": name, "error": "lane returned a non-object result"}
+
+
 def run_sleep_cycle(
+    *,
+    raw_limit: int = 100,
+    eval_limit: int = 100,
+    duplicate_limit: int = 200,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Run one cycle, enforcing process-wide read-only cache behavior in previews."""
+    lock_handle = None
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        lock_handle = _try_acquire_read_lock() if dry_run else _try_acquire_lock()
+        if lock_handle is None:
+            return {
+                "status": "skipped",
+                "reason": "sleep cycle already in progress",
+                "locked": True,
+                "lock_file": str(LOCK_FILE),
+            }
+    previous_read_only = os.environ.get("LLM_WIKI_READ_ONLY")
+    previous_deadline = os.environ.get("LLM_WIKI_CYCLE_DEADLINE_MONOTONIC")
+    deadline = time.monotonic() + 30 * 60
+    if previous_deadline:
+        try:
+            deadline = min(deadline, float(previous_deadline))
+        except ValueError:
+            pass
+    os.environ["LLM_WIKI_CYCLE_DEADLINE_MONOTONIC"] = str(deadline)
+    if dry_run:
+        os.environ["LLM_WIKI_READ_ONLY"] = "1"
+    try:
+        return _run_sleep_cycle(
+            raw_limit=raw_limit,
+            eval_limit=eval_limit,
+            duplicate_limit=duplicate_limit,
+            dry_run=dry_run,
+        )
+    finally:
+        if dry_run:
+            if previous_read_only is None:
+                os.environ.pop("LLM_WIKI_READ_ONLY", None)
+            else:
+                os.environ["LLM_WIKI_READ_ONLY"] = previous_read_only
+        if previous_deadline is None:
+            os.environ.pop("LLM_WIKI_CYCLE_DEADLINE_MONOTONIC", None)
+        else:
+            os.environ["LLM_WIKI_CYCLE_DEADLINE_MONOTONIC"] = previous_deadline
+        if lock_handle not in (None, False):
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_handle.close()
+
+
+def _run_sleep_cycle(
     *,
     raw_limit: int = 100,
     eval_limit: int = 100,
@@ -38,58 +135,256 @@ def run_sleep_cycle(
     from llm_wiki_mcp.hubs import build_hub_pages
     from llm_wiki_mcp.memory_integrity import run_eval
     from llm_wiki_mcp.prefetch import build_prefetch_cache
-    from llm_wiki_mcp.raw_replay import QUEUE_FILE, build_queue, select_raws
+    from llm_wiki_mcp.raw_replay import AUTO_SIGNAL_SOURCES, build_queue, run_pending_queue
     from llm_wiki_mcp.reflection import write_reflection_page
     from llm_wiki_mcp.retention import build_retention_scores
     from llm_wiki_mcp import recall_improvement
     from llm_wiki_mcp.state_register import refresh_state_register
     from llm_wiki_mcp.autonomy import run_autonomy_cycle
+    from llm_wiki_mcp.convergence import CycleBudget
     from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
 
+    cycle_budget = CycleBudget(
+        max_local_calls=12,
+        max_frontier_calls=9,
+        max_mutations=31,
+        max_raw_bytes=2_000_000,
+        max_elapsed_seconds=30 * 60,
+    )
+    artifact_budget = cycle_budget.slice(max_mutations=15)
+
+    def artifact_lane(name: str, fn, *, mutates: bool = True) -> dict[str, Any]:
+        if dry_run or not mutates:
+            allowed, reason = cycle_budget.can_consume("mutation", 0)
+        else:
+            allowed, reason = artifact_budget.consume("mutation")
+        if not allowed:
+            return {"status": "budget_deferred", "lane": name, "reason": reason}
+        return _run_lane(name, fn)
+
     started = datetime.now().isoformat(timespec="seconds")
-    before_health = health_snapshot()
+    before_health_result = artifact_lane("health_before", health_snapshot, mutates=False)
+    before_health = (
+        before_health_result if before_health_result.get("status") != "error" else {}
+    )
     snapshot = (
         {"status": "skipped", "reason": "dry_run"}
         if dry_run
-        else snapshot_wiki("before sleep cycle")
+        else artifact_lane("wiki_snapshot", lambda: snapshot_wiki("before sleep cycle"))
     )
-    cofire = build_cofire_graph(write=not dry_run)
-    prefetch = build_prefetch_cache(write=not dry_run)
-    retention = build_retention_scores(write=not dry_run)
-    claims = rebuild_claim_index(write=not dry_run)
-    golden = expand_golden_from_recall_questions(limit=0, write=not dry_run)
-    distill = export_distill_dataset(write=not dry_run)
-    hubs = build_hub_pages(write=not dry_run)
-    reflection = write_reflection_page(write=not dry_run)
-    state_register = refresh_state_register(write=not dry_run)
-    integrity = run_eval(limit=max(0, eval_limit), write=not dry_run)
-    raw_replay = (
-        {
-            "status": "dry_run",
-            "queue": str(QUEUE_FILE),
-            "count": len(select_raws(limit=max(0, raw_limit))),
-        }
-        if dry_run
-        else build_queue(limit=max(0, raw_limit))
+    cofire = artifact_lane("cofire", lambda: build_cofire_graph(write=not dry_run))
+    prefetch = artifact_lane("prefetch", lambda: build_prefetch_cache(write=not dry_run))
+    retention = artifact_lane("retention", lambda: build_retention_scores(write=not dry_run))
+    claims = artifact_lane("claims", lambda: rebuild_claim_index(write=not dry_run))
+    golden = artifact_lane(
+        "golden", lambda: expand_golden_from_recall_questions(limit=0, write=not dry_run)
     )
-    duplicates = build_duplicate_review_queue(limit=max(0, duplicate_limit))
+    distill = artifact_lane("distill", lambda: export_distill_dataset(write=not dry_run))
+    hubs = artifact_lane("hubs", lambda: build_hub_pages(write=not dry_run))
+    reflection = artifact_lane("reflection", lambda: write_reflection_page(write=not dry_run))
+    state_register = artifact_lane(
+        "state_register", lambda: refresh_state_register(write=not dry_run)
+    )
+    integrity = (
+        artifact_lane(
+            "memory_integrity", lambda: run_eval(limit=eval_limit, write=not dry_run)
+        )
+        if eval_limit > 0
+        else {"status": "skipped", "reason": "eval_limit_zero"}
+    )
+    lane_budgets = {
+        "lint": cycle_budget.slice(
+            max_local_calls=5, max_frontier_calls=1, max_mutations=3
+        ),
+        "read_back_repair": cycle_budget.slice(max_mutations=1),
+        "labels": cycle_budget.slice(max_frontier_calls=1, max_mutations=2),
+        "recall_auto_apply": cycle_budget.slice(max_mutations=1),
+        "self_heal": cycle_budget.slice(
+            max_local_calls=1, max_frontier_calls=1, max_mutations=1
+        ),
+        "recall_improve": cycle_budget.slice(max_frontier_calls=1, max_mutations=1),
+        "calibration": cycle_budget.slice(max_frontier_calls=1, max_mutations=1),
+        "self_tune": cycle_budget.slice(max_frontier_calls=1, max_mutations=1),
+        "duplicates": cycle_budget.slice(max_frontier_calls=1, max_mutations=1),
+        "orphans": cycle_budget.slice(
+            max_local_calls=4, max_frontier_calls=1, max_mutations=1
+        ),
+        "raw": cycle_budget.slice(
+            max_frontier_calls=1, max_mutations=1, max_raw_bytes=2_000_000
+        ),
+        "autonomy_duplicates": cycle_budget.slice(max_mutations=1),
+        "autonomy_retention": cycle_budget.slice(max_mutations=1),
+    }
+    if dry_run:
+        lint_due = _run_lane(
+            "lint_due",
+            lambda: __import__("llm_wiki_mcp.orchestrator", fromlist=["run_lint_if_due"]).run_lint_if_due(
+                dry_run=True
+            ),
+        )
+    else:
+        lint_allowed, lint_reason = lane_budgets["lint"].consume("mutation")
+        lint_due = (
+            _run_lane(
+                "lint_due",
+                lambda: __import__("llm_wiki_mcp.orchestrator", fromlist=["run_lint_if_due"]).run_lint_if_due(
+                    dry_run=False
+                ),
+            )
+            if lint_allowed
+            else {"status": "budget_deferred", "lane": "lint_due", "reason": lint_reason}
+        )
+    lint_repair = _run_lane(
+        "lint_repair",
+        lambda: __import__("llm_wiki_mcp.lint_repair", fromlist=["run_lint_repair"]).run_lint_repair(
+            max_items=5,
+            budget=lane_budgets["lint"],
+            dry_run=dry_run,
+        ),
+    )
+    read_back_repair = _run_lane(
+        "read_back_repair",
+        lambda: __import__("llm_wiki_mcp.read_back_repair", fromlist=["run_read_back_repair"]).run_read_back_repair(
+            max_items=5,
+            budget=lane_budgets["read_back_repair"],
+            dry_run=dry_run,
+        ),
+    )
+    raw_queue = artifact_lane(
+        "raw_replay_queue",
+        lambda: build_queue(
+            limit=max(0, raw_limit),
+            include_migration=False,
+            include_auto_signals=True,
+            dry_run=dry_run,
+        ),
+    )
+    raw_drain = _run_lane(
+        "raw_replay_drain",
+        lambda: run_pending_queue(
+            max_runs=1 if raw_limit > 0 else 0,
+            max_bytes=2_000_000,
+            dry_run=dry_run,
+            eligible_keys={str(key) for key in raw_queue.get("candidate_keys", [])}
+            if raw_queue.get("status") != "error"
+            else set(),
+            eligible_sources=(
+                AUTO_SIGNAL_SOURCES
+                if raw_queue.get("status") != "error"
+                else frozenset()
+            ),
+            budget=lane_budgets["raw"],
+        ),
+    )
+    raw_replay = {"status": "ok", "queue_refresh": raw_queue, "drain": raw_drain}
+    if any(item.get("status") == "error" for item in (raw_queue, raw_drain)):
+        raw_replay["status"] = "error"
+
+    search_labels = (
+        _run_lane(
+            "search_label_queue",
+            lambda: __import__("llm_wiki_mcp.search_eval", fromlist=["build_label_queue"]).build_label_queue(
+                limit=eval_limit,
+                dry_run=dry_run,
+                budget=lane_budgets["labels"],
+            ),
+        )
+        if eval_limit > 0
+        else {"status": "skipped", "reason": "eval_limit_zero"}
+    )
+    search_label_review = (
+        _run_lane(
+            "search_label_review",
+            lambda: __import__("llm_wiki_mcp.search_eval", fromlist=["review_label_queue_with_frontier"]).review_label_queue_with_frontier(
+                limit=min(2, eval_limit),
+                max_attempts=3,
+                dry_run=dry_run,
+                budget=lane_budgets["labels"],
+            ),
+        )
+        if eval_limit > 0
+        else {"status": "skipped", "reason": "eval_limit_zero"}
+    )
+    recall_auto_apply = _run_lane(
+        "recall_auto_apply",
+        lambda: __import__("llm_wiki_mcp.recall_auto_apply", fromlist=["apply_feedback_file"]).apply_feedback_file(
+            dry_run=dry_run,
+            budget=lane_budgets["recall_auto_apply"],
+        ),
+    )
+    self_heal = _run_lane(
+        "self_heal",
+        lambda: __import__("llm_wiki_mcp.self_heal", fromlist=["run_pending"]).run_pending(
+            max_packets=1,
+            dry_run=dry_run,
+            frontier_budget=lane_budgets["self_heal"],
+        ),
+    )
+    duplicate_build = _run_lane(
+        "duplicates",
+        lambda: {
+            "status": "ok",
+            "records": build_duplicate_review_queue(limit=max(0, duplicate_limit)),
+        },
+    )
+    duplicates = (
+        duplicate_build.get("records", [])
+        if duplicate_build.get("status") != "error"
+        and isinstance(duplicate_build.get("records"), list)
+        else []
+    )
     duplicate_path = ""
-    if not dry_run:
-        duplicate_path = str(write_review_queue(duplicates))
-    recall_improve = recall_improvement.run_due(
-        apply=not dry_run,
-        min_interval_hours=24.0,
-        min_new_feedback=5,
-        min_total_feedback=3,
-        max_examples=80,
-        frontier_mode="auto",
-        dry_run=dry_run,
+    duplicate_status = str(duplicate_build.get("status") or "ok")
+    duplicate_error = duplicate_build.get("error")
+    if not dry_run and duplicate_status != "error":
+        duplicate_write = artifact_lane(
+            "duplicates", lambda: {"status": "ok", "path": str(write_review_queue(duplicates))}
+        )
+        duplicate_status = str(duplicate_write.get("status") or "ok")
+        duplicate_path = str(duplicate_write.get("path") or "")
+        duplicate_error = duplicate_write.get("error")
+    recall_improve = _run_lane(
+        "recall_improve",
+        lambda: recall_improvement.run_due(
+            apply=not dry_run,
+            min_interval_hours=24.0,
+            min_new_feedback=5,
+            min_total_feedback=3,
+            max_examples=80,
+            frontier_mode="auto",
+            frontier_budget=lane_budgets["recall_improve"],
+            dry_run=dry_run,
+        ),
+    )
+    calibration = _run_lane(
+        "recall_calibration",
+        lambda: __import__("llm_wiki_mcp.recall_calibration", fromlist=["run_due"]).run_due(
+            min_interval_hours=7 * 24,
+            max_samples=2000,
+            max_recomputed_features=50,
+            dry_run=dry_run,
+            frontier_mode="auto",
+            budget=lane_budgets["calibration"],
+        ),
+    )
+    search_self_tune = _run_lane(
+        "search_self_tune",
+        lambda: __import__("llm_wiki_mcp.search_eval", fromlist=["run_self_tune_due"]).run_self_tune_due(
+            min_interval_hours=7 * 24,
+            apply=True,
+            dry_run=dry_run,
+            frontier_mode="auto",
+            budget=lane_budgets["self_tune"],
+            max_examples=40,
+            max_elapsed_seconds=120,
+        ),
     )
     payload = {
         "status": "ok",
         "started_at": started,
         "dry_run": dry_run,
         "wiki_snapshot": snapshot,
+        "health_before": before_health_result,
         "cofire": {k: v for k, v in cofire.items() if k != "graph"},
         "prefetch": {
             "status": prefetch.get("status"),
@@ -106,23 +401,78 @@ def run_sleep_cycle(
         "reflection": reflection,
         "state_register": state_register,
         "raw_replay": raw_replay,
+        "lint_due": lint_due,
+        "lint_repair": lint_repair,
+        "search_labels": search_labels,
+        "search_label_review": search_label_review,
+        "recall_auto_apply": recall_auto_apply,
+        "read_back_repair": read_back_repair,
+        "self_heal": self_heal,
         "duplicates": {
+            "status": duplicate_status,
             "count": len(duplicates),
             "path": duplicate_path,
+            **({"error": duplicate_error} if duplicate_error else {}),
         },
         "recall_improve": recall_improve,
+        "recall_calibration": calibration,
+        "search_self_tune": search_self_tune,
     }
-    payload["autonomy"] = run_autonomy_cycle(
-        duplicates=duplicates,
-        retention=retention,
-        before_health=before_health,
-        wiki_snapshot=snapshot,
-        dry_run=dry_run,
+    payload["autonomy"] = _run_lane(
+        "autonomy",
+        lambda: run_autonomy_cycle(
+            duplicates=duplicates,
+            retention=retention,
+            before_health=before_health,
+            wiki_snapshot=snapshot,
+            dry_run=dry_run,
+            budget=lane_budgets["autonomy_duplicates"],
+            retention_budget=lane_budgets["autonomy_retention"],
+        ),
     )
+    payload["duplicate_frontier"] = _run_lane(
+        "duplicate_frontier",
+        lambda: __import__("llm_wiki_mcp.autonomy", fromlist=["resolve_deferred_duplicates_with_frontier"]).resolve_deferred_duplicates_with_frontier(
+            duplicates,
+            budget=lane_budgets["duplicates"],
+            dry_run=dry_run,
+        ),
+    )
+    payload["orphan_links"] = _run_lane(
+        "orphan_links",
+        lambda: __import__("llm_wiki_mcp.orphan_link", fromlist=["run_autonomous"]).run_autonomous(
+            orphan_limit=2,
+            max_candidates=2,
+            budget=lane_budgets["orphans"],
+            dry_run=dry_run,
+        ),
+    )
+    payload["convergence_budget"] = cycle_budget.snapshot()
     if not dry_run:
-        payload["wiki_snapshot_after"] = snapshot_wiki("after sleep cycle")
+        payload["wiki_snapshot_after"] = artifact_lane(
+            "wiki_snapshot_after", lambda: snapshot_wiki("after sleep cycle")
+        )
+    lane_errors = [
+        name
+        for name, value in payload.items()
+        if isinstance(value, dict) and value.get("status") == "error"
+    ]
+    if lane_errors:
+        payload["status"] = "partial"
+        payload["lane_errors"] = lane_errors
     if not dry_run:
-        _append_history(payload)
+        history_allowed, history_reason = artifact_budget.consume("mutation")
+        payload["convergence_budget"] = cycle_budget.snapshot()
+        if history_allowed:
+            _append_history(payload)
+        else:
+            payload["history"] = {
+                "status": "budget_deferred",
+                "lane": "sleep_history",
+                "reason": history_reason,
+            }
+    else:
+        payload["convergence_budget"] = cycle_budget.snapshot()
     return payload
 
 
@@ -142,18 +492,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    elif payload.get("locked"):
+        print(f"sleep_cycle\t{payload['status']}\t{payload['reason']}")
     else:
-        print(f"cofire_edges\t{payload['cofire']['edges']}")
-        print(f"prefetch_buckets\t{payload['prefetch']['buckets']}")
-        print(f"capture_rate\t{payload['memory_integrity']['capture_rate']}")
-        print(f"retention_pages\t{payload['retention']['counts']['pages']}")
-        print(f"claim_index_claims\t{payload['claims']['claims']}")
-        print(f"golden_added\t{payload['golden']['added']}")
-        print(f"distill_rows\t{payload['distill']['rows']}")
-        print(f"hubs\t{payload['hubs']['hubs']}")
-        print(f"duplicates\t{payload['duplicates']['count']}")
-        print(f"recall_improve\t{payload['recall_improve'].get('status')}")
-        print(f"autonomy\t{payload['autonomy']['status']}")
+        def field(lane: str, *keys: str, default: object = "unavailable") -> object:
+            value: object = payload.get(lane, {})
+            for key in keys:
+                if not isinstance(value, dict) or key not in value:
+                    return default
+                value = value[key]
+            return value
+
+        print(f"sleep_cycle\t{payload.get('status', 'unknown')}")
+        print(f"cofire_edges\t{field('cofire', 'edges')}")
+        print(f"prefetch_buckets\t{field('prefetch', 'buckets')}")
+        print(f"capture_rate\t{field('memory_integrity', 'capture_rate')}")
+        print(f"retention_pages\t{field('retention', 'counts', 'pages')}")
+        print(f"claim_index_claims\t{field('claims', 'claims')}")
+        print(f"golden_added\t{field('golden', 'added')}")
+        print(f"distill_rows\t{field('distill', 'rows')}")
+        print(f"hubs\t{field('hubs', 'hubs')}")
+        print(f"duplicates\t{field('duplicates', 'count')}")
+        print(f"recall_improve\t{field('recall_improve', 'status')}")
+        print(f"autonomy\t{field('autonomy', 'status')}")
+        if payload.get("lane_errors"):
+            print(f"lane_errors\t{','.join(str(item) for item in payload['lane_errors'])}")
     return 0
 
 

@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.recall_log_schema import page_ids_from_record
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
@@ -46,14 +47,6 @@ def _read_recent_jsonl(path: Path, *, limit: int) -> list[dict[str, Any]]:
     return rows
 
 
-def _page_ids(row: dict[str, Any]) -> list[str]:
-    out: list[str] = []
-    for item in row.get("context_items", []) or []:
-        if isinstance(item, dict) and isinstance(item.get("page_id"), str):
-            out.append(item["page_id"])
-    return list(dict.fromkeys(out))
-
-
 def build_prefetch_cache(
     *,
     log_file: Path = RECALL_LOG_FILE,
@@ -65,7 +58,7 @@ def build_prefetch_cache(
     token_index: dict[str, Counter[str]] = defaultdict(Counter)
     episodes = 0
     for row in _read_recent_jsonl(log_file, limit=limit):
-        pages = _page_ids(row)
+        pages = page_ids_from_record(row)
         if not pages:
             continue
         episodes += 1

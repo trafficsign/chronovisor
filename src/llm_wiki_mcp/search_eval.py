@@ -12,18 +12,16 @@ import hashlib
 import json
 import math
 import os
-import shlex
-import shutil
 import statistics
-import subprocess
 import tempfile
 import time
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
 from llm_wiki_mcp.search import (
+    ACTIVE_SEARCH_POLICY_FILE,
     DEFAULT_FUSION_WEIGHTS,
     ScoredPage,
     apply_filters,
@@ -32,6 +30,7 @@ from llm_wiki_mcp.search import (
     graph_expand_results,
     semantic_search,
     usage_prior_results,
+    load_active_fusion_weights,
 )
 from llm_wiki_mcp.reranker import rerank_results
 from llm_wiki_mcp.negative_feedback import apply_penalties, penalties_for_query
@@ -99,6 +98,13 @@ FRONTIER_PENDING_STATUSES = {
     "frontier_uncertain",
 }
 
+FRONTIER_TERMINAL_STATUSES = {
+    "frontier_approved",
+    "frontier_rejected",
+    "frontier_quarantined",
+    "human_required",
+}
+
 FrontierLabelReviewer = Callable[[dict[str, Any]], dict[str, Any]]
 
 
@@ -141,12 +147,42 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+def _atomic_write_text(path: Path, payload: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
-        encoding="utf-8",
-    )
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    payload = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+    _atomic_write_text(path, payload)
 
 
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
@@ -648,26 +684,72 @@ def build_label_queue(
     log_file: Path = RECALL_LOG_FILE,
     output_file: Path = LABEL_QUEUE_FILE,
     limit: int = 100,
+    dry_run: bool = False,
+    budget: Any | None = None,
 ) -> dict[str, Any]:
     examples = build_candidates(feedback_file=feedback_file, log_file=log_file, limit=limit)
+    existing_rows = read_jsonl(output_file)
+    existing_by_key = {_golden_key(row): row for row in existing_rows}
     rows = []
+    seen: set[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = set()
     for row in examples_to_rows(examples):
+        key = _golden_key(row)
+        seen.add(key)
+        previous = existing_by_key.get(key, {})
         rows.append(
             {
                 **row,
-                "queue_status": "pending_frontier_review",
-                "promoted_to_golden": False,
-                "reviewer": "",
-                "review_confidence": None,
-                "review_note": "",
+                "queue_status": previous.get("queue_status", "pending_frontier_review"),
+                "promoted_to_golden": bool(previous.get("promoted_to_golden", False)),
+                "reviewer": previous.get("reviewer", ""),
+                "review_confidence": previous.get("review_confidence"),
+                "review_note": previous.get("review_note", ""),
+                **{
+                    key_: value
+                    for key_, value in previous.items()
+                    if key_
+                    in {
+                        "frontier_attempts",
+                        "frontier_review",
+                        "last_attempt_at",
+                        "next_attempt_at",
+                        "reviewed",
+                        "reviewed_at",
+                    }
+                },
             }
         )
-    write_jsonl(output_file, rows)
+    # A refresh must never resurrect or erase a prior decision. Keep rows that
+    # fell outside the latest candidate window so terminal state remains an
+    # exact-once ledger and retryable work can continue draining.
+    rows.extend(row for row in existing_rows if _golden_key(row) not in seen)
+    changed = rows != existing_rows
+    if not dry_run and changed:
+        if budget is not None:
+            allowed, reason = budget.consume("mutation")
+            if not allowed:
+                return {
+                    "status": "budget_deferred",
+                    "reason": reason,
+                    "output_file": str(output_file),
+                    "examples": len(existing_rows),
+                    "reviewed": sum(
+                        1
+                        for row in existing_rows
+                        if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+                    ),
+                    "preserved": len(existing_rows),
+                    "dry_run": False,
+                }
+        write_jsonl(output_file, rows)
     return {
         "status": "ok",
         "output_file": str(output_file),
         "examples": len(rows),
-        "reviewed": 0,
+        "reviewed": sum(1 for row in rows if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES),
+        "preserved": len(existing_rows),
+        "dry_run": dry_run,
+        "changed": changed,
         "note": "Candidates are not added to search-golden.jsonl until trusted frontier review.",
     }
 
@@ -830,91 +912,15 @@ def run_frontier_label_review(
 
     prompt = build_frontier_label_prompt(row)
     timeout_seconds = timeout or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600"))
-    command = os.environ.get("LLM_WIKI_LABEL_REVIEW_CMD")
-    if command:
-        completed = subprocess.run(
-            shlex.split(command),
-            input=prompt,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            env=frontier_review._frontier_env(),
-        )
-        output = frontier_review.redact_sensitive_text((completed.stdout or "") + "\n" + (completed.stderr or ""))
-        if completed.returncode != 0:
-            failure = frontier_review.classify_frontier_failure(output).to_dict()
-            return _frontier_label_failure(
-                f"frontier label command failed with exit {completed.returncode}",
-                output=output,
-                failure=failure,
-            )
-        return _parse_frontier_label_output(output)
-
-    codex = shutil.which("codex")
-    if codex is None:
-        failure = {
-            "failure_class": "frontier_tool_unavailable",
-            "rescue_status": "human_required",
-            "summary": "codex executable not found",
-            "human_required": True,
-            "notify_user": True,
-        }
-        return _frontier_label_failure("codex executable not found", failure=failure)
-
-    preflight = frontier_review.run_frontier_preflight()
-    if not preflight.get("ok"):
-        failure = preflight.get("failure") if isinstance(preflight.get("failure"), dict) else None
-        return _frontier_label_failure("frontier preflight failed", failure=failure)
-
-    with tempfile.TemporaryDirectory() as td:
-        schema_path = Path(td) / "frontier-label.schema.json"
-        output_path = Path(td) / "frontier-label-output.json"
-        strict_schema, _schema_repair = frontier_review._strict_schema_with_repair(FRONTIER_LABEL_SCHEMA)
-        schema_path.write_text(json.dumps(strict_schema, indent=2) + "\n", encoding="utf-8")
-        invocation = frontier_review._build_codex_exec_invocation(
-            codex,
-            repo_root=repo_root,
-            schema_path=schema_path,
-            output_path=output_path,
-            execute_patch=False,
-            preflight=preflight,
-        )
-        completed = subprocess.run(
-            invocation["cmd"],
-            input=prompt,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            env=frontier_review._frontier_env(),
-            cwd=invocation.get("cwd") or None,
-        )
-        output_text = ""
-        if output_path.exists():
-            output_text += output_path.read_text(encoding="utf-8", errors="replace")
-        output_text += "\n" + (completed.stdout or "") + "\n" + (completed.stderr or "")
-        output_text = frontier_review.redact_sensitive_text(output_text)
-        if completed.returncode != 0:
-            failure = frontier_review.classify_frontier_failure(output_text).to_dict()
-            return _frontier_label_failure(
-                f"codex frontier label review failed with exit {completed.returncode}",
-                output=output_text,
-                failure=failure,
-            )
-        result = _parse_frontier_label_output(output_text)
-        result["access_repair"] = {
-            "invocation": {
-                "source": invocation.get("source"),
-                "cmd": invocation.get("cmd"),
-                "cwd": invocation.get("cwd"),
-                "schema_path": invocation.get("schema_path"),
-                "output_path": invocation.get("output_path"),
-            },
-            "preflight": {
-                "codex_home": preflight.get("codex_home"),
-                "auth_path": preflight.get("auth_path"),
-            },
-        }
-        return result
+    raw = frontier_review.run_structured_review(
+        prompt,
+        FRONTIER_LABEL_SCHEMA,
+        repo_root=repo_root,
+        timeout=timeout_seconds,
+        execute_patch=False,
+        command_env="LLM_WIKI_LABEL_REVIEW_CMD",
+    )
+    return _normalize_frontier_label_result(raw)
 
 
 def _label_tuple_from_review(review: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
@@ -1043,33 +1049,184 @@ def review_label_queue_with_frontier(
     timeout: int | None = None,
     repo_root: Path = REPO_ROOT,
     reviewer: FrontierLabelReviewer | None = None,
+    max_attempts: int = 3,
+    backoff_base_seconds: int = 6 * 60 * 60,
+    dry_run: bool = False,
+    now: datetime | None = None,
+    budget: Any | None = None,
 ) -> dict[str, Any]:
     rows = read_jsonl(queue_file)
+    original_rows = json.loads(json.dumps(rows, ensure_ascii=False, default=str))
     golden_rows = read_jsonl(golden_file)
     golden_keys = {_golden_key(row) for row in golden_rows}
-    reviewed_at = datetime.now().isoformat(timespec="seconds")
+    current_time = now or datetime.now()
+    reviewed_at = current_time.isoformat(timespec="seconds")
     attempted = 0
     promoted = 0
     status_counts: dict[str, int] = {}
     updated_rows: list[dict[str, Any]] = []
     max_votes = max(1, votes)
+    attempts_cap = max(1, max_attempts)
+    budget_exhausted = False
+    mutation_reserved = False
+
+    # Recover both cross-file crash windows. The current golden-first commit can
+    # exit before acknowledging the queue; older builds could acknowledge the
+    # queue first. In either direction the durable side contains enough trusted
+    # evidence to reconcile without paying for another frontier call.
+    reviewed_golden = [row for row in golden_rows if row.get("reviewed") is True]
+    golden_by_key = {_golden_key(row): row for row in reviewed_golden}
+    golden_by_ref = {
+        (str(row.get("query") or ""), str(row.get("ref") or "")): row
+        for row in reviewed_golden
+        if str(row.get("ref") or "")
+    }
+    recovered_queue = 0
+    for row in rows:
+        if bool(row.get("promoted_to_golden")) or row.get("queue_status") == "frontier_approved":
+            continue
+        golden_match = golden_by_key.get(_golden_key(row))
+        ref = str(row.get("ref") or "")
+        if golden_match is None and ref:
+            golden_match = golden_by_ref.get((str(row.get("query") or ""), ref))
+        if golden_match is None:
+            continue
+        review = {
+            "decision": "approved",
+            "confidence": float(golden_match.get("review_confidence") or 1.0),
+            "expected_pages": _str_list(golden_match.get("expected_pages")),
+            "negative_pages": _str_list(golden_match.get("negative_pages")),
+            "stale_pages": _str_list(golden_match.get("stale_pages")),
+            "summary": str(golden_match.get("review_note") or "recovered from trusted golden label"),
+            "notes": None,
+            "reviewer": str(golden_match.get("reviewer") or "frontier"),
+        }
+        row.update(
+            {
+                "queue_status": "frontier_approved",
+                "promoted_to_golden": True,
+                "reviewed": True,
+                "reviewed_at": str(golden_match.get("reviewed_at") or reviewed_at),
+                "reviewer": review["reviewer"],
+                "review_confidence": review["confidence"],
+                "review_note": review["summary"],
+                "frontier_review": review,
+            }
+        )
+        recovered_queue += 1
+
+    recovered_golden = 0
+    for row in rows:
+        if not bool(row.get("promoted_to_golden")) and row.get("queue_status") != "frontier_approved":
+            continue
+        review = row.get("frontier_review")
+        if not isinstance(review, dict):
+            continue
+        if _queue_status_for_review(review, min_confidence=min_confidence) != "frontier_approved":
+            continue
+        golden_row = _golden_row_from_review(
+            row,
+            review,
+            reviewed_at=str(row.get("reviewed_at") or reviewed_at),
+        )
+        key = _golden_key(golden_row)
+        if key not in golden_keys:
+            golden_rows.append(golden_row)
+            golden_keys.add(key)
+            recovered_golden += 1
+        row["promoted_to_golden"] = True
+        row["reviewed"] = True
+        row["reviewed_at"] = str(row.get("reviewed_at") or reviewed_at)
+
+    if (recovered_queue or recovered_golden) and not dry_run and budget is not None:
+        allowed, reason = budget.consume("mutation")
+        if not allowed:
+            return {
+                "status": "budget_deferred",
+                "reason": reason,
+                "queue_file": str(queue_file),
+                "golden_file": str(golden_file),
+                "attempted": 0,
+                "promoted": 0,
+                "remaining": sum(
+                    1
+                    for row in original_rows
+                    if str(row.get("queue_status") or "") in FRONTIER_PENDING_STATUSES
+                    and not bool(row.get("promoted_to_golden"))
+                ),
+                "dry_run": False,
+                "budget_exhausted": True,
+                "recovered": 0,
+            }
+        mutation_reserved = True
+
+    # Golden is the source of truth for a successful promotion. Persist any
+    # recovered rows before reviewing new work; queue reconciliation is safe to
+    # repeat if the process exits immediately afterwards.
+    if recovered_golden and not dry_run:
+        write_jsonl(golden_file, golden_rows)
+
+    def retry_due(row: dict[str, Any]) -> bool:
+        raw = row.get("next_attempt_at")
+        if not isinstance(raw, str) or not raw:
+            return True
+        try:
+            return datetime.fromisoformat(raw) <= current_time
+        except ValueError:
+            return True
 
     for row in rows:
         status = str(row.get("queue_status") or "")
-        if attempted >= limit or bool(row.get("promoted_to_golden")) or status not in FRONTIER_PENDING_STATUSES:
+        if (
+            attempted >= limit
+            or bool(row.get("promoted_to_golden"))
+            or status not in FRONTIER_PENDING_STATUSES
+            or not retry_due(row)
+        ):
             updated_rows.append(row)
             continue
 
-        reviews: list[dict[str, Any]] = []
-        for _idx in range(max_votes):
-            review = (
-                reviewer(row)
-                if reviewer is not None
-                else run_frontier_label_review(row, repo_root=repo_root, timeout=timeout)
+        if dry_run:
+            updated_rows.append(row)
+            attempted += 1
+            continue
+
+        if budget is not None:
+            frontier_allowed, _frontier_reason = budget.can_consume("frontier", max_votes)
+            mutation_allowed, _mutation_reason = (
+                budget.can_consume("mutation")
+                if not mutation_reserved
+                else (True, "ok")
             )
-            reviews.append(_normalize_frontier_label_result(review) if "decision" in review else review)
+            if not frontier_allowed or not mutation_allowed:
+                budget_exhausted = True
+                updated_rows.append(row)
+                continue
+            budget.consume("frontier", max_votes)
+            if not mutation_reserved:
+                budget.consume("mutation")
+                mutation_reserved = True
+
+        reviews: list[dict[str, Any]] = []
+        try:
+            for _idx in range(max_votes):
+                review = (
+                    reviewer(row)
+                    if reviewer is not None
+                    else run_frontier_label_review(row, repo_root=repo_root, timeout=timeout)
+                )
+                reviews.append(_normalize_frontier_label_result(review) if "decision" in review else review)
+        except Exception as exc:
+            reviews = [
+                _frontier_label_failure(
+                    f"frontier label reviewer raised {exc.__class__.__name__}: {exc}"
+                )
+            ]
         combined = _combine_frontier_label_reviews(reviews, min_confidence=min_confidence)
         next_status = _queue_status_for_review(combined, min_confidence=min_confidence)
+        frontier_attempts = int(row.get("frontier_attempts") or 0) + 1
+        if next_status in {"frontier_retry", "frontier_uncertain"} and frontier_attempts >= attempts_cap:
+            next_status = "frontier_quarantined"
         attempted += 1
         status_counts[next_status] = status_counts.get(next_status, 0) + 1
 
@@ -1080,7 +1237,15 @@ def review_label_queue_with_frontier(
             "review_confidence": float(combined.get("confidence") or 0.0),
             "review_note": combined.get("summary") or "",
             "frontier_review": combined,
+            "frontier_attempts": frontier_attempts,
+            "last_attempt_at": reviewed_at,
         }
+
+        if next_status in {"frontier_retry", "frontier_uncertain"}:
+            delay = max(0, backoff_base_seconds) * (2 ** max(0, frontier_attempts - 1))
+            updated["next_attempt_at"] = (current_time + timedelta(seconds=delay)).isoformat(timespec="seconds")
+        else:
+            updated.pop("next_attempt_at", None)
 
         if next_status == "frontier_approved":
             golden_row = _golden_row_from_review(row, combined, reviewed_at=reviewed_at)
@@ -1096,9 +1261,13 @@ def review_label_queue_with_frontier(
             updated["promoted_to_golden"] = False
         updated_rows.append(updated)
 
-    write_jsonl(queue_file, updated_rows)
-    if promoted:
+    # Commit the durable effect before its queue acknowledgement. A crash after
+    # the golden replace merely causes an idempotent queue reconciliation; the
+    # reverse ordering could permanently lose an approved label.
+    if promoted and not dry_run:
         write_jsonl(golden_file, golden_rows)
+    if not dry_run and updated_rows != original_rows:
+        write_jsonl(queue_file, updated_rows)
     return {
         "status": "ok",
         "queue_file": str(queue_file),
@@ -1114,6 +1283,10 @@ def review_label_queue_with_frontier(
         "status_counts": dict(sorted(status_counts.items())),
         "min_confidence": min_confidence,
         "votes": max_votes,
+        "dry_run": dry_run,
+        "max_attempts": attempts_cap,
+        "budget_exhausted": budget_exhausted,
+        "recovered": recovered_queue + recovered_golden,
     }
 
 
@@ -1175,14 +1348,10 @@ def run_weighted_hybrid(query: str, weights: dict[str, float], *, top_n: int = 2
     started = time.perf_counter()
     pipeline_result = run_search_pipeline(
         query,
-        config=PipelineConfig(
+        config=production_pipeline_config(
             top_n=top_n,
             semantic=True,
             fusion_weights=dict(weights),
-            result_strategy="weighted_fusion",
-            graph_strategy="disabled",
-            usage_strategy="disabled",
-            apply_negative_feedback=False,
         ),
         deps=_pipeline_dependencies(),
     )
@@ -1217,19 +1386,65 @@ def self_tune(
     *,
     golden_file: Path = GOLDEN_FILE,
     history_file: Path = SELF_TUNE_HISTORY_FILE,
+    policy_file: Path = ACTIVE_SEARCH_POLICY_FILE,
+    apply: bool = False,
+    dry_run: bool = False,
+    frontier_mode: str = "off",
+    frontier_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    budget: Any | None = None,
+    max_examples: int = 200,
+    max_elapsed_seconds: float = 10 * 60,
 ) -> dict[str, Any]:
     examples = load_examples(golden_file)
-    dev = [example for example in examples if example.split == "dev"] or examples
-    locked = [example for example in examples if example.split == "locked-test"] or examples
-    baseline_weights = dict(DEFAULT_FUSION_WEIGHTS)
-    baseline_dev = _metrics(_rows_for_weight_eval(dev, baseline_weights))
-    baseline_locked = _metrics(_rows_for_weight_eval(locked, baseline_weights))
+    dev = [example for example in examples if example.split == "dev"]
+    locked = [example for example in examples if example.split == "locked-test"]
+    example_cap = max(2, int(max_examples))
+    if len(dev) + len(locked) > example_cap:
+        locked_quota = min(len(locked), max(1, example_cap // 5))
+        dev_quota = min(len(dev), example_cap - locked_quota)
+        if dev_quota < example_cap - locked_quota:
+            locked_quota = min(len(locked), example_cap - dev_quota)
+        dev = dev[-dev_quota:] if dev_quota else []
+        locked = locked[-locked_quota:] if locked_quota else []
+    if not dev or not locked:
+        record = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "status": "blocked",
+            "applied": False,
+            "reason": "independent dev and locked-test examples are required",
+            "dataset": {"dev": len(dev), "locked-test": len(locked)},
+        }
+        if not dry_run:
+            append_jsonl(history_file, record)
+        return record
+    deadline = time.monotonic() + max(0.0, float(max_elapsed_seconds))
 
-    candidates = []
-    for semantic_weight in (0.4, 0.5, 0.6, 0.7, 0.8):
-        weights = {**DEFAULT_FUSION_WEIGHTS, "semantic": semantic_weight}
-        dev_metrics = _metrics(_rows_for_weight_eval(dev, weights))
-        candidates.append({"weights": weights, "dev": dev_metrics})
+    def evaluate_bounded(items: list[SearchExample], weights: dict[str, float]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for offset in range(0, len(items), 10):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("search self-tune runtime budget exhausted")
+            rows.extend(_rows_for_weight_eval(items[offset:offset + 10], weights))
+        return rows
+
+    baseline_weights = load_active_fusion_weights(policy_file)
+    try:
+        baseline_dev = _metrics(evaluate_bounded(dev, baseline_weights))
+        baseline_locked = _metrics(evaluate_bounded(locked, baseline_weights))
+
+        candidates = []
+        for semantic_weight in (0.4, 0.5, 0.6, 0.7, 0.8):
+            weights = {**baseline_weights, "semantic": semantic_weight}
+            dev_metrics = _metrics(evaluate_bounded(dev, weights))
+            candidates.append({"weights": weights, "dev": dev_metrics})
+    except TimeoutError as exc:
+        return {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "status": "budget_deferred",
+            "applied": False,
+            "reason": str(exc),
+            "dataset": {"dev": len(dev), "locked-test": len(locked), "max_examples": example_cap},
+        }
     best = max(
         candidates,
         key=lambda item: (
@@ -1238,7 +1453,16 @@ def self_tune(
             item["dev"]["ndcg_at_10"],
         ),
     )
-    locked_metrics = _metrics(_rows_for_weight_eval(locked, best["weights"]))
+    try:
+        locked_metrics = _metrics(evaluate_bounded(locked, best["weights"]))
+    except TimeoutError as exc:
+        return {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "status": "budget_deferred",
+            "applied": False,
+            "reason": str(exc),
+            "dataset": {"dev": len(dev), "locked-test": len(locked), "max_examples": example_cap},
+        }
     locked_ok = (
         locked_metrics["recall_at_5"] >= baseline_locked["recall_at_5"]
         and locked_metrics["mrr_at_10"] >= baseline_locked["mrr_at_10"]
@@ -1257,11 +1481,169 @@ def self_tune(
         "guardrails": {
             "dev_improved": dev_improved,
             "locked_non_degrading": locked_ok,
-            "apply_policy": "shadow_only",
+            "apply_policy": "validated_auto" if apply else "shadow_only",
         },
     }
-    append_jsonl(history_file, record)
+    if status == "shadow_pass" and apply:
+        frontier: dict[str, Any] | None = None
+        if frontier_mode == "auto" and not dry_run:
+            allowed = True
+            if budget is not None:
+                allowed, _reason = budget.consume("frontier")
+            if not allowed:
+                record["status"] = "budget_deferred"
+                record["reason"] = "frontier cycle budget exhausted"
+            else:
+                frontier = (
+                    frontier_reviewer(record)
+                    if frontier_reviewer is not None
+                    else review_search_policy_with_frontier(record)
+                )
+        if frontier is not None:
+            record["frontier_review"] = frontier
+            if frontier.get("human_required"):
+                record["status"] = "human_required"
+                record["reason"] = str(frontier.get("summary") or "frontier access requires external authority")
+            elif frontier.get("decision") != "approved":
+                record["status"] = (
+                    "frontier_rejected" if frontier.get("decision") in {"rejected", "quarantined"}
+                    else "frontier_retry"
+                )
+                record["reason"] = str(frontier.get("summary") or "frontier did not approve search policy")
+        if record["status"] == "shadow_pass":
+            old = {}
+            try:
+                parsed = json.loads(policy_file.read_text(encoding="utf-8"))
+                old = parsed if isinstance(parsed, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                pass
+            artifact = {
+                "version": 1,
+                "created_at": record["ts"],
+                "source": "search_eval.self_tune",
+                "weights": best["weights"],
+                "holdout": locked_metrics,
+                "previous": old,
+            }
+            record["policy"] = artifact
+            if dry_run:
+                record["status"] = "dry_run"
+            else:
+                mutation_allowed = True
+                mutation_reason = "ok"
+                if budget is not None:
+                    mutation_allowed, mutation_reason = budget.consume("mutation")
+                if not mutation_allowed:
+                    record["status"] = "budget_deferred"
+                    record["reason"] = mutation_reason
+                else:
+                    _atomic_write_text(
+                        policy_file,
+                        json.dumps(artifact, ensure_ascii=False, indent=2) + "\n",
+                    )
+                    record["status"] = "applied"
+                    record["applied"] = True
+    if record.get("status") == "frontier_retry":
+        candidate_payload = {
+            "weights": (record.get("best") or {}).get("weights", {}),
+            "dev": (record.get("best") or {}).get("dev", {}),
+            "locked-test": (record.get("best") or {}).get("locked-test", {}),
+        }
+        candidate_hash = hashlib.sha256(
+            json.dumps(candidate_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        prior_history = read_jsonl(history_file)
+        prior = prior_history[-1] if prior_history else {}
+        attempts = (
+            int(prior.get("frontier_attempts") or 0) + 1
+            if prior.get("candidate_hash") == candidate_hash
+            else 1
+        )
+        record["candidate_hash"] = candidate_hash
+        record["frontier_attempts"] = attempts
+        if attempts >= 3:
+            record["status"] = "frontier_quarantined"
+            record["reason"] = f"{record.get('reason', '')}; frontier retry limit exhausted"
+            record["next_attempt_at"] = None
+        else:
+            record["next_attempt_at"] = (
+                datetime.now() + timedelta(minutes=15 * (2 ** max(0, attempts - 1)))
+            ).isoformat(timespec="seconds")
+    if not dry_run and record.get("status") != "budget_deferred":
+        append_jsonl(history_file, record)
     return record
+
+
+def review_search_policy_with_frontier(
+    record: dict[str, Any],
+    *,
+    repo_root: Path = REPO_ROOT,
+    timeout: int | None = None,
+) -> dict[str, Any]:
+    """Ask the frontier model for the final veto on a validated policy."""
+    from llm_wiki_mcp import frontier_review
+
+    prompt = f"""\
+You are the final autonomous reviewer for an LLM Wiki search ranking policy.
+The candidate already passed an independent locked-test non-regression gate.
+Approve only when the evidence supports the change and no metric or safety
+guard regresses. Do not edit files, commit, push, or ask a human. Return JSON
+matching the supplied frontier decision schema.
+
+Candidate evidence:
+{json.dumps(record, ensure_ascii=False, indent=2)}
+"""
+    return frontier_review.run_structured_review(
+        prompt,
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=repo_root,
+        timeout=timeout or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600")),
+        execute_patch=False,
+    )
+
+
+def run_self_tune_due(
+    *,
+    golden_file: Path = GOLDEN_FILE,
+    history_file: Path = SELF_TUNE_HISTORY_FILE,
+    policy_file: Path = ACTIVE_SEARCH_POLICY_FILE,
+    min_interval_hours: float = 7 * 24,
+    apply: bool = True,
+    dry_run: bool = False,
+    frontier_mode: str = "auto",
+    budget: Any | None = None,
+    max_examples: int = 200,
+    max_elapsed_seconds: float = 10 * 60,
+) -> dict[str, Any]:
+    history = read_jsonl(history_file)
+    latest = history[-1] if history else {}
+    last_ts = str(latest.get("ts") or "")
+    due = True
+    retry_pending = latest.get("status") == "frontier_retry"
+    retry_at = str(latest.get("next_attempt_at") or "")
+    if retry_pending and retry_at:
+        try:
+            due = datetime.now() >= datetime.fromisoformat(retry_at)
+        except ValueError:
+            due = True
+    elif last_ts:
+        try:
+            due = datetime.now() - datetime.fromisoformat(last_ts) >= timedelta(hours=max(0.0, min_interval_hours))
+        except ValueError:
+            due = True
+    if not due:
+        return {"status": "skipped", "reason": "interval_not_due", "last_run_at": last_ts}
+    return self_tune(
+        golden_file=golden_file,
+        history_file=history_file,
+        policy_file=policy_file,
+        apply=apply,
+        dry_run=dry_run,
+        frontier_mode=frontier_mode,
+        budget=budget,
+        max_examples=max_examples,
+        max_elapsed_seconds=max_elapsed_seconds,
+    )
 
 
 def run_report(

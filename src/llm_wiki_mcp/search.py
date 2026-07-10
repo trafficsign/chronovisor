@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import re
 import threading
 from collections import Counter, deque
@@ -127,6 +128,7 @@ class BM25Index:
         # query view — query iterates `_cache.items()` directly.
         self._cache: dict[str, dict] = {}
         self._cache_loaded: bool = False
+        self._persistence_dirty: bool = False
         # Reentrant lock so the BM25 singleton can be safely shared between
         # the FastMCP main thread and ingest's background thread. `build`
         # mutates internal state; `query` iterates `_cache.items()`. Without
@@ -184,6 +186,8 @@ class BM25Index:
         self._avgdl = avgdl
 
     def _persist_cache(self) -> None:
+        if os.environ.get("LLM_WIKI_READ_ONLY") == "1":
+            return
         _BM25_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         doc = {
             "schema_version": _BM25_CACHE_SCHEMA,
@@ -294,10 +298,14 @@ class BM25Index:
             self._n = len(self._cache)
             total_len = sum(d.get("doc_len", 0) for d in self._cache.values())
             self._avgdl = total_len / self._n if self._n else 1.0
+            self._persistence_dirty = True
+        if self._persistence_dirty and os.environ.get("LLM_WIKI_READ_ONLY") != "1":
             try:
                 self._persist_cache()
             except OSError:
                 pass
+            else:
+                self._persistence_dirty = False
 
     def _subtract_from_df(self, tf_map: dict) -> None:
         for tok in tf_map.keys():
@@ -458,6 +466,8 @@ def _vec_norm(vec: list[float]) -> float:
 
 
 def _connect_embeddings() -> sqlite3.Connection:
+    if os.environ.get("LLM_WIKI_READ_ONLY") == "1":
+        return sqlite3.connect(f"file:{EMBEDDINGS_DB}?mode=ro", uri=True)
     EMBEDDINGS_DB.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(EMBEDDINGS_DB)
     conn.execute(
@@ -530,6 +540,8 @@ def _maybe_migrate_legacy_json() -> None:
     no-ops because the SQLite table is already populated.
     """
     global _legacy_migration_done
+    if os.environ.get("LLM_WIKI_READ_ONLY") == "1":
+        return
     if _legacy_migration_done:
         return
     with _EMBED_DB_LOCK:
@@ -799,7 +811,10 @@ def _iter_all_question_embeddings() -> "list[tuple[str, str, int, list[float], f
 def _embedding_count() -> int:
     _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
-    conn = _connect_embeddings()
+    try:
+        conn = _connect_embeddings()
+    except sqlite3.OperationalError:
+        return 0
     try:
         return conn.execute(
             "SELECT COUNT(*) FROM embeddings WHERE model = ? AND text_prefix = ?",
@@ -1189,6 +1204,54 @@ DEFAULT_FUSION_WEIGHTS: dict[str, float] = {
     "retention_prior": 0.015,
 }
 
+ACTIVE_SEARCH_POLICY_FILE = WIKI_ROOT / "recall" / "search-policy.json"
+
+
+def load_active_fusion_weights(path: Path | None = None) -> dict[str, float]:
+    """Load the validated search policy, falling back safely to defaults.
+
+    The artifact is deliberately separate from user configuration: evaluation
+    can atomically replace it after holdout validation, while malformed or
+    stale artifacts can never make production search unusable.
+    """
+    policy_path = path or ACTIVE_SEARCH_POLICY_FILE
+    try:
+        payload = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return dict(DEFAULT_FUSION_WEIGHTS)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != 1
+        or payload.get("source") != "search_eval.self_tune"
+        or not isinstance(payload.get("holdout"), dict)
+    ):
+        return dict(DEFAULT_FUSION_WEIGHTS)
+    raw = payload.get("weights")
+    if not isinstance(raw, dict) or set(raw) != set(DEFAULT_FUSION_WEIGHTS):
+        return dict(DEFAULT_FUSION_WEIGHTS)
+    weights: dict[str, float] = {}
+    for key, value in raw.items():
+        if isinstance(value, bool):
+            return dict(DEFAULT_FUSION_WEIGHTS)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return dict(DEFAULT_FUSION_WEIGHTS)
+        if not math.isfinite(numeric) or numeric < 0:
+            return dict(DEFAULT_FUSION_WEIGHTS)
+        weights[key] = numeric
+    if not any(weights[channel] > 0 for channel in ("bm25", "semantic", "graph", "usage_prior")):
+        return dict(DEFAULT_FUSION_WEIGHTS)
+    for bounded in (
+        "semantic_min_top_score",
+        "semantic_min_margin",
+        "semantic_low_confidence_weight",
+        "usage_prior_decay",
+    ):
+        if weights[bounded] > 1:
+            return dict(DEFAULT_FUSION_WEIGHTS)
+    return weights
+
 
 def _semantic_reliability_multiplier(
     semantic_results: list[ScoredPage],
@@ -1442,7 +1505,11 @@ def search(
     fusion_weights: dict[str, float] | None = None,
 ) -> tuple[list[ScoredPage], str]:
     """Run search and return (results, search_mode)."""
-    weights = {**DEFAULT_FUSION_WEIGHTS, **(fusion_weights or {})}
+    weights = (
+        {**DEFAULT_FUSION_WEIGHTS, **fusion_weights}
+        if fusion_weights is not None
+        else load_active_fusion_weights()
+    )
     result = run_search_pipeline(
         query,
         config=production_pipeline_config(

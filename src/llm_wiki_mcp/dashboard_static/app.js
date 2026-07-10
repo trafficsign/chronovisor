@@ -1391,15 +1391,23 @@ function renderHealth(health) {
   const derived = data.derived || {};
   const readBack = data.read_back || {};
   const queues = data.queues || {};
+  const convergence = data.convergence || {};
   const sensitivity = coverage.sensitivity || {};
   const rawFiles = intValue(capture.raw_files);
   const claimed = intValue(capture.claimed_raw_files);
   const checked = intValue(readBack.checked);
   const passed = intValue(readBack.passed);
 
+  const convergenceBits = convergence.status === "ok"
+    ? [
+        `${intValue(convergence.actionable).toLocaleString()} active`,
+        `${intValue(convergence.quarantined).toLocaleString()} quarantined`,
+        `${intValue(convergence.human_required).toLocaleString()} human`,
+      ]
+    : [];
   els.healthCaption.textContent = rawFiles
-    ? `${claimed.toLocaleString()} / ${rawFiles.toLocaleString()} raw claimed`
-    : "waiting";
+    ? `${claimed.toLocaleString()} / ${rawFiles.toLocaleString()} raw claimed${convergenceBits.length ? ` · ${convergenceBits.join(" · ")}` : ""}`
+    : (convergenceBits.length ? convergenceBits.join(" · ") : "waiting");
   els.healthSummaryCoverage.textContent = healthPercent(coverage.summary_coverage);
   els.healthCapture.textContent = healthPercent(numeric(integrity.capture_rate) ? integrity.capture_rate : capture.claim_coverage);
   els.healthReadback.textContent = checked
