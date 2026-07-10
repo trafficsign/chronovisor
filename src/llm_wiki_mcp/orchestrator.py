@@ -116,12 +116,18 @@ def _save_state(state: dict) -> None:
 
 
 def get_pending_raw_files() -> list[Path]:
-    """Get raw files that haven't been processed yet."""
+    """Get active raw files that haven't been processed yet.
+
+    A raw with ``raw_status: retracted`` remains on disk as audit evidence,
+    but is never offered to normal ingest.
+    """
+    from llm_wiki_mcp.raw_replay import is_raw_retracted
+
     state = _load_state()
     processed = set(state.get("processed_raw_files", []))
     pending = []
     for f in sorted(RAW_DIR.glob("*.md")):
-        if f.name not in processed:
+        if f.name not in processed and not is_raw_retracted(f):
             pending.append(f)
     return pending
 

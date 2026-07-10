@@ -1304,6 +1304,52 @@ class TestRawKeywordsMetadataPropagation:
 
 
 class TestOrchestrator:
+    def test_retracted_raw_is_not_pending_and_body_is_preserved(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        raw_dir = isolated_wiki / "raw"
+        retracted = raw_dir / "retracted.md"
+        retracted_text = (
+            "---\n"
+            "raw_keywords: [kuycon, p24u]\n"
+            "raw_status: RETRACTED\n"
+            "retraction_reason: entity_fusion\n"
+            "---\n"
+            "Original raw body must remain byte-for-byte unchanged.\n"
+        )
+        retracted.write_text(retracted_text, encoding="utf-8")
+        (raw_dir / "active.md").write_text(
+            "---\nraw_status: active\n---\nactive body\n",
+            encoding="utf-8",
+        )
+        (raw_dir / "legacy.md").write_text("legacy body\n", encoding="utf-8")
+        (raw_dir / "unknown.md").write_text(
+            "---\nraw_status: corrected\n---\nunknown status remains compatible\n",
+            encoding="utf-8",
+        )
+
+        pending = {path.name for path in orchestrator.get_pending_raw_files()}
+
+        assert pending == {"active.md", "legacy.md", "unknown.md"}
+        assert retracted.read_text(encoding="utf-8") == retracted_text
+        assert retracted.name not in orchestrator._load_state()["processed_raw_files"]
+
+    def test_force_ingest_declines_when_only_raw_is_retracted(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        (isolated_wiki / "raw" / "retracted.md").write_text(
+            "---\nraw_status: retracted\n---\nbody\n",
+            encoding="utf-8",
+        )
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert result == {"triggered": False, "reason": "no pending raws"}
+
     def test_reset_stale_lock_clears_pending_sentinel(
         self, isolated_wiki: Path
     ) -> None:

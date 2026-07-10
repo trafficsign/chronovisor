@@ -97,6 +97,104 @@ def test_build_queue_selects_raws_by_date(tmp_path: Path, monkeypatch) -> None:
     assert "20260701-codex-a.md" not in text
 
 
+def test_select_raws_skips_retracted_before_limit_and_preserves_body(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    retracted = paths["raw"] / "20260701-codex-retracted.md"
+    retracted_text = (
+        "---\n"
+        "raw_status: retracted\n"
+        "retraction_reason: incorrect_entity_merge\n"
+        "---\n"
+        "Original incorrect capture remains available for audit.\n"
+    )
+    retracted.write_text(retracted_text, encoding="utf-8")
+    active = paths["raw"] / "20260702-codex-active.md"
+    active.write_text("---\nraw_status: active\n---\nactive\n", encoding="utf-8")
+
+    selected = raw_replay.select_raws(limit=1)
+
+    assert selected == [active]
+    assert retracted.read_text(encoding="utf-8") == retracted_text
+
+
+def test_auto_signal_does_not_create_candidate_for_retracted_raw(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    retracted = paths["raw"] / "20260701-codex-retracted.md"
+    retracted.write_text(
+        "---\nraw_status: retracted\n---\nincorrect capture\n",
+        encoding="utf-8",
+    )
+    paths["memory"].parent.mkdir(parents=True)
+    paths["memory"].write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "raw": retracted.name,
+                        "path": str(retracted),
+                        "status": "miss",
+                        "query": "kuycon monitor",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = raw_replay.build_queue(
+        path=paths["queue"],
+        include_migration=False,
+        include_auto_signals=True,
+    )
+
+    assert result["candidates"] == 0
+    assert result["candidate_keys"] == []
+    assert _read_jsonl(paths["queue"]) == []
+
+
+def test_pending_queue_retires_raw_retracted_after_it_was_queued(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    retracted = paths["raw"] / "20260701-codex-retracted.md"
+    retracted_text = "---\nraw_status: retracted\n---\noriginal body\n"
+    retracted.write_text(retracted_text, encoding="utf-8")
+    _write_jsonl(
+        paths["queue"],
+        [
+            {
+                "key": raw_replay.stable_key(retracted),
+                "raw": retracted.name,
+                "path": str(retracted),
+                "status": "pending",
+                "attempts": 0,
+                "sources": ["memory_integrity_miss"],
+                "priority": 200,
+                "bytes": retracted.stat().st_size,
+                "date": "20260701",
+            }
+        ],
+    )
+
+    result = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+    )
+
+    assert result["count"] == 0
+    [row] = _read_jsonl(paths["queue"])
+    assert row["status"] == "not_needed"
+    assert row["terminal_reason"] == "raw frontmatter marks capture as retracted"
+    assert retracted.read_text(encoding="utf-8") == retracted_text
+
+
 def test_build_queue_merges_signals_without_resetting_retry_state(tmp_path: Path, monkeypatch) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260706-codex-a.md"

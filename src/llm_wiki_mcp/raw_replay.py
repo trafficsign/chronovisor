@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
+from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.jobs import JobStatus, job_store
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT
 
@@ -112,13 +113,33 @@ def _nonnegative_int(value: object, *, default: int = 0) -> int:
         return max(0, default)
 
 
+def is_raw_retracted(path: Path) -> bool:
+    """Return whether a raw capture is explicitly excluded from ingestion.
+
+    Missing, malformed, and unknown ``raw_status`` values deliberately fail
+    open so existing raw metadata remains backwards-compatible.  Only the
+    explicit scalar value ``retracted`` opts a raw out.  This function is
+    read-only; the raw body remains the immutable audit record.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    meta, _body = parse_frontmatter(text)
+    status = meta.get("raw_status")
+    return isinstance(status, str) and status.strip().casefold() == "retracted"
+
+
 def raw_date(path: Path) -> str:
     match = RAW_DATE_RE.search(path.name)
     return match.group(1) if match else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%d")
 
 
 def select_raws(*, since: str = "", limit: int = 0) -> list[Path]:
-    candidates = sorted(RAW_DIR.glob("*.md"), key=lambda path: (raw_date(path), path.name))
+    candidates = sorted(
+        (path for path in RAW_DIR.glob("*.md") if not is_raw_retracted(path)),
+        key=lambda path: (raw_date(path), path.name),
+    )
     if since:
         normalized = since.replace("-", "")
         candidates = [path for path in candidates if raw_date(path) >= normalized]
@@ -253,7 +274,15 @@ def _resolve_raw_path(raw_name: str, preferred: object = None) -> Path | None:
     return None
 
 
-def _candidate(path: Path, *, source: str, reason: str, now: datetime) -> dict[str, Any]:
+def _candidate(
+    path: Path,
+    *,
+    source: str,
+    reason: str,
+    now: datetime,
+) -> dict[str, Any] | None:
+    if is_raw_retracted(path):
+        return None
     raw = path.name
     return {
         "schema_version": SCHEMA_VERSION,
@@ -332,6 +361,12 @@ def _normalize_queue_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any
     return normalized
 
 
+def _row_is_retracted(row: dict[str, Any]) -> bool:
+    raw = _raw_name(row)
+    path = _resolve_raw_path(raw, row.get("path")) if raw else None
+    return path is not None and is_raw_retracted(path)
+
+
 def _merge_rows(current: dict[str, Any], incoming: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     merged = dict(current)
     merged["sources"] = sorted(
@@ -407,15 +442,29 @@ def _memory_integrity_candidates(*, now: datetime) -> list[dict[str, Any]]:
         if path is None:
             continue
         reason = str(row.get("reason") or row.get("query") or "memory integrity search miss")
-        out.append(_candidate(path, source="memory_integrity_miss", reason=reason, now=now))
+        candidate = _candidate(
+            path,
+            source="memory_integrity_miss",
+            reason=reason,
+            now=now,
+        )
+        if candidate is not None:
+            out.append(candidate)
     return out
 
 
 def _explicit_migration_candidates(*, since: str, now: datetime) -> list[dict[str, Any]]:
-    return [
-        _candidate(path, source="explicit_migration", reason=f"explicit migration since {since or 'all'}", now=now)
-        for path in select_raws(since=since, limit=0)
-    ]
+    out: list[dict[str, Any]] = []
+    for path in select_raws(since=since, limit=0):
+        candidate = _candidate(
+            path,
+            source="explicit_migration",
+            reason=f"explicit migration since {since or 'all'}",
+            now=now,
+        )
+        if candidate is not None:
+            out.append(candidate)
+    return out
 
 
 def _claim_sources_by_page() -> dict[str, list[tuple[datetime | None, int, str]]]:
@@ -521,6 +570,8 @@ def _ingest_failure_candidates(*, now: datetime) -> list[dict[str, Any]]:
         if path is None:
             continue
         candidate = _candidate(path, source="ingest_failure", reason=reason, now=now)
+        if candidate is None:
+            continue
         current = out_by_key.get(candidate["key"])
         out_by_key[candidate["key"]] = (
             candidate if current is None else _merge_rows(current, candidate, now=now)
@@ -533,6 +584,8 @@ def _ingest_failure_candidates(*, now: datetime) -> list[dict[str, Any]]:
             if path is None:
                 continue
             candidate = _candidate(path, source="ingest_failure", reason=reason, now=now)
+            if candidate is None:
+                continue
             current = out_by_key.get(candidate["key"])
             out_by_key[candidate["key"]] = (
                 candidate if current is None else _merge_rows(current, candidate, now=now)
@@ -543,6 +596,8 @@ def _ingest_failure_candidates(*, now: datetime) -> list[dict[str, Any]]:
     if QUARANTINED_RAW_DIR.exists():
         for path in sorted(QUARANTINED_RAW_DIR.glob("*.md")):
             candidate = _candidate(path, source="ingest_failure", reason="raw remains in ingest quarantine", now=now)
+            if candidate is None:
+                continue
             current = out_by_key.get(candidate["key"])
             out_by_key[candidate["key"]] = (
                 candidate if current is None else _merge_rows(current, candidate, now=now)
@@ -551,6 +606,8 @@ def _ingest_failure_candidates(*, now: datetime) -> list[dict[str, Any]]:
     if dead_letter.exists():
         for path in sorted(dead_letter.glob("*.md")):
             candidate = _candidate(path, source="ingest_failure", reason="raw remains in ingest dead-letter", now=now)
+            if candidate is None:
+                continue
             current = out_by_key.get(candidate["key"])
             out_by_key[candidate["key"]] = (
                 candidate if current is None else _merge_rows(current, candidate, now=now)
@@ -990,13 +1047,30 @@ def _review_indeterminate_rows(
     return {"reviewed": 1, "record": record, "budget_deferred": []}
 
 
-def _mark_not_needed(row: dict[str, Any], *, now: datetime) -> None:
+def _mark_not_needed(
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    reason: str = "legacy explicit migration has no current autonomous signal",
+) -> None:
     row["status"] = "not_needed"
     row["next_retry_at"] = None
     row["last_error"] = None
     row["not_needed_at"] = row.get("not_needed_at") or _iso(now)
-    row["terminal_reason"] = "legacy explicit migration has no current autonomous signal"
+    row["terminal_reason"] = reason
     row["updated_at"] = _iso(now)
+
+
+def _retire_retracted_row(row: dict[str, Any], *, now: datetime) -> None:
+    status = str(row.get("status") or "pending")
+    if status in TERMINAL_STATUSES or status == "running":
+        return
+    if _row_is_retracted(row):
+        _mark_not_needed(
+            row,
+            now=now,
+            reason="raw frontmatter marks capture as retracted",
+        )
 
 
 def _reactivate_not_needed(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
@@ -1034,6 +1108,7 @@ def _build_queue_unlocked(
     for raw_row in _read_jsonl(path):
         row = _normalize_queue_row(raw_row, now=now)
         if row is not None:
+            _retire_retracted_row(row, now=now)
             key = str(row["key"])
             current = existing_by_key.get(key)
             existing_by_key[key] = row if current is None else _merge_durable_rows(current, row, now=now)
@@ -1187,6 +1262,8 @@ def build_queue(
 def _eligible(row: dict[str, Any], *, now: datetime) -> bool:
     status = str(row.get("status") or "pending")
     if status not in RETRYABLE_STATUSES:
+        return False
+    if _row_is_retracted(row):
         return False
     if _nonnegative_int(row.get("attempts")) >= MAX_ATTEMPTS:
         return False
@@ -1444,6 +1521,7 @@ def run_pending_queue(
             row = _normalize_queue_row(raw_row, now=current_time)
             if row is None:
                 continue
+            _retire_retracted_row(row, now=current_time)
             key = str(row["key"])
             current = by_key.get(key)
             by_key[key] = row if current is None else _merge_durable_rows(current, row, now=current_time)
@@ -1514,6 +1592,8 @@ def run_pending_queue(
             now=current_time,
             retry_delay_seconds=retry_delay_seconds,
         )
+        for row in rows:
+            _retire_retracted_row(row, now=current_time)
         completed = _completed_replays(
             history_file=history_target,
             claims_file=claims_target,
