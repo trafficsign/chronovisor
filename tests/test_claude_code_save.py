@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from llm_wiki_mcp import claude_code_save
 
@@ -164,6 +168,7 @@ def test_parse_writer_output_sanitizes_keywords() -> None:
             "content": "Body",
             "keywords": ["Claude Code", "Claude Code", "bad,keyword", 123, "LLM Wiki"],
             "reason": "durable",
+            "evidence_quotes": ["Wiki の保存フローを自動化したい"],
         }
     )
 
@@ -172,6 +177,115 @@ def test_parse_writer_output_sanitizes_keywords() -> None:
     assert result.should_save is True
     assert result.keywords == ["Claude Code", "LLM Wiki"]
     assert result.rejected_keywords == ["bad,keyword", "123"]
+    assert result.evidence_quotes == ["Wiki の保存フローを自動化したい"]
+
+
+def test_parse_writer_output_requires_evidence_quotes_for_save() -> None:
+    output = json.dumps(
+        {
+            "should_save": True,
+            "content": "Body",
+            "keywords": ["Claude Code"],
+            "reason": "durable",
+            "evidence_quotes": [],
+        }
+    )
+
+    with pytest.raises(
+        claude_code_save.ClaudeCodeSaveError,
+        match="must provide user evidence_quotes",
+    ):
+        claude_code_save.parse_writer_output(output)
+
+
+def test_writer_prompt_forbids_assistant_model_name_substitution(tmp_path: Path) -> None:
+    session = tmp_path / "session.jsonl"
+    sample_session(session)
+
+    prompt = claude_code_save.build_writer_prompt(
+        claude_code_save.extract_transcript_slice(session),
+        max_chars=claude_code_save.DEFAULT_MAX_CHARS,
+    )
+
+    assert "evidence_quotes" in claude_code_save.MEMORY_WRITER_SCHEMA["required"]
+    assert "exact substrings from USER messages only" in prompt
+    assert "do not replace Q-KUN with Qwen" in prompt
+    assert "appears only in ASSISTANT text, omit it" in prompt
+
+
+def test_user_evidence_validation_rejects_assistant_only_quote(tmp_path: Path) -> None:
+    session = tmp_path / "session.jsonl"
+    sample_session(session)
+    transcript_slice = claude_code_save.extract_transcript_slice(session)
+    valid = claude_code_save.WriterResult(
+        should_save=True,
+        content="Body",
+        keywords=["Claude Code"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["Wiki の保存フローを自動化したい"],
+    )
+    invalid = claude_code_save.WriterResult(
+        should_save=True,
+        content="Body",
+        keywords=["Claude Code"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["了解、実装します。"],
+    )
+
+    claude_code_save.validate_user_evidence_quotes(valid, transcript_slice)
+    with pytest.raises(
+        claude_code_save.ClaudeCodeSaveError,
+        match="not found verbatim in USER",
+    ):
+        claude_code_save.validate_user_evidence_quotes(invalid, transcript_slice)
+
+
+def test_user_evidence_validation_rejects_normalized_model_and_capacity(
+    tmp_path: Path,
+) -> None:
+    transcript_slice = claude_code_save.TranscriptSlice(
+        session_file=tmp_path / "session.jsonl",
+        scanned_until_line=2,
+        records=[
+            claude_code_save.TranscriptRecord(1, "user", "Q-KUNの32GPレビューを見た"),
+            claude_code_save.TranscriptRecord(2, "assistant", "Qwenの32GBレビューですね"),
+        ],
+    )
+    invalid = claude_code_save.WriterResult(
+        should_save=True,
+        content="ユーザーはQwenの32GBレビューを見た。",
+        keywords=["Qwen", "32GB"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["Q-KUNの32GPレビューを見た"],
+    )
+    valid = claude_code_save.WriterResult(
+        should_save=True,
+        content="ユーザーはQ-KUNの32GPレビューを見た。",
+        keywords=["Q-KUN", "32GP"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["Q-KUNの32GPレビューを見た"],
+    )
+    invalid_keyword = claude_code_save.WriterResult(
+        should_save=True,
+        content="ユーザーはQ-KUNの32GPレビューを見た。",
+        keywords=["Qwen"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["Q-KUNの32GPレビューを見た"],
+    )
+
+    with pytest.raises(
+        claude_code_save.ClaudeCodeSaveError,
+        match="ungrounded protected literal",
+    ):
+        claude_code_save.validate_user_evidence_quotes(invalid, transcript_slice)
+    with pytest.raises(claude_code_save.ClaudeCodeSaveError, match="keywords"):
+        claude_code_save.validate_user_evidence_quotes(invalid_keyword, transcript_slice)
+    claude_code_save.validate_user_evidence_quotes(valid, transcript_slice)
 
 
 def test_trim_middle() -> None:
@@ -222,6 +336,7 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
             keywords=["Claude Code", "LLM Wiki"],
             reason="useful",
             rejected_keywords=[],
+            evidence_quotes=["Wiki の保存フローを自動化したい"],
         ),
     )
 
@@ -231,6 +346,7 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
         session_id: str,
         keywords: list[str],
         trigger_ingest: bool,
+        idempotency_key: str,
     ) -> dict:
         calls.append(
             {
@@ -238,11 +354,15 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
                 "session_id": session_id,
                 "keywords": keywords,
                 "trigger_ingest": trigger_ingest,
+                "idempotency_key": idempotency_key,
             }
         )
         return {"saved": "raw.md"}
 
     monkeypatch.setattr(claude_code_save, "save_raw", fake_save_raw)
+    monkeypatch.setattr(
+        claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
 
     first = claude_code_save.run(args_for(session, state, ignore_state=True))
     second = claude_code_save.run(args_for(session, state))
@@ -253,8 +373,181 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
     assert len(calls) == 1
     assert calls[0]["session_id"] == "claude-code-abc-1234-def"
     assert calls[0]["trigger_ingest"] is False
+    assert calls[0]["idempotency_key"].startswith("claude-code-")
+    assert "> Wiki の保存フローを自動化したい" in calls[0]["content"]
+    assert "## Writer Reason" not in calls[0]["content"]
     saved_state = json.loads(state.read_text())
     assert saved_state["files"][str(session)]["last_saved_line"] == 8
+
+
+def test_retry_recovers_raw_published_before_state_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    sample_session(session)
+    with session.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "sessionId": "abc-1234-def",
+                    "cwd": "/tmp/project",
+                    "timestamp": "2026-05-25T00:00:08Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Edit",
+                                "input": {"file_path": "/tmp/foo"},
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n"
+        )
+    state.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "files": {
+                    str(session): {
+                        "last_saved_line": 3,
+                        "session_id": "abc-1234-def",
+                        "status": "declined",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    writer_calls: list[int] = []
+    save_calls: list[str] = []
+
+    monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(claude_code_save, "RAW_DIR", raw_dir)
+
+    def fake_writer(*_args, **_kwargs):
+        writer_calls.append(1)
+        return claude_code_save.WriterResult(
+            should_save=True,
+            content="Durable memory",
+            keywords=["Claude Code"],
+            reason="useful",
+            rejected_keywords=[],
+            evidence_quotes=["Wiki の保存フローを自動化したい"],
+        )
+
+    def durable_fake_save(content: str, *, idempotency_key: str, **_kwargs):
+        save_calls.append(idempotency_key)
+        path = raw_dir / f"save-{idempotency_key}.md"
+        path.write_text(content, encoding="utf-8")
+        return {"saved": path.name, "path": str(path)}
+
+    real_write_state = claude_code_save.write_state
+    state_writes = 0
+
+    def fail_first_state_commit(path: Path, payload: dict) -> None:
+        nonlocal state_writes
+        state_writes += 1
+        if state_writes == 1:
+            raise OSError("injected crash after raw publish")
+        real_write_state(path, payload)
+
+    monkeypatch.setattr(claude_code_save, "run_memory_writer", fake_writer)
+    monkeypatch.setattr(claude_code_save, "save_raw", durable_fake_save)
+    monkeypatch.setattr(claude_code_save, "write_state", fail_first_state_commit)
+
+    with pytest.raises(OSError, match="injected crash"):
+        claude_code_save.run(args_for(session, state))
+
+    retry = claude_code_save.run(args_for(session, state))
+
+    assert retry["status"] == "recovered"
+    assert retry["recovered_save"]["idempotency_key"] == save_calls[0]
+    assert len(writer_calls) == 1
+    assert len(save_calls) == 1
+    assert len(list(raw_dir.glob("*.md"))) == 1
+    saved_state = json.loads(state.read_text())
+    assert saved_state["files"][str(session)]["last_saved_line"] == 9
+
+
+def test_corrupt_publisher_receipt_does_not_advance_cursor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    sample_session(session)
+    monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(claude_code_save, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(
+        claude_code_save,
+        "run_memory_writer",
+        lambda *_args, **_kwargs: claude_code_save.WriterResult(
+            should_save=True,
+            content="Durable memory",
+            keywords=["Claude Code"],
+            reason="useful",
+            rejected_keywords=[],
+            evidence_quotes=["Wiki の保存フローを自動化したい"],
+        ),
+    )
+
+    def corrupt_save(content: str, *, idempotency_key: str, **_kwargs):
+        path = raw_dir / f"save-{idempotency_key}.md"
+        path.write_text(content.replace("Durable memory", "tampered memory"), encoding="utf-8")
+        return {"saved": path.name, "path": str(path)}
+
+    monkeypatch.setattr(claude_code_save, "save_raw", corrupt_save)
+
+    with pytest.raises(
+        claude_code_save.ClaudeCodeSaveError,
+        match="receipt validation failed",
+    ):
+        claude_code_save.run(args_for(session, state, ignore_state=True))
+
+    assert not state.exists()
+
+
+def test_save_rejects_assistant_only_evidence_before_writing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    sample_session(session)
+    monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        claude_code_save,
+        "run_memory_writer",
+        lambda *args, **kwargs: claude_code_save.WriterResult(
+            should_save=True,
+            content="Misattributed assistant memory",
+            keywords=["Claude Code"],
+            reason="assistant-only",
+            rejected_keywords=[],
+            evidence_quotes=["了解、実装します。"],
+        ),
+    )
+    monkeypatch.setattr(
+        claude_code_save,
+        "save_raw",
+        lambda *args, **kwargs: pytest.fail("invalid evidence must not be saved"),
+    )
+
+    with pytest.raises(
+        claude_code_save.ClaudeCodeSaveError,
+        match="not found verbatim in USER",
+    ):
+        claude_code_save.run(args_for(session, state, ignore_state=True))
+    assert not state.exists()
 
 
 def test_hook_mode_disabled_without_env(tmp_path: Path, monkeypatch) -> None:
@@ -369,6 +662,7 @@ def test_timing_triggers_on_edit(tmp_path: Path, monkeypatch) -> None:
         "run_memory_writer",
         lambda *a, **kw: claude_code_save.WriterResult(
             should_save=True, content="Memory", keywords=["test"], reason="edit", rejected_keywords=[],
+            evidence_quotes=["User message 0"],
         ),
     )
     monkeypatch.setattr(
@@ -376,11 +670,102 @@ def test_timing_triggers_on_edit(tmp_path: Path, monkeypatch) -> None:
         "save_raw",
         lambda *a, **kw: {"saved": "raw.md"},
     )
+    monkeypatch.setattr(
+        claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
     args = args_for(session, state_file)
     result = claude_code_save.run(args)
 
     assert result["status"] == "saved"
     assert result["trigger"] == "file_changes"
+
+
+def test_concurrent_stop_workers_publish_delta_exactly_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state_file = tmp_path / "state.json"
+    session_with_edits(session, user_turns=2, include_edit=True)
+
+    monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    first_writer_entered = threading.Event()
+    release_first_writer = threading.Event()
+    duplicate_writer_entered = threading.Event()
+    second_lock_attempted = threading.Event()
+    calls_guard = threading.Lock()
+    writer_calls: list[int] = []
+    lock_attempts: list[int] = []
+    saves: list[str] = []
+
+    from contextlib import contextmanager
+
+    real_transaction_lock = claude_code_save.save_transaction_lock
+
+    @contextmanager
+    def instrumented_transaction_lock(**kwargs):
+        with calls_guard:
+            lock_attempts.append(1)
+            if len(lock_attempts) == 2:
+                second_lock_attempted.set()
+        with real_transaction_lock(**kwargs) as lock_path:
+            yield lock_path
+
+    def fake_writer(*_args, **_kwargs):
+        with calls_guard:
+            writer_calls.append(1)
+            first = len(writer_calls) == 1
+        if first:
+            first_writer_entered.set()
+            assert release_first_writer.wait(5)
+        else:
+            duplicate_writer_entered.set()
+        return claude_code_save.WriterResult(
+            should_save=True,
+            content="Durable memory",
+            keywords=["Claude Code"],
+            reason="useful",
+            rejected_keywords=[],
+            evidence_quotes=["User message 0"],
+        )
+
+    def fake_save(content: str, **_kwargs):
+        saves.append(content)
+        return {"saved": "raw.md"}
+
+    monkeypatch.setattr(claude_code_save, "run_memory_writer", fake_writer)
+    monkeypatch.setattr(claude_code_save, "save_raw", fake_save)
+    monkeypatch.setattr(
+        claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        claude_code_save,
+        "save_transaction_lock",
+        instrumented_transaction_lock,
+    )
+    second_started = threading.Event()
+
+    def second_worker():
+        second_started.set()
+        return claude_code_save.run(args_for(session, state_file))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(claude_code_save.run, args_for(session, state_file))
+        assert first_writer_entered.wait(5)
+        second = pool.submit(second_worker)
+        assert second_started.wait(5)
+        assert second_lock_attempted.wait(5)
+        assert not duplicate_writer_entered.is_set()
+        release_first_writer.set()
+        results = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert not duplicate_writer_entered.is_set()
+    assert len(lock_attempts) == 2
+    assert len(writer_calls) == 1
+    assert len(saves) == 1
+    assert sorted(result["status"] for result in results) == ["saved", "skipped"]
+    saved_state = json.loads(state_file.read_text())
+    assert saved_state["files"][str(session)]["last_saved_line"] == 5
 
 
 def test_timing_triggers_on_turn_interval(tmp_path: Path, monkeypatch) -> None:
@@ -394,12 +779,16 @@ def test_timing_triggers_on_turn_interval(tmp_path: Path, monkeypatch) -> None:
         "run_memory_writer",
         lambda *a, **kw: claude_code_save.WriterResult(
             should_save=True, content="Memory", keywords=["test"], reason="turns", rejected_keywords=[],
+            evidence_quotes=["User message 0"],
         ),
     )
     monkeypatch.setattr(
         claude_code_save,
         "save_raw",
         lambda *a, **kw: {"saved": "raw.md"},
+    )
+    monkeypatch.setattr(
+        claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
     )
     args = args_for(session, state_file)
     result = claude_code_save.run(args)
@@ -449,12 +838,16 @@ def test_timing_bypass_with_ignore_state(tmp_path: Path, monkeypatch) -> None:
         "run_memory_writer",
         lambda *a, **kw: claude_code_save.WriterResult(
             should_save=True, content="Memory", keywords=["test"], reason="bypass", rejected_keywords=[],
+            evidence_quotes=["User message 0"],
         ),
     )
     monkeypatch.setattr(
         claude_code_save,
         "save_raw",
         lambda *a, **kw: {"saved": "raw.md"},
+    )
+    monkeypatch.setattr(
+        claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
     )
     args = args_for(session, state_file)
     args.ignore_state = True

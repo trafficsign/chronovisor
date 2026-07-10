@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import tempfile
@@ -348,12 +349,12 @@ def _run_sleep_cycle(
     from llm_wiki_mcp import recall_improvement
     from llm_wiki_mcp.state_register import refresh_state_register
     from llm_wiki_mcp.autonomy import run_autonomy_cycle
-    from llm_wiki_mcp.convergence import CycleBudget
+    from llm_wiki_mcp.convergence import ConvergenceStore, CycleBudget
     from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
 
     cycle_budget = CycleBudget(
         max_local_calls=12,
-        max_frontier_calls=9,
+        max_frontier_calls=12,
         max_mutations=31,
         max_raw_bytes=2_000_000,
         max_elapsed_seconds=30 * 60,
@@ -380,6 +381,68 @@ def _run_sleep_cycle(
         if dry_run
         else artifact_lane("wiki_snapshot", lambda: snapshot_wiki("before sleep cycle"))
     )
+    try:
+        quarantine_cooldown = max(
+            0,
+            int(os.getenv("LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "21600")),
+        )
+    except ValueError:
+        quarantine_cooldown = 21_600
+    convergence_quarantine_recovery = _run_lane(
+        "convergence_quarantine_recovery",
+        lambda: ConvergenceStore().resume_due_quarantined(
+            cooldown_seconds=quarantine_cooldown,
+            exclude_lanes={"content_correction"},
+            dry_run=dry_run,
+        ),
+    )
+    frontier_capability_preflight = _run_lane(
+        "frontier_capability_preflight",
+        lambda: __import__(
+            "llm_wiki_mcp.frontier_review", fromlist=["run_frontier_preflight"]
+        ).run_frontier_preflight(),
+    )
+    capability_fingerprint = ""
+    if frontier_capability_preflight.get("ok") is True:
+        capability_fingerprint = hashlib.sha256(
+            json.dumps(
+                frontier_capability_preflight,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+    try:
+        human_recheck_cooldown = max(
+            0,
+            int(os.getenv("LLM_WIKI_HUMAN_REQUIRED_RECHECK_SECONDS", "3600")),
+        )
+    except ValueError:
+        human_recheck_cooldown = 3_600
+    convergence_human_recovery = _run_lane(
+        "convergence_human_recovery",
+        lambda: ConvergenceStore().resume_due_human_required(
+            capability_fingerprint=capability_fingerprint,
+            cooldown_seconds=human_recheck_cooldown,
+            dry_run=dry_run,
+        ),
+    )
+    correction_budget = cycle_budget.slice(
+        # One authoritative classification plus one byte-level mutation review.
+        max_local_calls=2,
+        max_frontier_calls=2,
+        max_mutations=1,
+    )
+    content_corrections = _run_lane(
+        "content_corrections",
+        lambda: __import__(
+            "llm_wiki_mcp.content_correction", fromlist=["run_pending_corrections"]
+        ).run_pending_corrections(
+            max_items=2,
+            budget=correction_budget,
+            dry_run=dry_run,
+        ),
+    )
     cofire = artifact_lane("cofire", lambda: build_cofire_graph(write=not dry_run))
     prefetch = artifact_lane("prefetch", lambda: build_prefetch_cache(write=not dry_run))
     retention = artifact_lane("retention", lambda: build_retention_scores(write=not dry_run))
@@ -404,9 +467,13 @@ def _run_sleep_cycle(
         "lint": cycle_budget.slice(
             max_local_calls=5, max_frontier_calls=1, max_mutations=3
         ),
-        "read_back_repair": cycle_budget.slice(max_mutations=1),
+        "read_back_repair": cycle_budget.slice(
+            max_frontier_calls=1, max_mutations=1
+        ),
         "labels": cycle_budget.slice(max_frontier_calls=1, max_mutations=2),
-        "recall_auto_apply": cycle_budget.slice(max_mutations=1),
+        "recall_auto_apply": cycle_budget.slice(
+            max_frontier_calls=1, max_mutations=1
+        ),
         "self_heal": cycle_budget.slice(
             max_local_calls=1, max_frontier_calls=1, max_mutations=1
         ),
@@ -421,7 +488,9 @@ def _run_sleep_cycle(
             max_frontier_calls=1, max_mutations=1, max_raw_bytes=2_000_000
         ),
         "autonomy_duplicates": cycle_budget.slice(max_mutations=1),
-        "autonomy_retention": cycle_budget.slice(max_mutations=1),
+        "autonomy_retention": cycle_budget.slice(
+            max_frontier_calls=1, max_mutations=1
+        ),
     }
     if dry_run:
         lint_due = _run_lane(
@@ -593,6 +662,10 @@ def _run_sleep_cycle(
         "started_at": started,
         "dry_run": dry_run,
         "wiki_snapshot": snapshot,
+        "convergence_quarantine_recovery": convergence_quarantine_recovery,
+        "frontier_capability_preflight": frontier_capability_preflight,
+        "convergence_human_recovery": convergence_human_recovery,
+        "content_corrections": content_corrections,
         "health_before": before_health_result,
         "cofire": {k: v for k, v in cofire.items() if k != "graph"},
         "prefetch": {

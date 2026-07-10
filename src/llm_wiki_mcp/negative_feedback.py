@@ -1,7 +1,8 @@
 """Query-conditioned negative feedback penalties for search ranking.
 
 Recall feedback already records pages that were injected for a prompt and then
-ignored (``injection_ignored``) or explicitly flagged (``false-positive``).
+ignored (``injection_ignored``), explicitly flagged (``false-positive``), or
+rejected individually (``page_ignored``).
 The recall hook consumes those entries as injection suppressions, but the
 search ranking itself never learned from them, so the same pages keep
 surfacing in the top-20 for the same kind of vague prompts.
@@ -15,13 +16,15 @@ the query and does not suppress a page globally.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from llm_wiki_mcp.runtime_config import NegativeFeedbackConfig, load_negative_feedback_config
+from llm_wiki_mcp.page_mutation import find_mutation_page
 from llm_wiki_mcp.search_types import ScoredPage, tokenize
 
 # Test seams: when set, bypass the recall_runtime/golden default paths.
@@ -33,6 +36,10 @@ GOLDEN_FILE_OVERRIDE: Path | None = None
 class _FeedbackEntry:
     tokens: frozenset[str]
     pages: tuple[str, ...]
+    ts: datetime | None = None
+    kind: str = ""
+    frontier_confirmed: bool = False
+    page_hashes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -70,9 +77,18 @@ def _parse_ts(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _ts_rank(value: datetime | None) -> float:
+    """Return a stable ordering rank; undated legacy evidence is oldest."""
+
+    return value.timestamp() if value is not None else float("-inf")
 
 
 def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
@@ -87,7 +103,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
             return _CACHE.entries
 
     cutoff = (
-        datetime.now() - timedelta(days=config.max_age_days)
+        datetime.now(timezone.utc) - timedelta(days=config.max_age_days)
         if config.max_age_days > 0
         else None
     )
@@ -105,8 +121,26 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
             continue
         if not isinstance(row, dict) or row.get("kind") not in config.kinds:
             continue
+        kind = str(row.get("kind") or "")
+        source = str(row.get("source") or "")
+        # The local recall auditor emits observational precision labels. Those
+        # rows remain useful evidence for replay/evaluation, but cannot alter
+        # production ranking until a frontier reviewer has confirmed them.
+        if (
+            kind == "injection_ignored"
+            and source in {"auditor", "auditor_precision"}
+            and row.get("frontier_reviewed") is not True
+        ):
+            continue
+        if kind == "page_ignored" and row.get("frontier_reviewed") is not True:
+            continue
         prompt = row.get("prompt")
-        pages = row.get("expected_pages")
+        negative_pages = row.get("negative_pages")
+        pages = negative_pages if isinstance(negative_pages, list) and negative_pages else None
+        if pages is None and row.get("kind") != "page_ignored":
+            # Backward compatibility: the legacy prompt-scoped labels stored
+            # injected pages in ``expected_pages``.
+            pages = row.get("expected_pages")
         if not isinstance(prompt, str) or not prompt.strip():
             continue
         if not isinstance(pages, list):
@@ -121,7 +155,28 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         tokens = _tokenize(prompt)
         if not tokens:
             continue
-        entries.append(_FeedbackEntry(tokens=tokens, pages=page_ids))
+        page_hashes_value = row.get("negative_page_hashes")
+        page_hashes = (
+            tuple(
+                sorted(
+                    (str(page_id), str(digest))
+                    for page_id, digest in page_hashes_value.items()
+                    if isinstance(page_id, str) and isinstance(digest, str)
+                )
+            )
+            if isinstance(page_hashes_value, dict)
+            else ()
+        )
+        entries.append(
+            _FeedbackEntry(
+                tokens=tokens,
+                pages=page_ids,
+                ts=_parse_ts(row.get("ts")),
+                kind=kind,
+                frontier_confirmed=(row.get("frontier_reviewed") is True),
+                page_hashes=page_hashes,
+            )
+        )
 
     # Keep the most recent entries when the file grows large.
     if len(entries) > config.max_entries:
@@ -175,7 +230,14 @@ def _load_protections() -> list[_FeedbackEntry]:
         tokens = _tokenize(query)
         if not tokens:
             continue
-        entries.append(_FeedbackEntry(tokens=tokens, pages=page_ids))
+        entries.append(
+            _FeedbackEntry(
+                tokens=tokens,
+                pages=page_ids,
+                ts=_parse_ts(row.get("ts") or row.get("reviewed_at")),
+                kind="reviewed_positive",
+            )
+        )
 
     with _CACHE_LOCK:
         _PROTECT_CACHE.key = cache_key
@@ -195,6 +257,11 @@ def penalties_for_query(
     if not query_tokens:
         return {}
     penalties: dict[str, float] = {}
+    # A frontier-confirmed page-scoped rejection is stronger than an older
+    # reviewed positive label for the same query/page. Keep its newest
+    # timestamp separately from penalty magnitude so a slightly different
+    # wording cannot let stale golden data veto the newer correction.
+    newest_confirmed_ignored: dict[str, datetime | None] = {}
     for entry in _load_entries(config):
         union = len(query_tokens | entry.tokens)
         if union == 0:
@@ -203,13 +270,31 @@ def penalties_for_query(
         if jaccard < config.similarity_threshold:
             continue
         page_penalty = config.penalty * jaccard
+        expected_hashes = dict(entry.page_hashes)
         for page_id in entry.pages:
+            expected_hash = expected_hashes.get(page_id)
+            if expected_hash:
+                path = find_mutation_page(page_id)
+                try:
+                    current_hash = (
+                        hashlib.sha256(path.read_bytes()).hexdigest()
+                        if path is not None
+                        else ""
+                    )
+                except OSError:
+                    current_hash = ""
+                if current_hash != expected_hash:
+                    continue
             if page_penalty > penalties.get(page_id, 0.0):
                 penalties[page_id] = page_penalty
+            if entry.frontier_confirmed:
+                previous = newest_confirmed_ignored.get(page_id)
+                if page_id not in newest_confirmed_ignored or _ts_rank(entry.ts) > _ts_rank(previous):
+                    newest_confirmed_ignored[page_id] = entry.ts
     if not penalties:
         return {}
 
-    protected: dict[str, float] = {}
+    protected: dict[str, tuple[float, datetime | None]] = {}
     for entry in _load_protections():
         if not set(entry.pages) & set(penalties):
             continue
@@ -220,11 +305,25 @@ def penalties_for_query(
         if jaccard < config.similarity_threshold:
             continue
         for page_id in entry.pages:
-            if jaccard > protected.get(page_id, 0.0):
-                protected[page_id] = jaccard
-    for page_id, pos_jaccard in protected.items():
+            current = protected.get(page_id)
+            if (
+                current is None
+                or jaccard > current[0]
+                or (jaccard == current[0] and _ts_rank(entry.ts) > _ts_rank(current[1]))
+            ):
+                protected[page_id] = (jaccard, entry.ts)
+    for page_id, (pos_jaccard, positive_ts) in protected.items():
         penalty = penalties.get(page_id)
-        if penalty is not None and pos_jaccard * config.penalty >= penalty:
+        confirmed_ts = newest_confirmed_ignored.get(page_id)
+        confirmed_is_newer = (
+            page_id in newest_confirmed_ignored
+            and _ts_rank(confirmed_ts) >= _ts_rank(positive_ts)
+        )
+        if (
+            penalty is not None
+            and not confirmed_is_newer
+            and pos_jaccard * config.penalty >= penalty
+        ):
             del penalties[page_id]
     return penalties
 

@@ -162,6 +162,11 @@ def atomic_write(path: Path, content: str) -> None:
         os.fsync(tmp.fileno())
         tmp.close()
         os.replace(tmp_path, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except Exception:
         try:
             os.unlink(tmp_path)

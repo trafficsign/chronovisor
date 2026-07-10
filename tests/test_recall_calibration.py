@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 
 from llm_wiki_mcp import recall_calibration
 from llm_wiki_mcp.convergence import CycleBudget
@@ -145,7 +146,12 @@ def test_calibration_mutation_budget_guards_authoritative_artifact(monkeypatch, 
     before = calibration_file.read_bytes()
     monkeypatch.setattr(recall_calibration, "CALIBRATION_FILE", calibration_file)
     monkeypatch.setattr(recall_calibration, "CALIBRATION_HISTORY_FILE", history_file)
-    monkeypatch.setattr(recall_calibration, "load_calibration", lambda: {"weights": {"old": 1}})
+    monkeypatch.setattr(
+        recall_calibration,
+        "load_calibration",
+        lambda _path=None: {"weights": {"old": 1}},
+    )
+    monkeypatch.setattr(recall_calibration, "wiki_mutation_lock", nullcontext)
     monkeypatch.setattr(recall_calibration, "load_labeled_rows", lambda **_kwargs: rows)
     monkeypatch.setattr(
         recall_calibration,
@@ -165,12 +171,34 @@ def test_calibration_mutation_budget_guards_authoritative_artifact(monkeypatch, 
         min_improvement=0.1,
     )
 
-    denied_budget = CycleBudget(max_mutations=0)
-    deferred = recall_calibration.calibrate(policy=policy, budget=denied_budget)
+    denied_budget = CycleBudget(max_frontier_calls=1, max_mutations=0)
+    deferred = recall_calibration.calibrate(
+        policy=policy,
+        budget=denied_budget,
+        frontier_reviewer=lambda _proposal: {
+            "decision": "approved",
+            "summary": "safe",
+        },
+        review_dir=tmp_path / "denied-reviews",
+    )
     assert deferred["status"] == "budget_deferred"
     assert calibration_file.read_bytes() == before
     assert not history_file.exists()
     assert denied_budget.snapshot()["used"]["mutation"] == 0
+    assert denied_budget.snapshot()["used"]["frontier"] == 1
+
+    recovered = recall_calibration.calibrate(
+        policy=policy,
+        budget=CycleBudget(max_frontier_calls=0, max_mutations=1),
+        frontier_reviewer=lambda _proposal: (_ for _ in ()).throw(
+            AssertionError("durable approval must be reused")
+        ),
+        review_dir=tmp_path / "denied-reviews",
+    )
+    assert recovered["status"] == "applied"
+    assert recovered["frontier_review_reused"] is True
+    calibration_file.write_bytes(before)
+    history_file.unlink()
 
     reject_budget = CycleBudget(max_frontier_calls=1, max_mutations=0)
     rejected = recall_calibration.calibrate(
@@ -178,13 +206,22 @@ def test_calibration_mutation_budget_guards_authoritative_artifact(monkeypatch, 
         frontier_mode="auto",
         frontier_reviewer=lambda _artifact: {"decision": "rejected", "summary": "unsafe"},
         budget=reject_budget,
+        review_dir=tmp_path / "rejected-reviews",
     )
     assert rejected["status"] == "frontier_rejected"
     assert calibration_file.read_bytes() == before
     assert reject_budget.snapshot()["used"]["mutation"] == 0
 
-    apply_budget = CycleBudget(max_mutations=1)
-    applied = recall_calibration.calibrate(policy=policy, budget=apply_budget)
+    apply_budget = CycleBudget(max_frontier_calls=1, max_mutations=1)
+    applied = recall_calibration.calibrate(
+        policy=policy,
+        budget=apply_budget,
+        frontier_reviewer=lambda _proposal: {
+            "decision": "approved",
+            "summary": "safe",
+        },
+        review_dir=tmp_path / "apply-reviews",
+    )
     assert applied["status"] == "applied"
     assert calibration_file.read_bytes() != before
     assert apply_budget.snapshot()["used"]["mutation"] == 1

@@ -1,7 +1,8 @@
 """Self-improving recall policy loop.
 
-The loop is intentionally offline: local models can propose policy changes,
-but replay evaluation is the only adoption judge.
+The loop is intentionally offline: local models and replay evaluation produce
+policy proposals, while a durable frontier verdict is the final adoption
+authority for every active-policy mutation.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from llm_wiki_mcp.convergence import is_human_required_result
 from llm_wiki_mcp.recall_eval import (
     RecallExample,
     build_dataset,
@@ -62,6 +64,23 @@ DEFAULT_IMPROVEMENT_MODELS = (
 FRONTIER_AUDIT_MODES = {"off", "auto", "always"}
 PROPOSER_VISIBLE_BLOCKERS = {"dev_improved", "latency_ok"}
 RUN_DUE_LOCK_FILE = IMPROVEMENT_DIR / "run-due.lock"
+DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
+FRONTIER_POLICY_ARTIFACT_SCHEMA_VERSION = 1
+
+
+def _quarantine_retry_seconds() -> int:
+    try:
+        return max(
+            0,
+            int(
+                os.getenv(
+                    "LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS",
+                    str(DEFAULT_QUARANTINE_RETRY_SECONDS),
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_QUARANTINE_RETRY_SECONDS
 
 
 @dataclass(frozen=True)
@@ -93,6 +112,17 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return str(value)
+
+
+def _canonical_json_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_json_default,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -140,6 +170,7 @@ def write_episode_snapshot(
             "cwd": example.cwd,
             "session_id": example.session_id,
             "expected_pages": list(example.expected_pages),
+            "negative_pages": list(example.negative_pages),
             "injected_pages": list(example.injected_pages),
             "kind": example.kind,
             "ref": example.ref,
@@ -905,6 +936,98 @@ def _frontier_audit_needed(best: dict[str, Any], *, mode: str) -> tuple[bool, li
     return bool(reasons), reasons
 
 
+def _frontier_policy_evidence(
+    record: dict[str, Any],
+    best: dict[str, Any],
+    reasons: list[str],
+) -> dict[str, Any]:
+    """Return stable, complete evidence that a frontier verdict authorizes."""
+    proposal = best.get("proposal") if isinstance(best.get("proposal"), dict) else {}
+    stable_proposal = {
+        key: value
+        for key, value in proposal.items()
+        if key != "proposal_id"
+    }
+    dataset = record.get("dataset") if isinstance(record.get("dataset"), dict) else {}
+    stable_dataset = {
+        key: dataset.get(key)
+        for key in ("examples", "dev", "holdout")
+        if key in dataset
+    }
+    return {
+        "dataset": stable_dataset,
+        "baseline": record.get("baseline"),
+        "candidate": {
+            **best,
+            "proposal": stable_proposal,
+        },
+        "failure_samples": record.get("failure_samples", [])[:5],
+        "audit_reasons": list(reasons),
+    }
+
+
+def _frontier_policy_artifact_path(
+    *,
+    audit_dir: Path,
+    candidate_sha256: str,
+) -> Path:
+    return audit_dir / f"candidate-{candidate_sha256}.json"
+
+
+def _decorate_durable_frontier_review(
+    review: dict[str, Any],
+    *,
+    candidate_sha256: str,
+    artifact_path: Path,
+    reused: bool,
+) -> dict[str, Any]:
+    return {
+        **review,
+        "candidate_sha256": candidate_sha256,
+        "_artifact_durable": True,
+        "_artifact_path": str(artifact_path),
+        "_artifact_reused": reused,
+    }
+
+
+def load_frontier_policy_audit(
+    record: dict[str, Any],
+    best: dict[str, Any],
+    *,
+    reasons: list[str],
+    audit_dir: Path = FRONTIER_AUDIT_DIR,
+) -> dict[str, Any] | None:
+    evidence = _frontier_policy_evidence(record, best, reasons)
+    candidate_sha256 = _canonical_json_sha256(evidence)
+    artifact_path = _frontier_policy_artifact_path(
+        audit_dir=audit_dir,
+        candidate_sha256=candidate_sha256,
+    )
+    try:
+        envelope = read_json_file(artifact_path)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    if (
+        envelope.get("schema_version") != FRONTIER_POLICY_ARTIFACT_SCHEMA_VERSION
+        or envelope.get("kind") != "recall_policy_frontier_verdict"
+        or envelope.get("candidate_sha256") != candidate_sha256
+        or envelope.get("evidence") != evidence
+        or _canonical_json_sha256(envelope.get("evidence")) != candidate_sha256
+    ):
+        return None
+    review = envelope.get("review")
+    if not isinstance(review, dict) or review.get("decision") not in {"approved", "rejected"}:
+        return None
+    return _decorate_durable_frontier_review(
+        review,
+        candidate_sha256=candidate_sha256,
+        artifact_path=artifact_path,
+        reused=True,
+    )
+
+
 def build_frontier_audit_prompt(record: dict[str, Any], best: dict[str, Any], reasons: list[str]) -> str:
     excerpt = {
         "run_id": record.get("run_id"),
@@ -950,31 +1073,91 @@ def run_frontier_policy_audit(
     repo_root: Path | None = None,
     timeout: int | None = None,
     audit_dir: Path = FRONTIER_AUDIT_DIR,
+    reviewer: Any | None = None,
 ) -> dict[str, Any]:
     from llm_wiki_mcp import frontier_review
+
+    reused = load_frontier_policy_audit(
+        record,
+        best,
+        reasons=reasons,
+        audit_dir=audit_dir,
+    )
+    if reused is not None:
+        return reused
 
     repo = repo_root or Path(__file__).resolve().parents[2]
     timeout_seconds = timeout or int(os.environ.get("LLM_WIKI_RECALL_IMPROVE_FRONTIER_TIMEOUT", "1800"))
     prompt = build_frontier_audit_prompt(record, best, reasons)
-    payload = frontier_review.run_structured_review(
-        prompt,
-        frontier_review.FRONTIER_DECISION_SCHEMA,
-        repo_root=repo,
-        timeout=timeout_seconds,
-        execute_patch=False,
-    )
+    if reviewer is None:
+        payload = frontier_review.run_structured_review(
+            prompt,
+            frontier_review.FRONTIER_DECISION_SCHEMA,
+            repo_root=repo,
+            timeout=timeout_seconds,
+            execute_patch=False,
+        )
+    else:
+        payload = reviewer(prompt, best)
+    if not isinstance(payload, dict):
+        payload = {
+            "decision": "needs_retry",
+            "summary": "frontier policy reviewer returned invalid payload",
+        }
     payload["audit_reasons"] = reasons
     payload["run_id"] = record.get("run_id")
     payload["ts"] = _now_iso()
+    evidence = _frontier_policy_evidence(record, best, reasons)
+    candidate_sha256 = _canonical_json_sha256(evidence)
+    artifact_path = _frontier_policy_artifact_path(
+        audit_dir=audit_dir,
+        candidate_sha256=candidate_sha256,
+    )
+    envelope = {
+        "schema_version": FRONTIER_POLICY_ARTIFACT_SCHEMA_VERSION,
+        "kind": "recall_policy_frontier_verdict",
+        "candidate_sha256": candidate_sha256,
+        "evidence": evidence,
+        "review": payload,
+        "created_at": _now_iso(),
+    }
     audit_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(audit_dir / f"{record.get('run_id', 'unknown')}.json", payload)
-    return payload
+    # This write is deliberately before the active-policy mutation. A crash
+    # after this point can reuse the exact verdict without asking the frontier
+    # model again, while a changed candidate/eval gets a different digest.
+    atomic_write_json(artifact_path, envelope)
+    if payload.get("decision") in {"approved", "rejected"}:
+        verified = load_frontier_policy_audit(
+            record,
+            best,
+            reasons=reasons,
+            audit_dir=audit_dir,
+        )
+        if verified is None:
+            raise OSError("frontier policy artifact read-back validation failed")
+    run_id = str(record.get("run_id") or "unknown")
+    try:
+        atomic_write_json(audit_dir / f"run-{run_id}.json", envelope)
+    except OSError:
+        # The content-addressed artifact above is the authorization boundary;
+        # the run alias is audit convenience only.
+        pass
+    return _decorate_durable_frontier_review(
+        payload,
+        candidate_sha256=candidate_sha256,
+        artifact_path=artifact_path,
+        reused=False,
+    )
 
 
 def _frontier_blocks_adoption(audit: dict[str, Any] | None) -> bool:
-    if not audit:
-        return False
-    return audit.get("decision") != "approved"
+    return not (
+        audit
+        and audit.get("decision") == "approved"
+        and audit.get("_artifact_durable") is True
+        and isinstance(audit.get("candidate_sha256"), str)
+        and bool(audit.get("candidate_sha256"))
+    )
 
 
 def run_improvement(
@@ -995,10 +1178,16 @@ def run_improvement(
     episodes_file: Path = EPISODES_FILE,
     live_episodes_file: Path = LIVE_EPISODES_FILE,
     frontier_budget: Any | None = None,
+    frontier_audit_dir: Path = FRONTIER_AUDIT_DIR,
+    frontier_reviewer: Any | None = None,
 ) -> dict[str, Any]:
     run_id = _run_id()
     started = _now_iso()
-    examples = build_dataset(log_file=log_file, feedback_file=feedback_file)
+    examples = [
+        example
+        for example in build_dataset(log_file=log_file, feedback_file=feedback_file)
+        if example.kind != "page_ignored"
+    ]
     if max_examples > 0:
         examples = examples[-max_examples:]
     write_episode_snapshot(examples, path=episodes_file)
@@ -1081,6 +1270,11 @@ def run_improvement(
             "holdout": best.get("holdout", {}),
         }
         audit_needed, frontier_audit_reasons = _frontier_audit_needed(best, mode=frontier_mode)
+        if apply:
+            audit_needed = True
+            mandatory_reason = "active policy adoption requires a durable frontier verdict"
+            if mandatory_reason not in frontier_audit_reasons:
+                frontier_audit_reasons.append(mandatory_reason)
         if apply and audit_needed:
             provisional = {
                 "schema_version": 1,
@@ -1103,33 +1297,54 @@ def run_improvement(
                 },
                 "failure_samples": failures,
             }
+            frontier_audit = load_frontier_policy_audit(
+                provisional,
+                best,
+                reasons=frontier_audit_reasons,
+                audit_dir=frontier_audit_dir,
+            )
             allowed = True
             budget_reason = "ok"
-            if frontier_budget is not None:
+            if frontier_audit is None and frontier_budget is not None:
                 allowed, budget_reason = frontier_budget.consume("frontier")
-            frontier_audit = (
-                run_frontier_policy_audit(
-                    provisional,
-                    best,
-                    reasons=frontier_audit_reasons,
-                    timeout=frontier_timeout,
-                )
-                if allowed
-                else {
-                    "decision": "needs_retry",
-                    "summary": budget_reason,
-                    "rescue_status": "pending_frontier_review",
-                    "human_required": False,
-                }
-            )
+            if frontier_audit is None:
+                try:
+                    frontier_audit = (
+                        run_frontier_policy_audit(
+                            provisional,
+                            best,
+                            reasons=frontier_audit_reasons,
+                            timeout=frontier_timeout,
+                            audit_dir=frontier_audit_dir,
+                            reviewer=frontier_reviewer,
+                        )
+                        if allowed
+                        else {
+                            "decision": "needs_retry",
+                            "summary": budget_reason,
+                            "rescue_status": "pending_frontier_review",
+                            "human_required": False,
+                        }
+                    )
+                except Exception as exc:
+                    frontier_audit = {
+                        "decision": "needs_retry",
+                        "summary": (
+                            "frontier verdict could not be durably recorded: "
+                            f"{exc.__class__.__name__}: {exc}"
+                        ),
+                        "rescue_status": "pending_frontier_review",
+                        "human_required": False,
+                    }
             if _frontier_blocks_adoption(frontier_audit):
                 if not allowed:
                     status = "budget_deferred"
-                elif frontier_audit.get("human_required"):
+                elif is_human_required_result(frontier_audit):
                     status = "human_required"
                 elif (
                     frontier_audit.get("decision") == "needs_retry"
                     or frontier_audit.get("rescue_status") == "pending_frontier_review"
+                    or frontier_audit.get("decision") == "approved"
                 ):
                     status = "pending_frontier_review"
                 else:
@@ -1140,6 +1355,12 @@ def run_improvement(
                     else f"frontier audit did not approve: {frontier_audit.get('summary') or frontier_audit.get('decision')}"
                 )
                 active_policy = None
+            elif active_policy is not None:
+                active_policy["frontier_verdict"] = {
+                    "decision": "approved",
+                    "candidate_sha256": frontier_audit.get("candidate_sha256"),
+                    "artifact_path": frontier_audit.get("_artifact_path"),
+                }
         if apply and active_policy:
             mutation_allowed = True
             mutation_reason = "ok"
@@ -1283,7 +1504,7 @@ def _parse_ts(value: Any) -> datetime | None:
 
 
 def _feedback_count(path: Path = RECALL_FEEDBACK_FILE) -> int:
-    return len(read_jsonl(path))
+    return sum(1 for row in read_jsonl(path) if row.get("kind") != "page_ignored")
 
 
 def _try_acquire_run_due_lock(lock_file: Path = RUN_DUE_LOCK_FILE):
@@ -1391,8 +1612,29 @@ def _run_due_locked(
     enough_total = feedback_count >= min_total_feedback
     interval_due = last_run is None or (age_hours is not None and age_hours >= min_interval_hours)
     feedback_due = new_feedback >= min_new_feedback
-    retry_pending = state.get("last_status") == "pending_frontier_review"
-    retry_at = _parse_ts(state.get("frontier_next_retry_at"))
+    last_status = str(state.get("last_status") or "")
+    quarantine_pending = last_status == "frontier_quarantined"
+    quarantine_retry_at = _parse_ts(state.get("frontier_quarantine_retry_at"))
+    if quarantine_pending and quarantine_retry_at is None:
+        quarantine_started = _parse_ts(
+            state.get("frontier_quarantined_at")
+            or state.get("last_checked_at")
+            or state.get("last_run_at")
+        )
+        if quarantine_started is not None:
+            quarantine_retry_at = quarantine_started + timedelta(
+                seconds=_quarantine_retry_seconds()
+            )
+    quarantine_retry_due = (
+        quarantine_pending
+        and (quarantine_retry_at is None or quarantine_retry_at <= now)
+    )
+    retry_pending = last_status == "pending_frontier_review" or quarantine_pending
+    retry_at = (
+        quarantine_retry_at
+        if quarantine_pending
+        else _parse_ts(state.get("frontier_next_retry_at"))
+    )
     retry_due = retry_at is None or retry_at <= now
     due = enough_total and (
         (retry_pending and retry_due)
@@ -1417,6 +1659,8 @@ def _run_due_locked(
             "first_run": first_run,
             "frontier_retry_pending": retry_pending,
             "frontier_retry_due": retry_due,
+            "frontier_quarantine_pending": quarantine_pending,
+            "frontier_quarantine_retry_due": quarantine_retry_due,
         },
     }
     if dry_run:
@@ -1485,7 +1729,13 @@ def _run_due_locked(
             json.dumps(candidate_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
         previous_hash = str(state.get("frontier_retry_candidate") or "")
-        attempts = int(state.get("frontier_retry_attempts") or 0) if previous_hash == candidate_hash else 0
+        attempts = (
+            0
+            if quarantine_retry_due
+            else int(state.get("frontier_retry_attempts") or 0)
+            if previous_hash == candidate_hash
+            else 0
+        )
         if not budget_retry:
             attempts += 1
         if not budget_retry and attempts >= 3:
@@ -1500,11 +1750,17 @@ def _run_due_locked(
                 "last_run_at": result.get("ts") or decision["checked_at"],
                 "last_run_id": result.get("run_id"),
                 "last_status": "frontier_quarantined",
-                "last_feedback_count": feedback_count,
+                # The candidate remains unresolved. Do not acknowledge its
+                # feedback progress or it can disappear from future retries.
+                "last_feedback_count": last_feedback_count,
                 "last_decision": decision,
                 "frontier_retry_candidate": candidate_hash,
                 "frontier_retry_attempts": attempts,
                 "frontier_next_retry_at": None,
+                "frontier_quarantined_at": now.isoformat(timespec="seconds"),
+                "frontier_quarantine_retry_at": (
+                    now + timedelta(seconds=_quarantine_retry_seconds())
+                ).isoformat(timespec="seconds"),
             }
         else:
             delay_seconds = 5 * 60 if budget_retry else min(6 * 60 * 60, 15 * 60 * (2 ** max(0, attempts - 1)))
@@ -1517,6 +1773,8 @@ def _run_due_locked(
                 "frontier_retry_candidate": candidate_hash,
                 "frontier_retry_attempts": attempts,
                 "frontier_next_retry_at": (now + timedelta(seconds=delay_seconds)).isoformat(timespec="seconds"),
+                "frontier_quarantined_at": None,
+                "frontier_quarantine_retry_at": None,
             }
     else:
         next_state = {
@@ -1530,6 +1788,8 @@ def _run_due_locked(
             "frontier_retry_candidate": None,
             "frontier_retry_attempts": 0,
             "frontier_next_retry_at": None,
+            "frontier_quarantined_at": None,
+            "frontier_quarantine_retry_at": None,
         }
     atomic_write_json(schedule_file, next_state)
     safe_append_metric(

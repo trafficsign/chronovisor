@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -53,6 +54,182 @@ def test_similar_query_penalizes_feedback_pages(feedback_file) -> None:
     )
     assert "irrelevant-page" in penalties
     assert penalties["irrelevant-page"] == pytest.approx(0.85)
+
+
+def test_local_auditor_precision_label_cannot_penalize_without_frontier(
+    feedback_file,
+) -> None:
+    row = {
+        "ts": "2026-06-11T10:23:35",
+        "kind": "injection_ignored",
+        "source": "auditor_precision",
+        "prompt": "メニューバーにショートカットを置く設定の話",
+        "expected_pages": ["possibly-relevant-page"],
+    }
+    write_feedback(feedback_file, [row])
+
+    assert negative_feedback.penalties_for_query(row["prompt"], CONFIG) == {}
+
+    write_feedback(feedback_file, [{**row, "frontier_reviewed": True}])
+    negative_feedback._CACHE = negative_feedback._Cache()
+    assert negative_feedback.penalties_for_query(row["prompt"], CONFIG) == {
+        "possibly-relevant-page": pytest.approx(0.85)
+    }
+
+
+def test_page_ignored_penalizes_only_explicit_negative_page(feedback_file) -> None:
+    write_feedback(feedback_file, [
+        {
+            "ts": "2026-06-11T10:23:35",
+            "kind": "page_ignored",
+            "prompt": "G32P と P24U のレビューを比較して",
+            "expected_pages": ["g32p-review", "p24u-review"],
+            "negative_pages": ["p24u-review"],
+            "frontier_reviewed": True,
+        },
+    ])
+
+    penalties = negative_feedback.penalties_for_query(
+        "G32P と P24U のレビューを比較して", CONFIG
+    )
+
+    assert penalties == {"p24u-review": pytest.approx(0.85)}
+    adjusted = negative_feedback.apply_penalties(
+        [page("g32p-review", 0.8), page("p24u-review", 0.9)], penalties
+    )
+    assert [item.page_id for item in adjusted] == ["g32p-review", "p24u-review"]
+    assert adjusted[0].score == pytest.approx(0.8)
+    assert adjusted[1].score == pytest.approx(0.9 * 0.15)
+
+
+def test_page_ignored_hash_binding_expires_when_page_content_changes(
+    feedback_file,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    page_path = tmp_path / "p24u-review.md"
+    page_path.write_text("Old irrelevant content.\n", encoding="utf-8")
+    original_hash = hashlib.sha256(page_path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        negative_feedback,
+        "find_mutation_page",
+        lambda page_id: page_path if page_id == "p24u-review" else None,
+    )
+    write_feedback(
+        feedback_file,
+        [
+            {
+                "ts": "2026-07-11T10:23:35Z",
+                "kind": "page_ignored",
+                "prompt": "G32P と P24U のレビューを比較して",
+                "negative_pages": ["p24u-review"],
+                "negative_page_hashes": {"p24u-review": original_hash},
+                "frontier_reviewed": True,
+            }
+        ],
+    )
+
+    query = "G32P と P24U のレビューを比較して"
+    assert "p24u-review" in negative_feedback.penalties_for_query(query, CONFIG)
+    page_path.write_text("Now relevant corrected content.\n", encoding="utf-8")
+    assert negative_feedback.penalties_for_query(query, CONFIG) == {}
+
+
+def test_page_ignored_without_negative_pages_fails_closed(feedback_file) -> None:
+    write_feedback(feedback_file, [
+        {
+            "ts": "2026-06-11T10:23:35",
+            "kind": "page_ignored",
+            "prompt": "G32P と P24U のレビューを比較して",
+            "expected_pages": ["g32p-review", "p24u-review"],
+        },
+    ])
+
+    assert negative_feedback.penalties_for_query(
+        "G32P と P24U のレビューを比較して", CONFIG
+    ) == {}
+
+
+def test_page_ignored_without_frontier_confirmation_fails_closed(feedback_file) -> None:
+    write_feedback(
+        feedback_file,
+        [
+            {
+                "ts": "2026-06-11T10:23:35",
+                "kind": "page_ignored",
+                "prompt": "G32P と P24U のレビューを比較して",
+                "negative_pages": ["p24u-review"],
+            }
+        ],
+    )
+
+    assert negative_feedback.penalties_for_query(
+        "G32P と P24U のレビューを比較して", CONFIG
+    ) == {}
+
+
+def test_newer_frontier_page_ignored_overrides_older_positive_golden(feedback_file) -> None:
+    golden_file = negative_feedback.GOLDEN_FILE_OVERRIDE
+    assert golden_file is not None
+    write_feedback(
+        golden_file,
+        [
+            {
+                "ts": "2026-07-10T08:00:00Z",
+                "query": "G32P と P24U のレビューを比較して",
+                "expected_pages": ["p24u-review"],
+                "reviewed": True,
+            }
+        ],
+    )
+    write_feedback(
+        feedback_file,
+        [
+            {
+                "ts": "2026-07-11T08:00:00Z",
+                "kind": "page_ignored",
+                "prompt": "G32P と P24U のレビューを比較して",
+                "negative_pages": ["p24u-review"],
+                "frontier_reviewed": True,
+            }
+        ],
+    )
+
+    assert negative_feedback.penalties_for_query(
+        "G32P と P24U のレビューを比較して", CONFIG
+    ) == {"p24u-review": pytest.approx(0.85)}
+
+
+def test_newer_reviewed_positive_can_supersede_older_page_ignored(feedback_file) -> None:
+    golden_file = negative_feedback.GOLDEN_FILE_OVERRIDE
+    assert golden_file is not None
+    write_feedback(
+        golden_file,
+        [
+            {
+                "ts": "2026-07-11T08:00:00+00:00",
+                "query": "G32P と P24U のレビューを比較して",
+                "expected_pages": ["p24u-review"],
+                "reviewed": True,
+            }
+        ],
+    )
+    write_feedback(
+        feedback_file,
+        [
+            {
+                "ts": "2026-07-10T08:00:00",
+                "kind": "page_ignored",
+                "prompt": "G32P と P24U のレビューを比較して",
+                "negative_pages": ["p24u-review"],
+                "frontier_reviewed": True,
+            }
+        ],
+    )
+
+    assert negative_feedback.penalties_for_query(
+        "G32P と P24U のレビューを比較して", CONFIG
+    ) == {}
 
 
 def test_dissimilar_query_is_not_penalized(feedback_file) -> None:
@@ -217,7 +394,7 @@ def test_load_config_from_toml(tmp_path) -> None:
     assert config.similarity_threshold == pytest.approx(0.5)
     assert config.penalty == pytest.approx(0.7)
     assert config.max_age_days == 90
-    assert config.kinds == ("injection_ignored", "false-positive")
+    assert config.kinds == ("page_ignored", "injection_ignored", "false-positive")
 
 
 def test_load_config_defaults_when_missing(tmp_path) -> None:

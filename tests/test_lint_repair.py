@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 from llm_wiki_mcp import lint_repair
@@ -106,7 +107,10 @@ def test_normalize_tag_decision_is_fail_closed() -> None:
     assert "duplicate tags" in duplicate_tags["validation_errors"]
 
 
-def test_local_approved_tags_apply_and_finish_terminally(tmp_path: Path, monkeypatch) -> None:
+def test_local_approved_tags_require_frontier_approval_before_apply(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     page_id = "test-page"
     page_path = tmp_path / "pages" / f"{page_id}.md"
     _page(page_path)
@@ -119,6 +123,15 @@ def test_local_approved_tags_apply_and_finish_terminally(tmp_path: Path, monkeyp
     )
     store = _store(tmp_path)
     budget = _budget()
+    frontier_prompts: list[str] = []
+
+    def frontier_review(prompt, _schema):
+        frontier_prompts.append(prompt)
+        return {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "frontier independently verified the proposal",
+        }
 
     result = lint_repair.run_lint_repair(
         queue_file=queue_path,
@@ -129,26 +142,210 @@ def test_local_approved_tags_apply_and_finish_terminally(tmp_path: Path, monkeyp
             "tags": VALID_TAGS,
             "reason": "page is a configuration how-to",
         },
-        frontier_reviewer=_never,
+        frontier_reviewer=frontier_review,
         now=NOW,
     )
 
     meta, body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
     item = store.list_items()[0]
     assert result["applied"] == 1
-    assert result["escalated"] == 0
+    assert result["escalated"] == 1
     assert result["rejected"] == 0
     assert result["quarantined"] == 0
     assert result["budget"]["used"] == {
         "local": 1,
-        "frontier": 0,
+        "frontier": 1,
         "mutation": 1,
         "raw_bytes": 0,
     }
     assert meta["tags"] == VALID_TAGS
     assert body == "\n# Page\n\nUseful content.\n"
     assert item["status"] == "applied"
-    assert item["result"]["review_stage"] == "local"
+    assert item["result"]["review_stage"] == "frontier"
+    assert len(frontier_prompts) == 1
+    assert "Local proposal (may be null, malformed, or wrong)" in frontier_prompts[0]
+    assert "page is a configuration how-to" in frontier_prompts[0]
+
+
+def test_tag_apply_preserves_correction_that_lands_before_locked_cas(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page_path = tmp_path / "pages" / "race.md"
+    original = _page(page_path)
+    corrected = original.replace("Useful content.", "User-corrected content.")
+
+    @contextmanager
+    def correction_wins():
+        page_path.write_text(corrected, encoding="utf-8")
+        yield
+
+    monkeypatch.setattr(lint_repair, "wiki_mutation_lock", correction_wins)
+
+    result = lint_repair.apply_tags_cas(
+        page_path,
+        expected_text=original,
+        tags=VALID_TAGS,
+    )
+
+    assert result["status"] == "cas_conflict"
+    assert page_path.read_text(encoding="utf-8") == corrected
+
+
+def test_local_approval_cannot_mutate_when_frontier_rejects(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page_id = "local-is-not-final"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    original = _page(page_path)
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, [_row(page_id)])
+    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    store = _store(tmp_path)
+
+    result = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=_budget(),
+        local_reviewer=lambda _prompt, _schema: {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "local proposal",
+        },
+        frontier_reviewer=lambda _prompt, _schema: {
+            "decision": "rejected",
+            "tags": [],
+            "reason": "page evidence does not support the proposed taxonomy",
+        },
+        now=NOW,
+    )
+
+    item = store.list_items()[0]
+    assert result["rejected"] == 1
+    assert result["applied"] == 0
+    assert result["budget"]["used"] == {
+        "local": 1,
+        "frontier": 1,
+        "mutation": 0,
+        "raw_bytes": 0,
+    }
+    assert page_path.read_text(encoding="utf-8") == original
+    assert item["status"] == "rejected"
+    assert item["result"]["decision"]["reason"].startswith("page evidence")
+    assert lint_repair._review_artifact_path(store, str(item["key"])).exists()
+
+
+def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page_id = "durable-frontier"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    original = _page(page_path)
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, [_row(page_id)])
+    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    store = _store(tmp_path)
+    frontier_calls = 0
+
+    def frontier_review(_prompt, _schema):
+        nonlocal frontier_calls
+        frontier_calls += 1
+        return {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "authoritative frontier verdict",
+        }
+
+    first = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=CycleBudget(
+            max_local_calls=1,
+            max_frontier_calls=1,
+            max_mutations=0,
+            max_elapsed_seconds=60,
+        ),
+        local_reviewer=lambda _prompt, _schema: {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "local proposal",
+        },
+        frontier_reviewer=frontier_review,
+        now=NOW,
+    )
+
+    item = store.list_items()[0]
+    artifact = lint_repair._review_artifact_path(store, str(item["key"]))
+    assert first["results"][0]["status"] == "budget_exhausted"
+    assert item["status"] == "frontier_retry"
+    assert artifact.exists()
+    assert page_path.read_text(encoding="utf-8") == original
+    assert frontier_calls == 1
+
+    second = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=CycleBudget(
+            max_local_calls=0,
+            max_frontier_calls=0,
+            max_mutations=1,
+            max_elapsed_seconds=60,
+        ),
+        local_reviewer=_never,
+        frontier_reviewer=_never,
+        now=NOW + timedelta(seconds=901),
+    )
+
+    meta, _body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+    assert second["applied"] == 1
+    assert second["budget"]["used"]["frontier"] == 0
+    assert second["budget"]["used"]["mutation"] == 1
+    assert meta["tags"] == VALID_TAGS
+    assert frontier_calls == 1
+
+
+def test_frontier_artifact_write_failure_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page_id = "artifact-write-failure"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    original = _page(page_path)
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, [_row(page_id)])
+    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+
+    def fail_artifact(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(lint_repair, "_write_frontier_review_artifact", fail_artifact)
+    store = _store(tmp_path)
+    result = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=_budget(),
+        local_reviewer=lambda _prompt, _schema: {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "local proposal",
+        },
+        frontier_reviewer=lambda _prompt, _schema: {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "frontier approval",
+        },
+        now=NOW,
+    )
+
+    item = store.list_items()[0]
+    assert result["results"][0]["status"] == "frontier_error"
+    assert result["applied"] == 0
+    assert result["budget"]["used"]["mutation"] == 0
+    assert item["status"] == "frontier_retry"
+    assert item["last_failure_class"] == "review_artifact_write_error"
+    assert page_path.read_text(encoding="utf-8") == original
 
 
 def test_invalid_local_proposal_escalates_to_frontier_and_applies(
@@ -418,11 +615,18 @@ def test_cas_conflict_quarantines_without_overwriting_concurrent_change(
     concurrent = "---\ntitle: Concurrent\nupdated: 2026-07-10\n---\n\n# Changed elsewhere\n"
 
     def local_review(_prompt, _schema):
-        page_path.write_text(concurrent, encoding="utf-8")
         return {
             "decision": "approved",
             "tags": VALID_TAGS,
             "reason": "valid proposal for the old preimage",
+        }
+
+    def frontier_review(_prompt, _schema):
+        page_path.write_text(concurrent, encoding="utf-8")
+        return {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "frontier approved the old preimage",
         }
 
     result = lint_repair.run_lint_repair(
@@ -430,7 +634,7 @@ def test_cas_conflict_quarantines_without_overwriting_concurrent_change(
         store=store,
         budget=_budget(),
         local_reviewer=local_review,
-        frontier_reviewer=_never,
+        frontier_reviewer=frontier_review,
         now=NOW,
     )
 

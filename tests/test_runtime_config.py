@@ -58,6 +58,7 @@ recall = false
 [hooks.stop]
 save = true
 audit = false
+content_correction = false
 recall_improve = false
 """,
         encoding="utf-8",
@@ -68,6 +69,7 @@ recall_improve = false
     assert policy.user_prompt_recall is False
     assert policy.stop_save is True
     assert policy.stop_audit is False
+    assert policy.stop_content_correction is False
     assert policy.stop_recall_improve is False
 
 

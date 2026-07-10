@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""Migrate Basic Memory files to Wiki pages/ format.
+"""Obsolete Basic Memory migration converter (direct writes disabled).
 
 Converts frontmatter from Basic Memory format to Wiki format:
 - Keeps title, maps updated from file mtime
 - Strips permalink, tags, type fields
 - Converts filename to kebab-case
 - Preserves content and [[wiki-links]]
+
+Use normal raw capture and ``llm-wiki-sleep`` so a frontier-reviewed ingest
+proposal owns any new knowledge page.
 """
 
 import re
+import sys
 import unicodedata
 from datetime import date, datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+    block_legacy_semantic_mutation,
+)
 
 
 BASIC_MEMORY_ROOT = Path.home() / "basic-memory"
@@ -118,6 +128,10 @@ def convert_file(src: Path) -> tuple[str, str] | None:
 
 def migrate():
     """Run the migration."""
+    block_legacy_semantic_mutation(
+        tool="migrate_basic_memory.py",
+        replacement="the normal raw capture plus llm-wiki-sleep ingest lane",
+    )
     WIKI_PAGES.mkdir(parents=True, exist_ok=True)
 
     all_files = list(BASIC_MEMORY_ROOT.rglob("*.md"))

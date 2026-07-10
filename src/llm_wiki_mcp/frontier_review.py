@@ -17,6 +17,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from llm_wiki_mcp.convergence import (
+    HUMAN_REQUIRED_FAILURE_CLASSES as CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES,
+    is_human_required_failure,
+)
 
 FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -96,14 +100,7 @@ CODEX_OPTION_ALIASES = {
     "--output-last-message": ("--output-last-message", "-o"),
 }
 
-HUMAN_REQUIRED_FAILURE_CLASSES = {
-    "auth_required",
-    "oauth_required",
-    "quota_or_billing_required",
-    "keychain_permission_required",
-    "frontier_tool_unavailable",
-    "both_frontiers_unavailable",
-}
+HUMAN_REQUIRED_FAILURE_CLASSES = CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES
 
 SECRET_PATTERNS = [
     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{12,}"),
@@ -269,10 +266,17 @@ def _frontier_failure(
     *,
     human_required: bool | None = None,
 ) -> FrontierFailure:
-    needs_human = failure_class in HUMAN_REQUIRED_FAILURE_CLASSES if human_required is None else human_required
+    # ``human_required`` remains a compatibility-only argument.  Callers and
+    # model payloads cannot widen this boundary: it is derived solely from the
+    # deterministic failure-class allowlist shared with convergence state.
+    _ = human_required
+    needs_human = is_human_required_failure(failure_class)
+    canonical_status = "human_required" if needs_human else rescue_status
+    if not needs_human and canonical_status == "human_required":
+        canonical_status = "frontier_retry"
     return FrontierFailure(
         failure_class=failure_class,
-        rescue_status=rescue_status,
+        rescue_status=canonical_status,
         summary=summary,
         human_required=needs_human,
         notify_user=needs_human,
@@ -289,17 +293,28 @@ def classify_frontier_failure(text: str | None) -> FrontierFailure:
             "frontier structured output schema is invalid for the current API",
             human_required=False,
         )
-    if "missing bearer" in lower or ("401" in lower and "unauthorized" in lower):
-        return _frontier_failure(
-            "auth_required",
-            "human_required",
-            "frontier API authentication is missing or invalid",
-        )
-    if "oauth" in lower and ("login" in lower or "reauth" in lower or "expired" in lower):
+    auth_state_markers = ("denied", "expired", "invalid", "missing", "required", "revoked")
+    if "oauth" in lower and any(
+        marker in lower for marker in ("login", "reauth", *auth_state_markers)
+    ):
         return _frontier_failure(
             "oauth_required",
             "human_required",
             "frontier OAuth login appears to require human action",
+        )
+    if (
+        "missing bearer" in lower
+        or ("401" in lower and "unauthorized" in lower)
+        or ("403" in lower and "forbidden" in lower)
+        or (
+            any(marker in lower for marker in ("api key", "api_key", "authentication"))
+            and any(marker in lower for marker in auth_state_markers)
+        )
+    ):
+        return _frontier_failure(
+            "auth_required",
+            "human_required",
+            "frontier API authentication is missing or invalid",
         )
     if "insufficient_quota" in lower or "billing" in lower or "quota exceeded" in lower:
         return _frontier_failure(
@@ -307,11 +322,26 @@ def classify_frontier_failure(text: str | None) -> FrontierFailure:
             "human_required",
             "frontier quota or billing state requires human action",
         )
-    if "keychain" in lower and ("denied" in lower or "permission" in lower or "access" in lower):
+    permission_markers = ("denied", "permission", "not permitted", "access refused")
+    if "keychain" in lower and any(marker in lower for marker in permission_markers):
         return _frontier_failure(
             "keychain_permission_required",
             "human_required",
             "Keychain access for frontier credentials requires human action",
+        )
+    secret_store_markers = (
+        "secret store",
+        "secret service",
+        "credential store",
+        "credential helper",
+    )
+    if any(marker in lower for marker in secret_store_markers) and any(
+        marker in lower for marker in permission_markers
+    ):
+        return _frontier_failure(
+            "secret_store_permission_required",
+            "human_required",
+            "credential secret-store permission requires human action",
         )
     if "unknown option" in lower or "unrecognized option" in lower or "unexpected argument" in lower:
         return _frontier_failure(
@@ -406,7 +436,7 @@ def run_frontier_preflight() -> dict[str, Any]:
     if codex is None:
         failure = _frontier_failure(
             "frontier_tool_unavailable",
-            "human_required",
+            "frontier_retry",
             "codex executable not found",
         )
         return {"ok": False, "failure": failure.to_dict()}
@@ -670,7 +700,7 @@ def _structured_subprocess_failure(
         ):
             failure = _frontier_failure(
                 "frontier_tool_unavailable",
-                "human_required",
+                "frontier_retry",
                 f"{reviewer} executable could not be started",
             )
     return _structured_failure_payload(
@@ -1127,7 +1157,7 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
     if codex is None:
         failure = _frontier_failure(
             "frontier_tool_unavailable",
-            "human_required",
+            "frontier_retry",
             "codex executable not found",
         )
         return _failure_result(
@@ -1138,7 +1168,11 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
     if not preflight.get("ok"):
         failure_data = preflight.get("failure")
         failure = (
-            FrontierFailure(**failure_data)
+            _frontier_failure(
+                str(failure_data.get("failure_class") or "unknown_frontier_failure"),
+                str(failure_data.get("rescue_status") or "frontier_retry"),
+                str(failure_data.get("summary") or "frontier preflight failed"),
+            )
             if isinstance(failure_data, dict)
             else classify_frontier_failure("")
         )
@@ -1295,7 +1329,7 @@ def run_structured_review(
     if codex is None:
         failure = _frontier_failure(
             "frontier_tool_unavailable",
-            "human_required",
+            "frontier_retry",
             "codex executable not found",
         )
         return _structured_failure_payload(
@@ -1307,12 +1341,10 @@ def run_structured_review(
     preflight = run_frontier_preflight()
     if not preflight.get("ok"):
         failure_payload = preflight.get("failure") if isinstance(preflight.get("failure"), dict) else {}
-        failure = FrontierFailure(
-            failure_class=str(failure_payload.get("failure_class") or "unknown_frontier_failure"),
-            rescue_status=str(failure_payload.get("rescue_status") or "frontier_retry"),
-            summary=str(failure_payload.get("summary") or "frontier preflight failed"),
-            human_required=bool(failure_payload.get("human_required")),
-            notify_user=bool(failure_payload.get("notify_user")),
+        failure = _frontier_failure(
+            str(failure_payload.get("failure_class") or "unknown_frontier_failure"),
+            str(failure_payload.get("rescue_status") or "frontier_retry"),
+            str(failure_payload.get("summary") or "frontier preflight failed"),
         )
         return _structured_failure_payload(
             schema,

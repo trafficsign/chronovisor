@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 
 from llm_wiki_mcp.index_store import get_store
+from llm_wiki_mcp.jsonl_write import append_jsonl_durable
 from llm_wiki_mcp.runtime_config import (
     active_config_file,
     normalize_recall_config,
@@ -1830,6 +1831,7 @@ def append_feedback(
     host: str = "",
     *,
     expected_pages: list[str] | None = None,
+    negative_pages: list[str] | None = None,
     expected_queries: list[str] | None = None,
     ref: str = "",
     extra: dict[str, Any] | None = None,
@@ -1842,6 +1844,7 @@ def append_feedback(
         "prompt": prompt,
         "note": note,
         "expected_pages": expected_pages or [],
+        "negative_pages": negative_pages or [],
         "expected_queries": expected_queries or [],
         "ref": ref,
         "snapshot": snapshot,
@@ -1855,9 +1858,7 @@ def append_feedback(
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    append_jsonl_durable(path, [record])
 
 
 def result_to_dict(result: RecallResult) -> dict[str, Any]:
@@ -1912,11 +1913,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--feedback",
-        choices=["missed", "missed_candidate", "false-positive", "useful"],
+        choices=["missed", "missed_candidate", "false-positive", "page_ignored", "useful"],
         help="Record human feedback instead of running recall.",
     )
     parser.add_argument("--note", default="", help="Feedback note.")
     parser.add_argument("--expected-page", action="append", default=[], help="Expected page id for missed recall.")
+    parser.add_argument(
+        "--negative-page",
+        action="append",
+        default=[],
+        help="Specific irrelevant page id for page-scoped feedback.",
+    )
     parser.add_argument("--expected-query", action="append", default=[], help="Expected query for missed recall.")
     parser.add_argument("--ref", default="", help="Decision id to attach as a feedback snapshot.")
     return parser
@@ -1937,6 +1944,7 @@ def main(argv: list[str] | None = None) -> int:
             prompt=args.prompt or "",
             host=args.host,
             expected_pages=args.expected_page,
+            negative_pages=args.negative_page,
             expected_queries=args.expected_query,
             ref=args.ref,
         )

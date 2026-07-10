@@ -1,7 +1,9 @@
 """LLM Wiki MCP Server."""
 
 import json
+import os
 import re
+import secrets
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from llm_wiki_mcp.wiki import (
 from llm_wiki_mcp.link_fix import extract_targets as _extract_targets
 from llm_wiki_mcp.index_store import get_store
 from llm_wiki_mcp.frontmatter import parse as _frontmatter_parse, patch as _frontmatter_patch
+from llm_wiki_mcp.save_transaction import parse_save_transaction_receipt
 
 mcp = FastMCP(
     "llm-wiki",
@@ -600,33 +603,38 @@ def _raw_topic_slug(content: str, keywords: list[str] | None = None, *, max_len:
 
 
 _RAW_ALLOC_MAX_RETRIES = 32
+_RAW_IDEMPOTENCY_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,159}$")
 
 
-def _allocate_raw_path(prefix: str = "", topic_slug: str = "") -> Path:
-    """Reserve a unique raw/*.md path even under sub-millisecond contention.
-
-    Filename = ``YYYYMMDD-HHMMSS-{source}-{topic}-{8hex}.md`` when source or
-    topic can be derived, falling back to the old timestamp/hash shape. The
-    8-hex suffix is from :func:`secrets.token_hex` (32 bits of OS entropy,
-    far less collision-prone than ``time.time_ns() & 0xFFFF``). Combined
-    with ``O_CREAT|O_EXCL`` exclusive create this makes accidental overwrite
-    from concurrent callers effectively impossible. We bound retries so a
-    misconfigured filesystem doesn't spin forever.
-    """
-    import os
-    import secrets
-    from datetime import datetime
-
+def _raw_readable_component(prefix: str, topic_slug: str) -> str:
     source = _raw_source_label(prefix)
     topic = _sanitize_raw_component(topic_slug, max_len=56)
     name_parts = [part for part in (source, topic) if part]
-    readable = f"-{'-'.join(name_parts)}" if name_parts else _sanitize_raw_prefix(prefix)
+    return f"-{'-'.join(name_parts)}" if name_parts else _sanitize_raw_prefix(prefix)
+
+
+def _raw_candidate_path(prefix: str = "", topic_slug: str = "") -> Path:
+    readable = _raw_readable_component(prefix, topic_slug)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = secrets.token_hex(4)  # 8 hex chars / 32 bits
+    return RAW_DIR / f"{ts}{readable}-{suffix}.md"
+
+
+def _allocate_raw_path(prefix: str = "", topic_slug: str = "") -> Path:
+    """Reserve a unique, non-ingestable staging path for a raw publish.
+
+    The old allocator reserved the *final* ``raw/*.md`` filename by creating
+    a zero-byte file.  Concurrent ingest could discover that file before the
+    caller filled it.  Staging files are now dot-prefixed ``*.tmp`` entries,
+    so every raw glob sees either no entry or a complete final file.
+    """
+    readable = _raw_readable_component(prefix, topic_slug)
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     last_err: Exception | None = None
     for _ in range(_RAW_ALLOC_MAX_RETRIES):
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         suffix = secrets.token_hex(4)  # 8 hex chars / 32 bits
-        path = RAW_DIR / f"{ts}{readable}-{suffix}.md"
+        path = RAW_DIR / f".{ts}{readable}-{suffix}.tmp"
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             os.close(fd)
@@ -638,6 +646,114 @@ def _allocate_raw_path(prefix: str = "", topic_slug: str = "") -> Path:
         f"could not allocate unique raw path after "
         f"{_RAW_ALLOC_MAX_RETRIES} retries: {last_err}"
     )
+
+
+def _link_raw_no_replace(staging: Path, target: Path) -> None:
+    """Atomically publish ``staging`` at ``target`` without replacement."""
+    os.link(staging, target)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make a newly linked directory entry durable before reporting success."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _publish_raw(content: str, *, prefix: str = "", topic_slug: str = "") -> Path:
+    """Write a complete raw entry, then atomically expose its final name.
+
+    A hard link within ``RAW_DIR`` is the portable no-replace primitive we
+    need here: the target appears atomically and ``EEXIST`` never overwrites a
+    prior raw.  The hidden staging inode is unlinked after publication.
+    """
+    staging = _allocate_raw_path(prefix=prefix, topic_slug=topic_slug)
+    published: Path | None = None
+    try:
+        with staging.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        last_err: Exception | None = None
+        for _ in range(_RAW_ALLOC_MAX_RETRIES):
+            target = _raw_candidate_path(prefix=prefix, topic_slug=topic_slug)
+            try:
+                _link_raw_no_replace(staging, target)
+                _fsync_directory(RAW_DIR)
+                published = target
+                break
+            except FileExistsError as exc:
+                last_err = exc
+        if published is None:
+            raise RuntimeError(
+                "could not publish unique raw path after "
+                f"{_RAW_ALLOC_MAX_RETRIES} retries: {last_err}"
+            )
+        return published
+    finally:
+        try:
+            staging.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _publish_raw_idempotent(
+    content: str,
+    *,
+    idempotency_key: str,
+    prefix: str = "",
+    topic_slug: str = "",
+) -> tuple[Path, bool]:
+    """Atomically publish one complete raw per idempotency key.
+
+    The first file wins. Exact-byte retries are reused; nondeterministic saver
+    retries are reused only when both self-verifying transaction receipts
+    identify the same source interval. Collisions and corrupt receipts fail.
+    """
+    if not _RAW_IDEMPOTENCY_RE.fullmatch(idempotency_key):
+        raise ValueError(
+            "idempotency_key must contain only ASCII letters, digits, dash, "
+            "or underscore and be at most 160 characters"
+        )
+    staging = _allocate_raw_path(prefix=prefix, topic_slug=topic_slug)
+    target = RAW_DIR / f"save-{idempotency_key}.md"
+    try:
+        with staging.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            _link_raw_no_replace(staging, target)
+        except FileExistsError:
+            try:
+                existing = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise RuntimeError(
+                    "idempotent raw target exists but cannot be verified"
+                ) from exc
+            if existing != content:
+                incoming_receipt = parse_save_transaction_receipt(content)
+                existing_receipt = parse_save_transaction_receipt(existing)
+                if (
+                    incoming_receipt is None
+                    or existing_receipt is None
+                    or incoming_receipt.transaction != existing_receipt.transaction
+                    or incoming_receipt.transaction.idempotency_key != idempotency_key
+                ):
+                    raise RuntimeError(
+                        "idempotency key collision with different or corrupt raw content"
+                    )
+            return target, True
+        _fsync_directory(RAW_DIR)
+        return target, False
+    finally:
+        try:
+            staging.unlink()
+        except FileNotFoundError:
+            pass
 
 
 @mcp.tool()
@@ -658,8 +774,11 @@ def wiki_ingest(content: str, force: bool = True) -> str:
     """
     from llm_wiki_mcp.orchestrator import run_pending_ingest
 
-    path = _allocate_raw_path(prefix="ingest", topic_slug=_raw_topic_slug(content))
-    path.write_text(content)
+    path = _publish_raw(
+        content,
+        prefix="ingest",
+        topic_slug=_raw_topic_slug(content),
+    )
 
     result = run_pending_ingest(force=force)
     payload = {
@@ -937,6 +1056,7 @@ def wiki_save_raw(
     session_id: str | None = None,
     keywords: list[str] | None = None,
     trigger_ingest: bool = True,
+    idempotency_key: str | None = None,
 ) -> str:
     """Save raw session data to raw/ for later ingest.
 
@@ -954,6 +1074,8 @@ def wiki_save_raw(
         trigger_ingest: When True, preserve the historical behavior of
             running pending ingest immediately if the raw threshold is met.
             Set False for hooks that must not block on local LLM ingestion.
+        idempotency_key: Optional stable transaction identity. Repeated calls
+            with the same key reuse the first atomically published raw.
     """
     accepted: list[str] = []
     rejected: list[str] = []
@@ -969,12 +1091,19 @@ def wiki_save_raw(
     else:
         body = content
 
-    # session_id is advisory; always allocate a unique path so two callers
-    # in the same second don't silently overwrite each other.
     raw_slug = _raw_topic_slug(body, accepted)
-    path = _allocate_raw_path(prefix=session_id or "", topic_slug=raw_slug)
+    if idempotency_key:
+        path, deduplicated = _publish_raw_idempotent(
+            body,
+            idempotency_key=idempotency_key,
+            prefix=session_id or "",
+            topic_slug=raw_slug,
+        )
+    else:
+        # session_id is advisory; ordinary callers still get a unique path.
+        path = _publish_raw(body, prefix=session_id or "", topic_slug=raw_slug)
+        deduplicated = False
     filename = path.name
-    path.write_text(body)
 
     # Check if orchestrator should trigger ingest
     from llm_wiki_mcp.orchestrator import should_ingest, run_pending_ingest
@@ -987,6 +1116,8 @@ def wiki_save_raw(
         "ingest_pending": should,
         "ingest_reason": reason,
     }
+    if idempotency_key:
+        result["deduplicated"] = deduplicated
     if rejected:
         result["rejected_keywords"] = rejected
 

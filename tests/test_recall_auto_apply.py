@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 import json
+import threading
 from argparse import Namespace
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from llm_wiki_mcp import recall_auto_apply, recall_hints, wiki
+import pytest
+
+from llm_wiki_mcp import page_mutation, recall_auto_apply, recall_hints, wiki
 from llm_wiki_mcp.convergence import CycleBudget
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.recall_runtime import RecallPolicy, collect_context
+
+
+@pytest.fixture(autouse=True)
+def _frontier_approves_existing_auto_apply_tests(monkeypatch) -> None:
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "review_auto_apply_with_frontier",
+        lambda _proposal, **_kwargs: {
+            "decision": "approved",
+            "summary": "test frontier approval",
+        },
+    )
 
 
 def _page(root: Path, page_id: str, body: str = "Recall hook body") -> Path:
@@ -118,6 +135,185 @@ def test_page_tag_auto_apply_patches_frontmatter(tmp_path, monkeypatch) -> None:
 
     assert result["actions"][0]["status"] == "applied"
     assert "d/theory" in meta["tags"]
+
+
+@pytest.mark.parametrize(
+    ("action_type", "payload"),
+    [
+        ("query_hint", {"query": "exact missing context"}),
+        ("alias", {"alias": "new-recall-alias"}),
+        ("page_tag", {"tag": "d/theory"}),
+    ],
+)
+def test_frontier_rejection_blocks_every_auto_mutation_and_is_durable(
+    action_type,
+    payload,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from llm_wiki_mcp import alias_store
+
+    pages_root = tmp_path / "wiki"
+    page = _page(pages_root, "target-page")
+    before = page.read_bytes()
+    hints_file = tmp_path / "query-hints.json"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    seen: list[dict[str, object]] = []
+
+    def reject(proposal, **_kwargs):
+        seen.append(proposal)
+        return {"decision": "rejected", "summary": "mapping is unsupported"}
+
+    result = recall_auto_apply.apply_feedback_records(
+        [_candidate(action_type, page_id="target-page", payload=payload)],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+        review_dir=tmp_path / "reviews",
+        frontier_reviewer=reject,
+    )
+
+    action = result["actions"][0]
+    assert action["status"] == "frontier_rejected"
+    assert action["convergence_status"] == "rejected"
+    assert seen[0]["effective_action"] == action_type
+    artifact = Path(action["frontier_artifact"])
+    assert artifact.exists()
+    assert json.loads(artifact.read_text())["review"]["decision"] == "rejected"
+    assert page.read_bytes() == before
+    assert not hints_file.exists()
+    assert "new-recall-alias" not in alias_store.load_aliases()
+
+
+def test_approved_frontier_artifact_survives_mutation_budget_deferral(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target-page")
+    hints_file = tmp_path / "query-hints.json"
+    log_file = tmp_path / "auto-apply.jsonl"
+    review_dir = tmp_path / "reviews"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    calls = 0
+
+    def approve(_proposal, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"decision": "approved", "summary": "exact mapping is supported"}
+
+    record = _candidate(
+        "query_hint",
+        page_id="target-page",
+        payload={"query": "exact missing context"},
+    )
+    deferred = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=log_file,
+        review_dir=review_dir,
+        frontier_reviewer=approve,
+        budget=CycleBudget(max_frontier_calls=1, max_mutations=0),
+    )
+
+    artifact = Path(deferred["actions"][0]["frontier_artifact"])
+    assert deferred["actions"][0]["status"] == "budget_deferred"
+    assert artifact.exists()
+    assert not hints_file.exists()
+
+    def must_not_review_again(*_args, **_kwargs):
+        raise AssertionError("durable frontier verdict should be reused")
+
+    applied = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=log_file,
+        review_dir=review_dir,
+        frontier_reviewer=must_not_review_again,
+        budget=CycleBudget(max_frontier_calls=0, max_mutations=1),
+    )
+
+    assert calls == 1
+    assert applied["actions"][0]["status"] == "applied"
+    assert applied["actions"][0]["frontier_artifact_reused"] is True
+    assert hints_file.exists()
+
+
+def test_page_tag_does_not_overwrite_concurrent_content_correction(tmp_path, monkeypatch) -> None:
+    pages_root = tmp_path / "wiki"
+    page = _page(
+        pages_root,
+        "llm-wiki-recall-audit-architecture",
+        body="The recalled display is a Kuycon G32P.",
+    )
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(
+        page_mutation,
+        "WIKI_MUTATION_LOCK",
+        pages_root / "runtime" / "wiki-mutation.lock",
+    )
+
+    correction_locked = threading.Event()
+    auto_read_preimage = threading.Event()
+    apply_correction = threading.Event()
+    correction_errors: list[BaseException] = []
+    result: dict[str, object] = {}
+
+    def correction_writer() -> None:
+        try:
+            with page_mutation.wiki_mutation_lock():
+                correction_locked.set()
+                if not apply_correction.wait(timeout=5):
+                    raise TimeoutError("auto-apply did not reach its preimage read")
+                corrected = page.read_text(encoding="utf-8").replace(
+                    "The recalled display is a Kuycon G32P.",
+                    "The recalled displays are two Kuycon P24U units.",
+                )
+                atomic_write(page, corrected)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            correction_errors.append(exc)
+
+    original_parse = recall_auto_apply.parse_frontmatter
+
+    def parse_after_read(text: str):
+        auto_read_preimage.set()
+        return original_parse(text)
+
+    monkeypatch.setattr(recall_auto_apply, "parse_frontmatter", parse_after_read)
+    correction_thread = threading.Thread(target=correction_writer, daemon=True)
+    correction_thread.start()
+    assert correction_locked.wait(timeout=5)
+
+    record = _candidate(
+        "page_tag",
+        page_id="llm-wiki-recall-audit-architecture",
+        payload={"tag": "d/theory"},
+    )
+
+    def apply_tag() -> None:
+        result.update(recall_auto_apply.apply_page_tag(record, dry_run=False))
+
+    auto_thread = threading.Thread(target=apply_tag, daemon=True)
+    auto_thread.start()
+    assert auto_read_preimage.wait(timeout=5)
+    apply_correction.set()
+    correction_thread.join(timeout=5)
+    auto_thread.join(timeout=5)
+
+    assert not correction_thread.is_alive()
+    assert not auto_thread.is_alive()
+    assert correction_errors == []
+    assert result["status"] == "retry"
+    assert result["reason"] == "page changed before page_tag apply"
+    final_text = page.read_text(encoding="utf-8")
+    final_meta, final_body = parse_frontmatter(final_text)
+    assert "two Kuycon P24U units" in final_body
+    assert "Kuycon G32P" not in final_body
+    assert "d/theory" not in final_meta["tags"]
 
 
 def test_invalid_page_tag_falls_back_to_query_hint(tmp_path, monkeypatch) -> None:
@@ -316,17 +512,16 @@ def test_pull_log_candidate_is_consumed_by_validated_auto_lane(tmp_path, monkeyp
 
 
 def test_apply_feedback_budget_defers_without_burning_attempt(tmp_path, monkeypatch) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target")
+    hints_file = tmp_path / "query-hints.json"
     feedback_file = tmp_path / "feedback.jsonl"
     log_file = tmp_path / "auto-apply.jsonl"
     feedback_file.write_text(json.dumps(_candidate("query_hint", page_id="target")) + "\n")
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     monkeypatch.setattr(recall_auto_apply, "AUTO_APPLY_LOG_FILE", log_file)
-    calls = []
-
-    def apply(_record, dry_run=False):
-        calls.append(dry_run)
-        return {"status": "applied"}
-
-    monkeypatch.setattr(recall_auto_apply, "apply_record", apply)
     deferred = recall_auto_apply.apply_feedback_file(
         feedback_file=feedback_file,
         config_file=tmp_path / "missing.toml",
@@ -335,7 +530,7 @@ def test_apply_feedback_budget_defers_without_burning_attempt(tmp_path, monkeypa
 
     assert deferred["status"] == "budget_deferred"
     assert deferred["actions"][0]["attempt"] == 0
-    assert calls == []
+    assert not hints_file.exists()
     assert not log_file.exists()
 
     applied = recall_auto_apply.apply_feedback_file(
@@ -344,7 +539,7 @@ def test_apply_feedback_budget_defers_without_burning_attempt(tmp_path, monkeypa
         budget=CycleBudget(max_mutations=1),
     )
     assert applied["actions"][0]["attempt"] == 1
-    assert calls == [False]
+    assert hints_file.exists()
 
 
 def test_existing_query_hint_is_terminal_without_incrementing_evidence_count(tmp_path, monkeypatch) -> None:
@@ -389,6 +584,86 @@ def test_skipped_auto_apply_is_bounded_not_permanently_consumed(tmp_path, monkey
     assert recall_auto_apply.read_applied_keys(log_file) == set()
 
 
+def test_quarantined_auto_apply_resumes_with_fresh_attempt_budget(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    log_file = tmp_path / "auto-apply.jsonl"
+    record = _candidate(
+        "query_hint",
+        page_id="missing",
+        payload={"query": "q", "page_id": "missing"},
+    )
+    policy = recall_auto_apply.AutoApplyPolicy(min_count=1)
+    started = datetime(2026, 7, 11, 0, 0, 0)
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "apply_record",
+        lambda _record, dry_run=False: {"status": "skipped"},
+    )
+
+    quarantined = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=policy,
+        log_file=log_file,
+        max_attempts=1,
+        quarantine_cooldown_seconds=6 * 60 * 60,
+        now=started,
+    )
+    too_early = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=policy,
+        log_file=log_file,
+        max_attempts=1,
+        quarantine_cooldown_seconds=6 * 60 * 60,
+        now=started + timedelta(hours=6) - timedelta(seconds=1),
+    )
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "apply_record",
+        lambda _record, dry_run=False: {"status": "applied"},
+    )
+    resumed = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=policy,
+        log_file=log_file,
+        max_attempts=1,
+        quarantine_cooldown_seconds=6 * 60 * 60,
+        now=started + timedelta(hours=6, seconds=1),
+    )
+
+    assert quarantined["actions"][0]["convergence_status"] == "quarantined"
+    assert too_early["actions"] == []
+    assert resumed["actions"][0]["convergence_status"] == "applied"
+    assert resumed["actions"][0]["attempt"] == 1
+    assert resumed["actions"][0]["resumed_from_quarantine"] is True
+    assert resumed["actions"][0]["quarantine_resume_count"] == 1
+
+
+def test_human_required_auto_apply_state_never_auto_resumes(tmp_path) -> None:
+    log_file = tmp_path / "auto-apply.jsonl"
+    record = _candidate("query_hint", page_id="target", payload={"query": "q"})
+    key = recall_auto_apply.apply_key_for(record)
+    recall_auto_apply.record_apply_log(
+        {
+            "ts": "2026-07-01T00:00:00",
+            "apply_key": key,
+            "convergence_status": "human_required",
+            "attempt": 3,
+        },
+        log_file,
+    )
+
+    result = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=log_file,
+        now=datetime(2026, 7, 11, 0, 0, 0),
+    )
+
+    assert result["actions"] == []
+
+
 def test_threshold_review_action_routes_to_recall_lab(tmp_path) -> None:
     log_file = tmp_path / "auto-apply.jsonl"
     record = {
@@ -405,6 +680,48 @@ def test_threshold_review_action_routes_to_recall_lab(tmp_path) -> None:
 
     assert result["actions"][0]["status"] == "routed_to_recall_lab"
     assert result["actions"][0]["convergence_status"] == "applied"
+
+
+def test_quarantined_review_action_resumes_after_cooldown(tmp_path, monkeypatch) -> None:
+    log_file = tmp_path / "auto-apply.jsonl"
+    record = {
+        "kind": "missed_candidate",
+        "source": "auditor",
+        "lane": "review",
+        "action_type": "few_shot",
+        "normalize_key": "few-shot:retry",
+        "missing_signal": "specific recall",
+        "expected_pages": ["target"],
+        "ref": "d2",
+    }
+    started = datetime(2026, 7, 11, 0, 0, 0)
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "apply_query_hint",
+        lambda _record, dry_run=False: {"status": "skipped"},
+    )
+    first = recall_auto_apply.apply_review_feedback_records(
+        [record],
+        log_file=log_file,
+        max_attempts=1,
+        now=started,
+    )
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "apply_query_hint",
+        lambda _record, dry_run=False: {"status": "applied"},
+    )
+    resumed = recall_auto_apply.apply_review_feedback_records(
+        [record],
+        log_file=log_file,
+        max_attempts=1,
+        now=started + timedelta(hours=6, seconds=1),
+    )
+
+    assert first["actions"][0]["convergence_status"] == "quarantined"
+    assert resumed["actions"][0]["convergence_status"] == "applied"
+    assert resumed["actions"][0]["attempt"] == 1
+    assert resumed["actions"][0]["resumed_from_quarantine"] is True
 
 
 def test_query_hint_accepts_system_pages(tmp_path, monkeypatch) -> None:

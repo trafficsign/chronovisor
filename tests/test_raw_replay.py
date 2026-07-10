@@ -460,6 +460,100 @@ def test_terminal_history_does_not_consume_migration_limit(tmp_path: Path, monke
     assert rows[pending.name]["status"] == "pending"
 
 
+def test_nonhuman_quarantine_reopens_after_cooldown(tmp_path: Path, monkeypatch) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260702-quarantined.md"
+    raw.write_text("body", encoding="utf-8")
+    _write_jsonl(
+        paths["queue"],
+        [
+            {
+                "raw": raw.name,
+                "path": str(raw),
+                "status": "quarantined",
+                "attempts": 3,
+                "quarantined_at": "2000-01-01T00:00:00+00:00",
+                "sources": ["explicit_migration"],
+            }
+        ],
+    )
+    monkeypatch.setenv("LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "1")
+
+    raw_replay.build_queue(
+        path=paths["queue"],
+        include_migration=False,
+        include_auto_signals=False,
+    )
+
+    [row] = _read_jsonl(paths["queue"])
+    assert row["status"] == "pending"
+    assert row["attempts"] == 0
+    assert row["quarantine_reopen_count"] == 1
+    assert row["quarantine_resumed_at"]
+
+
+def test_legacy_nonexternal_human_required_is_reclassified_for_frontier_retry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260702-legacy-human.md"
+    raw.write_text("body", encoding="utf-8")
+    _write_jsonl(
+        paths["queue"],
+        [
+            {
+                "raw": raw.name,
+                "path": str(raw),
+                "status": "human_required",
+                "frontier_attempts": 3,
+                "frontier_failure": {"failure_class": "frontier_tool_unavailable"},
+                "sources": ["ingest_failure"],
+            }
+        ],
+    )
+
+    raw_replay.build_queue(
+        path=paths["queue"],
+        include_migration=False,
+        include_auto_signals=False,
+    )
+
+    [row] = _read_jsonl(paths["queue"])
+    assert row["status"] == "indeterminate"
+    assert row["frontier_attempts"] == 0
+    assert row["quarantine_reopen_count"] == 1
+
+
+def test_external_authority_human_required_remains_terminal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260702-auth.md"
+    raw.write_text("body", encoding="utf-8")
+    _write_jsonl(
+        paths["queue"],
+        [
+            {
+                "raw": raw.name,
+                "path": str(raw),
+                "status": "human_required",
+                "frontier_failure": {"failure_class": "oauth_required"},
+                "sources": ["ingest_failure"],
+            }
+        ],
+    )
+
+    raw_replay.build_queue(
+        path=paths["queue"],
+        include_migration=False,
+        include_auto_signals=False,
+    )
+
+    [row] = _read_jsonl(paths["queue"])
+    assert row["status"] == "human_required"
+    assert "quarantine_resumed_at" not in row
+
+
 def test_failed_history_restores_attempts_and_backoff_after_queue_loss(tmp_path: Path, monkeypatch) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-failed.md"
@@ -917,6 +1011,111 @@ def test_run_pending_queue_respects_priority_run_and_byte_bounds(tmp_path: Path,
     assert status_by_raw["20260701-300.md"] == "completed"
     assert status_by_raw["20260702-200.md"] == "completed"
     assert status_by_raw["20260703-100.md"] == "pending"
+
+
+def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from llm_wiki_mcp import index_store, ingest, page_mutation, wiki
+
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "display.md"
+    page.write_text(
+        "---\ntitle: Display\nsummary: Canonical display count\n"
+        "recall_questions: [How many displays?]\nupdated: 2026-07-10\n---\n"
+        "The setup has two G32P displays.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages)
+    monkeypatch.setattr(ingest, "PAGES_DIR", pages)
+    monkeypatch.setattr(ingest, "INDEX_FILE", tmp_path / "index.md")
+    monkeypatch.setattr(ingest, "LOG_FILE", tmp_path / "log.md")
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
+    monkeypatch.setattr(
+        page_mutation,
+        "WIKI_MUTATION_LOCK",
+        tmp_path / "runtime" / "wiki-mutation.lock",
+    )
+
+    class FakeIndex:
+        def refresh(self) -> None:
+            pass
+
+        def all_pages_meta(self, include_system=True):
+            return [{"page_id": "display"}]
+
+        def all_tags(self, include_system=False):
+            return set()
+
+    monkeypatch.setattr(index_store, "get_store", lambda: FakeIndex())
+    prepared = page_mutation.prepare_page_mutation(
+        "display",
+        [
+            {
+                "old_text": "The setup has two G32P displays.",
+                "new_text": "The setup has one G32P display.",
+            }
+        ],
+        correction_id="corr-replay-display",
+    )
+    assert page_mutation.apply_prepared_mutations([prepared])["status"] == "applied"
+
+    raw = paths["raw"] / "20260701-stale-display.md"
+    raw.write_text("The setup has two G32P displays.", encoding="utf-8")
+    _write_jsonl(
+        paths["queue"],
+        [
+            {
+                "key": raw_replay.stable_key(raw),
+                "raw": raw.name,
+                "path": str(raw),
+                "date": "20260701",
+                "bytes": raw.stat().st_size,
+                "priority": 100,
+                "sources": ["explicit_migration"],
+                "status": "pending",
+                "attempts": 0,
+            }
+        ],
+    )
+    store = _FakeJobStore(result_status=JobStatus.COMPLETED)
+    monkeypatch.setattr(raw_replay, "job_store", store)
+
+    def replay_via_ingest(content, job_id, on_complete=None, metadata=None):
+        _created, updated = ingest._apply_operations(
+            [
+                {
+                    "type": "update",
+                    "filename": "display.md",
+                    "content": content,
+                }
+            ]
+        )
+        job = store.get(job_id)
+        assert job is not None
+        job.status = JobStatus.COMPLETED
+        job.pages_updated = updated
+        if on_complete is not None:
+            on_complete()
+
+    monkeypatch.setattr("llm_wiki_mcp.ingest.run_ingest", replay_via_ingest)
+
+    result = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        max_runs=1,
+        max_bytes=1_000,
+    )
+
+    written = page.read_text(encoding="utf-8")
+    assert result["runs"][0]["status"] == "completed"
+    assert "two G32P displays" not in written
+    assert written.count("one G32P display") >= 2
+    assert "applied_corrections: [corr-replay-display]" in written
 
 
 def test_eligibility_union_drains_current_keys_and_prior_auto_lane(

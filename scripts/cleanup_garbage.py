@@ -10,8 +10,8 @@ raw 取り込み時にフィルタされず流入したものを削除する。
 - 一般的な title (authors, license 等) + 本文が短い (< 500B)
 
 実行モード:
-- 引数なし: 一覧表示 → 自動削除
-- --dry-run: 一覧表示のみ、削除しない
+- 引数なし / --dry-run: 一覧表示のみ、削除しない
+- --apply: 廃止済み。削除提案は frontier-managed sleep lane が処理する
 
 ログ: ~/.wiki/backups/<latest>/cleanup.log に記録
 """
@@ -20,6 +20,12 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+    block_legacy_semantic_mutation,
+)
 
 WIKI_ROOT = Path.home() / ".wiki"
 WIKI_PAGES = WIKI_ROOT / "pages"
@@ -141,7 +147,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true",
                         help="プレビューのみ、削除しない")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="廃止済み。frontier-managed sleep lane を使用する",
+    )
     args = parser.parse_args()
+
+    if args.apply:
+        block_legacy_semantic_mutation(
+            tool="cleanup_garbage.py",
+            replacement="llm-wiki-sleep",
+        )
 
     pages = sorted(WIKI_PAGES.rglob("*.md"))
     print(f"スキャン対象: {len(pages)} ページ")
@@ -165,49 +182,7 @@ def main() -> None:
         print(f"  {rel} ({size}B) — {reason}")
     print()
 
-    if args.dry_run:
-        print("[dry-run] 削除はスキップ")
-        return
-
-    # 削除実行
-    deleted = []
-    errors = []
-    for path, reason in garbage:
-        try:
-            path.unlink()
-            deleted.append((path, reason))
-        except OSError as e:
-            errors.append((path, str(e)))
-
-    print(f"削除完了: {len(deleted)} ページ")
-    if errors:
-        print(f"エラー: {len(errors)} 件")
-        for path, err in errors:
-            print(f"  {path}: {err}")
-
-    # ログ書き込み
-    log_target = find_log_target()
-    log_file = log_target / "cleanup.log"
-    with open(log_file, "w") as f:
-        f.write("# Wiki Cleanup Log\n")
-        f.write(f"Date: {datetime.now().isoformat()}\n")
-        f.write(f"Total scanned: {len(pages)}\n")
-        f.write(f"Garbage detected: {len(garbage)}\n")
-        f.write(f"Successfully deleted: {len(deleted)}\n")
-        f.write(f"Errors: {len(errors)}\n\n")
-        f.write("## Deleted Pages\n\n")
-        for path, reason in deleted:
-            try:
-                rel = path.relative_to(WIKI_PAGES)
-            except ValueError:
-                rel = path
-            f.write(f"- {rel} — {reason}\n")
-        if errors:
-            f.write("\n## Errors\n\n")
-            for path, err in errors:
-                f.write(f"- {path}: {err}\n")
-
-    print(f"ログ: {log_file}")
+    print("[dry-run] 削除はスキップ。適用は llm-wiki-sleep が frontier review 後に行います。")
 
 
 if __name__ == "__main__":

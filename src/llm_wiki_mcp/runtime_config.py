@@ -29,6 +29,7 @@ class HookPolicy:
     user_prompt_recall: bool = True
     stop_save: bool = True
     stop_audit: bool = True
+    stop_content_correction: bool = True
     stop_recall_improve: bool = True
 
 
@@ -107,6 +108,9 @@ def load_hook_policy(path: Path | str | None = None) -> HookPolicy:
         user_prompt_recall=nested_bool(data, ("hooks", "user_prompt", "recall"), True),
         stop_save=nested_bool(data, ("hooks", "stop", "save"), True),
         stop_audit=nested_bool(data, ("hooks", "stop", "audit"), True),
+        stop_content_correction=nested_bool(
+            data, ("hooks", "stop", "content_correction"), True
+        ),
         stop_recall_improve=nested_bool(data, ("hooks", "stop", "recall_improve"), True),
     )
 
@@ -202,7 +206,7 @@ def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
 @dataclass(frozen=True)
 class NegativeFeedbackConfig:
     enabled: bool = False
-    kinds: tuple[str, ...] = ("injection_ignored", "false-positive")
+    kinds: tuple[str, ...] = ("page_ignored", "injection_ignored", "false-positive")
     similarity_threshold: float = 0.35
     penalty: float = 0.85
     max_age_days: int = 180

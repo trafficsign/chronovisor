@@ -14,10 +14,15 @@ UserPromptSubmit
 
 Stop
   -> llm-wiki-hook
+  -> scan complete turn pairs after the durable per-session correction cursor
+  -> bind corrections to exact host/session/prompt/time recall provenance
+  -> local classification/proposal -> frontier final decision for every outcome
+  -> page error: persist review -> shared-lock CAS -> strict index/read-back gate
+  -> wrong retrieval: record page-scoped page_ignored negative feedback
   -> save session delta to raw/
   -> run asynchronous recall auditor with precision checks
   -> record missed_candidate and injection_used/injection_ignored feedback
-  -> auto-apply safe additive actions
+  -> propose additive actions -> frontier final approval -> atomic apply
 
 Nightly sleep
   -> refresh derived recall/search artifacts and integrity signals
@@ -37,9 +42,12 @@ Nightly sleep
 - `recall/`: recall decisions, feedback, query hints, and auto-apply logs.
 - `recall/sessions/`: lightweight recent query/topic/page state for an active host session.
 - `recall/pull-log.jsonl`: wiki.search/wiki.read calls used as implicit pull feedback.
+- `recall/content-feedback.jsonl`: immutable audit records for applied content corrections.
 - `recall/calibration.json`: validated evidence-gate weights.
 - `runtime/`: status, events, and metrics for observability.
 - `runtime/convergence/`: exact-once state, leases, retry/backoff, and terminal decisions.
+- `runtime/content-correction/`: per-session capture cursors plus immutable
+  proposal and frontier-review artifacts used for crash recovery.
 
 ## Runtime Roles
 
@@ -47,6 +55,28 @@ Nightly sleep
 - **Recall gate**: fast evidence-based search gate. BM25 is always attempted;
   semantic, graph expansion, rewrite, and calibrated weights fail open.
 - **Save harness**: host-specific session parser plus memory writer.
+- **Content correction**: detects explicit user corrections, binds them to the
+  preceding complete turn by exact prompt hash, host, session, and timestamped
+  recall provenance. The local model only proposes a classification and exact
+  spans: page error, outdated claim, wrong retrieval, assistant misquote,
+  ambiguity, no attributable page, and no correction all require a frontier
+  final decision. Wrong retrieval writes `page_ignored` feedback only for the
+  frontier-selected `negative_pages`; it never penalizes every recalled page.
+  Exact-provenance corrections may target ordinary pages or the allowlisted
+  user-memory system pages `user-profile`, `current-state`, and
+  `lessons-learned`; operational system files remain forbidden.
+  Approved content changes persist a review artifact before writing, then use
+  correction markers, per-page CAS under the writer lock shared with ingest and
+  repair lanes, and owned-byte rollback. Recovery can reuse that artifact when
+  the page marker proves the approved bytes were already applied, avoiding a
+  duplicate frontier decision.
+
+  A content change is not terminally applied until the page store, BM25,
+  embeddings, claim graph, and generated index all refresh successfully and a
+  semantic search read-back finds each changed page with the old/new span
+  postconditions satisfied. Refresh or read-back failure stays in bounded retry.
+  Raw captures marked `raw_status: retracted` remain as audit evidence but are
+  excluded from normal ingest and replay.
 - **Auditor**: heavy asynchronous judge that looks for missed recall and whether
   injected pages were used.
 - **Auto-apply**: applies additive actions only (`query_hint`, `alias`, `page_tag`).
@@ -65,8 +95,9 @@ Lab, where replay/holdout gates and a frontier veto decide adoption; neither
 action waits for a human review queue.
 
 The only human boundary is external authority: authentication/OAuth, billing or
-quota, Keychain permission, or installing/restoring a missing frontier tool.
-All other uncertainty ends through bounded retry, rejection, or quarantine.
+quota, and Keychain/secret-store permission. Missing tools or models and all
+other uncertainty use bounded retry, rejection, or cooldown quarantine that is
+reopened autonomously.
 
 ## Search Pipeline
 

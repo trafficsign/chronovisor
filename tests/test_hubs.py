@@ -22,5 +22,5 @@ def test_build_hub_pages_writes_folder_hub(tmp_path: Path, monkeypatch) -> None:
     payload = hubs.build_hub_pages(output_dir=tmp_path, min_pages=2, max_hubs=3)
 
     assert payload["hubs"] >= 1
+    assert payload["mutation"]["status"] == "applied"
     assert any(path.name.endswith("-hub.md") for path in tmp_path.iterdir())
-

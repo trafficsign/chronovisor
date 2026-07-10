@@ -12,6 +12,9 @@ wire host hooks for automatic save, recall, audit, and safe self-improvement.
 - `llm-wiki-recall`: synchronous recall gate.
 - `llm-wiki-recall-audit`: asynchronous missed-recall auditor.
 - `llm-wiki-recall-auto-apply`: applies safe auto-lane recall improvements.
+- `llm-wiki-content-correction`: binds explicit user corrections to exact-turn
+  recall provenance, then gives the frontier model the final decision on every
+  classification and exact page update.
 - `llm-wiki-codex-save` / `llm-wiki-claude-code-save`: host session save harnesses.
 
 ## Storage Layout
@@ -21,8 +24,8 @@ wire host hooks for automatic save, recall, audit, and safe self-improvement.
   raw/       # durable raw session captures
   pages/     # structured wiki pages
   system/    # privileged user/profile/state pages
-  recall/    # recall log, feedback, query hints, auto-apply log
-  runtime/   # observable runtime status/events/metrics
+  recall/    # recall log, retrieval/content feedback, query hints, auto-apply log
+  runtime/   # observable status, correction cursors/reviews, convergence state
 ```
 
 ## Hook Entry Point

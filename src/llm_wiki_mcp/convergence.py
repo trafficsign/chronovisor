@@ -58,8 +58,7 @@ HUMAN_REQUIRED_FAILURE_CLASSES = frozenset(
         "oauth_required",
         "quota_or_billing_required",
         "keychain_permission_required",
-        "frontier_tool_unavailable",
-        "both_frontiers_unavailable",
+        "secret_store_permission_required",
     }
 )
 
@@ -380,6 +379,35 @@ def is_human_required_failure(failure_class: str | None) -> bool:
     return bool(failure_class and failure_class in HUMAN_REQUIRED_FAILURE_CLASSES)
 
 
+def frontier_failure_class(result: object) -> str | None:
+    """Return the machine-classified failure class from a frontier result.
+
+    ``human_required`` is deliberately *not* accepted as evidence.  It is a
+    derived presentation field and may also be emitted by a model or an older
+    worker.  Only the deterministic failure class crosses the external
+    authority boundary.
+    """
+
+    if not isinstance(result, Mapping):
+        return None
+    direct = result.get("failure_class")
+    if isinstance(direct, str) and direct:
+        return direct
+    for key in ("frontier_failure", "failure"):
+        nested = result.get(key)
+        if isinstance(nested, Mapping):
+            failure_class = frontier_failure_class(nested)
+            if failure_class:
+                return failure_class
+    return None
+
+
+def is_human_required_result(result: object) -> bool:
+    """Classify a frontier payload without trusting model-authored booleans."""
+
+    return is_human_required_failure(frontier_failure_class(result))
+
+
 def _utc_now(now: datetime | None = None) -> datetime:
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -532,13 +560,18 @@ class ConvergenceStore:
         input_data: Any,
         resolver_version: str | int = "1",
         metadata: Mapping[str, Any] | None = None,
+        update_metadata: bool = True,
         now: datetime | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Insert a candidate or preserve its existing progress.
 
         Re-merging the same stable key is a no-op unless observational
-        ``metadata`` changed.  Attempts and terminal states are never reset.
+        ``metadata`` changed. Set ``update_metadata=False`` when the producer's
+        evidence bundle is immutable after first capture. Attempts and valid
+        terminal states are never reset; legacy ``human_required`` items whose
+        failure class is outside the external-authority allowlist are reopened
+        or quarantined without resetting attempt counts.
         """
 
         current_time = _utc_now(now)
@@ -553,15 +586,44 @@ class ConvergenceStore:
 
         def merge(
             state: dict[str, Any],
-        ) -> tuple[dict[str, Any], bool, bool, list[tuple[str, str | None, dict[str, Any]]]]:
+        ) -> tuple[
+            dict[str, Any],
+            bool,
+            bool,
+            bool,
+            list[tuple[str, str | None, dict[str, Any]]],
+        ]:
             items = state["items"]
             existing = items.get(key)
             if isinstance(existing, dict):
-                changed = existing.get("metadata") != normalized_metadata
+                reclassified = (
+                    existing.get("status") == "human_required"
+                    and not is_human_required_failure(
+                        str(existing.get("last_failure_class") or "")
+                    )
+                )
+                if reclassified:
+                    attempts = int(existing.get("frontier_attempts") or 0)
+                    exhausted = attempts >= self.policy.max_frontier_attempts
+                    existing = {
+                        **existing,
+                        "status": "quarantined" if exhausted else "frontier_retry",
+                        "human_required": False,
+                        "next_attempt_at": None,
+                        "lease_stage": None,
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "quarantine_reason": (
+                            "retry_exhausted:frontier" if exhausted else None
+                        ),
+                        "updated_at": _iso(current_time),
+                    }
+                changed = update_metadata and existing.get("metadata") != normalized_metadata
                 if changed:
                     existing = {**existing, "metadata": normalized_metadata, "updated_at": _iso(current_time)}
+                if changed or reclassified:
                     items[key] = existing
-                return existing, False, changed, []
+                return existing, False, changed or reclassified, reclassified, []
             retired: list[tuple[str, str | None, dict[str, Any]]] = []
             for previous_key, previous in list(items.items()):
                 if (
@@ -612,14 +674,15 @@ class ConvergenceStore:
                 "updated_at": _iso(current_time),
             }
             items[key] = item
-            return item, True, True, retired
+            return item, True, True, False, retired
 
         if dry_run:
             state = self._load_unlocked()
-            item, created, changed, retired = merge(state)
+            item, created, changed, reclassified, retired = merge(state)
             return {
                 "created": created,
                 "changed": changed,
+                "reclassified_human_boundary": reclassified,
                 "dry_run": True,
                 "item": copy.deepcopy(item),
                 "retired": [entry[0] for entry in retired],
@@ -627,7 +690,7 @@ class ConvergenceStore:
 
         with self._exclusive_lock():
             state = self._load_unlocked()
-            item, created, changed, retired = merge(state)
+            item, created, changed, reclassified, retired = merge(state)
             if changed:
                 self._save_unlocked(state)
                 for retired_key, previous_status, retired_item in retired:
@@ -644,15 +707,24 @@ class ConvergenceStore:
                 self._append_event_unlocked(
                     self._event(
                         key=key,
-                        name="candidate_merged" if created else "metadata_updated",
+                        name=(
+                            "candidate_merged"
+                            if created
+                            else "human_boundary_reclassified"
+                            if reclassified
+                            else "metadata_updated"
+                        ),
                         now=current_time,
-                        previous_status=None if created else str(item.get("status")),
+                        previous_status=(
+                            None if created else "human_required" if reclassified else str(item.get("status"))
+                        ),
                         item=item,
                     )
                 )
             return {
                 "created": created,
                 "changed": changed,
+                "reclassified_human_boundary": reclassified,
                 "dry_run": False,
                 "item": copy.deepcopy(item),
                 "retired": [entry[0] for entry in retired],
@@ -1091,6 +1163,155 @@ class ConvergenceStore:
             project=project,
         )
 
+    def return_to_local(
+        self,
+        key: str,
+        *,
+        reason: str,
+        owner: str | None = None,
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Return a claimed frontier item for a fresh bounded local proposal."""
+
+        current_time = _utc_now(now)
+
+        def project(state: dict[str, Any]) -> tuple[dict[str, Any], str]:
+            item = state["items"].get(key)
+            if not isinstance(item, dict):
+                raise KeyError(key)
+            previous_status = str(item.get("status") or "")
+            if previous_status != "frontier_running":
+                raise InvalidTransition(
+                    f"cannot return to local from status {previous_status!r}"
+                )
+            self._validate_owner(item, owner)
+            self._clear_lease(item)
+            item["status"] = "pending_local"
+            item["local_attempts"] = 0
+            item["next_attempt_at"] = None
+            item["last_error"] = str(reason)[:4000]
+            item["updated_at"] = _iso(current_time)
+            return item, previous_status
+
+        return self._persist_transition(
+            key=key,
+            name="returned_to_local",
+            now=current_time,
+            dry_run=dry_run,
+            project=project,
+        )
+
+    def resume_quarantined(
+        self,
+        key: str,
+        *,
+        stage: Stage = "frontier",
+        reason: str = "autonomous_cooldown_elapsed",
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Autonomously reopen a non-human quarantine after an external cooldown."""
+
+        if stage not in {"local", "frontier"}:
+            raise ValueError(f"unknown stage: {stage!r}")
+        current_time = _utc_now(now)
+
+        def project(state: dict[str, Any]) -> tuple[dict[str, Any], str]:
+            item = state["items"].get(key)
+            if not isinstance(item, dict):
+                raise KeyError(key)
+            previous_status = str(item.get("status") or "")
+            if previous_status != "quarantined":
+                raise InvalidTransition(
+                    f"cannot resume non-quarantined status {previous_status!r}"
+                )
+            if bool(item.get("human_required")):
+                raise InvalidTransition("human-required item cannot be auto-resumed")
+            self._clear_lease(item)
+            item["status"] = f"pending_{stage}"
+            item[self._stage_attempt_field(stage)] = 0
+            if stage == "local":
+                item["frontier_attempts"] = 0
+            item["next_attempt_at"] = None
+            item["quarantine_reason"] = None
+            item["result"] = None
+            item["last_error"] = str(reason)[:4000]
+            item["updated_at"] = _iso(current_time)
+            return item, previous_status
+
+        return self._persist_transition(
+            key=key,
+            name="quarantine_resumed",
+            now=current_time,
+            dry_run=dry_run,
+            project=project,
+        )
+
+    def resume_due_quarantined(
+        self,
+        *,
+        cooldown_seconds: int = 21_600,
+        exclude_lanes: Iterable[str] = (),
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Reopen due non-human quarantines across convergence lanes."""
+
+        if cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds must be >= 0")
+        current_time = _utc_now(now)
+        excluded = set(exclude_lanes)
+        results: list[dict[str, Any]] = []
+        for item in self.list_items(statuses={"quarantined"}):
+            key = str(item.get("key") or "")
+            lane = str(item.get("lane") or "")
+            failure_class = str(item.get("last_failure_class") or "")
+            if (
+                not key
+                or lane in excluded
+                or bool(item.get("human_required"))
+                or is_human_required_failure(failure_class)
+            ):
+                continue
+            updated_at = _parse_iso(item.get("updated_at"))
+            if (
+                updated_at is not None
+                and (current_time - updated_at).total_seconds() < cooldown_seconds
+            ):
+                continue
+            reason = str(item.get("quarantine_reason") or "")
+            stage: Stage = "local" if reason.endswith(":local") else "frontier"
+            try:
+                transition = self.resume_quarantined(
+                    key,
+                    stage=stage,
+                    reason="autonomous convergence quarantine cooldown elapsed",
+                    now=current_time,
+                    dry_run=dry_run,
+                )
+            except InvalidTransition as exc:
+                results.append(
+                    {"key": key, "lane": lane, "status": "resume_skipped", "error": str(exc)}
+                )
+                continue
+            resumed = transition.get("item") if isinstance(transition, dict) else {}
+            results.append(
+                {
+                    "key": key,
+                    "lane": lane,
+                    "stage": stage,
+                    "status": str((resumed or {}).get("status") or f"pending_{stage}"),
+                }
+            )
+        return {
+            "status": "ok",
+            "cooldown_seconds": cooldown_seconds,
+            "resumed": len([row for row in results if row.get("status") != "resume_skipped"]),
+            "results": results,
+            "dry_run": dry_run,
+        }
+
     def complete(
         self,
         key: str,
@@ -1212,6 +1433,63 @@ class ConvergenceStore:
             project=project,
         )
 
+    def resume_due_human_required(
+        self,
+        *,
+        capability_fingerprint: str,
+        cooldown_seconds: int = 3_600,
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Requeue due external-authority items after deterministic preflight.
+
+        The human only repairs authentication, billing or secret-store state.
+        Once a shared capability preflight succeeds, the next sleep cycle
+        automatically gives each old terminal item a fresh bounded frontier
+        window; no queue acknowledgement or content judgment is required.
+        """
+
+        fingerprint = capability_fingerprint.strip()
+        if not fingerprint:
+            return {
+                "status": "preflight_not_ready",
+                "resumed": 0,
+                "results": [],
+                "dry_run": dry_run,
+            }
+        if cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds must be >= 0")
+        current_time = _utc_now(now)
+        due: list[str] = []
+        for item in self.list_items(statuses={"human_required"}):
+            updated_at = _parse_iso(item.get("updated_at")) or _parse_iso(
+                item.get("created_at")
+            )
+            if (
+                updated_at is not None
+                and (current_time - updated_at).total_seconds() < cooldown_seconds
+            ):
+                continue
+            key = str(item.get("key") or "")
+            if key:
+                due.append(key)
+        results = [
+            self.resume_human_required(
+                key,
+                capability_fingerprint=fingerprint,
+                now=current_time,
+                dry_run=dry_run,
+            )
+            for key in due
+        ]
+        return {
+            "status": "ok",
+            "resumed": len(results),
+            "results": results,
+            "cooldown_seconds": cooldown_seconds,
+            "dry_run": dry_run,
+        }
+
     def _persist_transition(
         self,
         *,
@@ -1256,7 +1534,9 @@ __all__ = [
     "TERMINAL_STATUSES",
     "canonical_json",
     "exponential_backoff_seconds",
+    "frontier_failure_class",
     "input_fingerprint",
     "is_human_required_failure",
+    "is_human_required_result",
     "stable_item_key",
 ]

@@ -111,11 +111,16 @@ def test_schema_strictness_autofix_normalizes_required_fields() -> None:
 
 def test_classifies_frontier_failures() -> None:
     quota = frontier_review.classify_frontier_failure("insufficient_quota billing")
+    secret_store = frontier_review.classify_frontier_failure(
+        "credential store access denied"
+    )
     transient = frontier_review.classify_frontier_failure("request timed out")
     option = frontier_review.classify_frontier_failure("unknown option --foo")
 
     assert quota.failure_class == "quota_or_billing_required"
     assert quota.human_required is True
+    assert secret_store.failure_class == "secret_store_permission_required"
+    assert secret_store.human_required is True
     assert transient.failure_class == "network_transient"
     assert transient.rescue_status == "frontier_retry"
     assert option.failure_class == "cli_option_invalid"
@@ -359,7 +364,7 @@ def test_frontier_rescue_falls_back_to_claude_code(
     ("failure_kind", "expected_class", "expected_human_required"),
     [
         ("timeout", "network_transient", False),
-        ("missing_executable", "frontier_tool_unavailable", True),
+        ("missing_executable", "frontier_tool_unavailable", False),
     ],
 )
 def test_structured_review_normalizes_subprocess_exceptions(
@@ -417,6 +422,9 @@ def test_structured_review_normalizes_subprocess_exceptions(
     assert result["frontier_failure"]["human_required"] is expected_human_required
     assert result["human_required"] is expected_human_required
     if failure_kind == "timeout":
+        assert result["frontier_failure"]["rescue_status"] == "frontier_retry"
+        assert result["frontier_failure"]["notify_user"] is False
+    if failure_kind == "missing_executable":
         assert result["frontier_failure"]["rescue_status"] == "frontier_retry"
         assert result["frontier_failure"]["notify_user"] is False
 

@@ -7,6 +7,7 @@ end-to-end at runtime, not in CI.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 from pathlib import Path
 
@@ -105,6 +106,69 @@ def test_apply_suggestion_inserts_frontier_approved_link(isolated_pages: Path) -
 
     assert result["status"] == "applied"
     assert "[[target|durable anchor]]" in (isolated_pages / "source.md").read_text()
+
+
+def test_apply_suggestion_preserves_correction_that_lands_before_locked_cas(
+    isolated_pages: Path,
+    monkeypatch,
+) -> None:
+    _seed_page(isolated_pages, "source", "The durable anchor belongs here.")
+    _seed_page(isolated_pages, "target", "Target body")
+    source = isolated_pages / "source.md"
+    corrected = source.read_text(encoding="utf-8") + "user correction\n"
+
+    @contextmanager
+    def correction_wins():
+        source.write_text(corrected, encoding="utf-8")
+        yield
+
+    monkeypatch.setattr(ol_mod, "wiki_mutation_lock", correction_wins)
+    suggestion = Suggestion(
+        source_page_id="source",
+        confidence=0.9,
+        reason="related",
+        suggested_anchor="durable anchor",
+        suggested_section="Related",
+    )
+
+    result = apply_suggestion("target", suggestion)
+
+    assert result == {"status": "retry", "reason": "source_changed_before_apply"}
+    assert source.read_text(encoding="utf-8") == corrected
+
+
+def test_apply_suggestion_rolls_back_only_its_owned_write_under_lock(
+    isolated_pages: Path,
+    monkeypatch,
+) -> None:
+    _seed_page(isolated_pages, "source", "The durable anchor belongs here.")
+    _seed_page(isolated_pages, "target", "Target body")
+    source = isolated_pages / "source.md"
+    target = isolated_pages / "target.md"
+    original = source.read_text(encoding="utf-8")
+    real_atomic_write = ol_mod.atomic_write
+    writes = 0
+
+    def change_target_after_source_write(path: Path, content: str) -> None:
+        nonlocal writes
+        real_atomic_write(path, content)
+        writes += 1
+        if writes == 1:
+            target.write_text(target.read_text(encoding="utf-8") + "foreign target edit\n")
+
+    monkeypatch.setattr(ol_mod, "atomic_write", change_target_after_source_write)
+    suggestion = Suggestion(
+        source_page_id="source",
+        confidence=0.9,
+        reason="related",
+        suggested_anchor="durable anchor",
+        suggested_section="Related",
+    )
+
+    result = apply_suggestion("target", suggestion)
+
+    assert result == {"status": "error", "reason": "post_write_verification_failed"}
+    assert source.read_text(encoding="utf-8") == original
 
 
 def test_autonomous_orphan_lane_applies_once(tmp_path: Path, isolated_pages: Path) -> None:
@@ -574,7 +638,7 @@ def _high_local_suggestion() -> str:
     )
 
 
-def test_frontier_approval_below_confidence_gate_is_terminally_rejected(
+def test_frontier_approval_below_confidence_gate_retries_without_mutation(
     tmp_path: Path,
     isolated_pages: Path,
 ) -> None:
@@ -594,8 +658,8 @@ def test_frontier_approval_below_confidence_gate_is_terminally_rejected(
         convergence_store=state,
     )
 
-    assert result["results"][0]["status"] == "rejected"
-    assert state.list_items()[0]["result"]["reason"] == "frontier_confidence_below_threshold"
+    assert result["results"][0]["status"] == "frontier_retry"
+    assert state.list_items()[0]["last_error"] == "frontier_confidence_below_threshold"
     assert "[[target" not in (isolated_pages / "source.md").read_text(encoding="utf-8")
 
 
@@ -632,6 +696,11 @@ def test_local_model_error_retries_but_valid_low_score_rejects(
         store=store,
         generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
         semantic_search_fn=semantic,
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "retry is warranted",
+        },
         convergence_store=retry_state,
     )
 
@@ -648,13 +717,20 @@ def test_local_model_error_retries_but_valid_low_score_rejects(
             }
         ),
         semantic_search_fn=semantic,
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "no safe link",
+        },
         convergence_store=low_state,
     )
 
-    assert retry["results"][0]["status"] == "local_retry"
+    assert retry["results"][0]["status"] == "frontier_retry"
     assert retry_state.list_items()[0]["last_failure_class"] == "local_model_or_schema_error"
     assert low["results"][0]["status"] == "rejected"
-    assert low_state.list_items()[0]["result"]["reason"].startswith("all_local_candidates")
+    assert low_state.list_items()[0]["result"]["proposal"]["reason"].startswith(
+        "all_local_candidates"
+    )
 
 
 def test_no_candidate_does_not_starve_later_real_work(
@@ -751,6 +827,11 @@ def test_no_candidate_terminal_decision_is_durable(
         generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("no candidate means no local model call")
         ),
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "no semantic candidate",
+        },
         convergence_store=state,
     )
     second = run_autonomous(
@@ -759,6 +840,9 @@ def test_no_candidate_terminal_decision_is_durable(
         semantic_search_fn=lambda _query, _top_n: [],
         generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("terminal decision must be reused")
+        ),
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("terminal frontier decision must be reused")
         ),
         convergence_store=state,
     )
@@ -786,16 +870,38 @@ def test_candidate_discovery_error_retries_then_quarantines(
         orphan_limit=1,
         store=store,
         semantic_search_fn=unavailable,
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "candidate discovery should retry",
+        },
         convergence_store=state,
     )
     second = run_autonomous(
         orphan_limit=1,
         store=store,
         semantic_search_fn=unavailable,
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "candidate discovery should retry",
+        },
+        convergence_store=state,
+    )
+    third = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        semantic_search_fn=unavailable,
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "candidate discovery should retry",
+        },
         convergence_store=state,
     )
 
-    assert first["results"][0]["status"] == "local_retry"
-    assert second["results"][0]["status"] == "quarantined"
-    assert first["work_items"] == second["work_items"] == 0
+    assert first["results"][0]["status"] == "frontier_retry"
+    assert second["results"][0]["status"] == "frontier_retry"
+    assert third["results"][0]["status"] == "quarantined"
+    assert first["work_items"] == second["work_items"] == third["work_items"] == 1
     assert state.list_items()[0]["last_failure_class"] == "candidate_discovery_error"

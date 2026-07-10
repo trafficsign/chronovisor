@@ -26,9 +26,12 @@ the apply path.
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import date
 
+from llm_wiki_mcp.link_fix import atomic_write
+from llm_wiki_mcp.page_mutation import wiki_mutation_lock
 from llm_wiki_mcp.wiki import SYSTEM_DIR
 
 
@@ -261,23 +264,25 @@ def record_new_tag(tag: str, reason: str = "ingest auto-gen") -> None:
     """
     try:
         path = _changelog_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text(
-                _TAG_CHANGELOG_HEADER.format(today=date.today().isoformat())
-            )
-
         today = date.today().isoformat()
-        existing = path.read_text()
         line = f"- {today} | {tag} | {reason}"
-        # Same-day dedup: scan only the tail to keep this O(small) on a
-        # changelog that could grow to thousands of lines.
-        if any(today in ln and tag in ln for ln in existing.splitlines()[-50:]):
-            return
-        with open(path, "a") as f:
-            if not existing.endswith("\n"):
-                f.write("\n")
-            f.write(line + "\n")
+        with wiki_mutation_lock():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                atomic_write(path, _TAG_CHANGELOG_HEADER.format(today=today))
+
+            existing = path.read_text(encoding="utf-8")
+            # Header creation, same-day dedup, and append share the Wiki writer
+            # lock. The final append is one O_APPEND write, so even an older
+            # non-cooperating process cannot partially overwrite an entry.
+            prefix = f"- {today} | {tag} |"
+            if any(ln.startswith(prefix) for ln in existing.splitlines()[-50:]):
+                return
+            payload = ("" if existing.endswith("\n") else "\n") + line + "\n"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
     except Exception:
         # Audit failure must never break ingest. wiki_check can re-derive
         # the tag set from page frontmatter if the changelog gets out of

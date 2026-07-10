@@ -70,3 +70,41 @@ def test_replay_metrics_are_deterministic(monkeypatch) -> None:
     assert payload["metrics"]["recall_at_3"] == 1.0
     assert payload["metrics"]["waste_injection_rate"] == 1.0
     assert payload["metrics"]["latency_ms"]["p95"] == 5.0
+
+
+def test_page_ignored_is_neither_positive_nor_prompt_false_positive(monkeypatch) -> None:
+    examples = [
+        recall_eval.RecallExample(
+            prompt="mixed recall",
+            expected_pages=("relevant-page",),
+            negative_pages=("wrong-page",),
+            injected_pages=("relevant-page", "wrong-page"),
+            kind="page_ignored",
+        ),
+        recall_eval.RecallExample(
+            prompt="legacy ignored",
+            injected_pages=("legacy-noise",),
+            kind="injection_ignored",
+        ),
+    ]
+
+    def fake_run_recall(request, policy, *, perform_search):
+        page_id = "wrong-page" if request.prompt == "mixed recall" else "legacy-noise"
+        return RecallResult(
+            status="ok",
+            decision="read",
+            confidence=0.8,
+            queries=[request.prompt],
+            reasons=[],
+            matched_terms={},
+            context_items=[ContextItem(page_id=page_id, title=page_id, updated="", score=1.0)],
+            latency_ms=1,
+        )
+
+    monkeypatch.setattr(recall_eval, "run_recall", fake_run_recall)
+
+    payload = recall_eval.evaluate_examples(examples, policy=RecallPolicy(log_decisions=False))
+
+    assert payload["metrics"]["positives"] == 0
+    assert payload["metrics"]["false_positives"] == 1
+    assert payload["metrics"]["waste_injection_rate"] == 1.0

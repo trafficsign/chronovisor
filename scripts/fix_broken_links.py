@@ -9,7 +9,9 @@ lint が検出した broken_link について、以下を試行:
 
 実行:
     python3 fix_broken_links.py --dry-run   # プレビュー
-    python3 fix_broken_links.py             # 実行
+    llm-wiki-sleep                          # frontier 審査後に自動適用
+
+この旧スクリプトの直接書き込み関数は fail-closed。
 """
 
 import argparse
@@ -24,6 +26,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from llm_wiki_mcp.wiki import PAGES_DIR, WIKI_ROOT  # noqa: E402
 from llm_wiki_mcp.lint import check  # noqa: E402
+from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+    block_legacy_semantic_mutation,
+)
 
 SYSTEM_DIR = WIKI_ROOT / "system"
 
@@ -78,6 +83,10 @@ def find_fuzzy_match(
 
 
 def atomic_write(path: Path, content: str) -> None:
+    block_legacy_semantic_mutation(
+        tool="fix_broken_links.py",
+        replacement="llm-wiki-sleep",
+    )
     tmp = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",

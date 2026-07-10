@@ -156,6 +156,10 @@ search-before-create and read-back verification still apply.
 Read-back misses caused only by ranking (`not-in-top-results`) stay in the
 lighter query-hint repair lane; raw replay is reserved for structural ingest,
 metadata, quarantine, and integrity failures.
+The query hint is still a production ranking change: the local failure signal
+only creates an exact proposal, and a frontier approval bound to the page hash
+is durably persisted before the hint is written. Rejection is terminal for the
+same evidence; transient or low-confidence decisions retry autonomously.
 
 Before ingest starts, replay durably records a `running` row with job,
 attempt, content hash, and start time. The ingest `on_complete` callback then
@@ -219,6 +223,12 @@ nested cycle payloads. Scheduled sleep writes a compact text report, while the
 15-minute watchdog keeps its latest state and bounded history in `autonomy/`
 and sends routine stdout to `/dev/null`; stderr remains logged.
 
+Legacy maintenance scripts may still produce read-only diagnostics, but their
+heuristic/local-model page mutation paths are fail-closed. Garbage cleanup,
+tag/link/recall-metadata backfill, broken-link rewriting, and model-selected
+folder moves must enter the sleep/frontier lanes; they cannot write knowledge
+pages directly.
+
 ## Wiki Snapshots
 
 ```sh
@@ -229,6 +239,61 @@ llm-wiki-snapshot "before manual repair"
 `~/.wiki` is initialized as its own git repository on first snapshot. Scheduled
 lint auto-fix and MCP `wiki_apply` snapshot before changing files, giving
 self-heal and repair work a rollback point independent of the code repository.
+
+## User Content Corrections
+
+```sh
+llm-wiki-content-correction --host codex --session-file /path/to/session.jsonl --capture --run-due
+llm-wiki-content-correction --host claude-code --session-file /path/to/session.jsonl --capture --run-due
+```
+
+The Stop hook runs this lane automatically. An explicit user correction is
+bound to the preceding complete turn. Recall provenance must match the exact
+prompt hash, host, session, and turn-time window; injected pages and pages read
+during that recall decision form the only mutation candidates. A durable
+cursor keyed by host/session/transcript tracks the last completed assistant
+line. Later Stop runs therefore pick up delayed transcript appends and failed
+captures without replaying already-enqueued correction turns.
+
+The local model proposes page error, outdated claim, wrong retrieval,
+assistant misquote, ambiguity, unattributed, or no correction, but never makes
+the terminal semantic decision. Every classification is checked by the
+frontier model. A frontier-confirmed wrong retrieval writes `kind =
+"page_ignored"` with only its explicit `negative_pages` subset; the remaining
+pages from the recall decision are not demoted. Non-page classifications do not
+mutate wiki content.
+
+Normal pages plus the user-memory system pages `user-profile`, `current-state`,
+and `lessons-learned` are correctable when exact recall provenance names them.
+Operational system files remain outside the mutation boundary.
+
+Content mutations require unique exact old spans, verbatim user evidence,
+protected literal grounding, frontier approval of immutable before/after
+hashes, and a per-page CAS immediately before each replace. The CAS runs under
+the writer lock shared by correction, ingest, lint, entity, and orphan-link
+repairs; a partial multi-page failure rolls back only bytes still owned by the
+correction.
+
+The approved frontier payload is persisted as a review artifact before page
+bytes change. On restart, a matching correction marker and artifact allow the
+lane to resume refresh/audit work without asking the frontier model to decide
+the same patch again. Terminal `applied` additionally requires successful
+refresh of the page store, BM25, changed-page embeddings, claim graph, and
+generated index, followed by semantic search read-back of every changed page
+and verification that old spans are inactive and new spans are present.
+Refresh or read-back failure remains retryable rather than being reported as a
+successful correction.
+
+Audit rows go to `recall/content-feedback.jsonl`; capture cursors, proposals,
+and review artifacts live under `runtime/content-correction/`, while lease and
+retry state lives under `runtime/convergence/`. Exhausted autonomous failures
+enter quarantine for a cooldown and are then reopened automatically. An invalid
+review artifact is preserved under `invalid-artifacts/` and replaced by a fresh
+frontier decision; it is never trusted or silently discarded.
+
+When a historical raw capture is known to be false, keep its body for audit and
+set `raw_status: retracted` in frontmatter. Normal ingest, explicit replay,
+automatic replay signals, and already-queued replay all exclude it.
 
 ## Audit and Auto-Apply
 
@@ -242,6 +307,13 @@ Auditor feedback uses `kind = "missed_candidate"` and source `auditor` for
 false negatives. Precision labels use `kind = "injection_used"` or
 `kind = "injection_ignored"`. The Stop dispatcher passes `--audit-read` so read
 decisions can be precision-audited without changing the auditor CLI default.
+
+Auto-apply treats the local auditor as a proposal source only. Alias, query
+hint, and page-tag actions (including few-shot-derived hints) require a
+frontier approval bound to the exact proposal and current page hash. The
+approval artifact is persisted and read back before the mutation, then reused
+after budget deferral or a crash. Active recall-policy candidates likewise
+require a frontier final approval even when legacy `frontier_mode` is `off`.
 
 Repeated `recall/auto-apply.jsonl` errors are promoted into self-heal packets
 after the configured threshold. The live auto-apply path accumulates repeated
@@ -264,6 +336,9 @@ llm-wiki-eval --ci --ci-variant hybrid-current --min-recall-at-5 0.80
 `search-golden.jsonl`. Sleep sends a bounded batch to a frontier reviewer;
 approved labels are promoted automatically, rejections are terminal, and
 uncertain/retry results back off before quarantine after three passes.
+The legacy `--build-golden` spelling is a compatibility alias for building the
+same label queue; it can no longer overwrite the authoritative golden file.
+Evaluation, CI, and self-tune load only rows carrying `reviewed: true`.
 `--failure-index` records missed expected pages with channel candidates and a
 reason code. Weekly self-tune evaluates dev weights against an independent
 locked-test set, asks the frontier model for the final veto, and atomically
@@ -285,28 +360,30 @@ Calibration trains on older labeled rows and validates on the newest holdout
 slice. It writes `recall/calibration.json` only when holdout improvement exceeds
 the configured minimum, and records the old artifact in
 `recall/calibration-history.jsonl` for rollback. Sleep schedules this weekly
-with bounded samples/recomputed features and a frontier final veto.
+with bounded samples/recomputed features and a frontier final veto. The public
+calibration CLI uses the same mandatory frontier gate even if a legacy caller
+passes `frontier_mode=off`; an approval bound to the exact active-policy hash is
+persisted before a CAS-protected policy write.
 
 ## Human Boundary
 
 Normal content, ranking, repair, and policy decisions converge without a human.
 `human_required` is reserved for deterministic external-authority failures:
-OAuth/authentication, billing or quota changes, Keychain permission, or a
-missing frontier tool. Ambiguity, low confidence, schema errors, and model
-disagreement use bounded retry and terminal quarantine instead.
+OAuth/authentication, billing or quota changes, or Keychain/secret-store
+permission. Missing tools or models, ambiguity, low confidence, schema errors,
+and model disagreement use autonomous retry and cooldown quarantine instead.
 
 ## Recall Question Backfill
 
 ```sh
 scripts/backfill_recall_questions.py --dry-run
-scripts/backfill_recall_questions.py --limit 50
-llm-wiki-reindex
+llm-wiki-sleep --raw-limit 100 --eval-limit 100
 ```
 
-The backfill adds `summary` and `recall_questions` frontmatter to existing
-knowledge pages and skips reference pages unless `--include-reference` is
-passed. Re-run `llm-wiki-reindex` after a large backfill so semantic search
-sees question vectors.
+The legacy script is diagnostic-only. Recall-metadata proposals now enter the
+scheduled sleep pipeline, where a frontier reviewer binds any accepted change
+to the exact page preimage and the shared writer performs refresh/read-back.
+Reference pages remain excluded by default.
 
 ## Troubleshooting
 

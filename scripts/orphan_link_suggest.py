@@ -5,8 +5,9 @@ Generates ``~/.wiki/system/orphan-link-suggestions-{date}.md`` listing,
 for each orphan page, the existing pages most likely to benefit from
 gaining an inbound link to that orphan.
 
-The report is human-reviewable. Pages on disk are NEVER modified —
-applying suggestions is a separate, manual step.
+The report is diagnostic only. Pages on disk are NEVER modified; the scheduled
+sleep lane sends proposals to the frontier reviewer and applies them
+autonomously through the shared CAS writer.
 
 Usage:
     python3 scripts/orphan_link_suggest.py             # full run, all orphans

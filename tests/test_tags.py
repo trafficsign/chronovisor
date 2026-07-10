@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -258,6 +259,18 @@ class TestRecordNewTag:
         record_new_tag("d/dup")
         text = (isolated_changelog / "tag-changelog.md").read_text()
         assert text.count("d/dup") == 1
+
+    def test_concurrent_append_is_lossless_and_deduplicated(
+        self,
+        isolated_changelog: Path,
+    ) -> None:
+        values = [f"d/tag-{index % 5}" for index in range(40)]
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(record_new_tag, values))
+
+        text = (isolated_changelog / "tag-changelog.md").read_text(encoding="utf-8")
+        for index in range(5):
+            assert text.count(f"d/tag-{index}") == 1
 
     def test_io_failure_swallowed(
         self, isolated_changelog: Path, monkeypatch: pytest.MonkeyPatch

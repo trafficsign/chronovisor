@@ -20,6 +20,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if not args.dry_run:
+        from llm_wiki_mcp.legacy_semantic_write import block_legacy_semantic_mutation
+
+        block_legacy_semantic_mutation(
+            tool="backfill_recall_questions.py",
+            replacement="llm-wiki-sleep",
+        )
+
     from llm_wiki_mcp.frontmatter import parse, patch
     from llm_wiki_mcp.ingest import _ensure_recall_metadata_frontmatter
     from llm_wiki_mcp.link_fix import atomic_write

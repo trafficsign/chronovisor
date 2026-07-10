@@ -938,12 +938,14 @@ def _should_scan_chunks(page_scores: list[float]) -> bool:
     return top1 < CHUNK_SEARCH_MIN_TOP_SCORE or (top1 - top2) < CHUNK_SEARCH_MIN_MARGIN
 
 
-def update_embeddings(page_ids: list[str] | None = None) -> int:
+def update_embeddings(page_ids: list[str] | None = None, *, strict: bool = False) -> int:
     """Update embeddings for pages. Returns count of updated pages.
 
     Writes are scoped to the rows that actually changed (or the rows
     explicitly requested via `page_ids`). Unchanged pages are not
-    re-encoded and the SQLite table is not rewritten in full.
+    re-encoded and the SQLite table is not rewritten in full. ``strict``
+    propagates embedding failures and rejects truncated vector batches; it is
+    intended for correctness-critical post-mutation readback paths.
     """
     from llm_wiki_mcp.ollama import embed, is_available
 
@@ -1020,8 +1022,15 @@ def update_embeddings(page_ids: list[str] | None = None) -> int:
             texts = [_apply_prefix(document_prefix, t[3]) for t in batch]
             try:
                 vectors = embed(texts, model=model)
-            except Exception:
+            except Exception as exc:
+                if strict:
+                    raise RuntimeError("embedding batch failed") from exc
                 continue
+            if len(vectors) != len(batch):
+                if strict:
+                    raise RuntimeError(
+                        f"embedding batch was truncated: {len(vectors)} != {len(batch)}"
+                    )
             rows: list[tuple[str, list[float], float]] = []
             question_rows: list[tuple[str, int, str, list[float], float]] = []
             chunk_rows: list[tuple[str, int, str, list[float], float]] = []

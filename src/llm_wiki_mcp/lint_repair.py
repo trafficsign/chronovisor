@@ -3,10 +3,10 @@
 ``lint.py`` remains the detector and safe deterministic fixer.  This module
 drains the remaining queue with explicit boundaries:
 
-* missing/count-invalid tags are proposed by local Ollama, structurally
-  validated, and applied with a compare-and-swap guard;
-* an undecidable or malformed local proposal is escalated to one bounded
-  frontier structured review;
+* missing/count-invalid tags are proposed by local Ollama, then every semantic
+  tag decision is finalized by a bounded frontier structured review;
+* a frontier approval/rejection is durably bound to the exact page preimage
+  before any mutation, so crash recovery never falls back to local authority;
 * stale monitor rows terminate as observed facts; and
 * duplicate/orphan review rows terminate in this lane as routed work for their
   specialized consumers.
@@ -29,11 +29,13 @@ from llm_wiki_mcp.convergence import (
     ConvergenceStore,
     FRONTIER_STATUSES,
     TERMINAL_STATUSES,
+    is_human_required_result,
     stable_item_key,
 )
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.frontmatter import patch as patch_frontmatter
 from llm_wiki_mcp.link_fix import atomic_write
+from llm_wiki_mcp.page_mutation import wiki_mutation_lock
 from llm_wiki_mcp.tags import SEED_TAGS, parse_tags, validate_axis_counts, validate_tag
 
 
@@ -168,9 +170,11 @@ def normalize_tag_decision(value: Mapping[str, Any] | str) -> dict[str, Any]:
         "valid": valid_decision,
         "validation_errors": errors,
     }
-    for key in ("reviewer", "frontier_failure", "human_required"):
+    for key in ("reviewer", "frontier_failure"):
         if key in parsed:
             out[key] = parsed[key]
+    if "human_required" in parsed or "frontier_failure" in parsed:
+        out["human_required"] = is_human_required_result(parsed)
     return out
 
 
@@ -215,6 +219,39 @@ Return JSON matching this schema:
 """
 
 
+def build_frontier_tag_repair_prompt(
+    row: Mapping[str, Any],
+    page_text: str,
+    *,
+    local_proposal: Mapping[str, Any] | None = None,
+) -> str:
+    """Build the authoritative review prompt with the local output as a proposal only."""
+
+    seed_tags = [tag for values in SEED_TAGS.values() for tag in values]
+    proposed = dict(local_proposal) if isinstance(local_proposal, Mapping) else None
+    return f"""\
+You are the final frontier reviewer for an LLM Wiki tag mutation. The local
+review below is an untrusted proposal only. Independently verify it against the
+page excerpt. You may approve different tags, reject the mutation, or request a
+retry. No page mutation is allowed unless your exact verdict is durably saved.
+
+Issue:
+{json.dumps(dict(row), ensure_ascii=False, indent=2, default=str)}
+
+Local proposal (may be null, malformed, or wrong):
+{json.dumps(proposed, ensure_ascii=False, indent=2, default=str)}
+
+Seed tags (prefer when semantically correct):
+{json.dumps(seed_tags, ensure_ascii=False)}
+
+Page excerpt:
+{_page_excerpt(page_text)}
+
+Return JSON matching this schema:
+{json.dumps(TAG_REPAIR_SCHEMA, ensure_ascii=False, indent=2)}
+"""
+
+
 def _default_local_reviewer(prompt: str, schema: dict[str, Any]) -> Mapping[str, Any] | str:
     return ollama.generate(prompt, system=LOCAL_TAG_SYSTEM, format=schema)
 
@@ -234,6 +271,134 @@ def _failure_class(decision: Mapping[str, Any], fallback: str) -> str:
     if isinstance(failure, Mapping) and isinstance(failure.get("failure_class"), str):
         return str(failure["failure_class"])
     return fallback
+
+
+def _review_artifact_path(store: ConvergenceStore, key: str) -> Path:
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return store.state_file.parent / "lint-repair-frontier-reviews" / f"{digest}.json"
+
+
+def _proposal_artifact_path(store: ConvergenceStore, key: str) -> Path:
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return store.state_file.parent / "lint-repair-local-proposals" / f"{digest}.json"
+
+
+def _write_json_artifact(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(
+        path,
+        json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def _load_json_artifact(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _decision_payload(decision: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist only schema fields; derived validation fields are recomputed on read."""
+
+    return {
+        "decision": decision.get("decision"),
+        "tags": list(decision.get("tags") or []),
+        "reason": decision.get("reason"),
+    }
+
+
+def _write_local_proposal_artifact(
+    store: ConvergenceStore,
+    key: str,
+    *,
+    page_text: str,
+    decision: Mapping[str, Any],
+) -> None:
+    _write_json_artifact(
+        _proposal_artifact_path(store, key),
+        {
+            "schema_version": 1,
+            "kind": "lint_tag_local_proposal",
+            "key": key,
+            "page_sha256": _page_hash(page_text),
+            "proposal": _decision_payload(decision),
+        },
+    )
+
+
+def _load_local_proposal_artifact(
+    store: ConvergenceStore,
+    key: str,
+    *,
+    page_text: str,
+) -> dict[str, Any] | None:
+    artifact = _load_json_artifact(_proposal_artifact_path(store, key))
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("schema_version") != 1
+        or artifact.get("kind") != "lint_tag_local_proposal"
+        or artifact.get("key") != key
+        or artifact.get("page_sha256") != _page_hash(page_text)
+    ):
+        return None
+    proposal = artifact.get("proposal")
+    if not isinstance(proposal, Mapping):
+        return None
+    normalized = normalize_tag_decision(proposal)
+    if normalized.get("decision") != "approved" or normalized.get("valid") is not True:
+        return None
+    return normalized
+
+
+def _write_frontier_review_artifact(
+    store: ConvergenceStore,
+    key: str,
+    *,
+    page_text: str,
+    prompt: str,
+    decision: Mapping[str, Any],
+) -> None:
+    _write_json_artifact(
+        _review_artifact_path(store, key),
+        {
+            "schema_version": 1,
+            "kind": "lint_tag_frontier_verdict",
+            "key": key,
+            "page_sha256": _page_hash(page_text),
+            "prompt_sha256": _page_hash(prompt),
+            "verdict": _decision_payload(decision),
+        },
+    )
+
+
+def _load_frontier_review_artifact(
+    store: ConvergenceStore,
+    key: str,
+    *,
+    page_text: str,
+    prompt: str,
+) -> dict[str, Any] | None:
+    artifact = _load_json_artifact(_review_artifact_path(store, key))
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("schema_version") != 1
+        or artifact.get("kind") != "lint_tag_frontier_verdict"
+        or artifact.get("key") != key
+        or artifact.get("page_sha256") != _page_hash(page_text)
+        or artifact.get("prompt_sha256") != _page_hash(prompt)
+    ):
+        return None
+    verdict = artifact.get("verdict")
+    if not isinstance(verdict, Mapping):
+        return None
+    normalized = normalize_tag_decision(verdict)
+    if normalized.get("decision") not in {"approved", "rejected"}:
+        return None
+    if normalized.get("valid") is not True:
+        return None
+    return normalized
 
 
 def apply_tags_cas(
@@ -270,12 +435,14 @@ def apply_tags_cas(
     if dry_run:
         return {"status": "would_apply", "path": str(path), "tags": tags}
     try:
-        # Re-check immediately before the atomic replace. Other wiki writers
-        # use the same atomic-write boundary; a changed preimage fails closed.
-        if path.read_text(encoding="utf-8") != expected_text:
-            return {"status": "cas_conflict", "reason": "page changed before atomic write"}
-        atomic_write(path, patched)
-        written = path.read_text(encoding="utf-8")
+        # Serialize all cooperating page writers, then perform the final CAS
+        # immediately next to the replace.  A correction that landed after
+        # review therefore wins instead of being overwritten by stale tags.
+        with wiki_mutation_lock():
+            if path.read_text(encoding="utf-8") != expected_text:
+                return {"status": "cas_conflict", "reason": "page changed before atomic write"}
+            atomic_write(path, patched)
+            written = path.read_text(encoding="utf-8")
     except Exception as exc:
         return {"status": "error", "reason": f"write_error: {exc}"}
     if written != patched:
@@ -398,8 +565,27 @@ def _run_frontier_tag_review(
     key: str,
     reviewer: StructuredReviewer,
     now: datetime | None,
+    local_proposal: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    claim = store.claim_attempt(key, "frontier", budget=budget, now=now)
+    prompt = build_frontier_tag_repair_prompt(
+        row,
+        page_text,
+        local_proposal=local_proposal,
+    )
+    artifact_decision = _load_frontier_review_artifact(
+        store,
+        key,
+        page_text=page_text,
+        prompt=prompt,
+    )
+    # Replaying a durable verdict does not spend another model-call budget.
+    # It still acquires the convergence lease before applying or terminalizing.
+    claim = store.claim_attempt(
+        key,
+        "frontier",
+        budget=None if artifact_decision is not None else budget,
+        now=now,
+    )
     if not claim["claimed"]:
         return {
             "status": "deferred",
@@ -408,20 +594,50 @@ def _run_frontier_tag_review(
             "frontier_lane": True,
         }
     owner = str(claim["owner"])
-    prompt = build_tag_repair_prompt(row, page_text)
-    try:
-        raw = reviewer(prompt, TAG_REPAIR_SCHEMA)
-        decision = normalize_tag_decision(raw)
-    except Exception as exc:
-        failed = store.fail_attempt(
-            key,
-            "frontier",
-            owner=owner,
-            error=f"{exc.__class__.__name__}: {exc}",
-            failure_class="frontier_call_error",
-            now=now,
-        )
-        return {"status": "frontier_error", "state": failed["item"], "frontier_lane": True}
+    if artifact_decision is not None:
+        decision = artifact_decision
+    else:
+        try:
+            raw = reviewer(prompt, TAG_REPAIR_SCHEMA)
+            decision = normalize_tag_decision(raw)
+        except Exception as exc:
+            failed = store.fail_attempt(
+                key,
+                "frontier",
+                owner=owner,
+                error=f"{exc.__class__.__name__}: {exc}",
+                failure_class="frontier_call_error",
+                now=now,
+            )
+            return {
+                "status": "frontier_error",
+                "state": failed["item"],
+                "frontier_lane": True,
+            }
+
+        if decision["decision"] in {"approved", "rejected"} and decision["valid"]:
+            try:
+                _write_frontier_review_artifact(
+                    store,
+                    key,
+                    page_text=page_text,
+                    prompt=prompt,
+                    decision=decision,
+                )
+            except Exception as exc:
+                failed = store.fail_attempt(
+                    key,
+                    "frontier",
+                    owner=owner,
+                    error=f"{exc.__class__.__name__}: {exc}",
+                    failure_class="review_artifact_write_error",
+                    now=now,
+                )
+                return {
+                    "status": "frontier_error",
+                    "state": failed["item"],
+                    "frontier_lane": True,
+                }
 
     if decision["decision"] == "approved" and decision["valid"]:
         applied = _apply_reviewed_tags(
@@ -501,6 +717,11 @@ def _process_tag_candidate(
     current = store.get(key) or {}
     status = str(current.get("status") or "")
     if status in FRONTIER_STATUSES:
+        local_proposal = _load_local_proposal_artifact(
+            store,
+            key,
+            page_text=page_text,
+        )
         return _run_frontier_tag_review(
             row=row,
             path=path,
@@ -510,12 +731,18 @@ def _process_tag_candidate(
             key=key,
             reviewer=frontier_reviewer,
             now=now,
+            local_proposal=local_proposal,
         )
 
     claim = store.claim_attempt(key, "local", budget=budget, now=now)
     if not claim["claimed"]:
         next_item = claim.get("item") if isinstance(claim.get("item"), dict) else {}
         if next_item.get("status") in FRONTIER_STATUSES:
+            local_proposal = _load_local_proposal_artifact(
+                store,
+                key,
+                page_text=page_text,
+            )
             return _run_frontier_tag_review(
                 row=row,
                 path=path,
@@ -525,6 +752,7 @@ def _process_tag_candidate(
                 key=key,
                 reviewer=frontier_reviewer,
                 now=now,
+                local_proposal=local_proposal,
             )
         return {"status": "deferred", "reason": claim["reason"], "state": next_item}
     owner = str(claim["owner"])
@@ -555,17 +783,23 @@ def _process_tag_candidate(
         return {"status": "local_error", "state": failed["item"]}
 
     if decision["decision"] == "approved" and decision["valid"]:
-        return _apply_reviewed_tags(
-            store=store,
-            budget=budget,
-            key=key,
-            stage="local",
-            owner=owner,
-            path=path,
-            expected_text=page_text,
-            decision=decision,
-            now=now,
-        )
+        try:
+            _write_local_proposal_artifact(
+                store,
+                key,
+                page_text=page_text,
+                decision=decision,
+            )
+        except Exception as exc:
+            failed = store.fail_attempt(
+                key,
+                "local",
+                owner=owner,
+                error=f"{exc.__class__.__name__}: {exc}",
+                failure_class="proposal_artifact_write_error",
+                now=now,
+            )
+            return {"status": "local_error", "state": failed["item"]}
 
     escalated = store.escalate(
         key,
@@ -584,6 +818,11 @@ def _process_tag_candidate(
         key=key,
         reviewer=frontier_reviewer,
         now=now,
+        local_proposal=(
+            decision
+            if decision["decision"] == "approved" and decision["valid"]
+            else None
+        ),
     )
 
 

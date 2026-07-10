@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.index_store import get_store
-from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.wiki import PAGES_DIR
+from llm_wiki_mcp.wiki_write import apply_wiki_writes, prepare_wiki_write
 
 HUBS_DIR = PAGES_DIR / "hubs"
 
@@ -105,20 +105,30 @@ def build_hub_pages(
     selected = selected[:max_hubs]
 
     written: list[str] = []
+    plans = []
     today = date.today()
-    if write:
-        output_dir.mkdir(parents=True, exist_ok=True)
     for kind, name, pages in selected:
         path = output_dir / f"{kind}-{_slug(name)}-hub.md"
         if write:
-            atomic_write(path, _hub_markdown(kind, name, pages, today=today))
+            plans.append(
+                prepare_wiki_write(
+                    path,
+                    _hub_markdown(kind, name, pages, today=today),
+                )
+            )
         written.append(str(path))
+    mutation = apply_wiki_writes(plans) if write else None
     return {
-        "status": "ok",
+        "status": (
+            "ok"
+            if mutation is None or mutation["status"] in {"applied", "unchanged"}
+            else "retry"
+        ),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "write": write,
         "hubs": len(selected),
         "paths": written,
+        "mutation": mutation,
     }
 
 

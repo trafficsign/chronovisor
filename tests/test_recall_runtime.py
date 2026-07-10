@@ -916,6 +916,23 @@ def test_missed_feedback_prompt_only_records_without_expected(tmp_path, monkeypa
     assert record["snapshot"] is None
 
 
+def test_page_ignored_feedback_records_explicit_negative_pages(tmp_path, monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+
+    record = append_feedback(
+        "page_ignored",
+        prompt="G32P と P24U のレビューを比較して",
+        negative_pages=["p24u-review"],
+    )
+
+    assert record["kind"] == "page_ignored"
+    assert record["negative_pages"] == ["p24u-review"]
+    assert record["expected_pages"] == []
+
+
 def test_recent_cli_lists_latest_recall_decisions(tmp_path, monkeypatch, capsys) -> None:
     from llm_wiki_mcp import recall_runtime
 

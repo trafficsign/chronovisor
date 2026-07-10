@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.health import health_snapshot
-from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.wiki import PAGES_DIR
+from llm_wiki_mcp.wiki_write import apply_wiki_writes, prepare_wiki_write
 
 INSIGHTS_DIR = PAGES_DIR / "insights"
 
@@ -68,13 +68,18 @@ def write_reflection_page(*, output_dir: Path = INSIGHTS_DIR, write: bool = True
     today = date.today()
     path = output_dir / f"memory-reflection-{today.isoformat()}.md"
     markdown = build_reflection_markdown(snapshot, today=today)
+    mutation: dict[str, Any] | None = None
     if write:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        atomic_write(path, markdown)
+        mutation = apply_wiki_writes([prepare_wiki_write(path, markdown)])
     return {
-        "status": "ok",
+        "status": (
+            "ok"
+            if mutation is None or mutation["status"] in {"applied", "unchanged"}
+            else "retry"
+        ),
         "path": str(path),
         "write": write,
+        "mutation": mutation,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
 

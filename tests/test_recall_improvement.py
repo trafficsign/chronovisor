@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from llm_wiki_mcp import recall_improvement
 from llm_wiki_mcp.convergence import CycleBudget
@@ -167,6 +168,40 @@ def _write_feedback(log_file, feedback_file) -> None:
     )
 
 
+def test_run_improvement_excludes_page_ignored_from_policy_dataset(tmp_path) -> None:
+    log_file = tmp_path / "recall-log.jsonl"
+    log_file.write_text("", encoding="utf-8")
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        json.dumps(
+            {
+                "kind": "page_ignored",
+                "prompt": "G32P と P24U のレビューを比較して",
+                "negative_pages": ["p24u-review"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = recall_improvement.run_improvement(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=(),
+        include_heuristic=False,
+        active_file=tmp_path / "active.json",
+        registry_file=tmp_path / "registry.jsonl",
+        runs_dir=tmp_path / "runs",
+        episodes_file=tmp_path / "episodes.jsonl",
+        live_episodes_file=tmp_path / "live.jsonl",
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["reason"] == "no recall feedback examples available"
+    assert payload["dataset"]["examples"] == 0
+
+
 def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
     log_file = tmp_path / "recall-log.jsonl"
     feedback_file = tmp_path / "feedback.jsonl"
@@ -227,7 +262,15 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     episodes_file = tmp_path / "episodes.jsonl"
     live_file = tmp_path / "live-episodes.jsonl"
-    apply_budget = CycleBudget(max_mutations=1)
+    audit_dir = tmp_path / "frontier-audits"
+    frontier_calls = 0
+
+    def approve(_prompt, _best=None):
+        nonlocal frontier_calls
+        frontier_calls += 1
+        return {"decision": "approved", "summary": "frontier approved exact candidate"}
+
+    apply_budget = CycleBudget(max_frontier_calls=1, max_mutations=1)
     payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
@@ -240,15 +283,20 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
         episodes_file=episodes_file,
         live_episodes_file=live_file,
         frontier_budget=apply_budget,
+        frontier_audit_dir=audit_dir,
+        frontier_reviewer=approve,
     )
 
     assert payload["status"] == "applied"
     assert payload["applied"] is True
     active = json.loads(active_file.read_text(encoding="utf-8"))
     assert active["overrides"] == {"max_pages": 4}
+    assert active["frontier_verdict"]["decision"] == "approved"
+    assert Path(active["frontier_verdict"]["artifact_path"]).exists()
     assert registry_file.exists()
     assert episodes_file.exists()
     assert list(runs_dir.glob("*.json"))
+    assert apply_budget.snapshot()["used"]["frontier"] == 1
     assert apply_budget.snapshot()["used"]["mutation"] == 1
 
     preserved_active = tmp_path / "preserved-active-policy.json"
@@ -267,12 +315,16 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
         episodes_file=tmp_path / "deferred-episodes.jsonl",
         live_episodes_file=live_file,
         frontier_budget=denied_budget,
+        frontier_audit_dir=audit_dir,
+        frontier_reviewer=approve,
     )
     assert deferred["status"] == "budget_deferred"
     assert deferred["applied"] is False
     assert deferred["active_policy"] is None
     assert preserved_active.read_bytes() == before
     assert denied_budget.snapshot()["used"]["mutation"] == 0
+    assert denied_budget.snapshot()["used"]["frontier"] == 0
+    assert frontier_calls == 1
 
 
 def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monkeypatch) -> None:
@@ -394,6 +446,31 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monke
     assert retry_payload["applied"] is False
     assert retry_payload["active_policy"] is None
 
+    monkeypatch.setattr(
+        recall_improvement,
+        "run_frontier_policy_audit",
+        lambda *_args, **_kwargs: {
+            "decision": "approved",
+            "summary": "approval was not durably recorded",
+        },
+    )
+    undurable_active = tmp_path / "undurable-active-policy.json"
+    undurable = recall_improvement.run_improvement(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=("qwen",),
+        include_heuristic=False,
+        frontier_mode="always",
+        active_file=undurable_active,
+        registry_file=tmp_path / "undurable-registry.jsonl",
+        runs_dir=tmp_path / "undurable-runs",
+        episodes_file=tmp_path / "undurable-episodes.jsonl",
+        live_episodes_file=tmp_path / "undurable-live-episodes.jsonl",
+    )
+    assert undurable["status"] == "pending_frontier_review"
+    assert undurable["applied"] is False
+    assert not undurable_active.exists()
+
     preserved_active = tmp_path / "approved-but-deferred-active.json"
     preserved_active.write_text('{"run_id":"old","overrides":{"max_pages":3}}\n')
     before = preserved_active.read_bytes()
@@ -404,6 +481,9 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monke
             "decision": "approved",
             "summary": "safe",
             "human_required": False,
+            "_artifact_durable": True,
+            "candidate_sha256": "test-candidate",
+            "_artifact_path": str(tmp_path / "approved-verdict.json"),
         },
     )
     mutation_denied = CycleBudget(max_frontier_calls=1, max_mutations=0)
@@ -487,6 +567,37 @@ def test_run_due_dry_run_is_read_only(tmp_path, monkeypatch) -> None:
     assert payload["dry_run"] is True
     assert payload["would_update_schedule"]["last_status"] == "due"
     assert not schedule_file.exists()
+
+
+def test_run_due_does_not_count_page_ignored_as_policy_feedback(tmp_path) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "kind": "page_ignored",
+                    "prompt": f"mixed result {index}",
+                    "negative_pages": ["noise"],
+                }
+            )
+            for index in range(3)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = recall_improvement.run_due(
+        log_file=tmp_path / "recall-log.jsonl",
+        feedback_file=feedback_file,
+        min_total_feedback=1,
+        min_new_feedback=1,
+        dry_run=True,
+        schedule_file=tmp_path / "schedule.json",
+    )
+
+    assert payload["status"] == "skipped"
+    assert payload["feedback_count"] == 0
+    assert payload["new_feedback"] == 0
 
 
 def test_run_due_executes_and_updates_schedule_when_due(tmp_path, monkeypatch) -> None:
@@ -611,6 +722,129 @@ def test_run_due_preserves_pending_frontier_state_during_backoff(tmp_path, monke
     assert state["last_status"] == "pending_frontier_review"
     assert state["frontier_retry_attempts"] == 1
     assert state["frontier_next_retry_at"] == future
+
+
+def test_run_due_reopens_frontier_quarantine_without_new_feedback(
+    tmp_path, monkeypatch
+) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        json.dumps({"kind": "missed_candidate", "prompt": "x"}) + "\n",
+        encoding="utf-8",
+    )
+    schedule_file = tmp_path / "schedule-state.json"
+    schedule_file.write_text(
+        json.dumps(
+            {
+                "last_status": "frontier_quarantined",
+                "last_feedback_count": 1,
+                "frontier_retry_candidate": "candidate",
+                "frontier_retry_attempts": 3,
+                "frontier_quarantine_retry_at": "2000-01-01T00:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = 0
+
+    def recovered(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "ts": "2026-07-11T12:00:00",
+            "run_id": "recovered",
+            "status": "applied",
+            "applied": True,
+            "dataset": {"examples": 1},
+        }
+
+    monkeypatch.setattr(recall_improvement, "run_improvement", recovered)
+    monkeypatch.setattr(recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None)
+
+    result = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=5,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+
+    state = json.loads(schedule_file.read_text(encoding="utf-8"))
+    assert result["status"] == "ran"
+    assert calls == 1
+    assert state["last_status"] == "applied"
+    assert state["frontier_retry_attempts"] == 0
+    assert state["frontier_quarantine_retry_at"] is None
+
+
+def test_frontier_quarantine_does_not_ack_unresolved_feedback(
+    tmp_path, monkeypatch
+) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        "".join(
+            json.dumps({"kind": "missed_candidate", "prompt": str(index)}) + "\n"
+            for index in range(3)
+        ),
+        encoding="utf-8",
+    )
+    schedule_file = tmp_path / "schedule-state.json"
+    schedule_file.write_text(
+        json.dumps(
+            {
+                "last_status": "pending_frontier_review",
+                "last_feedback_count": 1,
+                "frontier_retry_candidate": "different-candidate",
+                "frontier_retry_attempts": 2,
+                "frontier_next_retry_at": "2000-01-01T00:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    pending_result = {
+        "ts": "2026-07-11T12:00:00",
+        "run_id": "still-pending",
+        "status": "pending_frontier_review",
+        "applied": False,
+        "dataset": {"examples": 3},
+        "best": {"proposal": {"overrides": {"fusion_semantic": 0.7}}},
+        "frontier_audit": {"summary": "temporary model outage"},
+    }
+    candidate_payload = {
+        "overrides": {"fusion_semantic": 0.7},
+        "examples": 3,
+        "feedback_count": 3,
+    }
+    candidate_hash = recall_improvement.hashlib.sha256(
+        json.dumps(candidate_payload, ensure_ascii=False, sort_keys=True, default=str).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    persisted = json.loads(schedule_file.read_text(encoding="utf-8"))
+    persisted["frontier_retry_candidate"] = candidate_hash
+    persisted["frontier_retry_attempts"] = 2
+    schedule_file.write_text(json.dumps(persisted), encoding="utf-8")
+    monkeypatch.setattr(
+        recall_improvement,
+        "run_improvement",
+        lambda **_kwargs: pending_result,
+    )
+    monkeypatch.setattr(recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None)
+
+    result = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=1,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+
+    state = json.loads(schedule_file.read_text(encoding="utf-8"))
+    assert result["result"]["status"] == "frontier_quarantined"
+    assert state["last_feedback_count"] == 1
+    assert state["frontier_quarantine_retry_at"]
 
 
 def test_run_due_budget_defer_keeps_schedule_byte_for_byte(tmp_path, monkeypatch) -> None:

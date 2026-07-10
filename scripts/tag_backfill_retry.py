@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retry pages whose backfill recorded ``llm response failed schema validation``.
+"""Obsolete tag-backfill retry reader (semantic writes disabled).
 
 Reads ``~/.wiki/.tag-backfill-progress.jsonl``, finds entries that failed
 the JSON schema gate (typically a one-shot Ollama format hiccup), and
@@ -9,9 +9,8 @@ to the progress log. The original ``skipped`` row is left untouched —
 the log is append-only — but the latest ``applied`` row will dominate
 any downstream tooling that walks the file.
 
-Usage:
-    python3 scripts/tag_backfill_retry.py
-    python3 scripts/tag_backfill_retry.py --retries 5
+Use ``llm-wiki-sleep``. The historical progress reader is retained for audit,
+but the executable fails closed before a local-model call or page mutation.
 """
 
 from __future__ import annotations
@@ -30,6 +29,9 @@ from tag_backfill_apply import (  # noqa: E402
     _append_progress,
     _flatten_master,
     _process_one,
+)
+from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+    block_legacy_semantic_mutation,
 )
 
 
@@ -75,6 +77,11 @@ def main() -> int:
         help="Max attempts per page (default 3).",
     )
     args = parser.parse_args()
+
+    block_legacy_semantic_mutation(
+        tool="tag_backfill_retry.py",
+        replacement="llm-wiki-sleep",
+    )
 
     failures = _collect_failures(PROGRESS_FILE)
     if not failures:

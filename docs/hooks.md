@@ -18,7 +18,18 @@ llm-wiki-hook --host codex --event Stop --hook
 llm-wiki-hook --host claude-code --event Stop --hook
 ```
 
-This schedules save and audit work in background and immediately prints `{}`.
+This schedules content-correction, save, recall-audit, and recall-improvement
+work in background and immediately prints `{}`. Content correction keeps a
+durable cursor keyed by host, session, and transcript file. Each Stop scans all
+newly completed turn pairs after that cursor, so a delayed transcript append or
+a previously failed Stop is captured on the next run instead of being limited
+to the newest turn. Re-capturing an existing turn preserves its immutable root
+identity. The lane accepts recall provenance only when prompt hash, host,
+session, and turn time match; repeated ambiguous prompts are left unattributed.
+
+Detection and local classification do not authorize a side effect. Every
+classification goes to the frontier model for the final decision in the
+separate content-correction convergence lane.
 
 ## Legacy Wrappers
 
@@ -33,7 +44,9 @@ These scripts remain for existing host settings:
 
 Save and audit wrappers call the dispatcher with `--only save` or
 `--only audit` to avoid duplicate work while current host settings still invoke
-two separate Stop hooks.
+two separate Stop hooks. The legacy `--only save` path also schedules content
+correction so existing installations gain the new behavior without another
+host hook entry.
 
 ## Install
 

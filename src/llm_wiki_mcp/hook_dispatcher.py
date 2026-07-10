@@ -109,6 +109,16 @@ def audit_enabled(explicit_config: Path | None = None) -> bool:
     return active_config_file(explicit_config).name == "config.toml"
 
 
+def content_correction_enabled(explicit_config: Path | None = None) -> bool:
+    policy = load_hook_policy(explicit_config)
+    if not policy.stop_content_correction:
+        return False
+    flag = env_flag("LLM_WIKI_CONTENT_CORRECTION_ENABLED")
+    if flag is not None:
+        return flag
+    return active_config_file(explicit_config).name == "config.toml"
+
+
 def recall_improve_enabled(explicit_config: Path | None = None) -> bool:
     policy = load_hook_policy(explicit_config)
     if not policy.stop_recall_improve:
@@ -183,7 +193,18 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
     tasks: list[BackgroundTask] = []
     run_save = args.only in {None, "save"}
     run_audit = args.only in {None, "audit"}
+    run_correction = args.only in {None, "save", "correction"}
     run_improve = args.only in {None, "improve"}
+    if run_correction and content_correction_enabled(config) and host in {"codex", "claude-code"}:
+        tasks.append(
+            BackgroundTask(
+                name=f"{host}-content-correction",
+                module="llm_wiki_mcp.content_correction",
+                args=["--host", host, "--hook", "--max-items", "1"],
+                env={"LLM_WIKI_CONTENT_CORRECTION_ENABLED": "1"},
+                log_prefix=f"{host}-content-correction",
+            )
+        )
     if run_save and save_enabled(host, config):
         if host == "codex":
             model = os.environ.get("CODEX_WIKI_SAVE_MODEL", CODEX_DEFAULT_MEMORY_MODEL)
@@ -258,7 +279,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id")
     parser.add_argument("--no-search", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--only", choices=["save", "audit", "improve"], help="Limit Stop dispatch for legacy wrappers.")
+    parser.add_argument(
+        "--only",
+        choices=["save", "audit", "correction", "improve"],
+        help="Limit Stop dispatch for legacy wrappers.",
+    )
     return parser
 
 

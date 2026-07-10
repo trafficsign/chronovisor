@@ -64,7 +64,13 @@ def test_stop_dispatch_only_save_for_legacy_wrapper(monkeypatch, tmp_path, capsy
     ) == 0
     output = json.loads(capsys.readouterr().out)
 
-    assert [task["name"] for task in output["tasks"]] == ["codex-save"]
+    assert [task["name"] for task in output["tasks"]] == [
+        "codex-content-correction",
+        "codex-save",
+    ]
+    correction = output["tasks"][0]
+    assert correction["module"] == "llm_wiki_mcp.content_correction"
+    assert correction["args"][:3] == ["--host", "codex", "--hook"]
 
 
 def test_stop_dispatch_full_entrypoint_runs_save_and_audit(monkeypatch, tmp_path, capsys) -> None:
@@ -92,6 +98,7 @@ def test_stop_dispatch_full_entrypoint_runs_save_and_audit(monkeypatch, tmp_path
     output = json.loads(capsys.readouterr().out)
 
     assert [task["name"] for task in output["tasks"]] == [
+        "claude-code-content-correction",
         "claude-code-save",
         "claude-code-recall-audit",
         "claude-code-recall-improve",
@@ -128,12 +135,40 @@ def test_stop_dispatch_only_improve_for_scheduler(monkeypatch, tmp_path, capsys)
     assert [task["name"] for task in output["tasks"]] == ["codex-recall-improve"]
 
 
+def test_stop_dispatch_only_content_correction(monkeypatch, tmp_path, capsys) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("[hooks.stop]\ncontent_correction = true\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", "1")
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+
+    assert hook_dispatcher.main(
+        [
+            "--host",
+            "codex",
+            "--event",
+            "Stop",
+            "--hook",
+            "--config",
+            str(config),
+            "--only",
+            "correction",
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    ) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert [task["name"] for task in output["tasks"]] == ["codex-content-correction"]
+
+
 def test_stop_dispatch_requires_env_without_unified_config(monkeypatch, tmp_path, capsys) -> None:
     legacy = tmp_path / "recall.toml"
     legacy.write_text("enabled = true\n", encoding="utf-8")
     monkeypatch.delenv("CODEX_WIKI_SAVE_ENABLED", raising=False)
     monkeypatch.delenv("LLM_WIKI_RECALL_AUDIT_ENABLED", raising=False)
     monkeypatch.delenv("LLM_WIKI_RECALL_IMPROVE_ENABLED", raising=False)
+    monkeypatch.delenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", raising=False)
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
     assert hook_dispatcher.main(

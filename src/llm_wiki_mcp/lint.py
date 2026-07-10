@@ -1,12 +1,17 @@
 """Lint engine - detect and fix wiki quality issues."""
 
-import json
+import difflib
+import fcntl
 import hashlib
+import json
 import re
 import threading
+from collections.abc import Callable, Mapping
 from collections import Counter
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
+from typing import Any, Iterator
 
 from llm_wiki_mcp.wiki import SYSTEM_DIR, WIKI_ROOT, all_pages, find_page
 from llm_wiki_mcp.index_store import get_store
@@ -19,6 +24,7 @@ from llm_wiki_mcp.link_fix import (
     position_in_spans,
     protected_spans,
 )
+from llm_wiki_mcp.page_mutation import wiki_mutation_lock
 from llm_wiki_mcp.tags import (
     parse_tags,
     validate_axis_counts,
@@ -27,6 +33,37 @@ from llm_wiki_mcp.tags import (
 
 
 STALE_DAYS = 90  # Pages not updated in this many days are flagged
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+StructuredReviewer = Callable[[str, dict[str, Any]], Mapping[str, Any] | str]
+
+SAFE_FIX_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "decision",
+        "summary",
+        "tests_run",
+        "commit",
+        "committed",
+        "pushed",
+        "risk",
+        "notes",
+    ],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected", "quarantined", "needs_retry"],
+        },
+        "summary": {"type": "string"},
+        "tests_run": {"type": "array", "items": {"type": "string"}},
+        "commit": {"type": ["string", "null"]},
+        "committed": {"type": "boolean"},
+        "pushed": {"type": "boolean"},
+        "risk": {"type": ["string", "null"]},
+        "notes": {"type": ["string", "null"]},
+    },
+}
 
 # `wiki_apply` runs `check()` and then re-runs it inside `apply_safe_fixes`,
 # so the same issue list is computed twice for an unchanged corpus. Cache
@@ -323,22 +360,396 @@ def _display_text_for_unwrap(link_inside: str, target: str) -> str:
     return target
 
 
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _canonical_hash(value: Mapping[str, Any]) -> str:
+    return _sha256_text(
+        json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def _bounded_text(value: str, limit: int = 30_000) -> str:
+    if len(value) <= limit:
+        return value
+    half = max(1, (limit - 35) // 2)
+    return value[:half] + "\n[... bounded review payload ...]\n" + value[-half:]
+
+
+def _safe_fix_artifact_dir(path: Path | None = None) -> Path:
+    if path is not None:
+        return path
+    # Resolve this dynamically: isolated tests and embedded runtimes patch the
+    # index-store Wiki root after this module has already been imported.
+    from llm_wiki_mcp import index_store
+
+    return Path(index_store.WIKI_ROOT) / "runtime" / "lint-safe-fixes"
+
+
+def _proposal_artifact_path(artifact_dir: Path, proposal_hash: str) -> Path:
+    return artifact_dir / "proposals" / f"{proposal_hash}.json"
+
+
+def _verdict_artifact_path(artifact_dir: Path, proposal_hash: str) -> Path:
+    return artifact_dir / "frontier-verdicts" / f"{proposal_hash}.json"
+
+
+@contextmanager
+def _safe_fix_review_lock(artifact_dir: Path, proposal_hash: str) -> Iterator[None]:
+    """Serialize one exact proposal across local processes.
+
+    The lock spans the frontier call and verdict persistence. This avoids two
+    workers racing an approval and rejection for the same exact page preimage.
+    """
+
+    lock_path = artifact_dir / "locks" / f"{proposal_hash}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _extract_review_object(value: Mapping[str, Any] | str) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if not isinstance(value, str):
+        return None
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(value):
+        if char != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(value, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _normalize_safe_fix_review(value: Mapping[str, Any] | str) -> dict[str, Any]:
+    parsed = _extract_review_object(value)
+    if parsed is None:
+        return {
+            "decision": "needs_retry",
+            "summary": "frontier output did not contain a JSON object",
+            "valid": False,
+        }
+    decision = parsed.get("decision")
+    summary = parsed.get("summary")
+    tests_run = parsed.get("tests_run")
+    commit = parsed.get("commit")
+    risk = parsed.get("risk")
+    notes = parsed.get("notes")
+    valid = (
+        decision in {"approved", "rejected", "quarantined", "needs_retry"}
+        and isinstance(summary, str)
+        and isinstance(tests_run, list)
+        and all(isinstance(item, str) for item in tests_run)
+        and (commit is None or isinstance(commit, str))
+        and isinstance(parsed.get("committed"), bool)
+        and isinstance(parsed.get("pushed"), bool)
+        and (risk is None or isinstance(risk, str))
+        and (notes is None or isinstance(notes, str))
+    )
+    if not valid:
+        return {
+            "decision": "needs_retry",
+            "summary": "frontier output failed the safe-fix decision schema",
+            "valid": False,
+        }
+    normalized = {
+        key: parsed.get(key)
+        for key in SAFE_FIX_REVIEW_SCHEMA["required"]
+    }
+    normalized["valid"] = True
+    if isinstance(parsed.get("frontier_failure"), Mapping):
+        normalized["frontier_failure"] = dict(parsed["frontier_failure"])
+    return normalized
+
+
+def _build_safe_fix_proposal(
+    *,
+    page_id: str,
+    operation: str,
+    expected_text: str,
+    updated_text: str,
+    details: Mapping[str, Any],
+) -> dict[str, Any]:
+    unified_diff = "".join(
+        difflib.unified_diff(
+            expected_text.splitlines(keepends=True),
+            updated_text.splitlines(keepends=True),
+            fromfile=f"{page_id}:before",
+            tofile=f"{page_id}:after",
+            n=5,
+        )
+    )
+    bounded_diff = _bounded_text(unified_diff)
+    return {
+        "schema_version": 1,
+        "kind": "lint_safe_fix_proposal",
+        "page_id": page_id,
+        "operation": operation,
+        "expected_sha256": _sha256_text(expected_text),
+        "updated_sha256": _sha256_text(updated_text),
+        "details": dict(details),
+        "unified_diff": bounded_diff,
+        "unified_diff_sha256": _sha256_text(bounded_diff),
+        "full_unified_diff_sha256": _sha256_text(unified_diff),
+        "unified_diff_truncated": bounded_diff != unified_diff,
+    }
+
+
+def _write_or_validate_proposal(
+    artifact_dir: Path,
+    proposal: Mapping[str, Any],
+) -> str:
+    proposal_hash = _canonical_hash(proposal)
+    path = _proposal_artifact_path(artifact_dir, proposal_hash)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        existing = None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read durable safe-fix proposal: {exc}") from exc
+    envelope = {
+        "schema_version": 1,
+        "kind": "lint_safe_fix_proposal_artifact",
+        "proposal_sha256": proposal_hash,
+        "proposal": dict(proposal),
+    }
+    if existing is not None:
+        if existing != envelope:
+            raise RuntimeError("durable safe-fix proposal failed integrity validation")
+        return proposal_hash
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return proposal_hash
+
+
+def _build_safe_fix_prompt(proposal: Mapping[str, Any], *, expected_text: str) -> str:
+    return f"""\
+You are the final autonomous reviewer for an LLM Wiki semantic page mutation.
+A local deterministic checker produced the proposal below, but it has no
+authority to change content or metadata. Independently decide whether this
+exact mutation is correct. Approve only when every change is justified by the
+supplied page context and operation-specific evidence. Do not propose or apply
+a different patch. Use needs_retry when the evidence is insufficient.
+
+Exact proposal:
+{json.dumps(dict(proposal), ensure_ascii=False, indent=2, sort_keys=True)}
+
+Page preimage (bounded; the exact full hash is in the proposal):
+{_bounded_text(expected_text, 24_000)}
+
+Return JSON matching this schema:
+{json.dumps(SAFE_FIX_REVIEW_SCHEMA, ensure_ascii=False, indent=2)}
+"""
+
+
+def _default_safe_fix_reviewer(
+    prompt: str,
+    schema: dict[str, Any],
+) -> Mapping[str, Any] | str:
+    from llm_wiki_mcp import frontier_review
+
+    return frontier_review.run_structured_review(
+        prompt,
+        schema,
+        repo_root=REPO_ROOT,
+        execute_patch=False,
+        command_env="LLM_WIKI_LINT_SAFE_FIX_FRONTIER_CMD",
+    )
+
+
+def _load_safe_fix_verdict(
+    artifact_dir: Path,
+    proposal_hash: str,
+    *,
+    prompt_hash: str,
+) -> dict[str, Any] | None:
+    path = _verdict_artifact_path(artifact_dir, proposal_hash)
+    try:
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(envelope, dict) or any(
+        (
+            envelope.get("schema_version") != 1,
+            envelope.get("kind") != "lint_safe_fix_frontier_verdict",
+            envelope.get("proposal_sha256") != proposal_hash,
+            envelope.get("prompt_sha256") != prompt_hash,
+        )
+    ):
+        return None
+    verdict = envelope.get("verdict")
+    if not isinstance(verdict, Mapping):
+        return None
+    normalized = _normalize_safe_fix_review(verdict)
+    if normalized.get("valid") is not True:
+        return None
+    if normalized.get("decision") not in {"approved", "rejected"}:
+        return None
+    normalized["reused"] = True
+    return normalized
+
+
+def _write_safe_fix_verdict(
+    artifact_dir: Path,
+    proposal_hash: str,
+    *,
+    prompt_hash: str,
+    verdict: Mapping[str, Any],
+) -> None:
+    path = _verdict_artifact_path(artifact_dir, proposal_hash)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    envelope = {
+        "schema_version": 1,
+        "kind": "lint_safe_fix_frontier_verdict",
+        "proposal_sha256": proposal_hash,
+        "prompt_sha256": prompt_hash,
+        "verdict": {
+            key: verdict.get(key)
+            for key in SAFE_FIX_REVIEW_SCHEMA["required"]
+        },
+    }
+    atomic_write(path, json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def _review_safe_fix(
+    proposal: Mapping[str, Any],
+    *,
+    expected_text: str,
+    reviewer: StructuredReviewer,
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    proposal_hash = _canonical_hash(proposal)
+    prompt = _build_safe_fix_prompt(proposal, expected_text=expected_text)
+    prompt_hash = _sha256_text(prompt)
+    with _safe_fix_review_lock(artifact_dir, proposal_hash):
+        # The exact proposal must be durable before calling the frontier model.
+        proposal_hash = _write_or_validate_proposal(artifact_dir, proposal)
+        reused = _load_safe_fix_verdict(
+            artifact_dir,
+            proposal_hash,
+            prompt_hash=prompt_hash,
+        )
+        if reused is not None:
+            return reused
+        try:
+            verdict = _normalize_safe_fix_review(reviewer(prompt, SAFE_FIX_REVIEW_SCHEMA))
+        except Exception as exc:
+            return {
+                "decision": "needs_retry",
+                "summary": f"frontier safe-fix review failed: {exc.__class__.__name__}: {exc}",
+                "valid": False,
+            }
+        if verdict.get("valid") is True and verdict.get("decision") in {"approved", "rejected"}:
+            try:
+                _write_safe_fix_verdict(
+                    artifact_dir,
+                    proposal_hash,
+                    prompt_hash=prompt_hash,
+                    verdict=verdict,
+                )
+            except Exception as exc:
+                return {
+                    "decision": "needs_retry",
+                    "summary": f"durable frontier verdict write failed: {exc}",
+                    "valid": False,
+                }
+        return verdict
+
+
+def build_semantic_mutation_proposal(
+    *,
+    page_id: str,
+    operation: str,
+    expected_text: str,
+    updated_text: str,
+    details: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the exact durable proposal shared by deterministic page lanes."""
+
+    return _build_safe_fix_proposal(
+        page_id=page_id,
+        operation=operation,
+        expected_text=expected_text,
+        updated_text=updated_text,
+        details=details,
+    )
+
+
+def review_semantic_mutation(
+    proposal: Mapping[str, Any],
+    *,
+    expected_text: str,
+    reviewer: StructuredReviewer,
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    """Persist and frontier-review one exact semantic mutation proposal."""
+
+    return _review_safe_fix(
+        proposal,
+        expected_text=expected_text,
+        reviewer=reviewer,
+        artifact_dir=artifact_dir,
+    )
+
+
+def _atomic_write_if_unchanged(
+    path: Path,
+    expected: str,
+    updated: str,
+    *,
+    evidence_guards: tuple[tuple[Path, str], ...] = (),
+) -> bool:
+    """Write a safe fix only while the reviewed page preimage is current."""
+
+    try:
+        with wiki_mutation_lock():
+            if path.read_text(encoding="utf-8") != expected:
+                return False
+            if any(
+                guard_path.read_text(encoding="utf-8") != guard_text
+                for guard_path, guard_text in evidence_guards
+            ):
+                return False
+            atomic_write(path, updated)
+            return path.read_text(encoding="utf-8") == updated
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def apply_safe_fixes(
     issues: list[dict],
     dry_run: bool = False,
     fuzzy: bool = True,
+    *,
+    reviewer: StructuredReviewer | None = None,
+    artifact_dir: Path | None = None,
 ) -> list[str]:
-    """Apply safe auto-fixes. Returns list of actions taken.
+    """Propose lint fixes and apply only durable frontier approvals.
 
     Args:
         issues: Issue list from check()
         dry_run: True なら書き込まず actions のプレビューだけ返す
         fuzzy: True なら broken_link を fuzzy match で救い、fallback で plaintext 化する。
                False なら broken_link は放置 (既存の挙動より安全側)。
+        reviewer: Structured frontier reviewer override (primarily tests).
+        artifact_dir: Durable proposal/verdict directory override.
     """
     store = get_store()
     actions: list[str] = []
+    mutated = False
     all_page_ids = store.all_page_ids(include_system=True)
+    frontier_reviewer = reviewer or _default_safe_fix_reviewer
+    durable_dir = _safe_fix_artifact_dir(artifact_dir)
 
     for issue in issues:
         if not issue.get("auto_fixable"):
@@ -362,6 +773,25 @@ def apply_safe_fixes(
                 continue
 
             replacement = find_fuzzy_match(target, all_page_ids)
+            replacement_guards: tuple[tuple[Path, str], ...] = ()
+            replacement_evidence: dict[str, Any] | None = None
+            if replacement and replacement != target:
+                replacement_path = find_page(replacement)
+                if replacement_path is None:
+                    system_candidate = SYSTEM_DIR / f"{replacement}.md"
+                    replacement_path = system_candidate if system_candidate.is_file() else None
+                if replacement_path is None:
+                    continue
+                try:
+                    replacement_text = replacement_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                replacement_guards = ((replacement_path, replacement_text),)
+                replacement_evidence = {
+                    "page_id": replacement,
+                    "sha256": _sha256_text(replacement_text),
+                    "excerpt": _bounded_text(replacement_text, 8_000),
+                }
 
             try:
                 content = path.read_text(encoding="utf-8")
@@ -380,14 +810,50 @@ def apply_safe_fixes(
             if dry_run:
                 actions.append(f"[dry-run] {label}")
             else:
-                atomic_write(path, new_content)
-                actions.append(label)
+                proposal = _build_safe_fix_proposal(
+                    page_id=page_id,
+                    operation=(
+                        "broken_link_retarget"
+                        if replacement and replacement != target
+                        else "broken_link_plaintext"
+                    ),
+                    expected_text=content,
+                    updated_text=new_content,
+                    details={
+                        "target": target,
+                        "replacement": replacement,
+                        "occurrences": count,
+                        "replacement_evidence": replacement_evidence,
+                    },
+                )
+                try:
+                    review = _review_safe_fix(
+                        proposal,
+                        expected_text=content,
+                        reviewer=frontier_reviewer,
+                        artifact_dir=durable_dir,
+                    )
+                except Exception as exc:
+                    actions.append(f"[frontier-retry] {label}: durable proposal error: {exc}")
+                    continue
+                if review.get("decision") == "approved" and review.get("valid") is True:
+                    if _atomic_write_if_unchanged(
+                        path,
+                        content,
+                        new_content,
+                        evidence_guards=replacement_guards,
+                    ):
+                        mutated = True
+                        actions.append(label)
+                elif review.get("decision") == "rejected" and review.get("valid") is True:
+                    actions.append(f"[frontier-rejected] {label}")
+                else:
+                    actions.append(f"[frontier-retry] {label}")
 
         elif issue["type"] == "tag_invalid":
-            # Drop malformed tags from frontmatter. Count violations are NOT
-            # auto-fixed here; lint_repair routes count decisions through a
-            # validated local proposal and bounded frontier review. Only
-            # obviously-broken individual tags are safe to silently strip.
+            # Dropping an invalid tag is still a semantic metadata mutation:
+            # the deterministic result is only a proposal until the frontier
+            # reviewer authorizes this exact page preimage and output hash.
             page_id = issue["page"]
             path = find_page(page_id)
             if not path:
@@ -424,12 +890,35 @@ def apply_safe_fixes(
             if dry_run:
                 actions.append(f"[dry-run] {label}")
             else:
-                atomic_write(path, new_content)
-                actions.append(label)
+                proposal = _build_safe_fix_proposal(
+                    page_id=page_id,
+                    operation="drop_invalid_tags",
+                    expected_text=content,
+                    updated_text=new_content,
+                    details={"kept_tags": kept, "dropped_tags": dropped},
+                )
+                try:
+                    review = _review_safe_fix(
+                        proposal,
+                        expected_text=content,
+                        reviewer=frontier_reviewer,
+                        artifact_dir=durable_dir,
+                    )
+                except Exception as exc:
+                    actions.append(f"[frontier-retry] {label}: durable proposal error: {exc}")
+                    continue
+                if review.get("decision") == "approved" and review.get("valid") is True:
+                    if _atomic_write_if_unchanged(path, content, new_content):
+                        mutated = True
+                        actions.append(label)
+                elif review.get("decision") == "rejected" and review.get("valid") is True:
+                    actions.append(f"[frontier-rejected] {label}")
+                else:
+                    actions.append(f"[frontier-retry] {label}")
 
     # If we mutated pages, the index is now stale — refresh once at the end
     # so subsequent reads see consistent backlinks/outlinks.
-    if actions and not dry_run:
+    if mutated and not dry_run:
         store.refresh()
 
     return actions

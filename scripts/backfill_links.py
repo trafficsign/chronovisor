@@ -15,7 +15,9 @@ Codex レビュー対応:
 
 実行:
 - python3 backfill_links.py --dry-run    # プレビュー
-- python3 backfill_links.py              # 実行
+- llm-wiki-sleep                         # frontier 審査後に自動適用
+
+この旧スクリプトの直接書き込み関数は fail-closed。
 """
 
 import argparse
@@ -27,6 +29,12 @@ import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+    block_legacy_semantic_mutation,
+)
 
 # llm-wiki-mcp パッケージから既存定数を import
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -402,6 +410,10 @@ def merge_related_section(content: str, new_links: list[str]) -> str:
 
 def atomic_write(path: Path, content: str) -> None:
     """tempfile + os.replace で atomic 書き込み。"""
+    block_legacy_semantic_mutation(
+        tool="backfill_links.py",
+        replacement="llm-wiki-sleep",
+    )
     tmp = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",

@@ -12,6 +12,10 @@ recall = true
 [hooks.stop]
 save = true
 audit = true
+# Capture every completed correction turn after a durable per-session cursor.
+# Local proposals never finalize a classification; the frontier model does.
+content_correction = true
+recall_improve = true
 
 [embedding]
 # Tuned search profile. If omitted, runtime falls back to nomic-embed-text.
@@ -32,10 +36,12 @@ num_predict = 8192
 read_timeout_ms = 660000
 
 [search.negative_feedback]
-# Optional. Demotes pages recorded as injection_ignored / false-positive
-# feedback when the incoming query is lexically similar (Jaccard over search
-# tokens) to the feedback prompt. Pages confirmed relevant by reviewed golden
-# labels for a similar query are protected and never demoted.
+# Optional. Demotes pages recorded as page_ignored / injection_ignored /
+# false-positive feedback when the incoming query is lexically similar
+# (Jaccard over search tokens) to the feedback prompt. A correction classified
+# as wrong retrieval supplies an explicit negative_pages subset, so unrelated
+# candidates from the same recall decision are not penalized. Pages confirmed
+# relevant by reviewed golden labels for a similar query remain protected.
 enabled = true
 similarity_threshold = 0.35
 penalty = 0.85
@@ -152,6 +158,18 @@ remain supported.
 - `CODEX_WIKI_SAVE_ENABLED=1`: enable Codex save hook.
 - `CLAUDE_CODE_WIKI_SAVE_ENABLED=1`: enable Claude Code save hook.
 - `LLM_WIKI_RECALL_AUDIT_ENABLED=1`: enable recall auditor hook.
+- `LLM_WIKI_CONTENT_CORRECTION_ENABLED=1`: enable the user-content-correction hook.
+- `LLM_WIKI_CONTENT_CORRECTION_REVIEW_CMD`: optional frontier structured-review command override.
+- `LLM_WIKI_RECALL_AUTO_APPLY_FRONTIER_TIMEOUT`: timeout in seconds for the
+  frontier final review of recall auto-apply actions (default: `1800`).
+- `LLM_WIKI_CONTENT_CORRECTION_QUARANTINE_RETRY_SECONDS`: cooldown before an
+  autonomous content-correction quarantine is reopened (default: `21600`).
+- `LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS`: cooldown before autonomous
+  recall, replay, repair, and self-heal quarantines are reopened (default:
+  `21600`).
+- `LLM_WIKI_HUMAN_REQUIRED_RECHECK_SECONDS`: interval for automatically
+  rechecking external-authority failures such as expired authentication,
+  billing/quota, or keychain access (default: `3600`).
 
 The compatibility wrappers preserve the old environment behavior. Direct
 `llm-wiki-hook --event Stop` deployments can rely on `config.toml`.

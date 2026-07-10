@@ -7,6 +7,7 @@ adds direct coverage for the tag taxonomy rules introduced in plan-4.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,19 @@ def _by_type(issues: list[dict], type_: str, page_id: str | None = None) -> list
         i for i in issues
         if i["type"] == type_ and (page_id is None or i["page"] == page_id)
     ]
+
+
+def _frontier_decision(decision: str, summary: str = "reviewed exact proposal") -> dict:
+    return {
+        "decision": decision,
+        "summary": summary,
+        "tests_run": ["checked exact page hashes and diff"],
+        "commit": None,
+        "committed": False,
+        "pushed": False,
+        "risk": None,
+        "notes": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +174,10 @@ class TestTagInvalid:
             "---\nbody\n",
         )
         issues = check()
-        actions = apply_safe_fixes(issues)
+        actions = apply_safe_fixes(
+            issues,
+            reviewer=lambda _prompt, _schema: _frontier_decision("approved"),
+        )
         assert any("no-prefix" in a for a in actions)
         text = path.read_text()
         assert "no-prefix" not in text
@@ -168,6 +185,182 @@ class TestTagInvalid:
         assert "d/ai-industry" in text
         assert "t/analysis" in text
         assert "s/2026" in text
+
+    def test_apply_safe_fixes_preserves_correction_that_lands_before_cas(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import lint as lint_mod
+
+        path = _seed(
+            isolated_wiki,
+            "p.md",
+            "---\ntitle: P\ntags: [d/ai-industry, invalid, t/analysis, s/2026]\n---\nold fact\n",
+        )
+        corrected = (
+            "---\ntitle: P\ntags: [d/ai-industry, invalid, t/analysis, s/2026]\n"
+            "---\nuser-corrected fact\n"
+        )
+
+        @contextmanager
+        def correction_wins():
+            path.write_text(corrected, encoding="utf-8")
+            yield
+
+        monkeypatch.setattr(lint_mod, "wiki_mutation_lock", correction_wins)
+        actions = lint_mod.apply_safe_fixes(
+            [{"type": "tag_invalid", "page": "p", "auto_fixable": True}],
+            reviewer=lambda _prompt, _schema: _frontier_decision("approved"),
+        )
+
+        assert actions == []
+        assert path.read_text(encoding="utf-8") == corrected
+
+    def test_local_proposal_cannot_mutate_without_frontier_approval(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp.lint import apply_safe_fixes, check
+
+        path = _seed(
+            isolated_wiki,
+            "p.md",
+            "---\ntitle: P\ntags: [d/ai-industry, invalid, t/analysis, s/2026]\n---\nbody\n",
+        )
+        original = path.read_text(encoding="utf-8")
+        actions = apply_safe_fixes(
+            check(),
+            reviewer=lambda _prompt, _schema: _frontier_decision("needs_retry"),
+        )
+
+        assert actions and actions[0].startswith("[frontier-retry]")
+        assert path.read_text(encoding="utf-8") == original
+
+    def test_frontier_rejection_is_durable_and_does_not_mutate(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp.lint import apply_safe_fixes, check
+
+        path = _seed(
+            isolated_wiki,
+            "p.md",
+            "---\ntitle: P\ntags: [d/ai-industry, invalid, t/analysis, s/2026]\n---\nbody\n",
+        )
+        original = path.read_text(encoding="utf-8")
+        calls = 0
+
+        def reject(_prompt, _schema):
+            nonlocal calls
+            calls += 1
+            return _frontier_decision("rejected")
+
+        issues = check()
+        first = apply_safe_fixes(issues, reviewer=reject)
+        second = apply_safe_fixes(
+            issues,
+            reviewer=lambda _prompt, _schema: (_ for _ in ()).throw(
+                AssertionError("durable rejection must be reused")
+            ),
+        )
+
+        assert calls == 1
+        assert first[0].startswith("[frontier-rejected]")
+        assert second[0].startswith("[frontier-rejected]")
+        assert path.read_text(encoding="utf-8") == original
+        artifact_root = isolated_wiki / "runtime" / "lint-safe-fixes"
+        assert len(list((artifact_root / "proposals").glob("*.json"))) == 1
+        assert len(list((artifact_root / "frontier-verdicts").glob("*.json"))) == 1
+
+    def test_durable_frontier_approval_is_reused_after_pre_apply_crash(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import lint as lint_mod
+
+        path = _seed(
+            isolated_wiki,
+            "p.md",
+            "---\ntitle: P\ntags: [d/ai-industry, invalid, t/analysis, s/2026]\n---\nbody\n",
+        )
+        issues = lint_mod.check()
+        real_apply = lint_mod._atomic_write_if_unchanged
+        monkeypatch.setattr(lint_mod, "_atomic_write_if_unchanged", lambda *_args: False)
+        first = lint_mod.apply_safe_fixes(
+            issues,
+            reviewer=lambda _prompt, _schema: _frontier_decision("approved"),
+        )
+        assert first == []
+        assert "invalid" in path.read_text(encoding="utf-8")
+
+        monkeypatch.setattr(lint_mod, "_atomic_write_if_unchanged", real_apply)
+        second = lint_mod.apply_safe_fixes(
+            issues,
+            reviewer=lambda _prompt, _schema: (_ for _ in ()).throw(
+                AssertionError("durable approval must be reused")
+            ),
+        )
+
+        assert second and "dropped 1 invalid tag" in second[0]
+        assert "invalid" not in path.read_text(encoding="utf-8")
+
+    def test_dry_run_is_read_only_and_does_not_call_frontier(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp.lint import apply_safe_fixes, check
+
+        path = _seed(
+            isolated_wiki,
+            "p.md",
+            "---\ntitle: P\ntags: [d/ai-industry, invalid, t/analysis, s/2026]\n---\nbody\n",
+        )
+        original = path.read_text(encoding="utf-8")
+        actions = apply_safe_fixes(
+            check(),
+            dry_run=True,
+            reviewer=lambda _prompt, _schema: (_ for _ in ()).throw(
+                AssertionError("dry-run must not call frontier")
+            ),
+        )
+
+        assert actions and actions[0].startswith("[dry-run]")
+        assert path.read_text(encoding="utf-8") == original
+        assert not (isolated_wiki / "runtime" / "lint-safe-fixes").exists()
+
+
+class TestBrokenLinkFrontierGate:
+    def test_retarget_requires_frontier_and_binds_exact_preimage(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp.lint import apply_safe_fixes, check
+
+        source = _seed(
+            isolated_wiki,
+            "source.md",
+            "---\ntitle: Source\ntags: [d/ai, t/analysis, s/2026]\n---\n[[known-pag|Known]]\n",
+        )
+        _seed(
+            isolated_wiki,
+            "known-page.md",
+            "---\ntitle: Known\ntags: [d/ai, t/analysis, s/2026]\n---\nbody\n",
+        )
+        prompts: list[str] = []
+
+        def approve(prompt, _schema):
+            prompts.append(prompt)
+            return _frontier_decision("approved")
+
+        actions = apply_safe_fixes(check(), reviewer=approve)
+
+        assert actions == ["[source] [[known-pag]] → [[known-page]] (1x)"]
+        assert "[[known-page|Known]]" in source.read_text(encoding="utf-8")
+        assert len(prompts) == 1
+        assert '"expected_sha256"' in prompts[0]
+        assert '"operation": "broken_link_retarget"' in prompts[0]
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ replacing it with something that catches the same class of mistake.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import date, datetime
@@ -353,6 +354,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         index_store,
         ollama,
         orchestrator,
+        page_mutation,
         runtime_status,
         search,
     )
@@ -369,6 +371,12 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
     monkeypatch.setattr(orchestrator, "WIKI_ROOT", wiki_root)
     monkeypatch.setattr(orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json")
+    monkeypatch.setattr(
+        page_mutation,
+        "WIKI_MUTATION_LOCK",
+        wiki_root / "runtime" / "wiki-mutation.lock",
+    )
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", wiki_root / "runtime")
     monkeypatch.setattr(runtime_status, "STATUS_FILE", wiki_root / "runtime" / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", wiki_root / "runtime" / "events.jsonl")
@@ -387,6 +395,26 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(index_store, "_store", None)
     monkeypatch.setattr(ollama, "is_available", lambda: False)
     monkeypatch.setattr(search, "update_embeddings", lambda page_ids=None: 0)
+    def isolated_frontier_review(proposal, *, reviewer=None):
+        if reviewer is not None:
+            return ingest._normalize_ingest_frontier_review(
+                reviewer(proposal),
+                proposal=proposal,
+            )
+        has_prepared = bool(proposal.get("prepared_operations"))
+        has_failed = bool(proposal.get("failed_operation_specs"))
+        return {
+            "decision": "apply_available" if has_prepared else "confirmed_noop",
+            "summary": "isolated ingest fixture disposition",
+            "failed_operations_disposition": (
+                "confirmed_unnecessary" if has_failed else "none"
+            ),
+            "tests_run": [],
+            "risk": None,
+            "notes": None,
+        }
+
+    monkeypatch.setattr(ingest, "_run_ingest_frontier_review", isolated_frontier_review)
 
     return wiki_root
 
@@ -543,6 +571,94 @@ class TestApplyOperations:
         assert "## addendum" in text
         assert "original" in text
 
+    def test_stale_ingest_cannot_reintroduce_applied_content_correction(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import page_mutation
+
+        path = _seed_page(
+            isolated_wiki,
+            "hardware/display.md",
+            "---\ntitle: Display\nupdated: 2026-07-10\n---\n"
+            "The setup has two G32P 32-inch 6K displays.\n",
+        )
+        prepared = page_mutation.prepare_page_mutation(
+            "display",
+            [
+                {
+                    "old_text": "The setup has two G32P 32-inch 6K displays.",
+                    "new_text": "The setup has one G32P 32-inch 6K display.",
+                }
+            ],
+            correction_id="corr-display-count",
+        )
+        assert page_mutation.apply_prepared_mutations([prepared])["status"] == "applied"
+
+        created, updated = _apply_operations(
+            [
+                {
+                    "type": "update",
+                    "filename": "display.md",
+                    "content": (
+                        "Stale replay says: The setup has two G32P 32-inch 6K displays. "
+                        "The desk is 180 cm wide."
+                    ),
+                }
+            ]
+        )
+
+        assert created == []
+        assert updated == ["display"]
+        written = path.read_text(encoding="utf-8")
+        assert "two G32P 32-inch 6K displays" not in written
+        assert written.count("one G32P 32-inch 6K display") >= 2
+        assert "The desk is 180 cm wide." in written
+        assert "applied_corrections: [corr-display-count]" in written
+
+    def test_stale_ingest_cannot_resurrect_correction_under_new_slug(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import page_mutation
+
+        _seed_page(
+            isolated_wiki,
+            "hardware/display.md",
+            "---\ntitle: Display\nupdated: 2026-07-10\n---\n"
+            "The setup has two G32P 32-inch 6K displays.\n",
+        )
+        prepared = page_mutation.prepare_page_mutation(
+            "display",
+            [
+                {
+                    "old_text": "The setup has two G32P 32-inch 6K displays.",
+                    "new_text": "The setup has one G32P 32-inch 6K display.",
+                }
+            ],
+            correction_id="corr-display-count-global",
+        )
+        assert page_mutation.apply_prepared_mutations([prepared])["status"] == "applied"
+
+        created, updated = _apply_operations(
+            [
+                {
+                    "type": "create",
+                    "filename": "alternate-display-memory.md",
+                    "content": (
+                        "---\ntitle: Alternate display memory\nupdated: 2026-07-11\n---\n"
+                        "The setup has two G32P 32-inch 6K displays.\n"
+                    ),
+                }
+            ]
+        )
+
+        assert updated == []
+        assert created == ["alternate-display-memory"]
+        alternate = page_mutation.PAGES_DIR / "alternate-display-memory.md"
+        written = alternate.read_text(encoding="utf-8")
+        assert "two G32P 32-inch 6K displays" not in written
+        assert "one G32P 32-inch 6K display" in written
+        assert "corr-display-count-global" in written
+
     def test_index_store_failure_raises(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -563,6 +679,209 @@ class TestApplyOperations:
         ]
         with pytest.raises(IngestApplyError, match="index_store unavailable"):
             _apply_operations(ops)
+
+
+class TestIngestFrontierGate:
+    @staticmethod
+    def _create_op() -> dict:
+        return {
+            "type": "create",
+            "filename": "memory/frontier-only.md",
+            "content": (
+                "---\ntitle: Frontier only\nupdated: 2026-07-11\n---\n"
+                "The exact proposed fact.\n"
+            ),
+        }
+
+    def test_local_prepare_alone_cannot_mutate_page(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        planned, _totals = ingest._prepare_operations([self._create_op()])
+
+        assert len(planned) == 1
+        assert "The exact proposed fact." in planned[0].new_body
+        assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
+
+    def test_frontier_confirmed_noop_is_durable_and_non_mutating(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="raw evidence",
+            reviewer=lambda _proposal: {
+                "decision": "confirmed_noop",
+                "summary": "claim is not grounded",
+                "failed_operations_disposition": "none",
+            },
+        )
+
+        assert result["status"] == "confirmed_noop"
+        assert result["created"] == []
+        assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
+        proposal_path, review_path = ingest._ingest_artifact_paths(result["source_key"])
+        assert proposal_path.exists()
+        assert review_path.exists()
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        assert review["proposal_sha256"] == result["proposal_sha256"]
+        assert review["review"]["decision"] == "confirmed_noop"
+
+    def test_frontier_retry_keeps_proposal_but_writes_no_verdict_or_page(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="retry evidence",
+            reviewer=lambda _proposal: {
+                "decision": "needs_retry",
+                "summary": "frontier transport unavailable",
+            },
+        )
+
+        assert result["status"] == "needs_retry"
+        proposal_path, review_path = ingest._ingest_artifact_paths(result["source_key"])
+        assert proposal_path.exists()
+        assert not review_path.exists()
+        assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
+
+    def test_frontier_approval_reviews_exact_raw_preimage_and_postimage(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        original = "---\ntitle: Existing\nupdated: 2026-01-01\n---\nold fact\n"
+        path = _seed_page(isolated_wiki, "memory/existing.md", original)
+        captured: list[dict] = []
+
+        result = ingest._review_and_apply_ingest_operations(
+            [
+                {
+                    "type": "update",
+                    "filename": "memory/existing.md",
+                    "content": "## New evidence\nnew fact",
+                }
+            ],
+            raw_content="verbatim raw evidence",
+            source_raw="raw/session.md",
+            reviewer=lambda proposal: (
+                captured.append(proposal)
+                or {
+                    "decision": "apply_available",
+                    "summary": "exact evidence supports it",
+                    "failed_operations_disposition": "none",
+                }
+            ),
+        )
+
+        assert result["status"] == "apply_available"
+        assert result["updated"] == ["existing"]
+        assert "new fact" in path.read_text(encoding="utf-8")
+        proposal = captured[0]
+        assert proposal["raw_content"] == "verbatim raw evidence"
+        exact = proposal["prepared_operations"][0]
+        assert exact["previous_text"] == original
+        assert exact["previous_sha256"] == hashlib.sha256(original.encode()).hexdigest()
+        assert exact["proposed_sha256"] == hashlib.sha256(
+            exact["proposed_text"].encode()
+        ).hexdigest()
+
+    def test_page_race_after_reviewed_prepare_fails_closed(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        path = _seed_page(
+            isolated_wiki,
+            "memory/race.md",
+            "---\ntitle: Race\nupdated: 2026-01-01\n---\nold\n",
+        )
+        planned, totals = ingest._prepare_operations(
+            [
+                {
+                    "type": "update",
+                    "filename": "memory/race.md",
+                    "content": "reviewed proposal",
+                }
+            ]
+        )
+        path.write_text(
+            "---\ntitle: Race\nupdated: 2026-01-01\n---\nconcurrent correction\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(IngestApplyError, match="page changed before ingest apply"):
+            ingest._apply_prepared_operations(planned, link_totals=totals)
+        assert "concurrent correction" in path.read_text(encoding="utf-8")
+        assert "reviewed proposal" not in path.read_text(encoding="utf-8")
+
+    def test_approved_artifact_recovers_without_second_frontier_call(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        real_apply = ingest._apply_prepared_operations
+        monkeypatch.setattr(
+            ingest,
+            "_apply_prepared_operations",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                IngestApplyError("simulated power loss before page replace")
+            ),
+        )
+        with pytest.raises(IngestApplyError, match="simulated power loss"):
+            ingest._review_and_apply_ingest_operations(
+                [self._create_op()],
+                raw_content="recoverable raw",
+                reviewer=lambda _proposal: {
+                    "decision": "apply_available",
+                    "summary": "approved before crash",
+                    "failed_operations_disposition": "none",
+                },
+            )
+
+        monkeypatch.setattr(ingest, "_apply_prepared_operations", real_apply)
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="recoverable raw",
+            reviewer=lambda _proposal: (_ for _ in ()).throw(
+                AssertionError("durable verdict should be reused")
+            ),
+        )
+
+        assert result["status"] == "apply_available"
+        assert result["recovered_artifact"] is True
+        assert result["reused_review"] is True
+        assert (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
+
+    def test_dry_run_is_completely_read_only(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp import ingest
+
+        before = {
+            path.relative_to(isolated_wiki).as_posix(): path.read_bytes()
+            for path in isolated_wiki.rglob("*")
+            if path.is_file()
+        }
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="dry-run raw",
+            dry_run=True,
+        )
+        after = {
+            path.relative_to(isolated_wiki).as_posix(): path.read_bytes()
+            for path in isolated_wiki.rglob("*")
+            if path.is_file()
+        }
+
+        assert result["status"] == "dry_run"
+        assert result["artifact_written"] is False
+        assert after == before
+        assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -876,7 +1195,7 @@ class TestRunIngestPartialFailure:
         """Contract: a partial generate failure (2 of 3 ops succeed, even
         after the per-op retry) writes the 2 successful pages, marks raws
         processed (so the next tick won't re-triage and collide on stem),
-        and records the failed op in ``job.result`` for human triage.
+        and records the failed op in ``job.result`` for autonomous follow-up.
 
         Replaces the prior 'discard everything on any failure' contract.
         Discarding both halved the data the wiki captured AND looped on
@@ -1172,6 +1491,184 @@ class TestRunIngestPartialFailure:
         assert (
             "raw_keywords: [Claude Code, Cursor, Mac Studio]" in page.read_text()
         )
+
+
+class TestRunIngestFrontierDisposition:
+    def test_local_noop_requires_frontier_confirmation(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        monkeypatch.setattr(ingest, "_triage", lambda _content: [])
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        captured: list[dict] = []
+        completed: list[bool] = []
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "raw must not disappear",
+            job.job_id,
+            on_complete=lambda: completed.append(True),
+            frontier_reviewer=lambda proposal: (
+                captured.append(proposal)
+                or {
+                    "decision": "retry",
+                    "summary": "local no-op is not yet proven",
+                    "failed_operations_disposition": "none",
+                }
+            ),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert completed == []
+        assert captured[0]["raw_content"] == "raw must not disappear"
+        assert captured[0]["triage_plan"] == []
+        assert captured[0]["local_disposition"] == "triage_no_operations"
+        proposal_path, _review_path = ingest._ingest_artifact_paths(
+            captured[0]["source_key"]
+        )
+        assert proposal_path.exists()
+
+    def test_all_generation_failures_require_frontier_disposition(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/missing.md",
+                "title": "Missing",
+                "summary": "must be retained",
+            }
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+        monkeypatch.setattr(ingest, "_generate_one", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        captured: list[dict] = []
+        completed: list[bool] = []
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "all-failed raw",
+            job.job_id,
+            on_complete=lambda: completed.append(True),
+            frontier_reviewer=lambda proposal: (
+                captured.append(proposal)
+                or {
+                    "decision": "retry",
+                    "summary": "regenerate the missing operation",
+                    "failed_operations_disposition": "retry_required",
+                }
+            ),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert completed == []
+        assert captured[0]["local_disposition"] == "all_generation_failed"
+        assert captured[0]["triage_plan"] == plan
+        [failure] = captured[0]["failed_operation_specs"]
+        assert failure["filename"] == "memory/missing.md"
+        assert failure["attempts"] == 2
+        assert "parse failed" in failure["error"]
+        assert captured[0]["prepared_operations"] == []
+
+    def test_partial_apply_without_explicit_failed_disposition_retries(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {"type": "create", "filename": "memory/ready.md", "title": "Ready"},
+            {"type": "create", "filename": "memory/failed.md", "title": "Failed"},
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+
+        def generate(op, _raw, **_kwargs):
+            if op["filename"].endswith("failed.md"):
+                return None
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": "---\ntitle: Ready\nupdated: 2026-07-11\n---\nready\n",
+            }
+
+        monkeypatch.setattr(ingest, "_generate_one", generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        completed: list[bool] = []
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "partial raw",
+            job.job_id,
+            on_complete=lambda: completed.append(True),
+            frontier_reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "ready page looks valid but failed op was not dispositioned",
+                # Deliberately omit failed_operations_disposition.
+            },
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert completed == []
+        assert not (isolated_wiki / "pages" / "memory" / "ready.md").exists()
+        assert not (isolated_wiki / "pages" / "memory" / "failed.md").exists()
+
+    def test_retryable_partial_proposal_does_not_pin_later_complete_generation(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {"type": "create", "filename": "memory/one.md", "title": "One"},
+            {"type": "create", "filename": "memory/two.md", "title": "Two"},
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        phase = {"complete": False}
+
+        def generate(op, _raw, **_kwargs):
+            if not phase["complete"] and op["filename"].endswith("two.md"):
+                return None
+            title = op["title"]
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    f"---\ntitle: {title}\nupdated: 2026-07-11\n---\n{title}\n"
+                ),
+            }
+
+        monkeypatch.setattr(ingest, "_generate_one", generate)
+        first = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "same replayable raw",
+            first.job_id,
+            frontier_reviewer=lambda _proposal: {
+                "decision": "retry",
+                "summary": "regenerate the missing page",
+                "failed_operations_disposition": "retry_required",
+            },
+        )
+        assert jobs.job_store.get(first.job_id).status == jobs.JobStatus.FAILED
+
+        phase["complete"] = True
+        second = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "same replayable raw",
+            second.job_id,
+            frontier_reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "complete regenerated proposal is grounded",
+                "failed_operations_disposition": "none",
+            },
+        )
+
+        finished = jobs.job_store.get(second.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED
+        assert sorted(finished.pages_created) == ["one", "two"]
+        assert (isolated_wiki / "pages" / "memory" / "one.md").exists()
+        assert (isolated_wiki / "pages" / "memory" / "two.md").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -2251,6 +2748,125 @@ class TestWikiIngestRouting:
 
 
 class TestWikiSaveRawRouting:
+    def test_idempotency_key_reuses_first_complete_raw(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator, server
+
+        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        key = "codex-0123456789abcdef01234567-from0-to5"
+
+        first = json.loads(
+            tool_fn("first complete payload", trigger_ingest=False, idempotency_key=key)
+        )
+        second = json.loads(
+            tool_fn("first complete payload", trigger_ingest=False, idempotency_key=key)
+        )
+
+        assert first["saved"] == f"save-{key}.md"
+        assert second["saved"] == first["saved"]
+        assert first["deduplicated"] is False
+        assert second["deduplicated"] is True
+        assert (isolated_wiki / "raw" / first["saved"]).read_text() == "first complete payload"
+        assert len(list((isolated_wiki / "raw").glob("*.md"))) == 1
+
+    def test_idempotency_key_rejects_different_unverified_payload(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator, server
+
+        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        key = "codex-0123456789abcdef01234567-from0-to5"
+
+        tool_fn("first complete payload", trigger_ingest=False, idempotency_key=key)
+        with pytest.raises(RuntimeError, match="idempotency key collision"):
+            tool_fn("corrupt retry payload", trigger_ingest=False, idempotency_key=key)
+
+        target = isolated_wiki / "raw" / f"save-{key}.md"
+        assert target.read_text() == "first complete payload"
+
+    def test_idempotency_key_accepts_different_self_verified_retry_receipt(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator, server
+        from llm_wiki_mcp.save_transaction import (
+            attach_save_transaction_marker,
+            make_save_transaction,
+        )
+
+        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        transaction = make_save_transaction(
+            host="codex",
+            session_file=isolated_wiki / "session.jsonl",
+            session_id="session-1",
+            after_line=0,
+            until_line=5,
+        )
+        first_content = attach_save_transaction_marker(transaction, "first writer output")
+        retry_content = attach_save_transaction_marker(transaction, "different retry output")
+
+        first = json.loads(
+            tool_fn(
+                first_content,
+                trigger_ingest=False,
+                idempotency_key=transaction.idempotency_key,
+            )
+        )
+        retry = json.loads(
+            tool_fn(
+                retry_content,
+                trigger_ingest=False,
+                idempotency_key=transaction.idempotency_key,
+            )
+        )
+
+        assert retry["saved"] == first["saved"]
+        assert retry["deduplicated"] is True
+        assert (isolated_wiki / "raw" / first["saved"]).read_text() == first_content
+
+    def test_idempotency_key_rejects_corrupt_existing_receipt(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator, server
+        from llm_wiki_mcp.save_transaction import (
+            attach_save_transaction_marker,
+            make_save_transaction,
+        )
+
+        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        transaction = make_save_transaction(
+            host="codex",
+            session_file=isolated_wiki / "session.jsonl",
+            session_id="session-1",
+            after_line=0,
+            until_line=5,
+        )
+        content = attach_save_transaction_marker(transaction, "complete payload")
+        result = json.loads(
+            tool_fn(
+                content,
+                trigger_ingest=False,
+                idempotency_key=transaction.idempotency_key,
+            )
+        )
+        target = isolated_wiki / "raw" / result["saved"]
+        target.write_text(content.replace("complete payload", "corrupt payload"))
+
+        with pytest.raises(RuntimeError, match="different or corrupt"):
+            tool_fn(
+                content,
+                trigger_ingest=False,
+                idempotency_key=transaction.idempotency_key,
+            )
+
     def test_trigger_ingest_false_defers_threshold_ingest(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2325,6 +2941,40 @@ class TestWikiSaveRawRouting:
 
 
 class TestLogFailuresDontBreakRollback:
+    def test_shared_lock_entry_rechecks_update_preimage(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A correction committed after ingest prepare must not be overwritten."""
+        from contextlib import contextmanager
+        from llm_wiki_mcp import page_mutation
+
+        target = isolated_wiki / "pages" / "x" / "page.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n"
+        )
+        correction = (
+            "---\ntitle: X\nupdated: 2026-07-11\n---\nfrontier correction\n"
+        )
+
+        @contextmanager
+        def correction_wins_before_ingest_commit():
+            target.write_text(correction)
+            yield
+
+        monkeypatch.setattr(
+            page_mutation,
+            "wiki_mutation_lock",
+            correction_wins_before_ingest_commit,
+        )
+
+        with pytest.raises(IngestApplyError, match="page changed before ingest apply"):
+            _apply_operations(
+                [{"type": "update", "filename": "page.md", "content": "stale addendum"}]
+            )
+
+        assert target.read_text() == correction
+
     def test_log_failure_does_not_drop_entry_from_rollback_set(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2678,6 +3328,55 @@ class TestRebuildIndexNonFatal:
 
 
 class TestRawAllocationParallel:
+    def test_save_publish_is_invisible_to_ingest_until_content_is_complete(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ingest must never observe the zero-byte reservation window."""
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        from llm_wiki_mcp import orchestrator, server
+
+        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        real_link = server._link_raw_no_replace
+        ready_to_publish = threading.Event()
+        allow_publish = threading.Event()
+
+        def paused_link(staging: Path, target: Path) -> None:
+            # _publish_raw reaches this point only after write + fsync.
+            ready_to_publish.set()
+            assert allow_publish.wait(5)
+            real_link(staging, target)
+
+        monkeypatch.setattr(server, "_link_raw_no_replace", paused_link)
+        content = "complete raw payload\n" * 100
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                tool_fn,
+                content,
+                "codex-test-session",
+                ["atomic-publish"],
+                False,
+            )
+            assert ready_to_publish.wait(5)
+            try:
+                assert orchestrator.get_pending_raw_files() == []
+                assert list((isolated_wiki / "raw").glob("*.md")) == []
+                staging = list((isolated_wiki / "raw").glob(".*.tmp"))
+                assert len(staging) == 1
+                staged_content = staging[0].read_text()
+                assert staged_content.endswith(content)
+                assert "raw_keywords: [atomic-publish]" in staged_content
+            finally:
+                allow_publish.set()
+            result = json.loads(future.result(timeout=5))
+
+        published = isolated_wiki / "raw" / result["saved"]
+        assert published.read_text() == staged_content
+        assert orchestrator.get_pending_raw_files() == [published]
+        assert list((isolated_wiki / "raw").glob(".*.tmp")) == []
+
     def test_concurrent_threads_get_unique_paths(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from llm_wiki_mcp.convergence import is_human_required_result
 from llm_wiki_mcp.search import (
     ACTIVE_SEARCH_POLICY_FILE,
     DEFAULT_FUSION_WEIGHTS,
@@ -104,6 +105,7 @@ FRONTIER_TERMINAL_STATUSES = {
     "frontier_quarantined",
     "human_required",
 }
+DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
 
 FrontierLabelReviewer = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -274,6 +276,7 @@ def build_candidates(
             "injection_used",
             "injection_ignored",
             "false-positive",
+            "page_ignored",
         }:
             continue
 
@@ -285,6 +288,7 @@ def build_candidates(
             continue
 
         raw_expected = _str_tuple(feedback.get("expected_pages"))
+        raw_negative = _str_tuple(feedback.get("negative_pages"))
         raw_injected = (
             _str_tuple(feedback.get("injected_pages"))
             or _str_tuple(record.get("pages"))
@@ -297,8 +301,19 @@ def build_candidates(
             expected = raw_expected or raw_injected
         elif kind == "injection_used":
             expected = raw_expected or raw_injected
+        elif kind == "page_ignored":
+            # Page-scoped feedback must never turn every injected page into a
+            # negative example when only one candidate was rejected.
+            negative = raw_negative
         else:
-            negative = raw_injected or raw_expected
+            # Prefer the explicit page-scoped field when present while
+            # retaining compatibility with legacy prompt-scoped feedback.
+            negative = raw_negative or raw_injected or raw_expected
+
+        # A reviewed search label may carry both relevant and irrelevant
+        # candidates. Preserve that mixed supervision for ranking evaluation.
+        if raw_negative:
+            negative = raw_negative
 
         if not expected and not negative:
             continue
@@ -350,9 +365,15 @@ def load_examples(
     *,
     limit: int = 0,
     source_filter: str = "all",
+    reviewed_only: bool = True,
 ) -> list[SearchExample]:
     examples: list[SearchExample] = []
     for row in read_jsonl(path):
+        # Active evaluation and self-tune must never consume a locally
+        # generated label. Candidate rows live in the label queue until a
+        # frontier reviewer promotes them with reviewed=true.
+        if reviewed_only and row.get("reviewed") is not True:
+            continue
         query = str(row.get("query", "")).strip()
         if not query:
             continue
@@ -662,19 +683,27 @@ def build_golden(
     *,
     feedback_file: Path = RECALL_FEEDBACK_FILE,
     log_file: Path = RECALL_LOG_FILE,
-    output_file: Path = GOLDEN_FILE,
+    output_file: Path = LABEL_QUEUE_FILE,
     limit: int = 100,
 ) -> dict[str, Any]:
-    examples = build_candidates(feedback_file=feedback_file, log_file=log_file, limit=limit)
-    write_jsonl(output_file, examples_to_rows(examples))
+    # Compatibility wrapper: the old command name may remain in scripts, but
+    # local candidates can no longer overwrite the authoritative golden set.
+    target = LABEL_QUEUE_FILE if output_file == GOLDEN_FILE else output_file
+    queued = build_label_queue(
+        feedback_file=feedback_file,
+        log_file=log_file,
+        output_file=target,
+        limit=limit,
+    )
     return {
-        "status": "ok",
-        "output_file": str(output_file),
-        "examples": len(examples),
-        "reviewed": sum(1 for example in examples if example.reviewed),
-        "splits": _count_by(examples, "split"),
-        "languages": _count_by(examples, "language"),
-        "kinds": _count_by(examples, "kind"),
+        **queued,
+        "status": (
+            queued.get("status")
+            if queued.get("status") != "ok"
+            else "queued_for_frontier_review"
+        ),
+        "legacy_command": "build-golden",
+        "authoritative_golden_unchanged": True,
     }
 
 
@@ -885,13 +914,15 @@ def _normalize_frontier_label_result(raw: dict[str, Any], *, raw_output: str = "
         normalized["raw_output"] = raw_text[-4000:]
     for key in (
         "frontier_failure",
-        "human_required",
-        "notify_user",
         "access_repair",
         "votes",
     ):
         if key in raw:
             normalized[key] = raw[key]
+    if any(key in raw for key in ("frontier_failure", "human_required", "notify_user")):
+        needs_human = is_human_required_result(raw)
+        normalized["human_required"] = needs_human
+        normalized["notify_user"] = needs_human
     return normalized
 
 
@@ -941,8 +972,8 @@ def _combine_frontier_label_reviews(
     if len(reviews) == 1:
         return reviews[0]
 
-    if any(review.get("human_required") for review in reviews):
-        first = next(review for review in reviews if review.get("human_required"))
+    if any(is_human_required_result(review) for review in reviews):
+        first = next(review for review in reviews if is_human_required_result(review))
         return {**first, "summary": f"frontier label review needs human action: {first.get('summary', '')}"}
 
     retry = [review for review in reviews if review.get("decision") == "needs_retry"]
@@ -1023,8 +1054,7 @@ def _golden_row_from_review(row: dict[str, Any], review: dict[str, Any], *, revi
 
 
 def _queue_status_for_review(review: dict[str, Any], *, min_confidence: float) -> str:
-    failure = review.get("frontier_failure") if isinstance(review.get("frontier_failure"), dict) else {}
-    if review.get("human_required") or failure.get("human_required"):
+    if is_human_required_result(review):
         return "human_required"
     decision = review.get("decision")
     confidence = float(review.get("confidence") or 0.0)
@@ -1069,6 +1099,63 @@ def review_label_queue_with_frontier(
     attempts_cap = max(1, max_attempts)
     budget_exhausted = False
     mutation_reserved = False
+
+    for row in rows:
+        review = row.get("frontier_review")
+        if (
+            row.get("queue_status") == "human_required"
+            and isinstance(review, dict)
+            and not is_human_required_result(review)
+        ):
+            attempts = int(row.get("frontier_attempts") or 0)
+            row["queue_status"] = (
+                "frontier_quarantined" if attempts >= attempts_cap else "frontier_retry"
+            )
+            row["human_boundary_reclassified_at"] = reviewed_at
+            if row["queue_status"] == "frontier_quarantined":
+                row["quarantined_at"] = reviewed_at
+            row.pop("next_attempt_at", None)
+
+    try:
+        quarantine_retry_seconds = max(
+            0,
+            int(
+                os.getenv(
+                    "LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS",
+                    str(DEFAULT_QUARANTINE_RETRY_SECONDS),
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        quarantine_retry_seconds = DEFAULT_QUARANTINE_RETRY_SECONDS
+    for row in rows:
+        if row.get("queue_status") != "frontier_quarantined":
+            continue
+        raw_quarantined_at = row.get("quarantined_at") or row.get("last_attempt_at")
+        try:
+            quarantined_at = (
+                datetime.fromisoformat(raw_quarantined_at)
+                if isinstance(raw_quarantined_at, str) and raw_quarantined_at
+                else None
+            )
+        except ValueError:
+            quarantined_at = None
+        compare_now = current_time
+        if quarantined_at is not None:
+            if quarantined_at.tzinfo is None and compare_now.tzinfo is not None:
+                compare_now = compare_now.replace(tzinfo=None)
+            elif quarantined_at.tzinfo is not None and compare_now.tzinfo is None:
+                quarantined_at = quarantined_at.replace(tzinfo=None)
+        if (
+            quarantined_at is not None
+            and (compare_now - quarantined_at).total_seconds() < quarantine_retry_seconds
+        ):
+            continue
+        row["queue_status"] = "frontier_retry"
+        row["frontier_attempts"] = 0
+        row["quarantine_reopened_at"] = reviewed_at
+        row["quarantine_reopen_count"] = int(row.get("quarantine_reopen_count") or 0) + 1
+        row.pop("next_attempt_at", None)
 
     # Recover both cross-file crash windows. The current golden-first commit can
     # exit before acknowledging the queue; older builds could acknowledge the
@@ -1246,6 +1333,8 @@ def review_label_queue_with_frontier(
             updated["next_attempt_at"] = (current_time + timedelta(seconds=delay)).isoformat(timespec="seconds")
         else:
             updated.pop("next_attempt_at", None)
+        if next_status == "frontier_quarantined":
+            updated["quarantined_at"] = reviewed_at
 
         if next_status == "frontier_approved":
             golden_row = _golden_row_from_review(row, combined, reviewed_at=reviewed_at)
@@ -1501,7 +1590,7 @@ def self_tune(
                 )
         if frontier is not None:
             record["frontier_review"] = frontier
-            if frontier.get("human_required"):
+            if is_human_required_result(frontier):
                 record["status"] = "human_required"
                 record["reason"] = str(frontier.get("summary") or "frontier access requires external authority")
             elif frontier.get("decision") != "approved":

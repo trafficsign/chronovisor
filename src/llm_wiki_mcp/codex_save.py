@@ -9,12 +9,25 @@ import os
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from llm_wiki_mcp.wiki import WIKI_ROOT, init_wiki
+from llm_wiki_mcp.evidence_grounding import (
+    ProtectedLiteralGroundingError,
+    validate_protected_literals,
+)
+from llm_wiki_mcp.link_fix import atomic_write
+from llm_wiki_mcp.save_transaction import (
+    SaveTransaction,
+    attach_save_transaction_marker,
+    find_published_save_transaction,
+    make_save_transaction,
+    save_transaction_lock,
+    validate_published_save_receipt,
+)
+from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, init_wiki
 
 
 DEFAULT_MEMORY_MODEL = "gpt-5.4-mini"
@@ -31,7 +44,7 @@ _RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")
 MEMORY_WRITER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["should_save", "content", "keywords", "reason"],
+    "required": ["should_save", "content", "keywords", "reason", "evidence_quotes"],
     "properties": {
         "should_save": {"type": "boolean"},
         "content": {"type": "string"},
@@ -42,6 +55,12 @@ MEMORY_WRITER_SCHEMA: dict[str, Any] = {
             "maxItems": 20,
         },
         "reason": {"type": "string"},
+        "evidence_quotes": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 500},
+            "minItems": 0,
+            "maxItems": 8,
+        },
     },
 }
 
@@ -82,6 +101,7 @@ class WriterResult:
     keywords: list[str]
     reason: str
     rejected_keywords: list[str]
+    evidence_quotes: list[str] = field(default_factory=list)
 
 
 def codex_home() -> Path:
@@ -371,7 +391,8 @@ def build_writer_prompt(transcript_slice: TranscriptSlice, *, max_chars: int) ->
         "Ignore transient command output unless it supports a durable fact.\n"
         "Do not use tools, browse the web, or modify files.\n\n"
         "Return JSON only, matching this shape:\n"
-        '{"should_save": true, "content": "...", "keywords": ["..."], "reason": "..."}\n\n'
+        '{"should_save": true, "content": "...", "keywords": ["..."], '
+        '"reason": "...", "evidence_quotes": ["exact USER quote"]}\n\n'
         "Rules:\n"
         "- Prefer Japanese when the source conversation is Japanese.\n"
         "- Preserve exact dates, paths, commands, model names, and decisions.\n"
@@ -379,6 +400,14 @@ def build_writer_prompt(transcript_slice: TranscriptSlice, *, max_chars: int) ->
         "- If there is no durable memory, set should_save=false, content=\"\", keywords=[].\n"
         "- Use 10 to 20 specific keywords when saving; avoid generic words by themselves.\n"
         "- Keywords must not contain commas, brackets, colons, braces, or newlines.\n"
+        "- A saved memory MUST be grounded in one or more evidence_quotes copied verbatim from USER text.\n"
+        "- evidence_quotes must contain exact substrings from USER messages only; never quote ASSISTANT text.\n"
+        "- If should_save=false, set evidence_quotes=[].\n"
+        "- Treat ASSISTANT text only as secondary execution context, never as authority for what the user named.\n"
+        "- Preserve model names, product names, versions, and spellings exactly as stated in USER evidence.\n"
+        "- Never normalize, correct, expand, translate, supplement, or replace a USER-stated model/product name "
+        "from ASSISTANT context (for example, do not replace Q-KUN with Qwen).\n"
+        "- If a model/product identity appears only in ASSISTANT text, omit it from the memory.\n"
         "- Do not invent facts beyond the transcript.\n\n"
         "Session metadata:\n"
         f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n\n"
@@ -449,6 +478,7 @@ def parse_writer_output(output: str) -> WriterResult:
     content = parsed.get("content")
     keywords = parsed.get("keywords")
     reason = parsed.get("reason")
+    evidence_quotes = parsed.get("evidence_quotes")
 
     if not isinstance(should_save, bool):
         raise CodexSaveError("memory writer JSON missing boolean should_save")
@@ -458,6 +488,12 @@ def parse_writer_output(output: str) -> WriterResult:
         raise CodexSaveError("memory writer JSON missing keyword list")
     if not isinstance(reason, str):
         raise CodexSaveError("memory writer JSON missing string reason")
+    if not isinstance(evidence_quotes, list):
+        raise CodexSaveError("memory writer JSON missing evidence_quotes list")
+
+    cleaned_quotes = _validate_evidence_quote_shape(evidence_quotes)
+    if should_save and not cleaned_quotes:
+        raise CodexSaveError("memory writer must provide user evidence_quotes when should_save=true")
 
     accepted, rejected = sanitize_keywords(keywords)
     return WriterResult(
@@ -466,7 +502,64 @@ def parse_writer_output(output: str) -> WriterResult:
         keywords=accepted,
         reason=reason.strip(),
         rejected_keywords=rejected,
+        evidence_quotes=cleaned_quotes,
     )
+
+
+def _validate_evidence_quote_shape(values: list[Any], *, limit: int = 8) -> list[str]:
+    """Validate the structured-output quote field without changing quote text."""
+    if len(values) > limit:
+        raise CodexSaveError(f"memory writer returned more than {limit} evidence quotes")
+    quotes: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise CodexSaveError("memory writer evidence_quotes must contain only strings")
+        quote = value
+        if not quote.strip():
+            raise CodexSaveError("memory writer evidence_quotes must not contain empty strings")
+        if len(quote) > 500:
+            raise CodexSaveError("memory writer evidence quote exceeds 500 characters")
+        if quote not in seen:
+            quotes.append(quote)
+            seen.add(quote)
+    return quotes
+
+
+def validate_user_evidence_quotes(
+    writer: WriterResult,
+    transcript_slice: TranscriptSlice,
+) -> None:
+    """Fail closed unless every save citation exists verbatim in a USER record."""
+    if not writer.should_save:
+        return
+    if not writer.evidence_quotes:
+        raise CodexSaveError("memory writer save is missing user evidence quotes")
+    user_texts = [record.text for record in transcript_slice.records if record.role == "user"]
+    if not user_texts:
+        raise CodexSaveError("memory writer save has no USER transcript evidence")
+    missing = [
+        quote
+        for quote in writer.evidence_quotes
+        if not any(quote in user_text for user_text in user_texts)
+    ]
+    if missing:
+        preview = ", ".join(repr(quote[:120]) for quote in missing[:3])
+        raise CodexSaveError(
+            "memory writer evidence quote was not found verbatim in USER messages: " + preview
+        )
+    assistant_texts = [
+        record.text for record in transcript_slice.records if record.role == "assistant"
+    ]
+    try:
+        validate_protected_literals(
+            {"content": writer.content, "keywords": writer.keywords},
+            evidence_quotes=writer.evidence_quotes,
+            context_texts=assistant_texts,
+            trusted_literals=("Codex", "LLM Wiki"),
+        )
+    except ProtectedLiteralGroundingError as exc:
+        raise CodexSaveError(f"memory writer {exc}") from exc
 
 
 def extract_json_object(output: str) -> Any:
@@ -609,9 +702,7 @@ def update_state(
 
 def write_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
-    tmp.replace(path)
+    atomic_write(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
 
 def raw_session_id(transcript_slice: TranscriptSlice) -> str:
@@ -626,6 +717,7 @@ def build_raw_content(
     writer: WriterResult,
     *,
     model: str,
+    transaction: SaveTransaction,
 ) -> str:
     header = [
         "# Codex Session Memory Save",
@@ -642,11 +734,11 @@ def build_raw_content(
         "",
         writer.content.strip(),
         "",
-        "## Writer Reason",
-        "",
-        writer.reason.strip(),
+        "## User Evidence",
         "",
     ]
+    for quote in writer.evidence_quotes:
+        header.extend(["\n".join(f"> {line}" for line in quote.splitlines()), ""])
     if writer.rejected_keywords:
         header.extend(
             [
@@ -656,7 +748,7 @@ def build_raw_content(
                 "",
             ]
         )
-    return "\n".join(header)
+    return attach_save_transaction_marker(transaction, "\n".join(header))
 
 
 def save_raw(
@@ -665,6 +757,7 @@ def save_raw(
     session_id: str,
     keywords: list[str],
     trigger_ingest: bool,
+    idempotency_key: str,
 ) -> dict[str, Any]:
     from llm_wiki_mcp.server import wiki_save_raw
 
@@ -673,6 +766,7 @@ def save_raw(
         session_id=session_id,
         keywords=keywords,
         trigger_ingest=trigger_ingest,
+        idempotency_key=idempotency_key,
     )
     parsed = json.loads(result)
     return parsed if isinstance(parsed, dict) else {"result": parsed}
@@ -693,7 +787,11 @@ def resolve_session_file(args: argparse.Namespace, hints: dict[str, str]) -> Pat
     )
 
 
-def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str, Any]:
+def _run_save_transaction(
+    args: argparse.Namespace,
+    *,
+    stdin_text: str | None = None,
+) -> dict[str, Any]:
     init_wiki()
 
     if args.hook and os.environ.get(HOOK_ENABLE_ENV) != "1":
@@ -709,8 +807,58 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
 
     state_file = Path(args.state_file).expanduser()
     state = load_state(state_file)
-    after_line = 0 if args.ignore_state else saved_line_for(state, session_file)
+    committed_line = saved_line_for(state, session_file)
+    after_line = 0 if args.ignore_state else committed_line
     transcript_slice = extract_transcript_slice(session_file, after_line=after_line)
+
+    # A process may die after the raw becomes visible but before the cursor
+    # state replace. The raw itself is the receipt, so recover it before
+    # invoking the nondeterministic writer or considering a wider new delta.
+    recovery_probe = (
+        transcript_slice
+        if after_line == committed_line
+        else extract_transcript_slice(session_file, after_line=committed_line)
+    )
+    recovered = find_published_save_transaction(
+        raw_dir=RAW_DIR,
+        host="codex",
+        session_file=session_file,
+        session_id=recovery_probe.session_id,
+        after_line=committed_line,
+    )
+    if (
+        recovered is not None
+        and recovered.transaction.until_line > recovery_probe.scanned_until_line
+    ):
+        raise CodexSaveError(
+            "published save receipt extends beyond the current transcript; "
+            "refusing to publish an overlapping replacement"
+        )
+    if (
+        recovered is not None
+        and recovered.transaction.until_line <= recovery_probe.scanned_until_line
+    ):
+        recovered_slice = TranscriptSlice(
+            session_file=session_file,
+            scanned_until_line=recovered.transaction.until_line,
+            records=[],
+            session_id=recovery_probe.session_id,
+            cwd=recovery_probe.cwd,
+            originator=recovery_probe.originator,
+            cli_version=recovery_probe.cli_version,
+            source=recovery_probe.source,
+            model_provider=recovery_probe.model_provider,
+            after_line=committed_line,
+        )
+        update_state(
+            state,
+            session_file=session_file,
+            transcript_slice=recovered_slice,
+            status="saved",
+        )
+        write_state(state_file, state)
+        after_line = recovered.transaction.until_line
+        transcript_slice = extract_transcript_slice(session_file, after_line=after_line)
 
     base_result: dict[str, Any] = {
         "session_file": str(session_file),
@@ -720,8 +868,20 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
         "scanned_until_line": transcript_slice.scanned_until_line,
         "record_count": len(transcript_slice.records),
     }
+    if recovered is not None and after_line == recovered.transaction.until_line:
+        base_result["recovered_save"] = {
+            "path": str(recovered.path),
+            "idempotency_key": recovered.transaction.idempotency_key,
+            "until_line": recovered.transaction.until_line,
+        }
 
     if not transcript_slice.records:
+        if "recovered_save" in base_result:
+            return {
+                **base_result,
+                "status": "recovered",
+                "reason": "published raw recovered before state cursor commit",
+            }
         return {**base_result, "status": "skipped", "reason": "no new user/assistant messages"}
 
     if not args.ignore_state:
@@ -746,12 +906,14 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
         }
 
     writer = run_memory_writer(prompt, model=args.model, timeout=args.timeout)
+    validate_user_evidence_quotes(writer, transcript_slice)
     writer_result = {
         "writer_model": args.model,
         "should_save": writer.should_save,
         "keywords": writer.keywords,
         "rejected_keywords": writer.rejected_keywords,
         "writer_reason": writer.reason,
+        "evidence_quotes": writer.evidence_quotes,
     }
 
     if not writer.should_save or not writer.content:
@@ -760,7 +922,19 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
             write_state(state_file, state)
         return {**base_result, **writer_result, "status": "skipped"}
 
-    raw_content = build_raw_content(transcript_slice, writer, model=args.model)
+    transaction = make_save_transaction(
+        host="codex",
+        session_file=session_file,
+        session_id=transcript_slice.session_id,
+        after_line=transcript_slice.after_line,
+        until_line=transcript_slice.scanned_until_line,
+    )
+    raw_content = build_raw_content(
+        transcript_slice,
+        writer,
+        model=args.model,
+        transaction=transaction,
+    )
     if args.dry_run or not args.save:
         return {
             **base_result,
@@ -774,10 +948,36 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
         session_id=raw_session_id(transcript_slice),
         keywords=writer.keywords,
         trigger_ingest=args.trigger_ingest,
+        idempotency_key=transaction.idempotency_key,
     )
+    try:
+        validate_published_save_receipt(
+            raw_dir=RAW_DIR,
+            save_result=save_result,
+            expected=transaction,
+        )
+    except ValueError as exc:
+        raise CodexSaveError(f"raw save receipt validation failed: {exc}") from exc
     update_state(state, session_file=session_file, transcript_slice=transcript_slice, status="saved")
     write_state(state_file, state)
     return {**base_result, **writer_result, "status": "saved", "save_result": save_result}
+
+
+def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str, Any]:
+    """Run one state-serialized Codex save transaction.
+
+    The lock deliberately covers writer execution and raw publication, not
+    just the final JSON replace.  A second Stop worker therefore reloads the
+    committed cursor and cannot summarize or publish the same delta.
+    """
+    state_file = Path(args.state_file).expanduser()
+    session_hint = Path(args.session_file).expanduser() if args.session_file else Path(".")
+    with save_transaction_lock(
+        host="codex",
+        session_file=session_hint,
+        state_file=state_file,
+    ):
+        return _run_save_transaction(args, stdin_text=stdin_text)
 
 
 def build_parser() -> argparse.ArgumentParser:

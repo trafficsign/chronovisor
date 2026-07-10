@@ -516,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     entities_init.add_argument("--json", action="store_true")
     entities_backfill = entities_sub.add_parser("backfill")
     entities_backfill.add_argument("--limit", type=int, default=0)
+    entities_backfill.add_argument("--max-frontier-calls", type=int, default=0)
     entities_backfill.add_argument("--dry-run", action="store_true")
     entities_backfill.add_argument("--include-reference", action="store_true")
     entities_backfill.add_argument("--json", action="store_true")
@@ -725,6 +726,7 @@ def main(argv: list[str] | None = None) -> int:
                 limit=max(0, args.limit),
                 dry_run=args.dry_run,
                 include_reference=args.include_reference,
+                max_frontier_calls=max(0, args.max_frontier_calls),
             )
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str))

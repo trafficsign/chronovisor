@@ -40,6 +40,7 @@ from typing import Any, Callable, Mapping
 from llm_wiki_mcp.wiki import find_page
 from llm_wiki_mcp.wiki import WIKI_ROOT
 from llm_wiki_mcp.link_fix import atomic_write, protected_spans
+from llm_wiki_mcp.page_mutation import wiki_mutation_lock
 
 
 DECISIONS_FILE = WIKI_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
@@ -495,30 +496,35 @@ def apply_suggestion(
         }
     wrote_source = False
     try:
-        if source_path.read_text(encoding="utf-8") != original:
-            return {"status": "retry", "reason": "source_changed_before_apply"}
-        if target_path.read_bytes() != target_preimage:
-            return {"status": "retry", "reason": "target_changed_before_apply"}
-        atomic_write(source_path, updated)
-        wrote_source = True
-        written = source_path.read_text(encoding="utf-8")
-        target_after = target_path.read_bytes()
-    except OSError as exc:
-        if wrote_source:
+        with wiki_mutation_lock():
             try:
-                if source_path.read_text(encoding="utf-8") == updated:
-                    atomic_write(source_path, original)
-            except OSError:
-                pass
+                if source_path.read_text(encoding="utf-8") != original:
+                    return {"status": "retry", "reason": "source_changed_before_apply"}
+                if target_path.read_bytes() != target_preimage:
+                    return {"status": "retry", "reason": "target_changed_before_apply"}
+                atomic_write(source_path, updated)
+                wrote_source = True
+                written = source_path.read_text(encoding="utf-8")
+                target_after = target_path.read_bytes()
+            except OSError as exc:
+                if wrote_source:
+                    try:
+                        if source_path.read_text(encoding="utf-8") == updated:
+                            atomic_write(source_path, original)
+                    except OSError:
+                        pass
+                return {"status": "error", "reason": f"write_error:{exc}"}
+            if f"[[{orphan_id}" not in written or target_after != target_preimage:
+                # Roll back under the same lock, and only while the page still
+                # contains our exact bytes.  A foreign post-write edit wins.
+                try:
+                    if source_path.read_text(encoding="utf-8") == updated:
+                        atomic_write(source_path, original)
+                except OSError:
+                    pass
+                return {"status": "error", "reason": "post_write_verification_failed"}
+    except OSError as exc:
         return {"status": "error", "reason": f"write_error:{exc}"}
-    if f"[[{orphan_id}" not in written or target_after != target_preimage:
-        # Roll back only our exact write; never overwrite a concurrent writer.
-        try:
-            if source_path.read_text(encoding="utf-8") == updated:
-                atomic_write(source_path, original)
-        except OSError:
-            pass
-        return {"status": "error", "reason": "post_write_verification_failed"}
     return {"status": "applied", "source": suggestion.source_page_id, "target": orphan_id}
 
 
@@ -567,31 +573,47 @@ def _normalize_frontier_review(value: object) -> dict[str, Any]:
     }
 
 
-def _review_orphan_suggestion(
+def _review_orphan_proposal(
     orphan_id: str,
-    suggestion: Suggestion,
+    proposal: dict[str, Any],
     *,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    candidate = {
+    kind = str(proposal.get("kind") or "")
+    candidate: dict[str, Any] = {
+        "proposal_kind": kind,
         "orphan_page_id": orphan_id,
-        "source_page_id": suggestion.source_page_id,
-        "confidence": suggestion.confidence,
-        "reason": suggestion.reason,
-        "suggested_anchor": suggestion.suggested_anchor,
-        "suggested_section": suggestion.suggested_section,
-        "source_excerpt": _page_head(suggestion.source_page_id, max_chars=1200),
         "target_excerpt": _page_head(orphan_id, max_chars=1200),
+        "proposal": proposal,
     }
+    raw_suggestion = proposal.get("suggestion")
+    if kind == "link" and isinstance(raw_suggestion, dict):
+        suggestion = Suggestion(**raw_suggestion)
+        candidate.update(
+            {
+                "source_page_id": suggestion.source_page_id,
+                "confidence": suggestion.confidence,
+                "reason": suggestion.reason,
+                "suggested_anchor": suggestion.suggested_anchor,
+                "suggested_section": suggestion.suggested_section,
+                "source_excerpt": _page_head(
+                    suggestion.source_page_id, max_chars=1200
+                ),
+            }
+        )
     if reviewer is not None:
         return reviewer(candidate)
     from llm_wiki_mcp.frontier_review import run_structured_review
 
     prompt = f"""\
-You are the final autonomous reviewer for an LLM Wiki orphan-link proposal.
-Approve only if the SOURCE naturally benefits from linking to the TARGET and
-the proposed placement is not misleading. Reject forced or weak links. Do not
-edit files and do not ask a human. Return JSON matching the schema.
+You are the final autonomous reviewer for an LLM Wiki orphan-link disposition.
+For proposal_kind=link, approve only if SOURCE naturally benefits from linking
+to TARGET. For proposal_kind=no_link, approve only if the supplied candidates
+support the conclusion that no safe link should be created. For
+proposal_kind=retry, approve only if evidence is genuinely unavailable or
+transiently broken and another autonomous attempt is required. Reject an
+unsupported disposition. Do not edit files or ask a human. Return JSON matching
+the schema.
 
 Candidate:
 {json.dumps(candidate, ensure_ascii=False, indent=2)}
@@ -747,33 +769,37 @@ def run_autonomous(
             )
             results.append({"orphan": orphan_id, "source": source_id, "status": status, "key": key})
             continue
-        if not candidates:
-            if discovery_error:
-                claim = state.claim_attempt(key, "local", budget=cycle_budget)
-                if not claim["claimed"]:
-                    results.append({"orphan": orphan_id, "status": claim["reason"], "key": key})
-                    continue
-                failed = state.fail_attempt(
-                    key,
-                    "local",
-                    error=discovery_error,
-                    failure_class="candidate_discovery_error",
-                    allow_frontier=False,
-                    owner=claim["owner"],
-                )
-                results.append(
-                    {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
-                )
-            else:
-                completed = state.complete(
-                    key,
-                    "rejected",
-                    result={"reason": "no_semantic_candidate"},
-                )
-                results.append(
-                    {"orphan": orphan_id, "status": completed["item"]["status"], "key": key}
-                )
-            continue
+        if not candidates and item.get("status") in {"pending_local", "local_retry"}:
+            claim = state.claim_attempt(key, "local")
+            if not claim["claimed"]:
+                results.append({"orphan": orphan_id, "status": claim["reason"], "key": key})
+                continue
+            frontier_proposal = {
+                "kind": "retry" if discovery_error else "no_link",
+                "reason": discovery_error or "no_semantic_candidate",
+                "candidates": [],
+                "failure_class": (
+                    "candidate_discovery_error" if discovery_error else None
+                ),
+            }
+            state.merge_item(
+                lane="orphan_link",
+                source_id=f"orphan:{orphan_id}",
+                input_data=input_data,
+                resolver_version=RESOLVER_VERSION,
+                metadata={
+                    "orphan": orphan_id,
+                    "source": source_id,
+                    "candidate_discovery_error": discovery_error,
+                    "frontier_proposal": frontier_proposal,
+                },
+            )
+            state.escalate(
+                key,
+                reason="deterministic orphan disposition requires frontier final review",
+                owner=claim["owner"],
+            )
+            item = state.get(key) or item
 
         item_counted = False
         if item["status"] == "pending_local" or item["status"] == "local_retry":
@@ -806,29 +832,35 @@ def run_autonomous(
                     break
             if local_suggestion is None:
                 if valid_scores and not local_errors:
-                    completed = state.complete(
-                        key,
-                        "rejected",
-                        result={
-                            "reason": "all_local_candidates_below_confidence_threshold",
-                            "max_confidence": max(float(score["confidence"]) for score in valid_scores),
-                            "local_errors": local_errors,
-                        },
-                        owner=claim["owner"],
-                    )
-                    results.append({"orphan": orphan_id, "status": completed["item"]["status"], "key": key})
+                    frontier_proposal = {
+                        "kind": "no_link",
+                        "reason": "all_local_candidates_below_confidence_threshold",
+                        "max_confidence": max(
+                            float(score["confidence"]) for score in valid_scores
+                        ),
+                        "scores": valid_scores,
+                    }
                 else:
-                    failed = state.fail_attempt(
-                        key,
-                        "local",
-                        error="; ".join(str(error.get("error") or error.get("status")) for error in local_errors)
-                        or "all local candidate reviews failed",
-                        failure_class="local_model_or_schema_error",
-                        allow_frontier=False,
-                        owner=claim["owner"],
-                    )
-                    results.append({"orphan": orphan_id, "status": failed["item"]["status"], "key": key})
-                continue
+                    frontier_proposal = {
+                        "kind": "retry",
+                        "reason": (
+                            "; ".join(
+                                str(error.get("error") or error.get("status"))
+                                for error in local_errors
+                            )
+                            or "all local candidate reviews failed"
+                        ),
+                        "failure_class": "local_model_or_schema_error",
+                        "scores": valid_scores,
+                        "local_errors": local_errors,
+                    }
+                suggestion_payload = None
+            else:
+                suggestion_payload = local_suggestion.__dict__
+                frontier_proposal = {
+                    "kind": "link",
+                    "suggestion": suggestion_payload,
+                }
             state.merge_item(
                 lane="orphan_link",
                 source_id=f"orphan:{orphan_id}",
@@ -838,7 +870,8 @@ def run_autonomous(
                     "orphan": orphan_id,
                     "source": source_id,
                     "candidate_discovery_error": None,
-                    "suggestion": local_suggestion.__dict__,
+                    "suggestion": suggestion_payload,
+                    "frontier_proposal": frontier_proposal,
                 },
             )
             state.escalate(key, reason="local suggestion requires frontier final review", owner=claim["owner"])
@@ -851,27 +884,55 @@ def run_autonomous(
         if not claim["claimed"]:
             results.append({"orphan": orphan_id, "status": claim["reason"], "key": key})
             continue
-        if not item_counted:
-            work_items += 1
         metadata = (state.get(key) or {}).get("metadata") or {}
+        frontier_proposal = (
+            metadata.get("frontier_proposal") if isinstance(metadata, dict) else None
+        )
         raw_suggestion = metadata.get("suggestion") if isinstance(metadata, dict) else None
-        if not isinstance(raw_suggestion, dict):
-            state.fail_attempt(key, "frontier", error="local suggestion missing", owner=claim["owner"])
-            results.append({"orphan": orphan_id, "status": "frontier_retry", "key": key})
-            continue
-        try:
-            suggestion = Suggestion(**raw_suggestion)
-        except (TypeError, ValueError) as exc:
-            failed = state.fail_attempt(
+        if not isinstance(frontier_proposal, dict) and isinstance(raw_suggestion, dict):
+            frontier_proposal = {"kind": "link", "suggestion": raw_suggestion}
+        if not isinstance(frontier_proposal, dict) or frontier_proposal.get("kind") not in {
+            "link",
+            "no_link",
+            "retry",
+        }:
+            state.fail_attempt(
                 key,
                 "frontier",
-                error=f"invalid persisted suggestion: {exc}",
+                error="durable frontier proposal missing",
                 owner=claim["owner"],
             )
-            results.append({"orphan": orphan_id, "status": failed["item"]["status"], "key": key})
+            results.append({"orphan": orphan_id, "status": "frontier_retry", "key": key})
             continue
+        proposal_kind = str(frontier_proposal["kind"])
+        if not item_counted and not (
+            proposal_kind == "no_link" and not candidates
+        ):
+            work_items += 1
+        suggestion: Suggestion | None = None
+        if proposal_kind == "link":
+            proposal_suggestion = frontier_proposal.get("suggestion")
+            if not isinstance(proposal_suggestion, dict):
+                proposal_suggestion = raw_suggestion
+            try:
+                suggestion = Suggestion(**proposal_suggestion)
+            except (TypeError, ValueError) as exc:
+                failed = state.fail_attempt(
+                    key,
+                    "frontier",
+                    error=f"invalid persisted suggestion: {exc}",
+                    owner=claim["owner"],
+                )
+                results.append(
+                    {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
+                )
+                continue
         try:
-            raw_review = _review_orphan_suggestion(orphan_id, suggestion, reviewer=reviewer)
+            raw_review = _review_orphan_proposal(
+                orphan_id,
+                frontier_proposal,
+                reviewer=reviewer,
+            )
         except Exception as exc:
             raw_review = {
                 "decision": "needs_retry",
@@ -881,8 +942,24 @@ def run_autonomous(
         review = _normalize_frontier_review(raw_review)
         decision = review.get("decision")
         if decision == "rejected":
-            state.complete(key, "rejected", result={"frontier": review}, owner=claim["owner"])
-            results.append({"orphan": orphan_id, "status": "rejected", "key": key})
+            if proposal_kind in {"link", "retry"}:
+                state.complete(
+                    key,
+                    "rejected",
+                    result={"frontier": review, "proposal": frontier_proposal},
+                    owner=claim["owner"],
+                )
+                results.append({"orphan": orphan_id, "status": "rejected", "key": key})
+            else:
+                failed = state.fail_attempt(
+                    key,
+                    "frontier",
+                    error=str(review.get("summary") or "frontier rejected no-link disposition"),
+                    owner=claim["owner"],
+                )
+                results.append(
+                    {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
+                )
             continue
         if decision != "approved":
             failed = state.fail_attempt(
@@ -895,18 +972,40 @@ def run_autonomous(
             results.append({"orphan": orphan_id, "status": failed["item"]["status"], "key": key})
             continue
         if float(review.get("confidence") or 0.0) < frontier_confidence_threshold:
+            failed = state.fail_attempt(
+                key,
+                "frontier",
+                error="frontier_confidence_below_threshold",
+                owner=claim["owner"],
+            )
+            results.append(
+                {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
+            )
+            continue
+        if proposal_kind == "no_link":
             completed = state.complete(
                 key,
                 "rejected",
-                result={
-                    "reason": "frontier_confidence_below_threshold",
-                    "required_confidence": frontier_confidence_threshold,
-                    "frontier": review,
-                },
+                result={"frontier": review, "proposal": frontier_proposal},
                 owner=claim["owner"],
             )
-            results.append({"orphan": orphan_id, "status": completed["item"]["status"], "key": key})
+            results.append(
+                {"orphan": orphan_id, "status": completed["item"]["status"], "key": key}
+            )
             continue
+        if proposal_kind == "retry":
+            failed = state.fail_attempt(
+                key,
+                "frontier",
+                error=str(frontier_proposal.get("reason") or "autonomous retry required"),
+                failure_class=str(frontier_proposal.get("failure_class") or "") or None,
+                owner=claim["owner"],
+            )
+            results.append(
+                {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
+            )
+            continue
+        assert suggestion is not None
         allowed, reason = cycle_budget.consume("mutation")
         if not allowed:
             state.fail_attempt(key, "frontier", error=reason, owner=claim["owner"])

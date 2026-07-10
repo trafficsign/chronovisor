@@ -5,7 +5,7 @@ from pathlib import Path
 
 from llm_wiki_mcp import recall_runtime
 from llm_wiki_mcp.recall_runtime import RecallPolicy, RecallRequest, render_output, run_recall
-from llm_wiki_mcp import state_register
+from llm_wiki_mcp import page_mutation, state_register
 
 
 def test_state_register_context_is_injected_for_codex(monkeypatch) -> None:
@@ -64,7 +64,75 @@ def test_refresh_state_register_writes_recent_pages(tmp_path: Path, monkeypatch)
     payload = state_register.refresh_state_register(["recent-page"], path=path)
 
     assert payload["pages"] == ["recent-page"]
+    assert payload["mutation"]["status"] == "applied"
     assert "[[recent-page]]" in path.read_text(encoding="utf-8")
+
+
+def test_refresh_preserves_approved_current_state_correction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    pages.mkdir()
+    system.mkdir()
+    path = system / "current-state.md"
+    path.write_text(
+        "---\ntitle: Current State\nupdated: 2026-07-10\ntype: state\n"
+        "summary: Working memory.\n---\n# Current State\n\n"
+        "- [[machine]] — Machine (2026-07-10) — Installed RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
+    monkeypatch.setattr(page_mutation, "SYSTEM_DIR", system)
+    monkeypatch.setattr(
+        page_mutation,
+        "WIKI_MUTATION_LOCK",
+        tmp_path / "runtime" / "wiki-mutation.lock",
+    )
+    monkeypatch.setattr(page_mutation, "find_page", lambda _page_id: None)
+    prepared = page_mutation.prepare_page_mutation(
+        "current-state",
+        [
+            {
+                "old_text": "Installed RAM is 16GB.",
+                "new_text": "Installed RAM is 32GB.",
+            }
+        ],
+        correction_id="corr-current-state-ram",
+    )
+    assert page_mutation.apply_prepared_mutations([prepared])["status"] == "applied"
+
+    class FakeStore:
+        def refresh(self) -> None:
+            pass
+
+        def meta(self, page_id: str):
+            return {
+                "page_id": page_id,
+                "title": "Machine",
+                # Simulate the stale generated source that caused the original
+                # current-state claim. The durable constraint must rebase it.
+                "summary": "Installed RAM is 16GB.",
+                "updated": "2026-07-10",
+                "page_type": "knowledge",
+            }
+
+        def all_pages_meta(self, include_system: bool = False):
+            return []
+
+    monkeypatch.setattr("llm_wiki_mcp.index_store.get_store", lambda: FakeStore())
+    payload = state_register.refresh_state_register(["machine"], path=path)
+    written = path.read_text(encoding="utf-8")
+
+    assert payload["status"] == "ok"
+    assert payload["mutation"]["status"] == "applied"
+    assert "Installed RAM is 16GB." not in written
+    assert "Installed RAM is 32GB." in written
+    assert "applied_corrections: [corr-current-state-ram]" in written
+    assert payload["mutation"]["correction_constraints"]["current-state"][0][
+        "correction_id"
+    ] == "corr-current-state-ram"
 
 
 def test_refresh_state_register_skips_placeholder_pages(tmp_path: Path, monkeypatch) -> None:

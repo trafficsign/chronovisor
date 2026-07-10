@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
+from llm_wiki_mcp.convergence import is_human_required_result
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.jobs import JobStatus, job_store
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT
@@ -39,6 +40,7 @@ SCHEMA_VERSION = 2
 MAX_ATTEMPTS = 3
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_RETRY_DELAY_SECONDS = 60 * 60
+DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
 
 SOURCE_PRIORITY = {
     "ingest_failure": 300,
@@ -111,6 +113,84 @@ def _nonnegative_int(value: object, *, default: int = 0) -> int:
         return max(0, int(value))
     except (TypeError, ValueError, OverflowError):
         return max(0, default)
+
+
+def _quarantine_retry_seconds() -> int:
+    try:
+        return max(
+            0,
+            int(
+                os.getenv(
+                    "LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS",
+                    str(DEFAULT_QUARANTINE_RETRY_SECONDS),
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_QUARANTINE_RETRY_SECONDS
+
+
+def _at_or_before(left: datetime, right: datetime) -> bool:
+    compare_left = left
+    compare_right = right
+    if compare_left.tzinfo is None and compare_right.tzinfo is not None:
+        compare_right = compare_right.replace(tzinfo=None)
+    elif compare_left.tzinfo is not None and compare_right.tzinfo is None:
+        compare_left = compare_left.replace(tzinfo=None)
+    return compare_left <= compare_right
+
+
+def _resume_due_autonomous_terminal(row: dict[str, Any], *, now: datetime) -> bool:
+    """Reopen non-human raw replay quarantine after a bounded cooldown.
+
+    ``quarantine_resumed_at`` survives the legacy history projection. That
+    makes the migration idempotent even when an older terminal history record
+    would otherwise win again on every queue load.
+    """
+
+    status = str(row.get("status") or "")
+    if status == "human_required" and is_human_required_result(row):
+        return False
+    legacy_human = status == "human_required"
+    if status != "quarantined" and not legacy_human:
+        return False
+    quarantined_at = _parse_dt(
+        row.get("quarantined_at")
+        or row.get("human_required_at")
+        or row.get("updated_at")
+        or row.get("last_attempt_at")
+    )
+    resumed_at = _parse_dt(row.get("quarantine_resumed_at"))
+    already_resumed = bool(
+        resumed_at is not None
+        and (quarantined_at is None or _at_or_before(quarantined_at, resumed_at))
+    )
+    if not legacy_human and not already_resumed and quarantined_at is not None:
+        retry_at = quarantined_at + timedelta(seconds=_quarantine_retry_seconds())
+        if not _at_or_before(retry_at, now):
+            return False
+
+    frontier_owned = legacy_human or bool(
+        _nonnegative_int(row.get("frontier_attempts"))
+        or row.get("frontier_decision")
+        or "frontier" in str(row.get("terminal_reason") or "").casefold()
+        or "immutable raw hash" in str(row.get("terminal_reason") or "").casefold()
+    )
+    row["status"] = "indeterminate" if frontier_owned else "pending"
+    row["attempts"] = 0
+    row["frontier_attempts"] = 0
+    row["next_retry_at"] = None
+    row["next_frontier_retry_at"] = _iso(now) if frontier_owned else None
+    row["terminal_reason"] = None
+    row["last_error"] = None
+    row["human_required_at"] = None
+    row["quarantine_resumed_at"] = row.get("quarantine_resumed_at") or _iso(now)
+    if not already_resumed:
+        row["quarantine_reopen_count"] = _nonnegative_int(
+            row.get("quarantine_reopen_count")
+        ) + 1
+    row["updated_at"] = _iso(now)
+    return True
 
 
 def is_raw_retracted(path: Path) -> bool:
@@ -998,8 +1078,10 @@ def _review_indeterminate_rows(
     reason = str(review.get("reason") or review.get("summary") or "invalid frontier result")
     row["frontier_attempts"] = attempts
     row["frontier_decision"] = decision
+    row["frontier_failure"] = review.get("frontier_failure")
     row["updated_at"] = _iso(now)
-    if bool(review.get("human_required")):
+    human_required = is_human_required_result(review)
+    if human_required:
         row["status"] = "human_required"
         row["human_required_at"] = _iso(now)
         row["terminal_reason"] = reason
@@ -1039,7 +1121,8 @@ def _review_indeterminate_rows(
         "frontier_attempts": attempts,
         "frontier_decision": decision,
         "frontier_confidence": confidence,
-        "human_required": bool(review.get("human_required")),
+        "human_required": human_required,
+        "frontier_failure": review.get("frontier_failure"),
         "error": row.get("last_error"),
         "terminal_reason": row.get("terminal_reason"),
     }
@@ -1115,6 +1198,7 @@ def _build_queue_unlocked(
     for key, row in existing_by_key.items():
         existing_by_key[key] = _merge_history_lifecycle(row, history_states.get(key))
         _coerce_exhausted(existing_by_key[key], now=now)
+        _resume_due_autonomous_terminal(existing_by_key[key], now=now)
 
     incoming: list[dict[str, Any]] = []
     if include_auto_signals:
@@ -1129,6 +1213,7 @@ def _build_queue_unlocked(
         key = str(row["key"])
         row = _merge_history_lifecycle(row, history_states.get(key))
         _coerce_exhausted(row, now=now)
+        _resume_due_autonomous_terminal(row, now=now)
         current = incoming_by_key.get(key)
         incoming_by_key[key] = row if current is None else _merge_durable_rows(current, row, now=now)
 
@@ -1187,6 +1272,7 @@ def _build_queue_unlocked(
         if current is not None and current.get("status") == "not_needed" and reactivation_signal:
             current = _reactivate_not_needed(current, now=now)
         combined = incoming_row if current is None else _merge_durable_rows(current, incoming_row, now=now)
+        _resume_due_autonomous_terminal(combined, now=now)
         if key in completed or combined.get("status") == "completed":
             skipped_completed += 1
             if current is not None:
@@ -1429,6 +1515,7 @@ def _run_candidate(
                 job_status = "error"
 
     updated = dict(row)
+    updated.pop("quarantine_resumed_at", None)
     updated["attempts"] = attempts
     updated["last_attempt_at"] = _iso(now)
     updated["updated_at"] = _iso(now)
@@ -1528,6 +1615,7 @@ def run_pending_queue(
         for key, row in by_key.items():
             by_key[key] = _merge_history_lifecycle(row, history_states.get(key))
             _coerce_exhausted(by_key[key], now=current_time)
+            _resume_due_autonomous_terminal(by_key[key], now=current_time)
         return list(by_key.values())
 
     if dry_run:
@@ -1666,6 +1754,7 @@ def run_pending_queue(
                 job = job_store.create(processor="ollama")
                 active_job_id = job.job_id
                 candidate = dict(selected_row)
+                candidate.pop("quarantine_resumed_at", None)
                 attempts = _nonnegative_int(candidate.get("attempts")) + 1
                 candidate.update(
                     {

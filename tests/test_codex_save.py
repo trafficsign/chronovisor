@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from llm_wiki_mcp import codex_save
 
@@ -124,6 +128,7 @@ def test_parse_writer_output_sanitizes_keywords() -> None:
             "content": "Body",
             "keywords": ["Codex", "Codex", "bad,keyword", 123, "LLM Wiki"],
             "reason": "durable",
+            "evidence_quotes": ["Codex 側の保存ハーネスを実装したい"],
         }
     )
 
@@ -132,6 +137,106 @@ def test_parse_writer_output_sanitizes_keywords() -> None:
     assert result.should_save is True
     assert result.keywords == ["Codex", "LLM Wiki"]
     assert result.rejected_keywords == ["bad,keyword", "123"]
+    assert result.evidence_quotes == ["Codex 側の保存ハーネスを実装したい"]
+
+
+def test_parse_writer_output_requires_evidence_quotes_for_save() -> None:
+    output = json.dumps(
+        {
+            "should_save": True,
+            "content": "Body",
+            "keywords": ["Codex"],
+            "reason": "durable",
+            "evidence_quotes": [],
+        }
+    )
+
+    with pytest.raises(codex_save.CodexSaveError, match="must provide user evidence_quotes"):
+        codex_save.parse_writer_output(output)
+
+
+def test_writer_prompt_forbids_assistant_model_name_substitution(tmp_path: Path) -> None:
+    session = tmp_path / "session.jsonl"
+    sample_session(session)
+
+    prompt = codex_save.build_writer_prompt(
+        codex_save.extract_transcript_slice(session),
+        max_chars=codex_save.DEFAULT_MAX_CHARS,
+    )
+
+    assert "evidence_quotes" in codex_save.MEMORY_WRITER_SCHEMA["required"]
+    assert "exact substrings from USER messages only" in prompt
+    assert "do not replace Q-KUN with Qwen" in prompt
+    assert "appears only in ASSISTANT text, omit it" in prompt
+
+
+def test_user_evidence_validation_rejects_assistant_only_quote(tmp_path: Path) -> None:
+    session = tmp_path / "session.jsonl"
+    sample_session(session)
+    transcript_slice = codex_save.extract_transcript_slice(session)
+    valid = codex_save.WriterResult(
+        should_save=True,
+        content="Body",
+        keywords=["Codex"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
+    )
+    invalid = codex_save.WriterResult(
+        should_save=True,
+        content="Body",
+        keywords=["Codex"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["gpt-5.4-mini で要約します"],
+    )
+
+    codex_save.validate_user_evidence_quotes(valid, transcript_slice)
+    with pytest.raises(codex_save.CodexSaveError, match="not found verbatim in USER"):
+        codex_save.validate_user_evidence_quotes(invalid, transcript_slice)
+
+
+def test_user_evidence_validation_rejects_normalized_model_and_capacity(
+    tmp_path: Path,
+) -> None:
+    transcript_slice = codex_save.TranscriptSlice(
+        session_file=tmp_path / "session.jsonl",
+        scanned_until_line=2,
+        records=[
+            codex_save.TranscriptRecord(1, "user", "Q-KUNの32GPレビューを見た"),
+            codex_save.TranscriptRecord(2, "assistant", "Qwenの32GBレビューですね"),
+        ],
+    )
+    invalid = codex_save.WriterResult(
+        should_save=True,
+        content="ユーザーはQwenの32GBレビューを見た。",
+        keywords=["Qwen", "32GB"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["Q-KUNの32GPレビューを見た"],
+    )
+    valid = codex_save.WriterResult(
+        should_save=True,
+        content="ユーザーはQ-KUNの32GPレビューを見た。",
+        keywords=["Q-KUN", "32GP"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["Q-KUNの32GPレビューを見た"],
+    )
+    invalid_keyword = codex_save.WriterResult(
+        should_save=True,
+        content="ユーザーはQ-KUNの32GPレビューを見た。",
+        keywords=["Qwen"],
+        reason="durable",
+        rejected_keywords=[],
+        evidence_quotes=["Q-KUNの32GPレビューを見た"],
+    )
+
+    with pytest.raises(codex_save.CodexSaveError, match="ungrounded protected literal"):
+        codex_save.validate_user_evidence_quotes(invalid, transcript_slice)
+    with pytest.raises(codex_save.CodexSaveError, match="keywords"):
+        codex_save.validate_user_evidence_quotes(invalid_keyword, transcript_slice)
+    codex_save.validate_user_evidence_quotes(valid, transcript_slice)
 
 
 def test_run_memory_writer_uses_mini_schema_and_disables_hooks(monkeypatch) -> None:
@@ -146,6 +251,7 @@ def test_run_memory_writer_uses_mini_schema_and_disables_hooks(monkeypatch) -> N
                     "content": "Body",
                     "keywords": ["Codex", "LLM Wiki"],
                     "reason": "ok",
+                    "evidence_quotes": ["exact user quote"],
                 }
             )
         )
@@ -186,6 +292,7 @@ def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, mon
             keywords=["Codex", "LLM Wiki"],
             reason="useful",
             rejected_keywords=[],
+            evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
         ),
     )
 
@@ -195,6 +302,7 @@ def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, mon
         session_id: str,
         keywords: list[str],
         trigger_ingest: bool,
+        idempotency_key: str,
     ) -> dict:
         calls.append(
             {
@@ -202,11 +310,15 @@ def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, mon
                 "session_id": session_id,
                 "keywords": keywords,
                 "trigger_ingest": trigger_ingest,
+                "idempotency_key": idempotency_key,
             }
         )
         return {"saved": "raw.md"}
 
     monkeypatch.setattr(codex_save, "save_raw", fake_save_raw)
+    monkeypatch.setattr(
+        codex_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
 
     first = codex_save.run(args_for(session, state, ignore_state=True))
     second = codex_save.run(args_for(session, state))
@@ -217,8 +329,260 @@ def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, mon
     assert len(calls) == 1
     assert calls[0]["session_id"] == "codex-019e5ec3-42fe-7f70-9402-7ff20da6be69"
     assert calls[0]["trigger_ingest"] is False
+    assert calls[0]["idempotency_key"].startswith("codex-")
+    assert "> Codex 側の保存ハーネスを実装したい" in calls[0]["content"]
+    assert "## Writer Reason" not in calls[0]["content"]
     saved_state = json.loads(state.read_text())
     assert saved_state["files"][str(session)]["last_saved_line"] == 5
+
+
+def test_retry_recovers_raw_published_before_state_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    sample_session(session)
+    with session.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-25T00:00:05Z",
+                    "type": "response_item",
+                    "payload": {"type": "function_call", "name": "apply_patch"},
+                }
+            )
+            + "\n"
+        )
+    state.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "files": {
+                    str(session): {
+                        "last_saved_line": 3,
+                        "session_id": "019e5ec3-42fe-7f70-9402-7ff20da6be69",
+                        "status": "declined",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    writer_calls: list[int] = []
+    save_calls: list[str] = []
+
+    monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(codex_save, "RAW_DIR", raw_dir)
+
+    def fake_writer(*_args, **_kwargs):
+        writer_calls.append(1)
+        return codex_save.WriterResult(
+            should_save=True,
+            content="Durable memory",
+            keywords=["Codex"],
+            reason="useful",
+            rejected_keywords=[],
+            evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
+        )
+
+    def durable_fake_save(content: str, *, idempotency_key: str, **_kwargs):
+        save_calls.append(idempotency_key)
+        path = raw_dir / f"save-{idempotency_key}.md"
+        path.write_text(content, encoding="utf-8")
+        return {"saved": path.name, "path": str(path)}
+
+    real_write_state = codex_save.write_state
+    state_writes = 0
+
+    def fail_first_state_commit(path: Path, payload: dict) -> None:
+        nonlocal state_writes
+        state_writes += 1
+        if state_writes == 1:
+            raise OSError("injected crash after raw publish")
+        real_write_state(path, payload)
+
+    monkeypatch.setattr(codex_save, "run_memory_writer", fake_writer)
+    monkeypatch.setattr(codex_save, "save_raw", durable_fake_save)
+    monkeypatch.setattr(codex_save, "write_state", fail_first_state_commit)
+
+    with pytest.raises(OSError, match="injected crash"):
+        codex_save.run(args_for(session, state))
+
+    retry = codex_save.run(args_for(session, state))
+
+    assert retry["status"] == "recovered"
+    assert retry["recovered_save"]["idempotency_key"] == save_calls[0]
+    assert len(writer_calls) == 1
+    assert len(save_calls) == 1
+    assert len(list(raw_dir.glob("*.md"))) == 1
+    saved_state = json.loads(state.read_text())
+    assert saved_state["files"][str(session)]["last_saved_line"] == 6
+
+
+def test_corrupt_publisher_receipt_does_not_advance_cursor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    sample_session(session)
+    monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(codex_save, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(
+        codex_save,
+        "run_memory_writer",
+        lambda *_args, **_kwargs: codex_save.WriterResult(
+            should_save=True,
+            content="Durable memory",
+            keywords=["Codex"],
+            reason="useful",
+            rejected_keywords=[],
+            evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
+        ),
+    )
+
+    def corrupt_save(content: str, *, idempotency_key: str, **_kwargs):
+        path = raw_dir / f"save-{idempotency_key}.md"
+        path.write_text(content.replace("Durable memory", "tampered memory"), encoding="utf-8")
+        return {"saved": path.name, "path": str(path)}
+
+    monkeypatch.setattr(codex_save, "save_raw", corrupt_save)
+
+    with pytest.raises(codex_save.CodexSaveError, match="receipt validation failed"):
+        codex_save.run(args_for(session, state, ignore_state=True))
+
+    assert not state.exists()
+
+
+def test_concurrent_stop_workers_publish_delta_exactly_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    sample_session(session)
+    with session.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-25T00:00:05Z",
+                    "type": "response_item",
+                    "payload": {"type": "function_call", "name": "apply_patch"},
+                }
+            )
+            + "\n"
+        )
+
+    monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
+    first_writer_entered = threading.Event()
+    release_first_writer = threading.Event()
+    duplicate_writer_entered = threading.Event()
+    second_lock_attempted = threading.Event()
+    calls_guard = threading.Lock()
+    writer_calls: list[int] = []
+    lock_attempts: list[int] = []
+    saves: list[str] = []
+
+    from contextlib import contextmanager
+
+    real_transaction_lock = codex_save.save_transaction_lock
+
+    @contextmanager
+    def instrumented_transaction_lock(**kwargs):
+        with calls_guard:
+            lock_attempts.append(1)
+            if len(lock_attempts) == 2:
+                second_lock_attempted.set()
+        with real_transaction_lock(**kwargs) as lock_path:
+            yield lock_path
+
+    def fake_writer(*_args, **_kwargs):
+        with calls_guard:
+            writer_calls.append(1)
+            first = len(writer_calls) == 1
+        if first:
+            first_writer_entered.set()
+            assert release_first_writer.wait(5)
+        else:
+            duplicate_writer_entered.set()
+        return codex_save.WriterResult(
+            should_save=True,
+            content="Durable memory",
+            keywords=["Codex"],
+            reason="useful",
+            rejected_keywords=[],
+            evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
+        )
+
+    def fake_save(content: str, **_kwargs):
+        saves.append(content)
+        return {"saved": "raw.md"}
+
+    monkeypatch.setattr(codex_save, "run_memory_writer", fake_writer)
+    monkeypatch.setattr(codex_save, "save_raw", fake_save)
+    monkeypatch.setattr(
+        codex_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(codex_save, "save_transaction_lock", instrumented_transaction_lock)
+    second_started = threading.Event()
+
+    def second_worker():
+        second_started.set()
+        return codex_save.run(args_for(session, state))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(codex_save.run, args_for(session, state))
+        assert first_writer_entered.wait(5)
+        second = pool.submit(second_worker)
+        assert second_started.wait(5)
+        assert second_lock_attempted.wait(5)
+        assert not duplicate_writer_entered.is_set()
+        release_first_writer.set()
+        results = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert not duplicate_writer_entered.is_set()
+    assert len(lock_attempts) == 2
+    assert len(writer_calls) == 1
+    assert len(saves) == 1
+    assert sorted(result["status"] for result in results) == ["saved", "skipped"]
+    saved_state = json.loads(state.read_text())
+    assert saved_state["files"][str(session)]["last_saved_line"] == 6
+
+
+def test_save_rejects_assistant_only_evidence_before_writing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    sample_session(session)
+    monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        codex_save,
+        "run_memory_writer",
+        lambda *args, **kwargs: codex_save.WriterResult(
+            should_save=True,
+            content="Misattributed model memory",
+            keywords=["gpt-5.4-mini"],
+            reason="assistant-only",
+            rejected_keywords=[],
+            evidence_quotes=["gpt-5.4-mini で要約します"],
+        ),
+    )
+    monkeypatch.setattr(
+        codex_save,
+        "save_raw",
+        lambda *args, **kwargs: pytest.fail("invalid evidence must not be saved"),
+    )
+
+    with pytest.raises(codex_save.CodexSaveError, match="not found verbatim in USER"):
+        codex_save.run(args_for(session, state, ignore_state=True))
+    assert not state.exists()
 
 
 def test_hook_mode_is_disabled_without_env(tmp_path: Path, monkeypatch) -> None:

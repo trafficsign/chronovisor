@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import httpx
 
 from llm_wiki_mcp import orchestrator, recall_runtime, runtime_status
+from llm_wiki_mcp.convergence import is_human_required_result
 from llm_wiki_mcp.health import health_snapshot
 from llm_wiki_mcp.ollama import OLLAMA_URL, embedding_model, ingest_model
 from llm_wiki_mcp.recall_auditor import load_audit_policy
@@ -923,7 +924,7 @@ def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> 
     local_decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
     decision = frontier.get("decision") or "unknown"
     rescue_status = frontier.get("rescue_status")
-    human_required = bool(frontier.get("human_required"))
+    human_required = is_human_required_result(frontier)
     if decision == "approved":
         state = "resolved"
         level = "success"

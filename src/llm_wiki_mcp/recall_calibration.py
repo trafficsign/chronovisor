@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.convergence import is_human_required_result
+from llm_wiki_mcp.page_mutation import wiki_mutation_lock
 from llm_wiki_mcp.recall_eval import read_jsonl
 from llm_wiki_mcp.recall_runtime import (
     RECALL_FEEDBACK_FILE,
@@ -35,6 +37,8 @@ from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 CALIBRATION_FILE = RECALL_DIR / "calibration.json"
 CALIBRATION_HISTORY_FILE = RECALL_DIR / "calibration-history.jsonl"
 CALIBRATION_RUN_HISTORY_FILE = RECALL_DIR / "calibration-run-history.jsonl"
+CALIBRATION_REVIEW_DIR = RECALL_DIR / "calibration-reviews"
+CALIBRATION_REVIEW_SCHEMA_VERSION = 1
 
 FEATURE_KEYS = (
     "top1_score_norm",
@@ -64,12 +68,102 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if tmp is not None:
             try:
                 tmp.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _canonical_hash(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _calibration_candidate_payload(artifact: dict[str, Any]) -> dict[str, Any]:
+    """Return the semantic candidate, excluding timestamps/provenance."""
+
+    return {
+        key: artifact.get(key)
+        for key in (
+            "version",
+            "lane",
+            "feature_keys",
+            "weights",
+            "bias",
+            "thresholds",
+            "samples",
+            "train_samples",
+            "holdout_samples",
+            "holdout",
+        )
+    }
+
+
+def _calibration_review_path(
+    proposal_hash: str,
+    *,
+    review_dir: Path = CALIBRATION_REVIEW_DIR,
+) -> Path:
+    return review_dir / f"candidate-{proposal_hash}.json"
+
+
+def _load_calibration_review(
+    path: Path,
+    *,
+    proposal_hash: str,
+) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    review = payload.get("review")
+    if (
+        payload.get("schema_version") != CALIBRATION_REVIEW_SCHEMA_VERSION
+        or payload.get("proposal_sha256") != proposal_hash
+        or not isinstance(payload.get("proposal"), dict)
+        or _canonical_hash(payload.get("proposal")) != proposal_hash
+        or not isinstance(review, dict)
+        or review.get("decision") not in {"approved", "rejected"}
+    ):
+        return None
+    return payload
+
+
+def _persist_calibration_review(
+    path: Path,
+    *,
+    proposal: dict[str, Any],
+    proposal_hash: str,
+    review: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": CALIBRATION_REVIEW_SCHEMA_VERSION,
+        "kind": "recall_calibration_frontier_review",
+        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        "proposal_sha256": proposal_hash,
+        "proposal": proposal,
+        "review": review,
+    }
+    _atomic_write_json(path, payload)
+    verified = _load_calibration_review(path, proposal_hash=proposal_hash)
+    if verified is None or verified.get("review") != review:
+        raise OSError("calibration frontier review artifact failed read-back verification")
+    return verified
 
 
 @dataclass(frozen=True)
@@ -274,6 +368,7 @@ def calibrate(
     frontier_mode: str = "off",
     frontier_reviewer: Any | None = None,
     budget: Any | None = None,
+    review_dir: Path | None = None,
 ) -> dict[str, Any]:
     if not policy.enabled:
         return {"status": "disabled", "reason": "recall calibration is disabled"}
@@ -370,65 +465,159 @@ def calibrate(
             "reason": "candidate precision or recall regressed on the temporal holdout",
             "candidate": artifact,
         }
-    frontier: dict[str, Any] | None = None
-    if frontier_mode == "auto" and not dry_run:
-        allowed = True
+    # Compatibility only: no caller may disable the final semantic reviewer.
+    _ = frontier_mode
+    old = load_calibration(CALIBRATION_FILE) or {}
+    candidate_payload = _calibration_candidate_payload(artifact)
+    if old and _calibration_candidate_payload(old) == candidate_payload:
+        return {
+            "status": "dry_run" if dry_run else "unchanged",
+            "calibration": old,
+            "reason": "candidate already active",
+        }
+
+    old_hash = _canonical_hash(old)
+    proposal = {
+        "schema_version": CALIBRATION_REVIEW_SCHEMA_VERSION,
+        "kind": "recall_calibration",
+        "active_calibration_sha256": old_hash,
+        "candidate": candidate_payload,
+    }
+    proposal_hash = _canonical_hash(proposal)
+    review_path = _calibration_review_path(
+        proposal_hash,
+        review_dir=review_dir or CALIBRATION_REVIEW_DIR,
+    )
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "calibration": artifact,
+            "frontier_proposal": proposal,
+            "frontier_review_path": str(review_path),
+        }
+
+    persisted = _load_calibration_review(
+        review_path,
+        proposal_hash=proposal_hash,
+    )
+    review_reused = persisted is not None
+    frontier = persisted.get("review") if persisted is not None else None
+    if not isinstance(frontier, dict):
         if budget is not None:
-            allowed, _reason = budget.consume("frontier")
-        if not allowed:
-            return {
-                "status": "budget_deferred",
-                "reason": "frontier cycle budget exhausted",
-                "candidate": artifact,
-            }
-        frontier = (
-            frontier_reviewer(artifact)
-            if callable(frontier_reviewer)
-            else review_calibration_with_frontier(artifact)
-        )
-        if frontier.get("human_required"):
-            return {
-                "status": "human_required",
-                "reason": str(frontier.get("summary") or "frontier access requires external authority"),
-                "candidate": artifact,
-                "frontier_review": frontier,
-            }
-        if frontier.get("decision") != "approved":
-            return {
-                "status": (
-                    "frontier_rejected"
-                    if frontier.get("decision") in {"rejected", "quarantined"}
-                    else "frontier_retry"
-                ),
-                "reason": str(frontier.get("summary") or "frontier did not approve calibration"),
-                "candidate": artifact,
-                "frontier_review": frontier,
-            }
-    old = load_calibration() or {}
-    if not dry_run:
-        if budget is not None:
-            mutation_allowed, mutation_reason = budget.consume("mutation")
-            if not mutation_allowed:
+            allowed, reason = budget.consume("frontier")
+            if not allowed:
                 return {
                     "status": "budget_deferred",
-                    "reason": mutation_reason,
+                    "reason": reason,
                     "candidate": artifact,
+                    "frontier_proposal": proposal,
                 }
-        _atomic_write_json(CALIBRATION_FILE, artifact)
-        append_jsonl(
-            CALIBRATION_HISTORY_FILE,
-            {
-                "ts": datetime.now().isoformat(timespec="seconds"),
-                "action": "apply",
-                "lane": "validated-auto",
-                "old": old,
-                "new": artifact,
-            },
+        frontier = (
+            frontier_reviewer(proposal)
+            if callable(frontier_reviewer)
+            else review_calibration_with_frontier(proposal)
         )
-    result = {"status": "dry_run" if dry_run else "applied", "calibration": artifact}
-    if frontier is not None:
-        result["frontier_review"] = frontier
-    return result
+        if not isinstance(frontier, dict):
+            frontier = {
+                "decision": "needs_retry",
+                "summary": "frontier result is not an object",
+            }
+        if is_human_required_result(frontier):
+            return {
+                "status": "human_required",
+                "reason": str(
+                    frontier.get("summary")
+                    or "frontier access requires external authority"
+                ),
+                "candidate": artifact,
+                "frontier_review": frontier,
+            }
+        if frontier.get("decision") in {"approved", "rejected"}:
+            try:
+                persisted = _persist_calibration_review(
+                    review_path,
+                    proposal=proposal,
+                    proposal_hash=proposal_hash,
+                    review=frontier,
+                )
+                frontier = dict(persisted["review"])
+            except OSError as exc:
+                return {
+                    "status": "frontier_retry",
+                    "reason": str(exc),
+                    "candidate": artifact,
+                    "frontier_review": frontier,
+                }
+
+    if frontier.get("decision") != "approved":
+        return {
+            "status": (
+                "frontier_rejected"
+                if frontier.get("decision") == "rejected"
+                else "frontier_retry"
+            ),
+            "reason": str(
+                frontier.get("summary") or "frontier did not approve calibration"
+            ),
+            "candidate": artifact,
+            "frontier_review": frontier,
+            "frontier_review_reused": review_reused,
+        }
+
+    if budget is not None:
+        mutation_allowed, mutation_reason = budget.consume("mutation")
+        if not mutation_allowed:
+            return {
+                "status": "budget_deferred",
+                "reason": mutation_reason,
+                "candidate": artifact,
+                "frontier_review": frontier,
+                "frontier_review_reused": review_reused,
+            }
+
+    applied_artifact = {
+        **artifact,
+        "frontier_provenance": {
+            "proposal_sha256": proposal_hash,
+            "review_artifact": str(review_path),
+            "review_summary": str(frontier.get("summary") or ""),
+        },
+    }
+    try:
+        with wiki_mutation_lock():
+            current = load_calibration(CALIBRATION_FILE) or {}
+            if _canonical_hash(current) != old_hash:
+                return {
+                    "status": "frontier_retry",
+                    "reason": "active calibration changed before apply",
+                    "candidate": artifact,
+                    "frontier_review": frontier,
+                }
+            _atomic_write_json(CALIBRATION_FILE, applied_artifact)
+            append_jsonl(
+                CALIBRATION_HISTORY_FILE,
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "action": "apply",
+                    "lane": "validated-auto",
+                    "old": old,
+                    "new": applied_artifact,
+                    "frontier_proposal_sha256": proposal_hash,
+                },
+            )
+    except OSError as exc:
+        return {
+            "status": "frontier_retry",
+            "reason": str(exc),
+            "candidate": artifact,
+            "frontier_review": frontier,
+        }
+    return {
+        "status": "applied",
+        "calibration": applied_artifact,
+        "frontier_review": frontier,
+        "frontier_review_reused": review_reused,
+    }
 
 
 def review_calibration_with_frontier(

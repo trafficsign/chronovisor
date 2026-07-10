@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tag backfill — full sweep with checkpoint/resume.
+"""Obsolete local-model tag backfill (semantic writes disabled).
 
 Walks every untagged page in ``~/.wiki/pages/``, asks the LLM for tags
 under the v2 prompt (TAG_REPORT_SYSTEM_PROMPT), and writes the result
@@ -13,9 +13,8 @@ skips any page already present in the progress log.
 Failure-tolerant: a single LLM error or parse failure does NOT abort the
 sweep; it logs ``error`` and moves on.
 
-Usage:
-    python3 scripts/tag_backfill_apply.py
-    python3 scripts/tag_backfill_apply.py --limit 100  # smoke run
+Use ``llm-wiki-sleep`` instead. This module remains only so historical logs and
+diagnostic helpers can be read; every mutation entry point fails closed.
 """
 
 from __future__ import annotations
@@ -31,6 +30,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from llm_wiki_mcp.frontmatter import parse as fm_parse, patch as fm_patch  # noqa: E402
 from llm_wiki_mcp.index_store import get_store  # noqa: E402
+from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+    block_legacy_semantic_mutation,
+)
 from llm_wiki_mcp.ollama import generate as _ollama_generate  # noqa: E402
 from llm_wiki_mcp.tag_distribution import (  # noqa: E402
     TAG_REPORT_SYSTEM_PROMPT,
@@ -113,6 +115,10 @@ def _mark_unfit(path: Path, status_value: str) -> None:
     Best-effort: any IO or parse error is swallowed so a stamp failure
     cannot derail the sweep.
     """
+    block_legacy_semantic_mutation(
+        tool="tag_backfill_apply.py",
+        replacement="llm-wiki-sleep",
+    )
     try:
         original = path.read_text()
         patched = fm_patch(original, {"tag_status": status_value})
@@ -197,6 +203,10 @@ def _process_one(page_id: str, master: list[str]) -> dict:
 
     # On success, clear any stale tag_status from a prior failed attempt.
     patched = fm_patch(original, {"tags": tags}, deletes=["tag_status"])
+    block_legacy_semantic_mutation(
+        tool="tag_backfill_apply.py",
+        replacement="llm-wiki-sleep",
+    )
     path.write_text(patched)
 
     return {
@@ -317,6 +327,11 @@ def main() -> int:
         help="Final summary path. Default: ~/projects/plan/inbox/{today}_morning-review-tag-backfill-result.md",
     )
     args = parser.parse_args()
+
+    block_legacy_semantic_mutation(
+        tool="tag_backfill_apply.py",
+        replacement="llm-wiki-sleep",
+    )
 
     store = get_store()
     store.refresh()

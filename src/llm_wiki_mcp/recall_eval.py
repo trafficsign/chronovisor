@@ -31,6 +31,7 @@ class RecallExample:
     cwd: str = ""
     session_id: str = ""
     expected_pages: tuple[str, ...] = ()
+    negative_pages: tuple[str, ...] = ()
     injected_pages: tuple[str, ...] = ()
     kind: str = ""
     ref: str = ""
@@ -38,7 +39,9 @@ class RecallExample:
 
     @property
     def is_positive(self) -> bool:
-        return bool(self.expected_pages)
+        # ``page_ignored`` is page-level ranking supervision, not evidence
+        # that the recall gate should inject any page for the whole prompt.
+        return self.kind != "page_ignored" and bool(self.expected_pages)
 
     @property
     def is_false_positive(self) -> bool:
@@ -92,7 +95,7 @@ def build_dataset(
         if record.get("decision_id")
     }
     examples: list[RecallExample] = []
-    seen: set[tuple[str, str, tuple[str, ...], str]] = set()
+    seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...], str]] = set()
     for feedback in read_jsonl(feedback_file):
         kind = str(feedback.get("kind", ""))
         if kind not in {
@@ -101,6 +104,7 @@ def build_dataset(
             "false-positive",
             "injection_used",
             "injection_ignored",
+            "page_ignored",
         }:
             continue
         ref = str(feedback.get("ref", ""))
@@ -110,10 +114,11 @@ def build_dataset(
         if not prompt:
             continue
         expected = _str_tuple(feedback.get("expected_pages"))
+        negative = _str_tuple(feedback.get("negative_pages"))
         injected = _str_tuple(record.get("pages")) or _str_tuple(feedback.get("injected_pages"))
         if kind == "injection_used" and not expected:
             expected = injected
-        key = (kind, prompt, expected, ref)
+        key = (kind, prompt, expected, negative, ref)
         if key in seen:
             continue
         seen.add(key)
@@ -124,6 +129,7 @@ def build_dataset(
                 cwd=str(record.get("cwd") or ""),
                 session_id=str(record.get("session_id") or ""),
                 expected_pages=expected,
+                negative_pages=negative,
                 injected_pages=injected,
                 kind=kind,
                 ref=ref,
@@ -226,6 +232,7 @@ def evaluate_examples(
                 "prompt": example.prompt[:180],
                 "kind": example.kind,
                 "expected_pages": list(example.expected_pages),
+                "negative_pages": list(example.negative_pages),
                 "pages": pages,
                 "decision": decision,
                 "latency_ms": latency,

@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.frontmatter import parse
-from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.wiki import SYSTEM_DIR
+from llm_wiki_mcp.wiki_write import apply_wiki_writes, prepare_wiki_write
 
 STATE_PAGE_ID = "current-state"
 STATE_PAGE = SYSTEM_DIR / f"{STATE_PAGE_ID}.md"
@@ -214,13 +214,18 @@ def refresh_state_register(
     if source_raw:
         lines.extend(["", "## Source", f"- Latest raw: `{Path(source_raw).name}`"])
     text = "\n".join(lines).rstrip() + "\n"
+    mutation: dict[str, Any] | None = None
     if write:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(path, text)
+        mutation = apply_wiki_writes([prepare_wiki_write(path, text)])
     return {
-        "status": "ok",
+        "status": (
+            "ok"
+            if mutation is None or mutation["status"] in {"applied", "unchanged"}
+            else "retry"
+        ),
         "path": str(path),
         "updated": today,
         "pages": [row["page_id"] for row in selected],
         "write": write,
+        "mutation": mutation,
     }

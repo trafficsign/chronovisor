@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from llm_wiki_mcp import autonomy
 from llm_wiki_mcp.convergence import ConvergenceStore, CycleBudget, RetryPolicy
@@ -91,7 +94,7 @@ def test_duplicate_decision_defers_uncertain_pair(monkeypatch) -> None:
     assert decision["reason"] == "title_mismatch"
 
 
-def test_duplicate_resolution_supersedes_exact_high_confidence_pair(monkeypatch, tmp_path: Path) -> None:
+def test_duplicate_resolution_routes_exact_high_confidence_pair_without_mutation(monkeypatch, tmp_path: Path) -> None:
     pages = {
         "rich": {
             "page_id": "rich",
@@ -132,14 +135,17 @@ def test_duplicate_resolution_supersedes_exact_high_confidence_pair(monkeypatch,
         write=True,
     )
 
-    assert payload["applied"] == 1
+    assert payload["applied"] == 0
+    assert payload["deferred"] == 1
     text = (tmp_path / "thin.md").read_text(encoding="utf-8")
-    assert "status: deprecated" in text
-    assert "superseded_by: rich" in text
-    assert writes[0]["action"] == "supersede"
+    assert "status: deprecated" not in text
+    assert "superseded_by: rich" not in text
+    assert writes[0]["action"] == "defer"
+    assert writes[0]["reason"] == "frontier_approval_required"
+    assert writes[0]["proposal"]["winner"] == "rich"
 
 
-def test_deterministic_duplicate_content_cas_preserves_concurrent_change(
+def test_deterministic_duplicate_proposal_never_calls_lifecycle_writer(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -152,30 +158,187 @@ def test_deterministic_duplicate_content_cas_preserves_concurrent_change(
         "_page_quality",
         lambda page_id, meta=None: 5.0 if page_id == "a" else 1.0,
     )
-    original_apply = autonomy._soft_supersede_page
-
-    def race_before_apply(**kwargs):
-        loser = tmp_path / "b.md"
-        loser.write_text(
-            loser.read_text(encoding="utf-8") + "concurrent update\n",
-            encoding="utf-8",
-        )
-        return original_apply(**kwargs)
-
-    monkeypatch.setattr(autonomy, "_soft_supersede_page", race_before_apply)
+    before = (tmp_path / "b.md").read_bytes()
+    monkeypatch.setattr(
+        autonomy,
+        "_soft_supersede_page",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("lifecycle writer called")),
+    )
 
     result = autonomy.resolve_duplicate_candidates([_exact_record()], write=False)
 
     assert result["applied"] == 0
     assert result["deferred"] == 1
-    assert result["decisions"][0]["result"]["reason"] == "loser_content_changed"
+    assert result["decisions"][0]["result"]["reason"] == "deterministic_heuristic_is_proposal_only"
     meta, body = parse_frontmatter((tmp_path / "b.md").read_text(encoding="utf-8"))
     assert meta["status"] == "active"
     assert "superseded_by" not in meta
-    assert body.endswith("concurrent update\n")
+    assert body == "Loser\n"
+    assert (tmp_path / "b.md").read_bytes() == before
 
 
-def test_deterministic_duplicate_budget_exhaustion_defers_without_mutation(
+def test_soft_supersede_preserves_correction_that_lands_before_locked_cas(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _write_page(tmp_path / "a.md", "Same", "Winner")
+    _write_page(tmp_path / "b.md", "Same", "Loser")
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md")
+    loser_snapshot = autonomy._duplicate_page_snapshot("b")
+    winner_snapshot = autonomy._duplicate_page_snapshot("a")
+    loser = tmp_path / "b.md"
+    corrected = loser.read_text(encoding="utf-8") + "user correction\n"
+
+    @contextmanager
+    def correction_wins():
+        loser.write_text(corrected, encoding="utf-8")
+        yield
+
+    monkeypatch.setattr(autonomy, "wiki_mutation_lock", correction_wins)
+
+    result = autonomy._soft_supersede_page(
+        loser="b",
+        winner="a",
+        expected_loser_hash=loser_snapshot["content_hash"],
+        expected_winner_hash=winner_snapshot["content_hash"],
+        decision_at=NOW.isoformat(),
+    )
+
+    assert result == {"status": "retry", "reason": "content_changed_before_apply"}
+    assert loser.read_text(encoding="utf-8") == corrected
+
+
+def test_lifecycle_writers_defer_pages_with_pending_content_correction(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _write_page(tmp_path / "winner.md", "Same", "Winner")
+    _write_page(tmp_path / "loser.md", "Same", "Loser")
+    _write_page(tmp_path / "old.md", "Old", "Archive candidate")
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md")
+    store = _convergence_store(tmp_path)
+    store.merge_item(
+        lane="content_correction",
+        source_id="codex:session:turn",
+        input_data={"correction": "wrong count"},
+        metadata={"candidate_pages": ["loser", "old"]},
+    )
+    loser_snapshot = autonomy._duplicate_page_snapshot("loser")
+    winner_snapshot = autonomy._duplicate_page_snapshot("winner")
+
+    supersede = autonomy._soft_supersede_page(
+        loser="loser",
+        winner="winner",
+        expected_loser_hash=loser_snapshot["content_hash"],
+        expected_winner_hash=winner_snapshot["content_hash"],
+        decision_at=NOW.isoformat(),
+        correction_store=store,
+    )
+    archive = autonomy.apply_retention_archives(
+        {
+            "archive_candidates": ["old"],
+            "pages": {"old": {"score": 0.1}},
+        },
+        write=False,
+        correction_store=store,
+        reviewer=lambda _candidate: {
+            "decision": "archive",
+            "confidence": 0.99,
+            "summary": "Obsolete duplicate",
+        },
+        now=NOW,
+    )
+
+    assert supersede["status"] == "retry"
+    assert supersede["reason"] == "pending_content_correction"
+    loser_meta, _ = parse_frontmatter((tmp_path / "loser.md").read_text(encoding="utf-8"))
+    old_meta, _ = parse_frontmatter((tmp_path / "old.md").read_text(encoding="utf-8"))
+    assert loser_meta["status"] == "active"
+    assert old_meta["status"] == "active"
+    assert archive["applied"] == 0
+    assert archive["decisions"][0]["reason"] == "pending_content_correction"
+
+
+def test_lifecycle_guard_keeps_auto_resumable_quarantine_protected(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Claim awaiting correction")
+    store = _convergence_store(tmp_path)
+    merged = store.merge_item(
+        lane="content_correction",
+        source_id="codex:session:quarantined-turn",
+        input_data={"correction": "the claim is wrong"},
+        metadata={"candidate_pages": ["old"]},
+    )
+    key = merged["item"]["key"]
+    store.quarantine(key, reason="frontier temporarily unavailable")
+
+    with autonomy._lifecycle_mutation_guard(
+        ["old"], page_path=page, correction_store=store
+    ) as quarantined_guard:
+        assert quarantined_guard["allowed"] is False
+        assert quarantined_guard["reason"] == "pending_content_correction"
+
+    store.resume_quarantined(key, stage="frontier")
+    store.complete(key, "applied", result={"correction": "verified"})
+
+    with autonomy._lifecycle_mutation_guard(
+        ["old"], page_path=page, correction_store=store
+    ) as resolved_guard:
+        assert resolved_guard["allowed"] is True
+
+
+def test_lifecycle_guard_avoids_inverse_lock_order(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Body")
+    store = _convergence_store(tmp_path)
+    order: list[str] = []
+    real_state_lock = store._exclusive_lock
+
+    @contextmanager
+    def tracked_state_lock():
+        order.append("state-enter")
+        with real_state_lock():
+            yield
+        order.append("state-exit")
+
+    @contextmanager
+    def tracked_wiki_lock():
+        assert order == ["state-enter"]
+        order.append("wiki-enter")
+        yield
+        order.append("wiki-exit")
+
+    monkeypatch.setattr(store, "_exclusive_lock", tracked_state_lock)
+    monkeypatch.setattr(autonomy, "wiki_mutation_lock", tracked_wiki_lock)
+
+    with autonomy._lifecycle_mutation_guard(
+        ["old"], page_path=page, correction_store=store
+    ) as guard:
+        assert guard["allowed"] is True
+
+    assert order == ["state-enter", "wiki-enter", "wiki-exit", "state-exit"]
+
+
+def test_autonomy_temp_names_are_unique_for_same_page_and_preimage(tmp_path: Path) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Body")
+    first = autonomy._write_unique_temp(page, b"one", token="same")
+    second = autonomy._write_unique_temp(page, b"two", token="same")
+    try:
+        assert first != second
+        assert first.read_bytes() == b"one"
+        assert second.read_bytes() == b"two"
+    finally:
+        first.unlink(missing_ok=True)
+        second.unlink(missing_ok=True)
+
+
+def test_deterministic_duplicate_proposal_does_not_spend_mutation_budget(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -199,7 +362,7 @@ def test_deterministic_duplicate_budget_exhaustion_defers_without_mutation(
 
     assert result["applied"] == 0
     assert result["deferred"] == 1
-    assert result["decisions"][0]["reason"] == "mutation_budget_exhausted"
+    assert result["decisions"][0]["reason"] == "frontier_approval_required"
     assert budget.snapshot()["used"]["mutation"] == 0
     assert (tmp_path / "b.md").read_bytes() == before
 
@@ -297,7 +460,7 @@ def test_soft_supersede_does_not_rollback_over_a_foreign_postwrite_change(
     )
 
 
-def test_frontier_consumer_defers_deterministic_mutation_without_attempt_when_budget_is_empty(
+def test_frontier_consumer_persists_approval_before_deferring_empty_mutation_budget(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -320,26 +483,32 @@ def test_frontier_consumer_defers_deterministic_mutation_without_attempt_when_bu
         [_exact_record()],
         convergence_store=store,
         budget=budget,
-        reviewer=lambda _candidate: (_ for _ in ()).throw(AssertionError("reviewer called")),
+        reviewer=lambda _candidate: {
+            "decision": "supersede_right",
+            "confidence": 0.99,
+            "summary": "A subsumes B",
+        },
         now=NOW,
         write=False,
     )
 
-    assert result["status_counts"] == {"mutation_budget_exhausted": 1}
+    assert result["status_counts"] == {"frontier_retry": 1}
     item = store.list_items(lane=autonomy.DUPLICATE_FRONTIER_LANE)[0]
-    assert item["status"] == "pending_local"
+    assert item["status"] == "frontier_retry"
     assert item["local_attempts"] == 0
-    assert item["frontier_attempts"] == 0
+    assert item["frontier_attempts"] == 1
     assert budget.snapshot()["used"] == {
         "local": 0,
-        "frontier": 0,
+        "frontier": 1,
         "mutation": 0,
         "raw_bytes": 0,
     }
+    approval_files = list((store.state_file.parent / "approvals").rglob("*.json"))
+    assert len(approval_files) == 1
     assert (pages / "b.md").read_bytes() == before
 
 
-def test_frontier_consumer_routes_failed_deterministic_apply_to_bounded_frontier(
+def test_duplicate_reuses_durable_frontier_approval_for_mutation_retry(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -354,21 +523,120 @@ def test_frontier_consumer_routes_failed_deterministic_apply_to_bounded_frontier
         "_page_quality",
         lambda page_id, meta=None: 5.0 if page_id == "a" else 1.0,
     )
+    store = _convergence_store(tmp_path)
+    calls: list[dict] = []
+
+    def reviewer(candidate: dict) -> dict:
+        calls.append(candidate)
+        return {
+            "decision": "supersede_right",
+            "confidence": 0.99,
+            "summary": "A subsumes B",
+        }
+
+    first = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_exact_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1, mutations=0),
+        reviewer=reviewer,
+        now=NOW,
+        write=False,
+    )
+    second = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_exact_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1, mutations=1),
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("durable approval was not reused")
+        ),
+        now=NOW + timedelta(seconds=61),
+        write=False,
+    )
+
+    assert first["status_counts"] == {"frontier_retry": 1}
+    assert second["status_counts"] == {"applied": 1}
+    assert second["frontier_calls"] == 0
+    assert len(calls) == 1
+    meta, body = parse_frontmatter((pages / "b.md").read_text(encoding="utf-8"))
+    assert meta["status"] == "deprecated"
+    assert meta["superseded_by"] == "a"
+    assert meta["frontier_approval_key"].startswith("duplicate_frontier:")
+    assert body == "Loser\n"
+
+
+def test_duplicate_recovers_convergence_after_crash_following_approved_write(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    _write_page(pages / "a.md", "Same", "Winner")
+    _write_page(pages / "b.md", "Same", "Loser")
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: pages / f"{page_id}.md")
+    store = _convergence_store(tmp_path)
+    real_complete = store.complete
+    crashed = False
+
+    def crash_after_write(key, status, **kwargs):
+        nonlocal crashed
+        if status == "applied" and not crashed:
+            crashed = True
+            raise RuntimeError("simulated process crash")
+        return real_complete(key, status, **kwargs)
+
+    monkeypatch.setattr(store, "complete", crash_after_write)
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        autonomy.resolve_deferred_duplicates_with_frontier(
+            [_deferred_record()],
+            convergence_store=store,
+            budget=_frontier_budget(calls=1, mutations=1),
+            reviewer=lambda _candidate: {
+                "decision": "supersede_right",
+                "confidence": 0.99,
+                "summary": "A subsumes B",
+            },
+            now=NOW,
+            write=False,
+        )
+
+    meta, _body = parse_frontmatter((pages / "b.md").read_text(encoding="utf-8"))
+    assert meta["status"] == "deprecated"
+    monkeypatch.setattr(store, "complete", real_complete)
+    recovered = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_deferred_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=0, mutations=0),
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("reviewer called during receipt recovery")
+        ),
+        now=NOW + timedelta(seconds=31),
+        write=False,
+    )
+
+    assert recovered["status_counts"] == {"already_applied": 1}
+    assert recovered["results"][0]["convergence_status"] == "applied"
+    item = store.list_items(lane=autonomy.DUPLICATE_FRONTIER_LANE)[0]
+    assert item["status"] == "applied"
+
+
+def test_frontier_consumer_routes_exact_title_heuristic_directly_to_frontier(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    _write_page(pages / "a.md", "Same", "Winner")
+    _write_page(pages / "b.md", "Same", "Loser")
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: pages / f"{page_id}.md")
+    monkeypatch.setattr(autonomy, "_page_meta", lambda page_id: {"page_id": page_id})
     monkeypatch.setattr(
         autonomy,
-        "_soft_supersede_page",
-        lambda **_kwargs: {"status": "retry", "reason": "simulated_local_apply_failure"},
+        "_page_quality",
+        lambda page_id, meta=None: 5.0 if page_id == "a" else 1.0,
     )
     monkeypatch.setattr(autonomy, "DECISIONS_FILE", tmp_path / "decisions.jsonl")
     store = _convergence_store(tmp_path, max_local_attempts=1)
 
-    local = autonomy.resolve_deferred_duplicates_with_frontier(
-        [_exact_record()],
-        convergence_store=store,
-        budget=_frontier_budget(calls=1, mutations=1),
-        reviewer=lambda _candidate: (_ for _ in ()).throw(AssertionError("reviewer called")),
-        now=NOW,
-    )
     frontier = autonomy.resolve_deferred_duplicates_with_frontier(
         [_exact_record()],
         convergence_store=store,
@@ -378,15 +646,13 @@ def test_frontier_consumer_routes_failed_deterministic_apply_to_bounded_frontier
             "confidence": 0.95,
             "summary": "Distinct evidence",
         },
-        now=NOW + timedelta(seconds=1),
+        now=NOW,
     )
 
-    assert local["status_counts"] == {"pending_frontier": 1}
-    assert local["results"][0]["decision"] == "deterministic_supersede"
     assert frontier["status_counts"] == {"rejected": 1}
     item = store.list_items(lane=autonomy.DUPLICATE_FRONTIER_LANE)[0]
     assert item["status"] == "rejected"
-    assert item["local_attempts"] == 1
+    assert item["local_attempts"] == 0
     assert item["frontier_attempts"] == 1
 
 
@@ -418,7 +684,7 @@ def test_frontier_consumer_deterministic_dry_run_is_byte_for_byte_read_only(
         dry_run=True,
     )
 
-    assert result["status_counts"] == {"would_apply_locally": 1}
+    assert result["status_counts"] == {"would_review": 1}
     assert budget.snapshot()["used"] == {
         "local": 0,
         "frontier": 0,
@@ -564,7 +830,7 @@ def test_frontier_duplicate_content_cas_refuses_concurrent_page_change(
     assert body.endswith("concurrent update\n")
 
 
-def test_frontier_duplicate_rejects_low_confidence_supersede_without_mutation(
+def test_frontier_duplicate_retries_low_confidence_decision_without_mutation(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -590,9 +856,9 @@ def test_frontier_duplicate_rejects_low_confidence_supersede_without_mutation(
         now=NOW,
     )
 
-    assert result["status_counts"] == {"rejected": 1}
-    assert result["kept_both"] == 1
-    assert result["results"][0]["decision"] == "keep_both"
+    assert result["status_counts"] == {"frontier_retry": 1}
+    assert result["kept_both"] == 0
+    assert result["results"][0]["decision"] == "needs_retry"
     assert budget.snapshot()["used"]["mutation"] == 0
     assert {path.name: path.read_bytes() for path in pages.iterdir()} == before
 
@@ -778,10 +1044,21 @@ def test_retention_archive_obeys_mutation_budget(monkeypatch, tmp_path: Path) ->
     payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.1}}}
     budget = _frontier_budget(mutations=0)
 
-    result = autonomy.apply_retention_archives(payload, write=False, budget=budget)
+    result = autonomy.apply_retention_archives(
+        payload,
+        write=False,
+        budget=budget,
+        convergence_store=_convergence_store(tmp_path),
+        reviewer=lambda _candidate: {
+            "decision": "archive",
+            "confidence": 0.99,
+            "summary": "Obsolete",
+        },
+        now=NOW,
+    )
 
     assert result["applied"] == 0
-    assert result["decisions"][0]["reason"] == "mutation_budget_exhausted"
+    assert result["decisions"][0]["status"] == "frontier_retry"
     meta, _body = parse_frontmatter(page.read_text(encoding="utf-8"))
     assert meta["status"] == "active"
 
@@ -809,7 +1086,17 @@ def test_retention_skips_already_archived_without_starving_next_candidate(
     budget = _frontier_budget(mutations=1)
 
     result = autonomy.apply_retention_archives(
-        payload, write=False, limit=1, budget=budget
+        payload,
+        write=False,
+        limit=1,
+        budget=budget,
+        convergence_store=_convergence_store(tmp_path),
+        reviewer=lambda _candidate: {
+            "decision": "archive",
+            "confidence": 0.99,
+            "summary": "Obsolete",
+        },
+        now=NOW,
     )
 
     assert result["applied"] == 1
@@ -820,6 +1107,188 @@ def test_retention_skips_already_archived_without_starving_next_candidate(
     active_meta, _body = parse_frontmatter(active.read_text(encoding="utf-8"))
     assert active_meta["status"] == "archived"
     assert budget.snapshot()["used"]["mutation"] == 1
+
+
+def test_retention_frontier_rejection_keeps_page_active_and_is_cached(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "useful.md"
+    _write_page(page, "Useful", "Distinct source of truth")
+    monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
+    store = _convergence_store(tmp_path)
+    payload = {
+        "archive_candidates": ["useful"],
+        "pages": {"useful": {"score": 0.05}},
+    }
+    calls = 0
+
+    def reviewer(_candidate: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "decision": "keep_active",
+            "confidence": 0.98,
+            "summary": "The page contains a distinct current fact",
+        }
+
+    first = autonomy.apply_retention_archives(
+        payload,
+        write=False,
+        convergence_store=store,
+        reviewer=reviewer,
+        now=NOW,
+    )
+    second = autonomy.apply_retention_archives(
+        payload,
+        write=False,
+        convergence_store=store,
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("terminal retention decision was not cached")
+        ),
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert first["status_counts"] == {"rejected": 1}
+    assert second["status_counts"] == {"rejected": 1}
+    assert calls == 1
+    meta, body = parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert meta["status"] == "active"
+    assert body == "Distinct source of truth\n"
+
+
+def test_retention_reuses_durable_approval_after_mutation_budget_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Redundant historical cache")
+    monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
+    store = _convergence_store(tmp_path)
+    payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
+    calls = 0
+
+    def reviewer(_candidate: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"decision": "archive", "confidence": 0.99, "summary": "Redundant"}
+
+    first = autonomy.apply_retention_archives(
+        payload,
+        write=False,
+        budget=_frontier_budget(calls=1, mutations=0),
+        convergence_store=store,
+        reviewer=reviewer,
+        now=NOW,
+    )
+    second = autonomy.apply_retention_archives(
+        payload,
+        write=False,
+        budget=_frontier_budget(calls=1, mutations=1),
+        convergence_store=store,
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("durable retention approval was not reused")
+        ),
+        now=NOW + timedelta(seconds=61),
+    )
+
+    assert first["status_counts"] == {"frontier_retry": 1}
+    assert second["status_counts"] == {"applied": 1}
+    assert second["frontier_calls"] == 0
+    assert calls == 1
+    meta, body = parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert meta["status"] == "archived"
+    assert meta["autonomy_decision"] == "retention_frontier_archive"
+    assert meta["frontier_approval_key"].startswith("retention_frontier:")
+    assert body == "Redundant historical cache\n"
+
+
+def test_retention_recovers_convergence_after_crash_following_archive(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Redundant")
+    monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
+    store = _convergence_store(tmp_path)
+    real_complete = store.complete
+    crashed = False
+
+    def crash_after_write(key, status, **kwargs):
+        nonlocal crashed
+        if status == "applied" and not crashed:
+            crashed = True
+            raise RuntimeError("simulated retention crash")
+        return real_complete(key, status, **kwargs)
+
+    monkeypatch.setattr(store, "complete", crash_after_write)
+    payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
+    with pytest.raises(RuntimeError, match="simulated retention crash"):
+        autonomy.apply_retention_archives(
+            payload,
+            write=False,
+            convergence_store=store,
+            reviewer=lambda _candidate: {
+                "decision": "archive",
+                "confidence": 0.99,
+                "summary": "Redundant",
+            },
+            now=NOW,
+        )
+
+    meta, _body = parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert meta["status"] == "archived"
+    monkeypatch.setattr(store, "complete", real_complete)
+    recovered = autonomy.apply_retention_archives(
+        payload,
+        write=False,
+        convergence_store=store,
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("reviewer called during retention receipt recovery")
+        ),
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert recovered["decisions"][0]["action"] == "already_archived"
+    assert recovered["decisions"][0]["convergence_status"] == "applied"
+    item = store.list_items(lane=autonomy.RETENTION_FRONTIER_LANE)[0]
+    assert item["status"] == "applied"
+
+
+def test_retention_dry_run_is_byte_for_byte_and_state_read_only(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Body")
+    before = page.read_bytes()
+    monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
+    store = _convergence_store(tmp_path)
+    budget = _frontier_budget(calls=1, mutations=1)
+
+    result = autonomy.apply_retention_archives(
+        {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}},
+        apply=False,
+        write=False,
+        budget=budget,
+        convergence_store=store,
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("reviewer called during dry run")
+        ),
+        now=NOW,
+    )
+
+    assert result["status_counts"] == {"would_review": 1}
+    assert page.read_bytes() == before
+    assert not store.state_file.exists()
+    assert not store.events_file.exists()
+    assert not store.lock_file.exists()
+    assert budget.snapshot()["used"] == {
+        "local": 0,
+        "frontier": 0,
+        "mutation": 0,
+        "raw_bytes": 0,
+    }
 
 
 def test_page_status_patch_rejects_stale_snapshot(monkeypatch, tmp_path: Path) -> None:

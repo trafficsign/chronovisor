@@ -56,6 +56,14 @@ def test_build_candidates_uses_feedback_labels(tmp_path) -> None:
                 "source": "auditor_precision",
                 "ref": "d2",
             },
+            {
+                "kind": "page_ignored",
+                "prompt": "G32P と P24U のレビューを比較して",
+                "expected_pages": ["g32p-review", "p24u-review"],
+                "negative_pages": ["p24u-review"],
+                "source": "content_correction",
+                "ref": "d3",
+            },
         ],
     )
     write_jsonl(log_file, [])
@@ -66,13 +74,16 @@ def test_build_candidates_uses_feedback_labels(tmp_path) -> None:
         limit=10,
     )
 
-    assert len(examples) == 2
+    assert len(examples) == 3
     assert examples[0].expected_pages == ("llm-wiki-search-improvement-roadmap",)
     assert examples[0].negative_pages == ()
     assert examples[0].language == "mixed"
     assert examples[0].reviewed is False
     assert examples[1].expected_pages == ()
     assert examples[1].negative_pages == ("noisy-page",)
+    assert examples[2].expected_pages == ()
+    assert examples[2].negative_pages == ("p24u-review",)
+    assert examples[2].kind == "page_ignored"
 
 
 def test_evaluate_examples_reports_ranking_metrics(monkeypatch) -> None:
@@ -145,9 +156,9 @@ def test_run_report_respects_limit(tmp_path, monkeypatch) -> None:
     write_jsonl(
         golden_file,
         [
-            {"query": "q1", "expected_pages": ["a"]},
-            {"query": "q2", "expected_pages": ["b"]},
-            {"query": "q3", "expected_pages": ["c"]},
+            {"query": "q1", "expected_pages": ["a"], "reviewed": True},
+            {"query": "q2", "expected_pages": ["b"], "reviewed": True},
+            {"query": "q3", "expected_pages": ["c"], "reviewed": True},
         ],
     )
     seen = {}
@@ -169,8 +180,8 @@ def test_run_report_can_filter_auto_golden_sources(tmp_path, monkeypatch) -> Non
     write_jsonl(
         golden_file,
         [
-            {"query": "manual", "expected_pages": ["a"], "source": "manual-curated-from-feedback"},
-            {"query": "auto", "expected_pages": ["b"], "source": "recall_questions"},
+            {"query": "manual", "expected_pages": ["a"], "source": "manual-curated-from-feedback", "reviewed": True},
+            {"query": "auto", "expected_pages": ["b"], "source": "recall_questions", "reviewed": True},
         ],
     )
     seen = {}
@@ -265,7 +276,62 @@ def test_cli_build_golden_json(tmp_path, capsys) -> None:
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["examples"] == 1
+    assert payload["status"] == "queued_for_frontier_review"
+    assert payload["authoritative_golden_unchanged"] is True
     assert output_file.exists()
+    row = json.loads(output_file.read_text(encoding="utf-8").splitlines()[0])
+    assert row["queue_status"] == "pending_frontier_review"
+    assert row["promoted_to_golden"] is False
+
+
+def test_unreviewed_rows_are_never_loaded_as_active_golden(tmp_path) -> None:
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        golden_file,
+        [
+            {"query": "local proposal", "expected_pages": ["unsafe"], "reviewed": False},
+            {"query": "frontier approved", "expected_pages": ["safe"], "reviewed": True},
+        ],
+    )
+
+    examples = search_eval.load_examples(golden_file)
+
+    assert [example.query for example in examples] == ["frontier approved"]
+
+
+def test_legacy_build_golden_reroutes_away_from_authoritative_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file = tmp_path / "recall-log.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    queue_file = tmp_path / "search-label-queue.jsonl"
+    golden_file.write_text('{"query":"safe","expected_pages":["p"],"reviewed":true}\n')
+    before = golden_file.read_bytes()
+    write_jsonl(
+        feedback_file,
+        [
+            {
+                "kind": "missed_candidate",
+                "prompt": "local candidate",
+                "expected_pages": ["candidate"],
+            }
+        ],
+    )
+    write_jsonl(log_file, [])
+    monkeypatch.setattr(search_eval, "GOLDEN_FILE", golden_file)
+    monkeypatch.setattr(search_eval, "LABEL_QUEUE_FILE", queue_file)
+
+    payload = search_eval.build_golden(
+        feedback_file=feedback_file,
+        log_file=log_file,
+        output_file=golden_file,
+    )
+
+    assert payload["status"] == "queued_for_frontier_review"
+    assert golden_file.read_bytes() == before
+    assert queue_file.exists()
 
 
 def test_build_label_queue_does_not_touch_golden(tmp_path) -> None:
@@ -556,7 +622,7 @@ def test_frontier_review_votes_require_same_label_set(tmp_path) -> None:
     assert queue_rows[0]["frontier_review"]["reviewer"] == "frontier_consensus"
 
 
-def test_frontier_review_marks_environment_failures_human_required(tmp_path) -> None:
+def test_frontier_tool_unavailable_retries_without_human_queue(tmp_path) -> None:
     queue_file = tmp_path / "label-queue.jsonl"
     golden_file = tmp_path / "search-golden.jsonl"
     write_jsonl(
@@ -595,7 +661,48 @@ def test_frontier_review_marks_environment_failures_human_required(tmp_path) -> 
 
     queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
     assert payload["promoted"] == 0
-    assert queue_rows[0]["queue_status"] == "human_required"
+    assert queue_rows[0]["queue_status"] == "frontier_retry"
+    assert queue_rows[0]["frontier_review"]["human_required"] is False
+
+
+def test_legacy_tool_unavailable_human_label_is_quarantined_without_human_wait(
+    tmp_path,
+) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "query",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "human_required",
+                "promoted_to_golden": False,
+                "frontier_attempts": 3,
+                "frontier_review": {
+                    "decision": "needs_retry",
+                    "human_required": True,
+                    "frontier_failure": {
+                        "failure_class": "frontier_tool_unavailable",
+                        "human_required": True,
+                    },
+                },
+            }
+        ],
+    )
+
+    payload = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: (_ for _ in ()).throw(AssertionError("must not review")),
+    )
+
+    queue_row = json.loads(queue_file.read_text(encoding="utf-8"))
+    assert payload["attempted"] == 0
+    assert queue_row["queue_status"] == "frontier_quarantined"
+    assert "human_boundary_reclassified_at" in queue_row
 
 
 def test_cli_frontier_review_labels_json(tmp_path, capsys, monkeypatch) -> None:
@@ -798,6 +905,44 @@ def test_frontier_label_retry_quarantines_after_bound(tmp_path) -> None:
     row = json.loads(queue_file.read_text().splitlines()[0])
     assert result["status_counts"] == {"frontier_quarantined": 1}
     assert row["queue_status"] == "frontier_quarantined"
+
+
+def test_frontier_label_quarantine_reopens_after_cooldown(tmp_path, monkeypatch) -> None:
+    queue_file = tmp_path / "queue.jsonl"
+    golden_file = tmp_path / "golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "q",
+                "expected_pages": ["p"],
+                "queue_status": "frontier_quarantined",
+                "frontier_attempts": 3,
+                "last_attempt_at": "2000-01-01T00:00:00",
+            }
+        ],
+    )
+    monkeypatch.setenv("LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "1")
+
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: {
+            "decision": "approved",
+            "confidence": 0.99,
+            "expected_pages": ["p"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "recovered",
+            "notes": None,
+        },
+    )
+
+    row = json.loads(queue_file.read_text().splitlines()[0])
+    assert result["promoted"] == 1
+    assert row["queue_status"] == "frontier_approved"
+    assert row["quarantine_reopen_count"] == 1
+    assert row["frontier_attempts"] == 1
 
 
 def test_self_tune_applies_frontier_approved_policy(tmp_path, monkeypatch) -> None:

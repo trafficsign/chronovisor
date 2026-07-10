@@ -14,6 +14,7 @@ from llm_wiki_mcp.convergence import (
     RetryPolicy,
     exponential_backoff_seconds,
     is_human_required_failure,
+    is_human_required_result,
     stable_item_key,
 )
 
@@ -258,8 +259,18 @@ def test_frontier_attempts_are_bounded_and_terminally_quarantined(tmp_path: Path
 
 def test_only_external_access_failures_cross_human_boundary(tmp_path: Path) -> None:
     assert is_human_required_failure("auth_required") is True
+    assert is_human_required_failure("secret_store_permission_required") is True
+    assert is_human_required_failure("frontier_tool_unavailable") is False
+    assert is_human_required_failure("both_frontiers_unavailable") is False
     assert is_human_required_failure("schema_invalid") is False
     assert is_human_required_failure("model_asked_for_human") is False
+    assert is_human_required_result({"human_required": True}) is False
+    assert is_human_required_result(
+        {
+            "human_required": False,
+            "frontier_failure": {"failure_class": "keychain_permission_required"},
+        }
+    ) is True
 
     store = _store(tmp_path)
     schema_key = _merge(store, source_id="schema")["key"]
@@ -320,6 +331,69 @@ def test_human_required_resumes_only_with_capability_fingerprint(tmp_path: Path)
     assert resumed["item"]["human_required"] is False
     assert resumed["item"]["frontier_attempts"] == 0
     assert resumed["item"]["capability_fingerprint"].startswith("codex-auth-mtime")
+
+
+def test_due_human_required_is_resumed_after_shared_preflight(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    key = _merge(store)["key"]
+    store.escalate(key, reason="frontier needed", now=NOW)
+    store.claim_attempt(key, "frontier", owner="frontier", now=NOW)
+    store.fail_attempt(
+        key,
+        "frontier",
+        owner="frontier",
+        error="oauth login required",
+        failure_class="oauth_required",
+        now=NOW,
+    )
+
+    not_ready = store.resume_due_human_required(
+        capability_fingerprint="",
+        cooldown_seconds=0,
+        now=NOW + timedelta(hours=1),
+    )
+    resumed = store.resume_due_human_required(
+        capability_fingerprint="frontier-preflight:ok",
+        cooldown_seconds=60,
+        now=NOW + timedelta(hours=1),
+    )
+
+    assert not_ready["status"] == "preflight_not_ready"
+    assert not_ready["resumed"] == 0
+    assert resumed["resumed"] == 1
+    assert store.get(key)["status"] == "pending_frontier"
+    assert store.get(key)["capability_fingerprint"] == "frontier-preflight:ok"
+
+
+def test_merge_reopens_legacy_non_external_human_required_item(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    key = _merge(store)["key"]
+    store.escalate(key, reason="frontier needed", now=NOW)
+    store.claim_attempt(key, "frontier", owner="frontier", now=NOW)
+    store.fail_attempt(
+        key,
+        "frontier",
+        owner="frontier",
+        error="auth required",
+        failure_class="auth_required",
+        now=NOW,
+    )
+    state = store.load()
+    state["items"][key]["last_failure_class"] = "frontier_tool_unavailable"
+    store.state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    merged = store.merge_item(
+        lane="test",
+        source_id="item-1",
+        input_data={"value": 1},
+        resolver_version="v1",
+        now=NOW,
+    )
+
+    assert merged["reclassified_human_boundary"] is True
+    assert merged["item"]["status"] == "frontier_retry"
+    assert merged["item"]["human_required"] is False
+    assert merged["item"]["frontier_attempts"] == 1
 
 
 def test_active_lease_blocks_duplicate_worker_and_expiry_counts_crash(tmp_path: Path) -> None:
@@ -502,6 +576,43 @@ def test_explicit_quarantine_is_terminal_and_completion_is_idempotent(tmp_path: 
     assert first["item"]["result"] == {"writes": 1}
     assert second["item"]["result"] == {"writes": 1}
     assert json.loads(store.state_file.read_text())["items"][applied_key]["status"] == "applied"
+
+
+def test_due_nonhuman_quarantine_is_reopened_without_resetting_other_lanes(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    retry_key = _merge(store, source_id="retryable")["key"]
+    excluded_key = _merge(store, source_id="content")["key"]
+    state = store.load()
+    state["items"][retry_key].update(
+        {
+            "lane": "lint_repair",
+            "status": "quarantined",
+            "quarantine_reason": "retry_exhausted:frontier",
+            "last_failure_class": "network_transient",
+            "updated_at": NOW.isoformat(),
+        }
+    )
+    state["items"][excluded_key].update(
+        {
+            "lane": "content_correction",
+            "status": "quarantined",
+            "quarantine_reason": "retry_exhausted:frontier",
+            "updated_at": NOW.isoformat(),
+        }
+    )
+    store.state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    result = store.resume_due_quarantined(
+        cooldown_seconds=3600,
+        exclude_lanes={"content_correction"},
+        now=NOW + timedelta(hours=2),
+    )
+
+    assert result["resumed"] == 1
+    assert store.get(retry_key)["status"] == "pending_frontier"
+    assert store.get(excluded_key)["status"] == "quarantined"
 
 
 def test_exponential_backoff_is_one_based_and_capped() -> None:
