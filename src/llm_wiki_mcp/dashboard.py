@@ -641,7 +641,7 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
     if isinstance(processed_raw_files, list):
         for filename in processed_raw_files:
             if isinstance(filename, str) and filename in raw_files:
-                raw_status[filename] = "processed"
+                raw_status.setdefault(filename, "processed")
 
     try:
         log_lines = LOG_FILE.read_text(encoding="utf-8").splitlines()

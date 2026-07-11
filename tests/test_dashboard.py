@@ -608,9 +608,26 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
     raw_dir = wiki_root / "raw"
     raw_dir.mkdir(parents=True)
     raw_name = "20260704-120000-codex-processed-without-drain-log-aaaaaaaa.md"
+    failed_name = "20260704-121000-codex-explicit-failure-bbbbbbbb.md"
     (raw_dir / raw_name).write_text("raw", encoding="utf-8")
+    (raw_dir / failed_name).write_text("bad", encoding="utf-8")
     (wiki_root / ".orchestrator_state.json").write_text(
-        json.dumps({"processed_raw_files": [raw_name]}),
+        json.dumps({"processed_raw_files": [raw_name, failed_name]}),
+        encoding="utf-8",
+    )
+    logs_dir = wiki_root / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "ingest-drain-20260704.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-04T12:30:00",
+                "result": {
+                    "files_attempted": [failed_name],
+                    "per_raw": [{"filename": failed_name, "succeeded": False}],
+                },
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -622,13 +639,20 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
 
     assert history["totals"]["processed_bytes"] == 3
     assert history["totals"]["pending_bytes"] == 0
+    assert history["totals"]["failed_bytes"] == 3
     assert day["raw_segments"] == [
         {
             "name": raw_name,
             "bytes": 3,
             "status": "processed",
             "source": "codex",
-        }
+        },
+        {
+            "name": failed_name,
+            "bytes": 3,
+            "status": "failed",
+            "source": "codex",
+        },
     ]
 
 
