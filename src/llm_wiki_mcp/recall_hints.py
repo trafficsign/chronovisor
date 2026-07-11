@@ -145,6 +145,7 @@ def add_query_hint(
     normalize_key: str = "",
     path: Path | None = None,
     increment_existing: bool = True,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     page_ref = page_id.strip()
     query_text = query.strip()
@@ -171,6 +172,12 @@ def add_query_hint(
                     _save_query_hints_unlocked(hints, path)
                 return hint
 
+        trusted_auto = bool(
+            isinstance(provenance, dict)
+            and provenance.get("schema_version") == 2
+            and provenance.get("frontier_approved") is True
+            and str(provenance.get("feedback_ref") or "").strip()
+        )
         record = {
             "page_id": page_ref,
             "query": query_text,
@@ -182,6 +189,9 @@ def add_query_hint(
             "count": 1,
             "created_at": now,
             "updated_at": now,
+            "provenance_version": 2,
+            "provenance": dict(provenance or {}),
+            "active": source != "recall-auto-apply" or trusted_auto,
         }
         hints.append(record)
         _save_query_hints_unlocked(hints, path)
@@ -221,6 +231,13 @@ def matching_hint_page_ids(queries: list[str], *, limit: int = 3, path: Path | N
     out: list[str] = []
     seen: set[str] = set()
     for hint in load_query_hints(path):
+        if hint.get("active") is False:
+            continue
+        if (
+            hint.get("source") == "recall-auto-apply"
+            and hint.get("provenance_version") != 2
+        ):
+            continue
         page_id = hint.get("page_id")
         if not isinstance(page_id, str) or page_id in seen:
             continue
@@ -232,3 +249,37 @@ def matching_hint_page_ids(queries: list[str], *, limit: int = 3, path: Path | N
             if len(out) >= limit:
                 break
     return out
+
+
+def quarantine_legacy_query_hints(
+    *,
+    path: Path | None = None,
+    quarantine_path: Path | None = None,
+    write: bool = False,
+) -> dict[str, Any]:
+    """Disable unversioned auto-learned hints and preserve them for audit."""
+    path = _hint_path(path)
+    quarantine_path = quarantine_path or path.with_name("query-hints-quarantine.json")
+    hints = load_query_hints(path)
+    quarantined: list[dict[str, Any]] = []
+    active: list[dict[str, Any]] = []
+    for hint in hints:
+        if (
+            hint.get("source") == "recall-auto-apply"
+            and hint.get("provenance_version") != 2
+        ):
+            quarantined.append({**hint, "active": False, "quarantine_reason": "legacy_unversioned_provenance"})
+        else:
+            active.append(hint)
+    if write:
+        with _hint_lock(path):
+            _save_query_hints_unlocked(active, path)
+            _save_query_hints_unlocked(quarantined, quarantine_path)
+    return {
+        "status": "ok",
+        "active": len(active),
+        "quarantined": len(quarantined),
+        "path": str(path),
+        "quarantine_path": str(quarantine_path),
+        "write": write,
+    }

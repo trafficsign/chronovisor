@@ -266,6 +266,7 @@ def test_run_memory_writer_uses_mini_schema_and_disables_hooks(monkeypatch) -> N
 
     cmd = seen["cmd"]
     assert cmd[cmd.index("-m") + 1] == codex_save.DEFAULT_MEMORY_MODEL
+    assert f'model_reasoning_effort="{codex_save.DEFAULT_REASONING_EFFORT}"' in cmd
     assert "--output-schema" in cmd
     assert "--disable" in cmd
     assert "hooks" in cmd

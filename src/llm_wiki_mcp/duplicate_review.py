@@ -56,6 +56,15 @@ def _normalize_text(text: object) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def _temporal_family(page_id: str) -> str | None:
+    """Return a stable family for dated snapshots that must coexist."""
+    match = re.match(r"^(.+?)-(?:19|20)\d{2}-\d{2}-\d{2}(?:-.+)?$", page_id)
+    if not match:
+        return None
+    family = match.group(1)
+    return family if family in {"memory-reflection", "job-change-status", "current-state"} else None
+
+
 def _knowledge_metas() -> list[dict]:
     store = get_store()
     store.refresh()
@@ -159,6 +168,9 @@ def build_duplicate_review_queue(
     by_pair: dict[tuple[str, str], DuplicateCandidate] = {}
     for candidate in candidates:
         if not candidate.left or not candidate.right or candidate.left == candidate.right:
+            continue
+        left_family = _temporal_family(candidate.left)
+        if left_family and left_family == _temporal_family(candidate.right):
             continue
         key = candidate.key()
         current = by_pair.get(key)

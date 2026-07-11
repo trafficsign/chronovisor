@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import math
 import os
@@ -99,6 +100,11 @@ CODEX_OPTION_ALIASES = {
     "--cd": ("--cd", "-C"),
     "--output-last-message": ("--output-last-message", "-o"),
 }
+
+# Autonomous memory reviews must not inherit a user-wide experimental model
+# or reasoning level that the installed Codex CLI cannot execute.
+DEFAULT_FRONTIER_MODEL = "gpt-5.4"
+DEFAULT_FRONTIER_REASONING_EFFORT = "high"
 
 HUMAN_REQUIRED_FAILURE_CLASSES = CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES
 
@@ -601,9 +607,15 @@ def _build_codex_exec_invocation(
                 "replacement": "default_sandbox",
             })
 
-    model = os.environ.get("LLM_WIKI_FRONTIER_MODEL")
+    model = os.environ.get("LLM_WIKI_FRONTIER_MODEL", DEFAULT_FRONTIER_MODEL).strip()
+    reasoning_effort = os.environ.get(
+        "LLM_WIKI_FRONTIER_REASONING_EFFORT",
+        DEFAULT_FRONTIER_REASONING_EFFORT,
+    ).strip()
     if model:
         cmd.extend(["--model", model])
+    if reasoning_effort:
+        cmd.extend(["--config", f'model_reasoning_effort="{reasoning_effort}"'])
 
     if execute_patch:
         if _option_supported(exec_help, "--dangerously-bypass-approvals-and-sandbox"):
@@ -816,6 +828,7 @@ def _structured_failure_payload(
     summary: str,
     failure: FrontierFailure,
     reviewer: str,
+    diagnostics: str = "",
 ) -> dict[str, Any]:
     strict_schema, _repair = _strict_schema_with_repair(schema)
     properties = strict_schema.get("properties")
@@ -825,7 +838,12 @@ def _structured_failure_payload(
         for name, field_schema in properties.items()
         if isinstance(field_schema, dict)
     }
-    payload["frontier_failure"] = failure.to_dict()
+    failure_payload = failure.to_dict()
+    if diagnostics:
+        redacted = redact_sensitive_text(diagnostics)
+        failure_payload["diagnostics_tail"] = redacted[-4000:]
+        failure_payload["diagnostics_sha256"] = hashlib.sha256(redacted.encode("utf-8")).hexdigest()
+    payload["frontier_failure"] = failure_payload
     payload["human_required"] = failure.human_required
     payload["reviewer"] = reviewer
     return payload
@@ -1319,6 +1337,7 @@ def run_structured_review(
                 summary=f"frontier command failed with exit {completed.returncode}",
                 failure=failure,
                 reviewer="frontier command",
+                diagnostics=output,
             )
         parsed = _extract_json_object(output)
         return _validated_structured_result(
@@ -1390,6 +1409,7 @@ def run_structured_review(
                 summary=f"codex structured review failed with exit {completed.returncode}",
                 failure=failure,
                 reviewer="codex",
+                diagnostics=output,
             )
         parsed = _extract_json_object(output)
         return _validated_structured_result(parsed, schema, reviewer="frontier")

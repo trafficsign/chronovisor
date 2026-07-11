@@ -8,7 +8,10 @@ auto-apply settings can converge on one public shape.
 from __future__ import annotations
 
 import os
+import json
+import subprocess
 import tomllib
+from importlib import metadata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,6 +61,48 @@ def uvx_runtime_command(
         command.extend(["--refresh-package", RUNTIME_PACKAGE])
     command.extend(["--from", runtime_source(), entrypoint])
     return command
+
+
+def runtime_identity() -> dict[str, Any]:
+    """Expose the installed Git revision and compare it with pushed main."""
+    commit_id = None
+    direct_url: dict[str, Any] = {}
+    package_version = None
+    try:
+        dist = metadata.distribution(RUNTIME_PACKAGE)
+        package_version = dist.version
+        raw = dist.read_text("direct_url.json")
+        if raw:
+            direct_url = json.loads(raw)
+            vcs = direct_url.get("vcs_info") if isinstance(direct_url, dict) else None
+            if isinstance(vcs, dict):
+                commit_id = vcs.get("commit_id")
+    except Exception:
+        pass
+    expected_commit = None
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "origin/main"],
+            cwd=runtime_repo_root(),
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        if completed.returncode == 0:
+            expected_commit = completed.stdout.strip()
+    except Exception:
+        pass
+    module_path = Path(__file__).resolve()
+    return {
+        "runtime_source": runtime_source(),
+        "commit_id": commit_id,
+        "expected_commit": expected_commit,
+        "drift": bool(commit_id and expected_commit and commit_id != expected_commit),
+        "archive_path": str(module_path.parents[2]),
+        "module_path": str(module_path),
+        "package_version": package_version,
+        "direct_url": direct_url,
+    }
 
 
 @dataclass(frozen=True)

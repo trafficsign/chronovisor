@@ -79,7 +79,7 @@ def _append_jsonl(path: Path, record: dict[str, Any], *, max_lines: int) -> None
     with path.open("a", encoding="utf-8") as f:
         f.write(line)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").split("\n")
     except Exception:
         return
     if len(lines) > max_lines:
@@ -147,7 +147,7 @@ def append_metric(kind: str, **fields: Any) -> dict[str, Any]:
 
 def _read_jsonl(path: Path, limit: int) -> list[dict[str, Any]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").split("\n")
     except Exception:
         return []
     records: list[dict[str, Any]] = []

@@ -109,7 +109,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
     )
     entries: list[_FeedbackEntry] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").split("\n")
     except OSError:
         return []
     for line in lines:
@@ -208,7 +208,7 @@ def _load_protections() -> list[_FeedbackEntry]:
 
     entries: list[_FeedbackEntry] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").split("\n")
     except OSError:
         return []
     for line in lines:

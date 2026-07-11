@@ -6,10 +6,11 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, init_wiki
 
 
 DEFAULT_MEMORY_MODEL = "gpt-5.4-mini"
+DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_STATE_FILE = WIKI_ROOT / "codex-save-state.json"
 DEFAULT_MAX_CHARS = 120_000
 DEFAULT_TIMEOUT_SECONDS = 300
@@ -265,10 +267,17 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
         if not isinstance(payload, dict):
             continue
 
-        if payload.get("type") == "function_call" and not has_file_changes:
-            fname = payload.get("name", "")
-            if fname in FILE_CHANGE_TOOLS:
+        if not has_file_changes:
+            payload_type = payload.get("type")
+            fname = str(payload.get("name") or "")
+            if payload_type == "function_call" and fname in FILE_CHANGE_TOOLS:
                 has_file_changes = True
+            elif payload_type == "custom_tool_call" and fname == "exec":
+                tool_input = payload.get("input")
+                serialized = tool_input if isinstance(tool_input, str) else json.dumps(tool_input, default=str)
+                has_file_changes = bool(
+                    re.search(r"\btools\.(?:apply_patch|write_file)\s*\(", serialized)
+                )
 
         if payload.get("type") != "message":
             continue
@@ -420,6 +429,7 @@ def run_memory_writer(
     prompt: str,
     *,
     model: str = DEFAULT_MEMORY_MODEL,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WriterResult:
     with tempfile.TemporaryDirectory(prefix="llm-wiki-codex-save-") as tmp:
@@ -433,6 +443,8 @@ def run_memory_writer(
             "exec",
             "-m",
             model,
+            "-c",
+            f'model_reasoning_effort="{reasoning_effort}"',
             "-s",
             "read-only",
             "--disable",
@@ -655,23 +667,36 @@ def last_saved_at(state: dict[str, Any], session_file: Path) -> datetime | None:
 
 
 def should_process(transcript_slice: TranscriptSlice, state: dict[str, Any]) -> tuple[bool, str]:
-    if transcript_slice.has_file_changes:
-        prev = last_saved_at(state, transcript_slice.session_file)
-        if prev is not None:
-            elapsed = (datetime.now(timezone.utc) - prev).total_seconds()
-            if elapsed < COOLDOWN_SECONDS:
-                return False, f"cooldown ({int(elapsed)}s / {COOLDOWN_SECONDS}s)"
-        return True, "file_changes"
+    # Every immutable delta receives a durable frontier disposition.  Turn
+    # thresholds and edit detection are useful scheduling signals, but must
+    # never decide whether a session tail is remembered at all.
+    if not transcript_slice.records:
+        return False, "no_messages"
+    return True, "file_changes" if transcript_slice.has_file_changes else "session_tail"
 
-    if transcript_slice.user_turn_count >= TURN_INTERVAL:
-        prev = last_saved_at(state, transcript_slice.session_file)
-        if prev is not None:
-            elapsed = (datetime.now(timezone.utc) - prev).total_seconds()
-            if elapsed < COOLDOWN_SECONDS:
-                return False, f"cooldown ({int(elapsed)}s / {COOLDOWN_SECONDS}s)"
-        return True, f"turn_interval ({transcript_slice.user_turn_count} turns)"
 
-    return False, f"waiting ({transcript_slice.user_turn_count}/{TURN_INTERVAL} turns, no file changes)"
+def bounded_transcript_slice(
+    transcript_slice: TranscriptSlice,
+    *,
+    max_chars: int,
+) -> TranscriptSlice:
+    """Return an ordered prefix so oversized deltas are never middle-trimmed."""
+    if len(format_transcript(transcript_slice.records)) <= max_chars:
+        return transcript_slice
+    selected: list[TranscriptRecord] = []
+    for record in transcript_slice.records:
+        candidate = [*selected, record]
+        if selected and len(format_transcript(candidate)) > max_chars:
+            break
+        selected.append(record)
+    if not selected:
+        selected = [transcript_slice.records[0]]
+    return replace(
+        transcript_slice,
+        records=selected,
+        scanned_until_line=selected[-1].line,
+        user_turn_count=sum(record.role == "user" for record in selected),
+    )
 
 
 def update_state(
@@ -896,6 +921,9 @@ def _run_save_transaction(
             }
         base_result["trigger"] = trigger_reason
 
+    transcript_slice = bounded_transcript_slice(transcript_slice, max_chars=args.max_chars)
+    base_result["scanned_until_line"] = transcript_slice.scanned_until_line
+    base_result["record_count"] = len(transcript_slice.records)
     prompt = build_writer_prompt(transcript_slice, max_chars=args.max_chars)
     if args.extract_only:
         return {
@@ -905,7 +933,12 @@ def _run_save_transaction(
             "transcript_preview": format_transcript(transcript_slice.records)[:4000],
         }
 
-    writer = run_memory_writer(prompt, model=args.model, timeout=args.timeout)
+    writer = run_memory_writer(
+        prompt,
+        model=args.model,
+        reasoning_effort=getattr(args, "reasoning_effort", DEFAULT_REASONING_EFFORT),
+        timeout=args.timeout,
+    )
     validate_user_evidence_quotes(writer, transcript_slice)
     writer_result = {
         "writer_model": args.model,
@@ -988,6 +1021,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sessions-root")
     parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE))
     parser.add_argument("--model", default=DEFAULT_MEMORY_MODEL)
+    parser.add_argument("--reasoning-effort", default=DEFAULT_REASONING_EFFORT)
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--dry-run", action="store_true", help="Run the writer but do not save raw data.")

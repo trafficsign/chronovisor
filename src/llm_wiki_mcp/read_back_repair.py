@@ -84,7 +84,7 @@ def failure_key(failure: dict[str, Any]) -> str:
 
 def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").split("\n")
     except OSError:
         return [], 0
     rows: list[dict[str, Any]] = []

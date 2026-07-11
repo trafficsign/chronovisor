@@ -23,6 +23,8 @@ Design tradeoffs:
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 from typing import Any
 
 _FM_DELIM = "---"
@@ -141,6 +143,90 @@ def patch(text: str, updates: dict[str, Any], deletes: list[str] | None = None) 
         out.append(_serialize_kv(k, v))
     out.append(_FM_DELIM)
     return "\n".join(out) + "\n" + body
+
+
+def normalize_nested(text: str) -> tuple[str, dict[str, Any]]:
+    """Merge one accidentally nested frontmatter block without losing fields.
+
+    Ingest used to prepend metadata around a model response that already had
+    frontmatter.  The inner block then became searchable body text.  We merge
+    only when both blocks parse and the inner block has a real title.  Conflicting
+    values are left untouched so a semantic reviewer can decide them.
+    """
+    outer, body = parse(text)
+    if not outer:
+        return text, {"changed": False, "reason": "no_outer_frontmatter"}
+    inner, inner_body = parse(body.lstrip())
+    if not inner or not str(inner.get("title") or "").strip():
+        return text, {"changed": False, "reason": "no_nested_frontmatter"}
+    conflicts = {
+        key: {"outer": outer[key], "inner": value}
+        for key, value in inner.items()
+        if key in outer and outer[key] != value
+    }
+    if conflicts:
+        return text, {
+            "changed": False,
+            "reason": "conflicting_nested_frontmatter",
+            "conflicts": conflicts,
+        }
+    merged = {**outer, **inner}
+    normalized = patch(inner_body, merged)
+    return normalized, {
+        "changed": normalized != text,
+        "reason": "merged_nested_frontmatter",
+        "merged_keys": sorted(inner),
+    }
+
+
+def propose_nested_resolution(text: str) -> tuple[str, dict[str, Any]]:
+    """Build an exact proposal for a conflicting nested block.
+
+    The newer outer scalar wins. Lists retain the outer order and append
+    inner-only values. A frontier reviewer must approve this proposal before
+    it is written.
+    """
+    outer, body = parse(text)
+    inner, inner_body = parse(body.lstrip()) if outer else ({}, body)
+    if not outer or not inner or not str(inner.get("title") or "").strip():
+        return text, {"changed": False, "reason": "no_nested_frontmatter"}
+    merged = dict(inner)
+    for key, value in outer.items():
+        if isinstance(value, list) and isinstance(merged.get(key), list):
+            merged[key] = list(dict.fromkeys([*value, *merged[key]]))
+        else:
+            merged[key] = value
+    proposed = patch(inner_body, merged)
+    conflict_keys = [key for key in inner if key in outer and inner[key] != outer[key]]
+    return proposed, {
+        "changed": proposed != text,
+        "reason": "frontier_required_conflict_resolution",
+        "policy": "outer scalar wins; lists are outer-first stable unions",
+        "outer_keys": sorted(outer),
+        "inner_keys": sorted(inner),
+        "merged_keys": sorted(merged),
+        "conflicts": {
+            key: {
+                "outer": _review_value(outer[key]),
+                "inner": _review_value(inner[key]),
+                "merged": _review_value(merged[key]),
+            }
+            for key in conflict_keys
+        },
+    }
+
+
+def _review_value(value: Any) -> Any:
+    """Bound large metadata lists without weakening exact diff/hash review."""
+    if not isinstance(value, list):
+        return value
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return {
+        "kind": "list",
+        "count": len(value),
+        "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        "sample": value[:8],
+    }
 
 
 def _unquote(value: str) -> str:

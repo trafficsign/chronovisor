@@ -104,7 +104,7 @@ def expected_terms_from_raw(path: Path, *, limit: int = 10) -> list[str]:
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").split("\n")
     except OSError:
         return []
     rows: list[dict[str, Any]] = []

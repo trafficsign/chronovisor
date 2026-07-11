@@ -43,6 +43,81 @@ def test_search_claims_scores_token_overlap(tmp_path: Path) -> None:
     assert [row["claim_id"] for row in rows] == ["c1"]
 
 
+def test_search_claims_excludes_superseded_rows(tmp_path: Path) -> None:
+    path = tmp_path / "claims.jsonl"
+    path.write_text(
+        json.dumps({"claim_id": "old", "subject": "gpu", "predicate": "fact.capacity", "value": "16GB", "status": "superseded"})
+        + "\n"
+        + json.dumps({"claim_id": "new", "subject": "gpu", "predicate": "fact.capacity", "value": "32GB", "status": "active"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = claims.search_claims("gpu capacity", path=path)
+
+    assert [row["claim_id"] for row in rows] == ["new"]
+
+
+def test_page_claims_extracts_evidence_backed_model_and_measurement(tmp_path: Path, monkeypatch) -> None:
+    page = tmp_path / "gpu.md"
+    page.write_text(
+        "---\ntitle: GPU\nupdated: 2026-07-11\nentities: [q-kun]\n---\n"
+        "P24U は 32GB、価格は55,399円で確定。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(claims, "find_page", lambda page_id: page)
+
+    rows = claims.page_claims("gpu", source_raw="raw-1.md")
+    facts = [row for row in rows if str(row["predicate"]).startswith("fact.")]
+
+    assert {"fact.model", "fact.price", "fact.capacity", "fact.status"} <= {row["predicate"] for row in facts}
+    assert all(row["source_raw"] == "raw-1.md" for row in facts)
+    assert all(row["evidence_span"] == "P24U は 32GB、価格は55,399円で確定。" for row in facts)
+
+
+def test_claim_conflicts_require_same_explicit_semantic_slot() -> None:
+    base = {"source_page": "gpu", "subject": "P24U", "predicate": "fact.price", "status": "active"}
+    rows = [
+        {**base, "claim_id": "unit", "value": "55,399円", "source_line": 1, "semantic_slot": "単価"},
+        {**base, "claim_id": "total", "value": "114,110円", "source_line": 2, "semantic_slot": "総額"},
+        {**base, "claim_id": "old", "value": "16GB", "predicate": "fact.capacity", "source_line": 3, "semantic_slot": "容量"},
+        {**base, "claim_id": "new", "value": "32GB", "predicate": "fact.capacity", "source_line": 4, "semantic_slot": "容量"},
+    ]
+
+    conflicts = claims.claim_conflicts(rows)
+
+    assert len(conflicts) == 1
+    assert conflicts[0]["semantic_slot"] == "容量"
+    assert {row["claim_id"] for row in conflicts[0]["claims"]} == {"old", "new"}
+
+
+def test_reviewed_claim_state_materializes_approved_invalidations(tmp_path: Path, monkeypatch) -> None:
+    review_file = tmp_path / "reviews.jsonl"
+    review_file.write_text(
+        json.dumps(
+            {
+                "conflict_id": "conflict-1",
+                "reviewed_at": "2026-07-11T12:00:00",
+                "valid": True,
+                "review": {
+                    "decision": "approved",
+                    "preferred_claim_ids": ["new"],
+                    "invalidated_claim_ids": ["old"],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(claims, "CLAIM_REVIEW_FILE", review_file)
+
+    state = claims._reviewed_claim_state()
+
+    assert state["old"]["status"] == "superseded"
+    assert state["old"]["valid_to"] == "2026-07-11T12:00:00"
+    assert state["new"]["status"] == "active"
+
+
 def test_append_page_claims_requires_source_raw(tmp_path: Path, monkeypatch) -> None:
     page = tmp_path / "alpha.md"
     page.write_text("---\ntitle: Alpha\nupdated: 2026-07-06\n---\nbody", encoding="utf-8")

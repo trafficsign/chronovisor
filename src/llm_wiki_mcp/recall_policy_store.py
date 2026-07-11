@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.wiki import WIKI_ROOT
+from llm_wiki_mcp.jsonl import read_jsonl as _strict_read_jsonl
 
 
 IMPROVEMENT_DIR = WIKI_ROOT / "runtime" / "recall-improvement"
@@ -157,21 +158,7 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 
 def read_jsonl(path: Path, *, limit: int | None = None) -> list[dict[str, Any]]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    if limit is not None:
-        lines = lines[-max(1, limit):]
-    rows: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            rows.append(parsed)
-    return rows
+    return _strict_read_jsonl(path, limit=limit)
 
 
 def append_live_episode(record: dict[str, Any], *, path: Path = LIVE_EPISODES_FILE) -> None:

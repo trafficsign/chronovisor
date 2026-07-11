@@ -168,24 +168,30 @@ def log_file(prefix: str) -> Path:
     return LOG_DIR / f"{prefix}-{today}.log"
 
 
-def spawn_task(task: BackgroundTask, stdin_text: str) -> int:
+def spawn_task(task: BackgroundTask, stdin_text: str) -> dict[str, Any]:
+    from llm_wiki_mcp.background_jobs import enqueue_job
+
     env = os.environ.copy()
     env.update(task.env)
-    cmd = [sys.executable, "-m", task.module, *task.args]
+    job = enqueue_job(
+        name=task.name,
+        module=task.module,
+        args=task.args,
+        env=task.env,
+        stdin_text=stdin_text,
+    )
+    cmd = [sys.executable, "-m", "llm_wiki_mcp.background_jobs", "run", str(job["job_id"])]
     log_path = log_file(task.log_prefix)
     with log_path.open("ab") as log:
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
             start_new_session=True,
         )
-        if proc.stdin is not None:
-            proc.stdin.write(stdin_text.encode("utf-8"))
-            proc.stdin.close()
-    return proc.pid
+    return {"pid": proc.pid, "job_id": job["job_id"]}
 
 
 def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
@@ -200,7 +206,7 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
             BackgroundTask(
                 name=f"{host}-content-correction",
                 module="llm_wiki_mcp.content_correction",
-                args=["--host", host, "--hook", "--max-items", "1"],
+                args=["--host", host, "--hook", "--max-items", "3"],
                 env={"LLM_WIKI_CONTENT_CORRECTION_ENABLED": "1"},
                 log_prefix=f"{host}-content-correction",
             )
@@ -259,7 +265,7 @@ def run_stop(args: argparse.Namespace, stdin_text: str) -> int:
         if args.dry_run:
             spawned.append({"name": task.name, "module": task.module, "args": task.args, "dry_run": True})
         else:
-            spawned.append({"name": task.name, "pid": spawn_task(task, stdin_text)})
+            spawned.append({"name": task.name, **spawn_task(task, stdin_text)})
     if args.format == "json":
         print(json.dumps({"status": "ok", "tasks": spawned}, ensure_ascii=False))
     else:

@@ -389,10 +389,10 @@ def test_capture_cursor_processes_delayed_corrections_exactly_once(monkeypatch, 
     )
 
     assert first["candidates"] == 1
-    assert second["candidates"] == 1
+    assert second["candidates"] == 2
     assert third["candidates"] == 0
-    assert matched_responses == ["old answer", "new answer"]
-    item = second["items"][0]["item"]
+    assert matched_responses == ["old answer", "old correction answer", "new answer"]
+    item = second["items"][1]["item"]
     assert item["metadata"]["correction_prompt"] == "それ違う。new correction"
 
 

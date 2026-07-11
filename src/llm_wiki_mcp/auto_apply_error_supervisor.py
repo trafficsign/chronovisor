@@ -34,7 +34,7 @@ def _auto_apply_log_file(path: Path | None = None) -> Path:
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").split("\n")
     except OSError:
         return []
     records: list[dict[str, Any]] = []

@@ -22,6 +22,7 @@ from llm_wiki_mcp.convergence import is_human_required_result
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.frontmatter import patch as patch_frontmatter
 from llm_wiki_mcp.link_fix import atomic_write
+from llm_wiki_mcp.jsonl import read_jsonl
 from llm_wiki_mcp.page_mutation import wiki_mutation_lock
 from llm_wiki_mcp.recall_hints import add_query_hint, load_query_hints, normalize_query_text
 from llm_wiki_mcp.recall_runtime import RECALL_CONFIG_FILE, RECALL_DIR, RECALL_FEEDBACK_FILE, append_jsonl
@@ -69,22 +70,6 @@ def load_auto_apply_policy(path: Path = RECALL_CONFIG_FILE) -> AutoApplyPolicy:
     if isinstance(section.get("actions"), list) and all(isinstance(v, str) for v in section["actions"]):
         values["actions"] = tuple(action for action in section["actions"] if action in AUTO_ACTIONS)
     return AutoApplyPolicy(**values)
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    records: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            records.append(parsed)
-    return records
 
 
 def _feedback_file(path: Path | None = None) -> Path:
@@ -543,6 +528,12 @@ def eligible_records(
             continue
         if record.get("source") not in {"auditor", "pull-log"}:
             continue
+        if record.get("source") == "pull-log":
+            session_id = str(record.get("session_id") or "").strip()
+            pull_event = record.get("pull_event")
+            pull_session = str(pull_event.get("session_id") or "").strip() if isinstance(pull_event, dict) else ""
+            if not session_id or pull_session != session_id:
+                continue
         action = record.get("action_type")
         if action not in allowed_actions:
             continue
@@ -615,6 +606,13 @@ def apply_query_hint(record: dict[str, Any], *, dry_run: bool) -> dict[str, Any]
         source="recall-auto-apply",
         normalize_key=str(record.get("normalize_key", "")),
         increment_existing=False,
+        provenance={
+            "schema_version": 2,
+            "feedback_ref": str(record.get("ref") or record.get("decision_id") or ""),
+            "session_id": str(record.get("session_id") or ""),
+            "source": str(record.get("source") or ""),
+            "frontier_approved": True,
+        },
     )
     return {"action": "query_hint", "status": "applied", "hint": hint}
 

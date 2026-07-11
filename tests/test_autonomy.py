@@ -1431,6 +1431,7 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     assert payload["dry_run"] is True
     labels = {item["label"] for item in payload["plists"]}
     assert autonomy.SLEEP_LABEL in labels
+    assert autonomy.CONVERGE_LABEL in labels
     assert autonomy.WATCHDOG_LABEL in labels
     programs = {item["label"]: item["program"] for item in payload["plists"]}
     assert Path(programs[autonomy.SLEEP_LABEL][0]).name == "llm-wiki-sleep"
@@ -1444,3 +1445,5 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     assert "--refresh-package" in command
     assert "git+ssh://git@github.com/trafficsign/llm-wiki-mcp" in command
     assert "--json" not in payload["wrappers"][0]["command"]
+    converge = next(item for item in payload["plists"] if item["label"] == autonomy.CONVERGE_LABEL)
+    assert converge["program"][0].endswith("llm-wiki-converge")

@@ -1165,7 +1165,13 @@ def _safe_recall_field(value: str, *, limit: int = 120) -> str:
     text = re.sub(r"\s+", " ", value).strip()
     text = "".join(" " if ch in _RECALL_FM_FORBIDDEN or ord(ch) < 0x20 else ch for ch in text)
     text = re.sub(r"\s+", " ", text).strip()
-    return text[:limit].strip()
+    if len(text) <= limit:
+        return text
+    candidate = text[:limit].rstrip()
+    boundary = max(candidate.rfind(mark) for mark in ("。", "！", "？", ".", "!", "?", " "))
+    if boundary >= max(20, limit // 2):
+        return candidate[: boundary + 1].strip()
+    return candidate.rstrip("、,:;・-").strip()
 
 
 def _fallback_recall_metadata(title: str, body: str, page_id: str) -> dict[str, Any]:
@@ -1253,6 +1259,9 @@ def _ensure_recall_metadata_frontmatter(text: str, page_id: str, parse, patch) -
 
 
 def _ensure_page_metadata_frontmatter(text: str, page_id: str, parse, patch) -> str:
+    from llm_wiki_mcp.frontmatter import normalize_nested
+
+    text, _normalization = normalize_nested(text)
     text = _ensure_recall_metadata_frontmatter(text, page_id, parse, patch)
     return patch_entities_frontmatter(text)
 
@@ -2307,6 +2316,10 @@ def _read_back_failure_log() -> Path:
     return PAGES_DIR.parent / "runtime" / "ingest-read-back-failures.jsonl"
 
 
+def _read_back_run_log() -> Path:
+    return PAGES_DIR.parent / "runtime" / "ingest-read-back-runs.jsonl"
+
+
 def _read_back_query(meta: dict, page_id: str) -> str:
     questions = meta.get("recall_questions")
     if isinstance(questions, list):
@@ -2368,13 +2381,22 @@ def _verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> 
         else:
             passed += 1
 
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "schema_version": 2,
+        "cohort": "all_ingest_runs",
+        "checked": checked,
+        "passed": passed,
+        "failed": failed,
+    }
+    try:
+        run_path = _read_back_run_log()
+        run_path.parent.mkdir(parents=True, exist_ok=True)
+        with run_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
     if failed:
-        record = {
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "checked": checked,
-            "passed": passed,
-            "failed": failed,
-        }
         try:
             log_path = _read_back_failure_log()
             log_path.parent.mkdir(parents=True, exist_ok=True)

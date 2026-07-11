@@ -920,6 +920,55 @@ class ConvergenceStore:
             item["quarantine_reason"] = f"retry_exhausted:{stage}"
         item["updated_at"] = _iso(now)
 
+    def reap_expired_leases(
+        self,
+        *,
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Return expired running items to a visible retry state."""
+        current_time = _utc_now(now)
+
+        def project(state: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+            recovered: list[tuple[str, str, dict[str, Any]]] = []
+            for key, item in state["items"].items():
+                if not isinstance(item, dict):
+                    continue
+                status = str(item.get("status") or "")
+                if status not in {"local_running", "frontier_running"}:
+                    continue
+                expiry = _parse_iso(item.get("lease_expires_at"))
+                if expiry is None or expiry > current_time:
+                    continue
+                stage = "local" if status.startswith("local_") else "frontier"
+                item["status"] = f"{stage}_retry"
+                item["next_attempt_at"] = _iso(current_time)
+                item["last_error"] = "worker lease expired before completion"
+                item["last_failure_class"] = "worker_lease_expired"
+                self._clear_lease(item)
+                item["updated_at"] = _iso(current_time)
+                recovered.append((str(key), status, item))
+            return recovered
+
+        if dry_run:
+            state = self._load_unlocked()
+            recovered = project(state)
+            return {"status": "ok", "recovered": len(recovered), "keys": [row[0] for row in recovered], "dry_run": True}
+        with self._exclusive_lock():
+            state = self._load_unlocked()
+            recovered = project(state)
+            if recovered:
+                self._save_unlocked(state)
+                for key, previous, item in recovered:
+                    self._append_event_unlocked(self._event(
+                        key=key,
+                        name="expired_lease_reaped",
+                        now=current_time,
+                        previous_status=previous,
+                        item=item,
+                    ))
+            return {"status": "ok", "recovered": len(recovered), "keys": [row[0] for row in recovered], "dry_run": False}
+
     def claim_attempt(
         self,
         key: str,

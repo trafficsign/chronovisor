@@ -47,6 +47,7 @@ QUARANTINE_FILE = AUTONOMY_DIR / "quarantine.json"
 PROJECT_ROOT = runtime_repo_root()
 
 SLEEP_LABEL = "com.trafficsign.llm-wiki-sleep"
+CONVERGE_LABEL = "com.trafficsign.llm-wiki-converge"
 WATCHDOG_LABEL = "com.trafficsign.llm-wiki-watchdog"
 LAUNCH_AGENT_DIR = Path.home() / "Library" / "LaunchAgents"
 WRAPPER_DIR = WIKI_ROOT / "bin"
@@ -1848,7 +1849,7 @@ def _write_watchdog_history(
     max_lines = max(1, int(max_lines))
     previous: list[dict[str, Any]] = []
     try:
-        lines = target.read_text(encoding="utf-8").splitlines()
+        lines = [line for line in target.read_text(encoding="utf-8").split("\n") if line.strip()]
     except OSError:
         lines = []
     keep_previous = max_lines - 1
@@ -1901,10 +1902,38 @@ def watchdog_snapshot(
         alerts.append({"type": "sleep_status_not_ok", "status": latest_sleep.get("status")})
     elif sleep_started and datetime.now() - sleep_started > timedelta(hours=max_sleep_age_hours):
         alerts.append({"type": "sleep_stale", "started_at": latest_sleep.get("started_at")})
-    if _queue_value(health, "duplicate_candidates") > 500:
+    if _queue_value(health, "duplicate_candidates") > 25:
         alerts.append({"type": "duplicate_backlog_high", "value": _queue_value(health, "duplicate_candidates")})
-    if _queue_value(health, "lint_repair") > 2000:
+    if _queue_value(health, "lint_repair") > 250:
         alerts.append({"type": "lint_backlog_high", "value": _queue_value(health, "lint_repair")})
+    convergence = health.get("convergence") if isinstance(health.get("convergence"), dict) else {}
+    if int(convergence.get("expired_running") or 0) > 0:
+        alerts.append({"type": "convergence_expired_leases", "value": convergence.get("expired_running")})
+    if float(convergence.get("oldest_actionable_age_hours") or 0.0) > 24.0:
+        alerts.append({
+            "type": "convergence_slo_missed",
+            "oldest_age_hours": convergence.get("oldest_actionable_age_hours"),
+            "actionable": convergence.get("actionable"),
+        })
+    capture_pipeline = health.get("capture_pipeline") if isinstance(health.get("capture_pipeline"), dict) else {}
+    background = capture_pipeline.get("background_jobs") if isinstance(capture_pipeline.get("background_jobs"), dict) else {}
+    background_status = background.get("by_status") if isinstance(background.get("by_status"), dict) else {}
+    if int(background_status.get("quarantined") or 0) > 0:
+        alerts.append({"type": "background_jobs_quarantined", "value": background_status.get("quarantined")})
+    if int(background_status.get("retry_wait") or 0) > 0:
+        alerts.append({"type": "background_jobs_retrying", "value": background_status.get("retry_wait")})
+    sweeper = capture_pipeline.get("session_sweeper") if isinstance(capture_pipeline.get("session_sweeper"), dict) else {}
+    if sweeper.get("status") == "attention":
+        alerts.append({"type": "session_sweeper_attention", "pending": sweeper.get("pending")})
+    runtime = health.get("runtime") if isinstance(health.get("runtime"), dict) else {}
+    if runtime.get("drift") is True:
+        alerts.append({
+            "type": "runtime_commit_drift",
+            "runtime_commit": runtime.get("commit_id"),
+            "expected_commit": runtime.get("expected_commit"),
+        })
+    if not runtime.get("commit_id"):
+        alerts.append({"type": "runtime_commit_unknown", "archive_path": runtime.get("archive_path")})
 
     if before_health:
         before_capture = _capture_rate(before_health)
@@ -2056,7 +2085,16 @@ def _uvx_path() -> str:
     return shutil.which("uvx") or str(Path.home() / ".local/bin/uvx")
 
 
-def _plist(label: str, args: list[str], *, stdout: Path, stderr: Path, start_interval: int | None = None, calendar: dict[str, int] | None = None) -> dict[str, Any]:
+def _plist(
+    label: str,
+    args: list[str],
+    *,
+    stdout: Path,
+    stderr: Path,
+    start_interval: int | None = None,
+    calendar: dict[str, int] | None = None,
+    environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
     data: dict[str, Any] = {
         "Label": label,
         "ProgramArguments": args,
@@ -2070,6 +2108,8 @@ def _plist(label: str, args: list[str], *, stdout: Path, stderr: Path, start_int
             "LLM_WIKI_REPO_ROOT": str(PROJECT_ROOT),
         },
     }
+    if environment:
+        data["EnvironmentVariables"].update(environment)
     if start_interval is not None:
         data["StartInterval"] = start_interval
     if calendar is not None:
@@ -2095,8 +2135,10 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
     logs = WIKI_ROOT / "logs"
     uvx = _uvx_path()
     sleep_path = LAUNCH_AGENT_DIR / f"{SLEEP_LABEL}.plist"
+    converge_path = LAUNCH_AGENT_DIR / f"{CONVERGE_LABEL}.plist"
     watchdog_path = LAUNCH_AGENT_DIR / f"{WATCHDOG_LABEL}.plist"
     sleep_wrapper = WRAPPER_DIR / "llm-wiki-sleep"
+    converge_wrapper = WRAPPER_DIR / "llm-wiki-converge"
     watchdog_wrapper = WRAPPER_DIR / "llm-wiki-watchdog"
     sleep_command = [
         *uvx_runtime_command("llm-wiki", executable=uvx, refresh=True),
@@ -2115,6 +2157,13 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "--notify",
         "--json",
     ]
+    converge_command = [
+        *uvx_runtime_command("llm-wiki-converge", executable=uvx, refresh=True),
+        "--session-limit",
+        "8",
+        "--job-limit",
+        "8",
+    ]
     sleep_plist = _plist(
         SLEEP_LABEL,
         [str(sleep_wrapper)],
@@ -2129,6 +2178,14 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         stderr=logs / "watchdog.launchd.err.log",
         start_interval=900,
     )
+    converge_plist = _plist(
+        CONVERGE_LABEL,
+        [str(converge_wrapper)],
+        stdout=logs / "converge.launchd.out.log",
+        stderr=logs / "converge.launchd.err.log",
+        start_interval=1800,
+        environment={"LLM_WIKI_FRONTIER_CALLS_PER_LANE": "5"},
+    )
     payload: dict[str, Any] = {
         "status": "ok",
         "dry_run": dry_run,
@@ -2141,6 +2198,12 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
                 "stdout": sleep_plist["StandardOutPath"],
             },
             {
+                "label": CONVERGE_LABEL,
+                "path": str(converge_path),
+                "program": converge_plist["ProgramArguments"],
+                "stdout": converge_plist["StandardOutPath"],
+            },
+            {
                 "label": WATCHDOG_LABEL,
                 "path": str(watchdog_path),
                 "program": watchdog_plist["ProgramArguments"],
@@ -2149,19 +2212,22 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         ],
         "wrappers": [
             {"path": str(sleep_wrapper), "command": sleep_command},
+            {"path": str(converge_wrapper), "command": converge_command},
             {"path": str(watchdog_wrapper), "command": watchdog_command},
         ],
     }
     if not dry_run:
         logs.mkdir(parents=True, exist_ok=True)
         _write_wrapper(sleep_wrapper, sleep_command)
+        _write_wrapper(converge_wrapper, converge_command)
         _write_wrapper(watchdog_wrapper, watchdog_command)
         _write_plist(sleep_path, sleep_plist)
+        _write_plist(converge_path, converge_plist)
         _write_plist(watchdog_path, watchdog_plist)
     if load and not dry_run:
         uid = os.getuid()
         loads = []
-        for path in (sleep_path, watchdog_path):
+        for path in (sleep_path, converge_path, watchdog_path):
             subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(path)], text=True, capture_output=True)
             proc = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(path)], text=True, capture_output=True)
             loads.append({"path": str(path), "returncode": proc.returncode, "stderr": proc.stderr.strip()})
@@ -2179,6 +2245,7 @@ def status() -> dict[str, Any]:
         "digest_path": str(DIGEST_FILE),
         "launchd": {
             "sleep": str(LAUNCH_AGENT_DIR / f"{SLEEP_LABEL}.plist"),
+            "converge": str(LAUNCH_AGENT_DIR / f"{CONVERGE_LABEL}.plist"),
             "watchdog": str(LAUNCH_AGENT_DIR / f"{WATCHDOG_LABEL}.plist"),
         },
     }

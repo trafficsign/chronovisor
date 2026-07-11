@@ -496,6 +496,8 @@ def test_full_apply_history_does_not_resurrect_old_terminal_keys(tmp_path) -> No
 def test_pull_log_candidate_is_consumed_by_validated_auto_lane(tmp_path, monkeypatch) -> None:
     record = _candidate("query_hint", page_id="target")
     record["source"] = "pull-log"
+    record["session_id"] = "session-1"
+    record["pull_event"] = {"session_id": "session-1"}
     monkeypatch.setattr(
         recall_auto_apply,
         "apply_record",

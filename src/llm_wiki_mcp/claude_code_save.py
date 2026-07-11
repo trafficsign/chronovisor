@@ -11,7 +11,7 @@ import hashlib
 import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,9 @@ from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, init_wiki
 
 DEFAULT_STATE_FILE = WIKI_ROOT / "claude-code-save-state.json"
 DEFAULT_MAX_CHARS = 120_000
+DEFAULT_MEMORY_MODEL = "gpt-5.4-mini"
+DEFAULT_REASONING_EFFORT = "medium"
+DEFAULT_TIMEOUT_SECONDS = 300
 HOOK_ENABLE_ENV = "CLAUDE_CODE_WIKI_SAVE_ENABLED"
 
 TURN_INTERVAL = 10
@@ -330,14 +333,30 @@ def build_writer_prompt(transcript_slice: TranscriptSlice, *, max_chars: int) ->
     )
 
 
-def run_memory_writer(prompt: str) -> WriterResult:
-    from llm_wiki_mcp.ollama import generate, is_available
+def run_memory_writer(
+    prompt: str,
+    *,
+    model: str = DEFAULT_MEMORY_MODEL,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> WriterResult:
+    """Use the frontier writer; a local proposal never finalizes data loss."""
+    from llm_wiki_mcp.codex_save import run_memory_writer as run_frontier_writer
 
-    if not is_available():
-        raise ClaudeCodeSaveError("Ollama is not running")
-
-    output = generate(prompt, format=MEMORY_WRITER_SCHEMA)
-    return parse_writer_output(output)
+    result = run_frontier_writer(
+        prompt,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        timeout=timeout,
+    )
+    return WriterResult(
+        should_save=result.should_save,
+        content=result.content,
+        keywords=list(result.keywords),
+        reason=result.reason,
+        rejected_keywords=list(result.rejected_keywords),
+        evidence_quotes=list(result.evidence_quotes),
+    )
 
 
 def parse_writer_output(output: str) -> WriterResult:
@@ -535,23 +554,33 @@ def last_saved_at(state: dict[str, Any], session_file: Path) -> datetime | None:
 
 
 def should_process(transcript_slice: TranscriptSlice, state: dict[str, Any]) -> tuple[bool, str]:
-    if transcript_slice.has_file_changes:
-        prev = last_saved_at(state, transcript_slice.session_file)
-        if prev is not None:
-            elapsed = (datetime.now(timezone.utc) - prev).total_seconds()
-            if elapsed < COOLDOWN_SECONDS:
-                return False, f"cooldown ({int(elapsed)}s / {COOLDOWN_SECONDS}s)"
-        return True, "file_changes"
+    if not transcript_slice.records:
+        return False, "no_messages"
+    return True, "file_changes" if transcript_slice.has_file_changes else "session_tail"
 
-    if transcript_slice.user_turn_count >= TURN_INTERVAL:
-        prev = last_saved_at(state, transcript_slice.session_file)
-        if prev is not None:
-            elapsed = (datetime.now(timezone.utc) - prev).total_seconds()
-            if elapsed < COOLDOWN_SECONDS:
-                return False, f"cooldown ({int(elapsed)}s / {COOLDOWN_SECONDS}s)"
-        return True, f"turn_interval ({transcript_slice.user_turn_count} turns)"
 
-    return False, f"waiting ({transcript_slice.user_turn_count}/{TURN_INTERVAL} turns, no file changes)"
+def bounded_transcript_slice(
+    transcript_slice: TranscriptSlice,
+    *,
+    max_chars: int,
+) -> TranscriptSlice:
+    """Return an ordered prefix so a large delta is dispositioned in chunks."""
+    if len(format_transcript(transcript_slice.records)) <= max_chars:
+        return transcript_slice
+    selected: list[TranscriptRecord] = []
+    for record in transcript_slice.records:
+        candidate = [*selected, record]
+        if selected and len(format_transcript(candidate)) > max_chars:
+            break
+        selected.append(record)
+    if not selected:
+        selected = [transcript_slice.records[0]]
+    return replace(
+        transcript_slice,
+        records=selected,
+        scanned_until_line=selected[-1].line,
+        user_turn_count=sum(record.role == "user" for record in selected),
+    )
 
 
 def update_state(
@@ -800,6 +829,9 @@ def _run_save_transaction(
             }
         base_result["trigger"] = trigger_reason
 
+    transcript_slice = bounded_transcript_slice(transcript_slice, max_chars=args.max_chars)
+    base_result["scanned_until_line"] = transcript_slice.scanned_until_line
+    base_result["record_count"] = len(transcript_slice.records)
     prompt = build_writer_prompt(transcript_slice, max_chars=args.max_chars)
     if args.extract_only:
         return {
@@ -809,7 +841,12 @@ def _run_save_transaction(
             "transcript_preview": format_transcript(transcript_slice.records)[:4000],
         }
 
-    writer = run_memory_writer(prompt)
+    writer = run_memory_writer(
+        prompt,
+        model=getattr(args, "model", DEFAULT_MEMORY_MODEL),
+        reasoning_effort=getattr(args, "reasoning_effort", DEFAULT_REASONING_EFFORT),
+        timeout=getattr(args, "timeout", DEFAULT_TIMEOUT_SECONDS),
+    )
     validate_user_evidence_quotes(writer, transcript_slice)
     writer_result = {
         "should_save": writer.should_save,
@@ -885,6 +922,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-file")
     parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE))
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    parser.add_argument("--model", default=DEFAULT_MEMORY_MODEL)
+    parser.add_argument("--reasoning-effort", default=DEFAULT_REASONING_EFFORT)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--extract-only", action="store_true")

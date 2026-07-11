@@ -1251,7 +1251,10 @@ def build_snapshot() -> dict[str, Any]:
     events = (runtime_status.read_events(limit=120) + _recent_log_events(limit=80))[-160:]
     ollama = _ollama_snapshot()
     model_status = _model_status_snapshot(ollama)
+    from llm_wiki_mcp.runtime_config import runtime_identity
+
     return {
+        "runtime": runtime_identity(),
         "status": status,
         "orchestrator": {
             "last_ingest": orch_state.get("last_ingest"),

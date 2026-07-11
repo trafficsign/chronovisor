@@ -304,8 +304,15 @@ def backfill_entities(
                 pending_pages.append(page_id)
                 if review.get("summary") == "entity backfill frontier budget deferred":
                     budget_deferred += 1
-        if limit and candidates >= limit:
+        if dry_run and limit and candidates >= limit:
             break
+        if not dry_run:
+            if review.get("summary") == "entity backfill frontier budget deferred":
+                break
+            # Cached terminal verdicts consume no call budget and must not
+            # pin the scan to the same leading pages forever.
+            if limit and frontier_calls >= limit:
+                break
     return {
         "status": "ok",
         "dry_run": dry_run,

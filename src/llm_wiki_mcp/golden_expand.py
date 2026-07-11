@@ -18,7 +18,7 @@ GOLDEN_FILE = RECALL_DIR / "search-golden.jsonl"
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").split("\n")
     except OSError:
         return []
     out: list[dict[str, Any]] = []

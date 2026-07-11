@@ -703,16 +703,22 @@ def capture_session_corrections(
     for source_turn, correction_turn in zip(turns, turns[1:]):
         if correction_turn.assistant_line <= cursor_line:
             continue
-        signal = correction_signal(correction_turn.prompt)
-        if signal is not None:
-            source_record = source_recall_record(source_turn)
-            event = build_correction_event(
-                source_turn,
-                correction_turn,
-                signal=signal,
-                source_record=source_record,
-            )
-            merged.append(enqueue_event(event, store=store, dry_run=dry_run))
+        # Regex is only a scheduling hint.  Every completed follow-up receives
+        # a durable frontier classification so natural corrections are never
+        # discarded merely because they use unfamiliar wording.  Quoted or
+        # hypothetical examples are expected to be classified as unrelated.
+        signal = correction_signal(correction_turn.prompt) or {
+            "matched": "unfiltered_completed_turn",
+            "confidence": "frontier_screen",
+        }
+        source_record = source_recall_record(source_turn)
+        event = build_correction_event(
+            source_turn,
+            correction_turn,
+            signal=signal,
+            source_record=source_record,
+        )
+        merged.append(enqueue_event(event, store=store, dry_run=dry_run))
     latest_line = max((turn.assistant_line for turn in all_turns), default=cursor_line)
     if not dry_run and latest_line > cursor_line:
         _advance_capture_cursor(cursor_file, cursor_key, latest_line)

@@ -139,7 +139,7 @@ class SearchExample:
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").split("\n")
     except OSError:
         return []
     rows: list[dict[str, Any]] = []

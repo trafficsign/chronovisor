@@ -3,34 +3,21 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.index_store import get_store
+from llm_wiki_mcp.jsonl import count_jsonl, read_jsonl
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT
 
 
 def _jsonl_count(path: Path) -> int:
-    try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    except OSError:
-        return 0
+    return count_jsonl(path)
 
 
 def _read_jsonl(path: Path, *, limit: int = 500) -> list[dict[str, Any]]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
-    except OSError:
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+    return read_jsonl(path, limit=limit)
 
 
 def summary_coverage() -> dict[str, Any]:
@@ -181,7 +168,12 @@ def derived_memory_kpi() -> dict[str, Any]:
 
 
 def read_back_kpi() -> dict[str, Any]:
-    rows = _read_jsonl(WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl", limit=200)
+    run_path = WIKI_ROOT / "runtime" / "ingest-read-back-runs.jsonl"
+    rows = _read_jsonl(run_path, limit=200)
+    cohort = "all_ingest_runs"
+    if not rows:
+        rows = _read_jsonl(WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl", limit=200)
+        cohort = "legacy_failure_bearing_runs_only"
     failures = 0
     checked = 0
     latest: dict[str, Any] | None = None
@@ -198,6 +190,7 @@ def read_back_kpi() -> dict[str, Any]:
         "failures": failures,
         "pass_rate": (passed / checked) if checked else None,
         "latest": latest,
+        "cohort": cohort,
     }
 
 
@@ -229,6 +222,9 @@ def convergence_kpi() -> dict[str, Any]:
         return {"status": "invalid", "path": str(path), "items": 0, "by_status": {}, "by_lane": {}}
     by_status: dict[str, int] = {}
     by_lane: dict[str, dict[str, int]] = {}
+    now = datetime.now(timezone.utc)
+    actionable_dates: list[datetime] = []
+    expired_running = 0
     for item in items.values():
         if not isinstance(item, dict):
             continue
@@ -237,6 +233,30 @@ def convergence_kpi() -> dict[str, Any]:
         by_status[status] = by_status.get(status, 0) + 1
         lane_counts = by_lane.setdefault(lane, {})
         lane_counts[status] = lane_counts.get(status, 0) + 1
+        if status in {"pending_local", "local_retry", "pending_frontier", "frontier_retry", "local_running", "frontier_running"}:
+            try:
+                actionable_dates.append(datetime.fromisoformat(str(item.get("created_at") or "")).astimezone(timezone.utc))
+            except ValueError:
+                pass
+        if status in {"local_running", "frontier_running"}:
+            try:
+                expires = datetime.fromisoformat(str(item.get("lease_expires_at") or "")).astimezone(timezone.utc)
+                expired_running += int(expires <= now)
+            except ValueError:
+                expired_running += 1
+    events = _read_jsonl(path.with_name("events.jsonl"), limit=100000)
+    cutoff = now - timedelta(hours=24)
+    recent = []
+    for event in events:
+        try:
+            ts = datetime.fromisoformat(str(event.get("ts") or "")).astimezone(timezone.utc)
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            recent.append(event)
+    arrivals = sum(event.get("event") == "candidate_merged" for event in recent)
+    completions = sum(event.get("event") in {"completed", "candidate_completed"} for event in recent)
+    oldest = min(actionable_dates) if actionable_dates else None
     return {
         "status": "ok",
         "path": str(path),
@@ -246,11 +266,28 @@ def convergence_kpi() -> dict[str, Any]:
         "actionable": sum(
             count
             for status, count in by_status.items()
-            if status in {"pending_local", "local_retry", "pending_frontier", "frontier_retry"}
+            if status in {"pending_local", "local_retry", "pending_frontier", "frontier_retry", "local_running", "frontier_running"}
         ),
         "quarantined": by_status.get("quarantined", 0),
         "human_required": by_status.get("human_required", 0),
+        "expired_running": expired_running,
+        "oldest_actionable_at": oldest.isoformat(timespec="seconds") if oldest else None,
+        "oldest_actionable_age_hours": round((now - oldest).total_seconds() / 3600, 2) if oldest else 0.0,
+        "arrivals_24h": arrivals,
+        "completions_24h": completions,
+        "net_growth_24h": arrivals - completions,
     }
+
+
+def capture_pipeline_kpi() -> dict[str, Any]:
+    from llm_wiki_mcp.background_jobs import snapshot as job_snapshot
+
+    sweeper_path = WIKI_ROOT / "runtime" / "session-sweeper-latest.json"
+    try:
+        sweeper = json.loads(sweeper_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        sweeper = {"status": "missing", "pending": None, "processed": 0}
+    return {"background_jobs": job_snapshot(), "session_sweeper": sweeper}
 
 
 def _queue_status_counts(path: Path, field: str) -> dict[str, int]:
@@ -262,6 +299,7 @@ def _queue_status_counts(path: Path, field: str) -> dict[str, int]:
 
 
 def health_snapshot() -> dict[str, Any]:
+    from llm_wiki_mcp.runtime_config import runtime_identity
     coverage = summary_coverage()
     duplicate_queue = WIKI_ROOT / "review" / "duplicate-candidates.jsonl"
     lint_queue = WIKI_ROOT / "review" / "lint-repair-queue.jsonl"
@@ -272,6 +310,7 @@ def health_snapshot() -> dict[str, Any]:
     replay_statuses = _queue_status_counts(raw_replay_queue, "status")
     return {
         "status": "ok",
+        "runtime": runtime_identity(),
         "coverage": coverage,
         "capture": capture_kpi(),
         "memory_integrity": latest_memory_integrity(),
@@ -281,6 +320,7 @@ def health_snapshot() -> dict[str, Any]:
         "read_back": read_back_kpi(),
         "recall_feedback": recall_feedback_kpi(),
         "convergence": convergence_kpi(),
+        "capture_pipeline": capture_pipeline_kpi(),
         "queues": {
             "duplicate_candidates": _jsonl_count(duplicate_queue),
             "lint_repair": _jsonl_count(lint_queue),

@@ -637,18 +637,26 @@ def session_with_edits(path: Path, user_turns: int = 3, include_edit: bool = Tru
     write_jsonl(path, rows)
 
 
-def test_timing_skip_few_turns_no_edits(tmp_path: Path, monkeypatch) -> None:
+def test_short_tail_gets_frontier_disposition(tmp_path: Path, monkeypatch) -> None:
     session = tmp_path / "session.jsonl"
     state_file = tmp_path / "state.json"
     session_with_edits(session, user_turns=3, include_edit=False)
 
     monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        claude_code_save,
+        "run_memory_writer",
+        lambda *a, **kw: claude_code_save.WriterResult(
+            should_save=False, content="", keywords=[], reason="not durable",
+            rejected_keywords=[], evidence_quotes=[],
+        ),
+    )
     args = args_for(session, state_file)
     result = claude_code_save.run(args)
 
     assert result["status"] == "skipped"
-    assert "waiting" in result["reason"]
-    assert not state_file.exists(), "state should not be written when trigger doesn't fire"
+    assert result["trigger"] == "session_tail"
+    assert json.loads(state_file.read_text())["files"][str(session)]["status"] == "declined"
 
 
 def test_timing_triggers_on_edit(tmp_path: Path, monkeypatch) -> None:
@@ -794,10 +802,10 @@ def test_timing_triggers_on_turn_interval(tmp_path: Path, monkeypatch) -> None:
     result = claude_code_save.run(args)
 
     assert result["status"] == "saved"
-    assert "turn_interval" in result["trigger"]
+    assert result["trigger"] == "session_tail"
 
 
-def test_timing_cooldown_blocks_save(tmp_path: Path, monkeypatch) -> None:
+def test_recent_save_does_not_strand_new_tail(tmp_path: Path, monkeypatch) -> None:
     session = tmp_path / "session.jsonl"
     state_file = tmp_path / "state.json"
     session_with_edits(session, user_turns=2, include_edit=True)
@@ -820,11 +828,21 @@ def test_timing_cooldown_blocks_save(tmp_path: Path, monkeypatch) -> None:
     state_file.write_text(json.dumps(state))
 
     monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        claude_code_save,
+        "run_memory_writer",
+        lambda *a, **kw: claude_code_save.WriterResult(
+            should_save=True, content="Memory", keywords=["test"], reason="tail",
+            rejected_keywords=[], evidence_quotes=["User message 0"],
+        ),
+    )
+    monkeypatch.setattr(claude_code_save, "save_raw", lambda *a, **kw: {"saved": "raw.md"})
+    monkeypatch.setattr(claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None)
     args = args_for(session, state_file)
     result = claude_code_save.run(args)
 
-    assert result["status"] == "skipped"
-    assert "cooldown" in result["reason"]
+    assert result["status"] == "saved"
+    assert result["trigger"] == "file_changes"
 
 
 def test_timing_bypass_with_ignore_state(tmp_path: Path, monkeypatch) -> None:

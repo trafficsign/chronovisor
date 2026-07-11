@@ -181,7 +181,7 @@ def _append_history(row: dict[str, Any], *, max_lines: int = HISTORY_MAX_LINES) 
 
     max_lines = max(1, int(max_lines))
     try:
-        lines = HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+        lines = [line for line in HISTORY_FILE.read_text(encoding="utf-8").split("\n") if line.strip()]
     except OSError:
         lines = []
     previous: list[dict[str, Any]] = []
@@ -352,10 +352,14 @@ def _run_sleep_cycle(
     from llm_wiki_mcp.convergence import ConvergenceStore, CycleBudget
     from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
 
+    try:
+        per_lane_frontier = max(1, int(os.getenv("LLM_WIKI_FRONTIER_CALLS_PER_LANE", "3")))
+    except ValueError:
+        per_lane_frontier = 3
     cycle_budget = CycleBudget(
-        max_local_calls=12,
-        max_frontier_calls=12,
-        max_mutations=31,
+        max_local_calls=30,
+        max_frontier_calls=max(24, per_lane_frontier * 8),
+        max_mutations=60,
         max_raw_bytes=2_000_000,
         max_elapsed_seconds=30 * 60,
     )
@@ -396,6 +400,10 @@ def _run_sleep_cycle(
             dry_run=dry_run,
         ),
     )
+    convergence_lease_recovery = _run_lane(
+        "convergence_lease_recovery",
+        lambda: ConvergenceStore().reap_expired_leases(dry_run=dry_run),
+    )
     frontier_capability_preflight = _run_lane(
         "frontier_capability_preflight",
         lambda: __import__(
@@ -427,18 +435,25 @@ def _run_sleep_cycle(
             dry_run=dry_run,
         ),
     )
+    external_queue_recovery = _run_lane(
+        "external_queue_recovery",
+        lambda: __import__("llm_wiki_mcp.capability_recovery", fromlist=["resume_external_queues"]).resume_external_queues(
+            preflight=frontier_capability_preflight,
+            dry_run=dry_run,
+        ),
+    )
     correction_budget = cycle_budget.slice(
         # One authoritative classification plus one byte-level mutation review.
-        max_local_calls=2,
-        max_frontier_calls=2,
-        max_mutations=1,
+        max_local_calls=6,
+        max_frontier_calls=6,
+        max_mutations=3,
     )
     content_corrections = _run_lane(
         "content_corrections",
         lambda: __import__(
             "llm_wiki_mcp.content_correction", fromlist=["run_pending_corrections"]
         ).run_pending_corrections(
-            max_items=2,
+            max_items=6,
             budget=correction_budget,
             dry_run=dry_run,
         ),
@@ -447,6 +462,13 @@ def _run_sleep_cycle(
     prefetch = artifact_lane("prefetch", lambda: build_prefetch_cache(write=not dry_run))
     retention = artifact_lane("retention", lambda: build_retention_scores(write=not dry_run))
     claims = artifact_lane("claims", lambda: rebuild_claim_index(write=not dry_run))
+    claim_conflicts = _run_lane(
+        "claim_conflicts",
+        lambda: __import__("llm_wiki_mcp.claims", fromlist=["review_claim_conflicts"]).review_claim_conflicts(
+            limit=per_lane_frontier,
+            write=not dry_run,
+        ),
+    )
     golden = artifact_lane(
         "golden", lambda: expand_golden_from_recall_questions(limit=0, write=not dry_run)
     )
@@ -455,6 +477,30 @@ def _run_sleep_cycle(
     reflection = artifact_lane("reflection", lambda: write_reflection_page(write=not dry_run))
     state_register = artifact_lane(
         "state_register", lambda: refresh_state_register(write=not dry_run)
+    )
+    page_normalization = artifact_lane(
+        "page_normalization",
+        lambda: __import__("llm_wiki_mcp.page_normalize", fromlist=["normalize_pages"]).normalize_pages(
+            write=not dry_run,
+            limit=100,
+            max_frontier_calls=per_lane_frontier,
+        ),
+    )
+    metadata_backfill = _run_lane(
+        "metadata_backfill",
+        lambda: __import__("llm_wiki_mcp.metadata_backfill", fromlist=["backfill_metadata"]).backfill_metadata(
+            limit=per_lane_frontier,
+            max_frontier_calls=per_lane_frontier,
+            dry_run=dry_run,
+        ),
+    )
+    entity_backfill = _run_lane(
+        "entity_backfill",
+        lambda: __import__("llm_wiki_mcp.entities", fromlist=["backfill_entities"]).backfill_entities(
+            limit=per_lane_frontier,
+            max_frontier_calls=per_lane_frontier,
+            dry_run=dry_run,
+        ),
     )
     integrity = (
         artifact_lane(
@@ -465,31 +511,31 @@ def _run_sleep_cycle(
     )
     lane_budgets = {
         "lint": cycle_budget.slice(
-            max_local_calls=5, max_frontier_calls=1, max_mutations=3
+            max_local_calls=10, max_frontier_calls=per_lane_frontier, max_mutations=6
         ),
         "read_back_repair": cycle_budget.slice(
-            max_frontier_calls=1, max_mutations=1
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
         ),
-        "labels": cycle_budget.slice(max_frontier_calls=1, max_mutations=2),
+        "labels": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
         "recall_auto_apply": cycle_budget.slice(
-            max_frontier_calls=1, max_mutations=1
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
         ),
         "self_heal": cycle_budget.slice(
-            max_local_calls=1, max_frontier_calls=1, max_mutations=1
+            max_local_calls=per_lane_frontier, max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
         ),
-        "recall_improve": cycle_budget.slice(max_frontier_calls=1, max_mutations=1),
-        "calibration": cycle_budget.slice(max_frontier_calls=1, max_mutations=1),
-        "self_tune": cycle_budget.slice(max_frontier_calls=1, max_mutations=1),
-        "duplicates": cycle_budget.slice(max_frontier_calls=1, max_mutations=1),
+        "recall_improve": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
+        "calibration": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
+        "self_tune": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
+        "duplicates": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
         "orphans": cycle_budget.slice(
-            max_local_calls=4, max_frontier_calls=1, max_mutations=1
+            max_local_calls=8, max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
         ),
         "raw": cycle_budget.slice(
-            max_frontier_calls=1, max_mutations=1, max_raw_bytes=2_000_000
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier, max_raw_bytes=2_000_000
         ),
         "autonomy_duplicates": cycle_budget.slice(max_mutations=1),
         "autonomy_retention": cycle_budget.slice(
-            max_frontier_calls=1, max_mutations=1
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
         ),
     }
     if dry_run:
@@ -663,8 +709,10 @@ def _run_sleep_cycle(
         "dry_run": dry_run,
         "wiki_snapshot": snapshot,
         "convergence_quarantine_recovery": convergence_quarantine_recovery,
+        "convergence_lease_recovery": convergence_lease_recovery,
         "frontier_capability_preflight": frontier_capability_preflight,
         "convergence_human_recovery": convergence_human_recovery,
+        "external_queue_recovery": external_queue_recovery,
         "content_corrections": content_corrections,
         "health_before": before_health_result,
         "cofire": {k: v for k, v in cofire.items() if k != "graph"},
@@ -677,11 +725,15 @@ def _run_sleep_cycle(
         "memory_integrity": {k: v for k, v in integrity.items() if k != "rows"},
         "retention": {k: v for k, v in retention.items() if k != "pages"},
         "claims": claims,
+        "claim_conflicts": claim_conflicts,
         "golden": golden,
         "distill": distill,
         "hubs": {k: v for k, v in hubs.items() if k != "paths"},
         "reflection": reflection,
         "state_register": state_register,
+        "page_normalization": page_normalization,
+        "metadata_backfill": metadata_backfill,
+        "entity_backfill": entity_backfill,
         "raw_replay": raw_replay,
         "lint_due": lint_due,
         "lint_repair": lint_repair,
