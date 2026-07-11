@@ -197,12 +197,10 @@ def _is_transient_read_back_packet(packet: dict[str, Any]) -> bool:
     return bool(READ_BACK_TRANSIENT_PATTERN.search(text))
 
 
-def _is_exhausted_query_hint_read_back_packet(packet: dict[str, Any]) -> bool:
-    if packet.get("failure_class") != "read_back.repeated_miss":
-        return False
-    failure = _read_back_failure_from_packet(packet)
-    if _canonical_read_back_reason(failure.get("reason")) != "not-in-top-results":
-        return False
+def _read_back_packet_diagnostic_text(
+    packet: dict[str, Any],
+    failure: dict[str, Any],
+) -> str:
     preview = packet.get("raw_preview")
     evidence: dict[str, Any] = {}
     if isinstance(preview, str) and preview.strip():
@@ -213,7 +211,7 @@ def _is_exhausted_query_hint_read_back_packet(packet: dict[str, Any]) -> bool:
         if isinstance(parsed, dict):
             evidence = parsed
     ledger_entry = evidence.get("ledger_entry") if isinstance(evidence, dict) else {}
-    text = " ".join(
+    return " ".join(
         str(value or "")
         for value in (
             packet.get("error"),
@@ -223,7 +221,18 @@ def _is_exhausted_query_hint_read_back_packet(packet: dict[str, Any]) -> bool:
             ledger_entry.get("last_error") if isinstance(ledger_entry, dict) else "",
         )
     )
-    return READ_BACK_EXHAUSTED_QUERY_HINT_TEXT in text
+
+
+def _is_exhausted_query_hint_read_back_packet(packet: dict[str, Any]) -> bool:
+    if packet.get("failure_class") != "read_back.repeated_miss":
+        return False
+    failure = _read_back_failure_from_packet(packet)
+    if _canonical_read_back_reason(failure.get("reason")) != "not-in-top-results":
+        return False
+    return READ_BACK_EXHAUSTED_QUERY_HINT_TEXT in _read_back_packet_diagnostic_text(
+        packet,
+        failure,
+    )
 
 
 def _is_unverifiable_query_hint_read_back_packet(packet: dict[str, Any]) -> bool:
@@ -232,27 +241,11 @@ def _is_unverifiable_query_hint_read_back_packet(packet: dict[str, Any]) -> bool
     failure = _read_back_failure_from_packet(packet)
     if _canonical_read_back_reason(failure.get("reason")) != "not-in-top-results":
         return False
-    preview = packet.get("raw_preview")
-    evidence: dict[str, Any] = {}
-    if isinstance(preview, str) and preview.strip():
-        try:
-            parsed = json.loads(preview)
-        except json.JSONDecodeError:
-            parsed = {}
-        if isinstance(parsed, dict):
-            evidence = parsed
-    ledger_entry = evidence.get("ledger_entry") if isinstance(evidence, dict) else {}
-    text = " ".join(
-        str(value or "")
-        for value in (
-            packet.get("error"),
-            failure.get("error"),
-            failure.get("message"),
-            failure.get("detail"),
-            ledger_entry.get("last_error") if isinstance(ledger_entry, dict) else "",
+    return bool(
+        READ_BACK_UNVERIFIABLE_QUERY_HINT_PATTERN.search(
+            _read_back_packet_diagnostic_text(packet, failure)
         )
     )
-    return bool(READ_BACK_UNVERIFIABLE_QUERY_HINT_PATTERN.search(text))
 
 
 def _retire_non_actionable_read_back_packet(
