@@ -600,6 +600,38 @@ def test_save_history_snapshot_combines_raw_drain_and_log(tmp_path: Path, monkey
     assert history["recent"][-1]["date"] == "2026-07-02"
 
 
+def test_save_history_snapshot_reconciles_processed_orchestrator_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    raw_dir = wiki_root / "raw"
+    raw_dir.mkdir(parents=True)
+    raw_name = "20260704-120000-codex-processed-without-drain-log-aaaaaaaa.md"
+    (raw_dir / raw_name).write_text("raw", encoding="utf-8")
+    (wiki_root / ".orchestrator_state.json").write_text(
+        json.dumps({"processed_raw_files": [raw_name]}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+
+    history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
+    day = history["days"][0]
+
+    assert history["totals"]["processed_bytes"] == 3
+    assert history["totals"]["pending_bytes"] == 0
+    assert day["raw_segments"] == [
+        {
+            "name": raw_name,
+            "bytes": 3,
+            "status": "processed",
+            "source": "codex",
+        }
+    ]
+
+
 def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(dashboard, "WIKI_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(dashboard, "LOG_FILE", tmp_path / "wiki" / "log.md")

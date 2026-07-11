@@ -631,6 +631,18 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
                     if isinstance(filename, str):
                         _add_sample(row, "raw_samples", filename)
 
+    # Drain logs are an event history, not the canonical queue state. They can
+    # be rotated or miss an older successful retry, which previously made an
+    # already-processed raw appear as pending in the Save Load chart. Reconcile
+    # with the orchestrator state after reading the logs so the current truth
+    # wins over incomplete or stale events.
+    orchestrator_state = _read_json_file(WIKI_ROOT / ".orchestrator_state.json") or {}
+    processed_raw_files = orchestrator_state.get("processed_raw_files")
+    if isinstance(processed_raw_files, list):
+        for filename in processed_raw_files:
+            if isinstance(filename, str) and filename in raw_files:
+                raw_status[filename] = "processed"
+
     try:
         log_lines = LOG_FILE.read_text(encoding="utf-8").splitlines()
     except Exception:
