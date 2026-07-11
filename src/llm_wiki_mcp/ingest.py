@@ -2203,12 +2203,14 @@ def _review_and_apply_ingest_operations(
     failed_operation_specs: list[dict] | None = None,
     local_disposition: str = "operations_available",
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    force_frontier_review: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Durably bind exact ingest evidence to a frontier verdict and CAS apply."""
+    """Authorize by risk policy, durably bind the verdict, and CAS apply."""
 
     source_key = _ingest_source_key(raw_content, raw_keywords)
     proposal_path, review_path = _ingest_artifact_paths(source_key)
+    audit_state_path = proposal_path.parent / "audit-state.json"
     recovered = _load_ingest_proposal(
         proposal_path,
         source_key=source_key,
@@ -2243,9 +2245,32 @@ def _review_and_apply_ingest_operations(
             failed_operation_specs=failed_operation_specs,
             local_disposition=local_disposition,
         )
+        from llm_wiki_mcp.ingest_audit import decide_ingest_audit
+
+        audit_decision = decide_ingest_audit(
+            source_key=source_key,
+            raw_content=raw_content,
+            operations=operations,
+            failed_operation_specs=list(failed_operation_specs or []),
+            local_disposition=local_disposition,
+            state_path=audit_state_path,
+            force=force_frontier_review,
+            explicit_reviewer=reviewer is not None,
+        ).to_dict()
+        proposal["audit_decision"] = audit_decision
         recovered_artifact = False
     else:
         proposal, planned = recovered
+        audit_raw = proposal.get("audit_decision")
+        audit_decision = (
+            dict(audit_raw)
+            if isinstance(audit_raw, dict)
+            else {
+                "required": True,
+                "mode": "legacy-frontier",
+                "reasons": ["legacy reviewed artifact"],
+            }
+        )
         totals_raw = proposal.get("link_reconciliation")
         totals = (
             {key: int(totals_raw.get(key, 0)) for key in ("resolved", "rewritten", "unwrapped")}
@@ -2261,6 +2286,7 @@ def _review_and_apply_ingest_operations(
             "source_key": source_key,
             "proposal_sha256": proposal_sha256,
             "proposal": proposal,
+            "audit": audit_decision,
             "created": [],
             "updated": [],
             "artifact_written": False,
@@ -2286,6 +2312,7 @@ def _review_and_apply_ingest_operations(
                 "summary": f"frontier proposal artifact write failed: {exc}",
                 "created": [],
                 "updated": [],
+                "audit": audit_decision,
             }
 
     review = _load_ingest_review(
@@ -2294,17 +2321,63 @@ def _review_and_apply_ingest_operations(
         proposal_sha256=proposal_sha256,
     )
     reused_review = review is not None
+    frontier_used = False
     if review is None:
-        try:
-            review = _run_ingest_frontier_review(proposal, reviewer=reviewer)
-        except Exception as exc:
+        if audit_decision.get("required") is not True:
             review = {
-                "decision": "needs_retry",
-                "summary": f"frontier reviewer failed: {exc.__class__.__name__}: {exc}",
+                "decision": (
+                    "apply_available" if planned else "confirmed_noop"
+                ),
+                "summary": "low-risk ingest authorized by deterministic local policy",
+                "failed_operations_disposition": "none",
+                "tests_run": ["prepare", "schema", "path", "link-reconciliation"],
+                "risk": "low",
+                "notes": None,
+                "reviewer": "local_policy",
             }
+        else:
+            frontier_used = True
+            try:
+                review = _run_ingest_frontier_review(proposal, reviewer=reviewer)
+            except Exception as exc:
+                review = {
+                    "decision": "needs_retry",
+                    "summary": f"frontier reviewer failed: {exc.__class__.__name__}: {exc}",
+                }
 
     review = _normalize_ingest_frontier_review(review, proposal=proposal)
     decision = str(review.get("decision") or "retry")
+    runtime_status.safe_append_metric(
+        "ingest_authorization",
+        source_key=source_key,
+        mode=str(audit_decision.get("mode") or "unknown"),
+        frontier_used=frontier_used,
+        required=audit_decision.get("required") is True,
+        sample_rate=audit_decision.get("sample_rate"),
+        caught_issue_rate=audit_decision.get("caught_issue_rate"),
+        decision=decision,
+    )
+    _safe_log(
+        "ingest | authorization: "
+        f"{audit_decision.get('mode', 'unknown')} -> {decision}"
+    )
+    if frontier_used:
+        try:
+            from llm_wiki_mcp.ingest_audit import record_frontier_audit_outcome
+
+            record_frontier_audit_outcome(
+                state_path=audit_state_path,
+                source_key=source_key,
+                approved=decision in {"apply_available", "confirmed_noop"},
+                mode=str(audit_decision.get("mode") or "mandatory"),
+                reasons=[
+                    str(reason)
+                    for reason in audit_decision.get("reasons", [])
+                    if isinstance(reason, str)
+                ],
+            )
+        except Exception:
+            pass
     if decision in {"apply_available", "confirmed_noop"} and not reused_review:
         try:
             _write_ingest_artifact(
@@ -2326,6 +2399,7 @@ def _review_and_apply_ingest_operations(
                 "summary": f"frontier review artifact write failed: {exc}",
                 "created": [],
                 "updated": [],
+                "audit": audit_decision,
             }
 
     if decision != "apply_available":
@@ -2338,6 +2412,7 @@ def _review_and_apply_ingest_operations(
             "reused_review": reused_review,
             "created": [],
             "updated": [],
+            "audit": audit_decision,
         }
 
     created, updated = _apply_prepared_operations(planned, link_totals=totals)
@@ -2350,6 +2425,7 @@ def _review_and_apply_ingest_operations(
         "reused_review": reused_review,
         "created": created,
         "updated": updated,
+        "audit": audit_decision,
     }
 
 
@@ -2916,6 +2992,7 @@ def run_ingest(
                     else "operations_available"
                 ),
                 reviewer=frontier_reviewer,
+                force_frontier_review=frontier_feedback is not None,
             )
             frontier_status = str(frontier_result.get("status") or "needs_retry")
             if frontier_status in {"apply_available", "confirmed_noop"}:
@@ -2959,6 +3036,7 @@ def run_ingest(
                         else "operations_available"
                     ),
                     reviewer=frontier_reviewer,
+                    force_frontier_review=True,
                 )
                 frontier_status = str(
                     frontier_result.get("status") or "needs_retry"
@@ -3032,7 +3110,8 @@ def run_ingest(
                 "review": frontier_result.get("review"),
                 "recovered_artifact": bool(frontier_result.get("recovered_artifact")),
                 "reused_review": bool(frontier_result.get("reused_review")),
-            }
+            },
+            "audit": frontier_result.get("audit"),
         }
         if failed_op_specs:
             job_result.update({
@@ -3081,6 +3160,7 @@ def run_ingest(
                 "updated": updated,
                 "failed_ops": failed_op_specs,
                 "frontier_status": frontier_status,
+                "audit": frontier_result.get("audit"),
                 "failed_operations_disposition": (
                     (frontier_result.get("review") or {}).get(
                         "failed_operations_disposition"

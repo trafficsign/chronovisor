@@ -720,6 +720,67 @@ class TestIngestFrontierGate:
         assert "The exact proposed fact." in planned[0].new_body
         assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
 
+    def test_low_risk_proposal_bypasses_frontier_but_keeps_durable_verdict(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        raw = next(
+            candidate
+            for index in range(1000)
+            if (
+                candidate := f"ordinary observation {index}"
+            )
+            and int(ingest._ingest_source_key(candidate, None)[:12], 16)
+            / float(16**12)
+            >= 0.10
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_run_ingest_frontier_review",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("low-risk proposal should not call frontier")
+            ),
+        )
+
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content=raw,
+        )
+
+        assert result["status"] == "apply_available"
+        assert result["audit"]["mode"] == "local"
+        assert result["review"]["reviewer"] == "local_policy"
+        assert (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
+
+    def test_explicit_correction_signal_requires_frontier(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        captured: list[dict] = []
+        monkeypatch.setattr(
+            ingest,
+            "_run_ingest_frontier_review",
+            lambda proposal, **_kwargs: (
+                captured.append(proposal)
+                or {
+                    "decision": "apply_available",
+                    "summary": "correction is grounded",
+                    "failed_operations_disposition": "none",
+                }
+            ),
+        )
+
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="その記憶は違う。訂正して。",
+        )
+
+        assert result["status"] == "apply_available"
+        assert result["audit"]["mode"] == "mandatory"
+        assert len(captured) == 1
+
     def test_frontier_confirmed_noop_is_durable_and_non_mutating(
         self, isolated_wiki: Path
     ) -> None:

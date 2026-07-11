@@ -144,6 +144,22 @@ class IngestConfig:
     read_timeout_ms: int = 660_000
 
 
+@dataclass(frozen=True)
+class IngestAuditConfig:
+    enabled: bool = True
+    sample_rate: float = 0.10
+    update_sample_rate: float = 0.15
+    noop_sample_rate: float = 0.20
+    adaptive: bool = True
+    adaptive_window: int = 50
+    adaptive_min_audits: int = 5
+    elevated_reject_rate: float = 0.10
+    critical_reject_rate: float = 0.20
+    elevated_sample_rate: float = 0.25
+    critical_sample_rate: float = 0.50
+    max_operations_without_audit: int = 4
+
+
 def active_config_file(path: Path | str | None = None) -> Path:
     if path:
         return Path(path).expanduser()
@@ -257,6 +273,56 @@ def load_ingest_config(path: Path | str | None = None) -> IngestConfig:
         max_num_ctx=max_num_ctx,
         num_predict=_positive_int(section.get("num_predict"), IngestConfig.num_predict, minimum=128),
         read_timeout_ms=_positive_int(section.get("read_timeout_ms"), IngestConfig.read_timeout_ms, minimum=1_000),
+    )
+
+
+def load_ingest_audit_config(path: Path | str | None = None) -> IngestAuditConfig:
+    data = load_toml_file(path)
+    ingest = data.get("ingest")
+    section = ingest.get("audit") if isinstance(ingest, dict) else None
+    if not isinstance(section, dict):
+        return IngestAuditConfig()
+
+    def rate(name: str, default: float) -> float:
+        return _bounded_float(section.get(name), default, minimum=0.0, maximum=1.0)
+
+    return IngestAuditConfig(
+        enabled=section.get("enabled") is not False,
+        sample_rate=rate("sample_rate", IngestAuditConfig.sample_rate),
+        update_sample_rate=rate(
+            "update_sample_rate", IngestAuditConfig.update_sample_rate
+        ),
+        noop_sample_rate=rate(
+            "noop_sample_rate", IngestAuditConfig.noop_sample_rate
+        ),
+        adaptive=section.get("adaptive") is not False,
+        adaptive_window=_positive_int(
+            section.get("adaptive_window"),
+            IngestAuditConfig.adaptive_window,
+            minimum=5,
+        ),
+        adaptive_min_audits=_positive_int(
+            section.get("adaptive_min_audits"),
+            IngestAuditConfig.adaptive_min_audits,
+            minimum=1,
+        ),
+        elevated_reject_rate=rate(
+            "elevated_reject_rate", IngestAuditConfig.elevated_reject_rate
+        ),
+        critical_reject_rate=rate(
+            "critical_reject_rate", IngestAuditConfig.critical_reject_rate
+        ),
+        elevated_sample_rate=rate(
+            "elevated_sample_rate", IngestAuditConfig.elevated_sample_rate
+        ),
+        critical_sample_rate=rate(
+            "critical_sample_rate", IngestAuditConfig.critical_sample_rate
+        ),
+        max_operations_without_audit=_positive_int(
+            section.get("max_operations_without_audit"),
+            IngestAuditConfig.max_operations_without_audit,
+            minimum=1,
+        ),
     )
 
 

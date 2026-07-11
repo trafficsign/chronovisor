@@ -157,6 +157,39 @@ read_timeout_ms = 120000
     assert cfg.read_timeout_ms == 120000
 
 
+def test_ingest_audit_config_reads_risk_sampling_knobs(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[ingest.audit]
+enabled = true
+sample_rate = 0.05
+update_sample_rate = 0.12
+noop_sample_rate = 0.25
+adaptive = true
+adaptive_window = 40
+adaptive_min_audits = 4
+elevated_reject_rate = 0.08
+critical_reject_rate = 0.18
+elevated_sample_rate = 0.30
+critical_sample_rate = 0.60
+max_operations_without_audit = 3
+""",
+        encoding="utf-8",
+    )
+
+    cfg = runtime_config.load_ingest_audit_config(config)
+
+    assert cfg.sample_rate == 0.05
+    assert cfg.update_sample_rate == 0.12
+    assert cfg.noop_sample_rate == 0.25
+    assert cfg.adaptive_window == 40
+    assert cfg.adaptive_min_audits == 4
+    assert cfg.elevated_sample_rate == 0.30
+    assert cfg.critical_sample_rate == 0.60
+    assert cfg.max_operations_without_audit == 3
+
+
 def test_reranker_config_reads_nested_search_section(tmp_path: Path, monkeypatch) -> None:
     config = tmp_path / "config.toml"
     legacy = tmp_path / "recall.toml"
