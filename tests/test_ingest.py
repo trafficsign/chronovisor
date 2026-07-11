@@ -1614,6 +1614,42 @@ class TestRunIngestFrontierDisposition:
         assert not (isolated_wiki / "pages" / "memory" / "ready.md").exists()
         assert not (isolated_wiki / "pages" / "memory" / "failed.md").exists()
 
+    def test_complete_proposal_ignores_redundant_failed_disposition(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {"type": "create", "filename": "memory/ready.md", "title": "Ready"},
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
+        monkeypatch.setattr(
+            ingest,
+            "_generate_one",
+            lambda op, _raw, **_kwargs: {
+                "type": "create",
+                "filename": op["filename"],
+                "content": "---\ntitle: Ready\nupdated: 2026-07-11\n---\nready\n",
+            },
+        )
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "complete raw",
+            job.job_id,
+            frontier_reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "prepared operation is grounded",
+                "failed_operations_disposition": "confirmed_unnecessary",
+            },
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED
+        assert finished.pages_created == ["ready"]
+        assert (isolated_wiki / "pages" / "memory" / "ready.md").exists()
+
     def test_retryable_partial_proposal_does_not_pin_later_complete_generation(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

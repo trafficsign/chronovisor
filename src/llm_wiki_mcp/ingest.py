@@ -2035,13 +2035,12 @@ def _normalize_ingest_frontier_review(
                 ),
                 "failed_operations_disposition": "retry_required",
             }
-    if not has_failed_operations and disposition != "none":
-        return {
-            **value,
-            "decision": "retry",
-            "summary": "frontier disposition conflicts with a complete local proposal",
-            "failed_operations_disposition": "retry_required",
-        }
+    if not has_failed_operations:
+        # The disposition field only matters when local generation left
+        # replayable failed ops behind. Frontier models may still emit a
+        # non-`none` enum because the schema requires the field; treat that
+        # as redundant noise instead of bouncing an otherwise-complete plan.
+        disposition = "none"
     if decision == "apply_available" and not has_available_operations:
         return {
             **value,
