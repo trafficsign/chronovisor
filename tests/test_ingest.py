@@ -1510,6 +1510,72 @@ class TestRunIngestPartialFailure:
 
 
 class TestRunIngestFrontierDisposition:
+    def test_frontier_invalid_tag_uses_minimal_repair_before_regeneration(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [{
+            "type": "create",
+            "filename": "memory/workflow-note.md",
+            "title": "Workflow note",
+            "summary": "grounded workflow",
+        }]
+        triage_calls: list[str] = []
+
+        def fake_triage(content: str, **_kwargs):
+            triage_calls.append(content)
+            return plan
+
+        monkeypatch.setattr(ingest, "_triage", fake_triage)
+        monkeypatch.setattr(
+            ingest,
+            "_generate_one",
+            lambda op, *_args, **_kwargs: {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Workflow note\nupdated: 2026-07-11\n"
+                    "tags: [d/ai-tools, t/hardware, s/2026]\n---\n"
+                    "Grounded workflow fact.\n"
+                ),
+            },
+        )
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        reviews: list[dict] = []
+
+        def reviewer(proposal: dict) -> dict:
+            reviews.append(proposal)
+            proposed = proposal["prepared_operations"][0]["proposed_text"]
+            if "t/hardware" in proposed:
+                return {
+                    "decision": "retry",
+                    "summary": "The incorrect tag `t/hardware` must be removed.",
+                    "failed_operations_disposition": "none",
+                    "invalid_tags": ["t/hardware"],
+                }
+            return {
+                "decision": "apply_available",
+                "summary": "The metadata-only repair is grounded.",
+                "failed_operations_disposition": "none",
+                "invalid_tags": [],
+            }
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "raw workflow fact",
+            job.job_id,
+            frontier_reviewer=reviewer,
+        )
+
+        assert jobs.job_store.get(job.job_id).status == jobs.JobStatus.COMPLETED
+        assert len(reviews) == 2
+        assert len(triage_calls) == 1
+        page = isolated_wiki / "pages" / "memory" / "workflow-note.md"
+        written = page.read_text(encoding="utf-8")
+        assert "t/hardware" not in written
+        assert "d/ai-tools" in written
+
     def test_frontier_rejection_regenerates_with_feedback_in_same_job(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
