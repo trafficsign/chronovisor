@@ -483,6 +483,14 @@ def _ensure_query_hint(
     return "applied", hint
 
 
+def _target_meta_present(page_id: str) -> bool:
+    from llm_wiki_mcp.index_store import get_store
+
+    store = get_store()
+    store.refresh()
+    return store.meta(page_id) is not None
+
+
 def run_read_back_repair(
     *,
     failure_file: Path = FAILURE_FILE,
@@ -588,6 +596,61 @@ def run_read_back_repair(
             outcome = "human_required"
             entry["status"] = outcome
             entry["human_required_at"] = now_utc.isoformat(timespec="seconds")
+        elif reason == "missing-meta":
+            page_id = str(failure.get("page_id") or "").strip()
+            if not page_id:
+                outcome = "rejected"
+                entry["status"] = outcome
+                entry["last_error"] = "missing-meta failure is missing page_id"
+                entry["rejected_at"] = now_utc.isoformat(timespec="seconds")
+                entry["resolved_occurrences"] = int(entry.get("occurrences") or 0)
+                entry["resolved_last_seen"] = str(entry.get("last_seen") or "")
+            elif not _target_page_exists(page_id):
+                outcome = "rejected"
+                entry["status"] = outcome
+                entry["last_error"] = (
+                    "missing-meta target page no longer exists: "
+                    f"{page_id!r}"
+                )
+                entry["rejected_at"] = now_utc.isoformat(timespec="seconds")
+                entry["resolved_occurrences"] = int(entry.get("occurrences") or 0)
+                entry["resolved_last_seen"] = str(entry.get("last_seen") or "")
+            elif dry_run:
+                outcome = "retry_scheduled"
+            else:
+                try:
+                    meta_present = _target_meta_present(page_id)
+                except Exception as exc:
+                    outcome = _schedule_retry(
+                        entry,
+                        now=now_utc,
+                        max_attempts=max_attempts,
+                        retry_base_seconds=retry_base_seconds,
+                        max_backoff_seconds=max_backoff_seconds,
+                        error=f"missing-meta refresh failed: {exc}",
+                    )
+                else:
+                    if meta_present:
+                        outcome = "already_present"
+                        entry["status"] = "applied"
+                        entry["application"] = "metadata_present"
+                        entry["applied_at"] = now_utc.isoformat(timespec="seconds")
+                        entry["resolved_occurrences"] = int(
+                            entry.get("occurrences") or 0
+                        )
+                        entry["resolved_last_seen"] = str(
+                            entry.get("last_seen") or ""
+                        )
+                        entry.pop("next_attempt_at", None)
+                    else:
+                        outcome = _schedule_retry(
+                            entry,
+                            now=now_utc,
+                            max_attempts=max_attempts,
+                            retry_base_seconds=retry_base_seconds,
+                            max_backoff_seconds=max_backoff_seconds,
+                            error="missing-meta target page still absent from index",
+                        )
         elif reason == "not-in-top-results":
             page_id = str(failure.get("page_id") or "").strip()
             query = str(failure.get("query") or "").strip()
@@ -737,6 +800,28 @@ def run_read_back_repair(
                 max_backoff_seconds=max_backoff_seconds,
                 error=str(failure.get("error") or reason),
             )
+
+        if (
+            outcome == "quarantined"
+            and not dry_run
+            and not entry.get("self_heal_packet_path")
+        ):
+            from llm_wiki_mcp.failure_supervisor import queue_operational_failure
+
+            packet_path = queue_operational_failure(
+                failure_class="read_back.repeated_miss",
+                fingerprint=f"read_back.repeated_miss:{key}",
+                message=(
+                    "ingest read-back repair exhausted its bounded attempts: "
+                    + str(entry.get("last_error") or reason)
+                ),
+                evidence={"failure": failure, "ledger_entry": entry},
+                attempts=int(entry.get("attempts") or max_attempts),
+                label=f"read-back-{str(failure.get('page_id') or key)}",
+            )
+            entry["self_heal_packet_path"] = str(packet_path)
+            entry["self_heal_queued_at"] = now_utc.isoformat(timespec="seconds")
+            action["self_heal_packet_path"] = str(packet_path)
 
         counts[outcome] += 1
         dry_run_outcomes = {

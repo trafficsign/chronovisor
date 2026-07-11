@@ -173,6 +173,8 @@ def _write_packet(
     attempts: int,
     job_id: str | None,
     raw_text: str | None,
+    status: str = "pending_local_repair",
+    local_decision: dict[str, Any] | None = None,
 ) -> Path:
     now = datetime.now().isoformat()
     failure_id = (
@@ -191,16 +193,76 @@ def _write_packet(
         "error": record.message,
         "requested_page_id": record.requested_page_id,
         "similar_existing_pages": _similar_existing_pages(record.requested_page_id),
-        "status": "pending_local_repair",
+        "status": status,
         "local_model": "qwen",
         "frontier_status": "not_requested",
         "raw_preview": (raw_text or "")[:4000],
     }
+    if local_decision is not None:
+        packet["local_decision"] = local_decision
     packets_dir = _runtime_failures_dir() / "packets"
     packets_dir.mkdir(parents=True, exist_ok=True)
     path = packets_dir / f"{failure_id}.json"
     path.write_text(json.dumps(packet, indent=2, ensure_ascii=False) + "\n")
     return path
+
+
+def queue_operational_failure(
+    *,
+    failure_class: str,
+    fingerprint: str,
+    message: str,
+    evidence: dict[str, Any],
+    attempts: int,
+    label: str,
+) -> Path:
+    """Queue a non-raw runtime failure directly for frontier self-heal."""
+
+    record = FailureRecord(
+        failure_class=failure_class,
+        fingerprint=fingerprint,
+        message=message,
+    )
+    local_decision = {
+        "status": "escalate",
+        "action": "escalate_to_frontier",
+        "confidence": 1.0,
+        "reason": "bounded operational repair attempts were exhausted",
+        "requested_page_id": None,
+        "target_page_id": None,
+        "notes": "No raw restore is applicable to this derived-runtime failure.",
+        "source": "deterministic",
+    }
+    packet_path = _write_packet(
+        raw_file=label,
+        record=record,
+        attempts=max(1, attempts),
+        job_id=None,
+        raw_text=json.dumps(evidence, ensure_ascii=False, default=str),
+        status="pending_frontier",
+        local_decision=local_decision,
+    )
+    runtime_status.safe_append_event(
+        "warn",
+        f"failure-supervisor | queued operational self-heal for {label}",
+        source="failure-supervisor",
+        failure_class=failure_class,
+        fingerprint=fingerprint,
+        packet_path=str(packet_path),
+        outcome_kind="self_heal_queued",
+    )
+    try:
+        from llm_wiki_mcp.self_heal import start_background
+
+        start_background(packet_path)
+    except Exception as exc:
+        runtime_status.safe_append_event(
+            "warn",
+            f"failure-supervisor | self-heal launch failed: {exc}",
+            source="failure-supervisor",
+            packet_path=str(packet_path),
+        )
+    return packet_path
 
 
 def _quarantine_raw(raw_path: Path, packet_path: Path) -> Path | None:

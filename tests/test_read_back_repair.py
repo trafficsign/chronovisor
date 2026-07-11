@@ -13,6 +13,16 @@ from llm_wiki_mcp.convergence import CycleBudget
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_operational_self_heal(monkeypatch, tmp_path: Path) -> None:
+    """Never let a unit test enqueue a packet in the live Wiki runtime."""
+
+    monkeypatch.setattr(
+        "llm_wiki_mcp.failure_supervisor.queue_operational_failure",
+        lambda **_kwargs: tmp_path / "operational-self-heal-packet.json",
+    )
+
+
 def _approve(_proposal: dict) -> dict:
     return {
         "decision": "approved",
@@ -326,6 +336,74 @@ def test_transient_failure_backs_off_then_quarantines(tmp_path: Path) -> None:
     assert resumed_entry["quarantine_resume_count"] == 1
 
 
+def test_quarantine_queues_one_operational_self_heal_packet(
+    tmp_path: Path, monkeypatch
+) -> None:
+    failure_file = tmp_path / "failures.jsonl"
+    ledger_file = tmp_path / "ledger.json"
+    _write_failures(
+        failure_file,
+        [{"page_id": "target", "reason": "search-error", "error": "persistent miss"}],
+    )
+    queued: list[dict] = []
+    packet_path = tmp_path / "packet.json"
+    monkeypatch.setattr(
+        "llm_wiki_mcp.failure_supervisor.queue_operational_failure",
+        lambda **kwargs: queued.append(kwargs) or packet_path,
+    )
+
+    read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        now=NOW,
+        max_attempts=1,
+    )
+    read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        now=NOW + timedelta(hours=7),
+        max_attempts=1,
+    )
+
+    assert len(queued) == 1
+    assert queued[0]["failure_class"] == "read_back.repeated_miss"
+    ledger = json.loads(ledger_file.read_text(encoding="utf-8"))
+    entry = next(iter(ledger["entries"].values()))
+    assert entry["self_heal_packet_path"] == str(packet_path)
+
+
+def test_missing_meta_for_deleted_page_is_rejected_without_self_heal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    failure_file = tmp_path / "failures.jsonl"
+    ledger_file = tmp_path / "ledger.json"
+    _write_failures(
+        failure_file,
+        [{"page_id": "missing", "reason": "missing-meta"}],
+    )
+    queued: list[dict] = []
+    monkeypatch.setattr(recall_hints.wiki, "find_page", lambda page_id: None)
+    monkeypatch.setattr(recall_hints.wiki, "SYSTEM_DIR", tmp_path / "system")
+    monkeypatch.setattr(
+        "llm_wiki_mcp.failure_supervisor.queue_operational_failure",
+        lambda **kwargs: queued.append(kwargs) or tmp_path / "packet.json",
+    )
+
+    result = read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        now=NOW,
+        max_attempts=1,
+    )
+
+    assert result["rejected"] == 1
+    assert result["quarantined"] == 0
+    assert queued == []
+    entry = next(iter(json.loads(ledger_file.read_text(encoding="utf-8"))["entries"].values()))
+    assert entry["status"] == "rejected"
+    assert entry["last_error"] == "missing-meta target page no longer exists: 'missing'"
+
+
 def test_missing_query_hint_target_retries_instead_of_requiring_human(
     tmp_path: Path,
     monkeypatch,
@@ -350,9 +428,13 @@ def test_missing_query_hint_target_retries_instead_of_requiring_human(
     assert result["human_required"] == 0
 
 
-def test_access_or_billing_failure_is_the_only_human_required_class(tmp_path: Path) -> None:
+def test_access_or_billing_failure_is_the_only_human_required_class(
+    tmp_path: Path, monkeypatch
+) -> None:
     failure_file = tmp_path / "failures.jsonl"
     ledger_file = tmp_path / "ledger.json"
+    monkeypatch.setattr(recall_hints.wiki, "find_page", lambda page_id: None)
+    monkeypatch.setattr(recall_hints.wiki, "SYSTEM_DIR", tmp_path / "system")
     _write_failures(
         failure_file,
         [
@@ -370,12 +452,13 @@ def test_access_or_billing_failure_is_the_only_human_required_class(tmp_path: Pa
     )
 
     assert result["human_required"] == 1
-    assert result["retry_scheduled"] == 3
+    assert result["retry_scheduled"] == 2
+    assert result["rejected"] == 1
     statuses = sorted(
         entry["status"]
         for entry in json.loads(ledger_file.read_text(encoding="utf-8"))["entries"].values()
     )
-    assert statuses == ["human_required", "retry_wait", "retry_wait", "retry_wait"]
+    assert statuses == ["human_required", "rejected", "retry_wait", "retry_wait"]
 
     read_back_repair.run_read_back_repair(
         failure_file=failure_file,
