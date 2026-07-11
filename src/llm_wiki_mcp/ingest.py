@@ -1,5 +1,6 @@
 """Ingest engine - structures raw data into wiki pages (two-stage pipeline)."""
 
+import ast
 import hashlib
 import json
 import re
@@ -75,6 +76,32 @@ def _extract_json_array(output: str) -> list[dict] | None:
         pos = max(end_offset, idx + 1)
 
     if not candidates:
+        # Some local models occasionally emit a Python literal despite an
+        # explicit JSON contract (single quotes / True / None).  Accept only
+        # a literal list whose entire value is JSON-shaped. ``literal_eval``
+        # cannot execute code, and the recursive type check keeps tuples,
+        # sets, bytes, and other Python-only values out of the ingest schema.
+        last_idx = text.rfind("]")
+        if last_idx > first_idx_in_text:
+            try:
+                literal = ast.literal_eval(text[first_idx_in_text:last_idx + 1])
+            except (SyntaxError, ValueError, MemoryError, RecursionError):
+                literal = None
+
+            def is_json_value(value: object) -> bool:
+                if value is None or isinstance(value, (str, int, float, bool)):
+                    return True
+                if isinstance(value, list):
+                    return all(is_json_value(item) for item in value)
+                if isinstance(value, dict):
+                    return all(
+                        isinstance(key, str) and is_json_value(item)
+                        for key, item in value.items()
+                    )
+                return False
+
+            if isinstance(literal, list) and is_json_value(literal):
+                return literal
         return None
 
     # If the outermost `[` parsed cleanly, trust the LLM's intent and return
@@ -133,10 +160,15 @@ def _generate_with_progress(
 def _triage_with_progress(
     content: str,
     progress_callback: Callable[[dict[str, Any]], None] | None,
+    *,
+    frontier_feedback: str | None = None,
 ) -> list[dict] | None:
+    kwargs: dict[str, Any] = {}
     if progress_callback is not None and _supports_keyword(_triage, "progress_callback"):
-        return _triage(content, progress_callback=progress_callback)
-    return _triage(content)
+        kwargs["progress_callback"] = progress_callback
+    if frontier_feedback and _supports_keyword(_triage, "frontier_feedback"):
+        kwargs["frontier_feedback"] = frontier_feedback
+    return _triage(content, **kwargs)
 
 
 def _generate_one_with_progress(
@@ -145,10 +177,13 @@ def _generate_one_with_progress(
     *,
     raw_keywords: list[str] | None,
     progress_callback: Callable[[dict[str, Any]], None] | None,
+    frontier_feedback: str | None = None,
 ) -> dict | None:
     kwargs: dict[str, Any] = {"raw_keywords": raw_keywords}
     if progress_callback is not None and _supports_keyword(_generate_one, "progress_callback"):
         kwargs["progress_callback"] = progress_callback
+    if frontier_feedback and _supports_keyword(_generate_one, "frontier_feedback"):
+        kwargs["frontier_feedback"] = frontier_feedback
     return _generate_one(op, raw_content, **kwargs)
 
 
@@ -213,6 +248,7 @@ def _triage(
     content: str,
     *,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    frontier_feedback: str | None = None,
 ) -> list[dict] | None:
     """Stage 1: Analyze raw content and return a plan, or None on parse failure.
 
@@ -241,6 +277,20 @@ def _triage(
 
     catalog = "\n".join(catalog_lines)
 
+    feedback_block = ""
+    if frontier_feedback:
+        feedback_block = f"""
+
+---
+Previous frontier review (authoritative correction instructions):
+---
+{frontier_feedback}
+---
+Regenerate the plan from the raw evidence. Remove unsupported claims, keep
+only durable facts explicitly grounded in the raw, and use the smallest
+complete create/update set that resolves the review.
+"""
+
     prompt = f"""{catalog}
 
 ---
@@ -248,6 +298,7 @@ Raw session data to triage:
 ---
 {content}
 ---
+{feedback_block}
 
 Analyze the raw data above. Output a JSON array of page operations (create/update)."""
 
@@ -802,6 +853,7 @@ def _generate_one(
     *,
     raw_keywords: list[str] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    frontier_feedback: str | None = None,
 ) -> dict | None:
     """Stage 2: generate one page; return an operation dict ready for apply.
 
@@ -821,6 +873,20 @@ def _generate_one(
     summary = op.get("summary", "")
     title = op.get("title", "")
 
+    feedback_block = ""
+    if frontier_feedback:
+        feedback_block = f"""
+
+---
+Previous frontier review (authoritative correction instructions):
+---
+{frontier_feedback}
+---
+Rewrite this operation as the smallest grounded change. Do not infer missing
+details, future plans, causal explanations, preferences, or outcomes that are
+not explicit in the raw evidence.
+"""
+
     prompt = f"""{context}
 
 ---
@@ -832,6 +898,7 @@ Raw session data (source material):
 Task: {op_type.upper()} page "{filename}"
 Title: {title}
 Summary: {summary}
+{feedback_block}
 
 Generate the page content based on the raw data and context above."""
 
@@ -2425,6 +2492,125 @@ def _verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> 
 # Main entry point — two-stage pipeline
 # ---------------------------------------------------------------------------
 
+_MAX_FRONTIER_CONVERGENCE_ATTEMPTS = 3
+
+
+def _frontier_feedback_text(result: dict[str, Any]) -> str:
+    """Return compact authoritative feedback for the next local proposal."""
+
+    review = result.get("review")
+    if isinstance(review, dict):
+        parts = [
+            str(review.get(key)).strip()
+            for key in ("summary", "risk", "notes")
+            if isinstance(review.get(key), str) and str(review.get(key)).strip()
+        ]
+        if parts:
+            return "\n".join(dict.fromkeys(parts))
+    summary = result.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    return "The previous proposal was not safe or complete enough to apply."
+
+
+def _frontier_retry_is_actionable(result: dict[str, Any]) -> bool:
+    """False when regenerating local content cannot repair the frontier lane."""
+
+    if str(result.get("status") or "") == "quarantined":
+        return False
+    feedback = _frontier_feedback_text(result).casefold()
+    infrastructure_markers = (
+        "artifact write failed",
+        "frontier reviewer failed",
+        "transport",
+        "timeout",
+        "timed out",
+        "budget exhausted",
+        "budget deferred",
+        "authentication",
+        "billing",
+        "quota",
+        "secret-store",
+    )
+    return not any(marker in feedback for marker in infrastructure_markers)
+
+
+def _generate_local_operations(
+    plan: list[dict],
+    *,
+    content: str,
+    raw_keywords: list[str] | None,
+    source_raw: str | None,
+    job_id: str,
+    frontier_feedback: str | None,
+) -> tuple[list[dict], list[dict]]:
+    """Generate every operation, retrying malformed local output once."""
+
+    job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
+    runtime_status.safe_write_status(
+        state="running",
+        stage="generate",
+        current_job_id=job_id,
+        current_raw=source_raw,
+        current_op=None,
+        op_progress={"index": 0, "total": len(plan)},
+    )
+    operations: list[dict] = []
+    failed_specs: list[dict] = []
+    for i, op in enumerate(plan):
+        fname = op.get("filename", "?")
+        runtime_status.safe_write_status(
+            state="running",
+            stage="generate",
+            current_job_id=job_id,
+            current_raw=source_raw,
+            current_op=fname,
+            op_progress={"index": i + 1, "total": len(plan)},
+        )
+        _safe_log(f"ingest | generating {i + 1}/{len(plan)}: {fname}")
+        generated = _generate_one_with_progress(
+            op,
+            content,
+            raw_keywords=raw_keywords,
+            progress_callback=_llm_progress_callback(
+                phase="generate",
+                target=fname,
+                job_id=job_id,
+                source_raw=source_raw,
+                op_progress={"index": i + 1, "total": len(plan)},
+            ),
+            frontier_feedback=frontier_feedback,
+        )
+        if generated is None:
+            _safe_log(f"ingest | retry generate for {fname}")
+            generated = _generate_one_with_progress(
+                op,
+                content,
+                raw_keywords=raw_keywords,
+                progress_callback=_llm_progress_callback(
+                    phase="generate-retry",
+                    target=fname,
+                    job_id=job_id,
+                    source_raw=source_raw,
+                    op_progress={"index": i + 1, "total": len(plan)},
+                ),
+                frontier_feedback=frontier_feedback,
+            )
+        if generated:
+            operations.append(generated)
+        else:
+            failed_specs.append({
+                "filename": fname,
+                "type": op.get("type", "?"),
+                "title": op.get("title", ""),
+                "summary": op.get("summary", ""),
+                "error": "generation parse failed after retry",
+                "attempts": 2,
+            })
+        job_store.update(job_id, completed_ops=i + 1)
+    return operations, failed_specs
+
+
 def run_ingest(
     content: str,
     job_id: str,
@@ -2484,236 +2670,137 @@ def run_ingest(
         if processor == "unavailable":
             raise RuntimeError("ollama unavailable; no fallback processor configured")
 
-        # Stage 1: Triage. Every log call here is _safe_log so a wedged
-        # log file can't promote a successful triage into a FAILED job.
-        job_store.update(job_id, stage="triage")
-        runtime_status.safe_write_status(
-            state="running",
-            stage="triage",
-            current_job_id=job_id,
-            current_raw=source_raw,
-            current_op=None,
-        )
-        _safe_log("ingest | stage 1: triage started")
-        plan = _triage_with_progress(
-            content,
-            _llm_progress_callback(
-                phase="triage",
-                target="operation plan",
-                job_id=job_id,
-                source_raw=source_raw,
-            ),
-        )
-
-        # None = parser/model failure → leave raws un-marked so the next
-        # tick can retry. [] is only a *local* no-op proposal; the frontier
-        # model must confirm it before the raw can be marked processed.
-        if plan is None:
-            triage_failed = True
-            job_store.update(
-                job_id,
-                status=JobStatus.FAILED,
-                completed_at=_now(),
-                error="triage parse failed",
-            )
+        # A frontier rejection is feedback, not a terminal batch failure.
+        # Re-run triage and generation inside the same job with the exact
+        # critique, capped so a bad raw cannot create an unbounded model loop.
+        frontier_feedback: str | None = None
+        frontier_result: dict[str, Any] | None = None
+        plan: list[dict] = []
+        all_operations: list[dict] = []
+        failed_op_specs: list[dict] = []
+        for convergence_attempt in range(1, _MAX_FRONTIER_CONVERGENCE_ATTEMPTS + 1):
+            job_store.update(job_id, stage="triage")
             runtime_status.safe_write_status(
-                state="error",
-                stage="triage",
+                state="running",
+                stage="triage" if convergence_attempt == 1 else "frontier-regenerate",
                 current_job_id=job_id,
                 current_raw=source_raw,
                 current_op=None,
-                last_error="triage parse failed",
-                llm=None,
             )
-            _safe_log("ingest | triage: parse failed (raws left pending for retry)")
-            return
+            _safe_log(
+                "ingest | stage 1: triage started"
+                if convergence_attempt == 1
+                else (
+                    "ingest | frontier convergence "
+                    f"{convergence_attempt}/{_MAX_FRONTIER_CONVERGENCE_ATTEMPTS} started"
+                )
+            )
+            raw_plan = _triage_with_progress(
+                content,
+                _llm_progress_callback(
+                    phase=(
+                        "triage"
+                        if convergence_attempt == 1
+                        else "frontier-regenerate-triage"
+                    ),
+                    target="operation plan",
+                    job_id=job_id,
+                    source_raw=source_raw,
+                ),
+                frontier_feedback=frontier_feedback,
+            )
+            if raw_plan is None:
+                if convergence_attempt < _MAX_FRONTIER_CONVERGENCE_ATTEMPTS:
+                    frontier_feedback = (
+                        "The previous triage response was not valid JSON matching the "
+                        "operation schema. Return only a complete JSON array; preserve "
+                        "the raw evidence exactly and do not add unsupported facts."
+                    )
+                    _safe_log("ingest | triage parse failed; regenerating in same job")
+                    continue
+                triage_failed = True
+                job_store.update(
+                    job_id,
+                    status=JobStatus.FAILED,
+                    completed_at=_now(),
+                    error="triage parse failed after convergence attempts",
+                )
+                runtime_status.safe_write_status(
+                    state="error",
+                    stage="triage",
+                    current_job_id=job_id,
+                    current_raw=source_raw,
+                    current_op=None,
+                    last_error="triage parse failed after convergence attempts",
+                    llm=None,
+                )
+                _safe_log("ingest | triage: parse failed after convergence attempts")
+                return
 
-        if not plan:
+            plan = _normalize_triage_plan(raw_plan)
+            plan = _dedupe_create_ops_with_existing(plan, content)
+            _safe_log(f"ingest | triage: {len(plan)} operations planned")
+            if plan:
+                all_operations, failed_op_specs = _generate_local_operations(
+                    plan,
+                    content=content,
+                    raw_keywords=raw_keywords_for_ops,
+                    source_raw=source_raw,
+                    job_id=job_id,
+                    frontier_feedback=frontier_feedback,
+                )
+            else:
+                all_operations, failed_op_specs = [], []
+
+            failed_ops = [spec["filename"] for spec in failed_op_specs]
             runtime_status.safe_write_status(
                 state="running",
                 stage="frontier-review",
                 current_job_id=job_id,
                 current_raw=source_raw,
                 current_op=None,
+                op_progress={"index": len(plan), "total": len(plan)},
                 llm=None,
             )
-            frontier_noop = _review_and_apply_ingest_operations(
-                [],
+            frontier_result = _review_and_apply_ingest_operations(
+                all_operations,
                 raw_content=content,
                 raw_keywords=raw_keywords_for_ops,
                 source_raw=source_raw,
-                triage_plan=[],
-                failed_operation_specs=[],
-                local_disposition="triage_no_operations",
+                triage_plan=plan,
+                failed_operation_specs=failed_op_specs,
+                local_disposition=(
+                    "triage_no_operations"
+                    if not plan
+                    else "all_generation_failed"
+                    if failed_ops and not all_operations
+                    else "partial_generation_failed"
+                    if failed_ops
+                    else "operations_available"
+                ),
                 reviewer=frontier_reviewer,
             )
-            if frontier_noop.get("status") != "confirmed_noop":
-                review = frontier_noop.get("review")
+            frontier_status = str(frontier_result.get("status") or "needs_retry")
+            if frontier_status in {"apply_available", "confirmed_noop"}:
+                break
+            frontier_feedback = _frontier_feedback_text(frontier_result)
+            if not _frontier_retry_is_actionable(frontier_result):
                 raise IngestApplyError(
-                    "frontier did not confirm local ingest no-op: "
-                    + str(
-                        review.get("summary")
-                        if isinstance(review, dict)
-                        else frontier_noop.get("summary") or frontier_noop.get("status")
-                    )
+                    "frontier ingest review deferred: " + frontier_feedback
                 )
-            job_store.update(
-                job_id,
-                status=JobStatus.COMPLETED,
-                completed_at=_now(),
-                result={
-                    "message": "Frontier confirmed no Wiki mutation is required",
-                    "frontier": {
-                        "status": "confirmed_noop",
-                        "proposal_sha256": frontier_noop.get("proposal_sha256"),
-                        "source_key": frontier_noop.get("source_key"),
-                        "review": frontier_noop.get("review"),
-                        "recovered_artifact": bool(
-                            frontier_noop.get("recovered_artifact")
-                        ),
-                        "reused_review": bool(frontier_noop.get("reused_review")),
-                    },
-                },
-                pages_created=[],
-                pages_updated=[],
+            _safe_log(
+                "ingest | frontier requested regeneration: "
+                + frontier_feedback.replace("\n", " ")[:300]
             )
-            _safe_log("ingest | frontier confirmed no-op (raw marked processed)")
-            failed = False
-            runtime_status.safe_write_status(
-                state="running",
-                stage="complete",
-                current_job_id=job_id,
-                current_raw=source_raw,
-                current_op=None,
-                llm=None,
-                last_success={
-                    "job_id": job_id,
-                    "raw": source_raw,
-                    "message": "frontier confirmed no-op",
-                    "frontier_status": "confirmed_noop",
-                },
-            )
-            if on_complete:
-                try:
-                    on_complete()
-                except Exception as cb_err:
-                    _safe_log(f"ingest | on_complete callback failed: {cb_err}")
-            return
-
-        plan = _normalize_triage_plan(plan)
-        plan = _dedupe_create_ops_with_existing(plan, content)
-        _safe_log(f"ingest | triage: {len(plan)} operations planned")
-        job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
-        runtime_status.safe_write_status(
-            state="running",
-            stage="generate",
-            current_job_id=job_id,
-            current_raw=source_raw,
-            current_op=None,
-            op_progress={"index": 0, "total": len(plan)},
-        )
-
-        # Stage 2: Generate each page. Failed ops are retried once before
-        # being dead-lettered — most generate failures are transient
-        # (truncation, malformed wrapper) and a second sample from the
-        # model usually succeeds.
-        all_operations: list[dict] = []
-        failed_op_specs: list[dict] = []  # full op dicts for the dead-letter record
-        for i, op in enumerate(plan):
-            fname = op.get("filename", "?")
-            runtime_status.safe_write_status(
-                state="running",
-                stage="generate",
-                current_job_id=job_id,
-                current_raw=source_raw,
-                current_op=fname,
-                op_progress={"index": i + 1, "total": len(plan)},
-            )
-            _safe_log(f"ingest | generating {i+1}/{len(plan)}: {fname}")
-            progress = _llm_progress_callback(
-                phase="generate",
-                target=fname,
-                job_id=job_id,
-                source_raw=source_raw,
-                op_progress={"index": i + 1, "total": len(plan)},
-            )
-            generated = _generate_one_with_progress(
-                op,
-                content,
-                raw_keywords=raw_keywords_for_ops,
-                progress_callback=progress,
-            )
-            if generated is None:
-                _safe_log(f"ingest | retry generate for {fname}")
-                retry_progress = _llm_progress_callback(
-                    phase="generate-retry",
-                    target=fname,
-                    job_id=job_id,
-                    source_raw=source_raw,
-                    op_progress={"index": i + 1, "total": len(plan)},
-                )
-                generated = _generate_one_with_progress(
-                    op,
-                    content,
-                    raw_keywords=raw_keywords_for_ops,
-                    progress_callback=retry_progress,
-                )
-            if generated:
-                all_operations.append(generated)
-            else:
-                failed_op_specs.append({
-                    "filename": fname,
-                    "type": op.get("type", "?"),
-                    "title": op.get("title", ""),
-                    "summary": op.get("summary", ""),
-                    "error": "generation parse failed after retry",
-                    "attempts": 2,
-                })
-            job_store.update(job_id, completed_ops=i + 1)
-
-        failed_ops = [spec["filename"] for spec in failed_op_specs]
-
-        # All local dispositions, including all-failed and partial-failed,
-        # pass through one frontier gate. Missing local output never marks a
-        # raw processed by itself.
-        # Local triage/generation is proposal-only.  The exact raw, page
-        # preimages, and postimages are durably bound to a frontier verdict
-        # before the shared-lock CAS apply path can run.
-        runtime_status.safe_write_status(
-            state="running",
-            stage="apply",
-            current_job_id=job_id,
-            current_raw=source_raw,
-            current_op=None,
-            op_progress={"index": len(plan), "total": len(plan)},
-            llm=None,
-        )
-        frontier_result = _review_and_apply_ingest_operations(
-            all_operations,
-            raw_content=content,
-            raw_keywords=raw_keywords_for_ops,
-            source_raw=source_raw,
-            triage_plan=plan,
-            failed_operation_specs=failed_op_specs,
-            local_disposition=(
-                "all_generation_failed"
-                if failed_ops and not all_operations
-                else "partial_generation_failed"
-                if failed_ops
-                else "operations_available"
-            ),
-            reviewer=frontier_reviewer,
-        )
-        frontier_status = str(frontier_result.get("status") or "needs_retry")
-        if frontier_status not in {"apply_available", "confirmed_noop"}:
+        else:
             raise IngestApplyError(
-                "frontier ingest review deferred: "
-                + str(
-                    (frontier_result.get("review") or {}).get("summary")
-                    if isinstance(frontier_result.get("review"), dict)
-                    else frontier_result.get("summary") or frontier_status
-                )
+                "frontier ingest review did not converge after "
+                f"{_MAX_FRONTIER_CONVERGENCE_ATTEMPTS} attempts: "
+                + (frontier_feedback or "unknown frontier rejection")
             )
+
+        assert frontier_result is not None
+        frontier_status = str(frontier_result.get("status") or "needs_retry")
         created = list(frontier_result.get("created") or [])
         updated = list(frontier_result.get("updated") or [])
 

@@ -58,6 +58,22 @@ class TestExtractJsonArray:
     def test_markdown_fence(self) -> None:
         assert _extract_json_array('```json\n[{"a":1}]\n```') == [{"a": 1}]
 
+    def test_safe_python_literal_fallback(self) -> None:
+        assert _extract_json_array(
+            "[{'type': 'create', 'filename': 'memory/fact.md', "
+            "'keywords': ['fact'], 'enabled': True}]"
+        ) == [
+            {
+                "type": "create",
+                "filename": "memory/fact.md",
+                "keywords": ["fact"],
+                "enabled": True,
+            }
+        ]
+
+    def test_python_only_literal_types_are_rejected(self) -> None:
+        assert _extract_json_array("[{'keywords': ('not', 'json')}]") is None
+
     def test_object_not_array(self) -> None:
         assert _extract_json_array('{"a":1}') is None
 
@@ -1494,6 +1510,86 @@ class TestRunIngestPartialFailure:
 
 
 class TestRunIngestFrontierDisposition:
+    def test_frontier_rejection_regenerates_with_feedback_in_same_job(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/converged.md",
+                "title": "Converged",
+                "summary": "one explicit fact",
+            }
+        ]
+        triage_feedback: list[str | None] = []
+        generate_feedback: list[str | None] = []
+
+        def fake_triage(_content: str, *, frontier_feedback=None):
+            triage_feedback.append(frontier_feedback)
+            return plan
+
+        def fake_generate(
+            op: dict,
+            _raw: str,
+            *,
+            raw_keywords=None,
+            progress_callback=None,
+            frontier_feedback=None,
+        ):
+            generate_feedback.append(frontier_feedback)
+            fact = "grounded fact" if frontier_feedback else "unsupported inference"
+            return {
+                "type": op["type"],
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Converged\nupdated: 2026-07-11\n---\n" + fact
+                ),
+            }
+
+        reviews: list[dict] = []
+
+        def reviewer(proposal: dict) -> dict:
+            reviews.append(proposal)
+            if len(reviews) == 1:
+                return {
+                    "decision": "retry",
+                    "summary": "Remove the unsupported inference; keep only the grounded fact.",
+                    "failed_operations_disposition": "none",
+                }
+            return {
+                "decision": "apply_available",
+                "summary": "The regenerated proposal is grounded.",
+                "failed_operations_disposition": "none",
+            }
+
+        monkeypatch.setattr(ingest, "_triage", fake_triage)
+        monkeypatch.setattr(ingest, "_generate_one", fake_generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        completed: list[bool] = []
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest(
+            "raw grounded fact",
+            job.job_id,
+            on_complete=lambda: completed.append(True),
+            frontier_reviewer=reviewer,
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED
+        assert completed == [True]
+        assert len(reviews) == 2
+        assert triage_feedback == [
+            None,
+            "Remove the unsupported inference; keep only the grounded fact.",
+        ]
+        assert generate_feedback == triage_feedback
+        page = isolated_wiki / "pages" / "memory" / "converged.md"
+        assert "grounded fact" in page.read_text(encoding="utf-8")
+        assert "unsupported inference" not in page.read_text(encoding="utf-8")
+
     def test_local_noop_requires_frontier_confirmation(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
