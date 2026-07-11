@@ -1,10 +1,13 @@
 """Ollama API client for Ingest/Lint operations."""
 
 import json
+import logging
 import threading
 import time
 from collections.abc import Callable
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 import httpx
 
@@ -102,6 +105,9 @@ def generate(
     still returning the final response string for existing callers.
     """
     config = load_ingest_config()
+    num_ctx = _num_ctx_for_prompt(prompt, system, config)
+    prompt_chars = len(prompt) + (len(system) if system else 0)
+    log.info("generate num_ctx=%d prompt_chars=%d model=%s", num_ctx, prompt_chars, config.model)
     payload = {
         "model": config.model,
         "prompt": prompt,
@@ -111,7 +117,7 @@ def generate(
         "options": {
             "temperature": config.temperature,
             "num_predict": config.num_predict,
-            "num_ctx": _num_ctx_for_prompt(prompt, system, config),
+            "num_ctx": num_ctx,
         },
     }
     if system:

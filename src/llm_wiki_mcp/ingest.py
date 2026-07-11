@@ -206,6 +206,9 @@ def _llm_progress_callback(
     return emit
 
 
+_TRIAGE_CATALOG_TOP_N = 100
+
+
 def _triage(
     content: str,
     *,
@@ -218,15 +221,23 @@ def _triage(
     raw files un-marked so the next tick retries them, while a legitimate
     empty plan should mark the raws processed to avoid forever-retry.
     """
-    # Build lightweight context: existing folders + page catalog (no full text)
     existing_folders = sorted({p.parent.name for p in all_pages() if p.parent != PAGES_DIR})
     catalog_lines = [f"Existing folders: {', '.join(f'{f}/' for f in existing_folders)}", ""]
+
     catalog_lines.append("Existing wiki pages (page_id — title):")
-    for path in all_pages():
-        content_text = path.read_text()
-        fm_match = re.search(r"title:\s*(.+)", content_text)
-        title = fm_match.group(1).strip() if fm_match else path.stem
-        catalog_lines.append(f"  [[{page_id_from_path(path)}]] — {title}")
+    try:
+        from llm_wiki_mcp.search import search as wiki_search
+        query_text = content[:2000]
+        results, _ = wiki_search(query_text, top_n=_TRIAGE_CATALOG_TOP_N, semantic=True)
+        for r in results:
+            catalog_lines.append(f"  [[{r.page_id}]] — {r.title}")
+        _safe_log(f"ingest | triage catalog filtered to {len(results)} pages (of {len(list(all_pages()))} total)")
+    except Exception:
+        for path in all_pages():
+            content_text = path.read_text()
+            fm_match = re.search(r"title:\s*(.+)", content_text)
+            title = fm_match.group(1).strip() if fm_match else path.stem
+            catalog_lines.append(f"  [[{page_id_from_path(path)}]] — {title}")
 
     catalog = "\n".join(catalog_lines)
 
