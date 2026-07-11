@@ -435,6 +435,66 @@ def test_missing_meta_for_deleted_page_is_rejected_without_self_heal(
     assert entry["last_error"] == "missing-meta target page no longer exists: 'missing'"
 
 
+def test_legacy_quarantined_missing_meta_deleted_page_is_rejected_without_self_heal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    failure_file = tmp_path / "failures.jsonl"
+    ledger_file = tmp_path / "ledger.json"
+    failure = {"page_id": "missing", "reason": "missing-meta"}
+    _write_failures(failure_file, [failure])
+    key = read_back_repair.failure_key(failure)
+    ledger_file.write_text(
+        json.dumps(
+            {
+                "schema_version": read_back_repair.SCHEMA_VERSION,
+                "entries": {
+                    key: {
+                        "failure_key": key,
+                        "failure": failure,
+                        "first_seen": "2026-07-10T12:00:00+0000",
+                        "last_seen": "2026-07-10T12:00:00+0000",
+                        "occurrences": 1,
+                        "attempts": 2,
+                        "status": "quarantined",
+                        "last_error": "missing-meta",
+                        "quarantined_at": (
+                            NOW
+                            - timedelta(
+                                seconds=read_back_repair.DEFAULT_QUARANTINE_COOLDOWN_SECONDS,
+                                microseconds=1,
+                            )
+                        ).isoformat(timespec="seconds"),
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    queued: list[dict] = []
+    monkeypatch.setattr(recall_hints.wiki, "find_page", lambda page_id: None)
+    monkeypatch.setattr(recall_hints.wiki, "SYSTEM_DIR", tmp_path / "system")
+    monkeypatch.setattr(
+        "llm_wiki_mcp.failure_supervisor.queue_operational_failure",
+        lambda **kwargs: queued.append(kwargs) or tmp_path / "packet.json",
+    )
+
+    result = read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        now=NOW,
+    )
+
+    assert result["resumed_quarantined"] == 1
+    assert result["rejected"] == 1
+    assert result["quarantined"] == 0
+    assert queued == []
+    entry = next(iter(json.loads(ledger_file.read_text(encoding="utf-8"))["entries"].values()))
+    assert entry["status"] == "rejected"
+    assert entry["attempts"] == 0
+    assert entry["last_error"] == "missing-meta target page no longer exists: 'missing'"
+
+
 def test_missing_query_hint_target_retries_instead_of_requiring_human(
     tmp_path: Path,
     monkeypatch,
