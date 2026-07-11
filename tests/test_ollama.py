@@ -62,6 +62,17 @@ class _PostClient:
         return _PostResponse()
 
 
+def test_triage_prompt_requires_filename_for_updates() -> None:
+    assert 'MUST use "filename"' in ollama.TRIAGE_SYSTEM_PROMPT
+    assert 'Never emit a "page_id" field' in ollama.TRIAGE_SYSTEM_PROMPT
+
+
+def test_generation_prompts_forbid_invented_dates() -> None:
+    assert "exact current date" in ollama.GENERATE_SYSTEM_PROMPT
+    assert "Never invent or infer dates" in ollama.GENERATE_SYSTEM_PROMPT
+    assert "Never invent or infer dates" in ollama.UPDATE_SYSTEM_PROMPT
+
+
 def test_generate_streams_progress_and_returns_text(monkeypatch) -> None:
     client = _StreamClient()
     monkeypatch.setattr(ollama, "_client", lambda: client)

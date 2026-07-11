@@ -872,6 +872,7 @@ def _generate_one(
     filename = op.get("filename", "unknown.md")
     summary = op.get("summary", "")
     title = op.get("title", "")
+    current_date = date.today().isoformat()
 
     feedback_block = ""
     if frontier_feedback:
@@ -899,6 +900,11 @@ Task: {op_type.upper()} page "{filename}"
 Title: {title}
 Summary: {summary}
 {feedback_block}
+
+Current date: {current_date}
+For CREATE, use this exact date for the `updated` frontmatter field.
+Do not add or infer any other date unless it is explicit in the raw evidence.
+For UPDATE, do not create a dated heading unless that date is explicit in the raw evidence.
 
 Generate the page content based on the raw data and context above."""
 
@@ -1512,6 +1518,13 @@ def _prepare_operations(
                 page_id,
                 _frontmatter_parse,
                 _frontmatter_patch,
+            )
+            # The model is not a clock. Even when the prompt supplies today's
+            # date, enforce it deterministically so a plausible-looking guess
+            # can never become page metadata.
+            body = _frontmatter_patch(
+                body,
+                {"updated": date.today().isoformat()},
             )
             created_meta, _created_body = _frontmatter_parse(body)
             created_tags = created_meta.get("tags")

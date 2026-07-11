@@ -240,7 +240,8 @@ Rules:
 - 1 entity = 1 page
 - Output valid JSON array only (no markdown fences, no explanation)
 - For new pages: choose folder and filename in kebab-case (English)
-- For updates: reference existing page ID
+- For updates: reference the existing page ID in a field named "filename"
+- Every update object MUST use "filename". Never emit a "page_id" field
 - If the target page is not listed in the catalog, use create, not update
 - Skip ephemeral conversation, greetings, and filler
 - Include brief summary of what knowledge each page should contain
@@ -275,6 +276,8 @@ You are a knowledge wiki structuring engine. Generate content for a SINGLE NEW w
 
 Rules:
 - Frontmatter MUST include: title, updated, AND tags
+- Use the exact current date supplied in the user prompt for `updated`
+- Never invent or infer dates that are absent from the raw evidence
 - Cross-references: use [[wiki-link]] notation (page ID only, no folder path)
 - Write content in Japanese
 - Focus on facts, decisions, and technical knowledge
@@ -326,6 +329,7 @@ You are a knowledge wiki structuring engine. Append content to an EXISTING wiki 
 
 Rules:
 - DO NOT output frontmatter (no `---`, no title:, no updated: lines). The existing page already has frontmatter; your output is appended to its body.
+- Never invent or infer dates that are absent from the raw evidence. Do not add a dated heading unless that date appears explicitly in the raw evidence.
 - DO NOT repeat content that already exists on the page (it is provided in context).
 - Output ONLY the new section(s) to add — Japanese prose, headings, lists, code, etc.
 - Cross-references: use [[wiki-link]] notation (page ID only, no folder path)

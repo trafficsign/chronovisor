@@ -9,12 +9,12 @@ from llm_wiki_mcp.recall_improvement import PolicyProposal
 from llm_wiki_mcp.recall_runtime import RecallPolicy
 
 
-def test_default_improvement_models_use_mlx_moe_pair(monkeypatch) -> None:
+def test_default_improvement_models_use_ornith_and_gemma_pair(monkeypatch) -> None:
     monkeypatch.delenv("LLM_WIKI_RECALL_IMPROVEMENT_MODELS", raising=False)
     monkeypatch.setattr(recall_improvement, "load_toml_file", lambda: {})
 
     assert recall_improvement.configured_models() == (
-        "qwen3.6:35b-a3b-mxfp8",
+        "maxwell1500/ornith-35b:Q5_K_M",
         "gemma4:26b-mxfp8",
     )
 

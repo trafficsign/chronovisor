@@ -287,6 +287,52 @@ class TestExtractPageBody:
         assert out is None
 
 
+def test_generate_one_supplies_current_date_and_forbids_date_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import ingest
+
+    captured: dict[str, str] = {}
+    today = date.today().isoformat()
+
+    monkeypatch.setattr(
+        ingest,
+        "_build_focused_context",
+        lambda _op, _raw: "Focused context",
+    )
+
+    def fake_generate(prompt: str, *, system: str, progress_callback=None) -> str:
+        captured["prompt"] = prompt
+        captured["system"] = system
+        return (
+            "=== NEW PAGE: memory/date-contract.md ===\n"
+            "---\n"
+            "title: Date contract\n"
+            f"updated: {today}\n"
+            "tags: [d/tools-config, t/reference, s/2026]\n"
+            "---\n\n"
+            "本文\n"
+            "=== END PAGE ==="
+        )
+
+    monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+
+    result = ingest._generate_one(
+        {
+            "type": "create",
+            "filename": "memory/date-contract.md",
+            "title": "Date contract",
+            "summary": "date handling",
+        },
+        "No date appears in this raw evidence.",
+    )
+
+    assert result is not None
+    assert f"Current date: {today}" in captured["prompt"]
+    assert "Do not add or infer any other date" in captured["prompt"]
+    assert "exact current date" in captured["system"]
+
+
 # ---------------------------------------------------------------------------
 # _reconcile_links — code-fence safety + resolve/rewrite/unwrap
 # ---------------------------------------------------------------------------
@@ -456,6 +502,7 @@ class TestApplyOperations:
         assert updated == []
         body = (isolated_wiki / "pages" / "misc" / "new-page.md").read_text()
         assert "title: T" in body and body.endswith("\n")
+        assert f"updated: {date.today().isoformat()}" in body
 
     def test_create_collision_converts_to_update(self, isolated_wiki: Path) -> None:
         path = _seed_page(

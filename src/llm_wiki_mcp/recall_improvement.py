@@ -57,7 +57,7 @@ from llm_wiki_mcp.runtime_status import safe_append_event, safe_append_metric
 
 
 DEFAULT_IMPROVEMENT_MODELS = (
-    "qwen3.6:35b-a3b-mxfp8",
+    "maxwell1500/ornith-35b:Q5_K_M",
     "gemma4:26b-mxfp8",
 )
 

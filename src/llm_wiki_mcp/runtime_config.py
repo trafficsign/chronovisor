@@ -24,7 +24,7 @@ LEGACY_RECALL_CONFIG_FILE = WIKI_ROOT / "recall.toml"
 FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
-DEFAULT_INGEST_MODEL = "qwen3.6:35b-a3b-mxfp8"
+DEFAULT_INGEST_MODEL = "maxwell1500/ornith-35b:Q5_K_M"
 DEFAULT_RUNTIME_SOURCE = "git+ssh://git@github.com/trafficsign/llm-wiki-mcp"
 RUNTIME_PACKAGE = "llm-wiki-mcp"
 
