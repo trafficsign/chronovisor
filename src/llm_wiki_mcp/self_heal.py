@@ -5,6 +5,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,6 +59,15 @@ FRONTIER_ONLY_STATUSES = {
 
 MAC_NOTIFICATION_TITLE = "LLM Wiki 自己修復"
 MAC_NOTIFICATION_COOLDOWN_SECONDS = 3600
+READ_BACK_TRANSIENT_REASONS = {"search-error", "read-back-unavailable"}
+READ_BACK_TRANSIENT_PATTERN = re.compile(
+    r"\b(?:"
+    r"temporary|temporarily|timeout|timed out|unavailable|overloaded|try again|"
+    r"connection reset|connection refused|connection aborted|network|"
+    r"rate limit(?:ed)?|too many requests|502|503|504"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _repo_root() -> Path:
@@ -131,6 +141,120 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def _canonical_read_back_reason(value: object) -> str:
+    reason = str(value or "unknown").strip().casefold().replace("_", "-")
+    return re.sub(r"\s+", "-", reason) or "unknown"
+
+
+def _read_back_failure_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    preview = packet.get("raw_preview")
+    if not isinstance(preview, str) or not preview.strip():
+        return {}
+    try:
+        evidence = json.loads(preview)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(evidence, dict):
+        return {}
+    failure = evidence.get("failure")
+    if isinstance(failure, dict):
+        return failure
+    ledger_entry = evidence.get("ledger_entry")
+    if isinstance(ledger_entry, dict) and isinstance(ledger_entry.get("failure"), dict):
+        return ledger_entry["failure"]
+    return {}
+
+
+def _is_transient_read_back_packet(packet: dict[str, Any]) -> bool:
+    if packet.get("failure_class") != "read_back.repeated_miss":
+        return False
+    failure = _read_back_failure_from_packet(packet)
+    reason = _canonical_read_back_reason(failure.get("reason"))
+    if reason and reason != "unknown" and reason not in READ_BACK_TRANSIENT_REASONS:
+        return False
+    text = " ".join(
+        str(value or "")
+        for value in (
+            failure.get("error"),
+            failure.get("message"),
+            failure.get("detail"),
+            packet.get("error"),
+        )
+    )
+    return bool(READ_BACK_TRANSIENT_PATTERN.search(text))
+
+
+def _retire_transient_read_back_packet(
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    summary = (
+        "transient read-back search/model outage is handled by the read-back "
+        "repair retry quarantine; no code or frontier repair is applicable"
+    )
+    result = {
+        "packet": str(packet_path),
+        "failure_id": packet.get("failure_id"),
+        "status": "dry_run" if dry_run else "frontier_rejected",
+        "reason": "transient_read_back_operational_failure",
+        "summary": summary,
+    }
+    if dry_run:
+        result["projected_status"] = "frontier_rejected"
+        return result
+
+    frontier_result = {
+        "decision": "rejected",
+        "summary": summary,
+        "human_required": False,
+        "frontier_required": False,
+    }
+    action = {
+        "action": "retire_transient_read_back_packet",
+        "reason": "transient_read_back_operational_failure",
+        "decision": packet.get("local_decision"),
+        "frontier": frontier_result,
+    }
+    action_path = _save_action(packet_path, action, applied=False)
+    _update_packet(
+        packet_path,
+        packet,
+        status="frontier_rejected",
+        frontier_result=frontier_result,
+        frontier_status="not_required",
+        rejected_action_path=str(action_path),
+        transient_read_back_retired_at=datetime.now().isoformat(timespec="seconds"),
+        next_attempt_at=None,
+        frontier_error=None,
+    )
+    _append_registry(
+        {
+            "timestamp": datetime.now().isoformat(),
+            "failure_id": packet.get("failure_id"),
+            "raw_file": packet.get("raw_file"),
+            "failure_class": packet.get("failure_class"),
+            "fingerprint": packet.get("fingerprint"),
+            "resolution": "transient_read_back_rejected",
+            "decision": packet.get("local_decision"),
+            "frontier": frontier_result,
+            "action": action,
+        }
+    )
+    runtime_status.safe_append_event(
+        "warn",
+        f"self-heal | retired transient read-back packet for {packet.get('raw_file')}",
+        source="self-heal",
+        packet=str(packet_path),
+        frontier_status="frontier_rejected",
+        outcome_kind="transient_read_back_retired",
+    )
+    result["frontier_result"] = frontier_result
+    result["rejected_action_path"] = str(action_path)
+    return result
 
 
 @contextmanager
@@ -680,6 +804,12 @@ def _handle_packet_unlocked(
     frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
     packet = _read_json(packet_path)
+    if _is_transient_read_back_packet(packet):
+        return _retire_transient_read_back_packet(
+            packet_path,
+            packet,
+            dry_run=dry_run,
+        )
     resume_kind = _resume_terminal_packet(
         packet_path,
         packet,

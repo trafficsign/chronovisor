@@ -619,6 +619,13 @@ def run_read_back_repair(
             outcome = "human_required"
             entry["status"] = outcome
             entry["human_required_at"] = now_utc.isoformat(timespec="seconds")
+        elif reason == "empty-query":
+            outcome = "rejected"
+            entry["status"] = outcome
+            entry["last_error"] = "empty-query read-back failure has no repairable query"
+            entry["rejected_at"] = now_utc.isoformat(timespec="seconds")
+            entry["resolved_occurrences"] = int(entry.get("occurrences") or 0)
+            entry["resolved_last_seen"] = str(entry.get("last_seen") or "")
         elif reason == "missing-meta":
             page_id = str(failure.get("page_id") or "").strip()
             if not page_id:

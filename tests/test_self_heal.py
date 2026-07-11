@@ -896,6 +896,118 @@ def test_frontier_exception_becomes_retry_and_releases_running_lease(
     assert packet["next_attempt_at"] is not None
 
 
+def test_transient_read_back_packet_is_retired_without_frontier(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(
+        json.dumps(
+            {
+                "failure_id": "read-back",
+                "raw_file": "read-back-target",
+                "failure_class": "read_back.repeated_miss",
+                "fingerprint": "read_back.repeated_miss:read-back-key",
+                "attempts": 2,
+                "error": (
+                    "ingest read-back repair exhausted its bounded attempts: "
+                    "model temporarily unavailable"
+                ),
+                "status": "frontier_running",
+                "frontier_attempts": 1,
+                "self_heal_attempts": 1,
+                "lease_expires_at": "2000-01-01T00:00:00",
+                "local_decision": {
+                    "status": "escalate",
+                    "action": "escalate_to_frontier",
+                    "confidence": 1.0,
+                    "reason": "bounded operational repair attempts were exhausted",
+                    "source": "deterministic",
+                },
+                "raw_preview": json.dumps(
+                    {
+                        "failure": {
+                            "page_id": "target",
+                            "reason": "search-error",
+                            "error": "model temporarily unavailable",
+                        }
+                    }
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "propose_repair",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("transient read-back packets must not run local repair")
+        ),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("transient read-back packets must not call frontier")
+        ),
+    )
+
+    result = self_heal.handle_packet(packet_path, use_qwen=False)
+
+    updated = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert result["status"] == "frontier_rejected"
+    assert result["reason"] == "transient_read_back_operational_failure"
+    assert updated["status"] == "frontier_rejected"
+    assert updated["frontier_status"] == "not_required"
+    assert updated["frontier_attempts"] == 1
+    assert updated["lease_owner"] is None
+    assert updated["lease_expires_at"] is None
+    assert Path(result["rejected_action_path"]).exists()
+
+
+def test_transient_read_back_dry_run_is_byte_for_byte_read_only(
+    isolated_wiki: Path,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(
+        json.dumps(
+            {
+                "failure_id": "read-back",
+                "raw_file": "read-back-target",
+                "failure_class": "read_back.repeated_miss",
+                "status": "pending_frontier",
+                "error": "model temporarily unavailable",
+                "raw_preview": json.dumps(
+                    {
+                        "ledger_entry": {
+                            "failure": {
+                                "page_id": "target",
+                                "reason": "search-error",
+                                "error": "model temporarily unavailable",
+                            }
+                        }
+                    }
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = packet_path.read_bytes()
+
+    result = self_heal.handle_packet(packet_path, dry_run=True)
+
+    assert result["status"] == "dry_run"
+    assert result["projected_status"] == "frontier_rejected"
+    assert packet_path.read_bytes() == before
+    assert not (isolated_wiki / "runtime" / "failures" / "rejected-actions").exists()
+
+
 def test_pending_packets_recovers_only_expired_running_leases(
     isolated_wiki: Path,
 ) -> None:
