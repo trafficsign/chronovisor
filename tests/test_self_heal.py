@@ -968,6 +968,157 @@ def test_transient_read_back_packet_is_retired_without_frontier(
     assert Path(result["rejected_action_path"]).exists()
 
 
+def test_exhausted_read_back_query_hint_packet_is_retired_without_frontier(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    exhausted = "read-back miss persisted after exact query hint was applied"
+    packet_path.write_text(
+        json.dumps(
+            {
+                "failure_id": "read-back",
+                "raw_file": "read-back-target",
+                "failure_class": "read_back.repeated_miss",
+                "fingerprint": "read_back.repeated_miss:read-back-key",
+                "attempts": 3,
+                "error": f"ingest read-back repair exhausted its bounded attempts: {exhausted}",
+                "status": "frontier_running",
+                "frontier_attempts": 1,
+                "self_heal_attempts": 1,
+                "lease_expires_at": "2000-01-01T00:00:00",
+                "local_decision": {
+                    "status": "escalate",
+                    "action": "escalate_to_frontier",
+                    "confidence": 1.0,
+                    "reason": "bounded operational repair attempts were exhausted",
+                    "source": "deterministic",
+                },
+                "raw_preview": json.dumps(
+                    {
+                        "failure": {
+                            "page_id": "target",
+                            "reason": "not-in-top-results",
+                            "query": "How does Setouchi interact with Azure OpenAI?",
+                        },
+                        "ledger_entry": {
+                            "last_error": exhausted,
+                            "frontier_review": {"decision": "approved"},
+                        },
+                    }
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "propose_repair",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("exhausted read-back hints must not run local repair")
+        ),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("exhausted read-back hints must not call frontier")
+        ),
+    )
+
+    result = self_heal.handle_packet(packet_path, use_qwen=False)
+
+    updated = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert result["status"] == "frontier_rejected"
+    assert result["reason"] == "exhausted_read_back_query_hint"
+    assert updated["status"] == "frontier_rejected"
+    assert updated["frontier_status"] == "not_required"
+    assert updated["frontier_attempts"] == 1
+    assert updated["lease_owner"] is None
+    assert updated["lease_expires_at"] is None
+    assert Path(result["rejected_action_path"]).exists()
+
+
+def test_unverifiable_read_back_query_hint_packet_is_retired_without_frontier(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    error = (
+        "The available workspace evidence does not include the target page "
+        "`codex-session-memory-save-protocol` or matching content for the "
+        "proposed `Self + AI` query"
+    )
+    packet_path.write_text(
+        json.dumps(
+            {
+                "failure_id": "read-back",
+                "raw_file": "read-back-codex-session-memory-save-protocol",
+                "failure_class": "read_back.repeated_miss",
+                "fingerprint": "read_back.repeated_miss:read-back-key",
+                "attempts": 3,
+                "error": f"ingest read-back repair exhausted its bounded attempts: {error}",
+                "status": "frontier_running",
+                "frontier_attempts": 1,
+                "self_heal_attempts": 1,
+                "lease_expires_at": "2000-01-01T00:00:00",
+                "local_decision": {
+                    "status": "escalate",
+                    "action": "escalate_to_frontier",
+                    "confidence": 1.0,
+                    "reason": "bounded operational repair attempts were exhausted",
+                    "source": "deterministic",
+                },
+                "raw_preview": json.dumps(
+                    {
+                        "failure": {
+                            "page_id": "codex-session-memory-save-protocol",
+                            "reason": "not-in-top-results",
+                            "query": "What is the Self + AI integration model?",
+                        },
+                        "ledger_entry": {
+                            "last_error": error,
+                        },
+                    }
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "propose_repair",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unverifiable read-back hints must not run local repair")
+        ),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unverifiable read-back hints must not call frontier")
+        ),
+    )
+
+    result = self_heal.handle_packet(packet_path, use_qwen=False)
+
+    updated = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert result["status"] == "frontier_rejected"
+    assert result["reason"] == "unverifiable_read_back_query_hint"
+    assert updated["status"] == "frontier_rejected"
+    assert updated["frontier_status"] == "not_required"
+    assert updated["frontier_attempts"] == 1
+    assert updated["lease_owner"] is None
+    assert updated["lease_expires_at"] is None
+    assert Path(result["rejected_action_path"]).exists()
+
+
 def test_transient_read_back_dry_run_is_byte_for_byte_read_only(
     isolated_wiki: Path,
 ) -> None:

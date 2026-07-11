@@ -68,6 +68,17 @@ READ_BACK_TRANSIENT_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+READ_BACK_EXHAUSTED_QUERY_HINT_TEXT = (
+    "read-back miss persisted after exact query hint was applied"
+)
+READ_BACK_UNVERIFIABLE_QUERY_HINT_PATTERN = re.compile(
+    r"(?:"
+    r"available workspace evidence does not include the target page|"
+    r"query hint target page does not exist|"
+    r"target page no longer exists"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _repo_root() -> Path:
@@ -186,21 +197,79 @@ def _is_transient_read_back_packet(packet: dict[str, Any]) -> bool:
     return bool(READ_BACK_TRANSIENT_PATTERN.search(text))
 
 
-def _retire_transient_read_back_packet(
+def _is_exhausted_query_hint_read_back_packet(packet: dict[str, Any]) -> bool:
+    if packet.get("failure_class") != "read_back.repeated_miss":
+        return False
+    failure = _read_back_failure_from_packet(packet)
+    if _canonical_read_back_reason(failure.get("reason")) != "not-in-top-results":
+        return False
+    preview = packet.get("raw_preview")
+    evidence: dict[str, Any] = {}
+    if isinstance(preview, str) and preview.strip():
+        try:
+            parsed = json.loads(preview)
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            evidence = parsed
+    ledger_entry = evidence.get("ledger_entry") if isinstance(evidence, dict) else {}
+    text = " ".join(
+        str(value or "")
+        for value in (
+            packet.get("error"),
+            failure.get("error"),
+            failure.get("message"),
+            failure.get("detail"),
+            ledger_entry.get("last_error") if isinstance(ledger_entry, dict) else "",
+        )
+    )
+    return READ_BACK_EXHAUSTED_QUERY_HINT_TEXT in text
+
+
+def _is_unverifiable_query_hint_read_back_packet(packet: dict[str, Any]) -> bool:
+    if packet.get("failure_class") != "read_back.repeated_miss":
+        return False
+    failure = _read_back_failure_from_packet(packet)
+    if _canonical_read_back_reason(failure.get("reason")) != "not-in-top-results":
+        return False
+    preview = packet.get("raw_preview")
+    evidence: dict[str, Any] = {}
+    if isinstance(preview, str) and preview.strip():
+        try:
+            parsed = json.loads(preview)
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            evidence = parsed
+    ledger_entry = evidence.get("ledger_entry") if isinstance(evidence, dict) else {}
+    text = " ".join(
+        str(value or "")
+        for value in (
+            packet.get("error"),
+            failure.get("error"),
+            failure.get("message"),
+            failure.get("detail"),
+            ledger_entry.get("last_error") if isinstance(ledger_entry, dict) else "",
+        )
+    )
+    return bool(READ_BACK_UNVERIFIABLE_QUERY_HINT_PATTERN.search(text))
+
+
+def _retire_non_actionable_read_back_packet(
     packet_path: Path,
     packet: dict[str, Any],
     *,
+    reason: str,
+    summary: str,
+    resolution: str,
+    outcome_kind: str,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    summary = (
-        "transient read-back search/model outage is handled by the read-back "
-        "repair retry quarantine; no code or frontier repair is applicable"
-    )
     result = {
         "packet": str(packet_path),
         "failure_id": packet.get("failure_id"),
         "status": "dry_run" if dry_run else "frontier_rejected",
-        "reason": "transient_read_back_operational_failure",
+        "reason": reason,
         "summary": summary,
     }
     if dry_run:
@@ -214,8 +283,8 @@ def _retire_transient_read_back_packet(
         "frontier_required": False,
     }
     action = {
-        "action": "retire_transient_read_back_packet",
-        "reason": "transient_read_back_operational_failure",
+        "action": "retire_non_actionable_read_back_packet",
+        "reason": reason,
         "decision": packet.get("local_decision"),
         "frontier": frontier_result,
     }
@@ -238,7 +307,7 @@ def _retire_transient_read_back_packet(
             "raw_file": packet.get("raw_file"),
             "failure_class": packet.get("failure_class"),
             "fingerprint": packet.get("fingerprint"),
-            "resolution": "transient_read_back_rejected",
+            "resolution": resolution,
             "decision": packet.get("local_decision"),
             "frontier": frontier_result,
             "action": action,
@@ -246,15 +315,76 @@ def _retire_transient_read_back_packet(
     )
     runtime_status.safe_append_event(
         "warn",
-        f"self-heal | retired transient read-back packet for {packet.get('raw_file')}",
+        f"self-heal | retired non-actionable read-back packet for {packet.get('raw_file')}",
         source="self-heal",
         packet=str(packet_path),
         frontier_status="frontier_rejected",
-        outcome_kind="transient_read_back_retired",
+        outcome_kind=outcome_kind,
     )
     result["frontier_result"] = frontier_result
     result["rejected_action_path"] = str(action_path)
     return result
+
+
+def _retire_transient_read_back_packet(
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    return _retire_non_actionable_read_back_packet(
+        packet_path,
+        packet,
+        reason="transient_read_back_operational_failure",
+        summary=(
+            "transient read-back search/model outage is handled by the read-back "
+            "repair retry quarantine; no code or frontier repair is applicable"
+        ),
+        resolution="transient_read_back_rejected",
+        outcome_kind="transient_read_back_retired",
+        dry_run=dry_run,
+    )
+
+
+def _retire_exhausted_query_hint_read_back_packet(
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    return _retire_non_actionable_read_back_packet(
+        packet_path,
+        packet,
+        reason="exhausted_read_back_query_hint",
+        summary=(
+            "read-back repair already applied the exact frontier-approved query "
+            "hint and the miss persisted; self-heal has no raw/code mutation to apply"
+        ),
+        resolution="exhausted_read_back_query_hint_rejected",
+        outcome_kind="exhausted_read_back_query_hint_retired",
+        dry_run=dry_run,
+    )
+
+
+def _retire_unverifiable_query_hint_read_back_packet(
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    return _retire_non_actionable_read_back_packet(
+        packet_path,
+        packet,
+        reason="unverifiable_read_back_query_hint",
+        summary=(
+            "read-back repair could not verify the missing target page or "
+            "page-specific query evidence; self-heal has no safe code/raw "
+            "mutation to apply"
+        ),
+        resolution="unverifiable_read_back_query_hint_rejected",
+        outcome_kind="unverifiable_read_back_query_hint_retired",
+        dry_run=dry_run,
+    )
 
 
 @contextmanager
@@ -806,6 +936,18 @@ def _handle_packet_unlocked(
     packet = _read_json(packet_path)
     if _is_transient_read_back_packet(packet):
         return _retire_transient_read_back_packet(
+            packet_path,
+            packet,
+            dry_run=dry_run,
+        )
+    if _is_exhausted_query_hint_read_back_packet(packet):
+        return _retire_exhausted_query_hint_read_back_packet(
+            packet_path,
+            packet,
+            dry_run=dry_run,
+        )
+    if _is_unverifiable_query_hint_read_back_packet(packet):
+        return _retire_unverifiable_query_hint_read_back_packet(
             packet_path,
             packet,
             dry_run=dry_run,

@@ -72,6 +72,17 @@ TRANSIENT_OPERATIONAL_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+EXHAUSTED_QUERY_HINT_ERROR = (
+    "read-back miss persisted after exact query hint was applied"
+)
+UNVERIFIABLE_QUERY_HINT_PATTERN = re.compile(
+    r"(?:"
+    r"available workspace evidence does not include the target page|"
+    r"query hint target page does not exist|"
+    r"target page no longer exists"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _canonical_reason(value: object) -> str:
@@ -275,8 +286,19 @@ def _transient_operational_failure(failure: dict[str, Any]) -> bool:
     return bool(TRANSIENT_OPERATIONAL_PATTERN.search(text))
 
 
-def _should_queue_operational_self_heal(failure: dict[str, Any]) -> bool:
-    return not _transient_operational_failure(failure)
+def _should_queue_operational_self_heal(
+    failure: dict[str, Any],
+    entry: dict[str, Any],
+) -> bool:
+    if _transient_operational_failure(failure):
+        return False
+    if _canonical_reason(failure.get("reason")) == "not-in-top-results":
+        last_error = str(entry.get("last_error") or "")
+        if EXHAUSTED_QUERY_HINT_ERROR in last_error:
+            return False
+        if UNVERIFIABLE_QUERY_HINT_PATTERN.search(last_error):
+            return False
+    return True
 
 
 def _due(entry: dict[str, Any], *, now: datetime) -> bool:
@@ -835,7 +857,7 @@ def run_read_back_repair(
             outcome == "quarantined"
             and not dry_run
             and not entry.get("self_heal_packet_path")
-            and _should_queue_operational_self_heal(failure)
+            and _should_queue_operational_self_heal(failure, entry)
         ):
             from llm_wiki_mcp.failure_supervisor import queue_operational_failure
 
@@ -853,9 +875,25 @@ def run_read_back_repair(
             entry["self_heal_packet_path"] = str(packet_path)
             entry["self_heal_queued_at"] = now_utc.isoformat(timespec="seconds")
             action["self_heal_packet_path"] = str(packet_path)
-        elif outcome == "quarantined" and _transient_operational_failure(failure):
-            entry["self_heal_skipped_reason"] = "transient_operational_failure"
-            action["self_heal_skipped_reason"] = "transient_operational_failure"
+        elif outcome == "quarantined":
+            skipped_reason = None
+            if _transient_operational_failure(failure):
+                skipped_reason = "transient_operational_failure"
+            elif (
+                reason == "not-in-top-results"
+                and EXHAUSTED_QUERY_HINT_ERROR in str(entry.get("last_error") or "")
+            ):
+                skipped_reason = "exhausted_query_hint"
+            elif (
+                reason == "not-in-top-results"
+                and UNVERIFIABLE_QUERY_HINT_PATTERN.search(
+                    str(entry.get("last_error") or "")
+                )
+            ):
+                skipped_reason = "unverifiable_query_hint"
+            if skipped_reason is not None:
+                entry["self_heal_skipped_reason"] = skipped_reason
+                action["self_heal_skipped_reason"] = skipped_reason
 
         counts[outcome] += 1
         dry_run_outcomes = {

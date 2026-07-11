@@ -720,6 +720,129 @@ def test_applied_read_back_failure_reopens_when_observed_again(
     assert entry["reopen_count"] == 1
 
 
+def test_exhausted_query_hint_quarantines_without_self_heal_packet(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    failure_file = tmp_path / "failures.jsonl"
+    ledger_file = tmp_path / "ledger.json"
+    hints_file = tmp_path / "query-hints.json"
+    failure = {
+        "page_id": "target",
+        "reason": "not-in-top-results",
+        "query": "specific target query",
+    }
+    _write_failures(failure_file, [failure])
+    _allow_pages(monkeypatch, tmp_path)
+    queued: list[dict] = []
+    monkeypatch.setattr(
+        "llm_wiki_mcp.failure_supervisor.queue_operational_failure",
+        lambda **kwargs: queued.append(kwargs) or tmp_path / "packet.json",
+    )
+
+    first = read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        hints_file=hints_file,
+        now=NOW,
+        max_attempts=2,
+        retry_base_seconds=60,
+        reviewer=_approve,
+    )
+    assert first["applied"] == 1
+    with failure_file.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-10T13:00:00+00:00",
+                    "checked": 1,
+                    "passed": 0,
+                    "failed": [failure],
+                }
+            )
+            + "\n"
+        )
+
+    retried = read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        hints_file=hints_file,
+        now=NOW + timedelta(hours=2),
+        max_attempts=2,
+        retry_base_seconds=60,
+        reviewer=lambda _proposal: (_ for _ in ()).throw(
+            AssertionError("durable frontier review must be reused")
+        ),
+    )
+    exhausted = read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        hints_file=hints_file,
+        now=NOW + timedelta(hours=2, seconds=61),
+        max_attempts=2,
+        retry_base_seconds=60,
+        reviewer=lambda _proposal: (_ for _ in ()).throw(
+            AssertionError("durable frontier review must be reused")
+        ),
+    )
+
+    assert retried["retry_scheduled"] == 1
+    assert exhausted["quarantined"] == 1
+    assert queued == []
+    entry = next(iter(json.loads(ledger_file.read_text(encoding="utf-8"))["entries"].values()))
+    assert entry["status"] == "quarantined"
+    assert entry["attempts"] == 2
+    assert entry["last_error"] == "read-back miss persisted after exact query hint was applied"
+    assert entry["self_heal_skipped_reason"] == "exhausted_query_hint"
+    assert "self_heal_packet_path" not in entry
+
+
+def test_unverifiable_query_hint_quarantines_without_self_heal_packet(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    failure_file = tmp_path / "failures.jsonl"
+    ledger_file = tmp_path / "ledger.json"
+    hints_file = tmp_path / "query-hints.json"
+    failure = {
+        "page_id": "target",
+        "reason": "not-in-top-results",
+        "query": "What is the Self + AI integration model?",
+    }
+    error = (
+        "The available workspace evidence does not include the target page "
+        "`target` or matching content for the proposed `Self + AI` query"
+    )
+    _write_failures(failure_file, [failure])
+    _allow_pages(monkeypatch, tmp_path)
+    queued: list[dict] = []
+    monkeypatch.setattr(
+        "llm_wiki_mcp.failure_supervisor.queue_operational_failure",
+        lambda **kwargs: queued.append(kwargs) or tmp_path / "packet.json",
+    )
+
+    result = read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        hints_file=hints_file,
+        now=NOW,
+        max_attempts=1,
+        reviewer=lambda _proposal: {
+            "decision": "needs_retry",
+            "confidence": 0.0,
+            "summary": error,
+        },
+    )
+
+    assert result["quarantined"] == 1
+    assert queued == []
+    entry = next(iter(json.loads(ledger_file.read_text(encoding="utf-8"))["entries"].values()))
+    assert entry["status"] == "quarantined"
+    assert entry["last_error"] == error
+    assert entry["self_heal_skipped_reason"] == "unverifiable_query_hint"
+    assert "self_heal_packet_path" not in entry
+
+
 def test_mutation_budget_defers_without_persisting_or_burning_attempt(
     tmp_path: Path,
 ) -> None:
