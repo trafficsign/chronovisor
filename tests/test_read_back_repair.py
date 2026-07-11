@@ -372,6 +372,37 @@ def test_quarantine_queues_one_operational_self_heal_packet(
     assert entry["self_heal_packet_path"] == str(packet_path)
 
 
+def test_temporary_search_timeout_quarantines_without_frontier_self_heal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    failure_file = tmp_path / "failures.jsonl"
+    ledger_file = tmp_path / "ledger.json"
+    _write_failures(
+        failure_file,
+        [{"page_id": "search", "reason": "search-error", "error": "temporary timeout"}],
+    )
+    queued: list[dict] = []
+    monkeypatch.setattr(
+        "llm_wiki_mcp.failure_supervisor.queue_operational_failure",
+        lambda **kwargs: queued.append(kwargs) or tmp_path / "packet.json",
+    )
+
+    result = read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        now=NOW,
+        max_attempts=1,
+    )
+
+    assert result["quarantined"] == 1
+    assert queued == []
+    entry = next(iter(json.loads(ledger_file.read_text(encoding="utf-8"))["entries"].values()))
+    assert entry["status"] == "quarantined"
+    assert entry["last_error"] == "temporary timeout"
+    assert entry["self_heal_skipped_reason"] == "transient_operational_failure"
+    assert "self_heal_packet_path" not in entry
+
+
 def test_missing_meta_for_deleted_page_is_rejected_without_self_heal(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -64,6 +64,14 @@ SECRET_PERMISSION_PATTERN = re.compile(
     r".{0,60}\b(?:keychain|secret store|secret service|credential store|credential helper)\b)",
     re.IGNORECASE,
 )
+TRANSIENT_OPERATIONAL_PATTERN = re.compile(
+    r"\b(?:"
+    r"temporary|temporarily|timeout|timed out|unavailable|overloaded|try again|"
+    r"connection reset|connection refused|connection aborted|network|"
+    r"rate limit(?:ed)?|too many requests|502|503|504"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _canonical_reason(value: object) -> str:
@@ -254,6 +262,21 @@ def _human_required(failure: dict[str, Any]) -> bool:
         or BILLING_REQUIRED_PATTERN.search(text)
         or SECRET_PERMISSION_PATTERN.search(text)
     )
+
+
+def _transient_operational_failure(failure: dict[str, Any]) -> bool:
+    reason = _canonical_reason(failure.get("reason"))
+    if reason not in {"search-error", "read-back-unavailable"}:
+        return False
+    text = " ".join(
+        str(failure.get(field) or "")
+        for field in ("error", "message", "detail")
+    )
+    return bool(TRANSIENT_OPERATIONAL_PATTERN.search(text))
+
+
+def _should_queue_operational_self_heal(failure: dict[str, Any]) -> bool:
+    return not _transient_operational_failure(failure)
 
 
 def _due(entry: dict[str, Any], *, now: datetime) -> bool:
@@ -805,6 +828,7 @@ def run_read_back_repair(
             outcome == "quarantined"
             and not dry_run
             and not entry.get("self_heal_packet_path")
+            and _should_queue_operational_self_heal(failure)
         ):
             from llm_wiki_mcp.failure_supervisor import queue_operational_failure
 
@@ -822,6 +846,9 @@ def run_read_back_repair(
             entry["self_heal_packet_path"] = str(packet_path)
             entry["self_heal_queued_at"] = now_utc.isoformat(timespec="seconds")
             action["self_heal_packet_path"] = str(packet_path)
+        elif outcome == "quarantined" and _transient_operational_failure(failure):
+            entry["self_heal_skipped_reason"] = "transient_operational_failure"
+            action["self_heal_skipped_reason"] = "transient_operational_failure"
 
         counts[outcome] += 1
         dry_run_outcomes = {

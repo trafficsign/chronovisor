@@ -1756,6 +1756,73 @@ class TestRunIngestFrontierDisposition:
         assert "t/hardware" not in written
         assert "d/ai-tools" in written
 
+    def test_frontier_content_replacement_preserves_unrejected_taxonomy(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [{
+            "type": "create",
+            "filename": "ai/socialization-scenario.md",
+            "title": "Socialization scenario",
+        }]
+        monkeypatch.setattr(ingest, "_triage", lambda *_args, **_kwargs: plan)
+        monkeypatch.setattr(
+            ingest,
+            "_generate_one",
+            lambda op, *_args, **_kwargs: {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Socialization scenario\nupdated: 2026-07-11\n"
+                    "tags: [d/scenario, t/ai-socialization]\n---\n"
+                    "Grounded fact plus unsupported claim.\n"
+                ),
+            },
+        )
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        reviews: list[dict] = []
+
+        def reviewer(proposal: dict) -> dict:
+            reviews.append(proposal)
+            proposed = proposal["prepared_operations"][0]["proposed_text"]
+            if "unsupported claim" in proposed:
+                return {
+                    "decision": "retry",
+                    "summary": "Remove only the unsupported claim.",
+                    "failed_operations_disposition": "none",
+                    "replacement_operations": [{
+                        "filename": "ai/socialization-scenario.md",
+                        "content": (
+                            "---\ntitle: Socialization scenario\nupdated: 2026-07-11\n"
+                            "tags: [d/event, t/ai-socialization]\n---\n"
+                            "Grounded fact.\n"
+                        ),
+                    }],
+                }
+            assert "d/scenario" in proposed
+            assert "d/event" not in proposed
+            return {
+                "decision": "apply_available",
+                "summary": "The bounded repair is grounded.",
+                "failed_operations_disposition": "none",
+            }
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "Grounded socialization scenario.",
+            job.job_id,
+            frontier_reviewer=reviewer,
+        )
+
+        assert jobs.job_store.get(job.job_id).status == jobs.JobStatus.COMPLETED
+        assert len(reviews) == 2
+        written = (
+            isolated_wiki / "pages" / "ai" / "socialization-scenario.md"
+        ).read_text(encoding="utf-8")
+        assert "d/scenario" in written
+        assert "d/event" not in written
+
     def test_frontier_rejection_regenerates_with_feedback_in_same_job(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2588,6 +2655,34 @@ class TestPerRawOrchestrator:
             "ai/opus-4.7-evaluation-and-industry-geopolitics"
         ]
         assert orchestrator.get_pending_raw_files() == []
+
+    def test_frontier_nonconvergence_immediately_queues_self_heal(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        raw_path = isolated_wiki / "raw" / "frontier-loop.md"
+        raw_path.write_text("grounded source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(self_heal, "start_background", started.append)
+
+        result = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=(
+                "frontier ingest review did not converge after 3 attempts: "
+                "taxonomy oscillated from scenario to event"
+            ),
+            raw_text="grounded source",
+        )
+
+        assert result.failure_class == "ingest.frontier_nonconvergent"
+        assert result.attempts == 1
+        assert result.quarantined is True
+        assert result.packet_path is not None
+        assert started == [Path(result.packet_path)]
+        packet = json.loads(Path(result.packet_path).read_text(encoding="utf-8"))
+        assert packet["fingerprint"] == "ingest.frontier_nonconvergent"
+        assert not raw_path.exists()
 
     def test_ollama_unavailable_stays_pending_without_self_heal_packet(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

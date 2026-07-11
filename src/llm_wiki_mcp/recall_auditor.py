@@ -35,7 +35,12 @@ from llm_wiki_mcp.recall_runtime import (
     recall_log_snapshot,
     stable_prompt_hash,
 )
-from llm_wiki_mcp.runtime_config import active_config_file, normalize_audit_config
+from llm_wiki_mcp.runtime_config import (
+    DEFAULT_HEAVY_KEEP_ALIVE,
+    DEFAULT_HEAVY_NUM_CTX,
+    active_config_file,
+    normalize_audit_config,
+)
 from llm_wiki_mcp.search import search as run_search
 
 
@@ -100,7 +105,8 @@ class AuditPolicy:
     model: str = "maxwell1500/ornith-35b:Q5_K_M"
     think: bool = False
     timeout_ms: int = 120_000
-    num_ctx: int = 32_768
+    num_ctx: int = DEFAULT_HEAVY_NUM_CTX
+    keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
     num_predict: int = 1024
     top_k: int = 5
     semantic: bool = False
@@ -196,6 +202,8 @@ def _apply_config(policy: AuditPolicy, data: dict[str, Any]) -> AuditPolicy:
             values["timeout_ms"] = max(1000, auditor["timeout_ms"])
         if isinstance(auditor.get("num_ctx"), int):
             values["num_ctx"] = max(2048, auditor["num_ctx"])
+        if isinstance(auditor.get("keep_alive"), str) and auditor["keep_alive"].strip():
+            values["keep_alive"] = auditor["keep_alive"].strip()
         if isinstance(auditor.get("num_predict"), int):
             values["num_predict"] = max(128, auditor["num_predict"])
         if isinstance(auditor.get("top_k"), int):
@@ -400,7 +408,7 @@ def run_auditor_judge(
         "prompt": build_auditor_prompt(turn, recall_snapshot, top_pages, policy),
         "stream": False,
         "think": policy.think,
-        "keep_alive": "5m",
+        "keep_alive": policy.keep_alive,
         "format": AUDITOR_SCHEMA,
         "options": {
             "temperature": 0,

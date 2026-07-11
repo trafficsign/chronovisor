@@ -25,6 +25,8 @@ FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
 DEFAULT_INGEST_MODEL = "maxwell1500/ornith-35b:Q5_K_M"
+DEFAULT_HEAVY_NUM_CTX = 32_768
+DEFAULT_HEAVY_KEEP_ALIVE = "20m"
 DEFAULT_RUNTIME_SOURCE = "git+ssh://git@github.com/trafficsign/llm-wiki-mcp"
 RUNTIME_PACKAGE = "llm-wiki-mcp"
 
@@ -136,10 +138,13 @@ class RerankerConfig:
 @dataclass(frozen=True)
 class IngestConfig:
     model: str = DEFAULT_INGEST_MODEL
-    keep_alive: str = "5m"
+    keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
     temperature: float = 0.3
-    num_ctx: int = 65_536
-    max_num_ctx: int = 262_144
+    # Keep the heavy runner on one allocation. Ollama replaces a loaded
+    # runner when the requested context changes, which caused the same 35B
+    # model to flap between ingest and audit calls.
+    num_ctx: int = DEFAULT_HEAVY_NUM_CTX
+    max_num_ctx: int = DEFAULT_HEAVY_NUM_CTX
     num_predict: int = 8_192
     read_timeout_ms: int = 660_000
 

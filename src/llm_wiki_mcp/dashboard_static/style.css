@@ -916,7 +916,17 @@ canvas {
   background: var(--amber);
 }
 
-.event-level.error {
+.event-level.retry,
+.event-level.search {
+  background: var(--amber);
+}
+
+.event-level.heal {
+  background: var(--cyan);
+}
+
+.event-level.error,
+.event-level.failure {
   background: var(--red);
 }
 

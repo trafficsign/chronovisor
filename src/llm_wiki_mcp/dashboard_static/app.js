@@ -908,12 +908,33 @@ function renderEvents(events) {
   recent.forEach((event) => {
     const row = document.createElement("div");
     row.className = "event";
-    const level = (event.level || "info").toLowerCase();
+    const rawLevel = (event.level || "info").toLowerCase();
+    const kind = (event.outcome_kind || "").toLowerCase();
+    const eventText = String(event.message || "").toLowerCase();
+    let level = rawLevel;
+    let label = rawLevel;
+    if (kind === "read_back_warning" || eventText.includes("read-back:")) {
+      level = "search";
+      label = "search";
+    } else if (
+      kind === "retry" ||
+      eventText.includes("-> retry") ||
+      eventText.includes("requested regeneration")
+    ) {
+      level = "retry";
+      label = "retry";
+    } else if (kind === "self_heal_queued") {
+      level = "heal";
+      label = "heal";
+    } else if (rawLevel === "error") {
+      level = "failure";
+      label = "failure";
+    }
     const time = document.createElement("time");
     time.textContent = timeLabel(event.timestamp);
     const badge = document.createElement("span");
     badge.className = `event-level ${level}`;
-    badge.textContent = level;
+    badge.textContent = label;
     const message = document.createElement("span");
     message.className = "event-message";
     message.textContent = fmt(event.message);

@@ -50,6 +50,13 @@ TRANSIENT_FAILURE_CLASSES = {
     "ingest.ollama_unavailable",
 }
 
+# These failures already exhausted a bounded convergence loop inside one
+# ingest job. Replaying the raw through three more jobs only burns local and
+# frontier tokens while reproducing the same control-path defect.
+IMMEDIATE_SELF_HEAL_FAILURE_CLASSES = {
+    "ingest.frontier_nonconvergent",
+}
+
 
 def _runtime_failures_dir() -> Path:
     return wiki.WIKI_ROOT / "runtime" / "failures"
@@ -95,6 +102,20 @@ def classify_failure(message: str | None) -> FailureRecord:
     """Return a stable failure class and fingerprint for a job error."""
 
     msg = (message or "unknown failure").strip() or "unknown failure"
+
+    if "frontier ingest review did not converge after" in msg.casefold():
+        return FailureRecord(
+            failure_class="ingest.frontier_nonconvergent",
+            fingerprint="ingest.frontier_nonconvergent",
+            message=msg,
+        )
+
+    if "frontier ingest review deferred:" in msg.casefold():
+        return FailureRecord(
+            failure_class="ingest.frontier_deferred",
+            fingerprint="ingest.frontier_deferred",
+            message=msg,
+        )
 
     update_target = re.search(
         r"update target not found for page_id ['\"]([^'\"]+)['\"]",
@@ -341,7 +362,12 @@ def record_raw_failure(
     _save_state(state)
 
     attempts = int(current["attempts"])
-    if attempts < threshold:
+    effective_threshold = (
+        1
+        if record.failure_class in IMMEDIATE_SELF_HEAL_FAILURE_CLASSES
+        else max(1, threshold)
+    )
+    if attempts < effective_threshold:
         return SupervisionResult(
             raw_file=raw_file,
             failure_class=record.failure_class,
