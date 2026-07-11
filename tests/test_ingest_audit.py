@@ -38,7 +38,7 @@ def test_low_risk_ingest_is_locally_authorized(tmp_path: Path) -> None:
 
     assert decision.required is False
     assert decision.mode == "local"
-    assert decision.sample_rate == 0.10
+    assert decision.sample_rate == 0.05
 
 
 def test_stable_hash_selects_quality_sample(tmp_path: Path) -> None:
@@ -67,6 +67,17 @@ def test_operational_policy_target_is_mandatory(tmp_path: Path) -> None:
     assert "operational or sensitive target" in decision.reasons
 
 
+def test_ordinary_policy_page_is_not_privileged(tmp_path: Path) -> None:
+    decision = _decision(
+        tmp_path,
+        source_key="f" * 64,
+        operations=[{"type": "update", "filename": "ai/model-policy-notes.md"}],
+    )
+
+    assert decision.required is False
+    assert decision.mode == "local"
+
+
 def test_adaptive_sampling_rises_when_audits_catch_issues(tmp_path: Path) -> None:
     state_path = tmp_path / "audit-state.json"
     config = IngestAuditConfig(adaptive_min_audits=5)
@@ -81,7 +92,7 @@ def test_adaptive_sampling_rises_when_audits_catch_issues(tmp_path: Path) -> Non
         )
 
     decision = decide_ingest_audit(
-        source_key="4ccccccccccc" + "f" * 52,
+        source_key="0" * 64,
         raw_content="ordinary",
         operations=[{"type": "create", "filename": "memory/note.md"}],
         failed_operation_specs=[],
@@ -91,7 +102,8 @@ def test_adaptive_sampling_rises_when_audits_catch_issues(tmp_path: Path) -> Non
     )
 
     assert decision.caught_issue_rate == 0.4
-    assert decision.adaptive_sample_rate == 0.5
+    assert decision.adaptive_sample_rate == 0.1
+    assert decision.sample_rate == 0.1
     assert decision.mode == "sampled"
 
 

@@ -1930,6 +1930,8 @@ class TestRunIngestFrontierDisposition:
         finished = jobs.job_store.get(job.job_id)
         assert finished.status == jobs.JobStatus.FAILED
         assert completed == []
+        assert len(captured) == 2
+        assert "did not converge after 2 frontier calls" in str(finished.error)
         assert captured[0]["raw_content"] == "raw must not disappear"
         assert captured[0]["triage_plan"] == []
         assert captured[0]["local_disposition"] == "triage_no_operations"

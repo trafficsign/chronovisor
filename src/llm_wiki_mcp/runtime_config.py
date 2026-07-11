@@ -152,16 +152,17 @@ class IngestConfig:
 @dataclass(frozen=True)
 class IngestAuditConfig:
     enabled: bool = True
-    sample_rate: float = 0.10
-    update_sample_rate: float = 0.15
-    noop_sample_rate: float = 0.20
+    sample_rate: float = 0.05
+    update_sample_rate: float = 0.08
+    noop_sample_rate: float = 0.05
     adaptive: bool = True
     adaptive_window: int = 50
     adaptive_min_audits: int = 5
     elevated_reject_rate: float = 0.10
     critical_reject_rate: float = 0.20
-    elevated_sample_rate: float = 0.25
-    critical_sample_rate: float = 0.50
+    elevated_sample_rate: float = 0.08
+    critical_sample_rate: float = 0.10
+    max_sample_rate: float = 0.10
     max_operations_without_audit: int = 4
 
 
@@ -322,6 +323,9 @@ def load_ingest_audit_config(path: Path | str | None = None) -> IngestAuditConfi
         ),
         critical_sample_rate=rate(
             "critical_sample_rate", IngestAuditConfig.critical_sample_rate
+        ),
+        max_sample_rate=rate(
+            "max_sample_rate", IngestAuditConfig.max_sample_rate
         ),
         max_operations_without_audit=_positive_int(
             section.get("max_operations_without_audit"),

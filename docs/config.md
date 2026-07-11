@@ -35,6 +35,25 @@ max_num_ctx = 262144
 num_predict = 8192
 read_timeout_ms = 660000
 
+[ingest.audit]
+# Routine quality sampling stays cheap. Mandatory correction, incomplete
+# generation, privileged system/security targets, and large mutations are not
+# controlled by these sampling rates.
+enabled = true
+sample_rate = 0.05
+update_sample_rate = 0.08
+noop_sample_rate = 0.05
+adaptive = true
+adaptive_window = 50
+adaptive_min_audits = 5
+elevated_reject_rate = 0.10
+critical_reject_rate = 0.20
+elevated_sample_rate = 0.08
+critical_sample_rate = 0.10
+# Hard circuit breaker for routine sampling even when historical catches spike.
+max_sample_rate = 0.10
+max_operations_without_audit = 4
+
 [search.negative_feedback]
 # Optional. Demotes pages recorded as page_ignored / injection_ignored /
 # false-positive feedback when the incoming query is lexically similar

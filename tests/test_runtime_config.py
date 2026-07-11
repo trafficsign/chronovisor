@@ -173,6 +173,7 @@ elevated_reject_rate = 0.08
 critical_reject_rate = 0.18
 elevated_sample_rate = 0.30
 critical_sample_rate = 0.60
+max_sample_rate = 0.09
 max_operations_without_audit = 3
 """,
         encoding="utf-8",
@@ -187,6 +188,7 @@ max_operations_without_audit = 3
     assert cfg.adaptive_min_audits == 4
     assert cfg.elevated_sample_rate == 0.30
     assert cfg.critical_sample_rate == 0.60
+    assert cfg.max_sample_rate == 0.09
     assert cfg.max_operations_without_audit == 3
 
 

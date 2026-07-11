@@ -19,8 +19,8 @@ _CORRECTION_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _HIGH_RISK_TARGET_RE = re.compile(
-    r"(?:^|[-/])(?:system|policy|protocol|security|auth|billing|credential|"
-    r"secret|keychain|correction)(?:[-/.]|$)",
+    r"(?:^|[-/])(?:system|security|auth|billing|credential|secret|keychain)"
+    r"(?:[-/.]|$)",
     re.IGNORECASE,
 )
 
@@ -117,7 +117,10 @@ def decide_ingest_audit(
         base_rate = cfg.update_sample_rate
     else:
         base_rate = cfg.sample_rate
-    effective_rate = max(base_rate, adaptive_rate)
+    # Adaptive auditing must never turn a temporary quality incident into a
+    # subscription-consuming positive feedback loop. Mandatory high-risk
+    # proposals remain mandatory; routine sampling is capped independently.
+    effective_rate = min(max(base_rate, adaptive_rate), cfg.max_sample_rate)
     try:
         sample_bucket = int(source_key[:12], 16) / float(16**12)
     except ValueError:

@@ -2220,6 +2220,7 @@ def _review_and_apply_ingest_operations(
     local_disposition: str = "operations_available",
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     force_frontier_review: bool = False,
+    frontier_budget: "_FrontierCallBudget | None" = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Authorize by risk policy, durably bind the verdict, and CAS apply."""
@@ -2352,7 +2353,40 @@ def _review_and_apply_ingest_operations(
                 "reviewer": "local_policy",
             }
         else:
+            if frontier_budget is not None and not frontier_budget.consume():
+                runtime_status.safe_append_metric(
+                    "ingest_authorization",
+                    source_key=source_key,
+                    mode=str(audit_decision.get("mode") or "unknown"),
+                    frontier_used=False,
+                    required=True,
+                    sample_rate=audit_decision.get("sample_rate"),
+                    caught_issue_rate=audit_decision.get("caught_issue_rate"),
+                    decision="frontier_budget_exhausted",
+                )
+                return {
+                    "status": "frontier_budget_exhausted",
+                    "source_key": source_key,
+                    "proposal_sha256": proposal_sha256,
+                    "summary": (
+                        "frontier call budget exhausted "
+                        f"({frontier_budget.used}/{frontier_budget.limit})"
+                    ),
+                    "review": {
+                        "decision": "retry",
+                        "summary": (
+                            "frontier call budget exhausted; route the raw to "
+                            "local self-heal instead of calling frontier again"
+                        ),
+                    },
+                    "recovered_artifact": recovered_artifact,
+                    "reused_review": False,
+                    "created": [],
+                    "updated": [],
+                    "audit": audit_decision,
+                }
             frontier_used = True
+            runtime_status.safe_write_status(stage="frontier-review")
             try:
                 review = _run_ingest_frontier_review(proposal, reviewer=reviewer)
             except Exception as exc:
@@ -2621,6 +2655,21 @@ def _verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> 
 # ---------------------------------------------------------------------------
 
 _MAX_FRONTIER_CONVERGENCE_ATTEMPTS = 3
+_MAX_FRONTIER_CALLS_PER_RAW = 2
+
+
+@dataclass
+class _FrontierCallBudget:
+    """Bound frontier use while local generation converges for one raw."""
+
+    limit: int = _MAX_FRONTIER_CALLS_PER_RAW
+    used: int = 0
+
+    def consume(self) -> bool:
+        if self.used >= self.limit:
+            return False
+        self.used += 1
+        return True
 
 
 def _frontier_feedback_text(result: dict[str, Any]) -> str:
@@ -2952,6 +3001,7 @@ def run_ingest(
         # critique, capped so a bad raw cannot create an unbounded model loop.
         frontier_feedback: str | None = None
         frontier_result: dict[str, Any] | None = None
+        frontier_budget = _FrontierCallBudget()
         plan: list[dict] = []
         all_operations: list[dict] = []
         failed_op_specs: list[dict] = []
@@ -3032,7 +3082,7 @@ def run_ingest(
             failed_ops = [spec["filename"] for spec in failed_op_specs]
             runtime_status.safe_write_status(
                 state="running",
-                stage="frontier-review",
+                stage="authorization",
                 current_job_id=job_id,
                 current_raw=source_raw,
                 current_op=None,
@@ -3057,10 +3107,17 @@ def run_ingest(
                 ),
                 reviewer=frontier_reviewer,
                 force_frontier_review=frontier_feedback is not None,
+                frontier_budget=frontier_budget,
             )
             frontier_status = str(frontier_result.get("status") or "needs_retry")
             if frontier_status in {"apply_available", "confirmed_noop"}:
                 break
+            if frontier_status == "frontier_budget_exhausted":
+                raise IngestApplyError(
+                    "frontier ingest review did not converge after "
+                    f"{frontier_budget.used} frontier calls: "
+                    + _frontier_feedback_text(frontier_result)
+                )
             repaired_operations, replaced_files = (
                 _apply_frontier_replacement_operations(
                     all_operations,
@@ -3101,12 +3158,19 @@ def run_ingest(
                     ),
                     reviewer=frontier_reviewer,
                     force_frontier_review=True,
+                    frontier_budget=frontier_budget,
                 )
                 frontier_status = str(
                     frontier_result.get("status") or "needs_retry"
                 )
                 if frontier_status in {"apply_available", "confirmed_noop"}:
                     break
+                if frontier_status == "frontier_budget_exhausted":
+                    raise IngestApplyError(
+                        "frontier ingest review did not converge after "
+                        f"{frontier_budget.used} frontier calls: "
+                        + _frontier_feedback_text(frontier_result)
+                    )
             frontier_feedback = _frontier_feedback_text(frontier_result)
             if not _frontier_retry_is_actionable(frontier_result):
                 raise IngestApplyError(

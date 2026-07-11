@@ -48,7 +48,16 @@ SELF_HEAL_FAILED_STATUSES = {
 }
 FRONTIER_PREFLIGHT_TTL_SECONDS = 300
 FRONTIER_ACTIVITY_STALE_SECONDS = 6 * 60 * 60
-ACTIVE_BATCH_STAGES = {"batch", "raw", "triage", "generate", "apply"}
+ACTIVE_BATCH_STAGES = {
+    "batch",
+    "raw",
+    "triage",
+    "generate",
+    "authorization",
+    "frontier-review",
+    "frontier-regenerate",
+    "apply",
+}
 _FRONTIER_PREFLIGHT_CACHE: dict[str, Any] | None = None
 _FRONTIER_PREFLIGHT_CACHE_AT = 0.0
 
