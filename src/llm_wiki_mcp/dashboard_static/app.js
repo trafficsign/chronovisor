@@ -22,6 +22,7 @@ const els = {
   llmTarget: document.getElementById("llm-target"),
   llmStats: document.getElementById("llm-stats"),
   llmSparkline: document.getElementById("llm-sparkline"),
+  frontierReview: document.getElementById("frontier-review"),
   currentJob: document.getElementById("current-job"),
   lastSuccess: document.getElementById("last-success"),
   selfHealPanel: document.getElementById("self-heal-panel"),
@@ -322,9 +323,12 @@ function setWorkStage(stage, stateKind) {
 
 function renderWorkStatus(status) {
   const llm = status.llm || null;
-  const active = Boolean(status.current_raw || status.current_job_id || (llm && llm.active));
+  const frontier = status.frontier_review || {};
+  const ingestActive = Boolean(status.current_raw || status.current_job_id || (llm && llm.active));
+  const reviewOnly = Boolean(frontier.active && !ingestActive);
+  const active = Boolean(ingestActive || frontier.active);
   const lastSuccess = status.last_success || null;
-  let stage = inferWorkStage(status, llm);
+  let stage = reviewOnly ? "review" : inferWorkStage(status, llm);
   if (!active && lastSuccess) stage = "index";
   const lastTargets = lastSuccessTargets(lastSuccess);
   const updated = status.updated_at ? `updated ${timeLabel(status.updated_at)}` : "--";
@@ -334,6 +338,7 @@ function renderWorkStatus(status) {
     generate: "Generating wiki page",
     apply: "Writing page update",
     index: "Indexing completed work",
+    review: "Frontier reviewing",
   };
 
   let stateKind = "idle";
@@ -343,9 +348,16 @@ function renderWorkStatus(status) {
   if (active) {
     stateKind = "running";
     summary = stageLabels[stage] || "Processing raw";
-    const current = shortName(status.current_raw || (llm && (llm.raw || llm.target)) || status.current_job_id);
-    const op = fmt(status.current_op || stage, "work");
-    detail = `${op} on ${current}`;
+    if (reviewOnly) {
+      const latest = frontier.latest || {};
+      const count = Number(frontier.count || 1);
+      const subject = [latest.kind, latest.reviewer, latest.model].filter(Boolean).join(" · ");
+      detail = `${count} active review${count === 1 ? "" : "s"}${subject ? ` · ${subject}` : ""}`;
+    } else {
+      const current = shortName(status.current_raw || (llm && (llm.raw || llm.target)) || status.current_job_id);
+      const op = fmt(status.current_op || stage, "work");
+      detail = `${op} on ${current}`;
+    }
   } else if (lastSuccess) {
     stateKind = "complete";
     summary = "Completed last raw";
@@ -1772,6 +1784,7 @@ function renderRecallImprovement(lab) {
 
 function render(snapshot) {
   const status = snapshot.status || {};
+  status.frontier_review = snapshot.frontier_review || status.frontier_review || {};
   const metrics = snapshot.metrics || [];
   const batch = status.batch || {};
   const ollama = snapshot.ollama || {};
@@ -1795,6 +1808,11 @@ function render(snapshot) {
   els.currentOp.textContent = status.current_op ? fmt(status.current_op) : fmt(status.stage || "idle");
   renderWorkStatus(status);
   renderLlm(status.llm, status);
+  const frontier = status.frontier_review || {};
+  const latestReview = frontier.latest || {};
+  els.frontierReview.textContent = frontier.active
+    ? `${intValue(frontier.count)} active · ${[latestReview.kind, latestReview.reviewer, latestReview.model].filter(Boolean).join(" · ")} · ${compactDuration(latestReview.elapsed_seconds)}`
+    : "idle";
   els.currentJob.textContent = status.current_job_id ? fmt(status.current_job_id) : "none";
   els.lastSuccess.textContent = status.last_success
     ? `${shortName(status.last_success.raw)} -> ${shortName(lastSuccessTargets(status.last_success) || "none")}`

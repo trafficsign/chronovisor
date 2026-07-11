@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+import os
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,6 +52,22 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     runtime_status.write_status({"state": "running", "stage": "generate"})
     runtime_status.append_event("info", "ingest | stage 1: triage started")
     runtime_status.append_metric("batch", pending_before=2, pending_after=1, files_processed=1)
+    frontier_activity_dir = runtime_dir / "frontier-reviews" / "active"
+    frontier_activity_dir.mkdir(parents=True)
+    (frontier_activity_dir / "review-1.json").write_text(
+        json.dumps(
+            {
+                "review_id": "review-1",
+                "active": True,
+                "kind": "semantic_judge",
+                "reviewer": "codex",
+                "model": "gpt-5.5",
+                "pid": os.getpid(),
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        ),
+        encoding="utf-8",
+    )
     failures_dir = runtime_dir / "failures"
     packets_dir = failures_dir / "packets"
     packets_dir.mkdir(parents=True)
@@ -99,6 +116,9 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     assert snapshot["self_heal"]["latest"]["details"]["action"]["retry"]["files_processed"] == ["broken.md"]
     assert snapshot["self_heal"]["watch"]["packets"]["total"] == 1
     assert snapshot["self_heal"]["watch"]["frontier_preflight"]["ok"] is True
+    assert snapshot["frontier_review"]["active"] is True
+    assert snapshot["frontier_review"]["count"] == 1
+    assert snapshot["status"]["frontier_review"]["latest"]["model"] == "gpt-5.5"
 
 
 def test_build_snapshot_surfaces_frontier_human_required(

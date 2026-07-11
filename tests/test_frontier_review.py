@@ -24,6 +24,20 @@ Options:
 """
 
 
+@pytest.fixture(autouse=True)
+def isolate_frontier_activity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        frontier_review,
+        "FRONTIER_ACTIVITY_DIR",
+        tmp_path / "frontier-activity",
+    )
+    monkeypatch.setattr(
+        frontier_review.runtime_status,
+        "safe_append_event",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def test_frontier_timeout_is_capped_by_sleep_cycle_deadline(monkeypatch) -> None:
     monkeypatch.setenv("LLM_WIKI_CYCLE_DEADLINE_MONOTONIC", "112.9")
     monkeypatch.setattr(frontier_review.time, "monotonic", lambda: 100.0)
@@ -66,7 +80,7 @@ def _preflight_response(cmd: list[str]) -> SimpleNamespace | None:
     return None
 
 
-def test_run_codex_supplies_codex_home_from_config_dir(
+def test_run_codex_uses_isolated_codex_home_with_shared_auth(
     tmp_path: Path, monkeypatch
 ) -> None:
     seen: dict[str, object] = {}
@@ -97,6 +111,13 @@ def test_run_codex_supplies_codex_home_from_config_dir(
         )
         seen["env"] = kwargs["env"]
         seen["cmd"] = cmd
+        isolated_home = Path(kwargs["env"]["CODEX_HOME"])
+        seen["isolated_home_differs"] = isolated_home != config_home
+        seen["auth_resolves_to_source"] = (
+            isolated_home / "auth.json"
+        ).resolve() == (config_home / "auth.json").resolve()
+        seen["config"] = (isolated_home / "config.toml").read_text()
+        seen["has_hooks"] = (isolated_home / "hooks.json").exists()
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.delenv("CODEX_HOME", raising=False)
@@ -109,9 +130,32 @@ def test_run_codex_supplies_codex_home_from_config_dir(
     )
 
     assert result.decision == "approved"
-    assert seen["env"]["CODEX_HOME"] == str(config_home)
+    assert seen["isolated_home_differs"] is True
+    assert seen["auth_resolves_to_source"] is True
+    assert "mcp_servers" not in str(seen["config"])
+    assert seen["has_hooks"] is False
     assert "--sandbox" in seen["cmd"]
     assert seen["cmd"][seen["cmd"].index("--sandbox") + 1] == "read-only"
+
+
+def test_frontier_activity_file_exists_only_while_review_runs(tmp_path: Path) -> None:
+    activity_dir = frontier_review.FRONTIER_ACTIVITY_DIR
+
+    with frontier_review._frontier_activity(
+        kind="semantic_judge",
+        reviewer="codex",
+        model="gpt-test",
+        prompt="review this",
+        repo_root=tmp_path,
+    ):
+        files = list(activity_dir.glob("*.json"))
+        assert len(files) == 1
+        record = json.loads(files[0].read_text())
+        assert record["active"] is True
+        assert record["model"] == "gpt-test"
+        assert "review this" not in files[0].read_text()
+
+    assert list(activity_dir.glob("*.json")) == []
 
 
 def test_frontier_schema_requires_all_declared_properties() -> None:

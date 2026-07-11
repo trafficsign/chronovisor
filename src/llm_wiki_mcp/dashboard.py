@@ -47,6 +47,7 @@ SELF_HEAL_FAILED_STATUSES = {
     "human_required",
 }
 FRONTIER_PREFLIGHT_TTL_SECONDS = 300
+FRONTIER_ACTIVITY_STALE_SECONDS = 6 * 60 * 60
 _FRONTIER_PREFLIGHT_CACHE: dict[str, Any] | None = None
 _FRONTIER_PREFLIGHT_CACHE_AT = 0.0
 
@@ -808,6 +809,59 @@ def _frontier_preflight_snapshot() -> dict[str, Any]:
     return summary
 
 
+def _frontier_activity_snapshot() -> dict[str, Any]:
+    active_dir = WIKI_ROOT / "runtime" / "frontier-reviews" / "active"
+    records: list[dict[str, Any]] = []
+    now = datetime.now()
+    if active_dir.exists():
+        for path in sorted(active_dir.glob("*.json")):
+            record = _read_json_file(path)
+            if not record:
+                continue
+            started_raw = record.get("started_at")
+            try:
+                started = (
+                    datetime.fromisoformat(started_raw)
+                    if isinstance(started_raw, str)
+                    else None
+                )
+            except ValueError:
+                started = None
+            age_seconds = (
+                max(
+                    0.0,
+                    (
+                        (datetime.now(started.tzinfo) if started.tzinfo else now)
+                        - started
+                    ).total_seconds(),
+                )
+                if started is not None
+                else None
+            )
+            pid = record.get("pid")
+            stale = (
+                (isinstance(pid, int) and not runtime_status._pid_is_alive(pid))
+                or (
+                    age_seconds is not None
+                    and age_seconds > FRONTIER_ACTIVITY_STALE_SECONDS
+                )
+            )
+            if stale:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            records.append({**record, "elapsed_seconds": age_seconds})
+    records.sort(key=lambda row: str(row.get("started_at") or ""))
+    return {
+        "active": bool(records),
+        "count": len(records),
+        "reviews": records,
+        "latest": records[-1] if records else None,
+    }
+
+
 def _last_self_heal_check(limit: int = 400) -> dict[str, Any] | None:
     logs_dir = WIKI_ROOT / "logs"
     if not logs_dir.exists():
@@ -1242,6 +1296,20 @@ def build_snapshot() -> dict[str, Any]:
     if not status.get("updated_at"):
         status["updated_at"] = orch_state.get("current_job_started_at") or orch_state.get("last_ingest")
 
+    frontier_activity = _frontier_activity_snapshot()
+    status["frontier_review"] = frontier_activity
+    active_llm = isinstance(status.get("llm"), dict) and status["llm"].get("active")
+    if (
+        frontier_activity["active"]
+        and not status.get("current_job_id")
+        and not status.get("current_raw")
+        and not active_llm
+    ):
+        status["state"] = "running"
+        status["stage"] = "review"
+        latest_review = frontier_activity.get("latest") or {}
+        status["updated_at"] = latest_review.get("started_at") or status.get("updated_at")
+
     runtime_metrics = runtime_status.read_metrics(limit=240)
     drain_metrics = _drain_history(limit=240)
     metrics = sorted(
@@ -1265,6 +1333,7 @@ def build_snapshot() -> dict[str, Any]:
     return {
         "runtime": runtime_identity(),
         "status": status,
+        "frontier_review": frontier_activity,
         "orchestrator": {
             "last_ingest": orch_state.get("last_ingest"),
             "last_lint": orch_state.get("last_lint"),

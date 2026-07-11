@@ -12,16 +12,23 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
+from contextlib import contextmanager
+from datetime import datetime
 from html import unescape
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse
 
 from llm_wiki_mcp.convergence import (
     HUMAN_REQUIRED_FAILURE_CLASSES as CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES,
     is_human_required_failure,
 )
+from llm_wiki_mcp import runtime_status
+from llm_wiki_mcp.wiki import WIKI_ROOT
+
+FRONTIER_ACTIVITY_DIR = WIKI_ROOT / "runtime" / "frontier-reviews" / "active"
 
 FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -942,9 +949,9 @@ def _codex_home() -> Path:
     return Path.home() / ".codex"
 
 
-def _frontier_env() -> dict[str, str]:
+def _frontier_env(*, codex_home: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
-    env.setdefault("CODEX_HOME", str(_codex_home()))
+    env["CODEX_HOME"] = str(codex_home or _codex_home())
     env.setdefault("NO_COLOR", "1")
     env["LLM_WIKI_INTERNAL_FRONTIER"] = "1"
     env["LLM_WIKI_CONTENT_CORRECTION_ENABLED"] = "0"
@@ -953,6 +960,132 @@ def _frontier_env() -> dict[str, str]:
     env["CODEX_WIKI_SAVE_ENABLED"] = "0"
     env["CLAUDE_CODE_WIKI_SAVE_ENABLED"] = "0"
     return env
+
+
+@contextmanager
+def _isolated_codex_environment() -> Iterator[dict[str, str]]:
+    """Yield a minimal authenticated Codex home with no MCP or hook config."""
+
+    source_home = _codex_home()
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-frontier-codex-") as td:
+        isolated_home = Path(td)
+        for filename in ("auth.json", "models_cache.json", "version.json"):
+            source = source_home / filename
+            if source.exists():
+                (isolated_home / filename).symlink_to(source)
+        (isolated_home / "config.toml").write_text(
+            "# Isolated LLM Wiki frontier reviewer: intentionally no MCP servers or hooks.\n"
+            'approval_policy = "never"\n'
+            'sandbox_mode = "workspace-write"\n',
+            encoding="utf-8",
+        )
+        yield _frontier_env(codex_home=isolated_home)
+
+
+def _write_frontier_activity(record: dict[str, Any]) -> Path | None:
+    try:
+        FRONTIER_ACTIVITY_DIR.mkdir(parents=True, exist_ok=True)
+        path = FRONTIER_ACTIVITY_DIR / f"{record['review_id']}.json"
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+        return path
+    except Exception:
+        return None
+
+
+@contextmanager
+def _frontier_activity(
+    *,
+    kind: str,
+    reviewer: str,
+    model: str | None,
+    prompt: str,
+    repo_root: Path | None,
+) -> Iterator[dict[str, Any]]:
+    review_id = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
+    started_at = datetime.now().isoformat(timespec="seconds")
+    record: dict[str, Any] = {
+        "review_id": review_id,
+        "active": True,
+        "kind": kind,
+        "reviewer": reviewer,
+        "model": model,
+        "pid": os.getpid(),
+        "repo_root": str(repo_root) if repo_root else None,
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "started_at": started_at,
+        "updated_at": started_at,
+    }
+    path = _write_frontier_activity(record)
+    runtime_status.safe_append_event(
+        "info",
+        "frontier | review started",
+        source="frontier",
+        review_id=review_id,
+        kind=kind,
+        reviewer=reviewer,
+        model=model,
+    )
+    started = time.monotonic()
+    try:
+        yield record
+    except BaseException as exc:
+        record["outcome"] = "error"
+        record["error"] = exc.__class__.__name__
+        raise
+    finally:
+        elapsed = round(max(0.0, time.monotonic() - started), 3)
+        outcome = str(record.get("outcome") or "completed")
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        event_level = (
+            "error" if outcome == "error" else "warn" if outcome == "failed" else "success"
+        )
+        runtime_status.safe_append_event(
+            event_level,
+            f"frontier | review {outcome}",
+            source="frontier",
+            review_id=review_id,
+            kind=kind,
+            reviewer=reviewer,
+            model=model,
+            elapsed_seconds=elapsed,
+        )
+
+
+def _run_review_subprocess(
+    cmd: list[str],
+    *,
+    activity_kind: str,
+    reviewer: str,
+    model: str | None,
+    prompt: str,
+    repo_root: Path | None,
+    isolate_codex: bool,
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    with _frontier_activity(
+        kind=activity_kind,
+        reviewer=reviewer,
+        model=model,
+        prompt=prompt,
+        repo_root=repo_root,
+    ) as activity:
+        if isolate_codex:
+            with _isolated_codex_environment() as env:
+                kwargs["env"] = env
+                completed = subprocess.run(cmd, **kwargs)
+        else:
+            completed = subprocess.run(cmd, **kwargs)
+        activity["outcome"] = "completed" if completed.returncode == 0 else "failed"
+        return completed
 
 
 def build_frontier_prompt(
@@ -1005,8 +1138,15 @@ def _run_custom_command(
     repo_root: Path,
     timeout: int,
 ) -> FrontierResult:
-    completed = subprocess.run(
-        shlex.split(command),
+    cmd = shlex.split(command)
+    completed = _run_review_subprocess(
+        cmd,
+        activity_kind="code_repair",
+        reviewer="custom",
+        model=None,
+        prompt=prompt,
+        repo_root=repo_root,
+        isolate_codex=bool(cmd and Path(cmd[0]).name == "codex"),
         input=prompt,
         text=True,
         capture_output=True,
@@ -1071,13 +1211,18 @@ def _run_codex_rescue(
         "--skip-git-repo-check",
     ]
     try:
-        completed = subprocess.run(
+        completed = _run_review_subprocess(
             cmd,
+            activity_kind="rescue",
+            reviewer="codex",
+            model=DEFAULT_FRONTIER_MODEL,
+            prompt=rescue_prompt,
+            repo_root=repo_root,
+            isolate_codex=True,
             input=rescue_prompt,
             text=True,
             capture_output=True,
             timeout=min(timeout, 300),
-            env=_frontier_env(),
         )
     except Exception as exc:
         return {"attempted": True, "ok": False, "error": str(exc)}
@@ -1128,8 +1273,14 @@ def _run_claude_code_rescue(
         f"{prompt[:2000]}"
     )
     try:
-        completed = subprocess.run(
+        completed = _run_review_subprocess(
             cmd,
+            activity_kind="rescue",
+            reviewer="claude-code",
+            model=None,
+            prompt=rescue_prompt,
+            repo_root=repo_root,
+            isolate_codex=False,
             input=rescue_prompt,
             text=True,
             capture_output=True,
@@ -1272,13 +1423,18 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
                 "codex": preflight.get("codex"),
             },
         }
-        completed = subprocess.run(
+        completed = _run_review_subprocess(
             invocation["cmd"],
+            activity_kind="code_repair",
+            reviewer="codex",
+            model=model,
+            prompt=prompt,
+            repo_root=repo_root,
+            isolate_codex=True,
             input=prompt,
             text=True,
             capture_output=True,
             timeout=timeout,
-            env=_frontier_env(),
             cwd=invocation.get("cwd") or None,
         )
         output_text = ""
@@ -1361,8 +1517,15 @@ def run_structured_review(
     command = os.environ.get(command_env)
     if command:
         try:
-            completed = subprocess.run(
-                shlex.split(command),
+            cmd = shlex.split(command)
+            completed = _run_review_subprocess(
+                cmd,
+                activity_kind=model_role,
+                reviewer="custom",
+                model=selected_model,
+                prompt=prompt,
+                repo_root=repo_root,
+                isolate_codex=bool(cmd and Path(cmd[0]).name == "codex"),
                 input=prompt,
                 text=True,
                 capture_output=True,
@@ -1433,13 +1596,18 @@ def run_structured_review(
             reasoning_effort=selected_effort,
         )
         try:
-            completed = subprocess.run(
+            completed = _run_review_subprocess(
                 invocation["cmd"],
+                activity_kind=model_role,
+                reviewer="codex",
+                model=selected_model,
+                prompt=prompt,
+                repo_root=repo_root,
+                isolate_codex=True,
                 input=prompt,
                 text=True,
                 capture_output=True,
                 timeout=timeout_seconds,
-                env=_frontier_env(),
                 cwd=invocation.get("cwd") or None,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
