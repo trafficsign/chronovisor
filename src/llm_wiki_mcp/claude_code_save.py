@@ -1,12 +1,13 @@
 """Claude Code session saver for LLM Wiki raw entries.
 
-Reads Claude Code JSONL session transcripts, extracts deltas since last save,
-asks an LLM whether the content is worth saving, and writes to ~/.wiki/raw/.
+Reads Claude Code JSONL session transcripts and losslessly captures every
+unpublished message delta into ~/.wiki/raw/ without starting an LLM.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -16,12 +17,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.decision_policy import resolve_decision_policy
 from llm_wiki_mcp.evidence_grounding import (
     ProtectedLiteralGroundingError,
     validate_protected_literals,
 )
 from llm_wiki_mcp.link_fix import atomic_write
-from llm_wiki_mcp.model_lab import resolve_role
 from llm_wiki_mcp.save_transaction import (
     SaveTransaction,
     attach_save_transaction_marker,
@@ -34,7 +35,10 @@ from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, init_wiki
 
 DEFAULT_STATE_FILE = WIKI_ROOT / "claude-code-save-state.json"
 DEFAULT_MAX_CHARS = 120_000
-DEFAULT_MEMORY_MODEL, DEFAULT_REASONING_EFFORT = resolve_role("raw_writer")
+# Kept as parser/API compatibility values for the legacy manual writer helpers.
+# The normal save path is deterministic and never resolves or starts a model.
+DEFAULT_MEMORY_MODEL = "deterministic-capture"
+DEFAULT_REASONING_EFFORT = "none"
 DEFAULT_TIMEOUT_SECONDS = 300
 HOOK_ENABLE_ENV = "CLAUDE_CODE_WIKI_SAVE_ENABLED"
 
@@ -77,6 +81,8 @@ class TranscriptRecord:
     role: str
     text: str
     timestamp: str | None = None
+    event_type: str | None = None
+    event: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -176,15 +182,23 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
         if item_type not in ("user", "assistant"):
             continue
 
-        content = item.get("message", {}).get("content")
+        message = item.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
 
         if item_type == "assistant" and not has_file_changes:
             has_file_changes = _content_has_file_changes(content)
 
-        role = item_type
-        text = message_content_text(content)
-        if not text:
+        sanitized_content = sanitize_message_content(content)
+        if not _content_has_capture_payload(sanitized_content):
             continue
+        text = message_content_text(sanitized_content)
+        role = _claude_record_role(item_type, sanitized_content, text)
+        event = dict(item)
+        event_message = dict(message)
+        event_message["content"] = sanitized_content
+        event["message"] = event_message
 
         if role == "user":
             user_turn_count += 1
@@ -195,6 +209,8 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
                 role=role,
                 text=text,
                 timestamp=item.get("timestamp") if isinstance(item.get("timestamp"), str) else None,
+                event_type=item_type,
+                event=event,
             )
         )
 
@@ -208,6 +224,50 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
         has_file_changes=has_file_changes,
         user_turn_count=user_turn_count,
     )
+
+
+def sanitize_message_content(content: Any) -> Any:
+    """Remove injected/reasoning blocks while retaining tools, images and files."""
+    if isinstance(content, str):
+        return None if is_injected_context(content) else content
+    if not isinstance(content, list):
+        return content
+
+    sanitized: list[Any] = []
+    for part in content:
+        if isinstance(part, dict):
+            ptype = part.get("type")
+            if ptype in {"thinking", "redacted_thinking"}:
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and is_injected_context(text):
+                continue
+        elif isinstance(part, str) and is_injected_context(part):
+            continue
+        sanitized.append(part)
+    return sanitized
+
+
+def _content_has_capture_payload(content: Any) -> bool:
+    if content is None:
+        return False
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return bool(content)
+    return True
+
+
+def _claude_record_role(item_type: str, content: Any, text: str) -> str:
+    if text:
+        return item_type
+    if isinstance(content, list) and any(
+        isinstance(part, dict)
+        and part.get("type") in {"tool_use", "tool_result", "server_tool_use", "web_search_tool_result"}
+        for part in content
+    ):
+        return "tool"
+    return item_type
 
 
 def _content_has_file_changes(content: Any) -> bool:
@@ -224,7 +284,7 @@ def message_content_text(content: Any) -> str:
     if isinstance(content, str):
         if is_injected_context(content):
             return ""
-        return content.strip()
+        return content if content.strip() else ""
 
     if isinstance(content, list):
         fragments: list[str] = []
@@ -235,7 +295,7 @@ def message_content_text(content: Any) -> str:
             if ptype == "text":
                 text = part.get("text", "")
                 if isinstance(text, str) and text.strip() and not is_injected_context(text):
-                    fragments.append(text.strip())
+                    fragments.append(text)
         return "\n\n".join(fragments)
 
     return ""
@@ -264,12 +324,32 @@ def is_injected_context(text: str) -> bool:
 def format_transcript(records: list[TranscriptRecord]) -> str:
     parts: list[str] = []
     for record in records:
+        if not record.text:
+            continue
         timestamp = f" @ {record.timestamp}" if record.timestamp else ""
         parts.append(
             f"### {record.role.upper()} line {record.line}{timestamp}\n"
-            f"{record.text.strip()}"
+            f"{record.text}"
         )
     return "\n\n".join(parts)
+
+
+def serialize_transcript_records(records: list[TranscriptRecord]) -> str:
+    """Serialize the selected transcript records without semantic rewriting."""
+    payload: list[dict[str, Any]] = []
+    for record in records:
+        row: dict[str, Any] = {
+            "line": record.line,
+            "role": record.role,
+            "text": record.text,
+            "timestamp": record.timestamp,
+        }
+        if record.event_type is not None:
+            row["event_type"] = record.event_type
+        if record.event is not None:
+            row["event"] = record.event
+        payload.append(row)
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def trim_middle(text: str, max_chars: int) -> str:
@@ -340,22 +420,10 @@ def run_memory_writer(
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WriterResult:
-    """Use the frontier writer; a local proposal never finalizes data loss."""
-    from llm_wiki_mcp.codex_save import run_memory_writer as run_frontier_writer
-
-    result = run_frontier_writer(
-        prompt,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        timeout=timeout,
-    )
-    return WriterResult(
-        should_save=result.should_save,
-        content=result.content,
-        keywords=list(result.keywords),
-        reason=result.reason,
-        rejected_keywords=list(result.rejected_keywords),
-        evidence_quotes=list(result.evidence_quotes),
+    """Reject the retired frontier writer without starting any process."""
+    del prompt, model, reasoning_effort, timeout
+    raise ClaudeCodeSaveError(
+        "memory writer is disabled; session saves use deterministic-lossless capture"
     )
 
 
@@ -600,23 +668,185 @@ def bounded_transcript_slice(
     *,
     max_chars: int,
 ) -> TranscriptSlice:
-    """Return an ordered prefix so a large delta is dispositioned in chunks."""
-    if len(format_transcript(transcript_slice.records)) <= max_chars:
+    """Return a byte-bounded ordered prefix; never admit an oversized first row."""
+    if max_chars < 1:
+        raise ClaudeCodeSaveError("max_chars must be a positive byte limit")
+    if len(_serialized_records_bytes(transcript_slice.records)) <= max_chars:
         return transcript_slice
     selected: list[TranscriptRecord] = []
     for record in transcript_slice.records:
         candidate = [*selected, record]
-        if selected and len(format_transcript(candidate)) > max_chars:
+        if len(_serialized_records_bytes(candidate)) > max_chars:
             break
         selected.append(record)
-    if not selected:
-        selected = [transcript_slice.records[0]]
     return replace(
         transcript_slice,
         records=selected,
-        scanned_until_line=selected[-1].line,
+        scanned_until_line=selected[-1].line if selected else transcript_slice.after_line,
         user_turn_count=sum(record.role == "user" for record in selected),
     )
+
+
+def _serialized_records_bytes(records: list[TranscriptRecord]) -> bytes:
+    return serialize_transcript_records(records).encode("utf-8")
+
+
+def _oversized_fragment_transaction(
+    transcript_slice: TranscriptSlice,
+    *,
+    record: TranscriptRecord,
+    record_sha256: str,
+    fragment_index: int,
+    fragment_count: int,
+    fragment_bytes: int,
+) -> SaveTransaction:
+    identity = "\0".join(
+        [
+            transcript_slice.session_id or "",
+            "oversized-record-v1",
+            str(record.line),
+            record_sha256,
+            str(fragment_index),
+            str(fragment_count),
+            str(fragment_bytes),
+        ]
+    )
+    return make_save_transaction(
+        host="claude-code",
+        session_file=transcript_slice.session_file,
+        session_id=identity,
+        after_line=max(0, record.line - 1),
+        until_line=record.line,
+    )
+
+
+def _build_oversized_fragment_content(
+    transcript_slice: TranscriptSlice,
+    *,
+    record: TranscriptRecord,
+    record_bytes: bytes,
+    record_sha256: str,
+    fragment: bytes,
+    fragment_index: int,
+    fragment_count: int,
+    transaction: SaveTransaction,
+) -> str:
+    payload = {
+        "schema": "llm-wiki.raw-capture-fragment.v1",
+        "host": "claude-code",
+        "session_id": transcript_slice.session_id,
+        "session_file": str(transcript_slice.session_file),
+        "source_line": record.line,
+        "record_sha256": record_sha256,
+        "record_bytes": len(record_bytes),
+        "fragment_index": fragment_index,
+        "fragment_count": fragment_count,
+        "fragment_bytes": len(fragment),
+        "encoding": "base64",
+        "data": base64.b64encode(fragment).decode("ascii"),
+    }
+    content = "\n".join(
+        [
+            "# Claude Code Oversized Transcript Record Fragment",
+            "",
+            "```json",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            "```",
+            "",
+        ]
+    )
+    return attach_save_transaction_marker(transaction, content)
+
+
+def _capture_oversized_record(
+    *,
+    args: argparse.Namespace,
+    transcript_slice: TranscriptSlice,
+    state: dict[str, Any],
+    state_file: Path,
+    base_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish one oversized record as idempotent reassemblable fragments."""
+    record = transcript_slice.records[0]
+    record_bytes = _serialized_records_bytes([record])
+    limit = args.max_chars
+    record_sha256 = hashlib.sha256(record_bytes).hexdigest()
+    fragments = [record_bytes[i : i + limit] for i in range(0, len(record_bytes), limit)]
+    metadata = {
+        **base_result,
+        "capture_mode": "deterministic-lossless",
+        "oversized_record": True,
+        "scanned_until_line": record.line,
+        "record_count": 1,
+        "record_bytes": len(record_bytes),
+        "record_sha256": record_sha256,
+        "fragment_bytes_limit": limit,
+        "fragment_count": len(fragments),
+        "keywords": ["Claude Code", "transcript-delta", "transcript-fragment"],
+    }
+    if args.extract_only:
+        return {**metadata, "status": "extracted"}
+    if args.dry_run or not args.save:
+        return {**metadata, "status": "dry_run"}
+
+    save_results: list[dict[str, Any]] = []
+    for offset, fragment in enumerate(fragments, start=1):
+        transaction = _oversized_fragment_transaction(
+            transcript_slice,
+            record=record,
+            record_sha256=record_sha256,
+            fragment_index=offset,
+            fragment_count=len(fragments),
+            fragment_bytes=limit,
+        )
+        content = _build_oversized_fragment_content(
+            transcript_slice,
+            record=record,
+            record_bytes=record_bytes,
+            record_sha256=record_sha256,
+            fragment=fragment,
+            fragment_index=offset,
+            fragment_count=len(fragments),
+            transaction=transaction,
+        )
+        save_result = save_raw(
+            content,
+            session_id=raw_session_id(transcript_slice),
+            keywords=metadata["keywords"],
+            trigger_ingest=False,
+            idempotency_key=transaction.idempotency_key,
+        )
+        try:
+            validate_published_save_receipt(
+                raw_dir=RAW_DIR,
+                save_result=save_result,
+                expected=transaction,
+            )
+        except ValueError as exc:
+            raise ClaudeCodeSaveError(
+                f"raw fragment receipt validation failed: {exc}"
+            ) from exc
+        save_results.append(save_result)
+
+    committed_slice = replace(
+        transcript_slice,
+        records=[record],
+        scanned_until_line=record.line,
+        user_turn_count=int(record.role == "user"),
+    )
+    update_state(
+        state,
+        session_file=transcript_slice.session_file,
+        transcript_slice=committed_slice,
+        status="saved",
+    )
+    write_state(state_file, state)
+    return {
+        **metadata,
+        "status": "saved",
+        "save_result": save_results[-1],
+        "save_results": save_results,
+    }
 
 
 def update_state(
@@ -663,38 +893,28 @@ def raw_session_id(transcript_slice: TranscriptSlice) -> str:
 
 def build_raw_content(
     transcript_slice: TranscriptSlice,
-    writer: WriterResult,
     *,
     transaction: SaveTransaction,
 ) -> str:
     header = [
-        "# Claude Code Session Memory Save",
+        "# Claude Code Session Transcript Delta",
         "",
-        f"- Source: Claude Code",
+        "- Source: Claude Code",
+        "- Capture mode: deterministic-lossless",
         f"- Session ID: {transcript_slice.session_id or 'unknown'}",
         f"- CWD: {transcript_slice.cwd or 'unknown'}",
         f"- Session file: {transcript_slice.session_file}",
         f"- Lines: {transcript_slice.after_line + 1}-{transcript_slice.scanned_until_line}",
-        f"- Generated at: {datetime.now(timezone.utc).isoformat()}",
+        f"- Record count: {len(transcript_slice.records)}",
+        f"- Chunk order: after={transaction.after_line}; until={transaction.until_line}",
         "",
-        "## Memory",
+        "## Transcript Delta",
         "",
-        writer.content.strip(),
-        "",
-        "## User Evidence",
+        "```json",
+        serialize_transcript_records(transcript_slice.records),
+        "```",
         "",
     ]
-    for quote in writer.evidence_quotes:
-        header.extend(["\n".join(f"> {line}" for line in quote.splitlines()), ""])
-    if writer.rejected_keywords:
-        header.extend(
-            [
-                "## Rejected Keywords",
-                "",
-                ", ".join(writer.rejected_keywords),
-                "",
-            ]
-        )
     return attach_save_transaction_marker(transaction, "\n".join(header))
 
 
@@ -762,13 +982,38 @@ def _run_save_transaction(
     *,
     stdin_text: str | None = None,
 ) -> dict[str, Any]:
-    init_wiki()
-
     if args.hook and os.environ.get(HOOK_ENABLE_ENV) != "1":
         return {
             "status": "disabled",
             "reason": f"{HOOK_ENABLE_ENV}=1 is required for hook execution",
         }
+
+    policy, policy_mode, policy_error = resolve_decision_policy("raw_capture")
+    policy_kind = policy.kind if policy is not None else None
+    policy_result = {
+        "lane": "raw_capture",
+        "kind": policy_kind,
+        "mode": policy_mode,
+        "error": policy_error,
+    }
+    if (
+        policy_error is not None
+        or policy_kind != "validated_local"
+        or policy_mode != "enabled"
+    ):
+        return {
+            "status": "deferred",
+            "reason": policy_error
+            or (
+                "raw_capture_policy_kind_invalid"
+                if policy_kind != "validated_local"
+                else f"raw_capture_policy_not_enabled:{policy_mode}"
+            ),
+            "decision_policy": policy_result,
+            "model_calls": 0,
+        }
+
+    init_wiki()
 
     hints = hook_hints(read_hook_payload(stdin_text)) if args.hook else {}
     session_file = find_session_file(
@@ -785,8 +1030,8 @@ def _run_save_transaction(
     transcript_slice = extract_transcript_slice(session_file, after_line=after_line)
 
     # A complete raw can outlive a crash before the state cursor replace.
-    # Recover that receipt before asking the writer to summarize overlapping
-    # transcript text again (including when the transcript grew meanwhile).
+    # Recover that receipt before capturing overlapping transcript text again
+    # (including when the transcript grew meanwhile).
     recovery_probe = (
         transcript_slice
         if after_line == committed_line
@@ -865,38 +1110,36 @@ def _run_save_transaction(
             }
         base_result["trigger"] = trigger_reason
 
+    if args.max_chars < 1:
+        raise ClaudeCodeSaveError("max_chars must be a positive byte limit")
+    if len(_serialized_records_bytes([transcript_slice.records[0]])) > args.max_chars:
+        return _capture_oversized_record(
+            args=args,
+            transcript_slice=transcript_slice,
+            state=state,
+            state_file=state_file,
+            base_result={**base_result, "decision_policy": policy_result},
+        )
+
     transcript_slice = bounded_transcript_slice(transcript_slice, max_chars=args.max_chars)
     base_result["scanned_until_line"] = transcript_slice.scanned_until_line
     base_result["record_count"] = len(transcript_slice.records)
-    prompt = build_writer_prompt(transcript_slice, max_chars=args.max_chars)
+    transcript_json = serialize_transcript_records(transcript_slice.records)
+    transcript_bytes = transcript_json.encode("utf-8")
     if args.extract_only:
         return {
             **base_result,
             "status": "extracted",
-            "prompt_chars": len(prompt),
-            "transcript_preview": format_transcript(transcript_slice.records)[:4000],
+            "capture_mode": "deterministic-lossless",
+            "transcript_bytes": len(transcript_bytes),
+            "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
+            "decision_policy": policy_result,
         }
 
-    writer = run_grounded_memory_writer(
-        prompt,
-        transcript_slice,
-        model=getattr(args, "model", DEFAULT_MEMORY_MODEL),
-        reasoning_effort=getattr(args, "reasoning_effort", DEFAULT_REASONING_EFFORT),
-        timeout=getattr(args, "timeout", DEFAULT_TIMEOUT_SECONDS),
-    )
-    writer_result = {
-        "should_save": writer.should_save,
-        "keywords": writer.keywords,
-        "rejected_keywords": writer.rejected_keywords,
-        "writer_reason": writer.reason,
-        "evidence_quotes": writer.evidence_quotes,
+    capture_result = {
+        "capture_mode": "deterministic-lossless",
+        "keywords": ["Claude Code", "transcript-delta"],
     }
-
-    if not writer.should_save or not writer.content:
-        if args.save and not args.dry_run:
-            update_state(state, session_file=session_file, transcript_slice=transcript_slice, status="declined")
-            write_state(state_file, state)
-        return {**base_result, **writer_result, "status": "skipped"}
 
     transaction = make_save_transaction(
         host="claude-code",
@@ -907,22 +1150,24 @@ def _run_save_transaction(
     )
     raw_content = build_raw_content(
         transcript_slice,
-        writer,
         transaction=transaction,
     )
     if args.dry_run or not args.save:
+        raw_bytes = raw_content.encode("utf-8")
         return {
             **base_result,
-            **writer_result,
+            **capture_result,
             "status": "dry_run",
-            "raw_content_preview": raw_content[:4000],
+            "raw_content_bytes": len(raw_bytes),
+            "raw_content_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "decision_policy": policy_result,
         }
 
     save_result = save_raw(
         raw_content,
         session_id=raw_session_id(transcript_slice),
-        keywords=writer.keywords,
-        trigger_ingest=args.trigger_ingest,
+        keywords=capture_result["keywords"],
+        trigger_ingest=False,
         idempotency_key=transaction.idempotency_key,
     )
     try:
@@ -937,7 +1182,13 @@ def _run_save_transaction(
         ) from exc
     update_state(state, session_file=session_file, transcript_slice=transcript_slice, status="saved")
     write_state(state_file, state)
-    return {**base_result, **writer_result, "status": "saved", "save_result": save_result}
+    return {
+        **base_result,
+        **capture_result,
+        "status": "saved",
+        "save_result": save_result,
+        "decision_policy": policy_result,
+    }
 
 
 def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str, Any]:
@@ -949,7 +1200,38 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
         session_file=session_hint,
         state_file=state_file,
     ):
-        return _run_save_transaction(args, stdin_text=stdin_text)
+        first = _run_save_transaction(args, stdin_text=stdin_text)
+        if (
+            first.get("status") != "saved"
+            or not args.save
+            or args.dry_run
+            or args.extract_only
+        ):
+            return first
+
+        # One Stop event must drain every ordered prefix, not leave the tail
+        # dependent on a future Stop. Keep the serialization lock for the
+        # entire drain and honor the committed cursor after the first chunk.
+        chunks = [first]
+        continuation_args = argparse.Namespace(**vars(args))
+        continuation_args.ignore_state = False
+        while True:
+            current = _run_save_transaction(
+                continuation_args,
+                stdin_text=stdin_text,
+            )
+            if current.get("status") != "saved":
+                break
+            chunks.append(current)
+
+        result = dict(first)
+        result["chunk_count"] = len(chunks)
+        result["scanned_until_line"] = chunks[-1].get(
+            "scanned_until_line", result.get("scanned_until_line")
+        )
+        if len(chunks) > 1:
+            result["save_results"] = [chunk.get("save_result") for chunk in chunks]
+        return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -958,17 +1240,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-file")
     parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE))
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
-    parser.add_argument("--model", default=DEFAULT_MEMORY_MODEL)
-    parser.add_argument("--reasoning-effort", default=DEFAULT_REASONING_EFFORT)
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--model", default=DEFAULT_MEMORY_MODEL, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--reasoning-effort",
+        default=DEFAULT_REASONING_EFFORT,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build deterministic raw data but do not save it.",
+    )
     parser.add_argument("--save", action="store_true")
-    parser.add_argument("--extract-only", action="store_true")
+    parser.add_argument(
+        "--extract-only",
+        action="store_true",
+        help="Only parse and serialize the transcript.",
+    )
     parser.add_argument("--ignore-state", action="store_true")
     parser.add_argument("--hook", action="store_true")
     parser.add_argument(
         "--trigger-ingest",
         action="store_true",
+        help=argparse.SUPPRESS,
     )
     return parser
 

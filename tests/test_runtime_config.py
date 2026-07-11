@@ -192,6 +192,76 @@ max_operations_without_audit = 3
     assert cfg.max_operations_without_audit == 3
 
 
+def test_decision_router_config_defaults_to_local_three_model_quorum() -> None:
+    cfg = runtime_config.load_decision_router_config("/does/not/exist.toml")
+
+    assert cfg.primary_model == "maxwell1500/ornith-35b:Q5_K_M"
+    assert cfg.challenger_model == "gpt-oss:20b"
+    assert cfg.tie_break_model == "gemma4:26b"
+    assert cfg.num_ctx == 32768
+    assert cfg.quorum == 2
+
+
+def test_decision_router_config_allows_exact_installed_tag_overrides(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[decision_router]
+primary_model = "ornith-local:35b-q5"
+challenger_model = "gpt-oss:20b"
+tie_break_model = "gemma4:26b-mxfp8"
+primary_keep_alive = "21m"
+challenger_keep_alive = "19m"
+tie_break_keep_alive = "90s"
+num_ctx = 16384
+num_predict = 2048
+read_timeout_ms = 180000
+max_input_chars = 80000
+max_output_chars = 12000
+max_feedback_chars = 6000
+quorum = 2
+adoption_artifact = "~/.wiki/runtime/model-lab/candidate.json"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = runtime_config.load_decision_router_config(config)
+
+    assert cfg.primary_model == "ornith-local:35b-q5"
+    assert cfg.challenger_model == "gpt-oss:20b"
+    assert cfg.tie_break_model == "gemma4:26b-mxfp8"
+    assert cfg.primary_keep_alive == "21m"
+    assert cfg.challenger_keep_alive == "19m"
+    assert cfg.tie_break_keep_alive == "90s"
+    assert cfg.num_ctx == 16384
+    assert cfg.num_predict == 2048
+    assert cfg.read_timeout_ms == 180000
+    assert cfg.max_input_chars == 80000
+    assert cfg.max_output_chars == 12000
+    assert cfg.max_feedback_chars == 6000
+    assert cfg.quorum == 2
+    assert cfg.adoption_artifact == "~/.wiki/runtime/model-lab/candidate.json"
+
+
+def test_decision_router_config_accepts_tie_model_alias(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[decision_router]
+tie_model = "gemma4:26b-local"
+tie_keep_alive = "3m"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = runtime_config.load_decision_router_config(config)
+
+    assert cfg.tie_break_model == "gemma4:26b-local"
+    assert cfg.tie_break_keep_alive == "3m"
+
+
 def test_reranker_config_reads_nested_search_section(tmp_path: Path, monkeypatch) -> None:
     config = tmp_path / "config.toml"
     legacy = tmp_path / "recall.toml"

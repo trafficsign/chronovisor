@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import hashlib
 import json
 import os
 import tempfile
@@ -404,44 +403,23 @@ def _run_sleep_cycle(
         "convergence_lease_recovery",
         lambda: ConvergenceStore().reap_expired_leases(dry_run=dry_run),
     )
-    frontier_capability_preflight = _run_lane(
-        "frontier_capability_preflight",
-        lambda: __import__(
-            "llm_wiki_mcp.frontier_review", fromlist=["run_frontier_preflight"]
-        ).run_frontier_preflight(),
-    )
-    capability_fingerprint = ""
-    if frontier_capability_preflight.get("ok") is True:
-        capability_fingerprint = hashlib.sha256(
-            json.dumps(
-                frontier_capability_preflight,
-                ensure_ascii=False,
-                sort_keys=True,
-                default=str,
-            ).encode("utf-8")
-        ).hexdigest()
-    try:
-        human_recheck_cooldown = max(
-            0,
-            int(os.getenv("LLM_WIKI_HUMAN_REQUIRED_RECHECK_SECONDS", "3600")),
-        )
-    except ValueError:
-        human_recheck_cooldown = 3_600
-    convergence_human_recovery = _run_lane(
-        "convergence_human_recovery",
-        lambda: ConvergenceStore().resume_due_human_required(
-            capability_fingerprint=capability_fingerprint,
-            cooldown_seconds=human_recheck_cooldown,
-            dry_run=dry_run,
-        ),
-    )
-    external_queue_recovery = _run_lane(
-        "external_queue_recovery",
-        lambda: __import__("llm_wiki_mcp.capability_recovery", fromlist=["resume_external_queues"]).resume_external_queues(
-            preflight=frontier_capability_preflight,
-            dry_run=dry_run,
-        ),
-    )
+    # Routine sleep is a local-only data-plane job.  Frontier capability is
+    # checked only when an explicit system-code incident acquires the durable
+    # repair guard; polling Codex here creates process noise and can revive
+    # human-boundary queues on every cycle.
+    frontier_capability_preflight = {
+        "ok": False,
+        "status": "disabled",
+        "reason": "repair_plane_only",
+    }
+    convergence_human_recovery = {
+        "status": "skipped",
+        "reason": "human_boundary_requires_explicit_recheck",
+    }
+    external_queue_recovery = {
+        "status": "skipped",
+        "reason": "repair_plane_only",
+    }
     correction_budget = cycle_budget.slice(
         # One authoritative classification plus one byte-level mutation review.
         max_local_calls=6,
@@ -639,6 +617,7 @@ def _run_sleep_cycle(
         "self_heal",
         lambda: __import__("llm_wiki_mcp.self_heal", fromlist=["run_pending"]).run_pending(
             max_packets=1,
+            enable_frontier=False,
             dry_run=dry_run,
             frontier_budget=lane_budgets["self_heal"],
         ),

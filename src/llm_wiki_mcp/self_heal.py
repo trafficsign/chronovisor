@@ -8,7 +8,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -18,7 +17,14 @@ from typing import Any
 
 from llm_wiki_mcp import runtime_status, wiki
 from llm_wiki_mcp.alias_store import add_alias
-from llm_wiki_mcp.convergence import is_human_required_result
+from llm_wiki_mcp.convergence import (
+    is_human_required_failure,
+    is_human_required_result,
+)
+from llm_wiki_mcp.frontier_guard import (
+    EvidenceValidationError,
+    RepairIncidentEvidence,
+)
 from llm_wiki_mcp.local_repair import LocalRepairDecision, propose_repair
 
 
@@ -29,6 +35,7 @@ SELF_HEAL_STATUSES = {
     "frontier_retry",
     "frontier_preflight_failed",
     "pending_frontier_review",
+    "repair_deferred",
 }
 
 RUNNING_STATUSES = {
@@ -736,6 +743,19 @@ def pending_packets(*, now: datetime | None = None) -> list[Path]:
         status = packet.get("status")
         if status in SELF_HEAL_STATUSES and due:
             out.append(path)
+        elif (
+            packet.get("incident_kind") == "system_code_repair"
+            and (
+                int(packet.get("frontier_attempts") or 0) > 0
+                or (
+                    isinstance(packet.get("frontier_result"), dict)
+                    and packet["frontier_result"].get("execution_started") is True
+                )
+            )
+        ):
+            # A started repair incident owns exactly one subscription session
+            # forever.  Generic quarantine cooldowns must not resurrect it.
+            continue
         elif _terminal_resume_kind(packet, now=current) is not None:
             # Non-human quarantines reopen after cooldown. Genuine external
             # authority boundaries are periodically rechecked so fixing auth,
@@ -823,7 +843,10 @@ def apply_local_decision(
     if decision.action == "quarantine_raw":
         return {"action": decision.action, "kept_quarantined": True}
 
-    raise ValueError(f"local action requires frontier or is not directly applicable: {decision.action}")
+    raise ValueError(
+        "local action is not directly applicable and requires the guarded "
+        f"system-repair lane: {decision.action}"
+    )
 
 
 def _local_decision_from_payload(payload: dict[str, Any] | None) -> LocalRepairDecision | None:
@@ -877,11 +900,182 @@ def _queue_frontier(packet_path: Path, packet: dict[str, Any], decision: dict[st
     return target
 
 
+def _repair_incident_evidence(packet: dict[str, Any]) -> RepairIncidentEvidence:
+    """Return the strict repair-plane evidence carried by ``packet``.
+
+    ``enable_frontier`` is an operator capability switch, not an admission
+    decision.  Admission additionally requires an explicit system-code
+    incident and a complete evidence envelope.  Routine semantic, content,
+    and structured-output failures intentionally have neither field.
+    """
+
+    if packet.get("incident_kind") != "system_code_repair":
+        raise EvidenceValidationError(
+            ["incident_kind must explicitly be system_code_repair"]
+        )
+    payload = packet.get("repair_evidence")
+    if not isinstance(payload, dict):
+        raise EvidenceValidationError(["repair_evidence object is required"])
+
+    required = {
+        "component",
+        "fingerprint",
+        "failure_class",
+        "occurrence_count",
+        "distinct_inputs",
+        "local_repair_attempts",
+        "local_repair_evidence",
+    }
+    missing = sorted(key for key in required if key not in payload)
+    if missing:
+        raise EvidenceValidationError(
+            [f"repair_evidence is missing required fields: {', '.join(missing)}"]
+        )
+
+    notes = payload.get("notes")
+    trusted_contract = (
+        packet.get("job_id") == "trusted-watchdog"
+        and packet.get("failure_class") == "system_health_snapshot_exception"
+        and payload.get("component") == "watchdog.health_snapshot"
+        and payload.get("failure_class") == "system_health_snapshot_exception"
+        and isinstance(notes, dict)
+        and notes.get("producer") == "trusted_watchdog"
+    )
+    if not trusted_contract:
+        raise EvidenceValidationError(
+            ["packet was not emitted by the allowlisted trusted watchdog producer"]
+        )
+
+    packet_fingerprint = packet.get("fingerprint")
+    evidence_fingerprint = payload.get("fingerprint")
+    if packet_fingerprint != evidence_fingerprint:
+        raise EvidenceValidationError(
+            ["repair_evidence fingerprint must match the packet fingerprint"]
+        )
+    if packet.get("local_repair_attempts") != payload.get("local_repair_attempts"):
+        raise EvidenceValidationError(
+            [
+                "repair_evidence local_repair_attempts must match the "
+                "persisted packet attempt count"
+            ]
+        )
+
+    reproduction = payload.get("reproduction")
+    reproduction_payload = reproduction if isinstance(reproduction, dict) else {}
+    distinct_inputs = payload.get("distinct_inputs")
+    reproduction_command = payload.get(
+        "reproduction_command",
+        reproduction_payload.get("command"),
+    )
+    return RepairIncidentEvidence(
+        component=payload["component"],
+        fingerprint=evidence_fingerprint,
+        failure_class=payload["failure_class"],
+        occurrence_count=payload["occurrence_count"],
+        distinct_inputs=(
+            tuple(distinct_inputs)
+            if isinstance(distinct_inputs, (list, tuple))
+            else distinct_inputs
+        ),
+        local_repair_attempts=payload["local_repair_attempts"],
+        local_repair_evidence=(
+            tuple(payload.get("local_repair_evidence") or ())
+            if isinstance(payload.get("local_repair_evidence"), (list, tuple))
+            else payload.get("local_repair_evidence")
+        ),
+        reproduction_command=(
+            tuple(reproduction_command)
+            if isinstance(reproduction_command, (list, tuple))
+            else reproduction_command
+        ),
+        failing_test=payload.get(
+            "failing_test",
+            reproduction_payload.get("failing_test"),
+        ),
+        reproduction_artifact=payload.get(
+            "reproduction_artifact",
+            reproduction_payload.get("artifact"),
+        ),
+        all_local_models_unavailable=payload.get(
+            "all_local_models_unavailable",
+            False,
+        ),
+        local_unavailability_artifact=payload.get(
+            "local_unavailability_artifact"
+        ),
+        role=payload.get("role", "code_repair"),
+        incident_kind=payload.get("incident_kind", "system_code_repair"),
+        notes=payload.get("notes") or {},
+    )
+
+
+def _frontier_eligibility(
+    packet: dict[str, Any],
+) -> tuple[RepairIncidentEvidence | None, str | None]:
+    try:
+        return _repair_incident_evidence(packet), None
+    except (EvidenceValidationError, TypeError, ValueError) as exc:
+        return None, str(exc)
+
+
+def _human_boundary_result(
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    """Stop external-authority failures before any local/frontier model call."""
+
+    failure_class = str(packet.get("failure_class") or "")
+    if not is_human_required_failure(failure_class):
+        return None
+    result: dict[str, Any] = {
+        "packet": str(packet_path),
+        "failure_id": packet.get("failure_id"),
+        "status": "dry_run" if dry_run else "human_required",
+        "reason": "external_authority_boundary",
+        "failure_class": failure_class,
+    }
+    if dry_run:
+        result["projected_status"] = "human_required"
+        return result
+
+    frontier_result = {
+        "decision": "needs_retry",
+        "summary": "external authority must be restored by the user",
+        "human_required": True,
+        "notify_user": True,
+        "frontier_failure": {
+            "failure_class": failure_class,
+            "rescue_status": "human_required",
+            "summary": "external authority must be restored by the user",
+            "human_required": True,
+            "notify_user": True,
+        },
+        "rescue_status": "human_required",
+    }
+    notification = maybe_notify_human_required(packet, frontier_result)
+    _update_packet(
+        packet_path,
+        packet,
+        status="human_required",
+        frontier_result=frontier_result,
+        frontier_status="not_attempted",
+        human_notification=notification,
+        human_required_at=datetime.now().isoformat(timespec="seconds"),
+        next_attempt_at=None,
+    )
+    result["frontier_result"] = frontier_result
+    result["human_notification"] = notification
+    return result
+
+
 def _run_frontier(
     packet_path: Path,
     packet: dict[str, Any],
     local_decision: dict[str, Any] | None,
     *,
+    evidence: RepairIncidentEvidence,
     execute_patch: bool,
 ) -> dict[str, Any]:
     from llm_wiki_mcp.frontier_review import run_frontier_review
@@ -891,6 +1085,7 @@ def _run_frontier(
         local_decision,
         repo_root=_repo_root(),
         execute_patch=execute_patch,
+        evidence=evidence,
     )
     payload = result.to_dict()
     _write_json(_frontier_decision_dir() / packet_path.name, payload)
@@ -945,7 +1140,10 @@ def _budget_deferred_result(
 def _frontier_final_status(frontier_result: dict[str, Any]) -> str:
     if is_human_required_result(frontier_result):
         return "human_required"
-    if frontier_result.get("decision") == "approved":
+    if (
+        frontier_result.get("decision") == "approved"
+        and frontier_result.get("verified") is True
+    ):
         return "frontier_approved"
     rescue_status = frontier_result.get("rescue_status")
     if rescue_status in PENDING_REVIEW_STATUSES:
@@ -961,7 +1159,7 @@ def _handle_packet_unlocked(
     packet_path: Path,
     *,
     use_qwen: bool = True,
-    enable_frontier: bool = True,
+    enable_frontier: bool = False,
     execute_frontier_patch: bool = True,
     dry_run: bool = False,
     max_attempts: int = 3,
@@ -969,6 +1167,14 @@ def _handle_packet_unlocked(
     frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
     packet = _read_json(packet_path)
+    human_boundary = _human_boundary_result(
+        packet_path,
+        packet,
+        dry_run=dry_run,
+    )
+    if human_boundary is not None:
+        return human_boundary
+    repair_evidence, frontier_ineligible_reason = _frontier_eligibility(packet)
     if _is_transient_read_back_packet(packet):
         return _retire_transient_read_back_packet(
             packet_path,
@@ -1050,7 +1256,6 @@ def _handle_packet_unlocked(
     max_frontier_attempts = max(1, max_attempts)
     will_apply_local = False
     requires_frontier_action = False
-    frontier_reserved = False
     mutation_reserved = False
 
     if frontier_only:
@@ -1082,15 +1287,18 @@ def _handle_packet_unlocked(
                 "local_decision": local_decision,
             }
 
-        # Only a deterministic retry may complete locally. Alias selection and
-        # permanent raw quarantine change semantic/lifecycle state, so Qwen can
-        # propose them but the frontier model must be the final judge.
+        # Validated deterministic repairs and two-vote local consensus repairs
+        # complete in the local data plane.  A legacy one-model generator is a
+        # test/compatibility seam and is never mutation authority.
         will_apply_local = (
-            decision.status == "resolved" and decision.action == "retry_raw"
+            decision.status == "resolved"
+            and decision.action
+            in {"resolve_update_target", "retry_raw", "quarantine_raw"}
+            and decision.source in {"deterministic", "local_consensus"}
         )
         requires_frontier_action = (
-            decision.status == "resolved"
-            and decision.action in {"resolve_update_target", "quarantine_raw"}
+            decision.status == "escalate"
+            or decision.action in {"escalate_to_frontier", "propose_prompt_fix", "propose_test_case"}
         )
         if will_apply_local and frontier_budget is not None:
             allowed, reason = frontier_budget.consume("mutation")
@@ -1107,41 +1315,37 @@ def _handle_packet_unlocked(
     if frontier_only:
         requires_frontier_action = bool(
             isinstance(local_decision, dict)
-            and local_decision.get("status") == "resolved"
-            and local_decision.get("action")
-            in {"resolve_update_target", "quarantine_raw"}
+            and (
+                local_decision.get("status") == "escalate"
+                or local_decision.get("action")
+                in {"escalate_to_frontier", "propose_prompt_fix", "propose_test_case"}
+            )
         )
     routes_directly_to_frontier = frontier_only or not will_apply_local
     if (
         routes_directly_to_frontier
         and enable_frontier
+        and repair_evidence is not None
         and prior_frontier_attempts < max_frontier_attempts
         and frontier_budget is not None
     ):
-        frontier_allowed, frontier_reason = frontier_budget.can_consume("frontier")
         needs_mutation = (
             (execute_frontier_patch or requires_frontier_action)
             and not dry_run
             and not mutation_reserved
         )
-        mutation_allowed, mutation_reason = (
-            frontier_budget.can_consume("mutation")
-            if needs_mutation
-            else (True, "ok")
-        )
-        if not frontier_allowed or not mutation_allowed:
-            return _budget_deferred_result(
-                packet_path,
-                packet,
-                kind="frontier" if not frontier_allowed else "mutation",
-                reason=frontier_reason if not frontier_allowed else mutation_reason,
-                local_decision=local_decision,
-            )
-        frontier_budget.consume("frontier")
         if needs_mutation:
+            mutation_allowed, mutation_reason = frontier_budget.can_consume("mutation")
+            if not mutation_allowed:
+                return _budget_deferred_result(
+                    packet_path,
+                    packet,
+                    kind="mutation",
+                    reason=mutation_reason,
+                    local_decision=local_decision,
+                )
             frontier_budget.consume("mutation")
             mutation_reserved = True
-        frontier_reserved = True
 
     lease_owner = uuid.uuid4().hex
     result: dict[str, Any] = {
@@ -1213,20 +1417,45 @@ def _handle_packet_unlocked(
             )
             result["local_error"] = str(exc)
 
-    queue_path = _queue_frontier(packet_path, packet, local_decision)
-    result["frontier_queue_path"] = str(queue_path)
-    if not enable_frontier:
-        delay = max(0, backoff_base_seconds) * (2 ** max(0, prior_frontier_attempts))
+    if not enable_frontier or repair_evidence is None:
+        local_attempts = int(packet.get("local_repair_attempts") or 0)
+        terminal = local_attempts >= max(1, max_attempts)
+        delay = max(0, backoff_base_seconds) * (2 ** max(0, local_attempts - 1))
+        status = "local_quarantined" if terminal else "pending_local_repair"
+        local_failure_reason = (
+            "repair_plane_disabled"
+            if not enable_frontier
+            else "frontier_repair_not_eligible"
+        )
         _update_packet(
             packet_path,
             packet,
-            status="pending_frontier",
+            status=status,
             local_decision=local_decision,
-            frontier_queue_path=str(queue_path),
-            next_attempt_at=(datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds"),
+            frontier_queue_path=None,
+            next_attempt_at=(
+                None
+                if terminal
+                else (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds")
+            ),
+            quarantined_at=(
+                datetime.now().isoformat(timespec="seconds")
+                if terminal
+                else packet.get("quarantined_at")
+            ),
+            local_failure_reason=local_failure_reason,
+            frontier_eligibility_error=(
+                frontier_ineligible_reason if repair_evidence is None else None
+            ),
         )
-        result["status"] = "pending_frontier"
+        result["status"] = status
+        result["reason"] = local_failure_reason
+        if repair_evidence is None:
+            result["frontier_eligibility_error"] = frontier_ineligible_reason
         return result
+
+    queue_path = _queue_frontier(packet_path, packet, local_decision)
+    result["frontier_queue_path"] = str(queue_path)
 
     if prior_frontier_attempts >= max_frontier_attempts:
         _update_packet(
@@ -1243,8 +1472,7 @@ def _handle_packet_unlocked(
         result["reason"] = "frontier_attempt_limit_reached"
         return result
 
-    if frontier_budget is not None and not frontier_reserved:
-        frontier_allowed, frontier_reason = frontier_budget.can_consume("frontier")
+    if frontier_budget is not None:
         needs_mutation = (
             (execute_frontier_patch or requires_frontier_action)
             and not dry_run
@@ -1255,15 +1483,14 @@ def _handle_packet_unlocked(
             if needs_mutation
             else (True, "ok")
         )
-        if not frontier_allowed or not mutation_allowed:
+        if not mutation_allowed:
             return _budget_deferred_result(
                 packet_path,
                 packet,
-                kind="frontier" if not frontier_allowed else "mutation",
-                reason=frontier_reason if not frontier_allowed else mutation_reason,
+                kind="mutation",
+                reason=mutation_reason,
                 local_decision=local_decision,
             )
-        frontier_budget.consume("frontier")
         if needs_mutation:
             frontier_budget.consume("mutation")
             mutation_reserved = True
@@ -1286,6 +1513,7 @@ def _handle_packet_unlocked(
             packet_path,
             packet,
             local_decision,
+            evidence=repair_evidence,
             execute_patch=(
                 execute_frontier_patch
                 and not requires_frontier_action
@@ -1293,17 +1521,11 @@ def _handle_packet_unlocked(
             ),
         )
     except Exception as exc:
-        final_status = (
-            "frontier_quarantined"
-            if attempt >= max_frontier_attempts
-            else "frontier_retry"
-        )
-        delay = max(0, backoff_base_seconds) * (2 ** max(0, attempt - 1))
-        next_attempt_at = (
-            None
-            if final_status == "frontier_quarantined"
-            else (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds")
-        )
+        # Once control enters the guarded execution call we cannot safely
+        # prove that a child was never spawned.  Fail terminally so one packet
+        # can never create a second subscription session.
+        final_status = "frontier_quarantined"
+        next_attempt_at = None
         frontier_error = {
             "exception_type": exc.__class__.__name__,
             "message": str(exc),
@@ -1346,7 +1568,49 @@ def _handle_packet_unlocked(
         result["status"] = final_status
         result["frontier_error"] = frontier_error
         return result
+    if frontier_result.get("execution_started") is False:
+        # Guard denial, guard failure, and preflight failure happen before the
+        # one permitted Codex process begins.  They are durable deferrals, not
+        # repair attempts, and therefore must not consume the packet limit.
+        attempt = prior_frontier_attempts
+        failure = frontier_result.get("frontier_failure")
+        failure = failure if isinstance(failure, dict) else {}
+        rescue = frontier_result.get("rescue_attempt")
+        rescue = rescue if isinstance(rescue, dict) else {}
+        guard_reason = str(rescue.get("guard_reason") or "")
+        if guard_reason == "incident_already_started":
+            deferred_status = "frontier_quarantined"
+            deferred_next_attempt = None
+        else:
+            deferred_status = "repair_deferred"
+            retry_at = _parse_iso(rescue.get("retry_at"))
+            deferred_next_attempt = (
+                retry_at.isoformat(timespec="seconds")
+                if retry_at is not None
+                else (datetime.now() + timedelta(seconds=max(60, backoff_base_seconds))).isoformat(
+                    timespec="seconds"
+                )
+            )
+        _update_packet(
+            packet_path,
+            packet,
+            status=deferred_status,
+            frontier_attempts=prior_frontier_attempts,
+            self_heal_attempts=prior_frontier_attempts,
+            frontier_result=frontier_result,
+            next_attempt_at=deferred_next_attempt,
+        )
+        result["status"] = deferred_status
+        result["frontier_result"] = frontier_result
+        result["next_attempt_at"] = deferred_next_attempt
+        result["reason"] = guard_reason or failure.get("failure_class")
+        return result
     final_status = _frontier_final_status(frontier_result)
+    if frontier_result.get("execution_started") is True and final_status not in {
+        "frontier_approved",
+        "human_required",
+    }:
+        final_status = "frontier_quarantined"
     next_attempt_at = None
     if final_status in {"frontier_retry", *PENDING_REVIEW_STATUSES}:
         if attempt >= max(1, max_attempts):
@@ -1396,16 +1660,8 @@ def _handle_packet_unlocked(
                     applied=False,
                 )
         if action_error is not None:
-            final_status = (
-                "frontier_quarantined"
-                if attempt >= max_frontier_attempts
-                else "frontier_retry"
-            )
-            if final_status == "frontier_retry":
-                delay = max(0, backoff_base_seconds) * (2 ** max(0, attempt - 1))
-                next_attempt_at = (
-                    datetime.now() + timedelta(seconds=delay)
-                ).isoformat(timespec="seconds")
+            final_status = "frontier_quarantined"
+            next_attempt_at = None
             result["action_error"] = action_error
     human_notification = None
     pending_review_path = None
@@ -1483,7 +1739,7 @@ def handle_packet(
     packet_path: Path,
     *,
     use_qwen: bool = True,
-    enable_frontier: bool = True,
+    enable_frontier: bool = False,
     execute_frontier_patch: bool = True,
     dry_run: bool = False,
     max_attempts: int = 3,
@@ -1553,7 +1809,7 @@ def run_pending(
     *,
     max_packets: int = 3,
     use_qwen: bool = True,
-    enable_frontier: bool = True,
+    enable_frontier: bool = False,
     execute_frontier_patch: bool = True,
     dry_run: bool = False,
     max_attempts: int = 3,
@@ -1595,7 +1851,7 @@ def run_auto_apply_error_self_heal(
     threshold: int = 3,
     max_packets: int = 3,
     use_qwen: bool = True,
-    enable_frontier: bool = True,
+    enable_frontier: bool = False,
     execute_frontier_patch: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -1637,25 +1893,98 @@ def run_auto_apply_error_self_heal(
     }
 
 
-def start_background(packet_path: Path) -> None:
-    """Launch self-heal asynchronously after quarantine."""
+def start_background(packet_path: Path) -> dict[str, Any] | None:
+    """Durably queue routine self-heal without detaching a Python worker.
+
+    The historical name is retained for callers in the failure supervisors.
+    Execution belongs to the single-flight converge queue; this function never
+    starts a process and never enables the exceptional frontier repair plane.
+    """
 
     if os.environ.get("LLM_WIKI_SELF_HEAL_AUTORUN", "1") in {"0", "false", "False"}:
-        return
+        return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
-        return
-    subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "llm_wiki_mcp.self_heal",
-            "--packet",
-            str(packet_path),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        return None
+    from llm_wiki_mcp.background_jobs import enqueue_job
+
+    resolved = packet_path.expanduser().resolve(strict=False)
+    return enqueue_job(
+        name="self-heal",
+        module="llm_wiki_mcp.self_heal",
+        args=["--packet", str(resolved)],
+        env={},
+        stdin_text="",
     )
+
+
+def enqueue_system_code_repair(packet_path: Path) -> dict[str, Any]:
+    """Durably enqueue one trusted repair-plane packet without spawning.
+
+    Only :mod:`llm_wiki_mcp.system_incident_supervisor` should call this
+    helper.  The converge worker owns execution through the background-job
+    ledger; watchdog and hook processes must never detach a worker directly.
+    """
+
+    from llm_wiki_mcp.background_jobs import enqueue_job
+
+    resolved = packet_path.expanduser().resolve(strict=False)
+    packet = _read_json(resolved)
+    evidence = _repair_incident_evidence(packet)
+    if (
+        evidence.component != "watchdog.health_snapshot"
+        or evidence.notes.get("producer") != "trusted_watchdog"
+        or packet.get("job_id") != "trusted-watchdog"
+    ):
+        raise EvidenceValidationError(
+            ["only trusted watchdog health incidents may be durably enqueued"]
+        )
+    return enqueue_job(
+        name="system-code-repair",
+        module="llm_wiki_mcp.self_heal",
+        args=["--packet", str(resolved), "--enable-frontier-repair"],
+        env={},
+        stdin_text="",
+    )
+
+
+def enqueue_due_system_repairs(*, limit: int = 2) -> dict[str, Any]:
+    """Requeue guard-deferred incidents only when their durable time is due."""
+
+    queued: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    due_paths: list[Path] = []
+    for path in pending_packets():
+        try:
+            if _read_json(path).get("status") == "repair_deferred":
+                due_paths.append(path)
+        except Exception:
+            continue
+        if len(due_paths) >= max(0, limit):
+            break
+    for path in due_paths:
+        try:
+            packet = _read_json(path)
+            job = enqueue_system_code_repair(path)
+            queued.append(
+                {
+                    "packet": str(path),
+                    "job_id": job.get("job_id"),
+                    "enqueued": bool(job.get("enqueued")),
+                    "coalesced": bool(job.get("coalesced")),
+                }
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "packet": str(path),
+                    "error_type": exc.__class__.__name__,
+                }
+            )
+    return {
+        "status": "ok" if not errors else "attention",
+        "queued": queued,
+        "errors": errors,
+    }
 
 
 def drill_packet() -> dict[str, Any]:
@@ -1813,17 +2142,9 @@ def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
             on_finally(failed=True, triage_failed=False)
 
     ingest_mod.run_ingest = fake_run_ingest
-    globals()["_run_frontier"] = lambda *_args, **_kwargs: {
-        "decision": "approved",
-        "summary": "sandbox frontier approved the exact alias repair",
-        "tests_run": ["sandbox ingest retry"],
-        "commit": None,
-        "committed": False,
-        "pushed": False,
-        "risk": "low",
-        "notes": None,
-        "human_required": False,
-    }
+    globals()["_run_frontier"] = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("sandbox semantic repair must remain in the local data plane")
+    )
     try:
         batches = [orchestrator.run_pending_ingest(force=True) for _ in range(3)]
         packet_paths = sorted((_packet_dir()).glob("*.json"))
@@ -1868,6 +2189,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--auto-apply-error-threshold", type=int, default=3)
     parser.add_argument("--no-qwen", action="store_true")
+    parser.add_argument(
+        "--enable-frontier-repair",
+        action="store_true",
+        help="Allow an eligible system-code incident to request the guarded repair plane.",
+    )
     parser.add_argument("--no-frontier", action="store_true")
     parser.add_argument("--review-only", action="store_true", help="Frontier may review but not patch.")
     parser.add_argument("--dry-run", action="store_true")
@@ -1880,8 +2206,53 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_BACKGROUND_RETRY_STATUSES = frozenset(
+    {
+        "busy",
+        "error",
+        "budget_deferred",
+        "pending_local_repair",
+        "local_repair_failed",
+        "pending_frontier",
+        "frontier_running",
+        "frontier_retry",
+        "frontier_preflight_failed",
+        "pending_frontier_review",
+    }
+)
+_BACKGROUND_QUARANTINE_STATUSES = frozenset(
+    {
+        "local_quarantined",
+        "frontier_quarantined",
+        "frontier_rejected",
+        "human_required",
+    }
+)
+
+
+def _background_exit_code(result: dict[str, Any]) -> int:
+    """Map durable repair state to the background-ledger exit protocol."""
+
+    from llm_wiki_mcp.background_jobs import (
+        QUARANTINE_EXIT_CODE,
+        RETRYABLE_EXIT_CODE,
+    )
+
+    rows = [result]
+    nested = result.get("results")
+    if isinstance(nested, list):
+        rows.extend(row for row in nested if isinstance(row, dict))
+    statuses = {str(row.get("status") or "") for row in rows}
+    if statuses & _BACKGROUND_RETRY_STATUSES:
+        return RETRYABLE_EXIT_CODE
+    if statuses & _BACKGROUND_QUARANTINE_STATUSES:
+        return QUARANTINE_EXIT_CODE
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    frontier_enabled = args.enable_frontier_repair and not args.no_frontier
     if args.sandbox_drill:
         print(
             json.dumps(
@@ -1900,17 +2271,17 @@ def main(argv: list[str] | None = None) -> int:
             threshold=args.auto_apply_error_threshold,
             max_packets=args.max_packets,
             use_qwen=not args.no_qwen,
-            enable_frontier=not args.no_frontier,
+            enable_frontier=frontier_enabled,
             execute_frontier_patch=not args.review_only,
             dry_run=args.dry_run,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-        return 0
+        return _background_exit_code(result)
     if args.packet:
         result = handle_packet(
             args.packet,
             use_qwen=not args.no_qwen,
-            enable_frontier=not args.no_frontier,
+            enable_frontier=frontier_enabled,
             execute_frontier_patch=not args.review_only,
             dry_run=args.dry_run,
         )
@@ -1918,12 +2289,12 @@ def main(argv: list[str] | None = None) -> int:
         result = run_pending(
             max_packets=args.max_packets,
             use_qwen=not args.no_qwen,
-            enable_frontier=not args.no_frontier,
+            enable_frontier=frontier_enabled,
             execute_frontier_patch=not args.review_only,
             dry_run=args.dry_run,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    return 0
+    return _background_exit_code(result)
 
 
 if __name__ == "__main__":

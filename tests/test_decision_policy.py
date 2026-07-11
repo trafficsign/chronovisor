@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from llm_wiki_mcp import decision_router, frontier_review
+from llm_wiki_mcp.decision_policy import (
+    DECISION_POLICIES,
+    decision_policy_snapshot,
+    resolve_decision_policy,
+)
+from llm_wiki_mcp.decision_router import DecisionRouterResult
+from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
+
+
+SCHEMA = frontier_review.FRONTIER_DECISION_SCHEMA
+
+
+class FakeRouter:
+    source = "bootstrap_current_policy"
+    calls = 0
+
+    def __init__(self, **_kwargs) -> None:
+        self.policy = SimpleNamespace(
+            source=self.source,
+            audit_record=lambda: {"source": self.source},
+        )
+
+    def decide(self, _prompt, _schema):
+        type(self).calls += 1
+        return DecisionRouterResult(
+            status="agreed",
+            value={
+                "decision": "approved",
+                "summary": "accepted",
+                "tests_run": [],
+                "commit": None,
+                "committed": False,
+                "pushed": False,
+                "risk": None,
+                "notes": None,
+            },
+            agreement_sha256="a" * 64,
+        )
+
+
+def test_unknown_lane_fails_closed_without_starting_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeRouter.calls = 0
+    monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
+
+    result = frontier_review.run_structured_review(
+        "review",
+        SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="not-registered",
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["frontier_failure"]["failure_class"] == "local_decision_policy_blocked"
+    assert FakeRouter.calls == 0
+
+
+def test_shadow_lane_collects_vote_but_cannot_authorize_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeRouter.calls = 0
+    FakeRouter.source = "bootstrap_current_policy"
+    monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
+
+    result = frontier_review.run_structured_review(
+        "review",
+        SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert FakeRouter.calls == 1
+    assert result["decision"] == "needs_retry"
+    assert result["decision_policy"]["mode"] == "shadow"
+    assert result["frontier_failure"]["failure_class"] == "local_decision_shadow_only"
+
+
+def test_enabled_lane_requires_adopted_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeRouter.calls = 0
+    FakeRouter.source = "bootstrap_current_policy"
+    monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "review",
+        SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["frontier_failure"]["failure_class"] == "local_decision_artifact_required"
+
+
+def test_enabled_lane_can_return_only_adopted_consensus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeRouter.calls = 0
+    FakeRouter.source = "adopted_artifact"
+    monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "review",
+        SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["decision"] == "approved"
+    assert result["decision_policy"]["router_policy"]["source"] == "adopted_artifact"
+
+
+def test_every_registered_lane_names_a_production_schema() -> None:
+    schemas = production_decision_schemas()
+    assert DECISION_POLICIES
+    structured = {
+        policy.schema_name
+        for policy in DECISION_POLICIES.values()
+        if policy.kind in {"consensus", "local_batch"}
+    }
+    assert structured <= set(schemas)
+
+
+def test_every_production_structured_review_call_names_a_lane() -> None:
+    src_root = Path(__file__).resolve().parents[1] / "src" / "llm_wiki_mcp"
+    missing: list[str] = []
+    for path in sorted(src_root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            name = (
+                function.attr
+                if isinstance(function, ast.Attribute)
+                else function.id
+                if isinstance(function, ast.Name)
+                else ""
+            )
+            if name != "run_structured_review":
+                continue
+            keywords = {keyword.arg for keyword in node.keywords if keyword.arg}
+            if "decision_lane" not in keywords:
+                missing.append(f"{path.name}:{node.lineno}")
+    assert missing == []
+
+
+def test_policy_snapshot_separates_structured_shadow_from_deterministic_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for lane in DECISION_POLICIES:
+        monkeypatch.delenv(
+            "LLM_WIKI_DECISION_POLICY_" + lane.upper(),
+            raising=False,
+        )
+    snapshot = decision_policy_snapshot()
+    structured = sum(
+        policy.kind in {"consensus", "local_batch"}
+        for policy in DECISION_POLICIES.values()
+    )
+    deterministic = len(DECISION_POLICIES) - structured
+    assert snapshot["counts"]["shadow"] == structured
+    assert snapshot["counts"]["enabled"] == deterministic
+    assert resolve_decision_policy(None)[2] == "decision_lane_required"
+
+
+def test_schema_mismatch_stops_before_any_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeRouter.calls = 0
+    monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "review",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["unexpected"],
+            "properties": {"unexpected": {"type": "string"}},
+        },
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["frontier_failure"]["failure_class"] == "local_decision_schema_mismatch"
+    assert FakeRouter.calls == 0
+
+
+def test_non_structured_lane_cannot_enter_model_router(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeRouter.calls = 0
+    monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
+
+    result = frontier_review.run_structured_review(
+        "review",
+        SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="raw_capture",
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["frontier_failure"]["failure_class"] == "local_decision_policy_kind_invalid"
+    assert FakeRouter.calls == 0

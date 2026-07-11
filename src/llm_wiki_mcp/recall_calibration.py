@@ -644,6 +644,7 @@ Candidate calibration:
         repo_root=repo_root,
         timeout=timeout or 3600,
         execute_patch=False,
+        decision_lane="recall_calibration",
     )
 
 

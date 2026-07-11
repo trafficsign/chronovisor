@@ -117,6 +117,42 @@ def test_not_in_top_results_applies_exact_query_hint_once(tmp_path: Path, monkey
     assert recall_hints.load_query_hints(hints_file)[0]["count"] == 1
 
 
+def test_approved_query_hint_is_not_blocked_by_confidence_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    failure_file = tmp_path / "failures.jsonl"
+    ledger_file = tmp_path / "ledger.json"
+    hints_file = tmp_path / "query-hints.json"
+    _write_failures(
+        failure_file,
+        [
+            {
+                "page_id": "target-page",
+                "reason": "not-in-top-results",
+                "query": "specific target query",
+            }
+        ],
+    )
+    _allow_pages(monkeypatch, tmp_path)
+
+    result = read_back_repair.run_read_back_repair(
+        failure_file=failure_file,
+        ledger_file=ledger_file,
+        hints_file=hints_file,
+        now=NOW,
+        frontier_confidence_threshold=1.0,
+        reviewer=lambda _proposal: {
+            "decision": "approved",
+            "confidence": 0.01,
+            "summary": "exact query hint is justified",
+        },
+    )
+
+    assert result["applied"] == 1
+    assert recall_hints.load_query_hints(hints_file)[0]["query"] == "specific target query"
+
+
 def test_query_hint_never_applies_without_frontier_approval(
     tmp_path: Path,
     monkeypatch,

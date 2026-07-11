@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -156,3 +157,173 @@ def test_background_job_failure_is_durable_and_retryable(tmp_path: Path, monkeyp
     assert result["status"] == "retry_wait"
     assert stored["exit_code"] == 1
     assert "temporary failure" in stored["output_tail"]
+
+
+def test_background_job_explicit_quarantine_exit_is_terminal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    monkeypatch.setattr(
+        background_jobs.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=background_jobs.QUARANTINE_EXIT_CODE,
+            stdout='{"status":"human_required"}',
+            stderr="",
+        ),
+    )
+    job = background_jobs.enqueue_job(
+        name="self-heal", module="example", args=[], env={}, stdin_text=""
+    )
+
+    result = background_jobs.run_job(job["job_id"])
+
+    assert result["status"] == "quarantined"
+    assert result["next_retry_at"] is None
+
+
+def test_capture_jobs_coalesce_by_session_and_keep_latest_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    first_payload = json.dumps({"session_id": "session-1", "turn": 1})
+    latest_payload = json.dumps({"session_id": "session-1", "turn": 2})
+
+    first = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text=first_payload,
+    )
+    second = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text=latest_payload,
+    )
+
+    stored = json.loads((tmp_path / "state.json").read_text())
+    assert second["job_id"] == first["job_id"]
+    assert second["coalesced"] is True
+    assert second["enqueued"] is False
+    assert len(stored["jobs"]) == 1
+    assert stored["jobs"][first["job_id"]]["stdin"] == latest_payload
+
+
+def test_capture_jobs_without_session_identity_do_not_cross_coalesce(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+
+    first = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text="{}",
+    )
+    second = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text="{}",
+    )
+
+    assert first["job_id"] != second["job_id"]
+    assert first["coalesced"] is False
+    assert second["coalesced"] is False
+
+
+def test_running_capture_coalesce_requests_one_tail_rerun(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    first = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text=json.dumps({"session_id": "session-1", "turn": 1}),
+    )
+    assert background_jobs._claim(first["job_id"])["status"] == "running"
+    latest_payload = json.dumps({"session_id": "session-1", "turn": 2})
+
+    coalesced = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text=latest_payload,
+    )
+    rerun = background_jobs._finish(first["job_id"], exit_code=0, output="ok")
+
+    assert coalesced["rerun_requested"] is True
+    assert rerun["status"] == "queued"
+    assert rerun["stdin"] == latest_payload
+    claimed_again = background_jobs._claim(first["job_id"])
+    assert claimed_again is not None
+    completed = background_jobs._finish(first["job_id"], exit_code=0, output="ok")
+    assert completed["status"] == "completed"
+    assert completed["stdin"] == ""
+
+
+def test_background_job_lane_is_single_flight(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    first = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text=json.dumps({"session_id": "session-1"}),
+    )
+    second = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text=json.dumps({"session_id": "session-2"}),
+    )
+
+    assert background_jobs._claim(first["job_id"])["owner_pid"] == os.getpid()
+    assert background_jobs._claim(second["job_id"]) is None
+    background_jobs._finish(first["job_id"], exit_code=0, output="ok")
+    assert background_jobs._claim(second["job_id"])["owner_pid"] == os.getpid()
+
+
+def test_background_job_terminal_history_is_pruned(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    monkeypatch.setattr(background_jobs, "MAX_TERMINAL_JOBS", 2)
+
+    for index in range(4):
+        job = background_jobs.enqueue_job(
+            name="demo",
+            module="example",
+            args=[str(index)],
+            env={},
+            stdin_text=str(index),
+        )
+        background_jobs._claim(job["job_id"])
+        background_jobs._finish(job["job_id"], exit_code=0, output="ok")
+
+    stored = json.loads((tmp_path / "state.json").read_text())
+    assert len(stored["jobs"]) == 2
+    assert stored["pruned_terminal_total"] == 2

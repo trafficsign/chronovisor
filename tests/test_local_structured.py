@@ -1,0 +1,543 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from collections import deque
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+from llm_wiki_mcp import ollama
+from llm_wiki_mcp.local_structured import (
+    ChatRequest,
+    LocalConsensusAuditStore,
+    LocalStructuredSession,
+    normalize_json_output,
+    validate_json,
+)
+
+
+SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["decision", "summary"],
+    "properties": {
+        "decision": {"type": "string", "enum": ["apply", "defer"]},
+        "summary": {"type": "string", "minLength": 1},
+    },
+}
+
+
+class QueueTransport:
+    def __init__(self, *responses: str | Exception) -> None:
+        self.responses = deque(responses)
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest) -> str:
+        self.requests.append(request)
+        response = self.responses.popleft()
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_audit_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_wiki_mcp import wiki
+
+    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
+
+
+def _session(transport: QueueTransport, **overrides: Any) -> LocalStructuredSession:
+    options: dict[str, Any] = {
+        "num_ctx": 16_384,
+        "num_predict": 256,
+        "max_input_chars": 20_000,
+        "max_output_chars": 1_000,
+        "max_feedback_chars": 2_000,
+    }
+    options.update(overrides)
+    return LocalStructuredSession(model="local:test", transport=transport, **options)
+
+
+def test_first_pass_valid_uses_fixed_non_thinking_request() -> None:
+    transport = QueueTransport('{"decision":"apply","summary":"ok"}')
+
+    result = _session(transport).run("decide", SCHEMA, system="Follow the decision rule.")
+
+    assert result.ok is True
+    assert result.value == {"decision": "apply", "summary": "ok"}
+    assert result.first_pass_valid is True
+    assert result.repair_turns == 0
+    request = transport.requests[0]
+    assert request.model == "local:test"
+    assert request.num_ctx == 16_384
+    assert request.num_predict == 256
+    assert request.temperature == 0
+    assert request.think is False
+    assert request.schema == SCHEMA
+    assert request.messages[0]["role"] == "system"
+    assert "untrusted data" in request.messages[0]["content"]
+    assert '"decision"' in request.messages[0]["content"]
+
+
+def test_active_marker_is_atomic_redacted_and_removed_after_session(
+    tmp_path: Path,
+) -> None:
+    audit_root = tmp_path / "local-consensus"
+    secret = "private user correction that must never be persisted"
+    observed: dict[str, object] = {}
+
+    def inspect_while_active(request: ChatRequest) -> str:
+        paths = list((audit_root / "active").glob("*.json"))
+        assert len(paths) == 1
+        marker = json.loads(paths[0].read_text(encoding="utf-8"))
+        observed.update(marker)
+        serialized = paths[0].read_text(encoding="utf-8")
+        assert secret not in serialized
+        assert set(marker) == {
+            "request_sha256",
+            "role",
+            "model",
+            "started_at",
+            "pid",
+        }
+        return '{"decision":"apply","summary":"ok"}'
+
+    result = LocalStructuredSession(
+        model="local:test",
+        role="primary",
+        transport=inspect_while_active,
+        audit_root=audit_root,
+        max_input_chars=20_000,
+        max_output_chars=1_000,
+        max_feedback_chars=2_000,
+    ).run(secret, SCHEMA)
+
+    assert result.ok is True
+    assert observed["role"] == "primary"
+    assert observed["model"] == "local:test"
+    assert list((audit_root / "active").glob("*.json")) == []
+    audit_text = (audit_root / "audit.jsonl").read_text(encoding="utf-8")
+    assert secret not in audit_text
+    summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
+    assert summary["sessions"]["first_pass_valid"] == 1
+    assert summary["sessions"]["repaired"] == 0
+
+
+def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -> None:
+    audit_root = tmp_path / "local-consensus"
+    transport = QueueTransport(RuntimeError("offline"))
+
+    result = _session(
+        transport,
+        role="challenger",
+        audit_root=audit_root,
+    ).run("decide", SCHEMA)
+
+    assert result.failure_class == "transport_error"
+    assert list((audit_root / "active").glob("*.json")) == []
+    summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
+    assert summary["sessions"]["failures"] == {"transport_error": 1}
+
+
+def test_observability_write_failure_does_not_change_valid_result(tmp_path: Path) -> None:
+    blocked_root = tmp_path / "not-a-directory"
+    blocked_root.write_text("file", encoding="utf-8")
+    transport = QueueTransport('{"decision":"apply","summary":"ok"}')
+
+    result = _session(transport, audit_root=blocked_root).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.value["decision"] == "apply"
+
+
+def test_activity_role_rejects_payload_like_values() -> None:
+    with pytest.raises(ValueError, match="role"):
+        LocalStructuredSession(
+            model="local:test",
+            role="private user prompt with spaces",
+            transport=QueueTransport('{"decision":"apply","summary":"unused"}'),
+        )
+
+
+def test_audit_store_keeps_a_bounded_tail_and_refreshes_summary(tmp_path: Path) -> None:
+    store = LocalConsensusAuditStore(tmp_path / "audit", max_records=2)
+
+    for index in range(3):
+        store.append(
+            {
+                "kind": "decision",
+                "request_sha256": str(index),
+                "status": "quarantined" if index == 2 else "agreed",
+                "pair_agreement": index == 1,
+                "tie_break_used": False,
+                "unresolved_quarantine": index == 2,
+            }
+        )
+
+    rows = [
+        json.loads(line)
+        for line in store.audit_file.read_text(encoding="utf-8").splitlines()
+    ]
+    summary = json.loads(store.summary_file.read_text(encoding="utf-8"))
+    assert [row["request_sha256"] for row in rows] == ["1", "2"]
+    assert summary["retained_records"] == 2
+    assert summary["decisions"] == {
+        "agreed": 1,
+        "pair_agreement": 1,
+        "tie_break_used": 0,
+        "total": 2,
+        "unresolved_quarantine": 1,
+    }
+
+
+def test_audit_quarantine_is_compare_and_swap_guarded(tmp_path: Path) -> None:
+    store = LocalConsensusAuditStore(tmp_path / "local-consensus")
+    store.append({"kind": "session", "role": "test", "model": "fake"})
+    store.append({"kind": "session", "role": "test", "model": "fake"})
+    original = store.audit_file.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+
+    result = store.quarantine_records(
+        expected_sha256=digest,
+        reason="test audit isolation bug",
+    )
+
+    assert result["status"] == "quarantined"
+    assert result["records"] == 2
+    assert Path(result["archive"]).read_bytes() == original
+    assert store.audit_file.read_bytes() == b""
+    summary = json.loads(store.summary_file.read_text(encoding="utf-8"))
+    assert summary["retained_records"] == 0
+    with pytest.raises(RuntimeError, match="changed before quarantine"):
+        store.quarantine_records(
+            expected_sha256=digest,
+            reason="stale cleanup",
+        )
+
+
+def test_parse_error_is_repaired_in_same_client_side_session() -> None:
+    transport = QueueTransport(
+        '{"decision":"apply",',
+        '{"decision":"apply","summary":"fixed"}',
+    )
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.repair_turns == 1
+    assert len(transport.requests) == 2
+    second = transport.requests[1]
+    assert [message["role"] for message in second.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert second.messages[2]["content"] == '{"decision":"apply",'
+    feedback = second.messages[3]["content"]
+    assert '"keyword":"parse"' in feedback
+    assert '"pointer":""' in feedback
+    assert '"line":1' in feedback
+    assert '"column":21' in feedback
+    assert '"byte_offset":20' in feedback
+    assert "preserve every field that was already valid" in feedback
+
+
+def test_schema_errors_use_escaped_rfc6901_pointers() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["a/b~c"],
+        "properties": {"a/b~c": {"type": "integer"}},
+    }
+
+    issues = validate_json({}, schema)
+
+    assert len(issues) == 1
+    assert issues[0].pointer == "/a~1b~0c"
+    assert issues[0].keyword == "required"
+    assert issues[0].expected == "property is present"
+    assert issues[0].received == {"type": "missing"}
+
+
+def test_schema_repair_prompt_contains_exact_pointer_expected_and_received() -> None:
+    transport = QueueTransport(
+        '{"decision":7,"summary":"wrong type"}',
+        '{"decision":"apply","summary":"fixed"}',
+    )
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is True
+    feedback = transport.requests[1].messages[-1]["content"]
+    assert '"pointer":"/decision"' in feedback
+    assert '"keyword":"type"' in feedback
+    assert '"expected":["string"]' in feedback
+    assert '"received":{"type":"integer","value":7}' in feedback
+
+
+def test_validator_handles_existing_schema_subset_strictly() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["count", "names", "slug"],
+        "properties": {
+            "count": {"type": "integer", "minimum": 1, "maximum": 3},
+            "names": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 2, "maxLength": 4},
+                "minItems": 1,
+                "maxItems": 2,
+                "uniqueItems": True,
+            },
+            "slug": {"type": "string", "pattern": "^[a-z-]+$"},
+        },
+    }
+
+    issues = validate_json(
+        {"count": True, "names": ["x", "x", "longer"], "slug": "BAD", "extra": 1},
+        schema,
+    )
+
+    observed = {(issue.pointer, issue.keyword) for issue in issues}
+    assert ("/count", "type") in observed
+    assert ("/names", "maxItems") in observed
+    assert ("/names/1", "uniqueItems") in observed
+    assert ("/names/0", "minLength") in observed
+    assert ("/names/2", "maxLength") in observed
+    assert ("/slug", "pattern") in observed
+    assert ("/extra", "additionalProperties") in observed
+
+
+def test_same_invalid_output_stops_before_second_repair() -> None:
+    invalid = '{"summary":"missing decision"}'
+    transport = QueueTransport(invalid, invalid, '{"decision":"apply","summary":"unused"}')
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "repeated_output"
+    assert len(result.attempts) == 2
+    assert len(transport.requests) == 2
+
+
+def test_same_validation_fingerprint_stops_even_when_output_changes() -> None:
+    transport = QueueTransport(
+        '{"summary":"first"}',
+        '{"summary":"second"}',
+        '{"decision":"apply","summary":"unused"}',
+    )
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "repeated_validation_error"
+    assert result.attempts[0].output_sha256 != result.attempts[1].output_sha256
+    assert result.attempts[0].error_fingerprint == result.attempts[1].error_fingerprint
+    assert len(transport.requests) == 2
+
+
+def test_session_stops_after_initial_plus_two_repairs() -> None:
+    transport = QueueTransport(
+        '{"summary":"missing"}',
+        '{"decision":"other","summary":"wrong enum"}',
+        '{"decision":"apply","summary":"ok","extra":true}',
+    )
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "repair_exhausted"
+    assert len(result.attempts) == 3
+    assert len(transport.requests) == 3
+
+
+def test_output_cap_fails_closed_without_putting_oversize_text_in_history() -> None:
+    transport = QueueTransport("x" * 101)
+
+    result = _session(transport, max_output_chars=100).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "output_too_large"
+    assert result.attempts == ()
+    assert len(transport.requests) == 1
+
+
+def test_initial_input_byte_cap_fails_before_call() -> None:
+    transport = QueueTransport('{"decision":"apply","summary":"unused"}')
+
+    result = _session(
+        transport,
+        max_input_chars=500,
+        max_output_chars=500,
+        max_feedback_chars=500,
+    ).run("x" * 200, SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "input_too_large"
+    assert transport.requests == []
+
+
+def test_context_preflight_reserves_two_maximum_repair_histories() -> None:
+    transport = QueueTransport('{"decision":"apply","summary":"unused"}')
+
+    result = _session(
+        transport,
+        num_ctx=4_096,
+        num_predict=256,
+        max_input_chars=20_000,
+        max_output_chars=1_000,
+        max_feedback_chars=1_000,
+    ).run("short", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "context_window_exceeded"
+    assert "two fixed UTF-8 byte-bounded repair histories" in result.failure_reason
+    assert transport.requests == []
+
+
+def test_context_window_guard_fails_before_ollama_can_truncate() -> None:
+    transport = QueueTransport('{"decision":"apply","summary":"unused"}')
+
+    result = _session(
+        transport,
+        num_ctx=4_096,
+        num_predict=512,
+        max_input_chars=20_000,
+        max_output_chars=500,
+        max_feedback_chars=500,
+    ).run("記憶" * 1_200, SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "context_window_exceeded"
+    assert transport.requests == []
+
+
+def test_ascii_incompressible_context_is_rejected_before_transport() -> None:
+    transport = QueueTransport('{"decision":"apply","summary":"unused"}')
+    payload = "".join(f"id_{index:08x}_" for index in range(320))
+
+    result = _session(
+        transport,
+        num_ctx=4_096,
+        num_predict=512,
+        max_input_chars=20_000,
+        max_output_chars=500,
+        max_feedback_chars=500,
+    ).run(payload, SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "context_window_exceeded"
+    assert transport.requests == []
+
+
+def test_ollama_context_accounting_fails_closed_after_unexpected_shift() -> None:
+    transport = QueueTransport(
+        ollama.ChatResponse(
+            content='{"decision":"apply","summary":"unsafe"}',
+            prompt_eval_count=4_000,
+            eval_count=200,
+        )
+    )
+
+    result = _session(
+        transport,
+        num_ctx=4_096,
+        num_predict=256,
+        max_output_chars=200,
+        max_feedback_chars=200,
+    ).run(
+        "decide", SCHEMA
+    )
+
+    assert result.ok is False
+    assert result.failure_class == "context_truncation_suspected"
+
+
+def test_unsupported_schema_keyword_fails_before_transport() -> None:
+    transport = QueueTransport('{"decision":"apply","summary":"unused"}')
+
+    result = _session(transport).run("decide", {"type": "string", "oneOf": []})
+
+    assert result.ok is False
+    assert result.failure_class == "schema_invalid"
+    assert transport.requests == []
+
+
+def test_feedback_cap_fails_closed_instead_of_truncating_errors() -> None:
+    transport = QueueTransport('{"summary":"missing decision"}')
+
+    result = _session(transport, max_feedback_chars=80).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "feedback_too_large"
+    assert len(transport.requests) == 1
+
+
+def test_transport_timeout_is_not_retried_as_a_json_repair() -> None:
+    transport = QueueTransport(httpx.ReadTimeout("slow"))
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "transport_timeout"
+    assert len(transport.requests) == 1
+
+
+def test_duplicate_json_object_keys_are_rejected_not_silently_overwritten() -> None:
+    transport = QueueTransport(
+        '{"decision":"defer","decision":"apply","summary":"ambiguous"}',
+        '{"decision":"apply","summary":"fixed"}',
+    )
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.repair_turns == 1
+    assert result.attempts[0].issues[0].keyword == "parse"
+    assert "duplicate object key" in result.attempts[0].issues[0].message
+
+
+def test_only_whole_document_known_wrappers_are_normalized() -> None:
+    fenced, fenced_changed = normalize_json_output("```json\n{\"ok\":true}\n```")
+    prose, prose_changed = normalize_json_output('answer: {"ok":true}')
+    channel, channel_changed = normalize_json_output(
+        '<|channel|>final<|message|>{"ok":true}<|return|>'
+    )
+
+    assert (fenced, fenced_changed) == ('{"ok":true}', True)
+    assert (channel, channel_changed) == ('{"ok":true}', True)
+    assert (prose, prose_changed) == ('answer: {"ok":true}', False)
+
+
+def test_audit_record_never_contains_raw_model_output_or_payload() -> None:
+    secret = "secret-user-payload"
+    transport = QueueTransport(
+        json.dumps({"decision": "apply", "summary": secret})
+    )
+
+    result = _session(transport).run(secret, SCHEMA)
+    serialized = json.dumps(result.audit_record(), ensure_ascii=False)
+
+    assert result.ok is True
+    assert secret not in serialized
+    assert result.attempts[0].output_sha256 in serialized
+
+
+def test_invalid_attempt_audit_hashes_snippets_and_received_values() -> None:
+    secret = "secret-invalid-decision"
+    transport = QueueTransport(
+        json.dumps({"decision": secret, "summary": "bad"}),
+        json.dumps({"decision": "apply", "summary": "fixed"}),
+    )
+
+    result = _session(transport).run("prompt", SCHEMA)
+    serialized = json.dumps(result.audit_record(), ensure_ascii=False)
+
+    assert result.ok is True
+    assert secret not in serialized
+    assert "value_sha256" in serialized

@@ -335,6 +335,7 @@ Proposal:
         repo_root=Path(__file__).resolve().parents[2],
         timeout=timeout_seconds,
         execute_patch=False,
+        decision_lane="recall_auto_apply",
     )
 
 
@@ -492,7 +493,7 @@ def _frontier_gate(
                 )
                 is None
             ):
-                raise OSError("frontier verdict artifact read-back validation failed")
+                raise OSError("local-consensus verdict artifact read-back validation failed")
         except OSError as exc:
             return {
                 "status": "needs_retry",
@@ -501,7 +502,7 @@ def _frontier_gate(
                 "review": review,
                 "result": {
                     "status": "error",
-                    "error": f"frontier verdict artifact write failed: {exc}",
+                    "error": f"local-consensus verdict artifact write failed: {exc}",
                 },
                 "artifact_path": str(artifact_path),
             }
@@ -1038,7 +1039,7 @@ def apply_feedback_records(
                 "status": "frontier_retry",
                 "reason": (review or {}).get("summary")
                 or (gate.get("result") or {}).get("error")
-                or "frontier verdict is not ready",
+                or "local-consensus verdict is not ready",
             }
         status = str(result.get("status") or "error")
         if status in TERMINAL_SUCCESS_STATUSES or (dry_run and status == "dry_run"):
@@ -1280,7 +1281,7 @@ def apply_review_feedback_records(
             else:
                 result = {
                     "status": "frontier_retry",
-                    "reason": (review or {}).get("summary") or "frontier verdict is not ready",
+                    "reason": (review or {}).get("summary") or "local-consensus verdict is not ready",
                 }
         attempt = (
             1

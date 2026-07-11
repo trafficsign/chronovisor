@@ -4,6 +4,7 @@ import json
 
 from llm_wiki_mcp import search_eval
 from llm_wiki_mcp.convergence import CycleBudget
+from llm_wiki_mcp.feedback_ledger import feedback_row_sha256
 from llm_wiki_mcp.reranker import RerankOutcome
 from llm_wiki_mcp.runtime_config import RerankerConfig
 from llm_wiki_mcp.search import ScoredPage
@@ -84,6 +85,47 @@ def test_build_candidates_uses_feedback_labels(tmp_path) -> None:
     assert examples[2].expected_pages == ()
     assert examples[2].negative_pages == ("p24u-review",)
     assert examples[2].kind == "page_ignored"
+
+
+def test_build_candidates_excludes_only_exactly_retracted_page_feedback(tmp_path) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file = tmp_path / "recall-log.jsonl"
+    legacy = {
+        "kind": "page_ignored",
+        "content_correction_key": "legacy",
+        "prompt": "same prompt",
+        "negative_pages": ["old-noise"],
+        "source": "content_correction",
+    }
+    valid = {
+        **legacy,
+        "content_correction_key": "valid",
+        "negative_pages": ["real-noise"],
+    }
+    write_jsonl(
+        feedback_file,
+        [
+            legacy,
+            valid,
+            {
+                "kind": "page_ignored_retracted",
+                "content_correction_key": "legacy",
+                "target_kind": "page_ignored",
+                "target_feedback_sha256": feedback_row_sha256(legacy),
+            },
+        ],
+    )
+    write_jsonl(log_file, [])
+
+    examples = search_eval.build_candidates(
+        feedback_file=feedback_file,
+        log_file=log_file,
+        limit=10,
+    )
+
+    assert [(row.kind, row.negative_pages) for row in examples] == [
+        ("page_ignored", ("real-noise",))
+    ]
 
 
 def test_evaluate_examples_reports_ranking_metrics(monkeypatch) -> None:
@@ -530,7 +572,7 @@ def test_frontier_review_recovers_either_cross_file_crash_window(tmp_path) -> No
     assert queue_row["promoted_to_golden"] is True
 
 
-def test_frontier_review_keeps_low_confidence_rows_out_of_golden(tmp_path) -> None:
+def test_frontier_review_does_not_use_confidence_as_promotion_gate(tmp_path) -> None:
     queue_file = tmp_path / "label-queue.jsonl"
     golden_file = tmp_path / "search-golden.jsonl"
     write_jsonl(
@@ -563,10 +605,44 @@ def test_frontier_review_keeps_low_confidence_rows_out_of_golden(tmp_path) -> No
     )
 
     queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
-    assert payload["promoted"] == 0
-    assert payload["status_counts"] == {"frontier_uncertain": 1}
-    assert queue_rows[0]["queue_status"] == "frontier_uncertain"
-    assert not golden_file.exists()
+    assert payload["promoted"] == 1
+    assert payload["status_counts"] == {"frontier_approved": 1}
+    assert queue_rows[0]["queue_status"] == "frontier_approved"
+    assert search_eval.read_jsonl(golden_file)[0]["expected_pages"] == ["target"]
+
+
+def test_same_label_action_is_order_independent_across_confidence_metadata() -> None:
+    primary = {
+        "decision": "approved",
+        "confidence": 0.1,
+        "expected_pages": ["target"],
+        "negative_pages": [],
+        "stale_pages": [],
+        "summary": "primary",
+        "notes": None,
+    }
+    challenger = {**primary, "confidence": 0.9, "summary": "challenger"}
+
+    actions = []
+    for reviews in ([primary, challenger], [challenger, primary]):
+        combined = search_eval._combine_frontier_label_reviews(
+            list(reviews),
+            min_confidence=0.8,
+        )
+        actions.append(
+            (
+                search_eval._queue_status_for_review(
+                    combined,
+                    min_confidence=0.8,
+                ),
+                search_eval._label_tuple_from_review(combined),
+            )
+        )
+
+    assert actions == [
+        ("frontier_approved", (("target",), (), ())),
+        ("frontier_approved", (("target",), (), ())),
+    ]
 
 
 def test_frontier_review_votes_require_same_label_set(tmp_path) -> None:

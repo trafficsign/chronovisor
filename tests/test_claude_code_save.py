@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -123,7 +124,7 @@ def test_extract_filters_system_and_injected(tmp_path: Path) -> None:
     assert ("user", 3) not in roles_lines, "system-reminder should be filtered"
     assert ("user", 4) in roles_lines
     assert ("assistant", 5) in roles_lines
-    assert ("user", 6) not in roles_lines, "tool_result should be filtered"
+    assert ("tool", 6) in roles_lines, "tool_result must remain in structured capture"
     assert ("user", 7) in roles_lines
     assert ("assistant", 8) in roles_lines
 
@@ -133,6 +134,50 @@ def test_extract_filters_system_and_injected(tmp_path: Path) -> None:
     assert "tool_use" not in transcript
     assert "Wiki の保存フローを自動化したい" in transcript
     assert "了解、実装します。" in transcript
+    serialized = claude_code_save.serialize_transcript_records(result.records)
+    assert "internal reasoning" not in serialized
+    assert '"type": "tool_use"' in serialized
+    assert '"type": "tool_result"' in serialized
+    assert "file contents here" in serialized
+
+
+def test_extract_preserves_image_file_and_tool_payloads(tmp_path: Path) -> None:
+    session = tmp_path / "structured.jsonl"
+    write_jsonl(
+        session,
+        [
+            {
+                "type": "user",
+                "sessionId": "structured",
+                "message": {
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "data": "AA=="}},
+                        {"type": "document", "source": {"type": "base64", "data": "AQ=="}},
+                    ]
+                },
+            },
+            {
+                "type": "assistant",
+                "sessionId": "structured",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "Read", "input": {"file_path": "/tmp/a"}}
+                    ]
+                },
+            },
+        ],
+    )
+
+    result = claude_code_save.extract_transcript_slice(session)
+    serialized = claude_code_save.serialize_transcript_records(result.records)
+
+    assert [(record.role, record.line) for record in result.records] == [
+        ("user", 1),
+        ("tool", 2),
+    ]
+    assert '"type": "image"' in serialized
+    assert '"type": "document"' in serialized
+    assert '"name": "Read"' in serialized
 
 
 def test_extract_honors_after_line(tmp_path: Path) -> None:
@@ -196,6 +241,14 @@ def test_parse_writer_output_requires_evidence_quotes_for_save() -> None:
         match="must provide user evidence_quotes",
     ):
         claude_code_save.parse_writer_output(output)
+
+
+def test_run_memory_writer_is_retired_without_frontier_delegation() -> None:
+    with pytest.raises(
+        claude_code_save.ClaudeCodeSaveError,
+        match="deterministic-lossless",
+    ):
+        claude_code_save.run_memory_writer("prompt")
 
 
 def test_writer_prompt_forbids_assistant_model_name_substitution(tmp_path: Path) -> None:
@@ -330,14 +383,7 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
     monkeypatch.setattr(
         claude_code_save,
         "run_memory_writer",
-        lambda *args, **kwargs: claude_code_save.WriterResult(
-            should_save=True,
-            content="Durable memory",
-            keywords=["Claude Code", "LLM Wiki"],
-            reason="useful",
-            rejected_keywords=[],
-            evidence_quotes=["Wiki の保存フローを自動化したい"],
-        ),
+        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
     )
 
     def fake_save_raw(
@@ -364,7 +410,9 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
         claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
     )
 
-    first = claude_code_save.run(args_for(session, state, ignore_state=True))
+    first_args = args_for(session, state, ignore_state=True)
+    first_args.trigger_ingest = True
+    first = claude_code_save.run(first_args)
     second = claude_code_save.run(args_for(session, state))
 
     assert first["status"] == "saved"
@@ -374,10 +422,169 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
     assert calls[0]["session_id"] == "claude-code-abc-1234-def"
     assert calls[0]["trigger_ingest"] is False
     assert calls[0]["idempotency_key"].startswith("claude-code-")
-    assert "> Wiki の保存フローを自動化したい" in calls[0]["content"]
-    assert "## Writer Reason" not in calls[0]["content"]
+    assert '"text": "Wiki の保存フローを自動化したい"' in calls[0]["content"]
+    assert "Capture mode: deterministic-lossless" in calls[0]["content"]
+    assert first["capture_mode"] == "deterministic-lossless"
+    assert first["keywords"] == ["Claude Code", "transcript-delta"]
     saved_state = json.loads(state.read_text())
     assert saved_state["files"][str(session)]["last_saved_line"] == 8
+
+
+def test_one_stop_drains_every_bounded_transcript_chunk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    sample_session(session)
+    calls: list[str] = []
+    monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        claude_code_save,
+        "save_raw",
+        lambda content, **_kwargs: calls.append(content)
+        or {"saved": f"raw-{len(calls)}.md"},
+    )
+    monkeypatch.setattr(
+        claude_code_save,
+        "validate_published_save_receipt",
+        lambda **_kwargs: None,
+    )
+    extracted = claude_code_save.extract_transcript_slice(session)
+    args = args_for(session, state, ignore_state=True)
+    args.max_chars = max(
+        len(claude_code_save._serialized_records_bytes([record]))
+        for record in extracted.records
+    )
+
+    result = claude_code_save.run(args)
+
+    assert result["status"] == "saved"
+    assert result["chunk_count"] >= 2
+    assert len(calls) == result["chunk_count"]
+    assert "Wiki の保存フローを自動化したい" in "\n".join(calls)
+    assert "file contents here" in "\n".join(calls)
+    assert "テストを書きます。" in "\n".join(calls)
+    assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 8
+
+
+def _fragment_payload(content: str) -> dict:
+    encoded = content.split("```json\n", 1)[1].split("\n```", 1)[0]
+    return json.loads(encoded)
+
+
+def test_oversized_first_record_is_reassemblable_and_commits_after_all_fragments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "oversized.jsonl"
+    state = tmp_path / "state.json"
+    write_jsonl(
+        session,
+        [
+            {
+                "type": "user",
+                "sessionId": "oversized",
+                "message": {"content": "記憶" * 300},
+            }
+        ],
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        claude_code_save,
+        "save_raw",
+        lambda content, **kwargs: calls.append({"content": content, **kwargs})
+        or {"saved": f"raw-{len(calls)}.md"},
+    )
+    monkeypatch.setattr(
+        claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
+    args = args_for(session, state, ignore_state=True)
+    args.max_chars = 128
+
+    result = claude_code_save.run(args)
+    payloads = [_fragment_payload(call["content"]) for call in calls]
+    reconstructed = b"".join(base64.b64decode(row["data"]) for row in payloads)
+    expected = claude_code_save._serialized_records_bytes(
+        [claude_code_save.extract_transcript_slice(session).records[0]]
+    )
+
+    assert result["status"] == "saved"
+    assert result["oversized_record"] is True
+    assert result["fragment_count"] == len(calls) > 1
+    assert all(row["fragment_bytes"] <= args.max_chars for row in payloads)
+    assert reconstructed == expected
+    assert len({call["idempotency_key"] for call in calls}) == len(calls)
+    assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 1
+
+
+def test_oversized_fragment_failure_never_advances_cursor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "oversized.jsonl"
+    state = tmp_path / "state.json"
+    write_jsonl(
+        session,
+        [
+            {
+                "type": "user",
+                "sessionId": "oversized",
+                "message": {"content": "X" * 1000},
+            }
+        ],
+    )
+    monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    attempts = 0
+
+    def fail_second_fragment(_content: str, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise RuntimeError("injected fragment failure")
+        return {"saved": f"raw-{attempts}.md"}
+
+    monkeypatch.setattr(claude_code_save, "save_raw", fail_second_fragment)
+    monkeypatch.setattr(
+        claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
+    args = args_for(session, state, ignore_state=True)
+    args.max_chars = 128
+
+    with pytest.raises(RuntimeError, match="injected fragment failure"):
+        claude_code_save.run(args)
+
+    assert not state.exists()
+
+
+@pytest.mark.parametrize("mode", ["off", "invalid-mode"])
+def test_raw_capture_policy_fail_closed_without_cursor_or_model(
+    tmp_path: Path, monkeypatch, mode: str
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    sample_session(session)
+    state.write_text('{"version": 1, "files": {}}\n')
+    original_state = state.read_bytes()
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RAW_CAPTURE", mode)
+    monkeypatch.setattr(
+        claude_code_save, "init_wiki", lambda: pytest.fail("policy gate must precede init")
+    )
+    monkeypatch.setattr(
+        claude_code_save,
+        "save_raw",
+        lambda *_args, **_kwargs: pytest.fail("must not publish"),
+    )
+    monkeypatch.setattr(
+        claude_code_save,
+        "run_memory_writer",
+        lambda *_args, **_kwargs: pytest.fail("must not start a model"),
+    )
+
+    result = claude_code_save.run(args_for(session, state))
+
+    assert result["status"] == "deferred"
+    assert result["model_calls"] == 0
+    assert result["decision_policy"]["mode"] == "off"
+    assert state.read_bytes() == original_state
 
 
 def test_retry_recovers_raw_published_before_state_commit(
@@ -425,22 +632,10 @@ def test_retry_recovers_raw_published_before_state_commit(
         ),
         encoding="utf-8",
     )
-    writer_calls: list[int] = []
     save_calls: list[str] = []
 
     monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
     monkeypatch.setattr(claude_code_save, "RAW_DIR", raw_dir)
-
-    def fake_writer(*_args, **_kwargs):
-        writer_calls.append(1)
-        return claude_code_save.WriterResult(
-            should_save=True,
-            content="Durable memory",
-            keywords=["Claude Code"],
-            reason="useful",
-            rejected_keywords=[],
-            evidence_quotes=["Wiki の保存フローを自動化したい"],
-        )
 
     def durable_fake_save(content: str, *, idempotency_key: str, **_kwargs):
         save_calls.append(idempotency_key)
@@ -458,7 +653,11 @@ def test_retry_recovers_raw_published_before_state_commit(
             raise OSError("injected crash after raw publish")
         real_write_state(path, payload)
 
-    monkeypatch.setattr(claude_code_save, "run_memory_writer", fake_writer)
+    monkeypatch.setattr(
+        claude_code_save,
+        "run_memory_writer",
+        lambda *args, **kwargs: pytest.fail("recovery must not start a writer"),
+    )
     monkeypatch.setattr(claude_code_save, "save_raw", durable_fake_save)
     monkeypatch.setattr(claude_code_save, "write_state", fail_first_state_commit)
 
@@ -469,7 +668,6 @@ def test_retry_recovers_raw_published_before_state_commit(
 
     assert retry["status"] == "recovered"
     assert retry["recovered_save"]["idempotency_key"] == save_calls[0]
-    assert len(writer_calls) == 1
     assert len(save_calls) == 1
     assert len(list(raw_dir.glob("*.md"))) == 1
     saved_state = json.loads(state.read_text())
@@ -490,19 +688,15 @@ def test_corrupt_publisher_receipt_does_not_advance_cursor(
     monkeypatch.setattr(
         claude_code_save,
         "run_memory_writer",
-        lambda *_args, **_kwargs: claude_code_save.WriterResult(
-            should_save=True,
-            content="Durable memory",
-            keywords=["Claude Code"],
-            reason="useful",
-            rejected_keywords=[],
-            evidence_quotes=["Wiki の保存フローを自動化したい"],
-        ),
+        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
     )
 
     def corrupt_save(content: str, *, idempotency_key: str, **_kwargs):
         path = raw_dir / f"save-{idempotency_key}.md"
-        path.write_text(content.replace("Durable memory", "tampered memory"), encoding="utf-8")
+        path.write_text(
+            content.replace("Wiki の保存フローを自動化したい", "tampered memory"),
+            encoding="utf-8",
+        )
         return {"saved": path.name, "path": str(path)}
 
     monkeypatch.setattr(claude_code_save, "save_raw", corrupt_save)
@@ -516,7 +710,7 @@ def test_corrupt_publisher_receipt_does_not_advance_cursor(
     assert not state.exists()
 
 
-def test_save_rejects_assistant_only_evidence_before_writing(
+def test_save_captures_user_and_assistant_text_without_writer(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -527,27 +721,25 @@ def test_save_rejects_assistant_only_evidence_before_writing(
     monkeypatch.setattr(
         claude_code_save,
         "run_memory_writer",
-        lambda *args, **kwargs: claude_code_save.WriterResult(
-            should_save=True,
-            content="Misattributed assistant memory",
-            keywords=["Claude Code"],
-            reason="assistant-only",
-            rejected_keywords=[],
-            evidence_quotes=["了解、実装します。"],
-        ),
+        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
     )
+    saved: list[str] = []
     monkeypatch.setattr(
         claude_code_save,
         "save_raw",
-        lambda *args, **kwargs: pytest.fail("invalid evidence must not be saved"),
+        lambda content, **kwargs: saved.append(content) or {"saved": "raw.md"},
+    )
+    monkeypatch.setattr(
+        claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
     )
 
-    with pytest.raises(
-        claude_code_save.ClaudeCodeSaveError,
-        match="not found verbatim in USER",
-    ):
-        claude_code_save.run(args_for(session, state, ignore_state=True))
-    assert not state.exists()
+    result = claude_code_save.run(args_for(session, state, ignore_state=True))
+
+    assert result["status"] == "saved"
+    assert len(saved) == 1
+    assert '"role": "user"' in saved[0]
+    assert '"role": "assistant"' in saved[0]
+    assert "了解、実装します。" in saved[0]
 
 
 def test_hook_mode_disabled_without_env(tmp_path: Path, monkeypatch) -> None:
@@ -637,7 +829,7 @@ def session_with_edits(path: Path, user_turns: int = 3, include_edit: bool = Tru
     write_jsonl(path, rows)
 
 
-def test_short_tail_gets_frontier_disposition(tmp_path: Path, monkeypatch) -> None:
+def test_short_tail_is_captured_without_frontier_disposition(tmp_path: Path, monkeypatch) -> None:
     session = tmp_path / "session.jsonl"
     state_file = tmp_path / "state.json"
     session_with_edits(session, user_turns=3, include_edit=False)
@@ -646,17 +838,23 @@ def test_short_tail_gets_frontier_disposition(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(
         claude_code_save,
         "run_memory_writer",
-        lambda *a, **kw: claude_code_save.WriterResult(
-            should_save=False, content="", keywords=[], reason="not durable",
-            rejected_keywords=[], evidence_quotes=[],
-        ),
+        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
+    )
+    monkeypatch.setattr(
+        claude_code_save,
+        "save_raw",
+        lambda *args, **kwargs: {"saved": "raw.md"},
+    )
+    monkeypatch.setattr(
+        claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
     )
     args = args_for(session, state_file)
     result = claude_code_save.run(args)
 
-    assert result["status"] == "skipped"
+    assert result["status"] == "saved"
     assert result["trigger"] == "session_tail"
-    assert json.loads(state_file.read_text())["files"][str(session)]["status"] == "declined"
+    assert result["capture_mode"] == "deterministic-lossless"
+    assert json.loads(state_file.read_text())["files"][str(session)]["status"] == "saved"
 
 
 def test_timing_triggers_on_edit(tmp_path: Path, monkeypatch) -> None:
@@ -697,12 +895,11 @@ def test_concurrent_stop_workers_publish_delta_exactly_once(
     session_with_edits(session, user_turns=2, include_edit=True)
 
     monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
-    first_writer_entered = threading.Event()
-    release_first_writer = threading.Event()
-    duplicate_writer_entered = threading.Event()
+    first_save_entered = threading.Event()
+    release_first_save = threading.Event()
+    duplicate_save_entered = threading.Event()
     second_lock_attempted = threading.Event()
     calls_guard = threading.Lock()
-    writer_calls: list[int] = []
     lock_attempts: list[int] = []
     saves: list[str] = []
 
@@ -719,29 +916,22 @@ def test_concurrent_stop_workers_publish_delta_exactly_once(
         with real_transaction_lock(**kwargs) as lock_path:
             yield lock_path
 
-    def fake_writer(*_args, **_kwargs):
-        with calls_guard:
-            writer_calls.append(1)
-            first = len(writer_calls) == 1
-        if first:
-            first_writer_entered.set()
-            assert release_first_writer.wait(5)
-        else:
-            duplicate_writer_entered.set()
-        return claude_code_save.WriterResult(
-            should_save=True,
-            content="Durable memory",
-            keywords=["Claude Code"],
-            reason="useful",
-            rejected_keywords=[],
-            evidence_quotes=["User message 0"],
-        )
-
     def fake_save(content: str, **_kwargs):
-        saves.append(content)
+        with calls_guard:
+            saves.append(content)
+            first = len(saves) == 1
+        if first:
+            first_save_entered.set()
+            assert release_first_save.wait(5)
+        else:
+            duplicate_save_entered.set()
         return {"saved": "raw.md"}
 
-    monkeypatch.setattr(claude_code_save, "run_memory_writer", fake_writer)
+    monkeypatch.setattr(
+        claude_code_save,
+        "run_memory_writer",
+        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
+    )
     monkeypatch.setattr(claude_code_save, "save_raw", fake_save)
     monkeypatch.setattr(
         claude_code_save, "validate_published_save_receipt", lambda **_kwargs: None
@@ -759,17 +949,16 @@ def test_concurrent_stop_workers_publish_delta_exactly_once(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(claude_code_save.run, args_for(session, state_file))
-        assert first_writer_entered.wait(5)
+        assert first_save_entered.wait(5)
         second = pool.submit(second_worker)
         assert second_started.wait(5)
         assert second_lock_attempted.wait(5)
-        assert not duplicate_writer_entered.is_set()
-        release_first_writer.set()
+        assert not duplicate_save_entered.is_set()
+        release_first_save.set()
         results = [first.result(timeout=5), second.result(timeout=5)]
 
-    assert not duplicate_writer_entered.is_set()
+    assert not duplicate_save_entered.is_set()
     assert len(lock_attempts) == 2
-    assert len(writer_calls) == 1
     assert len(saves) == 1
     assert sorted(result["status"] for result in results) == ["saved", "skipped"]
     saved_state = json.loads(state_file.read_text())

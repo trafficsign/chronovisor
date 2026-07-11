@@ -237,7 +237,7 @@ def queue_operational_failure(
     attempts: int,
     label: str,
 ) -> Path:
-    """Queue a non-raw runtime failure directly for frontier self-heal."""
+    """Queue a non-raw runtime failure for bounded local self-heal."""
 
     record = FailureRecord(
         failure_class=failure_class,
@@ -245,8 +245,8 @@ def queue_operational_failure(
         message=message,
     )
     local_decision = {
-        "status": "escalate",
-        "action": "escalate_to_frontier",
+        "status": "unresolved",
+        "action": "none",
         "confidence": 1.0,
         "reason": "bounded operational repair attempts were exhausted",
         "requested_page_id": None,
@@ -260,7 +260,7 @@ def queue_operational_failure(
         attempts=max(1, attempts),
         job_id=None,
         raw_text=json.dumps(evidence, ensure_ascii=False, default=str),
-        status="pending_frontier",
+        status="pending_local_repair",
         local_decision=local_decision,
     )
     runtime_status.safe_append_event(

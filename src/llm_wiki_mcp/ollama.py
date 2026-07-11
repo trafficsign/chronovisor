@@ -4,7 +4,8 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -35,6 +36,19 @@ _CLIENT_LOCK = threading.Lock()
 _CLIENT: httpx.Client | None = None
 
 
+class OutputTooLargeError(RuntimeError):
+    """Raised when a structured chat response crosses its fixed char cap."""
+
+
+@dataclass(frozen=True)
+class ChatResponse:
+    """Structured chat content plus Ollama's context accounting."""
+
+    content: str
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+
+
 def _client() -> httpx.Client:
     global _CLIENT
     if _CLIENT is None:
@@ -63,6 +77,35 @@ def is_available() -> bool:
         _health_cache["status"] = False
         _health_cache["checked_at"] = now
         return False
+
+
+def model_digests(models: Sequence[str]) -> dict[str, str]:
+    """Return the currently installed digest for each exact Ollama tag.
+
+    This metadata-only request never loads a model.  Missing tags are returned
+    as an empty digest so adoption callers can fail closed without guessing.
+    """
+
+    resp = _client().get("/api/tags", timeout=3)
+    resp.raise_for_status()
+    body = resp.json()
+    rows = body.get("models") if isinstance(body, dict) else None
+    rows = rows if isinstance(rows, list) else []
+    result: dict[str, str] = {}
+    for requested in models:
+        match = next(
+            (
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and requested
+                in {str(row.get("name") or ""), str(row.get("model") or "")}
+            ),
+            None,
+        )
+        digest = match.get("digest") if isinstance(match, dict) else None
+        result[requested] = digest if isinstance(digest, str) else ""
+    return result
 
 
 def _emit_progress(callback: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]) -> None:
@@ -200,6 +243,73 @@ def generate(
     )
     resp.raise_for_status()
     return resp.json()["response"]
+
+
+def chat(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
+    format: dict[str, Any],
+    num_ctx: int,
+    num_predict: int,
+    keep_alive: str,
+    read_timeout_ms: int,
+    max_output_chars: int,
+    return_metadata: bool = False,
+) -> str | ChatResponse:
+    """Call Ollama's chat API for one fixed-cap structured-output turn.
+
+    Unlike :func:`generate`, this adapter never derives context size from the
+    prompt.  Decision models therefore keep a stable runner allocation across
+    initial and repair turns.  Only ``message.content`` is returned; any
+    separate thinking field is intentionally ignored.
+    """
+
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("model is required")
+    if num_ctx < 1 or num_predict < 1 or max_output_chars < 1:
+        raise ValueError("chat limits must be positive")
+    payload = {
+        "model": model,
+        "messages": [dict(message) for message in messages],
+        "stream": False,
+        "think": False,
+        "format": format,
+        "keep_alive": keep_alive,
+        "options": {
+            "temperature": 0,
+            "num_predict": num_predict,
+            "num_ctx": num_ctx,
+        },
+    }
+    timeout = httpx.Timeout(
+        connect=10.0,
+        read=read_timeout_ms / 1000,
+        write=10.0,
+        pool=10.0,
+    )
+    resp = _client().post("/api/chat", json=payload, timeout=timeout)
+    resp.raise_for_status()
+    body = resp.json()
+    message = body.get("message") if isinstance(body, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        raise RuntimeError("Ollama chat response is missing message.content")
+    if len(content) > max_output_chars:
+        raise OutputTooLargeError(
+            f"Ollama chat response exceeded max_output_chars={max_output_chars}"
+        )
+    if not return_metadata:
+        return content
+    prompt_eval_count = body.get("prompt_eval_count") if isinstance(body, dict) else None
+    eval_count = body.get("eval_count") if isinstance(body, dict) else None
+    return ChatResponse(
+        content=content,
+        prompt_eval_count=(
+            prompt_eval_count if isinstance(prompt_eval_count, int) else None
+        ),
+        eval_count=eval_count if isinstance(eval_count, int) else None,
+    )
 
 
 EMBED_MODEL = DEFAULT_EMBEDDING_MODEL

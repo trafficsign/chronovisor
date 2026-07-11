@@ -1,8 +1,9 @@
 """Self-improving recall policy loop.
 
 The loop is intentionally offline: local models and replay evaluation produce
-policy proposals, while a durable frontier verdict is the final adoption
-authority for every active-policy mutation.
+policy proposals, while a durable local-consensus verdict is the final
+adoption authority for every active-policy mutation.  ``frontier_*`` names in
+this module are retained only for historical artifact compatibility.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import Any
 import httpx
 
 from llm_wiki_mcp.convergence import is_human_required_result
+from llm_wiki_mcp.feedback_ledger import active_feedback_rows
 from llm_wiki_mcp.recall_eval import (
     RecallExample,
     build_dataset,
@@ -941,7 +943,7 @@ def _frontier_policy_evidence(
     best: dict[str, Any],
     reasons: list[str],
 ) -> dict[str, Any]:
-    """Return stable, complete evidence that a frontier verdict authorizes."""
+    """Return stable, complete evidence that a local verdict authorizes."""
     proposal = best.get("proposal") if isinstance(best.get("proposal"), dict) else {}
     stable_proposal = {
         key: value
@@ -1096,6 +1098,7 @@ def run_frontier_policy_audit(
             repo_root=repo,
             timeout=timeout_seconds,
             execute_patch=False,
+            decision_lane="recall_improvement",
         )
     else:
         payload = reviewer(prompt, best)
@@ -1272,7 +1275,7 @@ def run_improvement(
         audit_needed, frontier_audit_reasons = _frontier_audit_needed(best, mode=frontier_mode)
         if apply:
             audit_needed = True
-            mandatory_reason = "active policy adoption requires a durable frontier verdict"
+            mandatory_reason = "active policy adoption requires a durable local-consensus verdict"
             if mandatory_reason not in frontier_audit_reasons:
                 frontier_audit_reasons.append(mandatory_reason)
         if apply and audit_needed:
@@ -1330,7 +1333,7 @@ def run_improvement(
                     frontier_audit = {
                         "decision": "needs_retry",
                         "summary": (
-                            "frontier verdict could not be durably recorded: "
+                            "local-consensus verdict could not be durably recorded: "
                             f"{exc.__class__.__name__}: {exc}"
                         ),
                         "rescue_status": "pending_frontier_review",
@@ -1504,7 +1507,11 @@ def _parse_ts(value: Any) -> datetime | None:
 
 
 def _feedback_count(path: Path = RECALL_FEEDBACK_FILE) -> int:
-    return sum(1 for row in read_jsonl(path) if row.get("kind") != "page_ignored")
+    return sum(
+        1
+        for row in active_feedback_rows(path)
+        if row.get("kind") != "page_ignored"
+    )
 
 
 def _try_acquire_run_due_lock(lock_file: Path = RUN_DUE_LOCK_FILE):

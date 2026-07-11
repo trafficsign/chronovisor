@@ -16,13 +16,16 @@ import hashlib
 import json
 import random
 import re
+import tempfile
 import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
+from llm_wiki_mcp.local_structured import ChatRequest, LocalStructuredSession
+from llm_wiki_mcp.runtime_config import load_decision_router_config
 from llm_wiki_mcp.tags import AXIS_LIMITS, SEED_TAGS, parse_tags, validate_axis_counts
 from llm_wiki_mcp.wiki import find_page
 
@@ -176,6 +179,38 @@ _REQUIRED_FIELDS = {
 
 _MAIN_TOPIC_MAX_CHARS = 50
 _TAG_EVIDENCE_MAX_WORDS = 5
+
+TAG_REPORT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": sorted(_REQUIRED_FIELDS),
+    "properties": {
+        "main_topic": {"type": "string", "maxLength": _MAIN_TOPIC_MAX_CHARS},
+        "assigned_tags": {"type": "array", "items": {"type": "string"}},
+        "tag_evidence": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+        },
+        "rejected_assigned_tags": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "suggested_missing_categories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["label", "justification", "fallback_axis"],
+                "properties": {
+                    "label": {"type": "string"},
+                    "justification": {"type": "string"},
+                    "fallback_axis": {"type": "string", "enum": ["d/", "t/", "s/"]},
+                },
+            },
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+}
 
 
 def parse_llm_response(raw: str, master_set: set[str]) -> dict | None:
@@ -466,18 +501,68 @@ Output the JSON object per the rules.
 def analyze_page(
     page_id: str,
     master: list[str],
-    generate_fn: Callable[..., str],
+    generate_fn: Callable[..., str] | None = None,
 ) -> PageAnalysis:
     """Tag one page. Returns a populated PageAnalysis even on LLM failure
     so the report can show "no result" cells with the raw text recorded
     for audit."""
     prompt = _build_prompt(page_id, master)
-    try:
-        raw = generate_fn(prompt, system=TAG_REPORT_SYSTEM_PROMPT)
-    except Exception:
-        return PageAnalysis(page_id=page_id, raw_response="<ollama error>")
+    config = load_decision_router_config()
+    last_output: list[str] = []
+    transport = None
+    if generate_fn is not None:
+        def transport(request: ChatRequest) -> str:
+            system = request.messages[0]["content"] if request.messages else ""
+            transcript = "\n\n".join(
+                f"<{message['role'].upper()}>\n{message['content']}"
+                for message in request.messages[1:]
+            )
+            output = generate_fn(transcript, system=system)
+            last_output[:] = [output]
+            return output
 
-    parsed = parse_llm_response(raw, set(master))
+    session_kwargs = {
+        "model": config.primary_model,
+        "transport": transport,
+        "role": "tag_distribution",
+        "num_ctx": config.num_ctx,
+        "num_predict": min(config.num_predict, 1_536),
+        "keep_alive": config.primary_keep_alive,
+        "read_timeout_ms": config.read_timeout_ms,
+        "max_input_chars": min(config.max_input_chars, 32_000),
+        "max_output_chars": min(config.max_output_chars, 4_000),
+        "max_feedback_chars": min(config.max_feedback_chars, 1_500),
+    }
+    if generate_fn is None:
+        result = LocalStructuredSession(**session_kwargs).run(
+            prompt,
+            TAG_REPORT_SCHEMA,
+            system=TAG_REPORT_SYSTEM_PROMPT,
+        )
+    else:
+        with tempfile.TemporaryDirectory(prefix="llm-wiki-tag-structured-") as root:
+            result = LocalStructuredSession(
+                **session_kwargs,
+                audit_root=Path(root),
+            ).run(
+                prompt,
+                TAG_REPORT_SCHEMA,
+                system=TAG_REPORT_SYSTEM_PROMPT,
+            )
+    if not result.ok:
+        raw = last_output[-1] if last_output else ""
+        if result.failure_class in {"transport_error", "transport_timeout"}:
+            raw = "<ollama error>"
+        return PageAnalysis(
+            page_id=page_id,
+            raw_response=raw or f"<structured {result.failure_class or 'error'}>",
+        )
+
+    raw = last_output[-1] if last_output else json.dumps(result.value, ensure_ascii=False)
+    parsed = parse_llm_response(
+        json.dumps(result.value, ensure_ascii=False),
+        set(master),
+    )
     if parsed is None:
         return PageAnalysis(page_id=page_id, raw_response=raw)
 
@@ -694,10 +779,6 @@ def run_dry_run(
         from llm_wiki_mcp.index_store import get_store
         store = get_store()
         store.refresh()
-    if generate_fn is None:
-        from llm_wiki_mcp.ollama import generate
-        generate_fn = generate
-
     page_ids = sorted(store.all_page_ids(include_system=False))
     population_total = len(page_ids)
 

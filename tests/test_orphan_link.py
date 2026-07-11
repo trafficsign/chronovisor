@@ -426,6 +426,41 @@ class TestScoreCandidate:
             is None
         )
 
+    def test_schema_error_is_repaired_in_same_structured_session(
+        self,
+        isolated_pages: Path,
+    ) -> None:
+        store = _FakeStore()
+        store.add_page("src")
+        store.add_page("orph")
+        _seed_page(isolated_pages, "src")
+        _seed_page(isolated_pages, "orph")
+        replies = iter(
+            [
+                json.dumps({"confidence": 0.8, "reason": "missing fields"}),
+                json.dumps(
+                    {
+                        "confidence": 0.8,
+                        "reason": "関連あり",
+                        "suggested_anchor": "anchor",
+                        "suggested_section": "関連",
+                    }
+                ),
+            ]
+        )
+        prompts: list[str] = []
+
+        def fake_generate(prompt: str, **_kwargs) -> str:
+            prompts.append(prompt)
+            return next(replies)
+
+        result = score_candidate("src", "orph", store, fake_generate)
+
+        assert result is not None
+        assert result["confidence"] == pytest.approx(0.8)
+        assert len(prompts) == 2
+        assert "Validator errors" in prompts[1]
+
 
 # ---------------------------------------------------------------------------
 # run_dry_run end-to-end
@@ -638,7 +673,7 @@ def _high_local_suggestion() -> str:
     )
 
 
-def test_frontier_approval_below_confidence_gate_retries_without_mutation(
+def test_frontier_approval_is_not_overridden_by_confidence_metadata(
     tmp_path: Path,
     isolated_pages: Path,
 ) -> None:
@@ -658,9 +693,8 @@ def test_frontier_approval_below_confidence_gate_retries_without_mutation(
         convergence_store=state,
     )
 
-    assert result["results"][0]["status"] == "frontier_retry"
-    assert state.list_items()[0]["last_error"] == "frontier_confidence_below_threshold"
-    assert "[[target" not in (isolated_pages / "source.md").read_text(encoding="utf-8")
+    assert result["results"][0]["status"] == "applied"
+    assert "[[target" in (isolated_pages / "source.md").read_text(encoding="utf-8")
 
 
 def test_malformed_frontier_approval_retries_without_mutation(

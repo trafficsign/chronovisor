@@ -11,11 +11,11 @@ recall = true
 
 [hooks.stop]
 save = true
-audit = true
-# Capture every completed correction turn after a durable per-session cursor.
-# Local proposals never finalize a classification; the frontier model does.
+# Stop only enqueues deterministic capture jobs. Semantic work is drained by
+# local convergence after the hook process exits.
+audit = false
 content_correction = true
-recall_improve = true
+recall_improve = false
 
 [embedding]
 # Tuned search profile. If omitted, runtime falls back to nomic-embed-text.
@@ -24,16 +24,51 @@ document_prefix = ""
 query_prefix = ""
 
 [ingest]
-# Heavy page generation model. The default context is kept below the model's
-# ceiling for faster MLX warm runs, and grows automatically for unusually long
-# raw transcripts up to max_num_ctx.
-model = "qwen3.6:35b-a3b-mxfp8"
-keep_alive = "5m"
+# Keep one fixed allocation for the heavy runner. Changing num_ctx between
+# calls makes Ollama replace the loaded runner and causes avoidable model flap.
+model = "maxwell1500/ornith-35b:Q5_K_M"
+keep_alive = "20m"
 temperature = 0.3
-num_ctx = 65536
-max_num_ctx = 262144
+num_ctx = 32768
+max_num_ctx = 32768
 num_predict = 8192
 read_timeout_ms = 660000
+
+[decision_router]
+# Routine structured decisions require a two-vote local quorum. The tie-break
+# model is loaded only when the first pair does not agree.
+primary_model = "maxwell1500/ornith-35b:Q5_K_M"
+challenger_model = "gpt-oss:20b"
+tie_break_model = "gemma4:26b"
+primary_keep_alive = "20m"
+challenger_keep_alive = "20m"
+tie_break_keep_alive = "2m"
+num_ctx = 32768
+num_predict = 2048
+read_timeout_ms = 660000
+max_input_chars = 65536
+max_output_chars = 8000
+max_feedback_chars = 2000
+quorum = 2
+# Empty keeps the exact model triplet above as the bootstrap/current policy.
+# Set this only after a full local-model-eval run has produced an adopted v2
+# artifact. Invalid, partial, or stale artifacts are ignored as candidates and
+# the current triplet continues running.
+adoption_artifact = ""
+
+[decision_policies]
+# Deterministic/non-model lanes are live immediately. Structured semantic
+# lanes stay in shadow until the full replay artifact above is adopted.
+raw_capture = "enabled"
+exact_user_correction = "enabled"
+derived_index_rebuild = "enabled"
+claims_conflict = "enabled"
+system_code_repair = "enabled"
+ingest_reconciliation = "shadow"
+content_correction_classification = "shadow"
+content_correction_review = "shadow"
+recall_auto_apply = "shadow"
+recall_improvement = "shadow"
 
 [ingest.audit]
 # Routine quality sampling stays cheap. Mandatory correction, incomplete
@@ -84,9 +119,9 @@ search = 0.35
 read = 0.65
 
 [recall.gate]
-model = "qwen3.5:4b-mlx"
+model = "ornith:9b-q4_K_M"
 think = false
-timeout_ms = 2000
+timeout_ms = 3000
 num_ctx = 4096
 num_predict = 64
 include_queries = false
@@ -110,7 +145,7 @@ session_ttl_seconds = 604800
 
 [recall.rewrite]
 enabled = true
-model = "qwen3.5:4b-mlx"
+model = "ornith:9b-q4_K_M"
 timeout_ms = 3000
 
 [recall.fusion]
@@ -141,10 +176,11 @@ fail_silent_on_judge_unavailable = true
 
 [audit]
 enabled = true
-model = "qwen3.6:35b-a3b-mxfp8"
+model = "maxwell1500/ornith-35b:Q5_K_M"
 think = false
 timeout_ms = 120000
 num_ctx = 32768
+keep_alive = "20m"
 num_predict = 1024
 top_k = 5
 semantic = true
@@ -155,8 +191,8 @@ recent_log_limit = 500
 
 [recall_improvement]
 models = [
-  "qwen3.6:35b-a3b-mxfp8",
-  "gemma4:26b-mxfp8",
+  "maxwell1500/ornith-35b:Q5_K_M",
+  "gemma4:26b",
 ]
 
 [auto_apply]
@@ -176,11 +212,12 @@ remain supported.
 - `LLM_WIKI_RECALL_ENABLED=0`: disable synchronous recall.
 - `CODEX_WIKI_SAVE_ENABLED=1`: enable Codex save hook.
 - `CLAUDE_CODE_WIKI_SAVE_ENABLED=1`: enable Claude Code save hook.
-- `LLM_WIKI_RECALL_AUDIT_ENABLED=1`: enable recall auditor hook.
-- `LLM_WIKI_CONTENT_CORRECTION_ENABLED=1`: enable the user-content-correction hook.
-- `LLM_WIKI_CONTENT_CORRECTION_REVIEW_CMD`: optional frontier structured-review command override.
-- `LLM_WIKI_RECALL_AUTO_APPLY_FRONTIER_TIMEOUT`: timeout in seconds for the
-  frontier final review of recall auto-apply actions (default: `1800`).
+- `LLM_WIKI_RECALL_AUDIT_ENABLED` and
+  `LLM_WIKI_CONTENT_CORRECTION_ENABLED`: legacy compatibility switches. The
+  Stop dispatcher is save-only and does not schedule those lanes.
+- `LLM_WIKI_RECALL_AUTO_APPLY_FRONTIER_TIMEOUT`: legacy name for the timeout
+  passed by auto-apply to the local structured-review compatibility boundary.
+  It does not enable a frontier call.
 - `LLM_WIKI_CONTENT_CORRECTION_QUARANTINE_RETRY_SECONDS`: cooldown before an
   autonomous content-correction quarantine is reopened (default: `21600`).
 - `LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS`: cooldown before autonomous
@@ -192,12 +229,25 @@ remain supported.
 - `LLM_WIKI_RUNTIME_SOURCE`: explicit override for the production `uvx`
   package source. The default is the pushed GitHub repository; local worktrees
   are never selected implicitly.
-- `LLM_WIKI_REPO_ROOT`: checkout used as frontier-review context and as the
-  target of approved self-heal code patches. It does not control imported
-  runtime code.
+- `LLM_WIKI_REPO_ROOT`: checkout used only as exceptional system-code-repair
+  context and as the target of an approved repair patch. It does not control
+  imported runtime code.
+- `LLM_WIKI_FRONTIER_MODEL`, `LLM_WIKI_FRONTIER_REASONING_EFFORT`, and
+  `LLM_WIKI_FRONTIER_TIMEOUT_SECONDS`: exceptional
+  code-repair settings. They are read only after validated
+  `RepairIncidentEvidence` passes the durable single-flight/24-hour guard; none
+  of them can turn a routine review into a frontier call.
+- Arbitrary `LLM_WIKI_FRONTIER_CMD` execution is intentionally unsupported;
+  one admitted incident can start only the built-in single Codex process.
 
-The compatibility wrappers preserve the old environment behavior. Direct
-`llm-wiki-hook --event Stop` deployments can rely on `config.toml`.
+Older settings may still expose `frontier_mode`, `frontier_*`, or
+`LLM_WIKI_*FRONTIER*` names. They are schema and artifact compatibility names
+unless they belong to the guarded code-repair settings listed above. Routine
+`run_structured_review()` calls always use `[decision_router]`.
+
+The compatibility wrappers preserve old command-line and environment parsing,
+but they do not weaken the save-only Stop invariant. Direct
+`llm-wiki-hook --event Stop` deployments should enable only `hooks.stop.save`.
 
 ## Optional Reranker
 

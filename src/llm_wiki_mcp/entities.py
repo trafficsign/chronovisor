@@ -131,6 +131,7 @@ def _default_frontier_reviewer(
         repo_root=REPO_ROOT,
         execute_patch=False,
         command_env="LLM_WIKI_ENTITY_BACKFILL_FRONTIER_CMD",
+        decision_lane="entity_backfill",
     )
 
 

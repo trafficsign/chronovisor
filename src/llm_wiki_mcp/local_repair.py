@@ -1,9 +1,9 @@
-"""Local Qwen repair agent for failure packets."""
+"""Deterministic and local-consensus repair decisions for failure packets."""
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 
@@ -34,14 +34,15 @@ LOCAL_REPAIR_SCHEMA: dict[str, Any] = {
 
 
 LOCAL_REPAIR_SYSTEM_PROMPT = """\
-You are the local repair agent for LLM Wiki.
+You are one independent local repair voter for LLM Wiki.
 Return JSON only. Choose only one whitelisted action.
 Prefer conservative repairs: if the packet has exactly one similar_existing_pages
 candidate for apply.update_target_not_found, resolve_update_target is allowed.
 If apply.update_target_not_found has no similar_existing_pages and the requested
 page id is safe ASCII kebab-case, retry_raw is allowed because ingest can
 retype a missing update into a create.
-If a code change is required, escalate_to_frontier.
+If a code change appears necessary, propose_test_case.  Routine packets never
+invoke a frontier model; only the separate trusted system-incident lane may do so.
 If ingest.frontier_nonconvergent was caused by frontier call budget exhaustion,
 retry_raw is allowed; do not escalate the packet back to frontier.
 """
@@ -125,7 +126,7 @@ def _validate_decision(data: dict[str, Any], packet: dict[str, Any]) -> LocalRep
             return None
         if target not in candidates:
             return None
-        if status != "resolved" or float(confidence) < 0.85:
+        if status != "resolved":
             return None
 
     notes = data.get("notes")
@@ -210,22 +211,23 @@ def deterministic_repair(packet: dict[str, Any]) -> LocalRepairDecision:
     if failure_class == "recall.auto_apply_error":
         return LocalRepairDecision(
             status="escalate",
-            action="escalate_to_frontier",
+            action="propose_test_case",
             confidence=0.88,
             requested_page_id=packet.get("requested_page_id"),
             reason=(
                 "repeated recall auto-apply errors indicate a system-level "
-                "policy or code fix that requires frontier approval"
+                "policy or code defect; preserve the packet for a reproducible "
+                "local test instead of granting routine mutation authority"
             ),
-            notes="local deterministic path intentionally escalates auto-apply error clusters",
+            notes="frontier repair remains unavailable without trusted incident evidence",
             source="deterministic",
         )
     return LocalRepairDecision(
         status="escalate",
-        action="escalate_to_frontier",
+        action="propose_test_case",
         confidence=0.5,
         requested_page_id=packet.get("requested_page_id"),
-        reason="local deterministic rules could not safely repair this packet",
+        reason="local deterministic rules could not safely repair this packet; preserve a test case",
         source="deterministic",
     )
 
@@ -243,35 +245,60 @@ def propose_repair(
     generator: Callable[..., str] | None = None,
     use_qwen: bool = True,
 ) -> LocalRepairDecision:
-    """Ask Qwen for a repair decision, falling back to deterministic rules."""
+    """Reach a local repair decision without any frontier-model fallback.
+
+    Deterministically provable repairs return immediately.  Every production
+    decision that still requires inference uses the independent local quorum,
+    whose structured sessions provide targeted JSON repair turns.  The
+    ``generator`` argument is retained only as a narrow compatibility/test
+    seam and never becomes the production default.
+    """
 
     deterministic = deterministic_repair(packet)
     if (
         deterministic.status == "resolved"
         and deterministic.action
         in {"resolve_update_target", "retry_raw", "quarantine_raw"}
-        and deterministic.confidence >= 0.85
     ):
         return deterministic
 
     if use_qwen:
         try:
             if generator is None:
-                from llm_wiki_mcp.ollama import generate, is_available
+                from llm_wiki_mcp.decision_policy import resolve_decision_policy
+                from llm_wiki_mcp.decision_router import DecisionRouter
 
-                if not is_available():
-                    raise RuntimeError("ollama unavailable")
-                generator = generate
-            output = generator(
-                build_prompt(packet),
-                system=LOCAL_REPAIR_SYSTEM_PROMPT,
-                format=LOCAL_REPAIR_SCHEMA,
-            )
-            parsed = _extract_json_object(output)
+                _policy, mode, policy_error = resolve_decision_policy("local_repair")
+                if policy_error is not None or mode == "off":
+                    return deterministic
+                router = DecisionRouter(audit_role="local_repair")
+                routed = router.decide(
+                    build_prompt(packet),
+                    LOCAL_REPAIR_SCHEMA,
+                    system=LOCAL_REPAIR_SYSTEM_PROMPT,
+                )
+                parsed = (
+                    routed.decision
+                    if (
+                        mode == "enabled"
+                        and router.policy.source == "adopted_artifact"
+                        and routed.ok
+                    )
+                    else None
+                )
+                source = "local_consensus"
+            else:
+                output = generator(
+                    build_prompt(packet),
+                    system=LOCAL_REPAIR_SYSTEM_PROMPT,
+                    format=LOCAL_REPAIR_SCHEMA,
+                )
+                parsed = _extract_json_object(output)
+                source = "legacy_generator"
             if parsed is not None:
                 decision = _validate_decision(parsed, packet)
                 if decision is not None:
-                    return decision
+                    return replace(decision, source=source)
         except Exception:
             pass
     return deterministic

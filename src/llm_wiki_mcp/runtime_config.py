@@ -25,6 +25,9 @@ FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
 DEFAULT_INGEST_MODEL = "maxwell1500/ornith-35b:Q5_K_M"
+DEFAULT_DECISION_PRIMARY_MODEL = DEFAULT_INGEST_MODEL
+DEFAULT_DECISION_CHALLENGER_MODEL = "gpt-oss:20b"
+DEFAULT_DECISION_TIE_BREAK_MODEL = "gemma4:26b"
 DEFAULT_HEAVY_NUM_CTX = 32_768
 DEFAULT_HEAVY_KEEP_ALIVE = "20m"
 DEFAULT_RUNTIME_SOURCE = "git+ssh://git@github.com/trafficsign/llm-wiki-mcp"
@@ -164,6 +167,36 @@ class IngestAuditConfig:
     critical_sample_rate: float = 0.10
     max_sample_rate: float = 0.10
     max_operations_without_audit: int = 4
+
+
+@dataclass(frozen=True)
+class DecisionRouterConfig:
+    """Fixed local-consensus model and resource limits.
+
+    The router deliberately uses one context size for every decision model so
+    repeated calls cannot replace an Ollama runner merely because a caller
+    requested a different context.  Temperature and thinking are not exposed
+    as configuration: structured votes always use temperature 0 and
+    ``think=false``.
+    """
+
+    primary_model: str = DEFAULT_DECISION_PRIMARY_MODEL
+    challenger_model: str = DEFAULT_DECISION_CHALLENGER_MODEL
+    tie_break_model: str = DEFAULT_DECISION_TIE_BREAK_MODEL
+    primary_keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
+    challenger_keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
+    tie_break_keep_alive: str = "2m"
+    num_ctx: int = DEFAULT_HEAVY_NUM_CTX
+    num_predict: int = 2_048
+    read_timeout_ms: int = 660_000
+    max_input_chars: int = 65_536
+    max_output_chars: int = 8_000
+    max_feedback_chars: int = 2_000
+    quorum: int = 2
+    # Empty means the exact TOML/default model triplet is the trusted
+    # bootstrap/current policy.  Setting this path only nominates an artifact;
+    # DecisionRouter still validates every adoption gate before switching.
+    adoption_artifact: str = ""
 
 
 def active_config_file(path: Path | str | None = None) -> Path:
@@ -331,6 +364,94 @@ def load_ingest_audit_config(path: Path | str | None = None) -> IngestAuditConfi
             section.get("max_operations_without_audit"),
             IngestAuditConfig.max_operations_without_audit,
             minimum=1,
+        ),
+    )
+
+
+def load_decision_router_config(
+    path: Path | str | None = None,
+) -> DecisionRouterConfig:
+    """Load the local semantic-decision ensemble configuration.
+
+    Model names remain ordinary non-empty strings so locally installed Ollama
+    tags can be selected without a code change.  Safety-critical generation
+    settings are bounded here and the router separately rejects duplicate
+    model roles or a quorum other than two.
+    """
+
+    data = load_toml_file(path)
+    section = data.get("decision_router")
+    if not isinstance(section, dict):
+        return DecisionRouterConfig()
+
+    def model(name: str, default: str, *, alias: str | None = None) -> str:
+        value = section.get(name)
+        if value is None and alias is not None:
+            value = section.get(alias)
+        return value.strip() if isinstance(value, str) and value.strip() else default
+
+    def keep_alive(name: str, default: str, *, alias: str | None = None) -> str:
+        value = section.get(name)
+        if value is None and alias is not None:
+            value = section.get(alias)
+        return value.strip() if isinstance(value, str) and value.strip() else default
+
+    return DecisionRouterConfig(
+        primary_model=model(
+            "primary_model", DecisionRouterConfig.primary_model
+        ),
+        challenger_model=model(
+            "challenger_model", DecisionRouterConfig.challenger_model
+        ),
+        tie_break_model=model(
+            "tie_break_model", DecisionRouterConfig.tie_break_model, alias="tie_model"
+        ),
+        primary_keep_alive=keep_alive(
+            "primary_keep_alive", DecisionRouterConfig.primary_keep_alive
+        ),
+        challenger_keep_alive=keep_alive(
+            "challenger_keep_alive", DecisionRouterConfig.challenger_keep_alive
+        ),
+        tie_break_keep_alive=keep_alive(
+            "tie_break_keep_alive",
+            DecisionRouterConfig.tie_break_keep_alive,
+            alias="tie_keep_alive",
+        ),
+        num_ctx=_positive_int(
+            section.get("num_ctx"), DecisionRouterConfig.num_ctx, minimum=2_048
+        ),
+        num_predict=_positive_int(
+            section.get("num_predict"),
+            DecisionRouterConfig.num_predict,
+            minimum=128,
+        ),
+        read_timeout_ms=_positive_int(
+            section.get("read_timeout_ms"),
+            DecisionRouterConfig.read_timeout_ms,
+            minimum=1_000,
+        ),
+        max_input_chars=_positive_int(
+            section.get("max_input_chars"),
+            DecisionRouterConfig.max_input_chars,
+            minimum=4_096,
+        ),
+        max_output_chars=_positive_int(
+            section.get("max_output_chars"),
+            DecisionRouterConfig.max_output_chars,
+            minimum=256,
+        ),
+        max_feedback_chars=_positive_int(
+            section.get("max_feedback_chars"),
+            DecisionRouterConfig.max_feedback_chars,
+            minimum=512,
+        ),
+        quorum=_positive_int(
+            section.get("quorum"), DecisionRouterConfig.quorum, minimum=2
+        ),
+        adoption_artifact=(
+            str(section.get("adoption_artifact") or "").strip()
+            if isinstance(section.get("adoption_artifact"), str)
+            else ""
         ),
     )
 

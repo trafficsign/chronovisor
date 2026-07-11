@@ -769,6 +769,36 @@ def _rollback_owned_write(mutation: PreparedPageMutation) -> bool:
         return False
 
 
+def rollback_prepared_mutations(
+    mutations: Iterable[PreparedPageMutation],
+) -> dict[str, Any]:
+    """Rollback only bytes still owned by a previously applied mutation."""
+
+    items = [item for item in mutations if not item.already_applied]
+    outcomes: dict[str, bool] = {}
+    try:
+        with wiki_mutation_lock():
+            for item in reversed(items):
+                try:
+                    current = item.path.read_bytes()
+                except OSError:
+                    outcomes[item.page_id] = False
+                    continue
+                if current == item.original:
+                    outcomes[item.page_id] = True
+                    continue
+                outcomes[item.page_id] = _rollback_owned_write_locked(item)
+    except OSError:
+        outcomes.update(
+            {item.page_id: False for item in items if item.page_id not in outcomes}
+        )
+    return {
+        "status": "rolled_back" if all(outcomes.values()) else "rollback_incomplete",
+        "pages": [item.page_id for item in items],
+        "outcomes": outcomes,
+    }
+
+
 def apply_prepared_mutations(
     mutations: Iterable[PreparedPageMutation],
     *,

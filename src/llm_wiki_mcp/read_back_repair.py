@@ -30,7 +30,6 @@ TERMINAL_STATUSES = frozenset(
     {"applied", "rejected", "quarantined", "human_required"}
 )
 DEFAULT_QUARANTINE_COOLDOWN_SECONDS = 6 * 60 * 60
-DEFAULT_FRONTIER_CONFIDENCE_THRESHOLD = 0.8
 PROJECT_ROOT = runtime_repo_root()
 READ_BACK_FRONTIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -499,6 +498,7 @@ END_UNTRUSTED_PROPOSAL_JSON
             prompt,
             READ_BACK_FRONTIER_SCHEMA,
             repo_root=PROJECT_ROOT,
+            decision_lane="read_back_repair",
         )
     )
 
@@ -550,7 +550,7 @@ def run_read_back_repair(
     quarantine_cooldown_seconds: int = DEFAULT_QUARANTINE_COOLDOWN_SECONDS,
     budget: Any | None = None,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    frontier_confidence_threshold: float = DEFAULT_FRONTIER_CONFIDENCE_THRESHOLD,
+    frontier_confidence_threshold: float | None = None,
 ) -> dict[str, Any]:
     """Process a bounded batch of read-back failures.
 
@@ -583,9 +583,10 @@ def run_read_back_repair(
     retry_base_seconds = max(1, int(retry_base_seconds))
     max_backoff_seconds = max(retry_base_seconds, int(max_backoff_seconds))
     quarantine_cooldown_seconds = max(0, int(quarantine_cooldown_seconds))
-    frontier_confidence_threshold = max(
-        0.0, min(1.0, float(frontier_confidence_threshold))
-    )
+    # Deprecated compatibility input. Consensus confidence is diagnostic only;
+    # the schema-valid decision and deterministic read-back evidence authorize
+    # the action.
+    del frontier_confidence_threshold
     resumed_quarantined = _resume_due_quarantines(
         entries,
         now=now_utc,
@@ -762,8 +763,7 @@ def run_read_back_repair(
                     action["frontier_review_reused"] = True
 
                 decision = review.get("decision")
-                confidence = float(review.get("confidence") or 0.0)
-                if decision == "rejected" and confidence >= frontier_confidence_threshold:
+                if decision == "rejected":
                     outcome = "rejected"
                     entry["status"] = outcome
                     entry["frontier_review"] = review
@@ -773,21 +773,17 @@ def run_read_back_repair(
                         entry.get("occurrences") or 0
                     )
                     entry["resolved_last_seen"] = str(entry.get("last_seen") or "")
-                elif decision != "approved" or confidence < frontier_confidence_threshold:
+                elif decision != "approved":
                     outcome = _schedule_retry(
                         entry,
                         now=now_utc,
                         max_attempts=max_attempts,
                         retry_base_seconds=retry_base_seconds,
                         max_backoff_seconds=max_backoff_seconds,
-                        error=(
-                            "frontier_confidence_below_threshold"
-                            if decision == "approved"
-                            else str(review.get("summary") or "frontier needs retry")
-                        ),
+                        error=str(review.get("summary") or "frontier needs retry"),
                     )
                 else:
-                    # Persist the exact frontier verdict before the ranking
+                    # Persist the exact local-consensus verdict before the ranking
                     # artifact changes. A crash can then reuse the verdict and
                     # the hint writer's exact lookup makes the operation
                     # idempotent.

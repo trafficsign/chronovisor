@@ -16,6 +16,7 @@ from llm_wiki_mcp.recall_runtime import RECALL_DIR, RECALL_FEEDBACK_FILE, RECALL
 from llm_wiki_mcp.runtime_config import (
     config_summary,
     load_hook_policy,
+    runtime_identity,
     uvx_runtime_command,
 )
 
@@ -495,6 +496,11 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     status_parser = sub.add_parser("status", help="Show content, recall, and runtime status.")
     status_parser.add_argument("--json", action="store_true")
+    runtime_identity_parser = sub.add_parser(
+        "runtime-identity",
+        help="Show the installed package revision without reading Wiki content.",
+    )
+    runtime_identity_parser.add_argument("--json", action="store_true")
     doctor_parser = sub.add_parser("doctor", help="Run operational checks.")
     doctor_parser.add_argument("--json", action="store_true")
     hooks_parser = sub.add_parser("hooks", help="Inspect host hook configuration.")
@@ -650,6 +656,15 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print_plain_status(data)
         return 0
+    if args.command == "runtime-identity":
+        data = runtime_identity()
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"commit_id\t{data.get('commit_id')}")
+            print(f"expected_commit\t{data.get('expected_commit')}")
+            print(f"archive_path\t{data.get('archive_path')}")
+        return 0 if data.get("commit_id") else 1
     if args.command == "doctor":
         data = doctor()
         if args.json:

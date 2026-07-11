@@ -497,9 +497,24 @@ class ConvergenceStore:
         _atomic_write_json(self.state_file, state)
 
     def _append_event_unlocked(self, event: dict[str, Any]) -> None:
+        self._append_events_unlocked([event])
+
+    def _append_events_unlocked(self, events: Iterable[dict[str, Any]]) -> None:
+        rows = list(events)
+        if not rows:
+            return
         self.events_file.parent.mkdir(parents=True, exist_ok=True)
         with self.events_file.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+            for event in rows:
+                handle.write(
+                    json.dumps(
+                        event,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    )
+                    + "\n"
+                )
             handle.flush()
             os.fsync(handle.fileno())
 
@@ -1404,6 +1419,104 @@ class ConvergenceStore:
             dry_run=dry_run,
             project=project,
         )
+
+    def complete_many(
+        self,
+        keys: Iterable[str],
+        status: Literal["applied", "rejected"],
+        *,
+        result: Mapping[str, Any] | None = None,
+        replace_terminal_statuses: Iterable[str] = (),
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Complete many unleased items with one durable state replacement.
+
+        This is intended for deterministic queue migrations. It avoids one
+        full state rewrite and fsync per item while preserving an individual
+        completion event for every transitioned key. Running/leased items are
+        skipped. Terminal replacement is limited to explicitly allowlisted
+        quarantine/human-boundary migrations; applied/rejected are immutable.
+        """
+
+        if status not in {"applied", "rejected"}:
+            raise ValueError("complete status must be applied or rejected")
+        normalized_keys = list(
+            dict.fromkeys(str(key) for key in keys if isinstance(key, str) and key)
+        )
+        replace_terminal = set(replace_terminal_statuses)
+        allowed_terminal_replacements = {"quarantined", "human_required"}
+        if not replace_terminal.issubset(allowed_terminal_replacements):
+            raise ValueError(
+                "complete_many can only replace quarantined or human_required terminals"
+            )
+        normalized_result = _canonicalize(dict(result or {}))
+        current_time = _utc_now(now)
+
+        def project(
+            state: dict[str, Any],
+        ) -> tuple[list[tuple[str, str, dict[str, Any]]], dict[str, int]]:
+            completed: list[tuple[str, str, dict[str, Any]]] = []
+            skipped: dict[str, int] = {}
+            for key in normalized_keys:
+                item = state["items"].get(key)
+                if not isinstance(item, dict):
+                    skipped["missing"] = skipped.get("missing", 0) + 1
+                    continue
+                previous_status = str(item.get("status") or "")
+                if (
+                    previous_status in TERMINAL_STATUSES
+                    and previous_status not in replace_terminal
+                ):
+                    skipped["terminal"] = skipped.get("terminal", 0) + 1
+                    continue
+                if previous_status.endswith("_running") or item.get("lease_owner"):
+                    skipped["leased"] = skipped.get("leased", 0) + 1
+                    continue
+                self._clear_lease(item)
+                item["status"] = status
+                item["result"] = copy.deepcopy(normalized_result)
+                item["next_attempt_at"] = None
+                if previous_status in replace_terminal:
+                    item["human_required"] = False
+                    item["quarantine_reason"] = None
+                item["updated_at"] = _iso(current_time)
+                completed.append((key, previous_status, item))
+            return completed, skipped
+
+        if dry_run:
+            completed, skipped = project(self._load_unlocked())
+            return {
+                "status": "ok",
+                "dry_run": True,
+                "requested": len(normalized_keys),
+                "completed": len(completed),
+                "skipped": sum(skipped.values()),
+                "skipped_reasons": skipped,
+            }
+        with self._exclusive_lock():
+            state = self._load_unlocked()
+            completed, skipped = project(state)
+            if completed:
+                self._save_unlocked(state)
+                self._append_events_unlocked(
+                    self._event(
+                        key=key,
+                        name="completed",
+                        now=current_time,
+                        previous_status=previous_status,
+                        item=item,
+                    )
+                    for key, previous_status, item in completed
+                )
+            return {
+                "status": "ok",
+                "dry_run": False,
+                "requested": len(normalized_keys),
+                "completed": len(completed),
+                "skipped": sum(skipped.values()),
+                "skipped_reasons": skipped,
+            }
 
     def quarantine(
         self,

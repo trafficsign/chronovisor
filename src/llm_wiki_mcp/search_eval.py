@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from llm_wiki_mcp.convergence import is_human_required_result
+from llm_wiki_mcp.feedback_ledger import active_feedback_rows
 from llm_wiki_mcp.search import (
     ACTIVE_SEARCH_POLICY_FILE,
     DEFAULT_FUSION_WEIGHTS,
@@ -272,7 +273,7 @@ def build_candidates(
     negative_examples: list[SearchExample] = []
     seen: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
 
-    for feedback in read_jsonl(feedback_file):
+    for feedback in active_feedback_rows(feedback_file):
         kind = str(feedback.get("kind", ""))
         if kind not in {
             "missed",
@@ -897,11 +898,17 @@ def _normalize_frontier_label_result(raw: dict[str, Any], *, raw_output: str = "
     if decision not in {"approved", "rejected", "uncertain", "needs_retry"}:
         return _frontier_label_failure("frontier label JSON failed schema validation", output=raw_output)
     confidence = raw.get("confidence")
-    try:
-        confidence_value = float(confidence)
-    except (TypeError, ValueError):
-        confidence_value = 0.0
-    confidence_value = max(0.0, min(1.0, confidence_value))
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not math.isfinite(float(confidence))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        return _frontier_label_failure(
+            "frontier label confidence metadata failed schema validation",
+            output=raw_output,
+        )
+    confidence_value = float(confidence)
     summary = raw.get("summary")
     normalized = {
         "decision": decision,
@@ -954,6 +961,7 @@ def run_frontier_label_review(
         timeout=timeout_seconds,
         execute_patch=False,
         command_env="LLM_WIKI_LABEL_REVIEW_CMD",
+        decision_lane="search_label",
     )
     return _normalize_frontier_label_result(raw)
 
@@ -971,6 +979,9 @@ def _combine_frontier_label_reviews(
     *,
     min_confidence: float,
 ) -> dict[str, Any]:
+    # Kept for API compatibility only. Confidence is diagnostic metadata and
+    # never participates in consensus or promotion.
+    del min_confidence
     if not reviews:
         return _frontier_label_failure("no frontier label reviews were attempted")
     if len(reviews) == 1:
@@ -991,15 +1002,15 @@ def _combine_frontier_label_reviews(
     approvals = [
         review
         for review in reviews
-        if review.get("decision") == "approved" and float(review.get("confidence") or 0.0) >= min_confidence
+        if review.get("decision") == "approved"
     ]
     label_sets = {_label_tuple_from_review(review) for review in approvals}
     if len(approvals) == len(reviews) and len(label_sets) == 1:
-        best = max(approvals, key=lambda review: float(review.get("confidence") or 0.0))
+        agreed = approvals[0]
         return {
-            **best,
+            **agreed,
             "reviewer": "frontier_consensus",
-            "summary": f"frontier consensus approved: {best.get('summary', '')}",
+            "summary": f"frontier consensus approved: {agreed.get('summary', '')}",
             "votes": reviews,
         }
 
@@ -1017,7 +1028,7 @@ def _combine_frontier_label_reviews(
         "expected_pages": [],
         "negative_pages": [],
         "stale_pages": [],
-        "summary": "frontier reviewers did not agree on a high-confidence label set",
+        "summary": "frontier reviewers did not agree on one label action",
         "notes": None,
         "reviewer": "frontier_consensus",
         "votes": reviews,
@@ -1058,11 +1069,13 @@ def _golden_row_from_review(row: dict[str, Any], review: dict[str, Any], *, revi
 
 
 def _queue_status_for_review(review: dict[str, Any], *, min_confidence: float) -> str:
+    # Deprecated compatibility input; decision + exact label action determine
+    # queue state.
+    del min_confidence
     if is_human_required_result(review):
         return "human_required"
     decision = review.get("decision")
-    confidence = float(review.get("confidence") or 0.0)
-    if decision == "approved" and confidence >= min_confidence and any(_label_tuple_from_review(review)):
+    if decision == "approved" and any(_label_tuple_from_review(review)):
         return "frontier_approved"
     if decision == "approved":
         return "frontier_uncertain"
@@ -1692,6 +1705,7 @@ Candidate evidence:
         repo_root=repo_root,
         timeout=timeout or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600")),
         execute_patch=False,
+        decision_lane="search_self_tune",
     )
 
 
@@ -1869,7 +1883,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--build-golden", action="store_true")
     parser.add_argument("--build-label-queue", action="store_true")
     parser.add_argument("--frontier-review-labels", action="store_true", help="Use a frontier model to promote trusted label-queue rows into the golden set.")
-    parser.add_argument("--frontier-min-confidence", type=float, default=0.8)
+    parser.add_argument(
+        "--frontier-min-confidence",
+        type=float,
+        default=0.8,
+        help="Deprecated no-op; confidence is retained only as review metadata.",
+    )
     parser.add_argument("--frontier-votes", type=int, default=1, help="Number of frontier votes required to agree before promotion.")
     parser.add_argument("--frontier-timeout", type=int, default=None)
     parser.add_argument("--self-tune", action="store_true", help="Run dev-only shadow self-tune with locked-test guard.")

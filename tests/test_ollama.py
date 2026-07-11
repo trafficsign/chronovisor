@@ -62,6 +62,65 @@ class _PostClient:
         return _PostResponse()
 
 
+class _ChatResponse:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+    def json(self) -> dict:
+        return {
+            "message": {
+                "role": "assistant",
+                "content": self.content,
+                "thinking": "this must not be returned",
+            },
+            "prompt_eval_count": 42,
+            "eval_count": 7,
+        }
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _ChatClient:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.path = None
+        self.payload = None
+
+    def post(self, path: str, *, json: dict, timeout: object) -> _ChatResponse:
+        self.path = path
+        self.payload = json
+        return _ChatResponse(self.content)
+
+
+class _TagsResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return {
+            "models": [
+                {
+                    "name": "ornith:test",
+                    "model": "ornith:test",
+                    "digest": "ornith-digest",
+                },
+                {
+                    "name": "gpt-oss:test",
+                    "model": "gpt-oss:test",
+                    "digest": "gpt-oss-digest",
+                },
+            ]
+        }
+
+
+class _TagsClient:
+    def get(self, path: str, *, timeout: object) -> _TagsResponse:
+        assert path == "/api/tags"
+        assert timeout == 3
+        return _TagsResponse()
+
+
 def test_triage_prompt_requires_filename_for_updates() -> None:
     assert 'MUST use "filename"' in ollama.TRIAGE_SYSTEM_PROMPT
     assert 'Never emit a "page_id" field' in ollama.TRIAGE_SYSTEM_PROMPT
@@ -111,6 +170,96 @@ def test_num_ctx_grows_for_long_prompts_without_crossing_cap() -> None:
 
     assert ollama._num_ctx_for_prompt("short", None, config) == 2048
     assert ollama._num_ctx_for_prompt("x" * 10_000, None, config) == 4096
+
+
+def test_chat_uses_fixed_structured_options_and_returns_final_content(monkeypatch) -> None:
+    client = _ChatClient('{"decision":"apply"}')
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+    schema = {
+        "type": "object",
+        "properties": {"decision": {"type": "string"}},
+        "required": ["decision"],
+    }
+
+    result = ollama.chat(
+        [{"role": "user", "content": "decide"}],
+        model="ornith:test",
+        format=schema,
+        num_ctx=32768,
+        num_predict=1024,
+        keep_alive="20m",
+        read_timeout_ms=120000,
+        max_output_chars=1000,
+    )
+
+    assert result == '{"decision":"apply"}'
+    assert client.path == "/api/chat"
+    assert client.payload["model"] == "ornith:test"
+    assert client.payload["messages"] == [{"role": "user", "content": "decide"}]
+    assert client.payload["stream"] is False
+    assert client.payload["think"] is False
+    assert client.payload["format"] == schema
+    assert client.payload["keep_alive"] == "20m"
+    assert client.payload["options"] == {
+        "temperature": 0,
+        "num_predict": 1024,
+        "num_ctx": 32768,
+    }
+
+
+def test_chat_enforces_output_char_cap(monkeypatch) -> None:
+    client = _ChatClient("x" * 11)
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    try:
+        ollama.chat(
+            [{"role": "user", "content": "decide"}],
+            model="ornith:test",
+            format={"type": "string"},
+            num_ctx=4096,
+            num_predict=128,
+            keep_alive="20m",
+            read_timeout_ms=120000,
+            max_output_chars=10,
+        )
+    except ollama.OutputTooLargeError:
+        pass
+    else:
+        raise AssertionError("expected OutputTooLargeError")
+
+
+def test_model_digests_returns_exact_installed_identities(monkeypatch) -> None:
+    monkeypatch.setattr(ollama, "_client", lambda: _TagsClient())
+
+    assert ollama.model_digests(
+        ["ornith:test", "gpt-oss:test", "missing:test"]
+    ) == {
+        "ornith:test": "ornith-digest",
+        "gpt-oss:test": "gpt-oss-digest",
+        "missing:test": "",
+    }
+
+
+def test_chat_can_return_context_accounting(monkeypatch) -> None:
+    client = _ChatClient('{"decision":"apply"}')
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    result = ollama.chat(
+        [{"role": "user", "content": "decide"}],
+        model="ornith:test",
+        format={"type": "object"},
+        num_ctx=4096,
+        num_predict=128,
+        keep_alive="20m",
+        read_timeout_ms=120000,
+        max_output_chars=1000,
+        return_metadata=True,
+    )
+
+    assert isinstance(result, ollama.ChatResponse)
+    assert result.content == '{"decision":"apply"}'
+    assert result.prompt_eval_count == 42
+    assert result.eval_count == 7
 
 
 def test_embed_uses_explicit_model(monkeypatch) -> None:

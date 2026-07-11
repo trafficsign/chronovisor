@@ -5,6 +5,7 @@ import time
 
 from llm_wiki_mcp import deep_retrieval, server
 from llm_wiki_mcp.jobs import JobStatus, job_store
+from llm_wiki_mcp.runtime_config import DecisionRouterConfig
 from llm_wiki_mcp.search import ScoredPage
 
 
@@ -105,3 +106,96 @@ def test_wiki_deep_dive_sync_returns_payload(monkeypatch) -> None:
     payload = json.loads(tool_fn("q", background=False))
 
     assert payload == {"status": "completed", "query": "q", "iterations": []}
+
+
+def _router_config() -> DecisionRouterConfig:
+    return DecisionRouterConfig(
+        primary_model="ornith:test",
+        challenger_model="gpt-oss:test",
+        tie_break_model="gemma:test",
+        num_ctx=16_384,
+        num_predict=512,
+        read_timeout_ms=5_000,
+        max_input_chars=20_000,
+        max_output_chars=2_000,
+        max_feedback_chars=2_000,
+    )
+
+
+def test_llm_requeries_repairs_invalid_json_in_same_session(monkeypatch) -> None:
+    from llm_wiki_mcp import ollama
+
+    responses = iter(
+        [
+            '{"queries":["next"],"extra":true}',
+            '{"queries":["next query"]}',
+        ]
+    )
+    requests = []
+
+    def transport(request):
+        requests.append(request)
+        return next(responses)
+
+    monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(deep_retrieval, "load_decision_router_config", _router_config)
+
+    queries = deep_retrieval._llm_requeries(
+        "original",
+        "current",
+        [{"page_id": "page-a", "title": "A", "snippet": "body"}],
+        limit=2,
+        transport=transport,
+    )
+
+    assert queries == ["next query"]
+    assert len(requests) == 2
+    assert len(requests[1].messages) == 4
+
+
+def test_llm_requeries_fails_closed_after_repeated_invalid_json(monkeypatch) -> None:
+    from llm_wiki_mcp import ollama
+
+    calls = 0
+
+    def transport(_request):
+        nonlocal calls
+        calls += 1
+        return '{"queries":[]}'
+
+    monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(deep_retrieval, "load_decision_router_config", _router_config)
+
+    queries = deep_retrieval._llm_requeries(
+        "original",
+        "current",
+        [],
+        limit=2,
+        transport=transport,
+    )
+
+    assert queries == []
+    assert calls == 2
+
+
+def test_injected_requery_transport_does_not_pollute_production_audit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from llm_wiki_mcp import ollama, wiki
+
+    wiki_root = tmp_path / "wiki"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(deep_retrieval, "load_decision_router_config", _router_config)
+
+    queries = deep_retrieval._llm_requeries(
+        "original",
+        "current",
+        [],
+        limit=1,
+        transport=lambda _request: '{"queries":["follow up"]}',
+    )
+
+    assert queries == ["follow up"]
+    assert not (wiki_root / "runtime" / "local-consensus").exists()

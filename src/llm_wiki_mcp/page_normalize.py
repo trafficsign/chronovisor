@@ -52,6 +52,7 @@ def normalize_pages(
                     frontier = lambda prompt, schema: run_structured_review(
                         prompt, schema, repo_root=runtime_repo_root(), execute_patch=False,
                         command_env="LLM_WIKI_PAGE_NORMALIZE_FRONTIER_CMD",
+                        decision_lane="page_normalize",
                     )
                 else:
                     frontier = reviewer

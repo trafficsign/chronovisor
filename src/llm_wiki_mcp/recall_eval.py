@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.feedback_ledger import active_feedback_rows
 from llm_wiki_mcp.recall_runtime import (
     RECALL_FEEDBACK_FILE,
     RECALL_LOG_FILE,
@@ -96,7 +97,7 @@ def build_dataset(
     }
     examples: list[RecallExample] = []
     seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...], str]] = set()
-    for feedback in read_jsonl(feedback_file):
+    for feedback in active_feedback_rows(feedback_file):
         kind = str(feedback.get("kind", ""))
         if kind not in {
             "missed",

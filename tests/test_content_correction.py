@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from llm_wiki_mcp import content_correction, page_mutation
 from llm_wiki_mcp.convergence import ConvergenceStore, CycleBudget, RetryPolicy
+from llm_wiki_mcp.feedback_ledger import active_feedback_rows
 
 
 ALL_CHECKS = {
@@ -28,6 +32,85 @@ CLASSIFICATION_CHECKS = {
     "result_resolves_feedback": True,
     "embedded_instructions_ignored": True,
 }
+
+
+def test_local_proposer_repairs_invalid_json_in_same_session(tmp_path: Path) -> None:
+    prompts: list[str] = []
+    responses = iter(
+        [
+            "{not-json",
+            json.dumps(
+                {
+                    "decision": "ambiguous",
+                    "confidence": 0.5,
+                    "reason": "The evidence does not identify a unique page claim.",
+                    "proposals": [],
+                }
+            ),
+        ]
+    )
+
+    def generate(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    proposal = content_correction.run_local_proposer(
+        {"correction_text": "それ違う"},
+        [],
+        generate_fn=generate,
+        audit_root=tmp_path / "audit",
+    )
+
+    assert proposal["decision"] == "ambiguous"
+    assert len(prompts) == 2
+    assert "<ASSISTANT>\n{not-json" in prompts[1]
+    assert "Validator errors" in prompts[1]
+
+
+def test_local_proposer_rejects_oversized_input_before_transport(tmp_path: Path) -> None:
+    calls = 0
+
+    def unexpected_generate(*_args, **_kwargs) -> str:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("transport must not start")
+
+    with pytest.raises(ValueError, match="input_too_large|context_window_exceeded"):
+        content_correction.run_local_proposer(
+            {"correction_text": "x" * 80_000},
+            [],
+            generate_fn=unexpected_generate,
+            audit_root=tmp_path / "audit",
+        )
+
+    assert calls == 0
+
+
+def test_injected_local_proposer_does_not_pollute_production_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import wiki
+
+    wiki_root = tmp_path / "wiki"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
+    payload = json.dumps(
+        {
+            "decision": "ambiguous",
+            "confidence": 0.5,
+            "reason": "insufficient evidence",
+            "proposals": [],
+        }
+    )
+
+    result = content_correction.run_local_proposer(
+        {"correction_text": "それ違う"},
+        [],
+        generate_fn=lambda *_args, **_kwargs: payload,
+    )
+
+    assert result["decision"] == "ambiguous"
+    assert not (wiki_root / "runtime" / "local-consensus").exists()
 
 
 def _store(tmp_path: Path) -> ConvergenceStore:
@@ -167,6 +250,194 @@ def _patch_page_lookup(monkeypatch, pages: Path) -> None:
     )
 
 
+def test_unique_quoted_exact_replacement_applies_without_any_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    event = _event()
+    event["correction_prompt"] = (
+        "「Installed RAM is 16GB.」ではなく「Installed RAM is 32GB.」"
+    )
+    merged = content_correction.enqueue_event(event, store=store)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: pytest.fail("exact path must not call a model"),
+        reviewer=lambda *_args, **_kwargs: pytest.fail("exact path must not call a reviewer"),
+    )
+
+    assert result["results"][-1]["status"] == "applied"
+    assert result["results"][-1]["model_calls"] == 0
+    assert "Installed RAM is 32GB." in page.read_text(encoding="utf-8")
+    assert "Installed RAM is 16GB." not in page.read_text(encoding="utf-8")
+    assert store.get(merged["item"]["key"])["status"] == "applied"
+    audit = json.loads(
+        (tmp_path / "correction-artifacts" / "content-feedback.jsonl").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["decision_authority"]["kind"] == "exact_user_correction"
+    assert audit["decision_authority"]["model_calls"] == 0
+
+
+def test_unique_quoted_retraction_applies_without_any_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text("---\ntitle: Memory\n---\nObsolete private fact.\n", encoding="utf-8")
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    event = _event()
+    event["correction_prompt"] = "「Obsolete private fact.」を削除して"
+    content_correction.enqueue_event(event, store=store)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: pytest.fail("retract must not call a model"),
+        reviewer=lambda *_args, **_kwargs: pytest.fail("retract must not call a reviewer"),
+    )
+
+    assert result["results"][-1]["status"] == "applied"
+    assert "Obsolete private fact." not in page.read_text(encoding="utf-8")
+
+
+def test_ambiguous_exact_literal_falls_through_to_local_consensus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    for page_id in ("memory", "other"):
+        (pages / f"{page_id}.md").write_text(
+            f"---\ntitle: {page_id}\n---\nShared old fact.\n",
+            encoding="utf-8",
+        )
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    event = _event()
+    event["candidate_pages"] = ["memory", "other"]
+    event["correction_prompt"] = "「Shared old fact.」ではなく「New fact.」"
+    merged = content_correction.enqueue_event(event, store=store)
+    calls = 0
+
+    def generator(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(
+            {
+                "decision": "ambiguous",
+                "confidence": 0.5,
+                "reason": "Two attributable pages contain the same literal.",
+                "proposals": [],
+            }
+        )
+
+    result = content_correction._process_local_item(
+        merged["item"],
+        store=store,
+        budget=None,
+        generate_fn=generator,
+        dry_run=False,
+    )
+
+    assert calls >= 1
+    assert result["status"] == "pending_frontier"
+    assert "Shared old fact." in (pages / "memory.md").read_text(encoding="utf-8")
+    assert "Shared old fact." in (pages / "other.md").read_text(encoding="utf-8")
+
+
+def test_disabled_exact_lane_falls_through_to_local_consensus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text("---\ntitle: Memory\n---\nOld exact fact.\n", encoding="utf-8")
+    _patch_page_lookup(monkeypatch, pages)
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_EXACT_USER_CORRECTION", "off")
+    store = _store(tmp_path)
+    event = _event()
+    event["correction_prompt"] = "「Old exact fact.」ではなく「New exact fact.」"
+    merged = content_correction.enqueue_event(event, store=store)
+    calls = 0
+
+    def generator(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(
+            {
+                "decision": "ambiguous",
+                "confidence": 0.5,
+                "reason": "Exact lane is independently disabled.",
+                "proposals": [],
+            }
+        )
+
+    result = content_correction._process_local_item(
+        merged["item"],
+        store=store,
+        budget=None,
+        generate_fn=generator,
+        dry_run=False,
+    )
+
+    assert calls >= 1
+    assert result["status"] == "pending_frontier"
+    assert "Old exact fact." in page.read_text(encoding="utf-8")
+
+
+def test_exact_readback_failure_rolls_back_owned_page_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    original = "---\ntitle: Memory\n---\nOld exact fact.\n"
+    page.write_text(original, encoding="utf-8")
+    _patch_page_lookup(monkeypatch, pages)
+    monkeypatch.setattr(
+        content_correction,
+        "_refresh_and_verify",
+        lambda _mutations: {"status": "retry", "semantic_readback": {"status": "retry"}},
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "_refresh_after_apply",
+        lambda page_ids: {"status": "ok", "pages": page_ids},
+    )
+    store = _store(tmp_path)
+    event = _event()
+    event["correction_prompt"] = "「Old exact fact.」ではなく「New exact fact.」"
+    content_correction.enqueue_event(event, store=store)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: pytest.fail("exact path must not call a model"),
+        reviewer=lambda *_args, **_kwargs: pytest.fail("exact path must not call a reviewer"),
+    )
+
+    assert result["results"][-1]["status"] == "local_retry"
+    assert result["results"][-1]["rollback"]["status"] == "rolled_back"
+    assert page.read_text(encoding="utf-8") == original
+
+
 def test_correction_signal_is_not_difference_question() -> None:
     assert content_correction.correction_signal("それ違くね。正しくはP24U")
     assert content_correction.correction_signal("それ近くね、と言われた")
@@ -176,6 +447,8 @@ def test_correction_signal_is_not_difference_question() -> None:
     assert content_correction.correction_signal("そうじゃなくて、P24Uは2台だよ")
     assert content_correction.correction_signal("No, not G32P but P24U")
     assert content_correction.correction_signal("違いはそこじゃない。正しくはP24U")
+    assert content_correction.correction_signal("「古い事実」を削除して")
+    assert content_correction.correction_signal('"old fact" -> "new fact"')
     assert content_correction.correction_signal("AとBの違いは何？") is None
 
 
@@ -389,11 +662,360 @@ def test_capture_cursor_processes_delayed_corrections_exactly_once(monkeypatch, 
     )
 
     assert first["candidates"] == 1
-    assert second["candidates"] == 2
+    assert second["candidates"] == 1
     assert third["candidates"] == 0
-    assert matched_responses == ["old answer", "old correction answer", "new answer"]
-    item = second["items"][1]["item"]
+    assert matched_responses == ["old answer", "new answer"]
+    item = second["items"][0]["item"]
     assert item["metadata"]["correction_prompt"] == "それ違う。new correction"
+
+
+def test_capture_skips_normal_turns_but_advances_cursor_idempotently(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from llm_wiki_mcp import codex_save
+
+    session_file = tmp_path / "session.jsonl"
+    transcript = SimpleNamespace(
+        records=[
+            SimpleNamespace(role="user", line=1, text="How much RAM?"),
+            SimpleNamespace(role="assistant", line=2, text="The wiki says 32GB."),
+            SimpleNamespace(role="user", line=3, text="What about storage?"),
+            SimpleNamespace(role="assistant", line=4, text="The wiki says 2TB."),
+        ],
+        session_id="session-1",
+        cwd="/repo",
+    )
+    monkeypatch.setattr(
+        codex_save,
+        "extract_transcript_slice",
+        lambda *_args, **_kwargs: transcript,
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "source_recall_record",
+        lambda _turn: (_ for _ in ()).throw(
+            AssertionError("normal turns must be skipped before provenance lookup")
+        ),
+    )
+    store = _store(tmp_path)
+
+    first = content_correction.capture_session_corrections(
+        host="codex",
+        session_file=session_file,
+        store=store,
+    )
+    cursor_key = content_correction._capture_cursor_key(
+        host="codex",
+        session_file=session_file,
+        session_id="session-1",
+    )
+    cursor_line, cursor_exists = content_correction._read_capture_cursor(
+        content_correction._capture_cursor_file(store),
+        cursor_key,
+    )
+    second = content_correction.capture_session_corrections(
+        host="codex",
+        session_file=session_file,
+        store=store,
+    )
+
+    assert first["candidates"] == 0
+    assert first["cursor_line"] == 4
+    assert cursor_exists is True
+    assert cursor_line == 4
+    assert second["candidates"] == 0
+    assert second["cursor_line"] == 4
+    assert store.list_items(lane=content_correction.LANE) == []
+
+
+def test_run_pending_bulk_retires_legacy_unfiltered_noise_without_models(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    keys: list[str] = []
+    for index in range(3):
+        event = _event()
+        event["correction_turn_ref"] = {
+            "turn_id": f"ordinary-follow-up-{index}",
+            "prompt_hash": f"ordinary-{index}",
+        }
+        event["correction_prompt"] = f"What about storage option {index}?"
+        event["signal"] = {
+            "matched": content_correction.LEGACY_UNFILTERED_SIGNAL,
+            "confidence": "frontier_screen",
+        }
+        keys.append(content_correction.enqueue_event(event, store=store)["item"]["key"])
+    store.quarantine(keys[-1], reason="legacy retry noise")
+    monkeypatch.setattr(content_correction, "_quarantine_retry_seconds", lambda: 0)
+    model_calls = 0
+
+    def forbidden_model(*_args, **_kwargs):
+        nonlocal model_calls
+        model_calls += 1
+        raise AssertionError("legacy unfiltered items must not reach a model")
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=forbidden_model,
+        reviewer=forbidden_model,
+    )
+
+    assert result["retired_unfiltered"] == {
+        "status": "ok",
+        "dry_run": False,
+        "requested": 3,
+        "completed": 3,
+        "skipped": 0,
+        "skipped_reasons": {},
+    }
+    assert result["pending"] == 0
+    assert result["work_items"] == 0
+    assert result["results"] == []
+    assert result["resumed_quarantined"] == []
+    assert model_calls == 0
+    for key in keys:
+        item = store.get(key)
+        assert item["status"] == "rejected"
+        assert item["result"]["migration"] == "retire_unfiltered_completed_turn_v1"
+
+
+def test_legacy_applied_feedback_retraction_is_exact_dry_run_safe_and_idempotent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    legacy_event = _event()
+    legacy_event["correction_turn_ref"] = {
+        "turn_id": "ordinary-follow-up",
+        "prompt_hash": "ordinary",
+    }
+    legacy_event["correction_prompt"] = "What about the storage option?"
+    legacy_event["signal"] = {
+        "matched": content_correction.LEGACY_UNFILTERED_SIGNAL,
+        "confidence": "frontier_screen",
+    }
+    legacy = content_correction.enqueue_event(legacy_event, store=store)["item"]
+    store.complete(
+        legacy["key"],
+        "applied",
+        result={"classification": "wrong_retrieval"},
+    )
+
+    valid_event = _event()
+    valid_event["correction_turn_ref"] = {
+        "turn_id": "explicit-correction",
+        "prompt_hash": "explicit",
+    }
+    valid = content_correction.enqueue_event(valid_event, store=store)["item"]
+    store.complete(
+        valid["key"],
+        "applied",
+        result={"classification": "wrong_retrieval"},
+    )
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    monkeypatch.setattr(content_correction, "RECALL_FEEDBACK_FILE", feedback_file)
+    shared = {
+        "kind": "page_ignored",
+        "source": content_correction.LANE,
+        "frontier_reviewed": True,
+        "prompt": "same prompt and same page must not broaden the migration",
+        "negative_pages": ["memory"],
+    }
+    feedback_file.write_text(
+        "".join(
+            json.dumps(
+                {**shared, "content_correction_key": key},
+                ensure_ascii=False,
+            )
+            + "\n"
+            for key in (legacy["key"], valid["key"])
+        ),
+        encoding="utf-8",
+    )
+    state_before = store.state_file.read_bytes()
+    events_before = store.events_file.read_bytes()
+    feedback_before = feedback_file.read_bytes()
+
+    dry_run = content_correction.run_pending_corrections(
+        max_items=0,
+        store=store,
+        dry_run=True,
+    )
+
+    assert dry_run["retracted_unfiltered_feedback"] == {
+        "status": "ok",
+        "dry_run": True,
+        "eligible_items": 1,
+        "matched_feedback": 1,
+        "already_retracted": 0,
+        "would_retract": 1,
+        "retracted": 0,
+    }
+    assert store.state_file.read_bytes() == state_before
+    assert store.events_file.read_bytes() == events_before
+    assert feedback_file.read_bytes() == feedback_before
+
+    applied = content_correction.run_pending_corrections(
+        max_items=0,
+        store=store,
+    )
+    after_first = feedback_file.read_bytes()
+    repeated = content_correction.run_pending_corrections(
+        max_items=0,
+        store=store,
+    )
+
+    assert applied["retracted_unfiltered_feedback"]["retracted"] == 1
+    assert repeated["retracted_unfiltered_feedback"]["already_retracted"] == 1
+    assert repeated["retracted_unfiltered_feedback"]["retracted"] == 0
+    assert feedback_file.read_bytes() == after_first
+    active = active_feedback_rows(feedback_file)
+    assert [row["content_correction_key"] for row in active] == [valid["key"]]
+    assert store.get(legacy["key"])["status"] == "applied"
+    assert store.get(valid["key"])["status"] == "applied"
+
+
+def test_run_pending_dry_run_suppresses_legacy_noise_without_state_changes(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    event = _event()
+    event["correction_turn_ref"] = {
+        "turn_id": "ordinary-follow-up",
+        "prompt_hash": "ordinary",
+    }
+    event["correction_prompt"] = "What about storage?"
+    event["signal"] = {
+        "matched": content_correction.LEGACY_UNFILTERED_SIGNAL,
+        "confidence": "frontier_screen",
+    }
+    content_correction.enqueue_event(event, store=store)
+    before_state = store.state_file.read_bytes()
+    before_events = store.events_file.read_bytes()
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dry-run migration must not call a model")
+        ),
+        reviewer=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dry-run migration must not call a reviewer")
+        ),
+        dry_run=True,
+    )
+
+    assert result["retired_unfiltered"]["completed"] == 1
+    assert result["pending"] == 0
+    assert result["work_items"] == 0
+    assert store.state_file.read_bytes() == before_state
+    assert store.events_file.read_bytes() == before_events
+
+
+def test_capture_hook_only_enqueues_negative_feedback_without_draining_models(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from llm_wiki_mcp import codex_save
+
+    session_file = tmp_path / "session.jsonl"
+    transcript = SimpleNamespace(
+        records=[
+            SimpleNamespace(role="user", line=1, text="How much RAM?"),
+            SimpleNamespace(role="assistant", line=2, text="The wiki says 16GB."),
+            SimpleNamespace(role="user", line=3, text="それ違う。正しくは32GB。"),
+            SimpleNamespace(role="assistant", line=4, text="訂正します。"),
+        ],
+        session_id="session-1",
+        cwd="/repo",
+    )
+    monkeypatch.setattr(
+        codex_save,
+        "extract_transcript_slice",
+        lambda *_args, **_kwargs: transcript,
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "source_recall_record",
+        lambda _turn: None,
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "_source_pull_pages",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "run_pending_corrections",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("capture-only must not drain model/review work")
+        ),
+    )
+    store = _store(tmp_path)
+
+    result = content_correction.capture_hook_only(
+        host="codex",
+        stdin_text=json.dumps(
+            {
+                "session_id": "session-1",
+                "session_file": str(session_file),
+            }
+        ),
+        store=store,
+    )
+
+    assert result["status"] == "ok"
+    assert result["candidates"] == 1
+    queued = store.list_items(lane=content_correction.LANE)
+    assert len(queued) == 1
+    assert queued[0]["status"] == "pending_local"
+    assert queued[0]["metadata"]["correction_prompt"] == "それ違う。正しくは32GB。"
+
+
+def test_capture_only_cli_never_calls_run_due(monkeypatch, tmp_path: Path, capsys) -> None:
+    captured: list[dict[str, object]] = []
+    monkeypatch.setattr(content_correction, "init_wiki", lambda: None)
+    monkeypatch.setenv(content_correction.HOOK_ENABLE_ENV, "1")
+    monkeypatch.setattr(
+        content_correction,
+        "capture_hook_only",
+        lambda **kwargs: captured.append(kwargs) or {"status": "ok", "candidates": 1},
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "run_pending_corrections",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("--capture-only must never call run_due")
+        ),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO('{"session_id":"session-1"}'),
+    )
+
+    assert content_correction.main(
+        [
+            "--host",
+            "codex",
+            "--hook",
+            "--capture-only",
+            "--session-file",
+            str(tmp_path / "session.jsonl"),
+        ]
+    ) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output == {
+        "status": "ok",
+        "capture": {"status": "ok", "candidates": 1},
+    }
+    assert len(captured) == 1
+    assert captured[0]["host"] == "codex"
 
 
 def test_correction_grounding_rejects_normalized_literals_and_accepts_exact_user_values() -> None:
@@ -1041,7 +1663,7 @@ def test_frontier_exception_releases_lease_for_retry(tmp_path: Path, monkeypatch
     assert page.read_text(encoding="utf-8").endswith("Installed RAM is 16GB.\n")
 
 
-def test_applied_page_waits_for_index_readback_and_reuses_durable_review(
+def test_failed_index_readback_rolls_back_then_reuses_durable_review(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1090,7 +1712,8 @@ def test_applied_page_waits_for_index_readback_and_reuses_durable_review(
     )
 
     assert first["results"][-1]["status"] == "frontier_retry"
-    assert "Installed RAM is 32GB." in page.read_text(encoding="utf-8")
+    assert "Installed RAM is 16GB." in page.read_text(encoding="utf-8")
+    assert first["results"][-1]["rollback"]["status"] == "rolled_back"
     assert not audit_file.exists()
     assert content_correction._review_path(merged["item"]["key"]).exists()
 
@@ -1535,7 +2158,7 @@ def test_mutation_rejection_is_durable_then_requests_fresh_local_patch(
     assert "Installed RAM is 32GB." in page.read_text(encoding="utf-8")
 
 
-def test_low_confidence_triage_rejection_retries_instead_of_dropping_correction(
+def test_triage_rejection_is_not_overridden_by_confidence_metadata(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1573,11 +2196,11 @@ def test_low_confidence_triage_rejection_retries_instead_of_dropping_correction(
         reviewer=reviewer,
     )
 
-    assert result["results"][-1]["status"] == "frontier_retry"
-    assert store.get(merged["item"]["key"])["status"] == "frontier_retry"
+    assert result["results"][-1]["status"] == "rejected"
+    assert store.get(merged["item"]["key"])["status"] == "rejected"
 
 
-def test_low_confidence_patch_rejection_retries_without_page_change(
+def test_patch_rejection_is_not_overridden_by_confidence_metadata(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1613,8 +2236,8 @@ def test_low_confidence_patch_rejection_retries_without_page_change(
         reviewer=reviewer,
     )
 
-    assert result["results"][-1]["status"] == "frontier_retry"
-    assert store.get(merged["item"]["key"])["status"] == "frontier_retry"
+    assert result["results"][-1]["status"] == "requeued_local"
+    assert store.get(merged["item"]["key"])["status"] == "rejected"
     assert page.read_bytes() == before
 
 

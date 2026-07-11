@@ -23,8 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import httpx
-
+from llm_wiki_mcp.local_structured import ChatTransport, LocalStructuredSession
 from llm_wiki_mcp.recall_runtime import (
     RECALL_CONFIG_FILE,
     RECALL_DIR,
@@ -400,28 +399,35 @@ def run_auditor_judge(
     recall_snapshot: dict[str, Any] | None,
     top_pages: list[dict[str, Any]],
     policy: AuditPolicy,
+    *,
+    transport: ChatTransport | None = None,
+    audit_root: Path | None = None,
 ) -> str:
-    from llm_wiki_mcp.ollama import OLLAMA_URL
+    """Run the asynchronous auditor with bounded same-session JSON repair."""
 
-    payload = {
-        "model": policy.model,
-        "prompt": build_auditor_prompt(turn, recall_snapshot, top_pages, policy),
-        "stream": False,
-        "think": policy.think,
-        "keep_alive": policy.keep_alive,
-        "format": AUDITOR_SCHEMA,
-        "options": {
-            "temperature": 0,
-            "num_ctx": policy.num_ctx,
-            "num_predict": policy.num_predict,
-        },
-    }
-    timeout_seconds = max(1.0, policy.timeout_ms / 1000)
-    timeout = httpx.Timeout(connect=10.0, read=timeout_seconds, write=10.0, pool=10.0)
-    with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
-        resp = client.post("/api/generate", json=payload)
-        resp.raise_for_status()
-        return str(resp.json().get("response", "{}"))
+    result = LocalStructuredSession(
+        model=policy.model,
+        transport=transport,
+        role="recall_auditor",
+        audit_root=audit_root,
+        num_ctx=policy.num_ctx,
+        num_predict=policy.num_predict,
+        keep_alive=policy.keep_alive,
+        read_timeout_ms=policy.timeout_ms,
+        max_input_chars=65_536,
+        max_output_chars=8_000,
+        max_feedback_chars=2_000,
+    ).run(
+        build_auditor_prompt(turn, recall_snapshot, top_pages, policy),
+        AUDITOR_SCHEMA,
+    )
+    if not result.ok:
+        reason = result.failure_class or "structured_session_failed"
+        detail = result.failure_reason or "recall auditor did not converge"
+        raise ValueError(f"recall auditor failed: {reason}: {detail}")
+    if not isinstance(result.value, dict):
+        raise ValueError("recall auditor output is not an object")
+    return json.dumps(result.value, ensure_ascii=False, separators=(",", ":"))
 
 
 def acquire_audit_lock(path: Path) -> Any | None:

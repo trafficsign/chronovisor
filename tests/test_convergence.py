@@ -438,6 +438,55 @@ def test_running_transition_requires_matching_lease_owner(tmp_path: Path) -> Non
     assert completed["item"]["status"] == "applied"
 
 
+def test_complete_many_rewrites_state_once_and_skips_active_leases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    first = _merge(store, source_id="first")["key"]
+    second = _merge(store, source_id="second")["key"]
+    leased = _merge(store, source_id="leased")["key"]
+    store.claim_attempt(leased, "local", owner="worker", now=NOW)
+    original_save = store._save_unlocked
+    saves = 0
+
+    def counted_save(state: dict) -> None:
+        nonlocal saves
+        saves += 1
+        original_save(state)
+
+    monkeypatch.setattr(store, "_save_unlocked", counted_save)
+
+    result = store.complete_many(
+        [first, second, leased, "missing"],
+        "rejected",
+        result={"migration": "test"},
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert result == {
+        "status": "ok",
+        "dry_run": False,
+        "requested": 4,
+        "completed": 2,
+        "skipped": 2,
+        "skipped_reasons": {"leased": 1, "missing": 1},
+    }
+    assert saves == 1
+    assert store.get(first)["status"] == "rejected"
+    assert store.get(second)["result"] == {"migration": "test"}
+    assert store.get(leased)["status"] == "local_running"
+    completed_events = [
+        row
+        for row in (
+            json.loads(line)
+            for line in store.events_file.read_text(encoding="utf-8").splitlines()
+        )
+        if row.get("event") == "completed"
+    ]
+    assert {row["key"] for row in completed_events} == {first, second}
+
+
 def test_expired_crash_at_limit_routes_to_frontier_without_another_call(tmp_path: Path) -> None:
     store = _store(
         tmp_path,

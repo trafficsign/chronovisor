@@ -830,7 +830,7 @@ def test_frontier_duplicate_content_cas_refuses_concurrent_page_change(
     assert body.endswith("concurrent update\n")
 
 
-def test_frontier_duplicate_retries_low_confidence_decision_without_mutation(
+def test_frontier_duplicate_decision_is_not_overridden_by_confidence_metadata(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -856,11 +856,11 @@ def test_frontier_duplicate_retries_low_confidence_decision_without_mutation(
         now=NOW,
     )
 
-    assert result["status_counts"] == {"frontier_retry": 1}
+    assert result["status_counts"] == {"applied": 1}
     assert result["kept_both"] == 0
-    assert result["results"][0]["decision"] == "needs_retry"
-    assert budget.snapshot()["used"]["mutation"] == 0
-    assert {path.name: path.read_bytes() for path in pages.iterdir()} == before
+    assert result["results"][0]["decision"] == "supersede_right"
+    assert budget.snapshot()["used"]["mutation"] == 1
+    assert {path.name: path.read_bytes() for path in pages.iterdir()} != before
 
 
 def test_frontier_duplicate_accepts_structured_runner_reviewer_annotation() -> None:
@@ -1171,7 +1171,7 @@ def test_retention_reuses_durable_approval_after_mutation_budget_retry(
     def reviewer(_candidate: dict) -> dict:
         nonlocal calls
         calls += 1
-        return {"decision": "archive", "confidence": 0.99, "summary": "Redundant"}
+        return {"decision": "archive", "confidence": 0.01, "summary": "Redundant"}
 
     first = autonomy.apply_retention_archives(
         payload,
@@ -1447,3 +1447,10 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     assert "--json" not in payload["wrappers"][0]["command"]
     converge = next(item for item in payload["plists"] if item["label"] == autonomy.CONVERGE_LABEL)
     assert converge["program"][0].endswith("llm-wiki-converge")
+    converge_wrapper = next(
+        item
+        for item in payload["wrappers"]
+        if Path(item["path"]).name == "llm-wiki-converge"
+    )
+    assert "--no-sleep" in converge_wrapper["command"]
+    assert "--with-sleep" not in converge_wrapper["command"]

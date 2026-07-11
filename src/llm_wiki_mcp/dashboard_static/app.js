@@ -22,7 +22,8 @@ const els = {
   llmTarget: document.getElementById("llm-target"),
   llmStats: document.getElementById("llm-stats"),
   llmSparkline: document.getElementById("llm-sparkline"),
-  frontierReview: document.getElementById("frontier-review"),
+  localConsensus: document.getElementById("local-consensus"),
+  frontierRepair: document.getElementById("frontier-repair"),
   currentJob: document.getElementById("current-job"),
   lastSuccess: document.getElementById("last-success"),
   selfHealPanel: document.getElementById("self-heal-panel"),
@@ -120,7 +121,7 @@ const llmSignalHistory = {
   rates: Array(32).fill(0),
 };
 
-const WORK_STAGE_ORDER = ["raw", "triage", "generate", "apply", "index"];
+const WORK_STAGE_ORDER = ["raw", "triage", "generate", "review", "apply", "index"];
 const WORK_STAGE_ALIASES = {
   idle: "idle",
   queued: "raw",
@@ -130,6 +131,7 @@ const WORK_STAGE_ALIASES = {
   generate: "generate",
   generating: "generate",
   llm: "generate",
+  review: "review",
   apply: "apply",
   applying: "apply",
   write: "apply",
@@ -323,22 +325,32 @@ function setWorkStage(stage, stateKind) {
 
 function renderWorkStatus(status) {
   const llm = status.llm || null;
-  const frontier = status.frontier_review || {};
+  const consensus = status.local_consensus || {};
+  const repair = status.frontier_repair || {};
   const ingestActive = Boolean(status.current_raw || status.current_job_id || (llm && llm.active));
-  const reviewOnly = Boolean(frontier.active && !ingestActive);
-  const active = Boolean(ingestActive || frontier.active);
+  const localReviewOnly = Boolean(consensus.active && !ingestActive);
+  const localEvaluationOnly = Boolean(
+    localReviewOnly && String((consensus.latest || {}).role || "").startsWith("model_eval:")
+  );
+  const repairOnly = Boolean(repair.active && !ingestActive && !localReviewOnly);
+  const reviewOnly = localReviewOnly || repairOnly;
+  const active = Boolean(ingestActive || consensus.active || repair.active);
   const lastSuccess = status.last_success || null;
   let stage = reviewOnly ? "review" : inferWorkStage(status, llm);
   if (!active && lastSuccess) stage = "index";
   const lastTargets = lastSuccessTargets(lastSuccess);
   const updated = status.updated_at ? `updated ${timeLabel(status.updated_at)}` : "--";
+  let reviewLabel = "Frontier repair running";
+  if (localReviewOnly) {
+    reviewLabel = localEvaluationOnly ? "Local model evaluation" : "Local consensus reviewing";
+  }
   const stageLabels = {
     raw: "Reading raw capture",
     triage: "Choosing page action",
     generate: "Generating wiki page",
     apply: "Writing page update",
     index: "Indexing completed work",
-    review: "Frontier reviewing",
+    review: reviewLabel,
   };
 
   let stateKind = "idle";
@@ -349,10 +361,18 @@ function renderWorkStatus(status) {
     stateKind = "running";
     summary = stageLabels[stage] || "Processing raw";
     if (reviewOnly) {
-      const latest = frontier.latest || {};
-      const count = Number(frontier.count || 1);
-      const subject = [latest.kind, latest.reviewer, latest.model].filter(Boolean).join(" · ");
-      detail = `${count} active review${count === 1 ? "" : "s"}${subject ? ` · ${subject}` : ""}`;
+      if (localReviewOnly) {
+        const latest = consensus.latest || {};
+        const count = Number(consensus.count || 1);
+        const subject = [latest.role, latest.model].filter(Boolean).join(" · ");
+        const activity = localEvaluationOnly ? "local eval vote" : "local vote";
+        detail = `${count} active ${activity}${count === 1 ? "" : "s"}${subject ? ` · ${subject}` : ""}`;
+      } else {
+        const process = repair.process_activity || {};
+        const latest = process.latest || repair.active_incident || {};
+        const subject = [latest.kind || latest.component, latest.model].filter(Boolean).join(" · ");
+        detail = `exceptional code repair${subject ? ` · ${subject}` : ""}`;
+      }
     } else {
       const current = shortName(status.current_raw || (llm && (llm.raw || llm.target)) || status.current_job_id);
       const op = fmt(status.current_op || stage, "work");
@@ -971,7 +991,10 @@ function renderSelfHeal(selfHeal) {
   els.selfHealPacketTotal.textContent = `${intValue(packets.total)} total · ${intValue(packets.failed)} failed`;
 
   els.selfHealFrontierCard.classList.remove("ready", "blocked", "unknown");
-  if (frontier.ok === true) {
+  if (frontier.mode === "on_demand_only") {
+    els.selfHealFrontierCard.classList.add(frontier.state === "active" ? "ready" : "unknown");
+    els.selfHealFrontierState.textContent = frontier.state === "active" ? "active" : "standby";
+  } else if (frontier.ok === true) {
     els.selfHealFrontierCard.classList.add("ready");
     els.selfHealFrontierState.textContent = "ready";
   } else if (frontier.ok === false) {
@@ -983,6 +1006,8 @@ function renderSelfHeal(selfHeal) {
   }
   const failure = frontier.failure || {};
   const frontierDetails = [
+    frontier.mode === "on_demand_only" ? "guard only" : null,
+    frontier.incidents_started != null ? `${intValue(frontier.incidents_started)} starts` : null,
     frontier.checked_at ? `checked ${ageLabel(frontier.checked_at)}` : null,
     frontier.cached ? "cached" : null,
     frontier.missing_exec_options && frontier.missing_exec_options.length
@@ -990,7 +1015,7 @@ function renderSelfHeal(selfHeal) {
       : null,
     failure.failure_class || frontier.error || null,
   ].filter(Boolean);
-  els.selfHealFrontierDetail.textContent = frontierDetails.join(" · ") || "preflight";
+  els.selfHealFrontierDetail.textContent = frontierDetails.join(" · ") || "guard state";
 
   const countItems = [
     ["resolved", counts.resolved || 0],
@@ -1805,7 +1830,8 @@ function renderRecallImprovement(lab) {
 
 function render(snapshot) {
   const status = snapshot.status || {};
-  status.frontier_review = snapshot.frontier_review || status.frontier_review || {};
+  status.local_consensus = snapshot.local_consensus || status.local_consensus || {};
+  status.frontier_repair = snapshot.frontier_repair || status.frontier_repair || {};
   const metrics = snapshot.metrics || [];
   const batch = status.batch || {};
   const ollama = snapshot.ollama || {};
@@ -1829,11 +1855,23 @@ function render(snapshot) {
   els.currentOp.textContent = status.current_op ? fmt(status.current_op) : fmt(status.stage || "idle");
   renderWorkStatus(status);
   renderLlm(status.llm, status);
-  const frontier = status.frontier_review || {};
-  const latestReview = frontier.latest || {};
-  els.frontierReview.textContent = frontier.active
-    ? `${intValue(frontier.count)} active · ${[latestReview.kind, latestReview.reviewer, latestReview.model].filter(Boolean).join(" · ")} · ${compactDuration(latestReview.elapsed_seconds)}`
-    : "idle";
+  const consensus = status.local_consensus || {};
+  const consensusSummary = consensus.summary || {};
+  const decisionSummary = consensusSummary.decisions || {};
+  const evaluationSummary = (consensusSummary.evaluation || {}).decisions || {};
+  const policyCounts = ((status.decision_policies || {}).counts) || {};
+  const activeModels = (consensus.activities || [])
+    .map((item) => [item.role, item.model].filter(Boolean).join(" · "))
+    .filter(Boolean);
+  els.localConsensus.textContent = consensus.active
+    ? `${intValue(consensus.count)} active · ${activeModels.join(" · ")}`
+    : `${intValue(decisionSummary.total)} routine · ${intValue(decisionSummary.pair_agreement)} pair · ${intValue(decisionSummary.tie_break_used)} tie · ${intValue(decisionSummary.unresolved_quarantine)} quarantined · ${intValue(evaluationSummary.total)} eval · ${intValue(policyCounts.shadow)} shadow / ${intValue(policyCounts.enabled)} enabled`;
+  const repair = status.frontier_repair || {};
+  const repairSummary = repair.summary || {};
+  const activeRepair = repair.active_incident || ((repair.process_activity || {}).latest) || {};
+  els.frontierRepair.textContent = repair.active
+    ? `active · ${[activeRepair.component || activeRepair.kind, activeRepair.status, activeRepair.model].filter(Boolean).join(" · ")}`
+    : `${intValue(repairSummary.starts_24h)} starts / 24h · ${intValue(repairSummary.total)} total`;
   els.currentJob.textContent = status.current_job_id ? fmt(status.current_job_id) : "none";
   els.lastSuccess.textContent = status.last_success
     ? `${shortName(status.last_success.raw)} -> ${shortName(lastSuccessTargets(status.last_success) || "none")}`

@@ -29,6 +29,7 @@ def _reviewer(prompt: str, schema: dict[str, Any]) -> Mapping[str, Any] | str:
         repo_root=runtime_repo_root(),
         execute_patch=False,
         command_env="LLM_WIKI_METADATA_BACKFILL_FRONTIER_CMD",
+        decision_lane="metadata_backfill",
     )
 
 

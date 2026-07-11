@@ -348,6 +348,38 @@ class TestAnalyzePage:
         assert analysis.assigned_tags == []
         assert analysis.raw_response == "not json"
 
+    def test_schema_error_is_repaired_in_same_structured_session(
+        self,
+        isolated_pages: Path,
+    ) -> None:
+        _seed(isolated_pages, "p1", body="MCP config")
+        replies = iter(
+            [
+                json.dumps({"main_topic": "missing fields"}),
+                json.dumps(
+                    {
+                        "main_topic": "MCP設定",
+                        "assigned_tags": ["d/tools-config"],
+                        "tag_evidence": {"d/tools-config": "MCP config"},
+                        "rejected_assigned_tags": [],
+                        "suggested_missing_categories": [],
+                        "confidence": 0.9,
+                    }
+                ),
+            ]
+        )
+        prompts: list[str] = []
+
+        def fake_generate(prompt: str, **_kwargs) -> str:
+            prompts.append(prompt)
+            return next(replies)
+
+        analysis = analyze_page("p1", ["d/tools-config"], fake_generate)
+
+        assert analysis.assigned_tags == ["d/tools-config"]
+        assert len(prompts) == 2
+        assert "Validator errors" in prompts[1]
+
 
 # ---------------------------------------------------------------------------
 # aggregate

@@ -5,8 +5,76 @@ from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from llm_wiki_mcp import recall_auditor
 from llm_wiki_mcp.recall_runtime import stable_prompt_hash
+
+
+def _valid_auditor_payload() -> dict[str, object]:
+    return {
+        "missed": False,
+        "confidence": 0.9,
+        "reason_code": "valid_skip",
+        "auditor_reason": "No prior memory was needed.",
+        "expected_pages": [],
+        "missing_signal": "valid_skip",
+        "action_type": "none",
+    }
+
+
+def test_auditor_judge_repairs_schema_error_in_same_session(tmp_path: Path) -> None:
+    requests = []
+    invalid = _valid_auditor_payload()
+    invalid["confidence"] = "high"
+    responses = iter([json.dumps(invalid), json.dumps(_valid_auditor_payload())])
+
+    def transport(request):
+        requests.append(request)
+        return next(responses)
+
+    output = recall_auditor.run_auditor_judge(
+        recall_auditor.TurnContext(
+            host="codex",
+            prompt="new standalone question",
+            assistant_response="standalone answer",
+        ),
+        None,
+        [],
+        recall_auditor.AuditPolicy(),
+        transport=transport,
+        audit_root=tmp_path / "audit",
+    )
+
+    assert json.loads(output)["reason_code"] == "valid_skip"
+    assert len(requests) == 2
+    assert requests[1].messages[-2]["role"] == "assistant"
+    assert "Validator errors" in requests[1].messages[-1]["content"]
+
+
+def test_auditor_judge_rejects_oversized_input_before_transport(tmp_path: Path) -> None:
+    calls = 0
+
+    def transport(_request):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("transport must not start")
+
+    with pytest.raises(ValueError, match="input_too_large|context_window_exceeded"):
+        recall_auditor.run_auditor_judge(
+            recall_auditor.TurnContext(
+                host="codex",
+                prompt="x" * 80_000,
+                assistant_response="answer",
+            ),
+            None,
+            [],
+            recall_auditor.AuditPolicy(max_prompt_chars=100_000),
+            transport=transport,
+            audit_root=tmp_path / "audit",
+        )
+
+    assert calls == 0
 
 
 def test_threshold_action_is_review_only_even_if_auditor_is_confident() -> None:

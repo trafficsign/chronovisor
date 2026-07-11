@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 
+import pytest
+
 from llm_wiki_mcp import lint_repair
 from llm_wiki_mcp.convergence import CycleBudget, ConvergenceStore, RetryPolicy
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
@@ -12,6 +14,55 @@ from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 VALID_TAGS = ["d/tools-config", "t/howto", "s/evergreen"]
+
+
+def test_default_local_reviewer_repairs_schema_error_in_same_session(tmp_path: Path) -> None:
+    requests = []
+    responses = iter(
+        [
+            json.dumps({"decision": "approved", "tags": "bad", "reason": "x"}),
+            json.dumps(
+                {"decision": "approved", "tags": VALID_TAGS, "reason": "matches page"}
+            ),
+        ]
+    )
+
+    def transport(request):
+        requests.append(request)
+        return next(responses)
+
+    result = lint_repair._default_local_reviewer(
+        "repair these tags",
+        lint_repair.TAG_REPAIR_SCHEMA,
+        transport=transport,
+        audit_root=tmp_path / "audit",
+    )
+
+    assert result["tags"] == VALID_TAGS
+    assert len(requests) == 2
+    assert requests[1].messages[-2]["role"] == "assistant"
+    assert "Validator errors" in requests[1].messages[-1]["content"]
+
+
+def test_default_local_reviewer_rejects_oversized_input_before_transport(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def transport(_request):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("transport must not start")
+
+    with pytest.raises(ValueError, match="input_too_large|context_window_exceeded"):
+        lint_repair._default_local_reviewer(
+            "x" * 80_000,
+            lint_repair.TAG_REPAIR_SCHEMA,
+            transport=transport,
+            audit_root=tmp_path / "audit",
+        )
+
+    assert calls == 0
 
 
 def _store(tmp_path: Path, *, policy: RetryPolicy | None = None) -> ConvergenceStore:

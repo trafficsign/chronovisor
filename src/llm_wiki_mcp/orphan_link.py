@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -41,13 +42,16 @@ from llm_wiki_mcp.wiki import find_page
 from llm_wiki_mcp.wiki import WIKI_ROOT
 from llm_wiki_mcp.link_fix import atomic_write, protected_spans
 from llm_wiki_mcp.page_mutation import wiki_mutation_lock
-from llm_wiki_mcp.runtime_config import runtime_repo_root
+from llm_wiki_mcp.local_structured import ChatRequest, LocalStructuredSession
+from llm_wiki_mcp.runtime_config import (
+    load_decision_router_config,
+    runtime_repo_root,
+)
 
 
 DECISIONS_FILE = WIKI_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
 PROJECT_ROOT = runtime_repo_root()
 RESOLVER_VERSION = "orphan-link-v1"
-DEFAULT_FRONTIER_CONFIDENCE_THRESHOLD = 0.8
 
 ORPHAN_FRONTIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -57,6 +61,18 @@ ORPHAN_FRONTIER_SCHEMA: dict[str, Any] = {
         "decision": {"type": "string", "enum": ["approved", "rejected", "needs_retry"]},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "summary": {"type": "string"},
+    },
+}
+
+ORPHAN_SUGGESTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["confidence", "reason", "suggested_anchor", "suggested_section"],
+    "properties": {
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "reason": {"type": "string"},
+        "suggested_anchor": {"type": "string"},
+        "suggested_section": {"type": "string"},
     },
 }
 
@@ -268,7 +284,7 @@ def score_candidate(
     source_id: str,
     orphan_id: str,
     store,
-    generate_fn: Callable[..., str],
+    generate_fn: Callable[..., str] | None = None,
 ) -> dict | None:
     """Ask the LLM to score one (source, orphan) pair. None on any failure
     (LLM down, malformed response, schema violation)."""
@@ -281,18 +297,67 @@ def _score_candidate_outcome(
     source_id: str,
     orphan_id: str,
     store,
-    generate_fn: Callable[..., str],
+    generate_fn: Callable[..., str] | None,
 ) -> dict[str, Any]:
     """Keep transient model failures distinct from a valid low score."""
     prompt = _build_prompt(source_id, orphan_id, store)
-    try:
-        raw = generate_fn(prompt, system=SUGGESTION_SYSTEM_PROMPT)
-    except Exception as exc:
+    config = load_decision_router_config()
+    last_output: list[str] = []
+    transport = None
+    if generate_fn is not None:
+        def transport(request: ChatRequest) -> str:
+            system = request.messages[0]["content"] if request.messages else ""
+            transcript = "\n\n".join(
+                f"<{message['role'].upper()}>\n{message['content']}"
+                for message in request.messages[1:]
+            )
+            output = generate_fn(transcript, system=system)
+            last_output[:] = [output]
+            return output
+
+    session_kwargs = {
+        "model": config.primary_model,
+        "transport": transport,
+        "role": "orphan_candidate",
+        "num_ctx": config.num_ctx,
+        "num_predict": min(config.num_predict, 1_024),
+        "keep_alive": config.primary_keep_alive,
+        "read_timeout_ms": config.read_timeout_ms,
+        "max_input_chars": min(config.max_input_chars, 16_000),
+        "max_output_chars": min(config.max_output_chars, 4_000),
+        "max_feedback_chars": config.max_feedback_chars,
+    }
+    if generate_fn is None:
+        result = LocalStructuredSession(**session_kwargs).run(
+            prompt,
+            ORPHAN_SUGGESTION_SCHEMA,
+            system=SUGGESTION_SYSTEM_PROMPT,
+        )
+    else:
+        # Injected generators are a compatibility/test seam, not a production
+        # decision source. Keep their audit artifacts isolated and ephemeral.
+        with tempfile.TemporaryDirectory(prefix="llm-wiki-orphan-structured-") as root:
+            result = LocalStructuredSession(
+                **session_kwargs,
+                audit_root=Path(root),
+            ).run(
+                prompt,
+                ORPHAN_SUGGESTION_SCHEMA,
+                system=SUGGESTION_SYSTEM_PROMPT,
+            )
+    if not result.ok:
         return {
-            "status": "call_error",
-            "error": f"{exc.__class__.__name__}: {exc}",
+            "status": (
+                "call_error"
+                if result.failure_class in {"transport_error", "transport_timeout"}
+                else "schema_error"
+            ),
+            "error": result.failure_reason or result.failure_class or "structured review failed",
+            "last_output": last_output[-1] if last_output else "",
         }
-    parsed = parse_llm_response(raw)
+    parsed = result.value if isinstance(result.value, dict) else None
+    if parsed is not None:
+        parsed = parse_llm_response(json.dumps(parsed, ensure_ascii=False))
     if parsed is None:
         return {
             "status": "schema_error",
@@ -329,10 +394,6 @@ def run_dry_run(
         from llm_wiki_mcp.index_store import get_store
         store = get_store()
         store.refresh()
-    if generate_fn is None:
-        from llm_wiki_mcp.ollama import generate
-        generate_fn = generate
-
     orphans = store.orphans(include_system=False)
     if orphan_limit is not None:
         orphans = orphans[:orphan_limit]
@@ -619,7 +680,12 @@ the schema.
 Candidate:
 {json.dumps(candidate, ensure_ascii=False, indent=2)}
 """
-    return run_structured_review(prompt, ORPHAN_FRONTIER_SCHEMA, repo_root=PROJECT_ROOT)
+    return run_structured_review(
+        prompt,
+        ORPHAN_FRONTIER_SCHEMA,
+        repo_root=PROJECT_ROOT,
+        decision_lane="orphan_link",
+    )
 
 
 def run_autonomous(
@@ -633,7 +699,7 @@ def run_autonomous(
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     convergence_store=None,
     budget=None,
-    frontier_confidence_threshold: float = DEFAULT_FRONTIER_CONFIDENCE_THRESHOLD,
+    frontier_confidence_threshold: float | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Boundedly drain orphan proposals through local + frontier review."""
@@ -649,10 +715,6 @@ def run_autonomous(
 
         store = get_store()
         store.refresh()
-    if generate_fn is None:
-        from llm_wiki_mcp.ollama import generate
-
-        generate_fn = generate
     state = convergence_store or ConvergenceStore()
     cycle_budget = budget or CycleBudget(max_local_calls=max(1, orphan_limit * max_candidates), max_frontier_calls=2, max_mutations=2)
     orphans = store.orphans(include_system=False)
@@ -668,7 +730,8 @@ def run_autonomous(
         dry_run=dry_run,
     )
     work_limit = max(0, int(orphan_limit))
-    frontier_confidence_threshold = max(0.0, min(1.0, float(frontier_confidence_threshold)))
+    # Deprecated compatibility input. Consensus confidence is diagnostic only.
+    del frontier_confidence_threshold
     results: list[dict[str, Any]] = []
     work_items = 0
     scanned = 0
@@ -971,17 +1034,6 @@ def run_autonomous(
                 owner=claim["owner"],
             )
             results.append({"orphan": orphan_id, "status": failed["item"]["status"], "key": key})
-            continue
-        if float(review.get("confidence") or 0.0) < frontier_confidence_threshold:
-            failed = state.fail_attempt(
-                key,
-                "frontier",
-                error="frontier_confidence_below_threshold",
-                owner=claim["owner"],
-            )
-            results.append(
-                {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
-            )
             continue
         if proposal_kind == "no_link":
             completed = state.complete(

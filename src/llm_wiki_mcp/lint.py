@@ -565,6 +565,7 @@ def _default_safe_fix_reviewer(
         repo_root=REPO_ROOT,
         execute_patch=False,
         command_env="LLM_WIKI_LINT_SAFE_FIX_FRONTIER_CMD",
+        decision_lane="lint_safe_semantic_mutation",
     )
 
 
@@ -661,7 +662,7 @@ def _review_safe_fix(
             except Exception as exc:
                 return {
                     "decision": "needs_retry",
-                    "summary": f"durable frontier verdict write failed: {exc}",
+                    "summary": f"durable local-consensus verdict write failed: {exc}",
                     "valid": False,
                 }
         return verdict

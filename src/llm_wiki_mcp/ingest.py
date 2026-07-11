@@ -20,6 +20,12 @@ from llm_wiki_mcp.ollama import (
     TRIAGE_SYSTEM_PROMPT,
     GENERATE_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT,
 )
+from llm_wiki_mcp.local_structured import (
+    ChatRequest,
+    ChatTransport,
+    LocalStructuredSession,
+)
+from llm_wiki_mcp.runtime_config import load_ingest_config
 from llm_wiki_mcp import runtime_status
 from llm_wiki_mcp.entities import patch_entities_frontmatter
 
@@ -147,14 +153,43 @@ def _generate_with_progress(
     *,
     system: str | None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    format: dict[str, Any] | str | None = None,
 ) -> str:
+    kwargs: dict[str, Any] = {}
     if progress_callback is not None and _supports_keyword(generate, "progress_callback"):
-        try:
-            return generate(prompt, system=system, progress_callback=progress_callback)
-        except Exception as e:
+        kwargs["progress_callback"] = progress_callback
+    if format is not None and _supports_keyword(generate, "format"):
+        kwargs["format"] = format
+    try:
+        return generate(prompt, system=system, **kwargs)
+    except Exception as e:
+        if progress_callback is not None:
             progress_callback({"event": "error", "active": False, "error": str(e)})
-            raise
-    return generate(prompt, system=system)
+        raise
+
+
+def _structured_generate_transport(
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> ChatTransport:
+    """Adapt the legacy generate fixture/progress seam to chat-style history."""
+
+    def transport(request: ChatRequest) -> str:
+        system = request.messages[0]["content"] if request.messages else ""
+        transcript = "\n\n".join(
+            f"<{message['role'].upper()}>\n{message['content']}"
+            for message in request.messages[1:]
+        )
+        kwargs: dict[str, Any] = {
+            "system": system,
+            "progress_callback": progress_callback,
+        }
+        # Existing tests and callers can still replace the historical helper
+        # with a narrower fixture. Production receives Ollama's JSON schema.
+        if _supports_keyword(_generate_with_progress, "format"):
+            kwargs["format"] = request.schema
+        return _generate_with_progress(transcript, **kwargs)
+
+    return transport
 
 
 def _triage_with_progress(
@@ -243,12 +278,36 @@ def _llm_progress_callback(
 
 _TRIAGE_CATALOG_TOP_N = 100
 
+TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "maxItems": 32,
+    "items": {
+        "type": "object",
+        # Historical triage operations carry a few optional diagnostic fields;
+        # keep accepting them while strictly validating mutation essentials.
+        "additionalProperties": True,
+        "required": ["type", "filename"],
+        "properties": {
+            "type": {"type": "string", "enum": ["create", "update"]},
+            "filename": {"type": "string", "minLength": 1, "maxLength": 200},
+            "title": {"type": "string"},
+            "keywords": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {"type": "string"},
+            },
+            "summary": {"type": "string"},
+        },
+    },
+}
+
 
 def _triage(
     content: str,
     *,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     frontier_feedback: str | None = None,
+    transport: ChatTransport | None = None,
 ) -> list[dict] | None:
     """Stage 1: Analyze raw content and return a plan, or None on parse failure.
 
@@ -302,12 +361,29 @@ Raw session data to triage:
 
 Analyze the raw data above. Output a JSON array of page operations (create/update)."""
 
-    output = _generate_with_progress(prompt, system=TRIAGE_SYSTEM_PROMPT, progress_callback=progress_callback)
-    raw_plan = _extract_json_array(output)
-    if raw_plan is None:
+    config = load_ingest_config()
+    result = LocalStructuredSession(
+        model=config.model,
+        transport=transport or _structured_generate_transport(progress_callback),
+        role="ingest_triage",
+        num_ctx=config.num_ctx,
+        num_predict=min(config.num_predict, 2_048),
+        keep_alive=config.keep_alive,
+        read_timeout_ms=config.read_timeout_ms,
+        max_input_chars=17_000,
+        max_output_chars=4_000,
+        max_feedback_chars=2_400,
+    ).run(prompt, TRIAGE_PLAN_SCHEMA, system=TRIAGE_SYSTEM_PROMPT)
+    if not result.ok:
         _safe_log(
-            f"ingest | triage parse failed (output preview: {output[:120]!r})"
+            "ingest | triage structured session failed "
+            f"({result.failure_class or 'unknown'}: "
+            f"{(result.failure_reason or '')[:160]})"
         )
+        return None
+    raw_plan = result.value
+    if not isinstance(raw_plan, list):
+        _safe_log("ingest | triage structured session returned a non-array")
         return None
     validated = _validate_triage_plan(raw_plan, coerce_missing_updates=True)
     if validated is None:
@@ -1279,21 +1355,34 @@ def _fallback_recall_metadata(title: str, body: str, page_id: str) -> dict[str, 
     }
 
 
-def _generate_recall_metadata(title: str, body: str, page_id: str) -> dict[str, Any]:
+RECALL_METADATA_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "recall_questions"],
+    "properties": {
+        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+        "recall_questions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1, "maxLength": 300},
+        },
+    },
+}
+
+
+def _generate_recall_metadata(
+    title: str,
+    body: str,
+    page_id: str,
+    *,
+    transport: ChatTransport | None = None,
+) -> dict[str, Any]:
     fallback = _fallback_recall_metadata(title, body, page_id)
     try:
-        from llm_wiki_mcp.ollama import generate, is_available
-
         if not is_available():
             return fallback
-        schema = {
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string"},
-                "recall_questions": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
-            },
-            "required": ["summary", "recall_questions"],
-        }
         prompt = {
             "task": "Create retrievability metadata for this wiki page.",
             "rules": [
@@ -1305,7 +1394,25 @@ def _generate_recall_metadata(title: str, body: str, page_id: str) -> dict[str, 
             "title": title,
             "body": body[:2500],
         }
-        parsed = json.loads(generate(json.dumps(prompt, ensure_ascii=False), format=schema))
+        config = load_ingest_config()
+        result = LocalStructuredSession(
+            model=config.model,
+            transport=transport or _structured_generate_transport(),
+            role="ingest_recall_metadata",
+            num_ctx=config.num_ctx,
+            num_predict=min(config.num_predict, 1_024),
+            keep_alive=config.keep_alive,
+            read_timeout_ms=config.read_timeout_ms,
+            max_input_chars=16_000,
+            max_output_chars=1_600,
+            max_feedback_chars=1_600,
+        ).run(
+            json.dumps(prompt, ensure_ascii=False),
+            RECALL_METADATA_SCHEMA,
+        )
+        if not result.ok or not isinstance(result.value, dict):
+            return fallback
+        parsed = result.value
         summary = parsed.get("summary")
         questions = parsed.get("recall_questions")
         if isinstance(summary, str) and isinstance(questions, list):
@@ -1323,18 +1430,34 @@ def _generate_recall_metadata(title: str, body: str, page_id: str) -> dict[str, 
     return fallback
 
 
-def _ensure_recall_metadata_frontmatter(text: str, page_id: str, parse, patch) -> str:
+def _ensure_recall_metadata_frontmatter(
+    text: str,
+    page_id: str,
+    parse,
+    patch,
+    *,
+    allow_local_model: bool = True,
+    force_deterministic_rebuild: bool = False,
+) -> str:
     meta, body = parse(text)
     title = meta.get("title", page_id)
     title_text = title if isinstance(title, str) else page_id
+    if force_deterministic_rebuild:
+        return patch(text, _fallback_recall_metadata(title_text, body, page_id))
+
+    def generate_metadata() -> dict[str, Any]:
+        if allow_local_model:
+            return _generate_recall_metadata(title_text, body, page_id)
+        return _fallback_recall_metadata(title_text, body, page_id)
+
     updates: dict[str, Any] = {}
     generated: dict[str, Any] | None = None
     if not isinstance(meta.get("summary"), str) or not str(meta.get("summary")).strip():
-        generated = generated or _generate_recall_metadata(title_text, body, page_id)
+        generated = generated or generate_metadata()
         updates["summary"] = generated["summary"]
     questions = meta.get("recall_questions")
     if not isinstance(questions, list) or not questions:
-        generated = generated or _generate_recall_metadata(title_text, body, page_id)
+        generated = generated or generate_metadata()
         updates["recall_questions"] = generated["recall_questions"]
         updates.setdefault("summary", generated["summary"])
     if not updates:
@@ -1342,11 +1465,26 @@ def _ensure_recall_metadata_frontmatter(text: str, page_id: str, parse, patch) -
     return patch(text, updates)
 
 
-def _ensure_page_metadata_frontmatter(text: str, page_id: str, parse, patch) -> str:
+def _ensure_page_metadata_frontmatter(
+    text: str,
+    page_id: str,
+    parse,
+    patch,
+    *,
+    allow_local_model: bool = True,
+    force_deterministic_rebuild: bool = False,
+) -> str:
     from llm_wiki_mcp.frontmatter import normalize_nested
 
     text, _normalization = normalize_nested(text)
-    text = _ensure_recall_metadata_frontmatter(text, page_id, parse, patch)
+    text = _ensure_recall_metadata_frontmatter(
+        text,
+        page_id,
+        parse,
+        patch,
+        allow_local_model=allow_local_model,
+        force_deterministic_rebuild=force_deterministic_rebuild,
+    )
     return patch_entities_frontmatter(text)
 
 
@@ -1396,6 +1534,9 @@ def _prepare_operations(
             page_paths = list(PAGES_DIR.rglob("*.md"))
             system_paths = list(_wiki.SYSTEM_DIR.rglob("*.md"))
             allowed_ids = {path.stem for path in [*page_paths, *system_paths]}
+            reserved_system_ids = {
+                _normalize_for_collision(path.stem) for path in system_paths
+            }
             tag_values: set[str] = set()
             for path in page_paths:
                 meta, _body = _frontmatter_parse(path.read_text(encoding="utf-8"))
@@ -1408,8 +1549,13 @@ def _prepare_operations(
 
             store = get_store()
             store.refresh()
-            allowed_ids = {
-                m["page_id"] for m in store.all_pages_meta(include_system=True)
+            allowed_ids = store.all_page_ids(include_system=True)
+            reserved_system_ids = {
+                _normalize_for_collision(page_id)
+                for page_id in (
+                    store.all_page_ids(include_system=True)
+                    - store.all_page_ids(include_system=False)
+                )
             }
             # Snapshot the tag pool once for the whole batch so dedupe doesn't
             # re-walk the index on every op. Same-batch siblings can't see
@@ -1440,6 +1586,10 @@ def _prepare_operations(
         # we use against the existing corpus, so two ops whose ids differ
         # only in case or NFC/NFD form are caught before any write.
         norm_key = _normalize_for_collision(page_id)
+        if norm_key in reserved_system_ids:
+            raise IngestApplyError(
+                f"reserved system page_id cannot be mutated by ingest: {page_id!r}"
+            )
         if norm_key in seen_norm_ids:
             raise IngestApplyError(
                 f"duplicate page_id within batch (case/Unicode-insensitive): "
@@ -1513,12 +1663,6 @@ def _prepare_operations(
                 # ``patch`` will splice raw_keywords into it without
                 # synthesizing a new block.
                 body = _frontmatter_patch(body, {"raw_keywords": op_raw_keywords})
-            body = _ensure_page_metadata_frontmatter(
-                body,
-                page_id,
-                _frontmatter_parse,
-                _frontmatter_patch,
-            )
             # The model is not a clock. Even when the prompt supplies today's
             # date, enforce it deterministically so a plausible-looking guess
             # can never become page metadata.
@@ -1588,12 +1732,6 @@ def _prepare_operations(
                 count=1,
             )
             new_body = stamped.rstrip() + "\n\n" + body + "\n"
-            new_body = _ensure_page_metadata_frontmatter(
-                new_body,
-                page_id,
-                _frontmatter_parse,
-                _frontmatter_patch,
-            )
             planned.append(
                 PreparedIngestOperation(
                     op_type="update",
@@ -1620,13 +1758,32 @@ def _prepare_operations(
                 entry.previous_text or "",
                 entry.new_body,
             )
+            # Recall metadata is derived only after active correction
+            # tombstones have canonicalized the page.  If a stale claim was
+            # rewritten, replace summary/questions deterministically from the
+            # corrected body so an LLM paraphrase cannot resurrect it.  Dry
+            # runs also stay byte-read-only by avoiding model audit artifacts.
+            constrained_body = _ensure_page_metadata_frontmatter(
+                constrained_body,
+                entry.page_id,
+                _frontmatter_parse,
+                _frontmatter_patch,
+                allow_local_model=not read_only and not enforced,
+                force_deterministic_rebuild=bool(enforced),
+            )
+            constrained_body, metadata_enforced = enforce_correction_constraints(
+                entry.page_id,
+                entry.previous_text or "",
+                constrained_body,
+            )
         except PageMutationError as exc:
             raise IngestApplyError(
                 f"content correction constraint failed for {entry.page_id}: {exc}"
             ) from exc
-        if enforced and not read_only:
+        all_enforced = [*enforced, *metadata_enforced]
+        if all_enforced and not read_only:
             _safe_log(
-                f"ingest | enforced {len(enforced)} global content correction(s) "
+                f"ingest | enforced {len(all_enforced)} global content correction(s) "
                 f"for {entry.page_id}"
             )
         constrained_plans.append(
@@ -2205,6 +2362,7 @@ Exact proposal:
         INGEST_FRONTIER_DECISION_SCHEMA,
         repo_root=Path(__file__).resolve().parents[2],
         execute_patch=False,
+        decision_lane="ingest_reconciliation",
     )
     return _normalize_ingest_frontier_review(result, proposal=proposal)
 

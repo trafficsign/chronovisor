@@ -95,7 +95,10 @@ def drain(
         try:
             from llm_wiki_mcp.self_heal import run_pending as run_pending_self_heal
 
-            self_heal_result = run_pending_self_heal(max_packets=1)
+            self_heal_result = run_pending_self_heal(
+                max_packets=1,
+                enable_frontier=False,
+            )
         except Exception as exc:
             self_heal_result = {"status": "error", "error": str(exc)}
         pending_after = len(orchestrator.get_pending_raw_files())

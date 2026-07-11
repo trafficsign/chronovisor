@@ -6,6 +6,7 @@ import json
 import pytest
 
 from llm_wiki_mcp import negative_feedback
+from llm_wiki_mcp.feedback_ledger import feedback_row_sha256
 from llm_wiki_mcp.runtime_config import NegativeFeedbackConfig, load_negative_feedback_config
 from llm_wiki_mcp.search import ScoredPage
 
@@ -100,6 +101,42 @@ def test_page_ignored_penalizes_only_explicit_negative_page(feedback_file) -> No
     assert [item.page_id for item in adjusted] == ["g32p-review", "p24u-review"]
     assert adjusted[0].score == pytest.approx(0.8)
     assert adjusted[1].score == pytest.approx(0.9 * 0.15)
+
+
+def test_exact_page_ignored_retraction_preserves_other_feedback(feedback_file) -> None:
+    legacy = {
+        "ts": "2026-07-11T10:23:35Z",
+        "kind": "page_ignored",
+        "source": "content_correction",
+        "content_correction_key": "legacy-key",
+        "prompt": "same query",
+        "negative_pages": ["legacy-noise"],
+        "frontier_reviewed": True,
+    }
+    valid = {
+        **legacy,
+        "content_correction_key": "valid-key",
+        "negative_pages": ["valid-noise"],
+    }
+    write_feedback(
+        feedback_file,
+        [
+            legacy,
+            valid,
+            {
+                "ts": "2026-07-11T11:00:00Z",
+                "kind": "page_ignored_retracted",
+                "source": "content_correction",
+                "content_correction_key": "legacy-key",
+                "target_kind": "page_ignored",
+                "target_feedback_sha256": feedback_row_sha256(legacy),
+            },
+        ],
+    )
+
+    assert negative_feedback.penalties_for_query("same query", CONFIG) == {
+        "valid-noise": pytest.approx(0.85)
+    }
 
 
 def test_page_ignored_hash_binding_expires_when_page_content_changes(

@@ -879,6 +879,42 @@ def test_unknown_crashed_replay_is_frontier_quarantined_not_blindly_retried(
     assert store.created == 1
 
 
+def test_safe_replay_decision_is_not_blocked_by_confidence_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from llm_wiki_mcp import frontier_review
+
+    row = {
+        "key": "raw-replay:test",
+        "raw": "missing.md",
+        "status": "indeterminate",
+        "frontier_attempts": 0,
+    }
+    monkeypatch.setattr(
+        frontier_review,
+        "run_structured_review",
+        lambda *_args, **_kwargs: {
+            "decision": "safe_replay",
+            "confidence": 0.01,
+            "reason": "no mutation evidence exists",
+        },
+    )
+
+    result = raw_replay._review_indeterminate_rows(
+        [row],
+        claims_file=tmp_path / "claims.jsonl",
+        history_file=tmp_path / "history.jsonl",
+        now=datetime(2026, 7, 11, tzinfo=timezone.utc),
+        budget=None,
+        retry_delay_seconds=60,
+    )
+
+    assert result["reviewed"] == 1
+    assert row["status"] == "pending"
+    assert row["frontier_decision"] == "safe_replay"
+
+
 def test_completed_ingest_with_broken_completion_journal_never_becomes_retryable(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1046,6 +1082,9 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
 
         def all_pages_meta(self, include_system=True):
             return [{"page_id": "display"}]
+
+        def all_page_ids(self, include_system=True):
+            return {"display"}
 
         def all_tags(self, include_system=False):
             return set()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -95,7 +96,9 @@ def args_for(session_file: Path, state_file: Path, *, ignore_state: bool = False
     )
 
 
-def test_extract_transcript_slice_filters_injected_context_and_tool_output(tmp_path: Path) -> None:
+def test_extract_transcript_slice_filters_injected_context_and_preserves_tool_output(
+    tmp_path: Path,
+) -> None:
     session = tmp_path / "session.jsonl"
     sample_session(session)
 
@@ -105,11 +108,58 @@ def test_extract_transcript_slice_filters_injected_context_and_tool_output(tmp_p
     assert result.cwd == "/tmp/project"
     assert result.scanned_until_line == 5
     assert [(record.role, record.line) for record in result.records] == [
+        ("tool", 3),
         ("user", 4),
         ("assistant", 5),
     ]
     assert "AGENTS.md" not in codex_save.format_transcript(result.records)
     assert "large command output" not in codex_save.format_transcript(result.records)
+    serialized = codex_save.serialize_transcript_records(result.records)
+    assert "large command output" in serialized
+    assert result.records[0].event_type == "function_call_output"
+
+
+def test_extract_preserves_image_file_and_tool_payloads(tmp_path: Path) -> None:
+    session = tmp_path / "structured.jsonl"
+    write_jsonl(
+        session,
+        [
+            {
+                "type": "session_meta",
+                "payload": {"id": "structured", "cwd": "/tmp/project"},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
+                        {"type": "input_file", "filename": "notes.pdf", "file_data": "AQ=="},
+                    ],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "view_image",
+                    "input": {"path": "/tmp/image.png"},
+                },
+            },
+        ],
+    )
+
+    result = codex_save.extract_transcript_slice(session)
+    serialized = codex_save.serialize_transcript_records(result.records)
+
+    assert [(record.role, record.line) for record in result.records] == [
+        ("user", 2),
+        ("tool", 3),
+    ]
+    assert "data:image/png;base64,AA==" in serialized
+    assert '"filename": "notes.pdf"' in serialized
+    assert '"name": "view_image"' in serialized
 
 
 def test_extract_transcript_slice_honors_after_line(tmp_path: Path) -> None:
@@ -239,42 +289,11 @@ def test_user_evidence_validation_rejects_normalized_model_and_capacity(
     codex_save.validate_user_evidence_quotes(valid, transcript_slice)
 
 
-def test_run_memory_writer_uses_mini_schema_and_disables_hooks(monkeypatch) -> None:
-    seen: dict[str, object] = {}
+def test_run_memory_writer_is_retired_without_a_subprocess_surface() -> None:
+    assert not hasattr(codex_save, "subprocess")
 
-    def fake_run(cmd, **kwargs):
-        output_path = Path(cmd[cmd.index("-o") + 1])
-        output_path.write_text(
-            json.dumps(
-                {
-                    "should_save": True,
-                    "content": "Body",
-                    "keywords": ["Codex", "LLM Wiki"],
-                    "reason": "ok",
-                    "evidence_quotes": ["exact user quote"],
-                }
-            )
-        )
-        seen["cmd"] = cmd
-        seen["env"] = kwargs["env"]
-        seen["input"] = kwargs["input"]
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(codex_save.subprocess, "run", fake_run)
-
-    result = codex_save.run_memory_writer("prompt")
-
-    cmd = seen["cmd"]
-    assert cmd[cmd.index("-m") + 1] == codex_save.DEFAULT_MEMORY_MODEL
-    assert f'model_reasoning_effort="{codex_save.DEFAULT_REASONING_EFFORT}"' in cmd
-    assert "--output-schema" in cmd
-    assert "--disable" in cmd
-    assert "hooks" in cmd
-    assert "--ephemeral" in cmd
-    assert seen["env"]["CODEX_HOME"].endswith("/.config/codex")
-    assert seen["env"][codex_save.HOOK_ENABLE_ENV] == "0"
-    assert seen["input"] == "prompt"
-    assert result.content == "Body"
+    with pytest.raises(codex_save.CodexSaveError, match="deterministic-lossless"):
+        codex_save.run_memory_writer("prompt")
 
 
 def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, monkeypatch) -> None:
@@ -287,14 +306,7 @@ def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, mon
     monkeypatch.setattr(
         codex_save,
         "run_memory_writer",
-        lambda *args, **kwargs: codex_save.WriterResult(
-            should_save=True,
-            content="Durable memory",
-            keywords=["Codex", "LLM Wiki"],
-            reason="useful",
-            rejected_keywords=[],
-            evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
-        ),
+        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
     )
 
     def fake_save_raw(
@@ -321,7 +333,9 @@ def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, mon
         codex_save, "validate_published_save_receipt", lambda **_kwargs: None
     )
 
-    first = codex_save.run(args_for(session, state, ignore_state=True))
+    first_args = args_for(session, state, ignore_state=True)
+    first_args.trigger_ingest = True
+    first = codex_save.run(first_args)
     second = codex_save.run(args_for(session, state))
 
     assert first["status"] == "saved"
@@ -331,10 +345,176 @@ def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, mon
     assert calls[0]["session_id"] == "codex-019e5ec3-42fe-7f70-9402-7ff20da6be69"
     assert calls[0]["trigger_ingest"] is False
     assert calls[0]["idempotency_key"].startswith("codex-")
-    assert "> Codex 側の保存ハーネスを実装したい" in calls[0]["content"]
-    assert "## Writer Reason" not in calls[0]["content"]
+    assert '"text": "Codex 側の保存ハーネスを実装したい"' in calls[0]["content"]
+    assert "Capture mode: deterministic-lossless" in calls[0]["content"]
+    assert first["capture_mode"] == "deterministic-lossless"
+    assert first["keywords"] == ["Codex", "transcript-delta"]
     saved_state = json.loads(state.read_text())
     assert saved_state["files"][str(session)]["last_saved_line"] == 5
+
+
+def test_one_stop_drains_every_bounded_transcript_chunk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    sample_session(session)
+    calls: list[str] = []
+    monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        codex_save,
+        "save_raw",
+        lambda content, **_kwargs: calls.append(content)
+        or {"saved": f"raw-{len(calls)}.md"},
+    )
+    monkeypatch.setattr(
+        codex_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
+    extracted = codex_save.extract_transcript_slice(session)
+    args = args_for(session, state, ignore_state=True)
+    args.max_chars = max(
+        len(codex_save._serialized_records_bytes([record]))
+        for record in extracted.records
+    )
+
+    result = codex_save.run(args)
+
+    assert result["status"] == "saved"
+    assert result["chunk_count"] >= 2
+    assert len(calls) == result["chunk_count"]
+    assert "large command output" in "\n".join(calls)
+    assert "Codex 側の保存ハーネスを実装したい" in "\n".join(calls)
+    assert "gpt-5.4-mini で要約します" in "\n".join(calls)
+    assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 5
+
+
+def _fragment_payload(content: str) -> dict:
+    encoded = content.split("```json\n", 1)[1].split("\n```", 1)[0]
+    return json.loads(encoded)
+
+
+def test_oversized_first_record_is_reassemblable_and_commits_after_all_fragments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "oversized.jsonl"
+    state = tmp_path / "state.json"
+    write_jsonl(
+        session,
+        [
+            {
+                "type": "session_meta",
+                "payload": {"id": "oversized", "cwd": "/tmp/project"},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "記憶" * 300}],
+                },
+            },
+        ],
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        codex_save,
+        "save_raw",
+        lambda content, **kwargs: calls.append({"content": content, **kwargs})
+        or {"saved": f"raw-{len(calls)}.md"},
+    )
+    monkeypatch.setattr(
+        codex_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
+    args = args_for(session, state, ignore_state=True)
+    args.max_chars = 128
+
+    result = codex_save.run(args)
+    payloads = [_fragment_payload(call["content"]) for call in calls]
+    reconstructed = b"".join(base64.b64decode(row["data"]) for row in payloads)
+    expected = codex_save._serialized_records_bytes(
+        [codex_save.extract_transcript_slice(session).records[0]]
+    )
+
+    assert result["status"] == "saved"
+    assert result["oversized_record"] is True
+    assert result["fragment_count"] == len(calls) > 1
+    assert all(row["fragment_bytes"] <= args.max_chars for row in payloads)
+    assert reconstructed == expected
+    assert len({call["idempotency_key"] for call in calls}) == len(calls)
+    assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 2
+
+
+def test_oversized_fragment_failure_never_advances_cursor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "oversized.jsonl"
+    state = tmp_path / "state.json"
+    write_jsonl(
+        session,
+        [
+            {"type": "session_meta", "payload": {"id": "oversized"}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "X" * 1000}],
+                },
+            },
+        ],
+    )
+    monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
+    attempts = 0
+
+    def fail_second_fragment(_content: str, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise RuntimeError("injected fragment failure")
+        return {"saved": f"raw-{attempts}.md"}
+
+    monkeypatch.setattr(codex_save, "save_raw", fail_second_fragment)
+    monkeypatch.setattr(
+        codex_save, "validate_published_save_receipt", lambda **_kwargs: None
+    )
+    args = args_for(session, state, ignore_state=True)
+    args.max_chars = 128
+
+    with pytest.raises(RuntimeError, match="injected fragment failure"):
+        codex_save.run(args)
+
+    assert not state.exists()
+
+
+@pytest.mark.parametrize("mode", ["off", "invalid-mode"])
+def test_raw_capture_policy_fail_closed_without_cursor_or_model(
+    tmp_path: Path, monkeypatch, mode: str
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    sample_session(session)
+    state.write_text('{"version": 1, "files": {}}\n')
+    original_state = state.read_bytes()
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RAW_CAPTURE", mode)
+    monkeypatch.setattr(
+        codex_save, "init_wiki", lambda: pytest.fail("policy gate must precede init")
+    )
+    monkeypatch.setattr(
+        codex_save, "save_raw", lambda *_args, **_kwargs: pytest.fail("must not publish")
+    )
+    monkeypatch.setattr(
+        codex_save,
+        "run_memory_writer",
+        lambda *_args, **_kwargs: pytest.fail("must not start a model"),
+    )
+
+    result = codex_save.run(args_for(session, state))
+
+    assert result["status"] == "deferred"
+    assert result["model_calls"] == 0
+    assert result["decision_policy"]["mode"] == "off"
+    assert state.read_bytes() == original_state
 
 
 def test_retry_recovers_raw_published_before_state_commit(
@@ -372,22 +552,10 @@ def test_retry_recovers_raw_published_before_state_commit(
         ),
         encoding="utf-8",
     )
-    writer_calls: list[int] = []
     save_calls: list[str] = []
 
     monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
     monkeypatch.setattr(codex_save, "RAW_DIR", raw_dir)
-
-    def fake_writer(*_args, **_kwargs):
-        writer_calls.append(1)
-        return codex_save.WriterResult(
-            should_save=True,
-            content="Durable memory",
-            keywords=["Codex"],
-            reason="useful",
-            rejected_keywords=[],
-            evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
-        )
 
     def durable_fake_save(content: str, *, idempotency_key: str, **_kwargs):
         save_calls.append(idempotency_key)
@@ -405,7 +573,11 @@ def test_retry_recovers_raw_published_before_state_commit(
             raise OSError("injected crash after raw publish")
         real_write_state(path, payload)
 
-    monkeypatch.setattr(codex_save, "run_memory_writer", fake_writer)
+    monkeypatch.setattr(
+        codex_save,
+        "run_memory_writer",
+        lambda *args, **kwargs: pytest.fail("recovery must not start a writer"),
+    )
     monkeypatch.setattr(codex_save, "save_raw", durable_fake_save)
     monkeypatch.setattr(codex_save, "write_state", fail_first_state_commit)
 
@@ -416,7 +588,6 @@ def test_retry_recovers_raw_published_before_state_commit(
 
     assert retry["status"] == "recovered"
     assert retry["recovered_save"]["idempotency_key"] == save_calls[0]
-    assert len(writer_calls) == 1
     assert len(save_calls) == 1
     assert len(list(raw_dir.glob("*.md"))) == 1
     saved_state = json.loads(state.read_text())
@@ -437,19 +608,15 @@ def test_corrupt_publisher_receipt_does_not_advance_cursor(
     monkeypatch.setattr(
         codex_save,
         "run_memory_writer",
-        lambda *_args, **_kwargs: codex_save.WriterResult(
-            should_save=True,
-            content="Durable memory",
-            keywords=["Codex"],
-            reason="useful",
-            rejected_keywords=[],
-            evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
-        ),
+        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
     )
 
     def corrupt_save(content: str, *, idempotency_key: str, **_kwargs):
         path = raw_dir / f"save-{idempotency_key}.md"
-        path.write_text(content.replace("Durable memory", "tampered memory"), encoding="utf-8")
+        path.write_text(
+            content.replace("Codex 側の保存ハーネスを実装したい", "tampered memory"),
+            encoding="utf-8",
+        )
         return {"saved": path.name, "path": str(path)}
 
     monkeypatch.setattr(codex_save, "save_raw", corrupt_save)
@@ -480,12 +647,11 @@ def test_concurrent_stop_workers_publish_delta_exactly_once(
         )
 
     monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
-    first_writer_entered = threading.Event()
-    release_first_writer = threading.Event()
-    duplicate_writer_entered = threading.Event()
+    first_save_entered = threading.Event()
+    release_first_save = threading.Event()
+    duplicate_save_entered = threading.Event()
     second_lock_attempted = threading.Event()
     calls_guard = threading.Lock()
-    writer_calls: list[int] = []
     lock_attempts: list[int] = []
     saves: list[str] = []
 
@@ -502,29 +668,22 @@ def test_concurrent_stop_workers_publish_delta_exactly_once(
         with real_transaction_lock(**kwargs) as lock_path:
             yield lock_path
 
-    def fake_writer(*_args, **_kwargs):
-        with calls_guard:
-            writer_calls.append(1)
-            first = len(writer_calls) == 1
-        if first:
-            first_writer_entered.set()
-            assert release_first_writer.wait(5)
-        else:
-            duplicate_writer_entered.set()
-        return codex_save.WriterResult(
-            should_save=True,
-            content="Durable memory",
-            keywords=["Codex"],
-            reason="useful",
-            rejected_keywords=[],
-            evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
-        )
-
     def fake_save(content: str, **_kwargs):
-        saves.append(content)
+        with calls_guard:
+            saves.append(content)
+            first = len(saves) == 1
+        if first:
+            first_save_entered.set()
+            assert release_first_save.wait(5)
+        else:
+            duplicate_save_entered.set()
         return {"saved": "raw.md"}
 
-    monkeypatch.setattr(codex_save, "run_memory_writer", fake_writer)
+    monkeypatch.setattr(
+        codex_save,
+        "run_memory_writer",
+        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
+    )
     monkeypatch.setattr(codex_save, "save_raw", fake_save)
     monkeypatch.setattr(
         codex_save, "validate_published_save_receipt", lambda **_kwargs: None
@@ -538,24 +697,23 @@ def test_concurrent_stop_workers_publish_delta_exactly_once(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(codex_save.run, args_for(session, state))
-        assert first_writer_entered.wait(5)
+        assert first_save_entered.wait(5)
         second = pool.submit(second_worker)
         assert second_started.wait(5)
         assert second_lock_attempted.wait(5)
-        assert not duplicate_writer_entered.is_set()
-        release_first_writer.set()
+        assert not duplicate_save_entered.is_set()
+        release_first_save.set()
         results = [first.result(timeout=5), second.result(timeout=5)]
 
-    assert not duplicate_writer_entered.is_set()
+    assert not duplicate_save_entered.is_set()
     assert len(lock_attempts) == 2
-    assert len(writer_calls) == 1
     assert len(saves) == 1
     assert sorted(result["status"] for result in results) == ["saved", "skipped"]
     saved_state = json.loads(state.read_text())
     assert saved_state["files"][str(session)]["last_saved_line"] == 6
 
 
-def test_save_rejects_assistant_only_evidence_before_writing(
+def test_save_captures_user_and_assistant_text_without_writer(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -566,24 +724,25 @@ def test_save_rejects_assistant_only_evidence_before_writing(
     monkeypatch.setattr(
         codex_save,
         "run_memory_writer",
-        lambda *args, **kwargs: codex_save.WriterResult(
-            should_save=True,
-            content="Misattributed model memory",
-            keywords=["gpt-5.4-mini"],
-            reason="assistant-only",
-            rejected_keywords=[],
-            evidence_quotes=["gpt-5.4-mini で要約します"],
-        ),
+        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
     )
+    saved: list[str] = []
     monkeypatch.setattr(
         codex_save,
         "save_raw",
-        lambda *args, **kwargs: pytest.fail("invalid evidence must not be saved"),
+        lambda content, **kwargs: saved.append(content) or {"saved": "raw.md"},
+    )
+    monkeypatch.setattr(
+        codex_save, "validate_published_save_receipt", lambda **_kwargs: None
     )
 
-    with pytest.raises(codex_save.CodexSaveError, match="not found verbatim in USER"):
-        codex_save.run(args_for(session, state, ignore_state=True))
-    assert not state.exists()
+    result = codex_save.run(args_for(session, state, ignore_state=True))
+
+    assert result["status"] == "saved"
+    assert len(saved) == 1
+    assert '"role": "user"' in saved[0]
+    assert '"role": "assistant"' in saved[0]
+    assert "gpt-5.4-mini で要約します" in saved[0]
 
 
 def test_hook_mode_is_disabled_without_env(tmp_path: Path, monkeypatch) -> None:

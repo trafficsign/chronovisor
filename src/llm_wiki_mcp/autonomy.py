@@ -56,8 +56,6 @@ RETENTION_FRONTIER_LANE = "retention_frontier"
 CONTENT_CORRECTION_LANE = "content_correction"
 DUPLICATE_FRONTIER_RESOLVER_VERSION = "duplicate-frontier-v1"
 RETENTION_FRONTIER_RESOLVER_VERSION = "retention-frontier-v1"
-DUPLICATE_SUPERSEDE_MIN_CONFIDENCE = 0.8
-RETENTION_DECISION_MIN_CONFIDENCE = 0.8
 DUPLICATE_FRONTIER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -404,14 +402,6 @@ def _trusted_approval_review(
         or not 0.0 <= float(confidence) <= 1.0
     ):
         return None
-    if (
-        decision in {"supersede_left", "supersede_right", "keep_both"}
-        and float(confidence) < DUPLICATE_SUPERSEDE_MIN_CONFIDENCE
-    ) or (
-        decision in {"archive", "keep_active"}
-        and float(confidence) < RETENTION_DECISION_MIN_CONFIDENCE
-    ):
-        return None
     return review
 
 
@@ -446,12 +436,7 @@ def _finalize_frontier_receipt(
         or isinstance(confidence, bool)
         or not isinstance(confidence, (int, float))
         or not math.isfinite(float(confidence))
-        or float(confidence)
-        < (
-            DUPLICATE_SUPERSEDE_MIN_CONFIDENCE
-            if lane == DUPLICATE_FRONTIER_LANE
-            else RETENTION_DECISION_MIN_CONFIDENCE
-        )
+        or not 0.0 <= float(confidence) <= 1.0
     ):
         return None
     if lane == DUPLICATE_FRONTIER_LANE:
@@ -984,6 +969,7 @@ Candidate:
         timeout=timeout,
         execute_patch=False,
         command_env="LLM_WIKI_DUPLICATE_REVIEW_CMD",
+        decision_lane="autonomy_duplicate_resolution",
     )
 
 
@@ -1183,23 +1169,6 @@ def resolve_deferred_duplicates_with_frontier(
                 }
             review = _normalize_duplicate_frontier_review(raw_review)
         frontier_decision = str(review.get("decision"))
-        if (
-            frontier_decision in {"supersede_left", "supersede_right", "keep_both"}
-            and float(review.get("confidence") or 0.0)
-            < DUPLICATE_SUPERSEDE_MIN_CONFIDENCE
-        ):
-            original_decision = frontier_decision
-            review = {
-                **review,
-                "decision": "needs_retry",
-                "original_decision": original_decision,
-                "low_confidence_decision": True,
-                "summary": (
-                    f"duplicate decision confidence below "
-                    f"{DUPLICATE_SUPERSEDE_MIN_CONFIDENCE:.2f}"
-                ),
-            }
-            frontier_decision = "needs_retry"
         if frontier_decision != "needs_retry" and approval is None:
             try:
                 _persist_frontier_approval(
@@ -1406,6 +1375,7 @@ Candidate:
         timeout=timeout,
         execute_patch=False,
         command_env="LLM_WIKI_RETENTION_REVIEW_CMD",
+        decision_lane="autonomy_retention",
     )
 
 
@@ -1600,18 +1570,6 @@ def apply_retention_archives(
                 }
             review = _normalize_retention_frontier_review(raw_review)
         frontier_decision = str(review.get("decision") or "needs_retry")
-        if (
-            frontier_decision in {"archive", "keep_active"}
-            and float(review.get("confidence") or 0.0) < RETENTION_DECISION_MIN_CONFIDENCE
-        ):
-            review = {
-                **review,
-                "decision": "needs_retry",
-                "summary": (
-                    f"retention confidence below {RETENTION_DECISION_MIN_CONFIDENCE:.2f}"
-                ),
-            }
-            frontier_decision = "needs_retry"
         if frontier_decision != "needs_retry" and approval is None:
             try:
                 _persist_frontier_approval(
@@ -1889,9 +1847,54 @@ def watchdog_snapshot(
     from llm_wiki_mcp.health import health_snapshot
     from llm_wiki_mcp.sleep_cycle import HISTORY_FILE
 
-    health = health_snapshot()
+    component_alert: dict[str, Any] | None = None
+    try:
+        health = health_snapshot()
+    except Exception as exc:
+        # A watchdog failure is itself observable state.  Keep the dashboard
+        # alive, then let the one trusted producer perform two deterministic
+        # local rechecks.  Routine alerts never enter this path.
+        from llm_wiki_mcp.system_incident_supervisor import (
+            safe_exception_diagnostic,
+            supervise_health_snapshot_exception,
+        )
+
+        diagnostic = safe_exception_diagnostic(exc)
+        incident_run_id = (
+            f"watchdog:{datetime.now().isoformat(timespec='microseconds')}:{os.getpid()}"
+        )
+        try:
+            incident = supervise_health_snapshot_exception(
+                exc,
+                run_id=incident_run_id,
+                runner=lambda _attempt: health_snapshot(),
+                dry_run=not write,
+            )
+        except Exception as supervisor_exc:
+            incident = {
+                "status": "supervisor_error",
+                "supervisor_error_type": supervisor_exc.__class__.__name__,
+            }
+        component_alert = {
+            "type": "component_error",
+            "component": "watchdog.health_snapshot",
+            "exception_type": diagnostic.exception_type,
+            "diagnostic_hash": diagnostic.diagnostic_hash,
+            "incident_status": incident.get("status"),
+            "fingerprint": incident.get("fingerprint"),
+            "occurrence_count": incident.get("occurrence_count"),
+            "distinct_input_count": incident.get("distinct_input_count"),
+            "packet_path": incident.get("packet_path"),
+            "supervisor_error_type": incident.get("supervisor_error_type"),
+        }
+        health = {
+            "status": "error",
+            "component": "watchdog.health_snapshot",
+        }
     latest_sleep = _latest_jsonl(HISTORY_FILE)
     alerts: list[dict[str, Any]] = []
+    if component_alert is not None:
+        alerts.append(component_alert)
     capture = _capture_rate(health)
     if capture is not None and capture < min_capture_rate:
         alerts.append({"type": "capture_rate_low", "value": capture, "threshold": min_capture_rate})
@@ -2163,6 +2166,7 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "8",
         "--job-limit",
         "8",
+        "--no-sleep",
     ]
     sleep_plist = _plist(
         SLEEP_LABEL,
@@ -2184,7 +2188,6 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         stdout=logs / "converge.launchd.out.log",
         stderr=logs / "converge.launchd.err.log",
         start_interval=1800,
-        environment={"LLM_WIKI_FRONTIER_CALLS_PER_LANE": "5"},
     )
     payload: dict[str, Any] = {
         "status": "ok",

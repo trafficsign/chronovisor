@@ -98,6 +98,7 @@ def test_reviewed_claim_state_materializes_approved_invalidations(tmp_path: Path
             {
                 "conflict_id": "conflict-1",
                 "reviewed_at": "2026-07-11T12:00:00",
+                "authority": "user",
                 "valid": True,
                 "review": {
                     "decision": "approved",
@@ -116,6 +117,60 @@ def test_reviewed_claim_state_materializes_approved_invalidations(tmp_path: Path
     assert state["old"]["status"] == "superseded"
     assert state["old"]["valid_to"] == "2026-07-11T12:00:00"
     assert state["new"]["status"] == "active"
+
+
+def test_default_conflict_review_preserves_all_claims(
+    tmp_path: Path, monkeypatch
+) -> None:
+    conflict_file = tmp_path / "conflicts.jsonl"
+    review_file = tmp_path / "reviews.jsonl"
+    conflict_file.write_text(
+        json.dumps(
+            {
+                "conflict_id": "conflict-1",
+                "claims": [
+                    {"claim_id": "old", "value": "16GB", "source_raw": "a.md"},
+                    {"claim_id": "new", "value": "32GB", "source_raw": "b.md"},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(claims, "CLAIM_CONFLICT_FILE", conflict_file)
+    monkeypatch.setattr(claims, "CLAIM_REVIEW_FILE", review_file)
+
+    result = claims.review_claim_conflicts()
+
+    review = result["results"][0]["review"]
+    assert review["decision"] == "preserved"
+    assert review["preferred_claim_ids"] == []
+    assert review["invalidated_claim_ids"] == []
+    assert review_file.exists()
+
+
+def test_disabled_conflict_lane_preserves_queue_without_review_or_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conflict_file = tmp_path / "conflicts.jsonl"
+    review_file = tmp_path / "reviews.jsonl"
+    conflict_file.write_text(
+        json.dumps({"conflict_id": "conflict-1", "claims": []}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(claims, "CLAIM_CONFLICT_FILE", conflict_file)
+    monkeypatch.setattr(claims, "CLAIM_REVIEW_FILE", review_file)
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_CLAIMS_CONFLICT", "off")
+
+    result = claims.review_claim_conflicts(
+        reviewer=lambda *_args, **_kwargs: pytest.fail("disabled lane must not review")
+    )
+
+    assert result["status"] == "deferred"
+    assert result["pending"] == 1
+    assert result["processed"] == 0
+    assert not review_file.exists()
 
 
 def test_append_page_claims_requires_source_raw(tmp_path: Path, monkeypatch) -> None:

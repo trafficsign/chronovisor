@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 from llm_wiki_mcp import recall_eval
+from llm_wiki_mcp.feedback_ledger import feedback_row_sha256
 from llm_wiki_mcp.recall_runtime import ContextItem, RecallPolicy, RecallResult
 
 
@@ -42,6 +43,48 @@ def test_build_dataset_uses_feedback_and_snapshot(tmp_path) -> None:
     assert len(examples) == 1
     assert examples[0].expected_pages == ("target-page",)
     assert examples[0].injected_pages == ("old-page",)
+
+
+def test_build_dataset_excludes_only_exactly_retracted_page_feedback(tmp_path) -> None:
+    log_file = tmp_path / "recall-log.jsonl"
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file.write_text("", encoding="utf-8")
+    legacy = {
+        "kind": "page_ignored",
+        "content_correction_key": "legacy",
+        "prompt": "same prompt",
+        "negative_pages": ["old-noise"],
+    }
+    valid = {
+        **legacy,
+        "content_correction_key": "valid",
+        "negative_pages": ["real-noise"],
+    }
+    feedback_file.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False) + "\n"
+            for row in (
+                legacy,
+                valid,
+                {
+                    "kind": "page_ignored_retracted",
+                    "content_correction_key": "legacy",
+                    "target_kind": "page_ignored",
+                    "target_feedback_sha256": feedback_row_sha256(legacy),
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    examples = recall_eval.build_dataset(
+        log_file=log_file,
+        feedback_file=feedback_file,
+    )
+
+    assert [(row.kind, row.negative_pages) for row in examples] == [
+        ("page_ignored", ("real-noise",))
+    ]
 
 
 def test_replay_metrics_are_deterministic(monkeypatch) -> None:

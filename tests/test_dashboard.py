@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,205 @@ def test_mark_batch_activity_requires_a_running_batch_job() -> None:
     }
     dashboard._mark_batch_activity(waiting)
     assert waiting["batch"]["active"] is False
+
+
+def test_dead_orchestrator_pid_clears_stale_live_status(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: False)
+    cached = {
+        "state": "running",
+        "stage": "triage",
+        "current_raw": "pending.md",
+        "current_op": "create",
+        "current_job_id": "job-1",
+        "current_job_pid": 999999,
+        "llm": {"active": True, "model": "local"},
+        "batch": {"index": 2, "total": 2, "succeeded": 2, "failed": 0},
+    }
+    orchestrator_state = {"current_job_id": "job-1", "current_job_pid": 999999}
+
+    status = dashboard._canonicalize_runtime_status(
+        cached,
+        orchestrator_state,
+        pending=1,
+    )
+    dashboard._mark_batch_activity(status)
+
+    assert status["state"] == "idle"
+    assert status["stage"] == "waiting"
+    assert status["current_job_id"] is None
+    assert status["current_job_pid"] is None
+    assert status["current_raw"] is None
+    assert status["llm"]["active"] is False
+    assert status["batch"]["active"] is False
+
+
+def test_snapshot_component_error_boundary_returns_structured_error() -> None:
+    def broken_component():
+        raise RuntimeError("duplicate page id")
+
+    result = dashboard._safe_snapshot_component(
+        "health",
+        broken_component,
+        {"summary": {}},
+    )
+
+    assert result == {
+        "summary": {},
+        "status": "error",
+        "component": "health",
+        "error_class": "RuntimeError",
+        "error": "duplicate page id",
+    }
+
+
+def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metrics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    root = wiki_root / "runtime" / "local-consensus"
+    active_dir = root / "active"
+    active_dir.mkdir(parents=True)
+    alive_pid = os.getpid()
+    dead_pid = 999_999
+    marker = {
+        "request_sha256": "a" * 64,
+        "role": "primary",
+        "model": "ornith:test",
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "pid": alive_pid,
+    }
+    (active_dir / "alive.json").write_text(json.dumps(marker), encoding="utf-8")
+    (active_dir / "dead.json").write_text(
+        json.dumps({**marker, "pid": dead_pid}),
+        encoding="utf-8",
+    )
+    (active_dir / "stale.json").write_text(
+        json.dumps({**marker, "started_at": "2020-01-01T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    summary = dashboard._empty_local_consensus_summary()
+    summary["sessions"].update(
+        {"first_pass_valid": 7, "repaired": 2, "repair_turns": 3}
+    )
+    summary["decisions"].update(
+        {"pair_agreement": 4, "tie_break_used": 2, "unresolved_quarantine": 1}
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    (root / "audit.jsonl").write_text(
+        json.dumps(
+            {
+                "kind": "decision",
+                "timestamp": "2026-07-11T12:00:00Z",
+                "request_sha256": "a" * 64,
+                "status": "agreed",
+                "pair_agreement": True,
+                "tie_break_used": False,
+                "unresolved_quarantine": False,
+                "prompt": "secret prompt",
+                "raw_output": "secret output",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(
+        runtime_status,
+        "_pid_is_alive",
+        lambda pid: pid == alive_pid,
+    )
+
+    snapshot = dashboard._local_consensus_snapshot()
+
+    assert snapshot["active"] is True
+    assert snapshot["count"] == 1
+    assert snapshot["activities"][0]["model"] == "ornith:test"
+    assert snapshot["summary"]["sessions"]["first_pass_valid"] == 7
+    assert snapshot["summary"]["sessions"]["repaired"] == 2
+    assert snapshot["summary"]["sessions"]["repair_turns"] == 3
+    assert snapshot["summary"]["decisions"]["pair_agreement"] == 4
+    assert snapshot["summary"]["decisions"]["tie_break_used"] == 2
+    assert snapshot["summary"]["decisions"]["unresolved_quarantine"] == 1
+    assert "prompt" not in snapshot["history"][0]
+    assert "raw_output" not in snapshot["history"][0]
+    assert not (active_dir / "dead.json").exists()
+    assert not (active_dir / "stale.json").exists()
+
+
+def test_frontier_repair_snapshot_uses_guard_ledger_and_dead_owner_is_inactive(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    root = wiki_root / "runtime" / "frontier-repair"
+    root.mkdir(parents=True)
+    incident_id = "incident-1"
+    state = {
+        "schema_version": 1,
+        "active_incident_id": incident_id,
+        "incidents": {
+            incident_id: {
+                "incident_id": incident_id,
+                "status": "started",
+                "reserved_at": "2026-07-11T11:59:00Z",
+                "started_at": datetime.now().astimezone().isoformat(),
+                "finished_at": None,
+                "owner_pid": os.getpid(),
+                "pid": os.getpid(),
+                "fingerprint_key": "b" * 64,
+                "evidence": {
+                    "component": "ingest",
+                    "failure_class": "adapter_crash",
+                    "notes": {"raw_payload": "must stay private"},
+                },
+            }
+        },
+    }
+    (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (root / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "sequence": 1,
+                "timestamp": "2026-07-11T12:00:00Z",
+                "event": "incident_started",
+                "incident_id": incident_id,
+                "private_details": "must stay private",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+
+    active = dashboard._frontier_repair_snapshot()
+
+    assert active["active"] is True
+    assert active["summary"]["starts_24h"] == 1
+    assert active["summary"]["counts"] == {"started": 1}
+    serialized = json.dumps(active, ensure_ascii=False)
+    assert "must stay private" not in serialized
+
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: False)
+    dead = dashboard._frontier_repair_snapshot()
+    assert dead["active"] is False
+    assert dead["stale_active_incident"] is True
+
+
+def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
+    app = (dashboard.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    style = (dashboard.STATIC_DIR / "style.css").read_text(encoding="utf-8")
+
+    assert "Frontier reviewing" not in app
+    assert "Local consensus reviewing" in app
+    assert "Local model evaluation" in app
+    assert 'id="local-consensus"' in page
+    assert 'id="frontier-repair"' in page
+    assert "Frontier Repair" in page
+    assert "grid-template-columns: repeat(6, minmax(0, 1fr));" in style
 
 
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:
@@ -77,6 +277,11 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
         "_frontier_preflight_snapshot",
         lambda: {"ok": True, "checked_at": "2026-06-01T12:00:00"},
     )
+    monkeypatch.setattr(
+        dashboard,
+        "health_snapshot",
+        lambda: (_ for _ in ()).throw(RuntimeError("duplicate page id")),
+    )
 
     runtime_status.write_status({"state": "running", "stage": "generate"})
     runtime_status.append_event("info", "ingest | stage 1: triage started")
@@ -95,6 +300,25 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
                 "started_at": datetime.now().isoformat(timespec="seconds"),
             }
         ),
+        encoding="utf-8",
+    )
+    consensus_dir = runtime_dir / "local-consensus"
+    consensus_active = consensus_dir / "active"
+    consensus_active.mkdir(parents=True)
+    (consensus_active / "vote-1.json").write_text(
+        json.dumps(
+            {
+                "request_sha256": "c" * 64,
+                "role": "primary",
+                "model": "ornith:test",
+                "pid": os.getpid(),
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (consensus_dir / "summary.json").write_text(
+        json.dumps(dashboard._empty_local_consensus_summary()),
         encoding="utf-8",
     )
     failures_dir = runtime_dir / "failures"
@@ -148,6 +372,38 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     assert snapshot["frontier_review"]["active"] is True
     assert snapshot["frontier_review"]["count"] == 1
     assert snapshot["status"]["frontier_review"]["latest"]["model"] == "gpt-5.5"
+    assert snapshot["local_consensus"]["active"] is True
+    assert snapshot["local_consensus"]["latest"]["model"] == "ornith:test"
+    assert snapshot["status"]["review_kind"] == "local_consensus"
+    assert snapshot["frontier_repair"]["process_activity"]["active"] is True
+    assert snapshot["health"]["status"] == "error"
+    assert snapshot["health"]["error_class"] == "RuntimeError"
+    assert snapshot["health"]["error"] == "duplicate page id"
+
+
+def test_snapshot_handler_returns_json_error_instead_of_empty_socket(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "build_snapshot",
+        lambda: (_ for _ in ()).throw(RuntimeError("snapshot exploded")),
+    )
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        response = dashboard.httpx.get(f"http://{host}:{port}/api/snapshot", timeout=2)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "status": "error",
+        "error_class": "RuntimeError",
+        "error": "snapshot exploded",
+    }
 
 
 def test_build_snapshot_surfaces_frontier_human_required(
@@ -420,6 +676,29 @@ def test_self_heal_snapshot_surfaces_watch_status(tmp_path: Path, monkeypatch) -
     assert watch["frontier_preflight"]["ok"] is True
 
 
+def test_frontier_dashboard_snapshot_never_runs_codex_preflight(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from llm_wiki_mcp import frontier_review
+
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(
+        frontier_review,
+        "run_frontier_preflight",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("dashboard must not start a Codex preflight")
+        ),
+    )
+
+    snapshot = dashboard._frontier_preflight_snapshot()
+
+    assert snapshot["ok"] is True
+    assert snapshot["mode"] == "on_demand_only"
+    assert snapshot["state"] == "standby"
+    assert snapshot["subprocess_checked"] is False
+
+
 def test_recall_snapshot_reads_logs_and_eval(tmp_path: Path, monkeypatch) -> None:
     wiki_root = tmp_path / "wiki"
     recall_dir = wiki_root / "recall"
@@ -637,9 +916,9 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
     history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
     day = history["days"][0]
 
-    assert history["totals"]["processed_bytes"] == 3
+    assert history["totals"]["processed_bytes"] == 6
     assert history["totals"]["pending_bytes"] == 0
-    assert history["totals"]["failed_bytes"] == 3
+    assert history["totals"]["failed_bytes"] == 0
     assert day["raw_segments"] == [
         {
             "name": raw_name,
@@ -650,7 +929,7 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
         {
             "name": failed_name,
             "bytes": 3,
-            "status": "failed",
+            "status": "processed",
             "source": "codex",
         },
     ]

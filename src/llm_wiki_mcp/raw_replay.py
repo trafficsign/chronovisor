@@ -1070,12 +1070,21 @@ def _review_indeterminate_rows(
         timeout=300,
         execute_patch=False,
         command_env="LLM_WIKI_RAW_REPLAY_REVIEW_CMD",
+        decision_lane="raw_replay_reconciliation",
     )
     attempts = _nonnegative_int(row.get("frontier_attempts")) + 1
     decision = str(review.get("decision") or "needs_retry")
     confidence_raw = review.get("confidence")
-    confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float)) else 0.0
+    confidence_valid = (
+        not isinstance(confidence_raw, bool)
+        and isinstance(confidence_raw, (int, float))
+        and 0.0 <= float(confidence_raw) <= 1.0
+    )
+    confidence = float(confidence_raw) if confidence_valid else 0.0
     reason = str(review.get("reason") or review.get("summary") or "invalid frontier result")
+    if not confidence_valid:
+        decision = "needs_retry"
+        reason = "local consensus returned invalid confidence metadata"
     row["frontier_attempts"] = attempts
     row["frontier_decision"] = decision
     row["frontier_failure"] = review.get("frontier_failure")
@@ -1086,7 +1095,7 @@ def _review_indeterminate_rows(
         row["human_required_at"] = _iso(now)
         row["terminal_reason"] = reason
         row["next_frontier_retry_at"] = None
-    elif decision == "accept_processed" and confidence >= 0.8:
+    elif decision == "accept_processed":
         _mark_completed(
             row,
             evidence="frontier_indeterminate_review",
@@ -1094,7 +1103,7 @@ def _review_indeterminate_rows(
             status="completed_partial",
         )
         row["terminal_reason"] = reason
-    elif decision == "safe_replay" and confidence >= 0.9:
+    elif decision == "safe_replay":
         row["status"] = "pending"
         row["next_retry_at"] = None
         row["next_frontier_retry_at"] = None

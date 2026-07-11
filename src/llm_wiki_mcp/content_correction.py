@@ -3,8 +3,8 @@
 The ordinary recall auditor optimizes retrieval.  This lane handles a distinct
 case: a user corrects an answer that used LLM Wiki content.  It binds the
 correction to the *previous* turn's recall provenance, asks a local model for
-an exact bounded proposal, lets a frontier model make the final semantic
-decision, then applies only the frontier-approved bytes with CAS + owned
+an exact bounded proposal, lets a local model quorum make the final semantic
+decision, then applies only quorum-approved bytes with CAS + owned
 rollback.
 """
 
@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -34,14 +35,23 @@ from llm_wiki_mcp.evidence_grounding import (
     ProtectedLiteralGroundingError,
     validate_protected_literals,
 )
+from llm_wiki_mcp.feedback_ledger import (
+    PAGE_IGNORED_RETRACTION_KIND,
+    feedback_row_sha256,
+    read_jsonl_rows,
+    retracted_page_ignored_targets,
+)
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.jsonl_write import append_jsonl_durable
+from llm_wiki_mcp.local_structured import ChatRequest, LocalStructuredSession
 from llm_wiki_mcp.page_mutation import (
+    ExactReplacement,
     PageMutationError,
     PreparedPageMutation,
     apply_prepared_mutations,
     find_mutation_page,
     prepare_page_mutation,
+    rollback_prepared_mutations,
 )
 from llm_wiki_mcp.recall_auditor import (
     TurnContext,
@@ -58,7 +68,7 @@ from llm_wiki_mcp.recall_runtime import (
     append_feedback,
     recall_log_snapshot,
 )
-from llm_wiki_mcp.runtime_config import runtime_repo_root
+from llm_wiki_mcp.runtime_config import load_ingest_config, runtime_repo_root
 from llm_wiki_mcp.wiki import WIKI_ROOT, find_page, init_wiki
 
 
@@ -71,10 +81,11 @@ PROPOSALS_DIR = RUNTIME_DIR / "proposals"
 CONTENT_FEEDBACK_FILE = WIKI_ROOT / "recall" / "content-feedback.jsonl"
 MAX_CANDIDATE_PAGES = 6
 MAX_STALE_REVISIONS = 3
-FRONTIER_CONFIDENCE_THRESHOLD = 0.90
 QUARANTINE_RETRY_ENV = "LLM_WIKI_CONTENT_CORRECTION_QUARANTINE_RETRY_SECONDS"
 DEFAULT_QUARANTINE_RETRY_SECONDS = 21_600
 TRIAGE_EVIDENCE_CHANGED_ERROR = "frontier triage page evidence changed"
+LEGACY_UNFILTERED_SIGNAL = "unfiltered_completed_turn"
+LEGACY_UNFILTERED_FEEDBACK_MIGRATION = "retract_unfiltered_page_ignored_v1"
 NON_MUTATION_CLASSIFICATIONS = (
     "wrong_retrieval",
     "response_misquote",
@@ -84,6 +95,46 @@ NON_MUTATION_CLASSIFICATIONS = (
 )
 CONTENT_CLASSIFICATIONS = ("page_fact_wrong", "outdated")
 ALL_CLASSIFICATIONS = (*CONTENT_CLASSIFICATIONS, *NON_MUTATION_CLASSIFICATIONS)
+
+_EXACT_REPLACEMENT_PATTERNS = (
+    re.compile(
+        r"「(?P<old>[^」\n]{1,2000})」\s*(?:ではなく|じゃなくて|でなく)\s*"
+        r"「(?P<new>[^」\n]{1,2000})」"
+    ),
+    re.compile(
+        r"「(?P<old>[^」\n]{1,2000})」\s*を\s*「(?P<new>[^」\n]{1,2000})」"
+        r"\s*に\s*(?:修正|変更|置換)"
+    ),
+    re.compile(
+        r"`(?P<old>[^`\n]{1,2000})`\s*(?:を|から|(?:-|=)?>(?:へ)?|→)\s*"
+        r"`(?P<new>[^`\n]{1,2000})`(?:\s*に\s*(?:修正|変更|置換))?"
+    ),
+    re.compile(
+        r'"(?P<old>[^"\n]{1,2000})"\s*(?:->|=>|→)\s*'
+        r'"(?P<new>[^"\n]{1,2000})"'
+    ),
+)
+_EXACT_RETRACTION_PATTERNS = (
+    re.compile(
+        r"「(?P<old>[^」\n]{1,2000})」\s*を\s*"
+        r"(?:忘れて|削除して|消して|撤回して|取り消して)"
+    ),
+    re.compile(
+        r"`(?P<old>[^`\n]{1,2000})`\s*を\s*"
+        r"(?:忘れて|削除して|消して|撤回して|取り消して)"
+    ),
+    re.compile(
+        r'"(?P<old>[^"\n]{1,2000})"\s*(?:を\s*)?'
+        r"(?:忘れて|削除して|消して|撤回して|取り消して|forget|retract|remove)",
+        re.IGNORECASE,
+    ),
+)
+
+
+@dataclass(frozen=True)
+class ExactUserCorrection:
+    mutation: PreparedPageMutation
+    policy_audit: dict[str, Any]
 
 
 def _find_correctable_page(page_id: str) -> Path | None:
@@ -282,6 +333,11 @@ _STRONG_CORRECTION_PATTERNS = (
     re.compile(r"\bno[,;:\s]+.{1,80}\b(?:not|but|actually|instead)\b", re.IGNORECASE),
     re.compile(r"\bnot\s+.{1,80}\bbut\s+", re.IGNORECASE),
     re.compile(r"\b(?:correction|correct this|remember this instead)\b", re.IGNORECASE),
+    re.compile(
+        r"(?:「[^」\n]{1,2000}」|`[^`\n]{1,2000}`|\"[^\"\n]{1,2000}\")"
+        r".{0,20}(?:削除して|消して|撤回して|取り消して|忘れて|->|=>|→|forget|retract|remove)",
+        re.IGNORECASE,
+    ),
 )
 _DIFFERENCE_QUESTION_RE = re.compile(r"(?:違い|相違|difference).{0,12}(?:は|何|between|\?)", re.IGNORECASE)
 
@@ -703,14 +759,15 @@ def capture_session_corrections(
     for source_turn, correction_turn in zip(turns, turns[1:]):
         if correction_turn.assistant_line <= cursor_line:
             continue
-        # Regex is only a scheduling hint.  Every completed follow-up receives
-        # a durable frontier classification so natural corrections are never
-        # discarded merely because they use unfamiliar wording.  Quoted or
-        # hypothetical examples are expected to be classified as unrelated.
-        signal = correction_signal(correction_turn.prompt) or {
-            "matched": "unfiltered_completed_turn",
-            "confidence": "frontier_screen",
-        }
+        # Stop capture must remain a sparse scheduling boundary. Enqueuing
+        # every adjacent turn would send ordinary conversation through the
+        # semantic correction lane and recreate the review storm this cursor
+        # is meant to prevent. Only deterministic explicit-correction signals
+        # become convergence work; the cursor still advances past every
+        # completed turn below.
+        signal = correction_signal(correction_turn.prompt)
+        if signal is None:
+            continue
         source_record = source_recall_record(source_turn)
         event = build_correction_event(
             source_turn,
@@ -823,20 +880,61 @@ def run_local_proposer(
     *,
     required_classification: str = "",
     generate_fn: Callable[..., str] | None = None,
+    audit_root: Path | None = None,
 ) -> dict[str, Any]:
-    if generate_fn is None:
-        from llm_wiki_mcp.ollama import generate
+    """Return one schema-valid local proposal or fail closed.
 
-        generate_fn = generate
-    output = generate_fn(
-        _local_proposal_prompt(
-            event,
-            pages,
-            required_classification=required_classification,
-        ),
-        format=LOCAL_PROPOSAL_SCHEMA,
-    )
-    parsed = extract_json_object(output) if isinstance(output, str) else output
+    Production uses Ollama chat through ``LocalStructuredSession`` so invalid
+    JSON receives exact validator feedback in the same bounded conversation.
+    ``generate_fn`` remains as a compatibility/test seam; its prompt contains
+    the complete client-side message history on every repair turn.
+    """
+
+    config = load_ingest_config()
+    transport = None
+    if generate_fn is not None:
+        def transport(request: ChatRequest) -> str:
+            system = request.messages[0]["content"] if request.messages else ""
+            transcript = "\n\n".join(
+                f"<{message['role'].upper()}>\n{message['content']}"
+                for message in request.messages[1:]
+            )
+            return generate_fn(transcript, system=system, format=request.schema)
+
+    def run_session(resolved_audit_root: Path | None):
+        return LocalStructuredSession(
+            model=config.model,
+            transport=transport,
+            role="content_correction_classification",
+            audit_root=resolved_audit_root,
+            num_ctx=config.num_ctx,
+            num_predict=min(config.num_predict, 3_072),
+            keep_alive=config.keep_alive,
+            read_timeout_ms=config.read_timeout_ms,
+            max_input_chars=65_536,
+            max_output_chars=6_000,
+            max_feedback_chars=3_000,
+        ).run(
+            _local_proposal_prompt(
+                event,
+                pages,
+                required_classification=required_classification,
+            ),
+            LOCAL_PROPOSAL_SCHEMA,
+        )
+
+    if generate_fn is not None and audit_root is None:
+        with tempfile.TemporaryDirectory(
+            prefix="llm-wiki-correction-structured-"
+        ) as root:
+            result = run_session(Path(root))
+    else:
+        result = run_session(audit_root)
+    if not result.ok:
+        reason = result.failure_class or "structured_session_failed"
+        detail = result.failure_reason or "local proposer did not converge"
+        raise ValueError(f"local correction proposal failed: {reason}: {detail}")
+    parsed = result.value
     if not isinstance(parsed, dict):
         raise ValueError("local correction proposal is not an object")
     return parsed
@@ -938,6 +1036,11 @@ def _resume_due_quarantined_corrections(
     resumed: list[dict[str, Any]] = []
     local_failure_classes = {"proposal_missing", "schema_invalid", "content_changed"}
     for item in store.list_items(lane=LANE, statuses={"quarantined"}):
+        if _is_legacy_unfiltered_item(item):
+            # These were ordinary adjacent turns admitted by the old Stop
+            # capture fallback. They are terminal noise, not autonomous retry
+            # candidates, and must never consume another model call.
+            continue
         key = str(item.get("key") or "")
         failure_class = str(item.get("last_failure_class") or "")
         if (
@@ -995,6 +1098,184 @@ def _resume_due_quarantined_corrections(
             }
         )
     return resumed
+
+
+def _is_legacy_unfiltered_item(item: dict[str, Any]) -> bool:
+    metadata = item.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    signal = metadata.get("signal")
+    signal = signal if isinstance(signal, dict) else {}
+    if signal.get("matched") != LEGACY_UNFILTERED_SIGNAL:
+        return False
+    # Preserve an old item if a newer deterministic signal policy now
+    # recognizes it as an explicit correction. Everything else admitted by
+    # this legacy marker is ordinary-turn queue pollution.
+    return correction_signal(str(metadata.get("correction_prompt") or "")) is None
+
+
+def _retire_legacy_unfiltered_corrections(
+    store: ConvergenceStore,
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    migratable_statuses = {
+        "pending_local",
+        "local_retry",
+        "pending_frontier",
+        "frontier_retry",
+        "quarantined",
+        "human_required",
+    }
+    keys = [
+        str(item.get("key") or "")
+        for item in store.list_items(lane=LANE, statuses=migratable_statuses)
+        if _is_legacy_unfiltered_item(item) and str(item.get("key") or "")
+    ]
+    if not keys:
+        return {
+            "status": "ok",
+            "dry_run": dry_run,
+            "requested": 0,
+            "completed": 0,
+            "skipped": 0,
+            "skipped_reasons": {},
+        }
+    return store.complete_many(
+        keys,
+        "rejected",
+        result={
+            "decision": "none",
+            "reason": "legacy unfiltered Stop capture had no explicit correction signal",
+            "migration": "retire_unfiltered_completed_turn_v1",
+        },
+        replace_terminal_statuses={"quarantined", "human_required"},
+        dry_run=dry_run,
+    )
+
+
+def _legacy_unfiltered_applied_wrong_retrieval_keys(
+    store: ConvergenceStore,
+) -> set[str]:
+    keys: set[str] = set()
+    for item in store.list_items(lane=LANE, statuses={"applied"}):
+        result = item.get("result")
+        result = result if isinstance(result, dict) else {}
+        key = str(item.get("key") or "")
+        if (
+            key
+            and result.get("classification") == "wrong_retrieval"
+            and _is_legacy_unfiltered_item(item)
+        ):
+            keys.add(key)
+    return keys
+
+
+def _legacy_page_ignored_retraction_plan(
+    rows: list[dict[str, Any]],
+    *,
+    bad_keys: set[str],
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Bind retractions to exact rows emitted by exact legacy item keys."""
+
+    already_retracted = retracted_page_ignored_targets(rows)
+    planned: list[dict[str, Any]] = []
+    matched = 0
+    already = 0
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for row in rows:
+        key = row.get("content_correction_key")
+        if (
+            row.get("kind") != "page_ignored"
+            or row.get("source") != LANE
+            or row.get("frontier_reviewed") is not True
+            or not isinstance(key, str)
+            or key not in bad_keys
+        ):
+            continue
+        matched += 1
+        digest = feedback_row_sha256(row)
+        if (key, digest) in already_retracted:
+            already += 1
+            continue
+        planned.append(
+            {
+                "ts": timestamp,
+                "kind": PAGE_IGNORED_RETRACTION_KIND,
+                "source": LANE,
+                "content_correction_key": key,
+                "target_kind": "page_ignored",
+                "target_feedback_sha256": digest,
+                "reason": (
+                    "legacy unfiltered Stop capture had no explicit correction signal"
+                ),
+                "migration": LEGACY_UNFILTERED_FEEDBACK_MIGRATION,
+            }
+        )
+    return planned, matched, already
+
+
+def _retract_legacy_unfiltered_page_ignored_feedback(
+    store: ConvergenceStore,
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Append exact-row tombstones for the legacy ordinary-turn pollution.
+
+    Applied convergence items remain immutable.  Only a ``page_ignored`` row
+    carrying an applied legacy item's exact producer key can be retracted; no
+    prompt, note, or page-name heuristic is used.
+    """
+
+    bad_keys = _legacy_unfiltered_applied_wrong_retrieval_keys(store)
+    if not bad_keys:
+        return {
+            "status": "ok",
+            "dry_run": dry_run,
+            "eligible_items": 0,
+            "matched_feedback": 0,
+            "already_retracted": 0,
+            "would_retract": 0,
+            "retracted": 0,
+        }
+
+    def plan() -> tuple[list[dict[str, Any]], int, int]:
+        return _legacy_page_ignored_retraction_plan(
+            read_jsonl_rows(RECALL_FEEDBACK_FILE),
+            bad_keys=bad_keys,
+        )
+
+    if dry_run:
+        planned, matched, already = plan()
+        return {
+            "status": "ok",
+            "dry_run": True,
+            "eligible_items": len(bad_keys),
+            "matched_feedback": matched,
+            "already_retracted": already,
+            "would_retract": len(planned),
+            "retracted": 0,
+        }
+
+    RECALL_FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = RECALL_FEEDBACK_FILE.with_suffix(RECALL_FEEDBACK_FILE.suffix + ".lock")
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            # Re-read under the producer's lock so concurrent feedback writes
+            # cannot create duplicate or partially bound migration records.
+            planned, matched, already = plan()
+            append_jsonl_durable(RECALL_FEEDBACK_FILE, planned, sort_keys=True)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    return {
+        "status": "ok",
+        "dry_run": False,
+        "eligible_items": len(bad_keys),
+        "matched_feedback": matched,
+        "already_retracted": already,
+        "would_retract": 0,
+        "retracted": len(planned),
+    }
 
 
 def _validate_local_proposal(
@@ -1117,7 +1398,7 @@ def _frontier_prompt(
     review_bundle = [mutation.review_payload() for mutation in mutations]
     bounded_evidence = _bounded_page_evidence(page_evidence)
     return f"""\
-You are the final frontier judge for an autonomous LLM Wiki content correction.
+You are a local-consensus judge for an autonomous LLM Wiki content correction.
 Do not edit files and do not ask a human. Review the immutable before/after
 bytes proposed below. Approve only when the USER correction supports the new
 claim, the old claim actually comes from the target page (not just an assistant
@@ -1202,6 +1483,7 @@ def run_frontier_judge(
             )
             else "mutation_approver"
         ),
+        decision_lane="content_correction_review",
     )
 
 
@@ -1212,7 +1494,7 @@ def _frontier_classification_prompt(
     page_evidence: list[dict[str, Any]] | None = None,
 ) -> str:
     return f"""\
-You are the authoritative frontier triage judge for an autonomous LLM Wiki
+You are an authoritative local-consensus triage judge for an autonomous LLM Wiki
 correction. Classify across the complete set: page_fact_wrong, outdated,
 wrong_retrieval, response_misquote, ambiguous, unattributed, or none. Never
 defer to the local proposal's branch choice. This triage never edits page bytes.
@@ -1297,6 +1579,7 @@ def run_frontier_classification_judge(
         execute_patch=False,
         command_env="LLM_WIKI_CONTENT_CORRECTION_REVIEW_CMD",
         model_role="semantic_judge",
+        decision_lane="content_correction_classification",
     )
 
 
@@ -1314,10 +1597,12 @@ def _validate_frontier_approval(
     if review.get("decision") != "approved":
         return "frontier did not approve"
     confidence = review.get("confidence")
-    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
         return "frontier confidence is invalid"
-    if float(confidence) < FRONTIER_CONFIDENCE_THRESHOLD:
-        return "frontier confidence below threshold"
     checks = review.get("semantic_checks")
     expected_checks = {
         "user_correction_supported",
@@ -1356,7 +1641,7 @@ def _validate_frontier_approval(
 
 
 def _validate_frontier_rejection(review: dict[str, Any]) -> str | None:
-    """Require a confident, schema-complete semantic rejection."""
+    """Require a schema-complete semantic rejection."""
 
     if review.get("decision") != "rejected":
         return "frontier did not reject"
@@ -1364,9 +1649,9 @@ def _validate_frontier_rejection(review: dict[str, Any]) -> str | None:
     if (
         isinstance(confidence, bool)
         or not isinstance(confidence, (int, float))
-        or float(confidence) < FRONTIER_CONFIDENCE_THRESHOLD
+        or not 0.0 <= float(confidence) <= 1.0
     ):
-        return "frontier rejection confidence below threshold"
+        return "frontier rejection confidence is invalid"
     checks = review.get("semantic_checks")
     expected_checks = {
         "user_correction_supported",
@@ -1400,13 +1685,12 @@ def _validate_frontier_classification(
     if require_approval and decision != "approved":
         return "frontier did not approve"
     confidence = review.get("confidence")
-    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-        return "frontier confidence is invalid"
     if (
-        decision in {"approved", "rejected"}
-        and float(confidence) < FRONTIER_CONFIDENCE_THRESHOLD
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0
     ):
-        return "frontier confidence below threshold"
+        return "frontier confidence is invalid"
     classification = review.get("classification")
     if classification not in ALL_CLASSIFICATIONS:
         return "frontier classification is invalid"
@@ -1578,11 +1862,7 @@ def _review_artifact_error(
     ):
         return "frontier review artifact semantic checks are incomplete"
     if decision == "rejected":
-        if float(confidence) < FRONTIER_CONFIDENCE_THRESHOLD:
-            return "frontier review artifact confidence is insufficient"
         return None
-    if float(confidence) < FRONTIER_CONFIDENCE_THRESHOLD:
-        return "frontier review artifact confidence is insufficient"
     if not all(value is True for value in checks.values()):
         return "frontier review artifact semantic checks are incomplete"
     approved = review.get("approved_mutations")
@@ -1995,6 +2275,296 @@ def _fallback_classification_proposal(reason: str) -> dict[str, Any]:
     }
 
 
+def _parse_exact_user_replacement(prompt: str) -> ExactReplacement | None:
+    for pattern in _EXACT_REPLACEMENT_PATTERNS:
+        match = pattern.search(prompt)
+        if match is None:
+            continue
+        old_text = match.group("old")
+        new_text = match.group("new")
+        if (
+            old_text != old_text.strip()
+            or new_text != new_text.strip()
+            or old_text == new_text
+        ):
+            return None
+        return ExactReplacement(old_text=old_text, new_text=new_text, action="replace")
+    for pattern in _EXACT_RETRACTION_PATTERNS:
+        match = pattern.search(prompt)
+        if match is None:
+            continue
+        old_text = match.group("old")
+        if old_text != old_text.strip():
+            return None
+        return ExactReplacement(old_text=old_text, new_text="", action="retract")
+    return None
+
+
+def _exact_correction_id(key: str) -> str:
+    return hashlib.sha256(
+        f"{key}:{RESOLVER_VERSION}:exact-user-correction".encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def _prepare_exact_user_correction(
+    *,
+    key: str,
+    event: dict[str, Any],
+    page_ids: list[str],
+) -> ExactUserCorrection | None:
+    """Prepare only an explicit, quoted, globally unique body replacement."""
+
+    from llm_wiki_mcp.decision_policy import resolve_decision_policy
+
+    policy, mode, error = resolve_decision_policy("exact_user_correction")
+    if (
+        error is not None
+        or policy is None
+        or policy.kind != "validated_local"
+        or mode != "enabled"
+    ):
+        return None
+    policy_audit = {
+        "lane": policy.lane,
+        "kind": policy.kind,
+        "mode": mode,
+        "error": error,
+    }
+    correction_id = _exact_correction_id(key)
+
+    existing = _jsonl_row_for_key(CONTENT_FEEDBACK_FILE, key)
+    if (
+        isinstance(existing, dict)
+        and isinstance(existing.get("decision_authority"), dict)
+        and existing["decision_authority"].get("kind") == "exact_user_correction"
+    ):
+        patches = existing.get("patches")
+        if not isinstance(patches, list) or len(patches) != 1:
+            raise PageMutationError("exact correction recovery audit is invalid")
+        patch = patches[0]
+        if not isinstance(patch, dict):
+            raise PageMutationError("exact correction recovery patch is invalid")
+        page_id = str(patch.get("page_id") or "")
+        if page_id not in page_ids:
+            raise PageMutationError("exact correction recovery target changed")
+        replacement = ExactReplacement(
+            old_text=str(patch.get("old_text") or ""),
+            new_text=str(patch.get("new_text") or ""),
+            action=str(patch.get("action") or "replace"),
+        )
+        mutation = prepare_page_mutation(
+            page_id,
+            [replacement],
+            correction_id=correction_id,
+        )
+        return ExactUserCorrection(mutation=mutation, policy_audit=policy_audit)
+
+    replacement = _parse_exact_user_replacement(
+        str(event.get("correction_prompt") or "")
+    )
+    if replacement is None:
+        return None
+    matches: list[str] = []
+    total_occurrences = 0
+    for page_id in page_ids:
+        path = _find_correctable_page(page_id)
+        if path is None:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        _meta, body = parse_frontmatter(text)
+        count = body.count(replacement.old_text)
+        total_occurrences += count
+        if count:
+            matches.append(page_id)
+    if total_occurrences != 1 or len(matches) != 1:
+        return None
+    mutation = prepare_page_mutation(
+        matches[0],
+        [replacement],
+        correction_id=correction_id,
+    )
+    return ExactUserCorrection(mutation=mutation, policy_audit=policy_audit)
+
+
+def _exact_patch_payload(mutation: PreparedPageMutation) -> list[dict[str, Any]]:
+    return [
+        {
+            "page_id": mutation.page_id,
+            "action": replacement.action,
+            "old_text": replacement.old_text,
+            "new_text": replacement.new_text,
+            "old_text_sha256": hashlib.sha256(
+                replacement.old_text.encode("utf-8")
+            ).hexdigest(),
+            "new_text_sha256": hashlib.sha256(
+                replacement.new_text.encode("utf-8")
+            ).hexdigest(),
+        }
+        for replacement in mutation.replacements
+    ]
+
+
+def _process_exact_user_correction(
+    exact: ExactUserCorrection,
+    *,
+    key: str,
+    event: dict[str, Any],
+    store: ConvergenceStore,
+    owner: str | None,
+    budget: CycleBudget | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    mutation = exact.mutation
+    if budget is not None:
+        allowed, reason = (
+            budget.can_consume("mutation")
+            if dry_run
+            else budget.consume("mutation")
+        )
+        if not allowed:
+            failed = store.fail_attempt(
+                key,
+                "local",
+                error=reason,
+                failure_class="budget_deferred",
+                owner=owner,
+                allow_frontier=False,
+                dry_run=dry_run,
+            )
+            return {"key": key, "status": failed["item"]["status"], "error": reason}
+    apply_result = apply_prepared_mutations([mutation], dry_run=dry_run)
+    if dry_run:
+        return {
+            "key": key,
+            "status": "dry_run",
+            "classification": "exact_user_correction",
+            "apply": apply_result,
+            "model_calls": 0,
+            "decision_policy": exact.policy_audit,
+        }
+    if apply_result.get("status") not in {"applied", "already_applied"}:
+        reason = str(apply_result.get("reason") or apply_result.get("status"))
+        failed = store.fail_attempt(
+            key,
+            "local",
+            error=reason,
+            failure_class="mutation_retry",
+            owner=owner,
+            allow_frontier=False,
+        )
+        return {
+            "key": key,
+            "status": failed["item"]["status"],
+            "error": reason,
+            "apply": apply_result,
+            "model_calls": 0,
+        }
+
+    verification = _refresh_and_verify([mutation])
+    if verification.get("status") != "ok":
+        rollback = rollback_prepared_mutations([mutation])
+        rollback_refresh = _refresh_after_apply([mutation.page_id])
+        reason = "exact correction read-back failed"
+        failed = store.fail_attempt(
+            key,
+            "local",
+            error=reason,
+            failure_class="readback_failed",
+            owner=owner,
+            allow_frontier=False,
+        )
+        return {
+            "key": key,
+            "status": failed["item"]["status"],
+            "error": reason,
+            "apply": apply_result,
+            "verification": verification,
+            "rollback": rollback,
+            "rollback_refresh": rollback_refresh,
+            "model_calls": 0,
+        }
+
+    authority = {
+        "kind": "exact_user_correction",
+        "decision": "approved",
+        "model_calls": 0,
+        "policy": exact.policy_audit,
+    }
+    audit_row = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "kind": "content_correction",
+        "key": key,
+        "correction_id": mutation.correction_id,
+        "source_decision_id": event.get("source_decision_id", ""),
+        "source_turn_ref": event.get("source_turn_ref", {}),
+        "correction_turn_ref": event.get("correction_turn_ref", {}),
+        "classification": "page_fact_wrong",
+        "pages": [mutation.page_id],
+        "patches": _exact_patch_payload(mutation),
+        "decision_authority": authority,
+        "apply": apply_result,
+        "verification": verification,
+    }
+    try:
+        _append_content_feedback(audit_row)
+    except Exception as exc:
+        rollback = rollback_prepared_mutations([mutation])
+        _refresh_after_apply([mutation.page_id])
+        failed = store.fail_attempt(
+            key,
+            "local",
+            error=f"exact correction audit write failed: {exc}",
+            failure_class="audit_write_error",
+            owner=owner,
+            allow_frontier=False,
+        )
+        return {
+            "key": key,
+            "status": failed["item"]["status"],
+            "error": str(exc),
+            "rollback": rollback,
+            "model_calls": 0,
+        }
+    try:
+        store.complete(
+            key,
+            "applied",
+            result={
+                "decision_authority": authority,
+                "apply": apply_result,
+                "verification": verification,
+            },
+            owner=owner,
+        )
+    except Exception as exc:
+        failed = store.fail_attempt(
+            key,
+            "local",
+            error=f"exact correction state commit failed: {exc}",
+            failure_class="state_write_error",
+            owner=owner,
+            allow_frontier=False,
+        )
+        return {
+            "key": key,
+            "status": failed["item"]["status"],
+            "error": str(exc),
+            "model_calls": 0,
+        }
+    return {
+        "key": key,
+        "status": "applied",
+        "classification": "exact_user_correction",
+        "apply": apply_result,
+        "verification": verification,
+        "model_calls": 0,
+        "decision_policy": exact.policy_audit,
+    }
+
+
 def _process_local_item(
     item: dict[str, Any],
     *,
@@ -2034,6 +2604,38 @@ def _process_local_item(
         _write_json_atomic(_proposal_path(key), proposal)
         store.escalate(key, reason=reason, owner=owner)
         return {"key": key, "status": "pending_frontier", "classification": "unattributed"}
+    try:
+        exact = _prepare_exact_user_correction(
+            key=key,
+            event=event,
+            page_ids=page_ids,
+        )
+    except PageMutationError as exc:
+        failed = store.fail_attempt(
+            key,
+            "local",
+            error=f"exact correction preparation failed: {exc}",
+            failure_class="mutation_invalid",
+            owner=owner,
+            allow_frontier=False,
+            dry_run=dry_run,
+        )
+        return {
+            "key": key,
+            "status": failed["item"]["status"],
+            "error": str(exc),
+            "model_calls": 0,
+        }
+    if exact is not None:
+        return _process_exact_user_correction(
+            exact,
+            key=key,
+            event=event,
+            store=store,
+            owner=str(owner) if owner is not None else None,
+            budget=budget,
+            dry_run=dry_run,
+        )
     context = " ".join(
         str(event.get(field) or "")
         for field in ("source_prompt", "source_assistant_response", "correction_prompt")
@@ -2625,7 +3227,7 @@ def _process_frontier_item(
                 key=key,
                 owner=owner,
                 error=rejection_error,
-                failure_class="low_confidence",
+                failure_class="semantic_rejection_invalid",
                 dry_run=dry_run,
             )
         if artifact_review is None:
@@ -2723,6 +3325,8 @@ def _process_frontier_item(
         else _refresh_and_verify(mutations)
     )
     if not dry_run and verification.get("status") != "ok":
+        rollback = rollback_prepared_mutations(mutations)
+        rollback_refresh = _refresh_after_apply(page_ids)
         result = _fail_claimed_frontier(
             store=store,
             key=key,
@@ -2734,6 +3338,8 @@ def _process_frontier_item(
         )
         result["apply"] = apply_result
         result["verification"] = verification
+        result["rollback"] = rollback
+        result["rollback_refresh"] = rollback_refresh
         return result
     audit_row = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -2787,14 +3393,33 @@ def run_pending_corrections(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     state = store or ConvergenceStore()
+    retracted_unfiltered_feedback = (
+        _retract_legacy_unfiltered_page_ignored_feedback(
+            state,
+            dry_run=dry_run,
+        )
+    )
+    retired_unfiltered = _retire_legacy_unfiltered_corrections(
+        state,
+        dry_run=dry_run,
+    )
     resumed_quarantined = _resume_due_quarantined_corrections(
         state,
         dry_run=dry_run,
     )
-    pending = state.list_items(
-        lane=LANE,
-        statuses={"pending_local", "local_retry", "pending_frontier", "frontier_retry"},
-    )
+    pending = [
+        item
+        for item in state.list_items(
+            lane=LANE,
+            statuses={
+                "pending_local",
+                "local_retry",
+                "pending_frontier",
+                "frontier_retry",
+            },
+        )
+        if not _is_legacy_unfiltered_item(item)
+    ]
     results: list[dict[str, Any]] = []
     work_items = 0
     work_limit = max(0, max_items)
@@ -2860,26 +3485,80 @@ def run_pending_corrections(
         "processed": len(results),
         "work_items": work_items,
         "results": results,
+        "retracted_unfiltered_feedback": retracted_unfiltered_feedback,
+        "retired_unfiltered": retired_unfiltered,
         "resumed_quarantined": resumed_quarantined,
         "dry_run": dry_run,
         "budget": budget.snapshot() if budget is not None else None,
     }
 
 
-def _resolve_session_file(host: str, args: argparse.Namespace, hints: dict[str, str]) -> Path:
-    if args.session_file:
-        return Path(args.session_file).expanduser()
-    if hints.get("session_file"):
-        return Path(hints["session_file"]).expanduser()
-    session_id = args.session_id or hints.get("session_id")
-    cwd = args.cwd or hints.get("cwd") or os.environ.get("PWD", "")
+def _resolve_session_file(
+    host: str,
+    *,
+    session_file: str | Path | None,
+    session_id: str,
+    cwd: str,
+    hints: dict[str, str],
+) -> Path:
+    if session_file:
+        return Path(session_file).expanduser()
+    hinted_file = hints.get("session_file") or hints.get("transcript_path")
+    if hinted_file:
+        return Path(hinted_file).expanduser()
+    resolved_session_id = session_id or hints.get("session_id")
+    resolved_cwd = cwd or hints.get("cwd") or os.environ.get("PWD", "")
     if host == "codex":
         from llm_wiki_mcp.codex_save import find_session_file
 
-        return find_session_file(session_id=session_id, cwd=cwd, sessions_root=None)
+        return find_session_file(
+            session_id=resolved_session_id,
+            cwd=resolved_cwd,
+            sessions_root=None,
+        )
     from llm_wiki_mcp.claude_code_save import find_session_file
 
-    return find_session_file(session_id=session_id, transcript_path=None)
+    return find_session_file(
+        session_id=resolved_session_id,
+        transcript_path=None,
+    )
+
+
+def capture_hook_only(
+    *,
+    host: str,
+    stdin_text: str = "",
+    session_file: str | Path | None = None,
+    session_id: str = "",
+    cwd: str = "",
+    store: ConvergenceStore | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Capture correction candidates without resolving any queued item.
+
+    This boundary is safe for a durable Stop worker: it parses a transcript,
+    appends idempotent convergence items, and advances the capture cursor. It
+    never enters ``run_pending_corrections`` and therefore cannot start local
+    model, ingest, mutation, or exceptional frontier work.
+    """
+
+    payload = read_hook_payload(stdin_text)
+    hints = hook_hints_for_host(host, payload)
+    resolved_file = _resolve_session_file(
+        host,
+        session_file=session_file,
+        session_id=session_id,
+        cwd=cwd,
+        hints=hints,
+    )
+    return capture_session_corrections(
+        host=host,
+        session_file=resolved_file,
+        session_id_hint=session_id or hints.get("session_id", ""),
+        cwd_hint=cwd or hints.get("cwd", ""),
+        store=store,
+        dry_run=dry_run,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2890,7 +3569,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id", default="")
     parser.add_argument("--cwd", default="")
     parser.add_argument("--capture", action="store_true")
-    parser.add_argument("--run-due", action="store_true")
+    execution = parser.add_mutually_exclusive_group()
+    execution.add_argument(
+        "--capture-only",
+        action="store_true",
+        help="Capture durable candidates and never resolve them in this process.",
+    )
+    execution.add_argument("--run-due", action="store_true")
     parser.add_argument("--max-items", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -2904,19 +3589,17 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "disabled", "reason": f"{HOOK_ENABLE_ENV}=1 is required"}))
         return 0
     stdin_text = sys.stdin.read() if args.hook else ""
-    payload = read_hook_payload(stdin_text)
-    hints = hook_hints_for_host(args.host, payload)
     result: dict[str, Any] = {"status": "ok"}
-    if args.capture or args.hook:
-        session_file = _resolve_session_file(args.host, args, hints)
-        result["capture"] = capture_session_corrections(
+    if args.capture or args.capture_only or args.hook:
+        result["capture"] = capture_hook_only(
             host=args.host,
-            session_file=session_file,
-            session_id_hint=args.session_id or hints.get("session_id", ""),
-            cwd_hint=args.cwd or hints.get("cwd", ""),
+            stdin_text=stdin_text,
+            session_file=args.session_file,
+            session_id=args.session_id,
+            cwd=args.cwd,
             dry_run=args.dry_run,
         )
-    if args.run_due or args.hook:
+    if args.run_due or (args.hook and not args.capture_only):
         result["run_due"] = run_pending_corrections(
             max_items=max(0, args.max_items),
             dry_run=args.dry_run,

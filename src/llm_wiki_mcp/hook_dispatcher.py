@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp import recall_runtime
-from llm_wiki_mcp.codex_save import DEFAULT_MEMORY_MODEL as CODEX_DEFAULT_MEMORY_MODEL
 from llm_wiki_mcp.runtime_config import (
     active_config_file,
     env_flag,
@@ -172,10 +169,9 @@ def log_file(prefix: str) -> Path:
 
 
 def spawn_task(task: BackgroundTask, stdin_text: str) -> dict[str, Any]:
+    """Durably enqueue hook work without starting a detached process."""
     from llm_wiki_mcp.background_jobs import enqueue_job
 
-    env = os.environ.copy()
-    env.update(task.env)
     job = enqueue_job(
         name=task.name,
         module=task.module,
@@ -183,45 +179,25 @@ def spawn_task(task: BackgroundTask, stdin_text: str) -> dict[str, Any]:
         env=task.env,
         stdin_text=stdin_text,
     )
-    cmd = [sys.executable, "-m", "llm_wiki_mcp.background_jobs", "run", str(job["job_id"])]
-    log_path = log_file(task.log_prefix)
-    with log_path.open("ab") as log:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-        )
-    return {"pid": proc.pid, "job_id": job["job_id"]}
+    return {
+        "job_id": job["job_id"],
+        "status": job.get("status"),
+        "enqueued": bool(job.get("enqueued", True)),
+        "coalesced": bool(job.get("coalesced", False)),
+    }
 
 
 def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
     config = active_config_file(args.config)
     tasks: list[BackgroundTask] = []
     run_save = args.only in {None, "save"}
-    run_audit = args.only in {None, "audit"}
-    run_correction = args.only in {None, "save", "correction"}
-    run_improve = args.only in {None, "improve"}
-    if run_correction and content_correction_enabled(config) and host in {"codex", "claude-code"}:
-        tasks.append(
-            BackgroundTask(
-                name=f"{host}-content-correction",
-                module="llm_wiki_mcp.content_correction",
-                args=["--host", host, "--hook", "--max-items", "3"],
-                env={"LLM_WIKI_CONTENT_CORRECTION_ENABLED": "1"},
-                log_prefix=f"{host}-content-correction",
-            )
-        )
     if run_save and save_enabled(host, config):
         if host == "codex":
-            model = os.environ.get("CODEX_WIKI_SAVE_MODEL", CODEX_DEFAULT_MEMORY_MODEL)
             tasks.append(
                 BackgroundTask(
                     name="codex-save",
                     module="llm_wiki_mcp.codex_save",
-                    args=["--hook", "--save", "--trigger-ingest", "--model", model],
+                    args=["--hook", "--save"],
                     env={"CODEX_WIKI_SAVE_ENABLED": "1"},
                     log_prefix="codex-save",
                 )
@@ -231,30 +207,27 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                 BackgroundTask(
                     name="claude-code-save",
                     module="llm_wiki_mcp.claude_code_save",
-                    args=["--hook", "--save", "--trigger-ingest"],
+                    args=["--hook", "--save"],
                     env={"CLAUDE_CODE_WIKI_SAVE_ENABLED": "1"},
                     log_prefix="claude-code-save",
                 )
             )
-
-    if run_audit and audit_enabled(config) and host in {"codex", "claude-code"}:
+    run_correction_capture = args.only in {None, "correction"}
+    if (
+        run_correction_capture
+        and host in {"codex", "claude-code"}
+        and content_correction_enabled(config)
+    ):
         tasks.append(
             BackgroundTask(
-                name=f"{host}-recall-audit",
-                module="llm_wiki_mcp.recall_auditor",
-                args=["--host", host, "--hook", "--config", str(config), "--audit-read"],
-                env={"LLM_WIKI_RECALL_AUDIT_ENABLED": "1"},
-                log_prefix=f"{host}-recall-audit",
-            )
-        )
-    if run_improve and recall_improve_enabled(config) and host in {"codex", "claude-code"}:
-        tasks.append(
-            BackgroundTask(
-                name=f"{host}-recall-improve",
-                module="llm_wiki_mcp.recall_improvement",
-                args=["run-due", "--config", str(config)],
-                env={"LLM_WIKI_RECALL_IMPROVE_ENABLED": "1"},
-                log_prefix=f"{host}-recall-improve",
+                # One shared lane makes transcript inspection single-flight
+                # across hosts. Session identity remains part of the durable
+                # dedupe key, so unrelated sessions never coalesce.
+                name="content-correction-capture",
+                module="llm_wiki_mcp.content_correction",
+                args=["--host", host, "--hook", "--capture-only"],
+                env={"LLM_WIKI_CONTENT_CORRECTION_ENABLED": "1"},
+                log_prefix="content-correction-capture",
             )
         )
     return tasks

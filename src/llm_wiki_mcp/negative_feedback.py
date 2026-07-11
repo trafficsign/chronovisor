@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from llm_wiki_mcp.feedback_ledger import active_feedback_rows
 from llm_wiki_mcp.runtime_config import NegativeFeedbackConfig, load_negative_feedback_config
 from llm_wiki_mcp.page_mutation import find_mutation_page
 from llm_wiki_mcp.search_types import ScoredPage, tokenize
@@ -94,10 +95,17 @@ def _ts_rank(value: datetime | None) -> float:
 def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
     path = _feedback_file()
     try:
-        mtime = path.stat().st_mtime
+        stat = path.stat()
     except OSError:
         return []
-    cache_key = (str(path), mtime, config.kinds, config.max_age_days, config.max_entries)
+    cache_key = (
+        str(path),
+        stat.st_mtime_ns,
+        stat.st_size,
+        config.kinds,
+        config.max_age_days,
+        config.max_entries,
+    )
     with _CACHE_LOCK:
         if _CACHE.key == cache_key:
             return _CACHE.entries
@@ -108,17 +116,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         else None
     )
     entries: list[_FeedbackEntry] = []
-    try:
-        lines = path.read_text(encoding="utf-8").split("\n")
-    except OSError:
-        return []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for row in active_feedback_rows(path):
         if not isinstance(row, dict) or row.get("kind") not in config.kinds:
             continue
         kind = str(row.get("kind") or "")

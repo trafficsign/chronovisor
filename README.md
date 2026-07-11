@@ -2,7 +2,9 @@
 
 LLM Wiki MCP is a local-first memory runtime for LLM agents. It stores durable
 conversation knowledge under `~/.wiki`, serves it through an MCP server, and can
-wire host hooks for automatic save, recall, audit, and safe self-improvement.
+wire host hooks for automatic recall and lossless transcript capture. Routine
+semantic decisions stay on local Ollama models; a frontier model is reserved for
+exceptional, repeatedly reproduced system-code repair incidents.
 
 ## Core Pieces
 
@@ -12,10 +14,24 @@ wire host hooks for automatic save, recall, audit, and safe self-improvement.
 - `llm-wiki-recall`: synchronous recall gate.
 - `llm-wiki-recall-audit`: asynchronous missed-recall auditor.
 - `llm-wiki-recall-auto-apply`: applies safe auto-lane recall improvements.
-- `llm-wiki-content-correction`: binds explicit user corrections to exact-turn
-  recall provenance, then gives the frontier model the final decision on every
-  classification and exact page update.
-- `llm-wiki-codex-save` / `llm-wiki-claude-code-save`: host session save harnesses.
+- `llm-wiki-content-correction`: compatibility CLI for binding explicit user
+  corrections to exact-turn recall provenance. Structured decisions use local
+  consensus and fail closed when the local quorum cannot be reached.
+- `llm-wiki-codex-save` / `llm-wiki-claude-code-save`: deterministic, lossless
+  host transcript-delta capture. The save path does not call an LLM.
+- `llm-wiki-local-model-eval`: read-only, full-corpus replay gate for measuring
+  the local decision fleet before an artifact-backed atomic policy adoption.
+
+The routine decision fleet is:
+
+- primary: `maxwell1500/ornith-35b:Q5_K_M`
+- challenger: `gpt-oss:20b`
+- tie-break, only when needed: `gemma4:26b`
+
+The primary and challenger must agree. If they do not, the tie-break model is
+called and any two matching votes form the quorum. Invalid JSON gets at most two
+targeted repair turns in the same local chat session. Exhausted repair or model
+disagreement is quarantined; it is never escalated to a frontier model.
 
 ## Storage Layout
 
@@ -38,6 +54,13 @@ llm-wiki-hook --host codex --event Stop --hook
 llm-wiki-hook --host claude-code --event UserPromptSubmit --hook
 llm-wiki-hook --host claude-code --event Stop --hook
 ```
+
+`UserPromptSubmit` runs synchronous recall. `Stop` durably enqueues the
+deterministic transcript-save lane and, when configured, a capture-only content
+correction job. The hook starts no subprocess, model, ingest, or semantic
+review. Only deterministic explicit-correction signals enter that queue;
+ordinary turns advance the capture cursor and queued corrections are resolved
+later by local convergence.
 
 To update local Codex and Claude Code settings in one pass:
 

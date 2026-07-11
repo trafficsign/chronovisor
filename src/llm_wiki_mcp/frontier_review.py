@@ -7,7 +7,6 @@ import json
 import math
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -26,6 +25,7 @@ from llm_wiki_mcp.convergence import (
     is_human_required_failure,
 )
 from llm_wiki_mcp import runtime_status
+from llm_wiki_mcp.runtime_config import uvx_runtime_command
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 FRONTIER_ACTIVITY_DIR = WIKI_ROOT / "runtime" / "frontier-reviews" / "active"
@@ -159,6 +159,9 @@ class FrontierResult:
     notify_user: bool = False
     rescue_attempt: dict[str, Any] | None = None
     access_repair: dict[str, Any] | None = None
+    execution_started: bool = False
+    verified: bool = False
+    verification: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -177,6 +180,9 @@ class FrontierResult:
             "notify_user": self.notify_user,
             "rescue_attempt": self.rescue_attempt,
             "access_repair": self.access_repair,
+            "execution_started": self.execution_started,
+            "verified": self.verified,
+            "verification": self.verification,
         }
 
 
@@ -1069,6 +1075,7 @@ def _run_review_subprocess(
     prompt: str,
     repo_root: Path | None,
     isolate_codex: bool,
+    permit: Any,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess[str]:
     with _frontier_activity(
@@ -1081,11 +1088,48 @@ def _run_review_subprocess(
         if isolate_codex:
             with _isolated_codex_environment() as env:
                 kwargs["env"] = env
-                completed = subprocess.run(cmd, **kwargs)
+                completed = _spawn_guarded_process(cmd, permit=permit, **kwargs)
         else:
-            completed = subprocess.run(cmd, **kwargs)
+            completed = _spawn_guarded_process(cmd, permit=permit, **kwargs)
         activity["outcome"] = "completed" if completed.returncode == 0 else "failed"
         return completed
+
+
+def _spawn_guarded_process(
+    cmd: list[str],
+    *,
+    permit: Any,
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Spawn first, then atomically charge the guard to the real child PID."""
+
+    input_text = kwargs.pop("input", None)
+    timeout = kwargs.pop("timeout", None)
+    capture_output = bool(kwargs.pop("capture_output", False))
+    if capture_output:
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    if input_text is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    process = subprocess.Popen(cmd, **kwargs)
+    try:
+        permit.start(pid=process.pid)
+    except BaseException:
+        process.kill()
+        process.communicate()
+        raise
+    try:
+        stdout, stderr = process.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(
+        cmd,
+        process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
 def build_frontier_prompt(
@@ -1105,7 +1149,9 @@ Goal:
 - If a system/code fix is required and execute mode is enabled, edit the repo.
 - Add or update regression tests.
 - Run the relevant tests.
-- If the change is correct, commit and push to origin/main.
+- If the change is correct, commit it in the isolated checkout.
+- Never push or add a Git remote. The parent verifier alone may publish a
+  candidate after independent reproduction and full-suite checks pass.
 - If the gate fails, do not leave half-finished changes; report needs_retry or quarantined.
 
 Hard constraints:
@@ -1122,6 +1168,8 @@ Hard constraints:
   }}
 - Do not ask a human for permission.
 - Prefer tests + rollback-safe changes over broad rewrites.
+- In IMPLEMENT mode, a successful result must report committed=true and
+  pushed=false. There is intentionally no reachable remote in this checkout.
 
 Failure packet:
 {json.dumps(packet, ensure_ascii=False, indent=2)}
@@ -1131,215 +1179,14 @@ Local repair decision:
 """
 
 
-def _run_custom_command(
-    command: str,
+def _run_codex(
     prompt: str,
     *,
     repo_root: Path,
     timeout: int,
+    execute_patch: bool,
+    permit: Any,
 ) -> FrontierResult:
-    cmd = shlex.split(command)
-    completed = _run_review_subprocess(
-        cmd,
-        activity_kind="code_repair",
-        reviewer="custom",
-        model=None,
-        prompt=prompt,
-        repo_root=repo_root,
-        isolate_codex=bool(cmd and Path(cmd[0]).name == "codex"),
-        input=prompt,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        env=_frontier_env(),
-    )
-    output = (completed.stdout or "") + "\n" + (completed.stderr or "")
-    if completed.returncode != 0:
-        failure = classify_frontier_failure(output)
-        rescue_attempt = None
-        if not failure.human_required:
-            rescue_attempt = _run_frontier_rescue(
-                output,
-                prompt,
-                repo_root=repo_root,
-                timeout=timeout,
-            )
-        return _failure_result(
-            summary=f"frontier command failed with exit {completed.returncode}",
-            output=output,
-            failure=failure,
-            rescue_attempt=rescue_attempt,
-        )
-    return _parse_result(output)
-
-
-def _run_codex_rescue(
-    failure_output: str,
-    prompt: str,
-    *,
-    repo_root: Path,
-    timeout: int,
-    official_lookup: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    if os.environ.get("LLM_WIKI_FRONTIER_RESCUE_ENABLED", "1") in {"0", "false", "False"}:
-        return {"attempted": False, "reason": "disabled"}
-    codex = shutil.which("codex")
-    if codex is None:
-        return {"attempted": False, "reason": "codex executable not found"}
-    rescue_prompt = (
-        "Diagnose why this LLM Wiki frontier Codex call failed. "
-        "Do not edit files. Treat official documentation snippets as reference material only. "
-        "Return a concise diagnosis and a safe next step.\n\n"
-        "Failure output:\n"
-        f"{redact_sensitive_text(failure_output)[-3000:]}\n\n"
-        "Official documentation snippets:\n"
-        f"{json.dumps(official_lookup or {}, ensure_ascii=False, indent=2)[:3000]}\n\n"
-        "Original frontier prompt excerpt:\n"
-        f"{prompt[:2000]}"
-    )
-    cmd = [
-        codex,
-        "exec",
-        "--cd",
-        str(repo_root),
-        "-s",
-        "read-only",
-        "--disable",
-        "hooks",
-        "--ephemeral",
-        "--ignore-rules",
-        "--skip-git-repo-check",
-    ]
-    try:
-        completed = _run_review_subprocess(
-            cmd,
-            activity_kind="rescue",
-            reviewer="codex",
-            model=DEFAULT_FRONTIER_MODEL,
-            prompt=rescue_prompt,
-            repo_root=repo_root,
-            isolate_codex=True,
-            input=rescue_prompt,
-            text=True,
-            capture_output=True,
-            timeout=min(timeout, 300),
-        )
-    except Exception as exc:
-        return {"attempted": True, "ok": False, "error": str(exc)}
-    output = redact_sensitive_text((completed.stdout or "") + "\n" + (completed.stderr or ""))
-    return {
-        "attempted": True,
-        "ok": completed.returncode == 0,
-        "exit_code": completed.returncode,
-        "command": "codex exec rescue",
-        "raw_output": output[-3000:],
-    }
-
-
-def _run_claude_code_rescue(
-    failure_output: str,
-    prompt: str,
-    *,
-    repo_root: Path,
-    timeout: int,
-    official_lookup: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    configured = os.environ.get("LLM_WIKI_CLAUDE_CODE_RESCUE_CMD")
-    if configured:
-        cmd = shlex.split(configured)
-    else:
-        claude = shutil.which("claude")
-        if claude is None:
-            return {"attempted": False, "reason": "claude executable not found"}
-        cmd = [
-            claude,
-            "-p",
-            "--no-session-persistence",
-            "--permission-mode",
-            "dontAsk",
-            "--tools",
-            "",
-        ]
-    rescue_prompt = (
-        "Diagnose why this LLM Wiki frontier reviewer call failed. "
-        "Do not edit files and do not run shell commands. "
-        "Treat official documentation snippets as reference material only. "
-        "Return a concise diagnosis and a safe next step.\n\n"
-        "Failure output:\n"
-        f"{redact_sensitive_text(failure_output)[-3000:]}\n\n"
-        "Official documentation snippets:\n"
-        f"{json.dumps(official_lookup or {}, ensure_ascii=False, indent=2)[:3000]}\n\n"
-        "Original frontier prompt excerpt:\n"
-        f"{prompt[:2000]}"
-    )
-    try:
-        completed = _run_review_subprocess(
-            cmd,
-            activity_kind="rescue",
-            reviewer="claude-code",
-            model=None,
-            prompt=rescue_prompt,
-            repo_root=repo_root,
-            isolate_codex=False,
-            input=rescue_prompt,
-            text=True,
-            capture_output=True,
-            timeout=min(timeout, 300),
-            cwd=repo_root,
-            env=_frontier_env(),
-        )
-    except Exception as exc:
-        return {"attempted": True, "ok": False, "error": str(exc)}
-    output = redact_sensitive_text((completed.stdout or "") + "\n" + (completed.stderr or ""))
-    return {
-        "attempted": True,
-        "ok": completed.returncode == 0,
-        "exit_code": completed.returncode,
-        "command": "claude code rescue",
-        "raw_output": output[-3000:],
-    }
-
-
-def _run_frontier_rescue(
-    failure_output: str,
-    prompt: str,
-    *,
-    repo_root: Path,
-    timeout: int,
-) -> dict[str, Any]:
-    attempts: list[dict[str, Any]] = []
-    official_lookup = collect_official_frontier_docs(failure_output)
-    codex_attempt = _run_codex_rescue(
-        failure_output,
-        prompt,
-        repo_root=repo_root,
-        timeout=timeout,
-        official_lookup=official_lookup,
-    )
-    attempts.append({"reviewer": "codex", **codex_attempt})
-
-    if not codex_attempt.get("ok"):
-        claude_attempt = _run_claude_code_rescue(
-            failure_output,
-            prompt,
-            repo_root=repo_root,
-            timeout=timeout,
-            official_lookup=official_lookup,
-        )
-        attempts.append({"reviewer": "claude-code", **claude_attempt})
-
-    attempted = any(bool(attempt.get("attempted")) for attempt in attempts)
-    ok = any(bool(attempt.get("ok")) for attempt in attempts)
-    return {
-        "attempted": attempted,
-        "ok": ok,
-        "status": "diagnosed" if ok else "rescue_unavailable" if not attempted else "rescue_failed",
-        "attempts": attempts,
-        "official_lookup": official_lookup,
-    }
-
-
-def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: bool) -> FrontierResult:
     codex = shutil.which("codex")
     if codex is None:
         failure = _frontier_failure(
@@ -1363,18 +1210,9 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
             if isinstance(failure_data, dict)
             else classify_frontier_failure("")
         )
-        rescue_attempt = None
-        if not failure.human_required:
-            rescue_attempt = _run_frontier_rescue(
-                json.dumps(preflight, ensure_ascii=False, default=str),
-                prompt,
-                repo_root=repo_root,
-                timeout=timeout,
-            )
         return _failure_result(
             summary=str(failure.summary),
             failure=failure,
-            rescue_attempt=rescue_attempt,
             access_repair={"preflight": preflight},
         )
 
@@ -1431,6 +1269,7 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
             prompt=prompt,
             repo_root=repo_root,
             isolate_codex=True,
+            permit=permit,
             input=prompt,
             text=True,
             capture_output=True,
@@ -1443,19 +1282,10 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
         output_text += "\n" + (completed.stdout or "") + "\n" + (completed.stderr or "")
         if completed.returncode != 0:
             failure = classify_frontier_failure(output_text)
-            rescue_attempt = None
-            if not failure.human_required:
-                rescue_attempt = _run_frontier_rescue(
-                    output_text,
-                    prompt,
-                    repo_root=repo_root,
-                    timeout=timeout,
-                )
             return _failure_result(
                 summary=f"codex exec failed with exit {completed.returncode}",
                 output=output_text,
                 failure=failure,
-                rescue_attempt=rescue_attempt,
                 access_repair=access_repair,
             )
         return replace(_parse_result(output_text), access_repair=access_repair)
@@ -1480,154 +1310,740 @@ def run_structured_review(
     schema: dict[str, Any],
     *,
     repo_root: Path,
+    audit_root: Path | None = None,
     timeout: int | None = None,
     execute_patch: bool = False,
     command_env: str = "LLM_WIKI_STRUCTURED_REVIEW_CMD",
     model_role: str = "semantic_judge",
+    decision_lane: str | None = None,
     model_override: str | None = None,
     reasoning_effort_override: str | None = None,
     record_replay: bool = True,
 ) -> dict[str, Any]:
-    """Run one bounded frontier review without rescue fan-out.
+    """Resolve a routine structured decision using local models only.
 
-    Routine queue decisions must not silently multiply one budgeted call into
-    Codex + rescue Codex + Claude. Code-repair packets keep the richer rescue
-    path in :func:`run_frontier_review`; content-policy lanes use this helper.
+    This compatibility entry point is intentionally unable to invoke Codex,
+    Claude, a custom frontier command, or the code-repair path.  The legacy
+    frontier-shaped failure envelope is retained so existing callers can fail
+    closed without losing their durable queue semantics.
     """
-    from llm_wiki_mcp.model_lab import record_live_result, record_replay_case, resolve_role
+    del (
+        repo_root,
+        timeout,
+        execute_patch,
+        command_env,
+        model_override,
+        reasoning_effort_override,
+    )
 
-    timeout_seconds = _bounded_timeout(timeout)
-    selected_model, selected_effort = resolve_role(model_role)
-    selected_model = model_override or selected_model
-    selected_effort = reasoning_effort_override or selected_effort
-    started = time.monotonic()
+    from llm_wiki_mcp.decision_policy import resolve_decision_policy
+    from llm_wiki_mcp.decision_router import DecisionRouter
+    from llm_wiki_mcp.decision_schema_manifest import (
+        production_schema_manifest,
+        schema_sha256,
+    )
 
-    def finalize(result: dict[str, Any]) -> dict[str, Any]:
-        elapsed = time.monotonic() - started
-        failure = result.get("frontier_failure")
-        failure_class = str(failure.get("failure_class")) if isinstance(failure, dict) else None
-        ok = failure is None and result.get("decision") != "needs_retry"
-        record_live_result(role=model_role, model=selected_model, ok=ok, failure_class=failure_class)
-        if record_replay and ok:
-            record_replay_case(
-                role=model_role, prompt=prompt, schema=schema, result=result,
-                model=selected_model, effort=selected_effort, latency_seconds=elapsed,
-            )
+    lane_policy, lane_mode, lane_error = resolve_decision_policy(decision_lane)
+    policy_audit = {
+        "lane": decision_lane,
+        "kind": lane_policy.kind if lane_policy is not None else None,
+        "schema_name": lane_policy.schema_name if lane_policy is not None else None,
+        "mode": lane_mode,
+        "error": lane_error,
+    }
+    if lane_error is not None or lane_mode == "off":
+        reason = lane_error or f"decision_lane_off:{decision_lane}"
+        failure = _frontier_failure(
+            "local_decision_policy_blocked",
+            "local_quarantined",
+            reason,
+            human_required=False,
+        )
+        result = _structured_failure_payload(
+            schema,
+            summary=reason,
+            failure=failure,
+            reviewer="local_policy",
+        )
+        result["decision_policy"] = policy_audit
         return result
-    command = os.environ.get(command_env)
-    if command:
+
+    if lane_policy is None or lane_policy.kind not in {"consensus", "local_batch"}:
+        reason = f"decision_lane_not_structured:{decision_lane}"
+        failure = _frontier_failure(
+            "local_decision_policy_kind_invalid",
+            "local_quarantined",
+            reason,
+            human_required=False,
+        )
+        result = _structured_failure_payload(
+            schema,
+            summary=reason,
+            failure=failure,
+            reviewer="local_policy",
+        )
+        result["decision_policy"] = policy_audit
+        return result
+
+    expected_digest = production_schema_manifest().get(str(lane_policy.schema_name))
+    actual_digest = schema_sha256(schema)
+    policy_audit["expected_schema_sha256"] = expected_digest
+    policy_audit["actual_schema_sha256"] = actual_digest
+    if expected_digest is None or actual_digest != expected_digest:
+        reason = f"decision_lane_schema_mismatch:{decision_lane}"
+        failure = _frontier_failure(
+            "local_decision_schema_mismatch",
+            "local_quarantined",
+            reason,
+            human_required=False,
+        )
+        result = _structured_failure_payload(
+            schema,
+            summary=reason,
+            failure=failure,
+            reviewer="local_policy",
+        )
+        result["decision_policy"] = policy_audit
+        return result
+
+    router = DecisionRouter(
+        audit_root=audit_root,
+        audit_role=decision_lane or model_role,
+        record_replay=record_replay,
+    )
+    routed = router.decide(prompt, schema)
+    policy_audit["router_policy"] = router.policy.audit_record()
+    if lane_mode == "shadow":
+        reason = f"decision_lane_shadow:{decision_lane}"
+        failure = _frontier_failure(
+            "local_decision_shadow_only",
+            "local_quarantined",
+            reason,
+            human_required=False,
+        )
+        result = _structured_failure_payload(
+            schema,
+            summary=reason,
+            failure=failure,
+            reviewer="local_consensus_shadow",
+        )
+        result["local_consensus"] = routed.audit_record()
+        result["decision_policy"] = policy_audit
+        return result
+    if router.policy.source != "adopted_artifact":
+        reason = f"decision_lane_unadopted:{decision_lane}"
+        failure = _frontier_failure(
+            "local_decision_artifact_required",
+            "local_quarantined",
+            reason,
+            human_required=False,
+        )
+        result = _structured_failure_payload(
+            schema,
+            summary=reason,
+            failure=failure,
+            reviewer="local_policy",
+        )
+        result["local_consensus"] = routed.audit_record()
+        result["decision_policy"] = policy_audit
+        return result
+    if routed.ok and isinstance(routed.decision, dict):
+        result = _validated_structured_result(
+            routed.decision,
+            schema,
+            reviewer="local_consensus",
+        )
+        result["local_consensus"] = routed.audit_record()
+        result["decision_policy"] = policy_audit
+        return result
+
+    reason = routed.quarantine_reason or routed.failure_class or "local consensus failed"
+    failure = _frontier_failure(
+        "local_consensus_failed",
+        "local_quarantined",
+        reason,
+        human_required=False,
+    )
+    result = _structured_failure_payload(
+        schema,
+        summary=reason,
+        failure=failure,
+        reviewer="local_consensus",
+    )
+    result["local_consensus"] = routed.audit_record()
+    result["decision_policy"] = policy_audit
+    return result
+
+
+def _git_probe(
+    repo_root: Path,
+    args: list[str],
+    *,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
+def _capture_repair_baseline(repo_root: Path) -> dict[str, Any]:
+    """Capture a clean, pushed main baseline before a repair process starts."""
+
+    result: dict[str, Any] = {
+        "ok": False,
+        "head": None,
+        "origin_main": None,
+        "clean": False,
+        "branch": None,
+        "failure_class": None,
+    }
+    try:
+        fetched = _git_probe(repo_root, ["fetch", "--quiet", "origin", "main"], timeout=120)
+        head = _git_probe(repo_root, ["rev-parse", "HEAD"])
+        origin = _git_probe(repo_root, ["rev-parse", "origin/main"])
+        branch = _git_probe(repo_root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+        status = _git_probe(
+            repo_root,
+            ["status", "--porcelain=v1", "--untracked-files=no"],
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        result["failure_class"] = f"git_probe_{exc.__class__.__name__}"
+        return result
+    if fetched.returncode != 0:
+        result["failure_class"] = "git_baseline_fetch_failed"
+        return result
+    if (
+        head.returncode != 0
+        or origin.returncode != 0
+        or branch.returncode != 0
+        or status.returncode != 0
+    ):
+        result["failure_class"] = "git_baseline_unavailable"
+        return result
+    head_sha = head.stdout.strip()
+    origin_sha = origin.stdout.strip()
+    clean = not status.stdout.strip()
+    result.update(
+        {
+            "head": head_sha,
+            "origin_main": origin_sha,
+            "clean": clean,
+            "branch": branch.stdout.strip(),
+        }
+    )
+    if not clean:
+        result["failure_class"] = "repair_worktree_dirty"
+        return result
+    if not head_sha or head_sha != origin_sha:
+        result["failure_class"] = "repair_baseline_not_pushed_main"
+        return result
+    if branch.stdout.strip() != "main":
+        result["failure_class"] = "repair_baseline_not_main_branch"
+        return result
+    result["ok"] = True
+    return result
+
+
+@contextmanager
+def _isolated_repair_checkout(
+    repo_root: Path,
+    baseline: dict[str, Any],
+) -> Iterator[Path]:
+    """Yield a disposable checkout with no Git remote.
+
+    A local clone is used instead of a linked worktree because worktrees share
+    remote configuration with the production checkout.  Removing ``origin``
+    from this clone makes a model-initiated push structurally impossible.
+    """
+
+    baseline_head = str(baseline.get("head") or "")
+    if not baseline_head:
+        raise RuntimeError("repair baseline is missing HEAD")
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-frontier-repair-") as td:
+        checkout = Path(td) / "candidate"
+        cloned = subprocess.run(
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--no-local",
+                "--no-checkout",
+                str(repo_root),
+                str(checkout),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=300,
+        )
+        if cloned.returncode != 0:
+            raise RuntimeError("failed to create isolated repair checkout")
+        checked_out = _git_probe(checkout, ["checkout", "--quiet", "--detach", baseline_head])
+        remote_removed = _git_probe(checkout, ["remote", "remove", "origin"])
+        if checked_out.returncode != 0 or remote_removed.returncode != 0:
+            raise RuntimeError("failed to isolate repair checkout")
+        remotes = _git_probe(checkout, ["remote"])
+        if remotes.returncode != 0 or remotes.stdout.strip():
+            raise RuntimeError("isolated repair checkout unexpectedly has a remote")
+        yield checkout
+
+
+def _verification_command(
+    command: list[str],
+    *,
+    repo_root: Path,
+    timeout: int,
+) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "ok": False,
+            "returncode": None,
+            "error_type": exc.__class__.__name__,
+        }
+    return {
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+    }
+
+
+PERSISTENT_RUNTIME_LABELS = (
+    "com.trafficsign.llm-wiki-dashboard",
+    "com.trafficsign.llm-wiki-ingest-drain",
+)
+
+
+def _launchd_pid(label: str) -> int | None:
+    """Return the running PID for a user LaunchAgent, without starting it."""
+
+    launchctl = shutil.which("launchctl")
+    if launchctl is None:
+        return None
+    completed = subprocess.run(
+        [launchctl, "print", f"gui/{os.getuid()}/{label}"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        return None
+    match = re.search(r"(?m)^\s*pid\s*=\s*(\d+)\s*$", completed.stdout or "")
+    return int(match.group(1)) if match else None
+
+
+def _pid_tree_uses_archive(pid: int, archive_path: str) -> bool:
+    """Confirm a service or one of its descendants executes from an archive."""
+
+    if not archive_path:
+        return False
+    completed = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,command="],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        return False
+    rows: dict[int, tuple[int, str]] = {}
+    for line in (completed.stdout or "").splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
         try:
-            cmd = shlex.split(command)
-            completed = _run_review_subprocess(
-                cmd,
-                activity_kind=model_role,
-                reviewer="custom",
-                model=selected_model,
-                prompt=prompt,
-                repo_root=repo_root,
-                isolate_codex=bool(cmd and Path(cmd[0]).name == "codex"),
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=timeout_seconds,
-                env=_frontier_env(),
-                cwd=str(repo_root),
+            child_pid = int(parts[0])
+            parent_pid = int(parts[1])
+        except ValueError:
+            continue
+        rows[child_pid] = (parent_pid, parts[2])
+    descendants = {pid}
+    changed = True
+    while changed:
+        changed = False
+        for child_pid, (parent_pid, _command) in rows.items():
+            if parent_pid in descendants and child_pid not in descendants:
+                descendants.add(child_pid)
+                changed = True
+    return any(
+        archive_path in rows[process_pid][1]
+        for process_pid in descendants
+        if process_pid in rows
+    )
+
+
+def _restart_persistent_runtime_services(archive_path: str) -> dict[str, Any]:
+    """Restart only persistent services that were already running.
+
+    Scheduled sleep/convergence/watchdog jobs are intentionally not kicked: a
+    repair may be running inside one of them. Their wrappers use ``uvx
+    --refresh`` and will naturally select the new archive on their next run.
+    """
+
+    launchctl = shutil.which("launchctl")
+    if launchctl is None:
+        return {"ok": False, "failure": "launchctl_unavailable", "services": []}
+    timeout_seconds = max(
+        5,
+        int(os.environ.get("LLM_WIKI_FRONTIER_RESTART_TIMEOUT_SECONDS", "30")),
+    )
+    services: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for label in PERSISTENT_RUNTIME_LABELS:
+        old_pid = _launchd_pid(label)
+        if old_pid is None:
+            services.append({"label": label, "status": "not_running", "ok": True})
+            continue
+        restarted = subprocess.run(
+            [launchctl, "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if restarted.returncode != 0:
+            failures.append(f"{label}:kickstart_failed")
+            services.append(
+                {
+                    "label": label,
+                    "status": "kickstart_failed",
+                    "old_pid": old_pid,
+                    "ok": False,
+                }
             )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            return finalize(_structured_subprocess_failure(
-                exc, reviewer="frontier command", schema=schema
-            ))
-        output = redact_sensitive_text((completed.stdout or "") + "\n" + (completed.stderr or ""))
-        if completed.returncode != 0:
-            failure = classify_frontier_failure(output)
-            return finalize(_structured_failure_payload(
-                schema,
-                summary=f"frontier command failed with exit {completed.returncode}",
-                failure=failure,
-                reviewer="frontier command",
-                diagnostics=output,
-            ))
-        parsed = _extract_json_object(output)
-        return finalize(_validated_structured_result(
-            parsed, schema, reviewer="frontier command"
-        ))
-
-    codex = shutil.which("codex")
-    if codex is None:
-        failure = _frontier_failure(
-            "frontier_tool_unavailable",
-            "frontier_retry",
-            "codex executable not found",
+            continue
+        deadline = time.monotonic() + timeout_seconds
+        new_pid: int | None = None
+        archive_loaded = False
+        while time.monotonic() < deadline:
+            new_pid = _launchd_pid(label)
+            if new_pid is not None and new_pid != old_pid:
+                archive_loaded = _pid_tree_uses_archive(new_pid, archive_path)
+                if archive_loaded:
+                    break
+            time.sleep(0.25)
+        ok = new_pid is not None and new_pid != old_pid and archive_loaded
+        if not ok:
+            failures.append(f"{label}:archive_verification_failed")
+        services.append(
+            {
+                "label": label,
+                "status": "restarted" if ok else "archive_verification_failed",
+                "old_pid": old_pid,
+                "new_pid": new_pid,
+                "archive_loaded": archive_loaded,
+                "ok": ok,
+            }
         )
-        return finalize(_structured_failure_payload(
-            schema,
-            summary=failure.summary,
-            failure=failure,
-            reviewer="codex",
-        ))
-    preflight = run_frontier_preflight()
-    if not preflight.get("ok"):
-        failure_payload = preflight.get("failure") if isinstance(preflight.get("failure"), dict) else {}
-        failure = _frontier_failure(
-            str(failure_payload.get("failure_class") or "unknown_frontier_failure"),
-            str(failure_payload.get("rescue_status") or "frontier_retry"),
-            str(failure_payload.get("summary") or "frontier preflight failed"),
-        )
-        return finalize(_structured_failure_payload(
-            schema,
-            summary=failure.summary,
-            failure=failure,
-            reviewer="codex",
-        ))
+    return {"ok": not failures, "failures": failures, "services": services}
 
-    with tempfile.TemporaryDirectory() as td:
-        schema_path = Path(td) / "structured-review.schema.json"
-        output_path = Path(td) / "structured-review-output.json"
-        strict_schema, _repair = _strict_schema_with_repair(schema)
-        schema_path.write_text(json.dumps(strict_schema, indent=2) + "\n", encoding="utf-8")
-        invocation = _build_codex_exec_invocation(
-            codex,
+
+def _remote_main_sha(repo_root: Path) -> str | None:
+    remote = _git_probe(
+        repo_root,
+        ["ls-remote", "--exit-code", "origin", "refs/heads/main"],
+        timeout=120,
+    )
+    words = remote.stdout.split() if remote.returncode == 0 else []
+    return words[0] if words else None
+
+
+def _publish_verified_candidate(
+    *,
+    repo_root: Path,
+    candidate_root: Path,
+    candidate_head: str,
+    baseline_head: str,
+) -> dict[str, Any]:
+    """Publish one tested descendant with an exact remote compare-and-swap."""
+
+    checks: dict[str, Any] = {
+        "remote_before": _remote_main_sha(repo_root),
+        "candidate_head": candidate_head,
+    }
+    if checks["remote_before"] != baseline_head:
+        return {"ok": False, "failure": "origin_main_changed_before_publish", **checks}
+    tracked_status = _git_probe(
+        repo_root,
+        ["status", "--porcelain=v1", "--untracked-files=no"],
+    )
+    changed = _git_probe(
+        candidate_root,
+        ["diff", "--name-only", baseline_head, candidate_head],
+    )
+    untracked = _git_probe(
+        repo_root,
+        ["ls-files", "--others", "--exclude-standard"],
+    )
+    if tracked_status.returncode != 0 or tracked_status.stdout.strip():
+        return {"ok": False, "failure": "production_checkout_changed", **checks}
+    if changed.returncode != 0 or untracked.returncode != 0:
+        return {"ok": False, "failure": "publish_path_preflight_failed", **checks}
+    changed_paths = {path for path in changed.stdout.splitlines() if path}
+    untracked_paths = {path for path in untracked.stdout.splitlines() if path}
+    collisions = sorted(
+        (candidate_path, local_path)
+        for candidate_path in changed_paths
+        for local_path in untracked_paths
+        if candidate_path == local_path
+        or candidate_path.startswith(f"{local_path}/")
+        or local_path.startswith(f"{candidate_path}/")
+    )
+    checks["untracked_path_collisions"] = collisions
+    if collisions:
+        return {"ok": False, "failure": "untracked_path_collision", **checks}
+    imported = _git_probe(
+        repo_root,
+        ["fetch", "--quiet", str(candidate_root), candidate_head],
+        timeout=300,
+    )
+    if imported.returncode != 0:
+        return {"ok": False, "failure": "candidate_import_failed", **checks}
+    pushed = _git_probe(
+        repo_root,
+        [
+            "push",
+            f"--force-with-lease=refs/heads/main:{baseline_head}",
+            "origin",
+            f"{candidate_head}:refs/heads/main",
+        ],
+        timeout=300,
+    )
+    checks["push_returncode"] = pushed.returncode
+    if pushed.returncode != 0:
+        return {"ok": False, "failure": "guarded_push_failed", **checks}
+    advanced = _git_probe(repo_root, ["merge", "--ff-only", candidate_head], timeout=120)
+    checks["fast_forward_returncode"] = advanced.returncode
+    checks["remote_after"] = _remote_main_sha(repo_root)
+    if advanced.returncode != 0:
+        return {"ok": False, "failure": "local_main_fast_forward_failed", **checks}
+    if checks["remote_after"] != candidate_head:
+        return {"ok": False, "failure": "origin_main_publish_mismatch", **checks}
+    return {"ok": True, **checks}
+
+
+def _verify_repair_result(
+    result: FrontierResult,
+    *,
+    repo_root: Path,
+    candidate_root: Path,
+    evidence: Any,
+    baseline: dict[str, Any],
+) -> FrontierResult:
+    """Verify an isolated candidate, then publish and verify the live archive."""
+
+    timeout = max(
+        60,
+        int(os.environ.get("LLM_WIKI_FRONTIER_VERIFY_TIMEOUT_SECONDS", "1800")),
+    )
+    checks: dict[str, Any] = {
+        "baseline_head": baseline.get("head"),
+        "model_reported_commit": result.commit,
+        "model_reported_tests": len(result.tests_run),
+        "model_reported_pushed": result.pushed,
+    }
+    failures: list[str] = []
+    if result.decision != "approved":
+        return replace(
+            result,
+            verified=False,
+            verification={"ok": False, "checks": checks, "failures": ["not_approved"]},
+        )
+    if not result.committed or result.pushed or not result.tests_run:
+        failures.append("model_report_missing_required_completion_fields")
+
+    try:
+        head = _git_probe(candidate_root, ["rev-parse", "HEAD"])
+        status = _git_probe(
+            candidate_root,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+        )
+        ancestry = _git_probe(
+            candidate_root,
+            ["merge-base", "--is-ancestor", str(baseline.get("head") or ""), "HEAD"],
+        )
+        remotes = _git_probe(candidate_root, ["remote"])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        failures.append(f"git_postcondition_{exc.__class__.__name__}")
+        head = status = ancestry = remotes = subprocess.CompletedProcess([], 1, "", "")
+
+    head_sha = head.stdout.strip() if head.returncode == 0 else ""
+    checks.update(
+        {
+            "candidate_head": head_sha or None,
+            "candidate_has_no_remote": remotes.returncode == 0 and not remotes.stdout.strip(),
+            "candidate_clean": status.returncode == 0 and not status.stdout.strip(),
+            "baseline_is_ancestor": ancestry.returncode == 0,
+        }
+    )
+    if not head_sha or head_sha == baseline.get("head"):
+        failures.append("no_new_commit")
+    if result.commit and not head_sha.startswith(result.commit):
+        failures.append("reported_commit_mismatch")
+    if status.returncode != 0 or status.stdout.strip():
+        failures.append("repair_candidate_not_clean")
+    if ancestry.returncode != 0:
+        failures.append("repair_commit_not_descended_from_baseline")
+    if remotes.returncode != 0 or remotes.stdout.strip():
+        failures.append("repair_candidate_remote_present")
+    if _remote_main_sha(repo_root) != baseline.get("head"):
+        failures.append("origin_main_changed_during_candidate_verification")
+
+    reproduction = list(getattr(evidence, "reproduction_command", ()) or ())
+    if reproduction and not failures:
+        reproduced = _verification_command(
+            reproduction,
+            repo_root=candidate_root,
+            timeout=timeout,
+        )
+        checks["reproduction"] = {
+            key: value for key, value in reproduced.items() if key != "stdout"
+        }
+        if not reproduced.get("ok"):
+            failures.append("trusted_reproduction_still_fails")
+    else:
+        if not reproduction:
+            failures.append("trusted_reproduction_command_missing")
+
+    if not failures:
+        suite = _verification_command(
+            ["uv", "run", "pytest", "-q"],
+            repo_root=candidate_root,
+            timeout=timeout,
+        )
+        checks["full_test_suite"] = {
+            key: value for key, value in suite.items() if key != "stdout"
+        }
+        if not suite.get("ok"):
+            failures.append("full_test_suite_failed")
+
+    published = False
+    if not failures:
+        publish = _publish_verified_candidate(
             repo_root=repo_root,
-            schema_path=schema_path,
-            output_path=output_path,
-            execute_patch=execute_patch,
-            preflight=preflight,
-            model=selected_model,
-            reasoning_effort=selected_effort,
+            candidate_root=candidate_root,
+            candidate_head=head_sha,
+            baseline_head=str(baseline.get("head") or ""),
         )
-        try:
-            completed = _run_review_subprocess(
-                invocation["cmd"],
-                activity_kind=model_role,
-                reviewer="codex",
-                model=selected_model,
-                prompt=prompt,
-                repo_root=repo_root,
-                isolate_codex=True,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=timeout_seconds,
-                cwd=invocation.get("cwd") or None,
+        checks["publish"] = publish
+        published = bool(publish.get("ok"))
+        if not published:
+            failures.append(str(publish.get("failure") or "candidate_publish_failed"))
+
+    runtime_identity_payload: dict[str, Any] = {}
+    if published:
+        runtime = _verification_command(
+            [
+                *uvx_runtime_command("llm-wiki", refresh=True),
+                "runtime-identity",
+                "--json",
+            ],
+            repo_root=repo_root,
+            timeout=timeout,
+        )
+        if runtime.get("ok") and isinstance(runtime.get("stdout"), str):
+            try:
+                parsed = json.loads(runtime["stdout"])
+                if isinstance(parsed, dict):
+                    runtime_identity_payload = parsed
+            except json.JSONDecodeError:
+                pass
+        checks["runtime_archive"] = {
+            "ok": bool(runtime.get("ok")),
+            "commit_id": runtime_identity_payload.get("commit_id"),
+            "archive_path": runtime_identity_payload.get("archive_path"),
+        }
+        if runtime_identity_payload.get("commit_id") != head_sha:
+            failures.append("refreshed_runtime_commit_mismatch")
+        else:
+            restart = _restart_persistent_runtime_services(
+                str(runtime_identity_payload.get("archive_path") or "")
             )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            return finalize(_structured_subprocess_failure(exc, reviewer="codex", schema=schema))
-        output = ""
-        if output_path.exists():
-            output += output_path.read_text(encoding="utf-8", errors="replace")
-        output += "\n" + (completed.stdout or "") + "\n" + (completed.stderr or "")
-        output = redact_sensitive_text(output)
-        if completed.returncode != 0:
-            failure = classify_frontier_failure(output)
-            return finalize(_structured_failure_payload(
-                schema,
-                summary=f"codex structured review failed with exit {completed.returncode}",
-                failure=failure,
-                reviewer="codex",
-                diagnostics=output,
-            ))
-        parsed = _extract_json_object(output)
-        return finalize(_validated_structured_result(parsed, schema, reviewer="frontier"))
+            checks["runtime_restart"] = restart
+            if not restart.get("ok"):
+                failures.append("persistent_runtime_restart_failed")
+
+    try:
+        final_status = _git_probe(
+            repo_root,
+            ["status", "--porcelain=v1", "--untracked-files=no"],
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        final_status = subprocess.CompletedProcess([], 1, "", "")
+    if final_status.returncode != 0 or final_status.stdout.strip():
+        failures.append("verification_left_worktree_dirty")
+
+    verification = {
+        "ok": not failures,
+        "checks": checks,
+        "failures": failures,
+    }
+    if failures:
+        failure = _frontier_failure(
+            "frontier_postcondition_failed",
+            "local_quarantined",
+            "frontier repair self-report did not satisfy independent postconditions",
+            human_required=False,
+        )
+        return replace(
+            result,
+            decision="quarantined",
+            summary=failure.summary,
+            frontier_failure=failure.to_dict(),
+            rescue_status=failure.rescue_status,
+            commit=head_sha or result.commit,
+            pushed=published,
+            verified=False,
+            verification=verification,
+        )
+    return replace(
+        result,
+        commit=head_sha,
+        pushed=True,
+        verified=True,
+        verification=verification,
+    )
+
+
+def _frontier_guard_outcome(result: FrontierResult) -> str:
+    if result.human_required:
+        return "human_required"
+    if result.decision == "approved" and result.verified:
+        return "succeeded"
+    if result.decision == "quarantined":
+        return "quarantined"
+    return "failed"
+
+
+def _frontier_guard_details(result: FrontierResult) -> dict[str, Any]:
+    failure_class = None
+    if isinstance(result.frontier_failure, dict):
+        failure_class = result.frontier_failure.get("failure_class")
+    return {
+        "decision": result.decision,
+        "summary": result.summary[:1000],
+        "tests_run": list(result.tests_run)[:100],
+        "commit": result.commit,
+        "committed": result.committed,
+        "pushed": result.pushed,
+        "verified": result.verified,
+        "verification": result.verification,
+        "failure_class": failure_class,
+    }
 
 
 def run_frontier_review(
@@ -1635,22 +2051,152 @@ def run_frontier_review(
     local_decision: dict[str, Any] | None,
     *,
     repo_root: Path,
+    evidence: Any | None = None,
+    guard: Any | None = None,
     execute_patch: bool = True,
     timeout: int | None = None,
 ) -> FrontierResult:
+    """Run exactly one guarded frontier attempt for proven code repair.
+
+    Routine callers cannot use this entry point without a strict
+    :class:`RepairIncidentEvidence` capability.  Admission, single-flight,
+    cooldown and the daily budget are durable across processes.
+    """
+    from llm_wiki_mcp.frontier_guard import (
+        FrontierGuard,
+        FrontierGuardError,
+        PermitDenied,
+        RepairIncidentEvidence,
+    )
+    from llm_wiki_mcp.decision_policy import resolve_decision_policy
+
+    repair_policy, repair_mode, repair_policy_error = resolve_decision_policy(
+        "system_code_repair"
+    )
+    if (
+        repair_policy_error is not None
+        or repair_policy is None
+        or repair_policy.kind != "repair_only"
+        or repair_mode != "enabled"
+    ):
+        failure = _frontier_failure(
+            "frontier_repair_policy_disabled",
+            "repair_deferred",
+            repair_policy_error or "system code repair lane is disabled",
+            human_required=False,
+        )
+        return _failure_result(summary=failure.summary, failure=failure)
+
+    if not isinstance(evidence, RepairIncidentEvidence):
+        failure = _frontier_failure(
+            "frontier_guard_evidence_required",
+            "local_quarantined",
+            "frontier code repair requires validated system incident evidence",
+            human_required=False,
+        )
+        return _failure_result(summary=failure.summary, failure=failure)
+
+    baseline = _capture_repair_baseline(repo_root) if execute_patch else {
+        "ok": True,
+        "head": None,
+        "origin_main": None,
+        "clean": True,
+        "review_only": True,
+    }
+    if not baseline.get("ok"):
+        failure = _frontier_failure(
+            "frontier_repair_preflight_failed",
+            "repair_deferred",
+            f"frontier code repair requires a clean pushed main baseline: {baseline.get('failure_class')}",
+            human_required=False,
+        )
+        return replace(
+            _failure_result(summary=failure.summary, failure=failure),
+            verification={"ok": False, "baseline": baseline},
+        )
+
     timeout_seconds = _bounded_timeout(timeout)
     prompt = build_frontier_prompt(packet, local_decision, execute_patch=execute_patch)
-    command = os.environ.get("LLM_WIKI_FRONTIER_CMD")
-    if command:
-        return _run_custom_command(
-            command,
-            prompt,
-            repo_root=repo_root,
-            timeout=timeout_seconds,
+    controller = guard or FrontierGuard()
+    try:
+        with controller.permit(evidence) as permit:
+            try:
+                if execute_patch:
+                    with _isolated_repair_checkout(repo_root, baseline) as candidate_root:
+                        result = _run_codex(
+                            prompt,
+                            repo_root=candidate_root,
+                            timeout=timeout_seconds,
+                            execute_patch=True,
+                            permit=permit,
+                        )
+                        execution_started = permit.status == "started"
+                        if execution_started and result.decision == "approved":
+                            result = _verify_repair_result(
+                                result,
+                                repo_root=repo_root,
+                                candidate_root=candidate_root,
+                                evidence=evidence,
+                                baseline=baseline,
+                            )
+                else:
+                    result = _run_codex(
+                        prompt,
+                        repo_root=repo_root,
+                        timeout=timeout_seconds,
+                        execute_patch=False,
+                        permit=permit,
+                    )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                failure = classify_frontier_failure(str(exc))
+                result = _failure_result(
+                    summary=f"frontier code repair failed to execute: {type(exc).__name__}",
+                    output=str(exc),
+                    failure=failure,
+                )
+            except RuntimeError as exc:
+                failure = _frontier_failure(
+                    "frontier_repair_isolation_failed",
+                    "repair_deferred",
+                    str(exc),
+                    human_required=False,
+                )
+                result = _failure_result(summary=failure.summary, failure=failure)
+            execution_started = permit.status == "started"
+            if execution_started and not execute_patch:
+                result = replace(
+                    result,
+                    verified=True,
+                    verification={"ok": True, "mode": "review_only"},
+                )
+            if execution_started:
+                permit.finish(
+                    _frontier_guard_outcome(result),
+                    details=_frontier_guard_details(result),
+                )
+            return replace(result, execution_started=execution_started)
+    except PermitDenied as exc:
+        failure = _frontier_failure(
+            "frontier_guard_denied",
+            "repair_deferred",
+            f"frontier code repair deferred: {exc.reason}",
+            human_required=False,
         )
-    return _run_codex(
-        prompt,
-        repo_root=repo_root,
-        timeout=timeout_seconds,
-        execute_patch=execute_patch,
-    )
+        result = _failure_result(summary=failure.summary, failure=failure)
+        return replace(
+            result,
+            rescue_attempt={
+                "guard_reason": exc.reason,
+                "retry_at": (
+                    exc.retry_at.isoformat() if exc.retry_at is not None else None
+                ),
+            },
+        )
+    except FrontierGuardError as exc:
+        failure = _frontier_failure(
+            "frontier_guard_unavailable",
+            "repair_deferred",
+            f"frontier guard unavailable: {type(exc).__name__}",
+            human_required=False,
+        )
+        return _failure_result(summary=failure.summary, failure=failure)

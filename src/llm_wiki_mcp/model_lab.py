@@ -7,12 +7,16 @@ import json
 import os
 import re
 import tempfile
-import time
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from llm_wiki_mcp.decision_schema_manifest import (
+    decision_signature_value,
+    default_decision_value,
+)
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 LAB_DIR = WIKI_ROOT / "runtime" / "model-lab"
@@ -21,16 +25,14 @@ STATE_FILE = LAB_DIR / "state.json"
 REPLAY_FILE = LAB_DIR / "replay.jsonl"
 HISTORY_FILE = LAB_DIR / "history.jsonl"
 LOCK_FILE = LAB_DIR / "model-lab.lock"
+REPLAY_PROMPT_LIMIT = 50_000
 
 ROLE_SPECS: dict[str, dict[str, str]] = {
-    "raw_writer": {"tier": "luna", "effort": "low", "fallback_model": "gpt-5.4-mini", "fallback_effort": "low"},
-    "semantic_judge": {"tier": "terra", "effort": "medium", "fallback_model": "gpt-5.5", "fallback_effort": "medium"},
-    "mutation_approver": {"tier": "sol", "effort": "low", "fallback_model": "gpt-5.5", "fallback_effort": "low"},
-    "mutation_escalation": {"tier": "sol", "effort": "medium", "fallback_model": "gpt-5.5", "fallback_effort": "medium"},
     "code_repair": {"tier": "sol", "effort": "high", "fallback_model": "gpt-5.5", "fallback_effort": "high"},
 }
 
 MODEL_RE = re.compile(r"^gpt-(\d+)\.(\d+)(?:-(sol|terra|luna|mini))?$")
+REPLAY_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 
 
 def _now() -> str:
@@ -142,10 +144,6 @@ def discover_models(paths: list[Path] | None = None) -> dict[str, Any]:
 def _selection(role: str, discovery: dict[str, Any]) -> dict[str, Any]:
     spec = ROLE_SPECS[role]
     preferences = {
-        "raw_writer": ("luna", "mini", "terra", "flagship", "sol"),
-        "semantic_judge": ("terra", "flagship", "sol", "luna", "mini"),
-        "mutation_approver": ("sol", "flagship", "terra", "luna", "mini"),
-        "mutation_escalation": ("sol", "flagship", "terra", "luna", "mini"),
         "code_repair": ("sol", "flagship", "terra", "luna", "mini"),
     }
     latest = discovery.get("latest", {})
@@ -190,7 +188,7 @@ def load_policy() -> dict[str, Any]:
 
 def resolve_role(role: str) -> tuple[str, str]:
     if role not in ROLE_SPECS:
-        role = "semantic_judge"
+        raise ValueError(f"frontier role is not permitted: {role}")
     env_key = re.sub(r"[^A-Z0-9]", "_", role.upper())
     policy = load_policy()
     selected = policy.get("roles", {}).get(role, _selection(role, discover_models()))
@@ -199,9 +197,16 @@ def resolve_role(role: str) -> tuple[str, str]:
     return model, effort
 
 
-def decision_signature(value: dict[str, Any]) -> dict[str, Any]:
-    keys = ("decision", "classification", "action", "approved", "ignored_pages")
-    return {key: value.get(key) for key in keys if key in value}
+def decision_signature(
+    value: Mapping[str, Any],
+    schema: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    selected = (
+        decision_signature_value(schema, value)
+        if schema is not None
+        else default_decision_value(value)
+    )
+    return dict(selected) if isinstance(selected, Mapping) else {}
 
 
 def _model_version(model: Any) -> tuple[int, int]:
@@ -217,11 +222,79 @@ def record_replay_case(
         return
     if result.get("frontier_failure"):
         return
+    prompt_truncated = len(prompt) > REPLAY_PROMPT_LIMIT
     _append_jsonl(REPLAY_FILE, {
         "timestamp": _now(), "role": role, "model": model, "effort": effort,
-        "prompt": prompt[-50_000:], "schema": schema,
-        "expected": decision_signature(result), "latency_seconds": round(latency_seconds, 3),
+        "prompt": prompt[-REPLAY_PROMPT_LIMIT:],
+        "prompt_truncated": prompt_truncated,
+        "prompt_original_chars": len(prompt),
+        "expected": decision_signature(result, schema),
+        "latency_seconds": round(latency_seconds, 3),
     })
+
+
+def record_local_replay_case(
+    *,
+    role: str,
+    prompt: str,
+    schema: Mapping[str, Any],
+    result: Mapping[str, Any],
+    models: Sequence[str],
+    latency_seconds: float,
+    system: str | None = None,
+    replay_file: Path | None = None,
+) -> bool:
+    """Append one successful local-consensus decision without another LLM call.
+
+    Prompts over the fixed evidence cap are retained only as an explicitly
+    marked tail.  The replay evaluator excludes those rows, so this diagnostic
+    record can never masquerade as complete adoption evidence.
+    """
+
+    if (
+        not isinstance(role, str)
+        or not REPLAY_ROLE_RE.fullmatch(role)
+        or not isinstance(prompt, str)
+        or not prompt
+        or not isinstance(schema, Mapping)
+        or not isinstance(result, Mapping)
+        or (system is not None and not isinstance(system, str))
+    ):
+        return False
+    expected = decision_signature(result, schema)
+    if not expected:
+        return False
+    model_tags = [model for model in models if isinstance(model, str) and model]
+    if len(model_tags) < 2:
+        return False
+    prompt_truncated = len(prompt) > REPLAY_PROMPT_LIMIT or (
+        isinstance(system, str) and len(system) > REPLAY_PROMPT_LIMIT
+    )
+    target = replay_file or REPLAY_FILE
+    _append_jsonl(
+        target,
+        {
+            "timestamp": _now(),
+            "source": "local_consensus",
+            "role": role,
+            "model": "local_consensus",
+            "models": model_tags,
+            "effort": "local",
+            "prompt": prompt[-REPLAY_PROMPT_LIMIT:],
+            "system": (
+                system[-REPLAY_PROMPT_LIMIT:]
+                if isinstance(system, str)
+                else None
+            ),
+            "prompt_truncated": prompt_truncated,
+            "prompt_original_chars": len(prompt),
+            "system_original_chars": len(system) if isinstance(system, str) else 0,
+            "schema": dict(schema),
+            "expected": expected,
+            "latency_seconds": round(max(0.0, latency_seconds), 3),
+        },
+    )
+    return True
 
 
 def _load_replays(role: str, limit: int = 40) -> list[dict[str, Any]]:
@@ -274,96 +347,71 @@ def record_live_result(*, role: str, model: str, ok: bool, failure_class: str | 
         return {"rollback": rollback, "calls": calls, "failures": failures}
 
 
-Reviewer = Callable[[dict[str, Any], dict[str, str]], dict[str, Any]]
+def run_due(*, dry_run: bool = False, max_evaluations: int = 0) -> dict[str, Any]:
+    """Track the newest repair model without running routine model reviews.
 
-
-def _default_reviewer(case: dict[str, Any], candidate: dict[str, str]) -> dict[str, Any]:
-    from llm_wiki_mcp.frontier_review import run_structured_review
-    old = os.environ.get("LLM_WIKI_MODEL_LAB_REPLAY")
-    os.environ["LLM_WIKI_MODEL_LAB_REPLAY"] = "1"
-    try:
-        return run_structured_review(
-            str(case["prompt"]), dict(case["schema"]), repo_root=Path.cwd(), timeout=300,
-            model_role=str(case["role"]), model_override=candidate["model"],
-            reasoning_effort_override=candidate["effort"], record_replay=False,
-        )
-    finally:
-        if old is None:
-            os.environ.pop("LLM_WIKI_MODEL_LAB_REPLAY", None)
-        else:
-            os.environ["LLM_WIKI_MODEL_LAB_REPLAY"] = old
-
-
-def run_due(*, dry_run: bool = False, max_evaluations: int = 2, reviewer: Reviewer | None = None) -> dict[str, Any]:
+    The frontier model is no longer a data-plane judge, so replay evaluation
+    here would itself create forbidden subscription traffic.  Discovery may
+    promote only the single ``code_repair`` role by monotonically newer model
+    version; the durable repair guard and the incident's tests remain the
+    actual execution gate.
+    """
     discovery = discover_models()
     if not POLICY_FILE.exists():
         policy = bootstrap_policy(write=not dry_run, discovery=discovery)
         return {"status": "bootstrapped", "dry_run": dry_run, "roles": policy["roles"], "evaluated": 0}
     policy = load_policy()
-    # One-time migration for policies written before model discovery became
-    # available. This is not a future promotion bypass: the flag is cleared
-    # atomically, and every later model change must pass replay gates.
-    if policy.get("bootstrap") is True and not REPLAY_FILE.exists():
-        policy["roles"] = {role: _selection(role, discovery) for role in ROLE_SPECS}
-        policy["bootstrap"] = False
-        policy["bootstrap_completed_at"] = _now()
-        policy["updated_at"] = _now()
-        if not dry_run:
-            with _lock():
-                _atomic_json(POLICY_FILE, policy)
-                _append_jsonl(HISTORY_FILE, {"event": "bootstrap_migrated", "timestamp": _now(), "roles": policy["roles"]})
-        return {"status": "bootstrapped", "dry_run": dry_run, "roles": policy["roles"], "evaluated": 0}
-    reviewer = reviewer or _default_reviewer
-    state = _read_json(STATE_FILE, {"schema_version": 1, "candidates": {}})
-    candidates = state.setdefault("candidates", {})
-    evaluated = 0
-    promoted: list[str] = []
-    pending: list[dict[str, Any]] = []
-    for role in ROLE_SPECS:
-        desired = _selection(role, discovery)
-        active = policy.get("roles", {}).get(role, {})
-        if desired["model"] == active.get("model") and desired["effort"] == active.get("effort"):
-            continue
-        if _model_version(desired["model"]) <= _model_version(active.get("model")):
-            continue
-        key = f"{role}:{desired['model']}:{desired['effort']}"
-        candidate = candidates.setdefault(key, {"role": role, "model": desired["model"], "effort": desired["effort"], "cases": 0, "matches": 0, "schema_failures": 0, "unsafe": 0, "created_at": _now()})
-        replays = _load_replays(role)
-        seen = int(candidate.get("cases") or 0)
-        available = replays[seen:]
-        for case in available[: max(0, max_evaluations - evaluated)]:
-            started = time.monotonic()
-            actual = reviewer(case, {"model": desired["model"], "effort": desired["effort"]})
-            actual_sig = decision_signature(actual)
-            expected = dict(case.get("expected") or {})
-            candidate["cases"] = int(candidate.get("cases") or 0) + 1
-            candidate["matches"] = int(candidate.get("matches") or 0) + int(actual_sig == expected)
-            candidate["schema_failures"] = int(candidate.get("schema_failures") or 0) + int(bool(actual.get("frontier_failure")))
-            candidate["unsafe"] = int(candidate.get("unsafe") or 0) + int(_is_unsafe(expected, actual_sig))
-            candidate["last_latency_seconds"] = round(time.monotonic() - started, 3)
-            candidate["updated_at"] = _now()
-            evaluated += 1
-        minimum = max(3, int(os.environ.get("LLM_WIKI_MODEL_LAB_MIN_REPLAYS", "8")))
-        cases = int(candidate.get("cases") or 0)
-        agreement = int(candidate.get("matches") or 0) / cases if cases else 0.0
-        passed = cases >= minimum and candidate.get("schema_failures") == 0 and candidate.get("unsafe") == 0 and agreement >= 0.95
-        if passed and not dry_run:
-            previous = dict(active)
-            policy["roles"][role] = desired
-            policy.setdefault("canaries", {})[role] = {"model": desired["model"], "effort": desired["effort"], "previous": previous, "calls": 0, "failures": 0, "target_calls": 20, "started_at": _now()}
-            policy["updated_at"] = _now()
-            promoted.append(role)
-            _append_jsonl(HISTORY_FILE, {"event": "promoted", "timestamp": _now(), "role": role, "candidate": desired, "previous": previous, "cases": cases, "agreement": agreement})
-        else:
-            pending.append({"role": role, "candidate": desired, "cases": cases, "minimum": minimum, "agreement": round(agreement, 3), "unsafe": candidate.get("unsafe", 0), "schema_failures": candidate.get("schema_failures", 0), "reason": "no_replay_cases" if not replays else "replay_gate"})
-        if evaluated >= max_evaluations:
-            break
-    if not dry_run:
-        with _lock():
-            _atomic_json(STATE_FILE, state)
-            if promoted:
-                _atomic_json(POLICY_FILE, policy)
-    return {"status": "promoted" if promoted else "pending" if pending else "current", "dry_run": dry_run, "evaluated": evaluated, "promoted": promoted, "pending": pending}
+    active = policy.get("roles", {}).get("code_repair", {})
+    desired = _selection("code_repair", discovery)
+    newer = _model_version(desired["model"]) > _model_version(active.get("model"))
+    changed = newer or set(policy.get("roles", {})) != {"code_repair"}
+    if not changed:
+        return {"status": "current", "dry_run": dry_run, "evaluated": 0, "promoted": []}
+    if dry_run:
+        return {
+            "status": "would_promote" if newer else "would_migrate",
+            "dry_run": True,
+            "evaluated": 0,
+            "candidate": desired,
+        }
+    previous = dict(active)
+    policy["roles"] = {"code_repair": desired if newer else active}
+    policy["canaries"] = (
+        {
+            "code_repair": {
+                "model": desired["model"],
+                "effort": desired["effort"],
+                "previous": previous,
+                "calls": 0,
+                "failures": 0,
+                "target_calls": 5,
+                "started_at": _now(),
+            }
+        }
+        if newer
+        else {}
+    )
+    policy["bootstrap"] = False
+    policy["updated_at"] = _now()
+    with _lock():
+        _atomic_json(POLICY_FILE, policy)
+        _append_jsonl(
+            HISTORY_FILE,
+            {
+                "event": "repair_model_promoted" if newer else "repair_roles_migrated",
+                "timestamp": _now(),
+                "role": "code_repair",
+                "candidate": desired,
+                "previous": previous,
+                "gate": "version_discovery_plus_guarded_incident_tests",
+            },
+        )
+    return {
+        "status": "promoted" if newer else "migrated",
+        "dry_run": False,
+        "evaluated": 0,
+        "promoted": ["code_repair"] if newer else [],
+    }
 
 
 def snapshot() -> dict[str, Any]:

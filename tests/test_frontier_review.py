@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import frontier_review
+from llm_wiki_mcp import decision_router, frontier_review, ollama
+from llm_wiki_mcp.decision_router import DecisionRouterResult
+from llm_wiki_mcp.runtime_config import DecisionRouterConfig
 
 
 CODEX_EXEC_HELP = """
@@ -22,6 +24,29 @@ Options:
       --output-schema <FILE>
   -o, --output-last-message <FILE>
 """
+
+
+class _StartedPermit:
+    def __init__(self) -> None:
+        self.status = "reserved"
+
+    def start(self, *, pid: int) -> None:
+        assert pid > 0
+        self.status = "started"
+
+
+def _local_router_config() -> DecisionRouterConfig:
+    return DecisionRouterConfig(
+        primary_model="ornith:test",
+        challenger_model="gpt-oss:test",
+        tie_break_model="gemma:test",
+        num_ctx=16_384,
+        num_predict=256,
+        read_timeout_ms=5000,
+        max_input_chars=20_000,
+        max_output_chars=1_000,
+        max_feedback_chars=2_000,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -80,6 +105,14 @@ def _preflight_response(cmd: list[str]) -> SimpleNamespace | None:
     return None
 
 
+def _use_fake_guarded_spawn(monkeypatch, fake_run) -> None:
+    def fake_spawn(cmd, *, permit, **kwargs):
+        permit.start(pid=12345)
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(frontier_review, "_spawn_guarded_process", fake_spawn)
+
+
 def test_run_codex_uses_isolated_codex_home_with_shared_auth(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -124,9 +157,14 @@ def test_run_codex_uses_isolated_codex_home_with_shared_auth(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
     monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
+    _use_fake_guarded_spawn(monkeypatch, fake_run)
 
     result = frontier_review._run_codex(
-        "prompt", repo_root=tmp_path, timeout=1, execute_patch=False
+        "prompt",
+        repo_root=tmp_path,
+        timeout=1,
+        execute_patch=False,
+        permit=_StartedPermit(),
     )
 
     assert result.decision == "approved"
@@ -216,9 +254,14 @@ def test_run_codex_missing_auth_stops_before_subprocess(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
     monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
+    _use_fake_guarded_spawn(monkeypatch, fake_run)
 
     result = frontier_review._run_codex(
-        "prompt", repo_root=tmp_path, timeout=1, execute_patch=False
+        "prompt",
+        repo_root=tmp_path,
+        timeout=1,
+        execute_patch=False,
+        permit=_StartedPermit(),
     )
 
     assert result.human_required is True
@@ -226,7 +269,7 @@ def test_run_codex_missing_auth_stops_before_subprocess(
     assert result.frontier_failure["failure_class"] == "auth_required"
 
 
-def test_run_codex_schema_failure_records_rescue_attempt(
+def test_run_codex_schema_failure_does_not_spawn_an_unguarded_rescue_session(
     tmp_path: Path, monkeypatch
 ) -> None:
     home = tmp_path / "home"
@@ -253,17 +296,27 @@ def test_run_codex_schema_failure_records_rescue_attempt(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
     monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
+    _use_fake_guarded_spawn(monkeypatch, fake_run)
 
+    permit = _StartedPermit()
     result = frontier_review._run_codex(
-        "prompt", repo_root=tmp_path, timeout=1, execute_patch=False
+        "prompt",
+        repo_root=tmp_path,
+        timeout=1,
+        execute_patch=False,
+        permit=permit,
     )
 
-    codex_exec_calls = [cmd for cmd in calls if cmd[:2] == ["/bin/codex", "exec"]]
-    assert len(codex_exec_calls) == 3
+    code_repair_calls = [
+        cmd
+        for cmd in calls
+        if cmd[:2] == ["/bin/codex", "exec"] and cmd[-2:] != ["exec", "--help"]
+    ]
+    assert len(code_repair_calls) == 1
+    assert permit.status == "started"
     assert result.rescue_status == "pending_frontier_review"
     assert result.frontier_failure["failure_class"] == "schema_invalid"
-    assert result.rescue_attempt["attempted"] is True
-    assert result.rescue_attempt["ok"] is True
+    assert result.rescue_attempt is None
 
 
 def test_redacts_secrets_and_allows_only_official_urls() -> None:
@@ -302,6 +355,7 @@ def test_preflight_reports_adaptive_codex_exec_options(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
     monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
+    _use_fake_guarded_spawn(monkeypatch, fake_run)
 
     result = frontier_review.run_frontier_preflight()
 
@@ -347,9 +401,14 @@ def test_run_codex_adapts_to_missing_cli_options(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
     monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
+    _use_fake_guarded_spawn(monkeypatch, fake_run)
 
     result = frontier_review._run_codex(
-        "prompt", repo_root=tmp_path, timeout=1, execute_patch=False
+        "prompt",
+        repo_root=tmp_path,
+        timeout=1,
+        execute_patch=False,
+        permit=_StartedPermit(),
     )
 
     assert result.decision == "approved"
@@ -392,151 +451,593 @@ def test_collect_official_frontier_docs_uses_allowlist(monkeypatch) -> None:
     assert all(frontier_review.is_allowed_official_url(url) for url in result["allowlist"])
 
 
-def test_frontier_rescue_falls_back_to_claude_code(
-    tmp_path: Path, monkeypatch
+def test_frontier_without_validated_evidence_starts_no_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[list[str]] = []
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("unvalidated frontier request must start no process")
 
-    def fake_which(name: str) -> str | None:
-        if name == "codex":
-            return "/bin/codex"
-        if name == "claude":
-            return "/bin/claude"
-        return None
+    monkeypatch.setattr(frontier_review, "_run_codex", forbidden)
+    monkeypatch.setattr(frontier_review.subprocess, "run", forbidden)
+    monkeypatch.setenv("LLM_WIKI_FRONTIER_CMD", "/bin/forbidden")
 
-    def fake_run(cmd, **_kwargs):
-        calls.append(cmd)
-        if cmd[0] == "/bin/codex":
-            return SimpleNamespace(returncode=1, stdout="", stderr="codex rescue failed")
-        return SimpleNamespace(returncode=0, stdout="claude diagnosis", stderr="")
-
-    monkeypatch.setattr(frontier_review.shutil, "which", fake_which)
-    monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
-    monkeypatch.setenv("LLM_WIKI_FRONTIER_DOC_LOOKUP", "0")
-
-    result = frontier_review._run_frontier_rescue(
-        "invalid_json_schema",
-        "prompt",
+    result = frontier_review.run_frontier_review(
+        {"failure_class": "model_json_invalid"},
+        None,
         repo_root=tmp_path,
-        timeout=1,
     )
 
-    assert result["attempted"] is True
-    assert result["ok"] is True
-    assert [attempt["reviewer"] for attempt in result["attempts"]] == [
-        "codex",
-        "claude-code",
-    ]
-    assert calls[0][0] == "/bin/codex"
-    assert calls[1][0] == "/bin/claude"
+    assert result.decision == "needs_retry"
+    assert result.frontier_failure["failure_class"] == "frontier_guard_evidence_required"
+    assert not hasattr(frontier_review, "_run_codex_rescue")
+    assert not hasattr(frontier_review, "_run_claude_code_rescue")
+    assert not hasattr(frontier_review, "_run_frontier_rescue")
 
 
-@pytest.mark.parametrize("use_custom_command", [True, False])
-@pytest.mark.parametrize(
-    ("failure_kind", "expected_class", "expected_human_required"),
-    [
-        ("timeout", "network_transient", False),
-        ("missing_executable", "frontier_tool_unavailable", False),
-    ],
-)
-def test_structured_review_normalizes_subprocess_exceptions(
+def test_disabled_repair_lane_starts_no_process(
     tmp_path: Path,
-    monkeypatch,
-    use_custom_command: bool,
-    failure_kind: str,
-    expected_class: str,
-    expected_human_required: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    command_env = "LLM_WIKI_TEST_STRUCTURED_REVIEW_CMD"
-    if use_custom_command:
-        monkeypatch.setenv(command_env, "/missing/frontier-review")
-    else:
-        monkeypatch.delenv(command_env, raising=False)
-        monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
-        monkeypatch.setattr(
-            frontier_review,
-            "run_frontier_preflight",
-            lambda: {
-                "ok": True,
-                "codex": {"exec_help": {"output": CODEX_EXEC_HELP}},
-                "repairs": [],
-            },
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("disabled repair lane must not inspect or start Codex")
+
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_SYSTEM_CODE_REPAIR", "off")
+    monkeypatch.setattr(frontier_review, "_capture_repair_baseline", forbidden)
+    monkeypatch.setattr(frontier_review, "_run_codex", forbidden)
+
+    result = frontier_review.run_frontier_review(
+        {"failure_class": "system_health_snapshot_exception"},
+        None,
+        repo_root=tmp_path,
+        evidence=object(),
+    )
+
+    assert result.execution_started is False
+    assert result.frontier_failure["failure_class"] == "frontier_repair_policy_disabled"
+
+
+def test_validated_repair_incident_gets_exactly_one_guarded_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp.frontier_guard import (
+        FrontierGuard,
+        RepairIncidentEvidence,
+        repair_fingerprint,
+    )
+
+    evidence = RepairIncidentEvidence(
+        component="watchdog.health_snapshot",
+        fingerprint=repair_fingerprint("watchdog.health_snapshot", "health-error"),
+        failure_class="system_health_snapshot_exception",
+        occurrence_count=3,
+        distinct_inputs=("input-a", "input-b"),
+        local_repair_attempts=2,
+        local_repair_evidence=("a" * 64, "b" * 64),
+        reproduction_command=("pytest", "tests/test_ingest.py", "-k", "invalid_json"),
+        notes={"producer": "trusted_watchdog", "incident_key": "frontier-review-test"},
+    )
+    guard = FrontierGuard(tmp_path / "frontier-guard")
+    calls: list[str] = []
+
+    def fake_run_codex(prompt: str, *, permit, **_kwargs):
+        calls.append(prompt)
+        permit.start(pid=12345)
+        return frontier_review.FrontierResult(
+            decision="approved",
+            summary="fixed",
+            tests_run=["pytest tests/test_ingest.py -k invalid_json"],
+            committed=True,
+            pushed=False,
+            commit="c" * 40,
         )
 
-    def fail_run(cmd, **kwargs):
-        if failure_kind == "timeout":
-            raise subprocess.TimeoutExpired(
-                cmd=cmd,
-                timeout=kwargs["timeout"],
-                output="partial output",
-                stderr="401 Unauthorized from stale child output",
-            )
-        raise FileNotFoundError(2, "No such file or directory", str(cmd[0]))
+    monkeypatch.setattr(frontier_review, "_run_codex", fake_run_codex)
+    monkeypatch.setattr(
+        frontier_review,
+        "_capture_repair_baseline",
+        lambda _repo: {
+            "ok": True,
+            "head": "b" * 40,
+            "origin_main": "b" * 40,
+            "clean": True,
+        },
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_verify_repair_result",
+        lambda result, **_kwargs: frontier_review.replace(
+            result,
+            verified=True,
+            verification={"ok": True},
+        ),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_isolated_repair_checkout",
+        lambda _repo, _baseline: nullcontext(tmp_path),
+    )
+    monkeypatch.delenv("LLM_WIKI_FRONTIER_CMD", raising=False)
 
-    monkeypatch.setattr(frontier_review.subprocess, "run", fail_run)
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["decision"],
-        "properties": {"decision": {"type": "string"}},
+    first = frontier_review.run_frontier_review(
+        {"failure_class": "model_json_invalid"},
+        None,
+        repo_root=tmp_path,
+        evidence=evidence,
+        guard=guard,
+    )
+    second = frontier_review.run_frontier_review(
+        {"failure_class": "model_json_invalid"},
+        None,
+        repo_root=tmp_path,
+        evidence=evidence,
+        guard=guard,
+    )
+
+    assert first.decision == "approved"
+    assert first.verified is True
+    assert first.execution_started is True
+    assert second.frontier_failure["failure_class"] == "frontier_guard_denied"
+    assert second.execution_started is False
+    assert len(calls) == 1
+
+
+def test_frontier_repair_success_requires_independent_postconditions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head = "c" * 40
+    baseline = {"ok": True, "head": "b" * 40, "origin_main": "b" * 40}
+    evidence = SimpleNamespace(reproduction_command=("uv", "run", "health-check"))
+    result = frontier_review.FrontierResult(
+        decision="approved",
+        summary="fixed",
+        tests_run=["uv run pytest -q"],
+        committed=True,
+        pushed=False,
+        commit=head,
+    )
+
+    candidate_root = tmp_path / "candidate"
+
+    def fake_git(repo, args, **_kwargs):
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=head + "\n", stderr="")
+        if args == ["remote"] and repo == candidate_root:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    calls: list[list[str]] = []
+
+    def fake_verify(command, **_kwargs):
+        calls.append(command)
+        if "runtime-identity" in command:
+            return {
+                "ok": True,
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {"commit_id": head, "archive_path": "/tmp/archive"}
+                ),
+            }
+        return {"ok": True, "returncode": 0, "stdout": ""}
+
+    monkeypatch.setattr(frontier_review, "_git_probe", fake_git)
+    monkeypatch.setattr(frontier_review, "_verification_command", fake_verify)
+    monkeypatch.setattr(
+        frontier_review,
+        "_remote_main_sha",
+        lambda _repo: baseline["head"],
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_publish_verified_candidate",
+        lambda **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_restart_persistent_runtime_services",
+        lambda _archive: {"ok": True, "services": []},
+    )
+
+    verified = frontier_review._verify_repair_result(
+        result,
+        repo_root=tmp_path,
+        candidate_root=candidate_root,
+        evidence=evidence,
+        baseline=baseline,
+    )
+
+    assert verified.decision == "approved"
+    assert verified.verified is True
+    assert verified.verification["ok"] is True
+    assert calls[0] == ["uv", "run", "health-check"]
+    assert calls[1] == ["uv", "run", "pytest", "-q"]
+    assert "runtime-identity" in calls[2]
+
+
+def test_frontier_self_report_is_quarantined_when_commit_did_not_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_head = "b" * 40
+    result = frontier_review.FrontierResult(
+        decision="approved",
+        summary="claimed fixed",
+        tests_run=["uv run pytest -q"],
+        committed=True,
+        pushed=False,
+        commit=baseline_head,
+    )
+
+    candidate_root = tmp_path / "candidate"
+
+    def fake_git(repo, args, **_kwargs):
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=baseline_head + "\n", stderr="")
+        if args == ["remote"] and repo == candidate_root:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(frontier_review, "_git_probe", fake_git)
+    monkeypatch.setattr(
+        frontier_review,
+        "_remote_main_sha",
+        lambda _repo: baseline_head,
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_verification_command",
+        lambda command, **_kwargs: {
+            "ok": True,
+            "returncode": 0,
+            "stdout": (
+                json.dumps({"commit_id": baseline_head, "archive_path": "/tmp/archive"})
+                if "runtime-identity" in command
+                else ""
+            ),
+        },
+    )
+
+    verified = frontier_review._verify_repair_result(
+        result,
+        repo_root=tmp_path,
+        candidate_root=candidate_root,
+        evidence=SimpleNamespace(reproduction_command=("uv", "run", "health-check")),
+        baseline={"ok": True, "head": baseline_head, "origin_main": baseline_head},
+    )
+
+    assert verified.decision == "quarantined"
+    assert verified.verified is False
+    assert "no_new_commit" in verified.verification["failures"]
+
+
+def test_isolated_repair_checkout_has_no_remote(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ["git", "init", "-b", "main"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "config", "user.email", "test@example.com"],
+    ):
+        completed = frontier_review.subprocess.run(
+            args,
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 0
+    (repo / "README.md").write_text("baseline\n", encoding="utf-8")
+    frontier_review.subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    frontier_review.subprocess.run(
+        ["git", "commit", "-m", "baseline"], cwd=repo, check=True
+    )
+    head = frontier_review.subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+
+    with frontier_review._isolated_repair_checkout(repo, {"head": head}) as candidate:
+        remotes = frontier_review.subprocess.run(
+            ["git", "remote"],
+            cwd=candidate,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        candidate_head = frontier_review.subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=candidate,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+        assert remotes.stdout.strip() == ""
+        assert candidate_head == head
+
+
+def test_failed_parent_suite_never_publishes_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_head = "b" * 40
+    candidate_head = "c" * 40
+    candidate_root = tmp_path / "candidate"
+    result = frontier_review.FrontierResult(
+        decision="approved",
+        summary="fixed",
+        tests_run=["uv run pytest -q"],
+        committed=True,
+        pushed=False,
+        commit=candidate_head,
+    )
+
+    def fake_git(repo, args, **_kwargs):
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=candidate_head + "\n", stderr="")
+        if args == ["remote"] and repo == candidate_root:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    verification_calls = 0
+
+    def fake_verify(_command, **_kwargs):
+        nonlocal verification_calls
+        verification_calls += 1
+        return {"ok": verification_calls == 1, "returncode": 0 if verification_calls == 1 else 1, "stdout": ""}
+
+    monkeypatch.setattr(frontier_review, "_git_probe", fake_git)
+    monkeypatch.setattr(frontier_review, "_remote_main_sha", lambda _repo: baseline_head)
+    monkeypatch.setattr(frontier_review, "_verification_command", fake_verify)
+    monkeypatch.setattr(
+        frontier_review,
+        "_publish_verified_candidate",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a failing candidate must never be published")
+        ),
+    )
+
+    verified = frontier_review._verify_repair_result(
+        result,
+        repo_root=tmp_path,
+        candidate_root=candidate_root,
+        evidence=SimpleNamespace(reproduction_command=("uv", "run", "health-check")),
+        baseline={"ok": True, "head": baseline_head, "origin_main": baseline_head},
+    )
+
+    assert verified.decision == "quarantined"
+    assert verified.pushed is False
+    assert "full_test_suite_failed" in verified.verification["failures"]
+
+
+def test_publish_stops_before_push_on_untracked_path_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_head = "b" * 40
+    candidate_head = "c" * 40
+
+    def fake_git(_repo, args, **_kwargs):
+        if args[:3] == ["status", "--porcelain=v1", "--untracked-files=no"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[:2] == ["diff", "--name-only"]:
+            return SimpleNamespace(returncode=0, stdout="new/module.py\n", stderr="")
+        if args[:2] == ["ls-files", "--others"]:
+            return SimpleNamespace(returncode=0, stdout="new/module.py\n", stderr="")
+        if args and args[0] == "push":
+            raise AssertionError("collision must be detected before push")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(frontier_review, "_git_probe", fake_git)
+    monkeypatch.setattr(frontier_review, "_remote_main_sha", lambda _repo: baseline_head)
+
+    published = frontier_review._publish_verified_candidate(
+        repo_root=tmp_path,
+        candidate_root=tmp_path / "candidate",
+        candidate_head=candidate_head,
+        baseline_head=baseline_head,
+    )
+
+    assert published["ok"] is False
+    assert published["failure"] == "untracked_path_collision"
+
+
+def test_frontier_prompt_forbids_model_push() -> None:
+    prompt = frontier_review.build_frontier_prompt(
+        {"failure_class": "system_health_snapshot_exception"},
+        None,
+        execute_patch=True,
+    )
+
+    assert "Never push" in prompt
+    assert "pushed=false" in prompt
+
+
+def test_runtime_restart_verifies_new_pid_and_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pids = {
+        "com.trafficsign.llm-wiki-dashboard": [101, 202],
+        "com.trafficsign.llm-wiki-ingest-drain": [None],
     }
+
+    def fake_pid(label: str) -> int | None:
+        values = pids[label]
+        return values.pop(0) if len(values) > 1 else values[0]
+
+    monkeypatch.setattr(frontier_review, "_launchd_pid", fake_pid)
+    monkeypatch.setattr(frontier_review, "_pid_tree_uses_archive", lambda pid, path: pid == 202 and path == "/archive")
+    monkeypatch.setattr(frontier_review.shutil, "which", lambda name: "/bin/launchctl" if name == "launchctl" else None)
+    monkeypatch.setattr(
+        frontier_review.subprocess,
+        "run",
+        lambda command, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = frontier_review._restart_persistent_runtime_services("/archive")
+
+    assert result["ok"] is True
+    assert result["services"][0]["old_pid"] == 101
+    assert result["services"][0]["new_pid"] == 202
+    assert result["services"][0]["archive_loaded"] is True
+    assert result["services"][1]["status"] == "not_running"
+
+
+def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_chat(_messages, *, model: str, **_kwargs) -> str:
+        calls.append(model)
+        return json.dumps(
+            {
+                "decision": "approved",
+                "summary": f"local vote from {model}",
+                "tests_run": [],
+                "commit": None,
+                "committed": False,
+                "pushed": False,
+                "risk": None,
+                "notes": None,
+            }
+        )
+
+    def forbidden_subprocess(*_args, **_kwargs):
+        raise AssertionError("routine structured review must never start subprocess/Codex")
+
+    monkeypatch.setattr(
+        decision_router,
+        "load_decision_router_config",
+        _local_router_config,
+    )
+    monkeypatch.setattr(ollama, "chat", fake_chat)
+    monkeypatch.setattr(
+        decision_router,
+        "resolve_router_policy",
+        lambda config, **_kwargs: decision_router.RouterPolicyResolution(
+            config=config,
+            source="adopted_artifact",
+        ),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setattr(frontier_review.subprocess, "run", forbidden_subprocess)
+    monkeypatch.setattr(frontier_review.shutil, "which", forbidden_subprocess)
+    monkeypatch.setenv("LLM_WIKI_TEST_STRUCTURED_REVIEW_CMD", "/bin/forbidden")
+    schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
     result = frontier_review.run_structured_review(
         "review this",
         schema,
         repo_root=tmp_path,
+        audit_root=tmp_path / "local-consensus-audit",
         timeout=1,
-        command_env=command_env,
+        execute_patch=True,
+        command_env="LLM_WIKI_TEST_STRUCTURED_REVIEW_CMD",
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["decision"] == "approved"
+    assert result["reviewer"] == "local_consensus"
+    assert "frontier_failure" not in result
+    assert result["local_consensus"]["status"] == "agreed"
+    assert calls == ["ornith:test", "gpt-oss:test"]
+    audit_rows = [
+        json.loads(line)
+        for line in (
+            tmp_path / "local-consensus-audit" / "audit.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["role"] for row in audit_rows] == [
+        "recall_auto_apply:primary",
+        "recall_auto_apply:challenger",
+        "recall_auto_apply",
+    ]
+
+
+def test_structured_review_local_model_failures_quarantine_without_tie_or_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def failed_chat(_messages, *, model: str, **_kwargs) -> str:
+        calls.append(model)
+        raise RuntimeError(f"{model} unavailable")
+
+    monkeypatch.setattr(
+        decision_router,
+        "load_decision_router_config",
+        _local_router_config,
+    )
+    monkeypatch.setattr(ollama, "chat", failed_chat)
+    monkeypatch.setattr(
+        frontier_review.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local failures must not fall back to frontier")
+        ),
+    )
+    schema = frontier_review.FRONTIER_DECISION_SCHEMA
+
+    result = frontier_review.run_structured_review(
+        "review this",
+        schema,
+        repo_root=tmp_path,
+        audit_root=tmp_path / "local-consensus-audit",
+        decision_lane="recall_auto_apply",
     )
 
     assert result["decision"] == "needs_retry"
-    assert result["frontier_failure"]["failure_class"] == expected_class
-    assert result["frontier_failure"]["human_required"] is expected_human_required
-    assert result["human_required"] is expected_human_required
-    if failure_kind == "timeout":
-        assert result["frontier_failure"]["rescue_status"] == "frontier_retry"
-        assert result["frontier_failure"]["notify_user"] is False
-    if failure_kind == "missing_executable":
-        assert result["frontier_failure"]["rescue_status"] == "frontier_retry"
-        assert result["frontier_failure"]["notify_user"] is False
+    assert result["frontier_failure"]["failure_class"] == "local_decision_shadow_only"
+    assert result["frontier_failure"]["rescue_status"] == "local_quarantined"
+    assert result["human_required"] is False
+    assert calls == ["ornith:test", "gpt-oss:test"]
+    assert (tmp_path / "local-consensus-audit" / "audit.jsonl").exists()
 
 
 def test_structured_review_rejects_incomplete_approved_json(
     tmp_path: Path, monkeypatch
 ) -> None:
-    command_env = "LLM_WIKI_TEST_STRUCTURED_REVIEW_CMD"
-    monkeypatch.setenv(command_env, "/bin/reviewer")
+    class IncompleteLocalRouter:
+        def __init__(self, **_kwargs) -> None:
+            self.policy = SimpleNamespace(
+                source="adopted_artifact",
+                audit_record=lambda: {"source": "adopted_artifact"},
+            )
+
+        def decide(self, _prompt, _schema):
+            return DecisionRouterResult(
+                status="agreed",
+                value={"decision": "approved"},
+                agreement_sha256="a" * 64,
+            )
+
+    monkeypatch.setattr(decision_router, "DecisionRouter", IncompleteLocalRouter)
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
     monkeypatch.setattr(
         frontier_review.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0,
-            stdout='{"decision":"approved"}',
-            stderr="",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("defensive schema rejection must stay local")
         ),
     )
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["decision", "confidence", "summary"],
-        "properties": {
-            "decision": {
-                "type": "string",
-                "enum": ["approved", "rejected", "needs_retry"],
-            },
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "summary": {"type": "string"},
-        },
-    }
+    schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
     result = frontier_review.run_structured_review(
         "review this",
         schema,
         repo_root=tmp_path,
-        command_env=command_env,
+        audit_root=tmp_path / "local-consensus-audit",
+        decision_lane="recall_auto_apply",
     )
 
     assert result["decision"] == "needs_retry"
-    assert result["confidence"] == 0.0
     assert result["frontier_failure"]["failure_class"] == "schema_invalid"
     assert result["human_required"] is False

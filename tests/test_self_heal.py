@@ -53,7 +53,41 @@ def _write_packet(wiki_root: Path) -> Path:
     return path
 
 
-def test_local_repair_adds_alias_restores_raw_and_retries(
+def _mark_system_code_repair(
+    packet_path: Path,
+    *,
+    local_repair_attempts: int = 2,
+) -> None:
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet["job_id"] = "trusted-watchdog"
+    packet["failure_class"] = "system_health_snapshot_exception"
+    packet["incident_kind"] = "system_code_repair"
+    packet["local_repair_attempts"] = local_repair_attempts
+    repair_evidence = [f"{index + 1:064x}" for index in range(local_repair_attempts)]
+    packet["local_repair_evidence"] = repair_evidence
+    packet["repair_evidence"] = {
+        "role": "code_repair",
+        "incident_kind": "system_code_repair",
+        "component": "watchdog.health_snapshot",
+        "fingerprint": packet["fingerprint"],
+        "failure_class": "system_health_snapshot_exception",
+        "occurrence_count": 3,
+        "distinct_inputs": ["input-a", "input-b"],
+        "local_repair_attempts": local_repair_attempts,
+        "local_repair_evidence": repair_evidence,
+        "reproduction_command": [
+            "uv",
+            "run",
+            "pytest",
+            "-q",
+            "tests/test_self_heal.py",
+        ],
+        "notes": {"producer": "trusted_watchdog", "incident_key": packet_path.stem},
+    }
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+
+
+def test_deterministic_single_alias_repair_applies_locally_without_frontier(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from llm_wiki_mcp import self_heal
@@ -73,11 +107,9 @@ def test_local_repair_adds_alias_restores_raw_and_retries(
     monkeypatch.setattr(
         self_heal,
         "_run_frontier",
-        lambda *_args, **_kwargs: {
-            "decision": "approved",
-            "summary": "exact alias repair is supported",
-            "human_required": False,
-        },
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("routine semantic repair must not call frontier")
+        ),
     )
     result = self_heal.handle_packet(
         packet_path,
@@ -86,12 +118,14 @@ def test_local_repair_adds_alias_restores_raw_and_retries(
         dry_run=False,
     )
 
-    assert result["status"] == "frontier_approved"
+    assert result["status"] == "local_repair_applied"
+    assert result["action"]["action"] == "resolve_update_target"
     assert load_aliases()["model-made-up-target"] == "ai/canonical-target"
     assert not quarantined.exists()
     assert (isolated_wiki / "raw" / "broken.md").exists()
     updated_packet = json.loads(packet_path.read_text())
-    assert updated_packet["status"] == "frontier_approved"
+    assert updated_packet["status"] == "local_repair_applied"
+    assert not (isolated_wiki / "runtime" / "failures" / "frontier-queue").exists()
 
 
 def test_drill_returns_local_repair_decision(isolated_wiki: Path) -> None:
@@ -103,7 +137,7 @@ def test_drill_returns_local_repair_decision(isolated_wiki: Path) -> None:
     assert result["decision"]["action"] == "resolve_update_target"
 
 
-def test_auto_apply_error_packet_escalates_to_frontier_deterministically(isolated_wiki: Path) -> None:
+def test_auto_apply_error_packet_preserves_local_test_case_deterministically(isolated_wiki: Path) -> None:
     from llm_wiki_mcp.local_repair import propose_repair
 
     packet = {
@@ -116,8 +150,167 @@ def test_auto_apply_error_packet_escalates_to_frontier_deterministically(isolate
     decision = propose_repair(packet, use_qwen=False)
 
     assert decision.status == "escalate"
-    assert decision.action == "escalate_to_frontier"
+    assert decision.action == "propose_test_case"
     assert decision.confidence >= 0.85
+
+
+@pytest.mark.parametrize(
+    "failure_class",
+    [
+        "semantic.claim_conflict",
+        "content.correction_requested",
+        "triage.json_parse_failed",
+    ],
+)
+def test_routine_packets_stay_local_even_when_frontier_switch_is_enabled(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_class: str,
+) -> None:
+    from llm_wiki_mcp import self_heal
+    from llm_wiki_mcp.local_repair import LocalRepairDecision
+
+    packet_path = _write_packet(isolated_wiki)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet["failure_class"] = failure_class
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    monkeypatch.setattr(
+        self_heal,
+        "propose_repair",
+        lambda *_args, **_kwargs: LocalRepairDecision(
+            status="escalate",
+            action="escalate_to_frontier",
+            confidence=0.9,
+            reason="local repair could not resolve the packet",
+            source="deterministic",
+        ),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("routine packets must never call frontier")
+        ),
+    )
+
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=True,
+        max_attempts=1,
+    )
+
+    assert result["status"] == "local_quarantined"
+    assert result["reason"] == "frontier_repair_not_eligible"
+    assert not (isolated_wiki / "runtime" / "failures" / "frontier-queue").exists()
+
+
+def test_valid_system_code_evidence_is_forwarded_to_frontier(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+    from llm_wiki_mcp.frontier_guard import RepairIncidentEvidence
+
+    packet_path = _write_packet(isolated_wiki)
+    _mark_system_code_repair(packet_path)
+    _force_frontier(monkeypatch, self_heal)
+    captured: list[RepairIncidentEvidence] = []
+
+    def fake_frontier(*_args, evidence: RepairIncidentEvidence, **_kwargs):
+        captured.append(evidence)
+        return {
+            "decision": "rejected",
+            "summary": "repair is not safe",
+            "human_required": False,
+        }
+
+    monkeypatch.setattr(self_heal, "_run_frontier", fake_frontier)
+
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=True,
+    )
+
+    assert result["status"] == "frontier_rejected"
+    assert len(captured) == 1
+    assert captured[0].incident_kind == "system_code_repair"
+    assert captured[0].local_repair_attempts == 2
+
+
+def test_frontier_caller_passes_same_evidence_capability(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import frontier_review, self_heal
+
+    packet_path = _write_packet(isolated_wiki)
+    _mark_system_code_repair(packet_path)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    evidence = self_heal._repair_incident_evidence(packet)
+    captured: dict[str, object] = {}
+
+    class Result:
+        def to_dict(self) -> dict[str, object]:
+            return {"decision": "rejected", "summary": "test result"}
+
+    def fake_run_frontier_review(*_args, **kwargs):
+        captured.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(
+        frontier_review,
+        "run_frontier_review",
+        fake_run_frontier_review,
+    )
+
+    result = self_heal._run_frontier(
+        packet_path,
+        packet,
+        None,
+        evidence=evidence,
+        execute_patch=False,
+    )
+
+    assert result["decision"] == "rejected"
+    assert captured["evidence"] is evidence
+    assert captured["execute_patch"] is False
+
+
+def test_incomplete_system_code_evidence_is_quarantined_locally(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = _write_packet(isolated_wiki)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet.update(
+        {
+            "incident_kind": "system_code_repair",
+            "repair_evidence": {"fingerprint": packet["fingerprint"]},
+        }
+    )
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid evidence must not call frontier")
+        ),
+    )
+
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=True,
+        max_attempts=1,
+    )
+
+    assert result["status"] == "local_quarantined"
+    assert result["reason"] == "frontier_repair_not_eligible"
+    assert "missing required fields" in result["frontier_eligibility_error"]
 
 
 def test_missing_update_without_candidate_retries_create_safe_raw(
@@ -196,7 +389,7 @@ def test_missing_update_with_unsafe_page_id_still_escalates(
     decision = propose_repair(packet, use_qwen=False)
 
     assert decision.status == "escalate"
-    assert decision.action == "escalate_to_frontier"
+    assert decision.action == "propose_test_case"
 
 
 def test_missing_update_retry_raw_restores_raw_and_retries(
@@ -329,7 +522,9 @@ def test_frontier_nonconvergence_restores_raw_without_frontier(
     assert updated_packet["local_decision"]["source"] == "deterministic"
 
 
-def test_sandbox_drill_runs_pending_raw_to_self_heal(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sandbox_drill_keeps_semantic_repair_out_of_frontier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from llm_wiki_mcp.self_heal import run_sandbox_drill
 
     monkeypatch.setenv("LLM_WIKI_SELF_HEAL_AUTORUN", "0")
@@ -338,11 +533,11 @@ def test_sandbox_drill_runs_pending_raw_to_self_heal(monkeypatch: pytest.MonkeyP
 
     assert result["status"] == "ok"
     assert result["packet_paths"]
-    assert result["heal_result"]["status"] == "frontier_approved"
+    assert result["heal_result"]["status"] == "local_repair_applied"
+    assert result["heal_result"]["action"]["action"] == "resolve_update_target"
     assert result["pending_after"] == []
-    assert (
-        result["aliases"]["opus-4-7-evaluation-and-industry-geopolitics"]
-        == "ai/opus-4.7-evaluation-and-industry-geopolitics"
+    assert result["aliases"]["opus-4-7-evaluation-and-industry-geopolitics"] == (
+        "ai/opus-4.7-evaluation-and-industry-geopolitics"
     )
 
 
@@ -364,6 +559,7 @@ def test_frontier_human_required_sends_notification(
     packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "auth1.json"
     packet_path.parent.mkdir(parents=True, exist_ok=True)
     packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    _mark_system_code_repair(packet_path)
     sent: list[tuple[str, str]] = []
 
     monkeypatch.setattr(
@@ -409,7 +605,11 @@ def test_frontier_human_required_sends_notification(
         lambda title, body: sent.append((title, body)) or {"sent": True},
     )
 
-    result = self_heal.handle_packet(packet_path, use_qwen=False)
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=True,
+    )
 
     assert result["status"] == "human_required"
     assert sent == [
@@ -441,6 +641,7 @@ def test_frontier_pending_review_writes_artifact(
     packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "schema1.json"
     packet_path.parent.mkdir(parents=True, exist_ok=True)
     packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    _mark_system_code_repair(packet_path)
 
     monkeypatch.setattr(
         self_heal,
@@ -482,7 +683,11 @@ def test_frontier_pending_review_writes_artifact(
         },
     )
 
-    result = self_heal.handle_packet(packet_path, use_qwen=False)
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=True,
+    )
 
     assert result["status"] == "pending_frontier_review"
     pending_path = Path(result["pending_frontier_review_path"])
@@ -608,7 +813,7 @@ def test_legacy_tool_unavailable_human_packet_reopens_autonomously(
     assert packet_path.read_bytes() == before
 
 
-def test_frontier_quarantine_reopens_after_cooldown(
+def test_frontier_quarantine_is_terminal_after_execution_started(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -618,9 +823,11 @@ def test_frontier_quarantine_reopens_after_cooldown(
     packet_path.parent.mkdir(parents=True, exist_ok=True)
     packet_path.write_text(
         json.dumps(
-            {
-                "failure_id": "quarantine",
-                "status": "frontier_quarantined",
+                {
+                    "failure_id": "quarantine",
+                    "failure_class": "adapter_contract_failure",
+                    "fingerprint": "adapter-contract:quarantine",
+                    "status": "frontier_quarantined",
                 "frontier_attempts": 3,
                 "self_heal_attempts": 3,
                 "quarantined_at": "2000-01-01T00:00:00",
@@ -635,6 +842,7 @@ def test_frontier_quarantine_reopens_after_cooldown(
         ),
         encoding="utf-8",
     )
+    _mark_system_code_repair(packet_path)
     monkeypatch.setenv("LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "1")
     monkeypatch.setattr(
         self_heal,
@@ -646,17 +854,12 @@ def test_frontier_quarantine_reopens_after_cooldown(
         },
     )
 
-    assert packet_path in self_heal.pending_packets()
-    result = self_heal.handle_packet(packet_path, use_qwen=False)
-
-    updated = json.loads(packet_path.read_text(encoding="utf-8"))
-    assert result["status"] == "frontier_rejected"
-    assert updated["frontier_attempts"] == 1
-    assert updated["quarantine_reopen_count"] == 1
-    assert updated["terminal_resume_kind"] == "quarantine_cooldown"
+    before = packet_path.read_bytes()
+    assert packet_path not in self_heal.pending_packets()
+    assert packet_path.read_bytes() == before
 
 
-def test_external_human_boundary_is_rechecked_after_fix_window(
+def test_external_human_boundary_never_calls_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -666,43 +869,39 @@ def test_external_human_boundary_is_rechecked_after_fix_window(
     packet_path.parent.mkdir(parents=True, exist_ok=True)
     packet_path.write_text(
         json.dumps(
-            {
-                "failure_id": "oauth",
-                "status": "human_required",
-                "human_required_at": "2000-01-01T00:00:00",
-                "frontier_result": {
-                    "decision": "needs_retry",
-                    "frontier_failure": {"failure_class": "oauth_required"},
-                },
-                "local_decision": {
-                    "status": "escalate",
-                    "action": "escalate_to_frontier",
-                    "confidence": 0.9,
-                    "reason": "retry after login",
-                    "source": "deterministic",
-                },
-            }
-        ),
+                {
+                    "failure_id": "oauth",
+                    "failure_class": "oauth_required",
+                    "fingerprint": "oauth-required",
+                    "status": "pending_local_repair",
+                }
+            ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("LLM_WIKI_HUMAN_REQUIRED_RECHECK_SECONDS", "1")
     monkeypatch.setattr(
         self_heal,
         "_run_frontier",
-        lambda *_args, **_kwargs: {
-            "decision": "approved",
-            "summary": "authentication is now available",
-            "human_required": False,
-        },
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("external authority failures must not call frontier")
+        ),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_send_mac_notification",
+        lambda *_args, **_kwargs: {"sent": True},
     )
 
-    assert packet_path in self_heal.pending_packets()
-    result = self_heal.handle_packet(packet_path, use_qwen=False)
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=True,
+    )
 
     updated = json.loads(packet_path.read_text(encoding="utf-8"))
-    assert result["status"] == "frontier_approved"
-    assert updated["human_recheck_count"] == 1
-    assert updated["terminal_resume_kind"] == "external_authority_recheck"
+    assert result["status"] == "human_required"
+    assert result["reason"] == "external_authority_boundary"
+    assert updated["status"] == "human_required"
+    assert updated["frontier_status"] == "not_attempted"
 
 
 def test_handle_packet_dry_run_is_byte_for_byte_read_only(isolated_wiki: Path) -> None:
@@ -783,7 +982,7 @@ def test_run_pending_local_budget_defer_is_no_progress_and_skips_proposal(
     assert not (isolated_wiki / "runtime" / "failures" / "local-repair").exists()
 
 
-def test_local_mutation_budget_defer_preserves_packet_progress(
+def test_deterministic_alias_repair_respects_mutation_budget(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -791,13 +990,12 @@ def test_local_mutation_budget_defer_preserves_packet_progress(
 
     _seed_page(isolated_wiki, "ai/canonical-target.md")
     packet_path = _write_packet(isolated_wiki)
-    before = packet_path.read_bytes()
     budget = _RecordingBudget(local=True, mutation=False)
     monkeypatch.setattr(
         self_heal,
         "apply_local_decision",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("local mutation must not run without budget")
+            AssertionError("mutation must not run without budget")
         ),
     )
 
@@ -810,14 +1008,13 @@ def test_local_mutation_budget_defer_preserves_packet_progress(
     assert result["status"] == "budget_deferred"
     assert result["budget_kind"] == "mutation"
     assert result["local_decision"]["status"] == "resolved"
-    assert budget.calls == ["local"]
-    assert packet_path.read_bytes() == before
+    assert budget.calls == ["local", "mutation"]
     failures = isolated_wiki / "runtime" / "failures"
     assert not (failures / "local-repair").exists()
     assert not (failures / "applied-actions").exists()
 
 
-def test_successful_local_repair_charges_local_and_mutation(
+def test_deterministic_quarantine_completes_locally_without_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -840,11 +1037,9 @@ def test_successful_local_repair_charges_local_and_mutation(
     monkeypatch.setattr(
         self_heal,
         "_run_frontier",
-        lambda *_args, **_kwargs: {
-            "decision": "approved",
-            "summary": "quarantine is semantically justified",
-            "human_required": False,
-        },
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("routine quarantine proposal must not call frontier")
+        ),
     )
 
     result = self_heal.handle_packet(
@@ -853,12 +1048,15 @@ def test_successful_local_repair_charges_local_and_mutation(
         frontier_budget=budget,
     )
 
-    assert result["status"] == "frontier_approved"
-    assert result["action"]["action"] == "quarantine_raw"
-    assert budget.calls == ["local", "frontier", "mutation"]
+    assert result["status"] == "local_repair_applied"
+    assert result["action"] == {
+        "action": "quarantine_raw",
+        "kept_quarantined": True,
+    }
+    assert budget.calls == ["local", "mutation"]
 
 
-def test_frontier_only_executable_retry_charges_frontier_and_mutation_budget(
+def test_frontier_only_executable_retry_charges_only_local_mutation_budget(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -869,7 +1067,7 @@ def test_frontier_only_executable_retry_charges_frontier_and_mutation_budget(
     packet.update(
         {
             "status": "pending_frontier",
-            "local_repair_attempts": 1,
+            "local_repair_attempts": 2,
             "frontier_attempts": 0,
             "local_decision": {
                 "status": "escalate",
@@ -881,6 +1079,7 @@ def test_frontier_only_executable_retry_charges_frontier_and_mutation_budget(
         }
     )
     packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    _mark_system_code_repair(packet_path)
     budget = _RecordingBudget(frontier=True, mutation=True)
     monkeypatch.setattr(
         self_heal,
@@ -902,30 +1101,32 @@ def test_frontier_only_executable_retry_charges_frontier_and_mutation_budget(
     result = self_heal.handle_packet(
         packet_path,
         use_qwen=False,
+        enable_frontier=True,
         frontier_budget=budget,
     )
     updated = json.loads(packet_path.read_text(encoding="utf-8"))
 
     assert result["status"] == "frontier_rejected"
-    assert budget.calls == ["frontier", "mutation"]
-    assert updated["local_repair_attempts"] == 1
+    assert budget.calls == ["mutation"]
+    assert updated["local_repair_attempts"] == 2
     assert updated["frontier_attempts"] == 1
 
 
-def test_frontier_budget_defer_does_not_consume_attempt(
+def test_mutation_budget_defer_does_not_consume_frontier_attempt(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from llm_wiki_mcp import self_heal
 
     packet_path = _write_packet(isolated_wiki)
+    _mark_system_code_repair(packet_path)
     before = packet_path.read_bytes()
     _force_frontier(monkeypatch, self_heal)
     monkeypatch.setattr(
         self_heal,
         "_run_frontier",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("frontier must not run without budget")
+            AssertionError("frontier must not run without mutation budget")
         ),
     )
 
@@ -943,35 +1144,72 @@ def test_frontier_budget_defer_does_not_consume_attempt(
             if kind == "local":
                 return True, "ok"
             if kind == "mutation":
-                return True, "ok"
-            return False, "frontier_budget_exhausted"
+                return False, "mutation_budget_exhausted"
+            return True, "ok"
 
     budget = DeniedBudget()
     result = self_heal.handle_packet(
         packet_path,
         use_qwen=False,
+        enable_frontier=True,
         frontier_budget=budget,
         backoff_base_seconds=0,
     )
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
 
     assert result["status"] == "budget_deferred"
-    assert result["budget_kind"] == "frontier"
+    assert result["budget_kind"] == "mutation"
     assert packet["status"] == "pending_local_repair"
     assert int(packet.get("frontier_attempts") or 0) == 0
     assert int(packet.get("self_heal_attempts") or 0) == 0
-    assert int(packet.get("local_repair_attempts") or 0) == 0
+    assert int(packet.get("local_repair_attempts") or 0) == 2
     assert budget.calls == ["local"]
     assert packet_path.read_bytes() == before
 
 
-def test_frontier_exception_becomes_retry_and_releases_running_lease(
+def test_guard_denial_does_not_consume_frontier_attempt(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from llm_wiki_mcp import self_heal
 
     packet_path = _write_packet(isolated_wiki)
+    _mark_system_code_repair(packet_path)
+    _force_frontier(monkeypatch, self_heal)
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: {
+            "decision": "needs_retry",
+            "summary": "daily guard budget is unavailable",
+            "rescue_status": "repair_deferred",
+            "frontier_failure": {"failure_class": "frontier_guard_denied"},
+            "execution_started": False,
+        },
+    )
+
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=True,
+        backoff_base_seconds=0,
+    )
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+
+    assert result["status"] == "repair_deferred"
+    assert packet["status"] == "repair_deferred"
+    assert packet["frontier_attempts"] == 0
+    assert packet["self_heal_attempts"] == 0
+
+
+def test_frontier_exception_after_start_is_terminal_and_releases_running_lease(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = _write_packet(isolated_wiki)
+    _mark_system_code_repair(packet_path)
     _force_frontier(monkeypatch, self_heal)
     monkeypatch.setattr(
         self_heal,
@@ -982,18 +1220,19 @@ def test_frontier_exception_becomes_retry_and_releases_running_lease(
     result = self_heal.handle_packet(
         packet_path,
         use_qwen=False,
+        enable_frontier=True,
         backoff_base_seconds=0,
     )
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
 
-    assert result["status"] == "frontier_retry"
+    assert result["status"] == "frontier_quarantined"
     assert result["frontier_error"]["exception_type"] == "TimeoutError"
-    assert packet["status"] == "frontier_retry"
+    assert packet["status"] == "frontier_quarantined"
     assert packet["frontier_attempts"] == 1
     assert packet["self_heal_attempts"] == 1
     assert packet["lease_owner"] is None
     assert packet["lease_expires_at"] is None
-    assert packet["next_attempt_at"] is not None
+    assert packet.get("next_attempt_at") is None
 
 
 def test_transient_read_back_packet_is_retired_without_frontier(
@@ -1395,25 +1634,19 @@ def test_completed_packet_is_cached_instead_of_reprocessed(
 
     _seed_page(isolated_wiki, "ai/canonical-target.md")
     packet_path = _write_packet(isolated_wiki)
-    quarantined = isolated_wiki / "runtime" / "failures" / "quarantined-raw" / "broken.md"
-    quarantined.parent.mkdir(parents=True, exist_ok=True)
-    quarantined.write_text("raw body", encoding="utf-8")
-    monkeypatch.setattr(
-        self_heal,
-        "_retry_ingest",
-        lambda *, dry_run: {"triggered": True, "files_processed": ["broken.md"]},
-    )
     monkeypatch.setattr(
         self_heal,
         "_run_frontier",
-        lambda *_args, **_kwargs: {
-            "decision": "approved",
-            "summary": "exact alias repair is supported",
-            "human_required": False,
-        },
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("routine packet must not call frontier")
+        ),
     )
 
-    first = self_heal.handle_packet(packet_path, use_qwen=False)
+    first = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        max_attempts=1,
+    )
     after_first = packet_path.read_bytes()
     monkeypatch.setattr(
         self_heal,
@@ -1424,7 +1657,60 @@ def test_completed_packet_is_cached_instead_of_reprocessed(
     )
     second = self_heal.handle_packet(packet_path, use_qwen=False)
 
-    assert first["status"] == "frontier_approved"
-    assert second["status"] == "frontier_approved"
+    assert first["status"] == "local_repair_applied"
+    assert second["status"] == "local_repair_applied"
     assert second["cached"] is True
     assert packet_path.read_bytes() == after_first
+
+
+def test_start_background_uses_durable_queue_without_popen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import background_jobs, self_heal
+
+    packet = tmp_path / "packet.json"
+    packet.write_text("{}", encoding="utf-8")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("LLM_WIKI_SELF_HEAL_AUTORUN", "1")
+    monkeypatch.setattr(
+        self_heal.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("routine self-heal must not detach"),
+        raising=False,
+    )
+    seen: dict[str, object] = {}
+
+    def fake_enqueue(**kwargs):
+        seen.update(kwargs)
+        return {"job_id": "job-1", "status": "queued", "enqueued": True}
+
+    monkeypatch.setattr(background_jobs, "enqueue_job", fake_enqueue)
+
+    result = self_heal.start_background(packet)
+
+    assert result == {"job_id": "job-1", "status": "queued", "enqueued": True}
+    assert seen["name"] == "self-heal"
+    assert seen["module"] == "llm_wiki_mcp.self_heal"
+    assert seen["args"] == ["--packet", str(packet.resolve())]
+
+
+def test_background_exit_code_preserves_retry_and_terminal_states() -> None:
+    from llm_wiki_mcp import background_jobs, self_heal
+
+    assert self_heal._background_exit_code({"status": "local_repair_applied"}) == 0
+    assert self_heal._background_exit_code({"status": "pending_local_repair"}) == (
+        background_jobs.RETRYABLE_EXIT_CODE
+    )
+    assert self_heal._background_exit_code({"status": "human_required"}) == (
+        background_jobs.QUARANTINE_EXIT_CODE
+    )
+    assert self_heal._background_exit_code(
+        {
+            "status": "ok",
+            "results": [
+                {"status": "local_repair_applied"},
+                {"status": "frontier_retry"},
+            ],
+        }
+    ) == background_jobs.RETRYABLE_EXIT_CODE

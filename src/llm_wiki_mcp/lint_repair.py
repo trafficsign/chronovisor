@@ -23,7 +23,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from llm_wiki_mcp import frontier_review, ollama, wiki
+from llm_wiki_mcp import frontier_review, wiki
 from llm_wiki_mcp.convergence import (
     CycleBudget,
     ConvergenceStore,
@@ -35,8 +35,9 @@ from llm_wiki_mcp.convergence import (
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.frontmatter import patch as patch_frontmatter
 from llm_wiki_mcp.link_fix import atomic_write
+from llm_wiki_mcp.local_structured import ChatTransport, LocalStructuredSession
 from llm_wiki_mcp.page_mutation import wiki_mutation_lock
-from llm_wiki_mcp.runtime_config import runtime_repo_root
+from llm_wiki_mcp.runtime_config import load_ingest_config, runtime_repo_root
 from llm_wiki_mcp.tags import SEED_TAGS, parse_tags, validate_axis_counts, validate_tag
 
 
@@ -231,7 +232,7 @@ def build_frontier_tag_repair_prompt(
     seed_tags = [tag for values in SEED_TAGS.values() for tag in values]
     proposed = dict(local_proposal) if isinstance(local_proposal, Mapping) else None
     return f"""\
-You are the final frontier reviewer for an LLM Wiki tag mutation. The local
+You are a local-consensus reviewer for an LLM Wiki tag mutation. The local
 review below is an untrusted proposal only. Independently verify it against the
 page excerpt. You may approve different tags, reject the mutation, or request a
 retry. No page mutation is allowed unless your exact verdict is durably saved.
@@ -253,8 +254,36 @@ Return JSON matching this schema:
 """
 
 
-def _default_local_reviewer(prompt: str, schema: dict[str, Any]) -> Mapping[str, Any] | str:
-    return ollama.generate(prompt, system=LOCAL_TAG_SYSTEM, format=schema)
+def _default_local_reviewer(
+    prompt: str,
+    schema: dict[str, Any],
+    *,
+    transport: ChatTransport | None = None,
+    audit_root: Path | None = None,
+) -> Mapping[str, Any] | str:
+    """Run the local tag proposal as a bounded repairable JSON session."""
+
+    config = load_ingest_config()
+    result = LocalStructuredSession(
+        model=config.model,
+        transport=transport,
+        role="lint_tag_repair",
+        audit_root=audit_root,
+        num_ctx=config.num_ctx,
+        num_predict=min(config.num_predict, 2_048),
+        keep_alive=config.keep_alive,
+        read_timeout_ms=config.read_timeout_ms,
+        max_input_chars=65_536,
+        max_output_chars=4_000,
+        max_feedback_chars=2_000,
+    ).run(prompt, schema, system=LOCAL_TAG_SYSTEM)
+    if not result.ok:
+        reason = result.failure_class or "structured_session_failed"
+        detail = result.failure_reason or "local tag proposal did not converge"
+        raise ValueError(f"local tag proposal failed: {reason}: {detail}")
+    if not isinstance(result.value, Mapping):
+        raise ValueError("local tag proposal is not an object")
+    return dict(result.value)
 
 
 def _default_frontier_reviewer(prompt: str, schema: dict[str, Any]) -> Mapping[str, Any] | str:
@@ -264,6 +293,7 @@ def _default_frontier_reviewer(prompt: str, schema: dict[str, Any]) -> Mapping[s
         repo_root=REPO_ROOT,
         execute_patch=False,
         command_env="LLM_WIKI_LINT_REPAIR_FRONTIER_CMD",
+        decision_lane="lint_tag_repair",
     )
 
 

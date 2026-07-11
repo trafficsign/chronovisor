@@ -46,8 +46,8 @@ SELF_HEAL_FAILED_STATUSES = {
     "frontier_quarantined",
     "human_required",
 }
-FRONTIER_PREFLIGHT_TTL_SECONDS = 300
 FRONTIER_ACTIVITY_STALE_SECONDS = 6 * 60 * 60
+LOCAL_CONSENSUS_ACTIVITY_STALE_SECONDS = 60 * 60
 ACTIVE_BATCH_STAGES = {
     "batch",
     "raw",
@@ -58,8 +58,6 @@ ACTIVE_BATCH_STAGES = {
     "frontier-regenerate",
     "apply",
 }
-_FRONTIER_PREFLIGHT_CACHE: dict[str, Any] | None = None
-_FRONTIER_PREFLIGHT_CACHE_AT = 0.0
 
 
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
@@ -634,14 +632,14 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
     # Drain logs are an event history, not the canonical queue state. They can
     # be rotated or miss an older successful retry, which previously made an
     # already-processed raw appear as pending in the Save Load chart. Reconcile
-    # with the orchestrator state after reading the logs so it fills gaps
-    # without erasing explicit failure events.
+    # with the orchestrator state after reading the logs. Canonical processed
+    # state wins over an older failed attempt for the same immutable raw.
     orchestrator_state = _read_json_file(WIKI_ROOT / ".orchestrator_state.json") or {}
     processed_raw_files = orchestrator_state.get("processed_raw_files")
     if isinstance(processed_raw_files, list):
         for filename in processed_raw_files:
             if isinstance(filename, str) and filename in raw_files:
-                raw_status.setdefault(filename, "processed")
+                raw_status[filename] = "processed"
 
     try:
         log_lines = LOG_FILE.read_text(encoding="utf-8").splitlines()
@@ -791,43 +789,47 @@ def _self_heal_packet_index() -> dict[str, dict[str, Any]]:
 
 
 def _frontier_preflight_snapshot() -> dict[str, Any]:
-    global _FRONTIER_PREFLIGHT_CACHE, _FRONTIER_PREFLIGHT_CACHE_AT
+    """Read the durable repair guard without starting Codex or any subprocess.
 
-    now = time.time()
-    if (
-        _FRONTIER_PREFLIGHT_CACHE is not None
-        and now - _FRONTIER_PREFLIGHT_CACHE_AT < FRONTIER_PREFLIGHT_TTL_SECONDS
-    ):
-        return {**_FRONTIER_PREFLIGHT_CACHE, "cached": True}
-
+    The legacy function/response name is retained for dashboard API
+    compatibility.  A real Codex preflight belongs inside an admitted repair
+    attempt, immediately before that one process starts.
+    """
     checked_at = datetime.now().isoformat(timespec="seconds")
     try:
-        from llm_wiki_mcp.frontier_review import run_frontier_preflight
+        from llm_wiki_mcp.frontier_guard import FrontierGuard
 
-        result = run_frontier_preflight()
-        codex = result.get("codex") if isinstance(result.get("codex"), dict) else {}
-        failure = result.get("failure") if isinstance(result.get("failure"), dict) else None
+        inspection = FrontierGuard(
+            WIKI_ROOT / "runtime" / "frontier-repair"
+        ).inspect(dry_run=True)
+        state = inspection.state
+        incidents = state.get("incidents") if isinstance(state, dict) else {}
+        incidents = incidents if isinstance(incidents, dict) else {}
+        active_id = state.get("active_incident_id") if isinstance(state, dict) else None
+        started = sum(
+            1
+            for incident in incidents.values()
+            if isinstance(incident, dict) and incident.get("started_at")
+        )
         summary = {
-            "ok": bool(result.get("ok")),
+            "ok": True,
             "checked_at": checked_at,
-            "cached": False,
-            "codex_home": result.get("codex_home"),
-            "codex_version_ok": bool((codex.get("version") or {}).get("ok")),
-            "exec_help_ok": bool((codex.get("exec_help") or {}).get("ok")),
-            "missing_exec_options": codex.get("missing_exec_options") or [],
-            "adaptive_required": bool(codex.get("adaptive_required")),
-            "failure": failure,
+            "mode": "on_demand_only",
+            "state": "active" if active_id else "standby",
+            "active_incident_id": active_id,
+            "incidents_started": started,
+            "would_abandon": list(inspection.would_abandon),
+            "subprocess_checked": False,
         }
     except Exception as exc:
         summary = {
             "ok": False,
             "checked_at": checked_at,
-            "cached": False,
+            "mode": "guard_state_unreadable",
+            "state": "blocked",
+            "subprocess_checked": False,
             "error": str(exc),
         }
-
-    _FRONTIER_PREFLIGHT_CACHE = summary
-    _FRONTIER_PREFLIGHT_CACHE_AT = now
     return summary
 
 
@@ -881,6 +883,248 @@ def _frontier_activity_snapshot() -> dict[str, Any]:
         "count": len(records),
         "reviews": records,
         "latest": records[-1] if records else None,
+    }
+
+
+def _activity_age_seconds(started_raw: object) -> float | None:
+    if not isinstance(started_raw, str):
+        return None
+    try:
+        started = datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    now = datetime.now(started.tzinfo) if started.tzinfo else datetime.now()
+    return max(0.0, (now - started).total_seconds())
+
+
+def _empty_local_consensus_summary() -> dict[str, Any]:
+    sessions = {
+        "total": 0,
+        "ok": 0,
+        "first_pass_valid": 0,
+        "repaired": 0,
+        "repair_turns": 0,
+        "failures": {},
+    }
+    decisions = {
+        "total": 0,
+        "agreed": 0,
+        "pair_agreement": 0,
+        "tie_break_used": 0,
+        "unresolved_quarantine": 0,
+    }
+    return {
+        "schema_version": 2,
+        "retained_records": 0,
+        "routine_records": 0,
+        "sessions": sessions,
+        "decisions": decisions,
+        "evaluation": {
+            "records": 0,
+            "sessions": dict(sessions),
+            "decisions": dict(decisions),
+        },
+        "roles": {},
+    }
+
+
+def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
+    """Return live local review truth plus a redacted bounded audit tail."""
+
+    root = WIKI_ROOT / "runtime" / "local-consensus"
+    active_dir = root / "active"
+    activities: list[dict[str, Any]] = []
+    if active_dir.exists():
+        for path in sorted(active_dir.glob("*.json")):
+            row = _read_json_file(path)
+            pid = row.get("pid") if row else None
+            age_seconds = _activity_age_seconds(row.get("started_at")) if row else None
+            stale = (
+                not row
+                or not runtime_status._pid_is_alive(pid)
+                or age_seconds is None
+                or age_seconds > LOCAL_CONSENSUS_ACTIVITY_STALE_SECONDS
+            )
+            if stale:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            safe = {
+                "request_sha256": row.get("request_sha256"),
+                "role": row.get("role"),
+                "model": row.get("model"),
+                "started_at": row.get("started_at"),
+                "pid": pid,
+                "elapsed_seconds": age_seconds,
+            }
+            activities.append(safe)
+    activities.sort(key=lambda row: str(row.get("started_at") or ""))
+
+    summary = _read_json_file(root / "summary.json") or _empty_local_consensus_summary()
+    history: list[dict[str, Any]] = []
+    for row in _read_jsonl_file(root / "audit.jsonl", limit=max(1, limit)):
+        kind = row.get("kind")
+        if kind == "session":
+            history.append(
+                {
+                    key: row.get(key)
+                    for key in (
+                        "kind",
+                        "timestamp",
+                        "request_sha256",
+                        "role",
+                        "model",
+                        "ok",
+                        "first_pass_valid",
+                        "repaired",
+                        "repair_turns",
+                        "failure_class",
+                    )
+                }
+            )
+        elif kind == "decision":
+            history.append(
+                {
+                    key: row.get(key)
+                    for key in (
+                        "kind",
+                        "timestamp",
+                        "request_sha256",
+                        "role",
+                        "status",
+                        "failure_class",
+                        "quarantine_reason",
+                        "pair_agreement",
+                        "tie_break_used",
+                        "unresolved_quarantine",
+                        "vote_count",
+                        "valid_votes",
+                        "first_pass_valid_votes",
+                        "repaired_votes",
+                        "repair_turns",
+                        "models",
+                    )
+                }
+            )
+    latest_decision = next(
+        (row for row in reversed(history) if row.get("kind") == "decision"),
+        None,
+    )
+    return {
+        "active": bool(activities),
+        "count": len(activities),
+        "activities": activities,
+        "latest": activities[-1] if activities else None,
+        "summary": summary,
+        "latest_decision": latest_decision,
+        "history": history,
+    }
+
+
+def _frontier_repair_snapshot(limit: int = 40) -> dict[str, Any]:
+    """Expose the exceptional repair ledger without leaking incident payloads."""
+
+    root = WIKI_ROOT / "runtime" / "frontier-repair"
+    state_path = root / "state.json"
+    state = _read_json_file(state_path) or {}
+    incidents_raw = state.get("incidents")
+    incidents = incidents_raw if isinstance(incidents_raw, dict) else {}
+    counts: dict[str, int] = {}
+    recent: list[dict[str, Any]] = []
+    starts_24h = 0
+    cutoff = datetime.now().astimezone() - timedelta(hours=24)
+    for incident_id, raw in incidents.items():
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+        started_at = raw.get("started_at")
+        if isinstance(started_at, str):
+            try:
+                started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                compare_cutoff = (
+                    cutoff.astimezone(started.tzinfo)
+                    if started.tzinfo
+                    else cutoff.replace(tzinfo=None)
+                )
+                if started >= compare_cutoff:
+                    starts_24h += 1
+            except ValueError:
+                pass
+        evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+        recent.append(
+            {
+                "incident_id": incident_id,
+                "status": status,
+                "component": evidence.get("component"),
+                "failure_class": evidence.get("failure_class"),
+                "fingerprint_key": raw.get("fingerprint_key"),
+                "reserved_at": raw.get("reserved_at"),
+                "started_at": started_at,
+                "finished_at": raw.get("finished_at"),
+                "owner_pid": raw.get("owner_pid"),
+                "pid": raw.get("pid"),
+            }
+        )
+    recent.sort(
+        key=lambda row: str(
+            row.get("started_at") or row.get("reserved_at") or row.get("finished_at") or ""
+        )
+    )
+    recent = recent[-max(1, limit) :]
+
+    active_id = state.get("active_incident_id")
+    active_row = next(
+        (row for row in recent if row.get("incident_id") == active_id),
+        None,
+    )
+    active_status = active_row.get("status") if active_row else None
+    owner_alive = bool(
+        active_row
+        and active_status in {"reserved", "started"}
+        and runtime_status._pid_is_alive(active_row.get("owner_pid"))
+    )
+    if active_row is not None:
+        active_row = {
+            **active_row,
+            "owner_alive": owner_alive,
+            "elapsed_seconds": _activity_age_seconds(
+                active_row.get("started_at") or active_row.get("reserved_at")
+            ),
+        }
+
+    events = []
+    for row in _read_jsonl_file(root / "events.jsonl", limit=max(1, limit)):
+        events.append(
+            {
+                key: row.get(key)
+                for key in (
+                    "sequence",
+                    "timestamp",
+                    "event",
+                    "incident_id",
+                    "fingerprint_key",
+                    "outcome",
+                    "reason",
+                    "prior_status",
+                    "stale_recovery",
+                )
+            }
+        )
+    return {
+        "available": state_path.exists(),
+        "active": owner_alive,
+        "active_incident": active_row,
+        "stale_active_incident": bool(active_row and not owner_alive),
+        "summary": {
+            "total": len(incidents),
+            "starts_24h": starts_24h,
+            "counts": counts,
+        },
+        "recent": recent,
+        "events": events,
     }
 
 
@@ -1317,35 +1561,137 @@ def _mark_batch_activity(status: dict[str, Any]) -> None:
     status["batch"] = annotated
 
 
+def _canonicalize_runtime_status(
+    status: dict[str, Any],
+    orch_state: dict[str, Any],
+    *,
+    pending: int,
+) -> dict[str, Any]:
+    """Project durable orchestrator truth onto the dashboard status cache."""
+    canonical = dict(status)
+    job_id = orch_state.get("current_job_id")
+    job_pid = orch_state.get("current_job_pid")
+    job_active = bool(job_id and runtime_status._pid_is_alive(job_pid))
+    canonical["pending"] = pending
+
+    if job_active:
+        same_job = canonical.get("current_job_id") == job_id
+        canonical["current_job_id"] = job_id
+        canonical["current_job_pid"] = job_pid
+        canonical["state"] = "running"
+        if not same_job or canonical.get("stage") not in ACTIVE_BATCH_STAGES | {"locked"}:
+            canonical["stage"] = "batch"
+        canonical["updated_at"] = (
+            canonical.get("updated_at")
+            or orch_state.get("current_job_started_at")
+            or orch_state.get("last_ingest")
+        )
+        return canonical
+
+    canonical["state"] = "idle"
+    canonical["stage"] = "waiting" if pending else "idle"
+    canonical["current_raw"] = None
+    canonical["current_op"] = None
+    canonical["current_job_id"] = None
+    canonical["current_job_pid"] = None
+    canonical.pop("review_kind", None)
+    llm = canonical.get("llm")
+    if isinstance(llm, dict):
+        canonical["llm"] = {**llm, "active": False}
+    return canonical
+
+
+def _safe_snapshot_component(
+    name: str,
+    builder: Any,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Keep one failed component from taking down the snapshot endpoint."""
+    try:
+        value = builder()
+        if isinstance(value, dict):
+            return value
+        raise TypeError(f"snapshot component returned {type(value).__name__}, expected dict")
+    except Exception as exc:
+        return {
+            **(fallback or {}),
+            "status": "error",
+            "component": name,
+            "error_class": exc.__class__.__name__,
+            "error": str(exc),
+        }
+
+
 def build_snapshot() -> dict[str, Any]:
     init_wiki()
-    status = runtime_status.read_status()
+    cached_status = runtime_status.read_status()
     orch_state = orchestrator._load_state()
     pending = len(orchestrator.get_pending_raw_files())
-    status["pending"] = pending
-    status["current_job_id"] = status.get("current_job_id") or orch_state.get("current_job_id")
-    status["current_job_pid"] = status.get("current_job_pid") or orch_state.get("current_job_pid")
-    if not status.get("stage") and status.get("current_job_id"):
-        status["stage"] = "running"
-    if status.get("state") in (None, "unknown") and orch_state.get("current_job_id"):
-        status["state"] = "running"
-    elif status.get("state") in (None, "unknown"):
-        status["state"] = "idle"
-    if not status.get("updated_at"):
-        status["updated_at"] = orch_state.get("current_job_started_at") or orch_state.get("last_ingest")
+    status = _canonicalize_runtime_status(cached_status, orch_state, pending=pending)
 
-    frontier_activity = _frontier_activity_snapshot()
+    local_consensus = _safe_snapshot_component(
+        "local_consensus",
+        _local_consensus_snapshot,
+        {
+            "active": False,
+            "count": 0,
+            "activities": [],
+            "summary": _empty_local_consensus_summary(),
+            "history": [],
+        },
+    )
+    frontier_activity = _safe_snapshot_component(
+        "frontier_process_activity",
+        _frontier_activity_snapshot,
+        {"active": False, "count": 0, "reviews": [], "latest": None},
+    )
+    frontier_repair = _safe_snapshot_component(
+        "frontier_repair",
+        _frontier_repair_snapshot,
+        {
+            "available": False,
+            "active": False,
+            "summary": {"total": 0, "starts_24h": 0, "counts": {}},
+            "recent": [],
+            "events": [],
+        },
+    )
+    frontier_repair = {
+        **frontier_repair,
+        "active": bool(frontier_repair.get("active") or frontier_activity.get("active")),
+        "process_activity": frontier_activity,
+    }
+    status["local_consensus"] = local_consensus
+    status["frontier_repair"] = frontier_repair
+    # Compatibility for older dashboard clients. This is repair-plane activity,
+    # never a routine semantic-review tier.
     status["frontier_review"] = frontier_activity
     active_llm = isinstance(status.get("llm"), dict) and status["llm"].get("active")
+    local_review_active = bool(local_consensus.get("active"))
+    repair_active = bool(frontier_repair.get("active"))
     if (
-        frontier_activity["active"]
+        (local_review_active or repair_active)
         and not status.get("current_job_id")
         and not status.get("current_raw")
         and not active_llm
     ):
         status["state"] = "running"
         status["stage"] = "review"
-        latest_review = frontier_activity.get("latest") or {}
+        latest_review = (
+            local_consensus.get("latest")
+            if local_review_active
+            else frontier_activity.get("latest")
+            or frontier_repair.get("active_incident")
+        ) or {}
+        latest_role = str(latest_review.get("role") or "")
+        if local_review_active:
+            status["review_kind"] = (
+                "local_model_eval"
+                if latest_role.startswith("model_eval:")
+                else "local_consensus"
+            )
+        else:
+            status["review_kind"] = "frontier_repair"
         status["updated_at"] = latest_review.get("started_at") or status.get("updated_at")
     _mark_batch_activity(status)
 
@@ -1366,12 +1712,27 @@ def build_snapshot() -> dict[str, Any]:
     )
     events = (runtime_status.read_events(limit=120) + _recent_log_events(limit=80))[-160:]
     ollama = _ollama_snapshot()
-    model_status = _model_status_snapshot(ollama)
+    model_status = _safe_snapshot_component(
+        "model_status",
+        lambda: _model_status_snapshot(ollama),
+        {"available": False, "models": [], "summary": {}},
+    )
     from llm_wiki_mcp.runtime_config import runtime_identity
+    from llm_wiki_mcp.decision_policy import decision_policy_snapshot
+
+    decision_policies = _safe_snapshot_component(
+        "decision_policies",
+        decision_policy_snapshot,
+        {"lanes": {}, "counts": {"off": 0, "shadow": 0, "enabled": 0}},
+    )
+    status["decision_policies"] = decision_policies
 
     return {
         "runtime": runtime_identity(),
         "status": status,
+        "decision_policies": decision_policies,
+        "local_consensus": local_consensus,
+        "frontier_repair": frontier_repair,
         "frontier_review": frontier_activity,
         "orchestrator": {
             "last_ingest": orch_state.get("last_ingest"),
@@ -1382,18 +1743,44 @@ def build_snapshot() -> dict[str, Any]:
         "model_status": model_status,
         "events": events,
         "metrics": metrics,
-        "self_heal": _self_heal_snapshot(),
-        "recall": _recall_snapshot(),
-        "recall_improvement": _recall_improvement_snapshot(),
-        "model_lab": _model_lab_snapshot(),
-        "save_history": _save_history_snapshot(),
-        "knowledge_mix": _knowledge_mix_snapshot(),
-        "health": health_snapshot(),
+        "self_heal": _safe_snapshot_component(
+            "self_heal",
+            _self_heal_snapshot,
+            {"history": [], "counts": {}, "watch": {}},
+        ),
+        "recall": _safe_snapshot_component(
+            "recall",
+            _recall_snapshot,
+            {"recent": [], "evals": [], "errors": 0},
+        ),
+        "recall_improvement": _safe_snapshot_component(
+            "recall_improvement",
+            _recall_improvement_snapshot,
+            {"active": None, "latest": None, "history": [], "counts": {}},
+        ),
+        "model_lab": _safe_snapshot_component(
+            "model_lab",
+            _model_lab_snapshot,
+            {"policy": {"roles": {}}, "candidates": [], "history": []},
+        ),
+        "save_history": _safe_snapshot_component(
+            "save_history",
+            _save_history_snapshot,
+            {"days": [], "recent": [], "totals": {}, "sources": []},
+        ),
+        "knowledge_mix": _safe_snapshot_component(
+            "knowledge_mix",
+            _knowledge_mix_snapshot,
+            {"total_pages": 0, "total_bytes": 0, "categories": [], "top": []},
+        ),
+        "health": _safe_snapshot_component("health", health_snapshot),
         "paths": {
             "wiki_root": str(WIKI_ROOT),
             "status_file": str(runtime_status.STATUS_FILE),
             "events_file": str(runtime_status.EVENTS_FILE),
             "metrics_file": str(runtime_status.METRICS_FILE),
+            "local_consensus": str(WIKI_ROOT / "runtime" / "local-consensus"),
+            "frontier_repair": str(WIKI_ROOT / "runtime" / "frontier-repair"),
         },
     }
 
@@ -1404,44 +1791,68 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = parsed.path
-        if path == "/":
-            _file_response(self, STATIC_DIR / "index.html")
-        elif path == "/api/snapshot":
-            _json_response(self, build_snapshot())
-        elif path == "/api/status":
-            _json_response(self, {"status": build_snapshot()["status"]})
-        elif path == "/api/events":
-            _json_response(self, {"events": build_snapshot()["events"]})
-        elif path == "/api/metrics":
-            _json_response(self, {"metrics": build_snapshot()["metrics"]})
-        elif path == "/api/self-heal":
-            _json_response(self, {"self_heal": build_snapshot()["self_heal"]})
-        elif path == "/api/recall":
-            _json_response(self, {"recall": build_snapshot()["recall"]})
-        elif path == "/api/recall-improvement":
-            _json_response(self, {"recall_improvement": build_snapshot()["recall_improvement"]})
-        elif path == "/api/model-lab":
-            _json_response(self, {"model_lab": build_snapshot()["model_lab"]})
-        elif path == "/api/save-history":
-            _json_response(self, {"save_history": build_snapshot()["save_history"]})
-        elif path == "/api/knowledge-mix":
-            _json_response(self, {"knowledge_mix": build_snapshot()["knowledge_mix"]})
-        elif path == "/api/health":
-            _json_response(self, {"health": build_snapshot()["health"]})
-        elif path == "/api/model-status":
-            snapshot = build_snapshot()
-            _json_response(self, {"model_status": snapshot["model_status"], "ollama": snapshot["ollama"]})
-        elif path.startswith("/static/"):
-            rel = path.removeprefix("/static/").lstrip("/")
-            target = (STATIC_DIR / rel).resolve()
-            try:
-                target.relative_to(STATIC_DIR.resolve())
-            except ValueError:
-                self.send_error(HTTPStatus.FORBIDDEN)
+        try:
+            if path == "/":
+                _file_response(self, STATIC_DIR / "index.html")
+            elif path == "/api/snapshot":
+                _json_response(self, build_snapshot())
+            elif path == "/api/status":
+                _json_response(self, {"status": build_snapshot()["status"]})
+            elif path == "/api/local-consensus":
+                _json_response(
+                    self,
+                    {"local_consensus": build_snapshot()["local_consensus"]},
+                )
+            elif path == "/api/frontier-repair":
+                _json_response(
+                    self,
+                    {"frontier_repair": build_snapshot()["frontier_repair"]},
+                )
+            elif path == "/api/events":
+                _json_response(self, {"events": build_snapshot()["events"]})
+            elif path == "/api/metrics":
+                _json_response(self, {"metrics": build_snapshot()["metrics"]})
+            elif path == "/api/self-heal":
+                _json_response(self, {"self_heal": build_snapshot()["self_heal"]})
+            elif path == "/api/recall":
+                _json_response(self, {"recall": build_snapshot()["recall"]})
+            elif path == "/api/recall-improvement":
+                _json_response(self, {"recall_improvement": build_snapshot()["recall_improvement"]})
+            elif path == "/api/model-lab":
+                _json_response(self, {"model_lab": build_snapshot()["model_lab"]})
+            elif path == "/api/save-history":
+                _json_response(self, {"save_history": build_snapshot()["save_history"]})
+            elif path == "/api/knowledge-mix":
+                _json_response(self, {"knowledge_mix": build_snapshot()["knowledge_mix"]})
+            elif path == "/api/health":
+                _json_response(self, {"health": build_snapshot()["health"]})
+            elif path == "/api/model-status":
+                snapshot = build_snapshot()
+                _json_response(self, {"model_status": snapshot["model_status"], "ollama": snapshot["ollama"]})
+            elif path.startswith("/static/"):
+                rel = path.removeprefix("/static/").lstrip("/")
+                target = (STATIC_DIR / rel).resolve()
+                try:
+                    target.relative_to(STATIC_DIR.resolve())
+                except ValueError:
+                    self.send_error(HTTPStatus.FORBIDDEN)
+                    return
+                _file_response(self, target)
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            if path.startswith("/api/"):
+                _json_response(
+                    self,
+                    {
+                        "status": "error",
+                        "error_class": exc.__class__.__name__,
+                        "error": str(exc),
+                    },
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
                 return
-            _file_response(self, target)
-        else:
-            self.send_error(HTTPStatus.NOT_FOUND)
+            raise
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return

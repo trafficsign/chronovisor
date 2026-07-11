@@ -23,6 +23,23 @@ JOB_DIR = WIKI_ROOT / "runtime" / "background-jobs"
 STATE_FILE = JOB_DIR / "state.json"
 LOCK_FILE = JOB_DIR / "state.lock"
 MAX_ATTEMPTS = 5
+MAX_TERMINAL_JOBS = 500
+RETRYABLE_EXIT_CODE = 75
+QUARANTINE_EXIT_CODE = 78
+ACTIVE_STATUSES = frozenset({"queued", "running", "retry_wait"})
+TERMINAL_STATUSES = frozenset({"completed", "quarantined", "failed", "cancelled"})
+_SESSION_ID_KEYS = frozenset(
+    {"session_id", "sessionId", "conversation_id", "conversationId", "rollout_id"}
+)
+_SESSION_PATH_KEYS = frozenset(
+    {"session_file", "sessionFile", "transcript_path", "transcriptPath"}
+)
+
+
+def _is_capture_job(name: str) -> bool:
+    """Return whether a job captures a mutable host transcript by session."""
+
+    return name.endswith("-save") or name.endswith("-capture")
 
 
 def _now() -> datetime:
@@ -81,9 +98,33 @@ def _pid_alive(pid: Any) -> bool:
     return True
 
 
+def _prune_terminal(state: dict[str, Any]) -> int:
+    """Keep active work and a bounded tail of terminal history."""
+    jobs = state.get("jobs")
+    if not isinstance(jobs, dict):
+        return 0
+    terminal = [
+        (job_id, job)
+        for job_id, job in jobs.items()
+        if isinstance(job, dict) and str(job.get("status") or "") in TERMINAL_STATUSES
+    ]
+    terminal.sort(
+        key=lambda item: str(item[1].get("updated_at") or item[1].get("created_at") or ""),
+        reverse=True,
+    )
+    removed = 0
+    for job_id, _job in terminal[MAX_TERMINAL_JOBS:]:
+        jobs.pop(job_id, None)
+        removed += 1
+    if removed:
+        state["pruned_terminal_total"] = int(state.get("pruned_terminal_total") or 0) + removed
+    return removed
+
+
 def repair_stale(*, quarantine_pending: bool = False) -> dict[str, Any]:
     """Quarantine abandoned workers and optionally an incident backlog."""
     repaired = 0
+    requeued = 0
     with _lock():
         state = _load()
         for job in state["jobs"].values():
@@ -94,21 +135,76 @@ def repair_stale(*, quarantine_pending: bool = False) -> dict[str, Any]:
             pending_incident = quarantine_pending and status in {"queued", "retry_wait"}
             if not abandoned and not pending_incident:
                 continue
-            job["status"] = "quarantined"
+            capture_job = _is_capture_job(str(job.get("name") or ""))
+            if abandoned and capture_job and not quarantine_pending:
+                job["status"] = "queued"
+                job["attempts"] = 0
+                job["output_tail"] = "requeued after abandoned capture worker"
+                requeued += 1
+            else:
+                job["status"] = "quarantined"
+                job["exit_code"] = 1
+                job["output_tail"] = "quarantined by background-job stale recovery"
             job["next_retry_at"] = None
-            job["exit_code"] = 1
-            job["output_tail"] = "quarantined by background-job stale recovery"
             job["updated_at"] = _iso()
             job.pop("owner_pid", None)
             repaired += 1
-        if repaired:
+        pruned = _prune_terminal(state)
+        if repaired or pruned:
             _save(state)
-    return {"status": "ok", "repaired": repaired, "quarantine_pending": quarantine_pending}
+    return {
+        "status": "ok",
+        "repaired": repaired,
+        "requeued": requeued,
+        "pruned": pruned,
+        "quarantine_pending": quarantine_pending,
+    }
+
+
+def _find_payload_string(value: Any, keys: frozenset[str]) -> str | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in keys and isinstance(child, str) and child.strip():
+                return child.strip()
+        for child in value.values():
+            found = _find_payload_string(child, keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_payload_string(child, keys)
+            if found:
+                return found
+    return None
+
+
+def _capture_session_identity(stdin_text: str) -> str | None:
+    try:
+        payload = json.loads(stdin_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    session_id = _find_payload_string(payload, _SESSION_ID_KEYS)
+    if session_id:
+        return f"id:{session_id}"
+    session_path = _find_payload_string(payload, _SESSION_PATH_KEYS)
+    if session_path:
+        normalized = str(Path(session_path).expanduser().resolve(strict=False))
+        return f"path:{normalized}"
+    return None
 
 
 def _dedupe_key(name: str, module: str, args: list[str], stdin_text: str) -> str:
+    session_identity = (
+        _capture_session_identity(stdin_text) if _is_capture_job(name) else None
+    )
     payload = json.dumps(
-        {"name": name, "module": module, "args": args, "stdin": stdin_text},
+        {
+            "name": name,
+            "module": module,
+            "args": args,
+            "session": session_identity,
+            "stdin": "" if session_identity else stdin_text,
+        },
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -123,12 +219,34 @@ def enqueue_job(
     env: dict[str, str],
     stdin_text: str,
 ) -> dict[str, Any]:
+    session_identity = (
+        _capture_session_identity(stdin_text) if _is_capture_job(name) else None
+    )
     dedupe = _dedupe_key(name, module, args, stdin_text)
+    if _is_capture_job(name) and session_identity is None:
+        # Without a stable identity, coalescing could collapse different
+        # sessions that emitted the same minimal Stop payload.
+        dedupe = f"unscoped-{uuid.uuid4().hex}"
     with _lock():
         state = _load()
         for existing in state["jobs"].values():
-            if existing.get("dedupe_key") == dedupe and existing.get("status") in {"queued", "running", "retry_wait"}:
-                return dict(existing)
+            if not isinstance(existing, dict):
+                continue
+            if existing.get("dedupe_key") != dedupe or existing.get("status") not in ACTIVE_STATUSES:
+                continue
+            existing["stdin"] = stdin_text
+            existing["env"] = dict(env)
+            existing["updated_at"] = _iso()
+            existing["coalesced_count"] = int(existing.get("coalesced_count") or 0) + 1
+            if existing.get("status") == "running":
+                existing["rerun_requested"] = True
+            else:
+                existing["status"] = "queued"
+                existing["attempts"] = 0
+                existing["next_retry_at"] = None
+            _prune_terminal(state)
+            _save(state)
+            return {**existing, "enqueued": False, "coalesced": True}
         job_id = uuid.uuid4().hex
         job = {
             "job_id": job_id,
@@ -138,6 +256,7 @@ def enqueue_job(
             "env": dict(env),
             "stdin": stdin_text,
             "dedupe_key": dedupe,
+            "lane_key": name,
             "status": "queued",
             "attempts": 0,
             "created_at": _iso(),
@@ -147,8 +266,9 @@ def enqueue_job(
             "output_tail": "",
         }
         state["jobs"][job_id] = job
+        _prune_terminal(state)
         _save(state)
-        return dict(job)
+        return {**job, "enqueued": True, "coalesced": False}
 
 
 def _claim(job_id: str) -> dict[str, Any] | None:
@@ -164,6 +284,18 @@ def _claim(job_id: str) -> dict[str, Any] | None:
                     return None
             except ValueError:
                 pass
+        lane_key = str(job.get("lane_key") or job.get("name") or "")
+        for other_id, other in state["jobs"].items():
+            if other_id == job_id or not isinstance(other, dict):
+                continue
+            other_lane = str(other.get("lane_key") or other.get("name") or "")
+            if (
+                lane_key
+                and other_lane == lane_key
+                and other.get("status") == "running"
+                and _pid_alive(other.get("owner_pid"))
+            ):
+                return None
         job["status"] = "running"
         job["attempts"] = int(job.get("attempts") or 0) + 1
         job["updated_at"] = _iso()
@@ -179,7 +311,15 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
         if not isinstance(job, dict):
             raise KeyError(job_id)
         attempts = int(job.get("attempts") or 0)
-        if exit_code == 0:
+        rerun_requested = bool(job.pop("rerun_requested", False))
+        if rerun_requested:
+            job["status"] = "queued"
+            job["attempts"] = 0
+            job["next_retry_at"] = None
+        elif exit_code == QUARANTINE_EXIT_CODE:
+            job["status"] = "quarantined"
+            job["next_retry_at"] = None
+        elif exit_code == 0:
             job["status"] = "completed"
             job["next_retry_at"] = None
             job["stdin"] = ""
@@ -194,6 +334,7 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
         job["output_tail"] = redact_sensitive_text(output)[-4000:]
         job["updated_at"] = _iso()
         job.pop("owner_pid", None)
+        _prune_terminal(state)
         _save(state)
         return dict(job)
 
@@ -229,7 +370,7 @@ def retry_due(*, limit: int = 8) -> dict[str, Any]:
     with _lock():
         state = _load()
         now = _now()
-        due: list[str] = []
+        due: list[tuple[str, str]] = []
         for job_id, job in state["jobs"].items():
             if not isinstance(job, dict) or job.get("status") not in {"queued", "retry_wait"}:
                 continue
@@ -239,10 +380,11 @@ def retry_due(*, limit: int = 8) -> dict[str, Any]:
             except ValueError:
                 ready = True
             if ready:
-                due.append(job_id)
-        due = due[: max(0, limit)]
-    results = [run_job(job_id) for job_id in due]
-    return {"status": "ok", "due": len(due), "results": results}
+                due.append((str(job.get("created_at") or ""), job_id))
+        due.sort()
+        job_ids = [job_id for _created, job_id in due[: max(0, limit)]]
+    results = [run_job(job_id) for job_id in job_ids]
+    return {"status": "ok", "due": len(job_ids), "results": results}
 
 
 def snapshot() -> dict[str, Any]:

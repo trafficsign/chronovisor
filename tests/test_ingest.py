@@ -2950,6 +2950,19 @@ class TestReadBackVerification:
 # ---------------------------------------------------------------------------
 
 
+class _QueueStructuredTransport:
+    def __init__(self, *responses: str | Exception) -> None:
+        self.responses = list(responses)
+        self.requests: list[object] = []
+
+    def __call__(self, request):
+        self.requests.append(request)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 class TestTriagePlanSchema:
     def test_valid_plan_passes_through(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
@@ -3010,6 +3023,79 @@ class TestTriagePlanSchema:
 
         assert _validate_triage_plan(plan, coerce_missing_updates=True) == plan
 
+    def test_live_triage_repairs_malformed_json_in_same_session(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        transport = _QueueStructuredTransport(
+            '[{"type":"create","filename":',
+            json.dumps(
+                [
+                    {
+                        "type": "create",
+                        "filename": "memory/repaired.md",
+                        "title": "Repaired",
+                        "summary": "Durable repaired plan",
+                    }
+                ]
+            ),
+        )
+
+        out = ingest._triage("raw content", transport=transport)
+
+        assert out == [
+            {
+                "type": "create",
+                "filename": "memory/repaired.md",
+                "title": "Repaired",
+                "summary": "Durable repaired plan",
+            }
+        ]
+        assert len(transport.requests) == 2
+        second = transport.requests[1]
+        assert [message["role"] for message in second.messages] == [
+            "system",
+            "user",
+            "assistant",
+            "user",
+        ]
+        assert '"keyword":"parse"' in second.messages[-1]["content"]
+
+    def test_live_triage_three_invalid_responses_fail_closed(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        transport = _QueueStructuredTransport(
+            '[{"type":"create","filename":',
+            '{"type":"create","filename":"memory/no-array.md"}',
+            '[{"type":"create"}]',
+        )
+
+        assert ingest._triage("raw content", transport=transport) is None
+        assert len(transport.requests) == 3
+
+    def test_live_triage_transport_exception_fails_closed(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        transport = _QueueStructuredTransport(RuntimeError("ollama offline"))
+
+        assert ingest._triage("raw content", transport=transport) is None
+        assert len(transport.requests) == 1
+
+    def test_live_triage_oversized_input_never_calls_transport(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        transport = _QueueStructuredTransport("[]")
+
+        assert ingest._triage("x" * 20_000, transport=transport) is None
+        assert transport.requests == []
+
     def test_empty_plan_passes(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
@@ -3045,6 +3131,72 @@ class TestTriagePlanSchema:
         assert (
             _validate_triage_plan([{"type": "create", "filename": 123}]) is None
         )
+
+
+class TestRecallMetadataStructuredSession:
+    def test_malformed_json_is_repaired_in_same_session(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        transport = _QueueStructuredTransport(
+            '{"summary":',
+            json.dumps(
+                {
+                    "summary": "短い要約",
+                    "recall_questions": ["何を決めた?", "次に何をする?"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        result = ingest._generate_recall_metadata(
+            "Title", "Body", "page-id", transport=transport
+        )
+
+        assert result == {
+            "summary": "短い要約",
+            "recall_questions": ["何を決めた?", "次に何をする?"],
+        }
+        assert len(transport.requests) == 2
+        assert '"keyword":"parse"' in transport.requests[1].messages[-1]["content"]
+
+    def test_three_invalid_responses_use_deterministic_fallback(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        transport = _QueueStructuredTransport(
+            '{"summary":',
+            "[]",
+            '{"summary":"x","recall_questions":[]}',
+        )
+        expected = ingest._fallback_recall_metadata("Title", "Body", "page-id")
+
+        result = ingest._generate_recall_metadata(
+            "Title", "Body", "page-id", transport=transport
+        )
+
+        assert result == expected
+        assert len(transport.requests) == 3
+
+    def test_transport_exception_uses_deterministic_fallback(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        transport = _QueueStructuredTransport(RuntimeError("ollama offline"))
+        expected = ingest._fallback_recall_metadata("Title", "Body", "page-id")
+
+        result = ingest._generate_recall_metadata(
+            "Title", "Body", "page-id", transport=transport
+        )
+
+        assert result == expected
+        assert len(transport.requests) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -3106,6 +3258,26 @@ class TestApplyPreparePhase:
         # Neither file written.
         assert not (isolated_wiki / "pages" / "a" / "dup.md").exists()
         assert not (isolated_wiki / "pages" / "b" / "dup.md").exists()
+
+    @pytest.mark.parametrize("op_type", ["create", "update"])
+    def test_system_page_id_is_reserved_from_ingest(
+        self, isolated_wiki: Path, op_type: str
+    ) -> None:
+        system_page = isolated_wiki / "system" / "lessons-learned.md"
+        system_page.write_text(
+            "---\ntitle: System Lessons\nupdated: 2026-07-11\n---\ncanonical\n"
+        )
+        op = {
+            "type": op_type,
+            "filename": "generated/lessons-learned.md",
+            "content": "---\ntitle: Generated\nupdated: 2026-07-11\n---\nbody",
+        }
+
+        with pytest.raises(IngestApplyError, match="reserved system page_id"):
+            _apply_operations([op])
+
+        assert system_page.read_text().endswith("canonical\n")
+        assert not (isolated_wiki / "pages" / "generated" / "lessons-learned.md").exists()
 
     def test_rollback_on_write_failure_restores_previous_state(
         self,
