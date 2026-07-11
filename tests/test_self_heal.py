@@ -16,16 +16,96 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, runtime):
         d.mkdir(parents=True, exist_ok=True)
 
-    from llm_wiki_mcp import wiki, runtime_status
+    from llm_wiki_mcp import (
+        claims,
+        index_store,
+        ingest,
+        ollama,
+        orchestrator,
+        page_mutation,
+        runtime_status,
+        search,
+        state_register,
+        wiki,
+    )
 
     monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
     monkeypatch.setattr(wiki, "PAGES_DIR", pages)
     monkeypatch.setattr(wiki, "RAW_DIR", raw)
     monkeypatch.setattr(wiki, "SYSTEM_DIR", system)
+    monkeypatch.setattr(wiki, "INDEX_FILE", wiki_root / "index.md")
+    monkeypatch.setattr(wiki, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(ingest, "PAGES_DIR", pages)
+    monkeypatch.setattr(ingest, "INDEX_FILE", wiki_root / "index.md")
+    monkeypatch.setattr(ingest, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
+    monkeypatch.setattr(orchestrator, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(orchestrator, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(
+        orchestrator,
+        "STATE_FILE",
+        wiki_root / ".orchestrator_state.json",
+    )
+    monkeypatch.setattr(
+        page_mutation,
+        "WIKI_MUTATION_LOCK",
+        runtime / "wiki-mutation.lock",
+    )
+    monkeypatch.setattr(page_mutation, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
+    monkeypatch.setattr(page_mutation, "SYSTEM_DIR", system)
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime / "metrics.jsonl")
+    monkeypatch.setattr(state_register, "STATE_PAGE", system / "current-state.md")
+    monkeypatch.setattr(
+        state_register,
+        "refresh_state_register",
+        lambda *args, **kwargs: {
+            "status": "unchanged",
+            "path": str(system / "current-state.md"),
+            "pages": list(args[0]) if args else [],
+            "write": kwargs.get("write", True),
+            "mutation": None,
+        },
+    )
+
+    claims_dir = wiki_root / "claims"
+    monkeypatch.setattr(claims, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(claims, "CLAIMS_DIR", claims_dir)
+    monkeypatch.setattr(claims, "CLAIMS_FILE", claims_dir / "claims.jsonl")
+    monkeypatch.setattr(
+        claims,
+        "CLAIM_INDEX_FILE",
+        claims_dir / "claims-index.jsonl",
+    )
+    monkeypatch.setattr(
+        claims,
+        "CLAIM_CONFLICT_FILE",
+        claims_dir / "claim-conflicts.jsonl",
+    )
+    monkeypatch.setattr(
+        claims,
+        "CLAIM_REVIEW_FILE",
+        claims_dir / "claim-conflict-reviews.jsonl",
+    )
+
+    index_dir = wiki_root / ".index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(index_store, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(index_store, "PAGES_DIR", pages)
+    monkeypatch.setattr(index_store, "SYSTEM_DIR", system)
+    monkeypatch.setattr(index_store, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(index_store, "PAGES_INDEX_FILE", index_dir / "pages.json")
+    monkeypatch.setattr(
+        index_store,
+        "BACKLINKS_INDEX_FILE",
+        index_dir / "backlinks.json",
+    )
+    monkeypatch.setattr(index_store, "_store", None)
+    monkeypatch.setattr(ollama, "is_available", lambda: False)
+    monkeypatch.setattr(search, "update_embeddings", lambda page_ids=None: 0)
     return wiki_root
 
 

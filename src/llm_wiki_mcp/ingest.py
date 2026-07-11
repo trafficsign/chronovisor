@@ -2106,6 +2106,205 @@ def _prepared_from_review_payload(
     return prepared
 
 
+def rollback_ingest_proposal_artifact(
+    artifact_path: Path,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """CAS-rollback exact page postimages recorded by an ingest proposal.
+
+    This is an incident-recovery primitive, not a second normal write path.
+    Every target must still contain either the proposal's exact postimage or
+    its exact preimage before any byte is changed.  A third state aborts the
+    whole rollback, so later edits can never be overwritten.  Successful
+    actions are recorded beside the immutable proposal artifact.
+    """
+
+    reason_text = reason.strip()
+    if not reason_text:
+        return {
+            "status": "rejected",
+            "reason": "rollback reason is required",
+            "artifact": str(artifact_path),
+        }
+    try:
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "status": "invalid_artifact",
+            "reason": f"{exc.__class__.__name__}: {exc}",
+            "artifact": str(artifact_path),
+        }
+    proposal = artifact.get("proposal") if isinstance(artifact, dict) else None
+    if not isinstance(proposal, dict):
+        return {
+            "status": "invalid_artifact",
+            "reason": "proposal payload missing",
+            "artifact": str(artifact_path),
+        }
+    proposal_sha256 = _canonical_json_sha256(proposal)
+    source_key = proposal.get("source_key")
+    if (
+        artifact.get("schema_version") != INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
+        or artifact.get("kind") != "ingest_frontier_proposal_artifact"
+        or not isinstance(source_key, str)
+        or not source_key
+        or artifact.get("source_key") != source_key
+        or artifact.get("proposal_sha256") != proposal_sha256
+    ):
+        return {
+            "status": "invalid_artifact",
+            "reason": "artifact identity or digest mismatch",
+            "artifact": str(artifact_path),
+        }
+    planned = _prepared_from_review_payload(proposal.get("prepared_operations"))
+    if not planned:
+        return {
+            "status": "invalid_artifact",
+            "reason": "no valid prepared operations",
+            "artifact": str(artifact_path),
+        }
+    identities = [str(item.path.resolve(strict=False)) for item in planned]
+    if len(identities) != len(set(identities)):
+        return {
+            "status": "invalid_artifact",
+            "reason": "duplicate target path",
+            "artifact": str(artifact_path),
+        }
+    page_ids = [item.page_id for item in planned]
+    if len(page_ids) != len(set(page_ids)):
+        return {
+            "status": "invalid_artifact",
+            "reason": "duplicate page_id",
+            "artifact": str(artifact_path),
+        }
+    if any(
+        (item.op_type == "create") is not (item.previous_text is None)
+        for item in planned
+    ):
+        return {
+            "status": "invalid_artifact",
+            "reason": "operation type does not match recorded preimage",
+            "artifact": str(artifact_path),
+        }
+
+    from llm_wiki_mcp.link_fix import atomic_write
+    from llm_wiki_mcp.page_mutation import wiki_mutation_lock
+
+    def read_optional(item: PreparedIngestOperation) -> str | None:
+        return item.path.read_text(encoding="utf-8") if item.path.exists() else None
+
+    rolled_back: list[PreparedIngestOperation] = []
+    already_rolled_back: list[str] = []
+    try:
+        with wiki_mutation_lock():
+            states: dict[str, str] = {}
+            for item in planned:
+                try:
+                    current = read_optional(item)
+                except (OSError, UnicodeDecodeError) as exc:
+                    return {
+                        "status": "conflict",
+                        "reason": f"cannot read {item.page_id}: {exc}",
+                        "artifact": str(artifact_path),
+                        "pages": [],
+                    }
+                if current == item.new_body:
+                    states[item.page_id] = "postimage"
+                elif current == item.previous_text:
+                    states[item.page_id] = "preimage"
+                    already_rolled_back.append(item.page_id)
+                else:
+                    digest = (
+                        hashlib.sha256(current.encode("utf-8")).hexdigest()
+                        if current is not None
+                        else None
+                    )
+                    return {
+                        "status": "conflict",
+                        "reason": "target no longer matches proposal preimage or postimage",
+                        "artifact": str(artifact_path),
+                        "page_id": item.page_id,
+                        "current_sha256": digest,
+                        "pages": [],
+                    }
+            try:
+                for item in reversed(planned):
+                    if states[item.page_id] == "preimage":
+                        continue
+                    if item.previous_text is None:
+                        item.path.unlink()
+                    else:
+                        atomic_write(item.path, item.previous_text)
+                    if read_optional(item) != item.previous_text:
+                        raise IngestApplyError(
+                            f"rollback verification failed: {item.page_id}"
+                        )
+                    rolled_back.append(item)
+            except Exception as exc:
+                restored: dict[str, bool] = {}
+                for item in reversed(rolled_back):
+                    try:
+                        if read_optional(item) != item.previous_text:
+                            restored[item.page_id] = False
+                            continue
+                        item.path.parent.mkdir(parents=True, exist_ok=True)
+                        atomic_write(item.path, item.new_body)
+                        restored[item.page_id] = read_optional(item) == item.new_body
+                    except Exception:
+                        restored[item.page_id] = False
+                return {
+                    "status": "rollback_failed",
+                    "reason": f"{exc.__class__.__name__}: {exc}",
+                    "artifact": str(artifact_path),
+                    "restored_postimages": restored,
+                    "pages": [],
+                }
+    except OSError as exc:
+        return {
+            "status": "rollback_failed",
+            "reason": f"wiki mutation lock failed: {exc}",
+            "artifact": str(artifact_path),
+            "pages": [],
+        }
+
+    rolled_back_page_ids = [item.page_id for item in reversed(rolled_back)]
+    status = "rolled_back" if rolled_back_page_ids else "already_rolled_back"
+    audit_path = artifact_path.with_name(f"{source_key}.rollback.json")
+    audit = {
+        "schema_version": INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+        "kind": "ingest_frontier_rollback_artifact",
+        "source_key": source_key,
+        "proposal_sha256": proposal_sha256,
+        "rolled_back_at": _now(),
+        "reason": reason_text,
+        "status": status,
+        "pages": rolled_back_page_ids,
+        "already_rolled_back": already_rolled_back,
+    }
+    audit_written = True
+    audit_error: str | None = None
+    if audit_path.exists():
+        audit_written = False
+        audit_error = "rollback audit already exists"
+    else:
+        try:
+            _write_ingest_artifact(audit_path, audit)
+        except OSError as exc:
+            audit_written = False
+            audit_error = f"{exc.__class__.__name__}: {exc}"
+    return {
+        "status": status,
+        "artifact": str(artifact_path),
+        "proposal_sha256": proposal_sha256,
+        "pages": rolled_back_page_ids,
+        "already_rolled_back": already_rolled_back,
+        "audit_path": str(audit_path),
+        "audit_written": audit_written,
+        "audit_error": audit_error,
+    }
+
+
 def _prepared_plan_is_recoverable(planned: list[PreparedIngestOperation]) -> bool:
     """True when every page is still at the reviewed pre- or postimage."""
 
@@ -2498,60 +2697,54 @@ def _review_and_apply_ingest_operations(
     reused_review = review is not None
     frontier_used = False
     if review is None:
-        if audit_decision.get("required") is not True:
-            review = {
-                "decision": (
-                    "apply_available" if planned else "confirmed_noop"
+        # Triage and generation are semantic model output.  Deterministic
+        # schema/path/link validation proves that a proposal is well-formed;
+        # it cannot prove that its claims are grounded in the raw.  Therefore
+        # even an audit sampler's "low-risk" result must never authorize a
+        # write or discard by itself.  Every semantic ingest disposition goes
+        # through the lane-scoped local consensus gate, which fails closed
+        # while shadowed or before an adoption artifact exists.
+        if frontier_budget is not None and not frontier_budget.consume():
+            runtime_status.safe_append_metric(
+                "ingest_authorization",
+                source_key=source_key,
+                mode=str(audit_decision.get("mode") or "unknown"),
+                frontier_used=False,
+                required=True,
+                sample_rate=audit_decision.get("sample_rate"),
+                caught_issue_rate=audit_decision.get("caught_issue_rate"),
+                decision="frontier_budget_exhausted",
+            )
+            return {
+                "status": "frontier_budget_exhausted",
+                "source_key": source_key,
+                "proposal_sha256": proposal_sha256,
+                "summary": (
+                    "structured review budget exhausted "
+                    f"({frontier_budget.used}/{frontier_budget.limit})"
                 ),
-                "summary": "low-risk ingest authorized by deterministic local policy",
-                "failed_operations_disposition": "none",
-                "tests_run": ["prepare", "schema", "path", "link-reconciliation"],
-                "risk": "low",
-                "notes": None,
-                "reviewer": "local_policy",
-            }
-        else:
-            if frontier_budget is not None and not frontier_budget.consume():
-                runtime_status.safe_append_metric(
-                    "ingest_authorization",
-                    source_key=source_key,
-                    mode=str(audit_decision.get("mode") or "unknown"),
-                    frontier_used=False,
-                    required=True,
-                    sample_rate=audit_decision.get("sample_rate"),
-                    caught_issue_rate=audit_decision.get("caught_issue_rate"),
-                    decision="frontier_budget_exhausted",
-                )
-                return {
-                    "status": "frontier_budget_exhausted",
-                    "source_key": source_key,
-                    "proposal_sha256": proposal_sha256,
+                "review": {
+                    "decision": "retry",
                     "summary": (
-                        "frontier call budget exhausted "
-                        f"({frontier_budget.used}/{frontier_budget.limit})"
+                        "structured review budget exhausted; keep the raw "
+                        "pending for local consensus"
                     ),
-                    "review": {
-                        "decision": "retry",
-                        "summary": (
-                            "frontier call budget exhausted; route the raw to "
-                            "local self-heal instead of calling frontier again"
-                        ),
-                    },
-                    "recovered_artifact": recovered_artifact,
-                    "reused_review": False,
-                    "created": [],
-                    "updated": [],
-                    "audit": audit_decision,
-                }
-            frontier_used = True
-            runtime_status.safe_write_status(stage="frontier-review")
-            try:
-                review = _run_ingest_frontier_review(proposal, reviewer=reviewer)
-            except Exception as exc:
-                review = {
-                    "decision": "needs_retry",
-                    "summary": f"frontier reviewer failed: {exc.__class__.__name__}: {exc}",
-                }
+                },
+                "recovered_artifact": recovered_artifact,
+                "reused_review": False,
+                "created": [],
+                "updated": [],
+                "audit": audit_decision,
+            }
+        frontier_used = True
+        runtime_status.safe_write_status(stage="local-consensus-review")
+        try:
+            review = _run_ingest_frontier_review(proposal, reviewer=reviewer)
+        except Exception as exc:
+            review = {
+                "decision": "needs_retry",
+                "summary": f"local consensus reviewer failed: {exc.__class__.__name__}: {exc}",
+            }
 
     review = _normalize_ingest_frontier_review(review, proposal=proposal)
     decision = str(review.get("decision") or "retry")

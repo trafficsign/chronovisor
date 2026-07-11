@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -195,6 +196,17 @@ def _mark_one_raw_processed(filename: str) -> None:
     _save_state(state)
 
 
+def _mark_raws_processed_preserving_lock(filenames: list[str]) -> None:
+    """Mark one ingest unit's source files without releasing the batch lock."""
+    state = _load_state()
+    processed = set(state.get("processed_raw_files", []))
+    processed.update(filenames)
+    state["processed_raw_files"] = sorted(processed)
+    state["last_ingest"] = datetime.now().isoformat()
+    state["triage_failure_count"] = 0
+    _save_state(state)
+
+
 def _update_triage_failure_count(failed: bool, triage_failed: bool) -> None:
     """Per-raw triage counter update — does NOT touch ``current_job_id``.
 
@@ -269,6 +281,199 @@ def get_ollama_status() -> dict:
 # How many consecutive triage failures we tolerate before quarantining the
 # offending raws so the queue can keep moving.
 TRIAGE_FAILURE_QUARANTINE_THRESHOLD = 3
+
+
+@dataclass(frozen=True)
+class _PendingRawUnit:
+    paths: tuple[Path, ...]
+    content: str | None = None
+    raw_keywords: tuple[str, ...] | None = None
+    fragment_record_sha256: str | None = None
+
+    @property
+    def representative(self) -> Path:
+        return self.paths[0]
+
+    @property
+    def filenames(self) -> list[str]:
+        return [path.name for path in self.paths]
+
+
+def _raw_ingest_input_limit() -> int:
+    from llm_wiki_mcp.runtime_config import load_decision_router_config
+
+    return max(1, load_decision_router_config().max_input_chars)
+
+
+def _quarantine_capture_fragment_paths(
+    paths: list[Path],
+    *,
+    record_sha256: str,
+    reason: str,
+    details: dict | None = None,
+) -> dict:
+    """Preserve a complete unsafe fragment set with a durable reason manifest."""
+
+    dead_letter_dir = (
+        RAW_DIR
+        / ".dead-letter"
+        / "raw-capture-fragments"
+        / record_sha256
+    )
+    dead_letter_dir.mkdir(parents=True, exist_ok=True)
+    moved: list[dict[str, str]] = []
+    for src in paths:
+        if not src.exists():
+            continue
+        dst = dead_letter_dir / src.name
+        duplicate = 1
+        while dst.exists():
+            dst = dead_letter_dir / f"{src.name}.duplicate-{duplicate}"
+            duplicate += 1
+        try:
+            src.rename(dst)
+        except OSError:
+            continue
+        moved.append({"source": src.name, "preserved_as": dst.name})
+
+    filenames = [row["source"] for row in moved]
+    if filenames:
+        _mark_raws_processed_preserving_lock(filenames)
+    manifest = {
+        "schema_version": 1,
+        "kind": "raw_capture_fragment_quarantine",
+        "created_at": datetime.now().isoformat(),
+        "record_sha256": record_sha256,
+        "reason": reason,
+        "details": details or {},
+        "files": moved,
+    }
+    manifest_path = dead_letter_dir / "manifest.json"
+    temporary = dead_letter_dir / ".manifest.json.tmp"
+    temporary.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(manifest_path)
+    return {
+        "record_sha256": record_sha256,
+        "reason": reason,
+        "files": filenames,
+        "manifest": str(manifest_path),
+    }
+
+
+def _prepare_pending_raw_units(
+    pending: list[Path],
+) -> tuple[list[_PendingRawUnit], list[dict], list[dict]]:
+    """Separate normal raws from validated, complete fragment transport sets."""
+
+    from llm_wiki_mcp.raw_capture_fragments import (
+        RawCaptureFragmentError,
+        group_capture_fragments,
+        parse_capture_fragment,
+    )
+
+    fragments = []
+    fragment_paths: set[Path] = set()
+    quarantined: list[dict] = []
+    deferred: list[dict] = []
+    for path in pending:
+        try:
+            fragment = parse_capture_fragment(path)
+        except (OSError, UnicodeError, RawCaptureFragmentError) as exc:
+            fragment_paths.add(path)
+            quarantined.append(
+                _quarantine_capture_fragment_paths(
+                    [path],
+                    record_sha256=f"malformed-{path.stem}",
+                    reason="fragment_parse_error",
+                    details={"error": f"{type(exc).__name__}: {exc}"},
+                )
+            )
+            continue
+        if fragment is not None:
+            fragments.append(fragment)
+            fragment_paths.add(path)
+
+    units = [
+        _PendingRawUnit(paths=(path,))
+        for path in pending
+        if path not in fragment_paths
+    ]
+    try:
+        groups = group_capture_fragments(fragments)
+    except RawCaptureFragmentError as exc:
+        # Duplicate indices are not independently meaningful. Preserve every
+        # claimed transport fragment rather than leaking any one into ingest.
+        paths = sorted(fragment_paths, key=lambda path: path.name)
+        if paths:
+            quarantined.append(
+                _quarantine_capture_fragment_paths(
+                    paths,
+                    record_sha256="malformed-duplicate-fragment-index",
+                    reason="fragment_group_invalid",
+                    details={"error": str(exc)},
+                )
+            )
+        return sorted(units, key=lambda unit: unit.representative.name), quarantined, deferred
+
+    input_limit = _raw_ingest_input_limit()
+    for group in groups:
+        if not group.complete:
+            deferred.append(
+                {
+                    "record_sha256": group.identity.record_sha256,
+                    "reason": "fragment_group_incomplete",
+                    "missing_indices": list(group.missing_indices),
+                    "files": [path.name for path in group.paths],
+                }
+            )
+            continue
+        try:
+            record_text = group.assemble_text()
+        except RawCaptureFragmentError as exc:
+            quarantined.append(
+                _quarantine_capture_fragment_paths(
+                    list(group.paths),
+                    record_sha256=group.identity.record_sha256,
+                    reason="fragment_integrity_failure",
+                    details={"error": str(exc)},
+                )
+            )
+            continue
+        ingest_content = group.ingest_content()
+        if len(ingest_content) > input_limit:
+            quarantined.append(
+                _quarantine_capture_fragment_paths(
+                    list(group.paths),
+                    record_sha256=group.identity.record_sha256,
+                    reason="reassembled_input_limit_exceeded",
+                    details={
+                        "record_chars": len(record_text),
+                        "ingest_chars": len(ingest_content),
+                        "record_bytes": group.identity.record_bytes,
+                        "max_input_chars": input_limit,
+                        "fragment_count": group.identity.fragment_count,
+                    },
+                )
+            )
+            continue
+        host_label = "Claude Code" if group.identity.host == "claude-code" else "Codex"
+        units.append(
+            _PendingRawUnit(
+                paths=tuple(sorted(group.paths, key=lambda path: path.name)),
+                content=ingest_content,
+                raw_keywords=(
+                    host_label,
+                    "transcript-delta",
+                    "transcript-reassembled",
+                ),
+                fragment_record_sha256=group.identity.record_sha256,
+            )
+        )
+    units.sort(key=lambda unit: unit.representative.name)
+    return units, quarantined, deferred
 
 
 def _quarantine_pending_raws(filenames: list[str]) -> Path:
@@ -374,11 +579,52 @@ def run_pending_ingest(force: bool = False) -> dict:
 
         pending = get_pending_raw_files()
         pending_before_count = len(pending)
+        units, fragment_quarantined, fragment_deferred = _prepare_pending_raw_units(
+            pending
+        )
 
-        # Limit batch size to avoid overwhelming LLM.
+        # Limit semantic work units, not transport fragments. A complete
+        # fragment set is reconstructed and presented to ingest exactly once.
         MAX_BATCH = 10
-        pending = pending[:MAX_BATCH]
-        filenames = [f.name for f in pending]
+        units = units[:MAX_BATCH]
+        filenames = [name for unit in units for name in unit.filenames]
+
+        if not units:
+            pending_after_preflight = len(get_pending_raw_files())
+            runtime_status.safe_write_status(
+                state="idle",
+                stage="waiting",
+                pending=pending_after_preflight,
+                current_raw=None,
+                current_op=None,
+                current_job_id=None,
+                current_job_pid=None,
+                ollama=get_ollama_status(),
+                llm=None,
+            )
+            if fragment_quarantined:
+                return {
+                    "triggered": True,
+                    "reason": "capture fragments quarantined before semantic ingest",
+                    "job_ids": [],
+                    "files_attempted": [],
+                    "files_processed": [],
+                    "files_quarantined": [
+                        name
+                        for row in fragment_quarantined
+                        for name in row.get("files", [])
+                    ],
+                    "fragment_quarantined": fragment_quarantined,
+                    "fragment_deferred": fragment_deferred,
+                    "processor": get_ollama_status()["processor"],
+                    "elapsed_seconds": 0.0,
+                }
+            return {
+                "triggered": False,
+                "reason": "capture fragment groups are incomplete",
+                "fragment_quarantined": [],
+                "fragment_deferred": fragment_deferred,
+            }
 
         # Quarantine if this same head-of-queue keeps blowing up triage.
         if state.get("triage_failure_count", 0) >= TRIAGE_FAILURE_QUARANTINE_THRESHOLD:
@@ -438,15 +684,23 @@ def run_pending_ingest(force: bool = False) -> dict:
             llm=None,
         )
 
+        succeeded_units = 0
         try:
-            for raw_index, raw_path in enumerate(pending, start=1):
+            for raw_index, unit in enumerate(units, start=1):
+                raw_path = unit.representative
                 fname = raw_path.name
+                source_filenames = unit.filenames
                 try:
-                    raw_text = raw_path.read_text()
+                    raw_text = (
+                        unit.content
+                        if unit.content is not None
+                        else raw_path.read_text()
+                    )
                 except Exception as e:
                     _orch_log(f"orchestrator | failed to read raw {fname}: {e}")
                     per_raw.append({
                         "filename": fname,
+                        "source_files": source_filenames,
                         "succeeded": False,
                         "error": f"read error: {e}",
                     })
@@ -455,10 +709,13 @@ def run_pending_ingest(force: bool = False) -> dict:
                 # Extract raw_keywords from frontmatter, falling back to the
                 # legacy ``keywords`` field for raws written before Phase 1.
                 # Anything that isn't a list of strings is normalized to [].
-                meta, _body = _frontmatter_parse(raw_text)
-                raw_keywords = _coerce_str_list(meta.get("raw_keywords"))
-                if raw_keywords is None:
-                    raw_keywords = _coerce_str_list(meta.get("keywords")) or []
+                if unit.raw_keywords is not None:
+                    raw_keywords = list(unit.raw_keywords)
+                else:
+                    meta, _body = _frontmatter_parse(raw_text)
+                    raw_keywords = _coerce_str_list(meta.get("raw_keywords"))
+                    if raw_keywords is None:
+                        raw_keywords = _coerce_str_list(meta.get("keywords")) or []
 
                 processor = "ollama" if is_available() else "unavailable"
                 job = job_store.create(processor=processor)
@@ -474,9 +731,9 @@ def run_pending_ingest(force: bool = False) -> dict:
                     batch={
                         "started_at": datetime.fromtimestamp(batch_started).isoformat(),
                         "index": raw_index,
-                        "total": len(filenames),
-                        "succeeded": len(succeeded_filenames),
-                        "failed": len(per_raw) - len(succeeded_filenames),
+                        "total": len(units),
+                        "succeeded": succeeded_units,
+                        "failed": len(per_raw) - succeeded_units,
                         "files": filenames,
                     },
                     ollama=get_ollama_status(),
@@ -497,9 +754,9 @@ def run_pending_ingest(force: bool = False) -> dict:
                 # ``nonlocal`` gymnastics across the loop iterations.
                 raw_success_flag = [False]
 
-                def _on_complete(name=fname, flag=raw_success_flag):
+                def _on_complete(names=source_filenames, flag=raw_success_flag):
                     flag[0] = True
-                    _mark_one_raw_processed(name)
+                    _mark_raws_processed_preserving_lock(list(names))
 
                 def _on_finally(failed: bool, triage_failed: bool):
                     _update_triage_failure_count(failed, triage_failed)
@@ -522,7 +779,8 @@ def run_pending_ingest(force: bool = False) -> dict:
 
                 supervision = None
                 if raw_success_flag[0]:
-                    succeeded_filenames.append(fname)
+                    succeeded_filenames.extend(source_filenames)
+                    succeeded_units += 1
                     try:
                         from llm_wiki_mcp.failure_supervisor import reset_raw_failure
 
@@ -548,6 +806,32 @@ def run_pending_ingest(force: bool = False) -> dict:
                                 raw_text=raw_text,
                             )
                         )
+                        if (
+                            isinstance(supervision, dict)
+                            and supervision.get("quarantined") is True
+                            and len(source_filenames) > 1
+                        ):
+                            fragment_paths = [
+                                path for path in unit.paths if path.exists()
+                            ]
+                            quarantined_representative = supervision.get(
+                                "quarantine_path"
+                            )
+                            if isinstance(quarantined_representative, str):
+                                quarantined_path = Path(quarantined_representative)
+                                if quarantined_path.exists():
+                                    fragment_paths.append(quarantined_path)
+                            _quarantine_capture_fragment_paths(
+                                fragment_paths,
+                                record_sha256=(
+                                    unit.fragment_record_sha256
+                                    or f"failed-{raw_path.stem}"
+                                ),
+                                reason="reassembled_ingest_failure",
+                                details={
+                                    "failure_class": supervision.get("failure_class")
+                                },
+                            )
                     except Exception as e:
                         _orch_log(
                             f"orchestrator | failure supervisor failed "
@@ -556,9 +840,14 @@ def run_pending_ingest(force: bool = False) -> dict:
 
                 raw_result = {
                     "filename": fname,
+                    "source_files": source_filenames,
                     "job_id": job.job_id,
                     "succeeded": raw_success_flag[0],
                 }
+                if unit.fragment_record_sha256 is not None:
+                    raw_result["reassembled_fragment_record_sha256"] = (
+                        unit.fragment_record_sha256
+                    )
                 if supervision is not None:
                     raw_result["supervision"] = supervision
                 per_raw.append(raw_result)
@@ -604,10 +893,10 @@ def run_pending_ingest(force: bool = False) -> dict:
             current_job_pid=None,
             batch={
                 "started_at": datetime.fromtimestamp(batch_started).isoformat(),
-                "index": len(filenames),
-                "total": len(filenames),
-                "succeeded": len(succeeded_filenames),
-                "failed": len(filenames) - len(succeeded_filenames),
+                "index": len(units),
+                "total": len(units),
+                "succeeded": succeeded_units,
+                "failed": len(units) - succeeded_units,
                 "elapsed_seconds": round(elapsed, 2),
                 "files": filenames,
             },
@@ -621,6 +910,13 @@ def run_pending_ingest(force: bool = False) -> dict:
             "job_ids": job_ids,
             "files_attempted": filenames,
             "files_processed": succeeded_filenames,
+            "files_quarantined": [
+                name
+                for row in fragment_quarantined
+                for name in row.get("files", [])
+            ],
+            "fragment_quarantined": fragment_quarantined,
+            "fragment_deferred": fragment_deferred,
             "per_raw": per_raw,
             "processor": get_ollama_status()["processor"],
             "elapsed_seconds": round(elapsed, 2),

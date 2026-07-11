@@ -5,6 +5,7 @@ replacing it with something that catches the same class of mistake.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -767,7 +768,7 @@ class TestIngestFrontierGate:
         assert "The exact proposed fact." in planned[0].new_body
         assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
 
-    def test_low_risk_proposal_bypasses_frontier_but_keeps_durable_verdict(
+    def test_low_risk_proposal_still_requires_semantic_consensus(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from llm_wiki_mcp import ingest
@@ -782,11 +783,17 @@ class TestIngestFrontierGate:
             / float(16**12)
             >= 0.10
         )
+        captured: list[dict] = []
         monkeypatch.setattr(
             ingest,
             "_run_ingest_frontier_review",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("low-risk proposal should not call frontier")
+            lambda proposal, **_kwargs: (
+                captured.append(proposal)
+                or {
+                    "decision": "apply_available",
+                    "summary": "local consensus accepted grounded proposal",
+                    "failed_operations_disposition": "none",
+                }
             ),
         )
 
@@ -797,10 +804,33 @@ class TestIngestFrontierGate:
 
         assert result["status"] == "apply_available"
         assert result["audit"]["mode"] == "local"
-        assert result["review"]["reviewer"] == "local_policy"
+        assert len(captured) == 1
         assert (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
 
-    def test_explicit_correction_signal_requires_frontier(
+    def test_low_risk_proposal_cannot_mutate_when_consensus_is_shadowed(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_run_ingest_frontier_review",
+            lambda _proposal, **_kwargs: {
+                "decision": "retry",
+                "summary": "decision_lane_shadow:ingest_reconciliation",
+                "failed_operations_disposition": "retry_required",
+            },
+        )
+
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="ordinary low-risk observation",
+        )
+
+        assert result["status"] == "needs_retry"
+        assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
+
+    def test_explicit_correction_signal_requires_structured_review(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from llm_wiki_mcp import ingest
@@ -1011,6 +1041,94 @@ class TestIngestFrontierGate:
 # ---------------------------------------------------------------------------
 # Phase 4: raw_keywords frontmatter patch in apply prepare phase
 # ---------------------------------------------------------------------------
+
+
+class TestIngestProposalRollback:
+    def test_exact_applied_postimages_can_be_rolled_back_idempotently(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        existing = _seed_page(
+            isolated_wiki,
+            "memory/existing.md",
+            "---\ntitle: Existing\nupdated: 2026-07-11\n---\nold fact\n",
+        )
+        previous = existing.read_text(encoding="utf-8")
+        operations = [
+            {
+                "type": "create",
+                "filename": "memory/new.md",
+                "content": "---\ntitle: New\nupdated: 2026-07-12\n---\nnew fact\n",
+            },
+            {
+                "type": "update",
+                "filename": "memory/existing.md",
+                "content": "additional fact\n",
+            },
+        ]
+        result = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content="grounded raw",
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "test approval",
+                "failed_operations_disposition": "none",
+            },
+        )
+        proposal_path, _review_path = ingest._ingest_artifact_paths(
+            result["source_key"]
+        )
+
+        rolled_back = ingest.rollback_ingest_proposal_artifact(
+            proposal_path,
+            reason="test incident recovery",
+        )
+
+        assert rolled_back["status"] == "rolled_back"
+        assert set(rolled_back["pages"]) == {"new", "existing"}
+        assert not (isolated_wiki / "pages" / "memory" / "new.md").exists()
+        assert existing.read_text(encoding="utf-8") == previous
+        audit_path = Path(rolled_back["audit_path"])
+        audit_before = audit_path.read_bytes()
+
+        repeated = ingest.rollback_ingest_proposal_artifact(
+            proposal_path,
+            reason="verify idempotence",
+        )
+        assert repeated["status"] == "already_rolled_back"
+        assert set(repeated["already_rolled_back"]) == {"new", "existing"}
+        assert repeated["audit_written"] is False
+        assert audit_path.read_bytes() == audit_before
+
+    def test_rollback_aborts_before_writes_when_any_target_diverged(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        result = ingest._review_and_apply_ingest_operations(
+            [TestIngestFrontierGate._create_op()],
+            raw_content="grounded raw with later edit",
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "test approval",
+                "failed_operations_disposition": "none",
+            },
+        )
+        target = isolated_wiki / "pages" / "memory" / "frontier-only.md"
+        target.write_text("a later independent edit\n", encoding="utf-8")
+        proposal_path, _review_path = ingest._ingest_artifact_paths(
+            result["source_key"]
+        )
+
+        rolled_back = ingest.rollback_ingest_proposal_artifact(
+            proposal_path,
+            reason="must not overwrite later edit",
+        )
+
+        assert rolled_back["status"] == "conflict"
+        assert rolled_back["page_id"] == "frontier-only"
+        assert target.read_text(encoding="utf-8") == "a later independent edit\n"
 
 
 class TestApplyRawKeywordsPatch:
@@ -2248,6 +2366,222 @@ class TestRawKeywordsMetadataPropagation:
 
 
 class TestOrchestrator:
+    @staticmethod
+    def _write_capture_fragments(
+        raw_dir: Path,
+        *,
+        record_text: str,
+        fragment_bytes: int,
+        omit_indices: set[int] | None = None,
+    ) -> tuple[str, list[Path]]:
+        record = record_text.encode("utf-8")
+        record_sha256 = hashlib.sha256(record).hexdigest()
+        chunks = [
+            record[offset : offset + fragment_bytes]
+            for offset in range(0, len(record), fragment_bytes)
+        ]
+        paths: list[Path] = []
+        for index, chunk in enumerate(chunks, start=1):
+            if index in (omit_indices or set()):
+                continue
+            payload = {
+                "schema": "llm-wiki.raw-capture-fragment.v1",
+                "host": "codex",
+                "session_id": "fragment-session",
+                "session_file": "/tmp/session.jsonl",
+                "source_line": 42,
+                "record_sha256": record_sha256,
+                "record_bytes": len(record),
+                "fragment_index": index,
+                "fragment_count": len(chunks),
+                "fragment_bytes": len(chunk),
+                "encoding": "base64",
+                "data": base64.b64encode(chunk).decode("ascii"),
+            }
+            path = raw_dir / f"fragment-{index}.md"
+            path.write_text(
+                "---\nraw_keywords: [Codex, transcript-fragment]\n---\n"
+                "# Codex Oversized Transcript Record Fragment\n\n"
+                "```json\n"
+                + json.dumps(payload, ensure_ascii=False, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            paths.append(path)
+        return record_sha256, paths
+
+    def test_complete_fragment_group_is_reassembled_before_ingest(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+
+        record = json.dumps(
+            [{"line": 42, "role": "user", "text": "remember the whole record"}],
+            ensure_ascii=False,
+        )
+        _sha256, paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=record,
+            fragment_bytes=13,
+        )
+        observed: list[tuple[str, dict]] = []
+
+        def fake_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            observed.append((content, metadata or {}))
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(orchestrator, "_raw_ingest_input_limit", lambda: 10_000)
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert len(observed) == 1
+        assert record in observed[0][0]
+        assert '"data"' not in observed[0][0]
+        assert observed[0][1]["raw_keywords"] == [
+            "Codex",
+            "transcript-delta",
+            "transcript-reassembled",
+        ]
+        assert result["files_processed"] == sorted(path.name for path in paths)
+        assert orchestrator.get_pending_raw_files() == []
+
+    def test_over_limit_fragment_group_is_quarantined_without_model_call(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+
+        record = json.dumps([{"role": "user", "text": "X" * 200}])
+        record_sha256, paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=record,
+            fragment_bytes=32,
+        )
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail("fragment leaked into model ingest"),
+        )
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(orchestrator, "_raw_ingest_input_limit", lambda: 50)
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert result["triggered"] is True
+        assert result["files_quarantined"] == sorted(path.name for path in paths)
+        assert orchestrator.get_pending_raw_files() == []
+        manifest = (
+            isolated_wiki
+            / "raw"
+            / ".dead-letter"
+            / "raw-capture-fragments"
+            / record_sha256
+            / "manifest.json"
+        )
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        assert payload["reason"] == "reassembled_input_limit_exceeded"
+        assert payload["details"]["max_input_chars"] == 50
+
+    def test_incomplete_fragment_group_is_deferred_without_model_call(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+
+        record = json.dumps([{"role": "user", "text": "Y" * 100}])
+        _sha256, paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=record,
+            fragment_bytes=32,
+            omit_indices={2},
+        )
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail("incomplete fragments reached model"),
+        )
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(orchestrator, "_raw_ingest_input_limit", lambda: 10_000)
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert result["triggered"] is False
+        assert result["fragment_deferred"][0]["missing_indices"] == [2]
+        assert orchestrator.get_pending_raw_files() == sorted(paths)
+
+    def test_failed_reassembled_group_is_quarantined_as_one_complete_set(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import (
+            failure_supervisor,
+            ingest as ingest_mod,
+            orchestrator,
+        )
+
+        record = json.dumps([{"role": "user", "text": "grounded record"}])
+        record_sha256, paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=record,
+            fragment_bytes=9,
+        )
+
+        def fake_run_ingest(
+            _content, _job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            del on_complete, metadata
+            if on_finally:
+                on_finally(failed=True, triage_failed=False)
+
+        def fake_record_raw_failure(*, raw_path, **_kwargs):
+            quarantine = (
+                isolated_wiki
+                / "runtime"
+                / "failures"
+                / "quarantined-raw"
+                / raw_path.name
+            )
+            quarantine.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.rename(quarantine)
+            return {
+                "quarantined": True,
+                "quarantine_path": str(quarantine),
+                "failure_class": "semantic.test_failure",
+            }
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(orchestrator, "_raw_ingest_input_limit", lambda: 10_000)
+        monkeypatch.setattr(
+            failure_supervisor,
+            "record_raw_failure",
+            fake_record_raw_failure,
+        )
+        monkeypatch.setattr(failure_supervisor, "result_to_dict", lambda value: value)
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert result["per_raw"][0]["succeeded"] is False
+        assert orchestrator.get_pending_raw_files() == []
+        dead_letter = (
+            isolated_wiki
+            / "raw"
+            / ".dead-letter"
+            / "raw-capture-fragments"
+            / record_sha256
+        )
+        manifest = json.loads(
+            (dead_letter / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["reason"] == "reassembled_ingest_failure"
+        assert {row["source"] for row in manifest["files"]} == {
+            path.name for path in paths
+        }
+
     def test_retracted_raw_is_not_pending_and_body_is_preserved(
         self, isolated_wiki: Path
     ) -> None:
