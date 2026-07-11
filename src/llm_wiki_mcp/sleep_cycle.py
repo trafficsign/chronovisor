@@ -679,6 +679,13 @@ def _run_sleep_cycle(
             dry_run=dry_run,
         ),
     )
+    model_lab = _run_lane(
+        "model_lab",
+        lambda: __import__("llm_wiki_mcp.model_lab", fromlist=["run_due"]).run_due(
+            dry_run=dry_run,
+            max_evaluations=2,
+        ),
+    )
     calibration = _run_lane(
         "recall_calibration",
         lambda: __import__("llm_wiki_mcp.recall_calibration", fromlist=["run_due"]).run_due(
@@ -749,6 +756,7 @@ def _run_sleep_cycle(
             **({"error": duplicate_error} if duplicate_error else {}),
         },
         "recall_improve": recall_improve,
+        "model_lab": model_lab,
         "recall_calibration": calibration,
         "search_self_tune": search_self_tune,
     }

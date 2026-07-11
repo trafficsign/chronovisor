@@ -131,6 +131,9 @@ def recall_improve_enabled(explicit_config: Path | None = None) -> bool:
 
 def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
     host = normalize_host(args.host)
+    if env_flag("LLM_WIKI_INTERNAL_FRONTIER") is True:
+        _print_host_noop(host)
+        return 0
     if not recall_enabled() or not load_hook_policy(args.config).user_prompt_recall:
         _print_host_noop(host)
         return 0
@@ -259,6 +262,12 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
 
 def run_stop(args: argparse.Namespace, stdin_text: str) -> int:
     host = normalize_host(args.host)
+    if env_flag("LLM_WIKI_INTERNAL_FRONTIER") is True:
+        if args.format == "json":
+            print(json.dumps({"status": "suppressed", "reason": "internal_frontier", "tasks": []}))
+        else:
+            print("{}")
+        return 0
     tasks = stop_tasks(host, args)
     spawned: list[dict[str, Any]] = []
     for task in tasks:

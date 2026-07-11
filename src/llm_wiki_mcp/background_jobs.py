@@ -71,6 +71,41 @@ def _save(state: dict[str, Any]) -> None:
             pass
 
 
+def _pid_alive(pid: Any) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def repair_stale(*, quarantine_pending: bool = False) -> dict[str, Any]:
+    """Quarantine abandoned workers and optionally an incident backlog."""
+    repaired = 0
+    with _lock():
+        state = _load()
+        for job in state["jobs"].values():
+            if not isinstance(job, dict):
+                continue
+            status = str(job.get("status") or "")
+            abandoned = status == "running" and not _pid_alive(job.get("owner_pid"))
+            pending_incident = quarantine_pending and status in {"queued", "retry_wait"}
+            if not abandoned and not pending_incident:
+                continue
+            job["status"] = "quarantined"
+            job["next_retry_at"] = None
+            job["exit_code"] = 1
+            job["output_tail"] = "quarantined by background-job stale recovery"
+            job["updated_at"] = _iso()
+            job.pop("owner_pid", None)
+            repaired += 1
+        if repaired:
+            _save(state)
+    return {"status": "ok", "repaired": repaired, "quarantine_pending": quarantine_pending}
+
+
 def _dedupe_key(name: str, module: str, args: list[str], stdin_text: str) -> str:
     payload = json.dumps(
         {"name": name, "module": module, "args": args, "stdin": stdin_text},
@@ -190,6 +225,7 @@ def run_job(job_id: str) -> dict[str, Any]:
 
 
 def retry_due(*, limit: int = 8) -> dict[str, Any]:
+    repair_stale()
     with _lock():
         state = _load()
         now = _now()
@@ -210,6 +246,7 @@ def retry_due(*, limit: int = 8) -> dict[str, Any]:
 
 
 def snapshot() -> dict[str, Any]:
+    repair_stale()
     with _lock():
         jobs = _load()["jobs"]
     counts: dict[str, int] = {}
@@ -234,11 +271,15 @@ def main(argv: list[str] | None = None) -> int:
     retry_p = sub.add_parser("retry")
     retry_p.add_argument("--limit", type=int, default=8)
     sub.add_parser("status")
+    repair_p = sub.add_parser("repair")
+    repair_p.add_argument("--quarantine-pending", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "run":
         result = run_job(args.job_id)
     elif args.command == "retry":
         result = retry_due(limit=max(0, args.limit))
+    elif args.command == "repair":
+        result = repair_stale(quarantine_pending=args.quarantine_pending)
     else:
         result = snapshot()
     if args.command != "run":

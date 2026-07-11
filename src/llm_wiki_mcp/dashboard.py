@@ -1216,6 +1216,15 @@ def _recall_improvement_snapshot() -> dict[str, Any]:
         }
 
 
+def _model_lab_snapshot() -> dict[str, Any]:
+    try:
+        from llm_wiki_mcp.model_lab import snapshot
+
+        return snapshot()
+    except Exception as exc:
+        return {"status": "error", "error": exc.__class__.__name__, "policy": {"roles": {}}, "candidates": [], "history": []}
+
+
 def build_snapshot() -> dict[str, Any]:
     init_wiki()
     status = runtime_status.read_status()
@@ -1268,6 +1277,7 @@ def build_snapshot() -> dict[str, Any]:
         "self_heal": _self_heal_snapshot(),
         "recall": _recall_snapshot(),
         "recall_improvement": _recall_improvement_snapshot(),
+        "model_lab": _model_lab_snapshot(),
         "save_history": _save_history_snapshot(),
         "knowledge_mix": _knowledge_mix_snapshot(),
         "health": health_snapshot(),
@@ -1302,6 +1312,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _json_response(self, {"recall": build_snapshot()["recall"]})
         elif path == "/api/recall-improvement":
             _json_response(self, {"recall_improvement": build_snapshot()["recall_improvement"]})
+        elif path == "/api/model-lab":
+            _json_response(self, {"model_lab": build_snapshot()["model_lab"]})
         elif path == "/api/save-history":
             _json_response(self, {"save_history": build_snapshot()["save_history"]})
         elif path == "/api/knowledge-mix":

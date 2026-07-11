@@ -103,8 +103,8 @@ CODEX_OPTION_ALIASES = {
 
 # Autonomous memory reviews must not inherit a user-wide experimental model
 # or reasoning level that the installed Codex CLI cannot execute.
-DEFAULT_FRONTIER_MODEL = "gpt-5.4"
-DEFAULT_FRONTIER_REASONING_EFFORT = "high"
+DEFAULT_FRONTIER_MODEL = "gpt-5.5"
+DEFAULT_FRONTIER_REASONING_EFFORT = "medium"
 
 HUMAN_REQUIRED_FAILURE_CLASSES = CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES
 
@@ -531,6 +531,8 @@ def _build_codex_exec_invocation(
     output_path: Path,
     execute_patch: bool,
     preflight: dict[str, Any],
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     codex_meta = preflight.get("codex") if isinstance(preflight.get("codex"), dict) else {}
     exec_help_data = codex_meta.get("exec_help") if isinstance(codex_meta.get("exec_help"), dict) else {}
@@ -596,6 +598,17 @@ def _build_codex_exec_invocation(
             "replacement": "omitted",
         })
 
+    # A frontier child must never execute the parent host's Stop hooks. Without
+    # this, each review recursively schedules save/correction/review children.
+    if _option_supported(exec_help, "--disable"):
+        cmd.extend(["--disable", "hooks"])
+    else:
+        repairs.append({
+            "type": "cli_option_adapted",
+            "option": "--disable hooks",
+            "replacement": "LLM_WIKI_INTERNAL_FRONTIER guard",
+        })
+
     if not execute_patch:
         sandbox_option = _preferred_option(exec_help, "--sandbox")
         if sandbox_option:
@@ -607,11 +620,10 @@ def _build_codex_exec_invocation(
                 "replacement": "default_sandbox",
             })
 
-    model = os.environ.get("LLM_WIKI_FRONTIER_MODEL", DEFAULT_FRONTIER_MODEL).strip()
-    reasoning_effort = os.environ.get(
-        "LLM_WIKI_FRONTIER_REASONING_EFFORT",
-        DEFAULT_FRONTIER_REASONING_EFFORT,
-    ).strip()
+    model = (model or os.environ.get("LLM_WIKI_FRONTIER_MODEL", DEFAULT_FRONTIER_MODEL)).strip()
+    reasoning_effort = (reasoning_effort or os.environ.get(
+        "LLM_WIKI_FRONTIER_REASONING_EFFORT", DEFAULT_FRONTIER_REASONING_EFFORT,
+    )).strip()
     if model:
         cmd.extend(["--model", model])
     if reasoning_effort:
@@ -934,6 +946,12 @@ def _frontier_env() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("CODEX_HOME", str(_codex_home()))
     env.setdefault("NO_COLOR", "1")
+    env["LLM_WIKI_INTERNAL_FRONTIER"] = "1"
+    env["LLM_WIKI_CONTENT_CORRECTION_ENABLED"] = "0"
+    env["LLM_WIKI_RECALL_AUDIT_ENABLED"] = "0"
+    env["LLM_WIKI_RECALL_IMPROVE_ENABLED"] = "0"
+    env["CODEX_WIKI_SAVE_ENABLED"] = "0"
+    env["CLAUDE_CODE_WIKI_SAVE_ENABLED"] = "0"
     return env
 
 
@@ -1217,6 +1235,8 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
             json.dumps(strict_schema, indent=2) + "\n",
             encoding="utf-8",
         )
+        from llm_wiki_mcp.model_lab import resolve_role
+        model, reasoning_effort = resolve_role("code_repair")
         invocation = _build_codex_exec_invocation(
             codex,
             repo_root=repo_root,
@@ -1224,6 +1244,8 @@ def _run_codex(prompt: str, *, repo_root: Path, timeout: int, execute_patch: boo
             output_path=output_path,
             execute_patch=execute_patch,
             preflight=preflight,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
         access_repairs = [
             repair
@@ -1305,6 +1327,10 @@ def run_structured_review(
     timeout: int | None = None,
     execute_patch: bool = False,
     command_env: str = "LLM_WIKI_STRUCTURED_REVIEW_CMD",
+    model_role: str = "semantic_judge",
+    model_override: str | None = None,
+    reasoning_effort_override: str | None = None,
+    record_replay: bool = True,
 ) -> dict[str, Any]:
     """Run one bounded frontier review without rescue fan-out.
 
@@ -1312,7 +1338,26 @@ def run_structured_review(
     Codex + rescue Codex + Claude. Code-repair packets keep the richer rescue
     path in :func:`run_frontier_review`; content-policy lanes use this helper.
     """
+    from llm_wiki_mcp.model_lab import record_live_result, record_replay_case, resolve_role
+
     timeout_seconds = _bounded_timeout(timeout)
+    selected_model, selected_effort = resolve_role(model_role)
+    selected_model = model_override or selected_model
+    selected_effort = reasoning_effort_override or selected_effort
+    started = time.monotonic()
+
+    def finalize(result: dict[str, Any]) -> dict[str, Any]:
+        elapsed = time.monotonic() - started
+        failure = result.get("frontier_failure")
+        failure_class = str(failure.get("failure_class")) if isinstance(failure, dict) else None
+        ok = failure is None and result.get("decision") != "needs_retry"
+        record_live_result(role=model_role, model=selected_model, ok=ok, failure_class=failure_class)
+        if record_replay and ok:
+            record_replay_case(
+                role=model_role, prompt=prompt, schema=schema, result=result,
+                model=selected_model, effort=selected_effort, latency_seconds=elapsed,
+            )
+        return result
     command = os.environ.get(command_env)
     if command:
         try:
@@ -1326,23 +1371,23 @@ def run_structured_review(
                 cwd=str(repo_root),
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
-            return _structured_subprocess_failure(
+            return finalize(_structured_subprocess_failure(
                 exc, reviewer="frontier command", schema=schema
-            )
+            ))
         output = redact_sensitive_text((completed.stdout or "") + "\n" + (completed.stderr or ""))
         if completed.returncode != 0:
             failure = classify_frontier_failure(output)
-            return _structured_failure_payload(
+            return finalize(_structured_failure_payload(
                 schema,
                 summary=f"frontier command failed with exit {completed.returncode}",
                 failure=failure,
                 reviewer="frontier command",
                 diagnostics=output,
-            )
+            ))
         parsed = _extract_json_object(output)
-        return _validated_structured_result(
+        return finalize(_validated_structured_result(
             parsed, schema, reviewer="frontier command"
-        )
+        ))
 
     codex = shutil.which("codex")
     if codex is None:
@@ -1351,12 +1396,12 @@ def run_structured_review(
             "frontier_retry",
             "codex executable not found",
         )
-        return _structured_failure_payload(
+        return finalize(_structured_failure_payload(
             schema,
             summary=failure.summary,
             failure=failure,
             reviewer="codex",
-        )
+        ))
     preflight = run_frontier_preflight()
     if not preflight.get("ok"):
         failure_payload = preflight.get("failure") if isinstance(preflight.get("failure"), dict) else {}
@@ -1365,12 +1410,12 @@ def run_structured_review(
             str(failure_payload.get("rescue_status") or "frontier_retry"),
             str(failure_payload.get("summary") or "frontier preflight failed"),
         )
-        return _structured_failure_payload(
+        return finalize(_structured_failure_payload(
             schema,
             summary=failure.summary,
             failure=failure,
             reviewer="codex",
-        )
+        ))
 
     with tempfile.TemporaryDirectory() as td:
         schema_path = Path(td) / "structured-review.schema.json"
@@ -1384,6 +1429,8 @@ def run_structured_review(
             output_path=output_path,
             execute_patch=execute_patch,
             preflight=preflight,
+            model=selected_model,
+            reasoning_effort=selected_effort,
         )
         try:
             completed = subprocess.run(
@@ -1396,7 +1443,7 @@ def run_structured_review(
                 cwd=invocation.get("cwd") or None,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
-            return _structured_subprocess_failure(exc, reviewer="codex", schema=schema)
+            return finalize(_structured_subprocess_failure(exc, reviewer="codex", schema=schema))
         output = ""
         if output_path.exists():
             output += output_path.read_text(encoding="utf-8", errors="replace")
@@ -1404,15 +1451,15 @@ def run_structured_review(
         output = redact_sensitive_text(output)
         if completed.returncode != 0:
             failure = classify_frontier_failure(output)
-            return _structured_failure_payload(
+            return finalize(_structured_failure_payload(
                 schema,
                 summary=f"codex structured review failed with exit {completed.returncode}",
                 failure=failure,
                 reviewer="codex",
                 diagnostics=output,
-            )
+            ))
         parsed = _extract_json_object(output)
-        return _validated_structured_result(parsed, schema, reviewer="frontier")
+        return finalize(_validated_structured_result(parsed, schema, reviewer="frontier"))
 
 
 def run_frontier_review(

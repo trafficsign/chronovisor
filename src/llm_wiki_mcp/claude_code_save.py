@@ -21,6 +21,7 @@ from llm_wiki_mcp.evidence_grounding import (
     validate_protected_literals,
 )
 from llm_wiki_mcp.link_fix import atomic_write
+from llm_wiki_mcp.model_lab import resolve_role
 from llm_wiki_mcp.save_transaction import (
     SaveTransaction,
     attach_save_transaction_marker,
@@ -33,8 +34,7 @@ from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, init_wiki
 
 DEFAULT_STATE_FILE = WIKI_ROOT / "claude-code-save-state.json"
 DEFAULT_MAX_CHARS = 120_000
-DEFAULT_MEMORY_MODEL = "gpt-5.4-mini"
-DEFAULT_REASONING_EFFORT = "medium"
+DEFAULT_MEMORY_MODEL, DEFAULT_REASONING_EFFORT = resolve_role("raw_writer")
 DEFAULT_TIMEOUT_SECONDS = 300
 HOOK_ENABLE_ENV = "CLAUDE_CODE_WIKI_SAVE_ENABLED"
 

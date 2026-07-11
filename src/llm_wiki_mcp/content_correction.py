@@ -1192,6 +1192,16 @@ def run_frontier_judge(
         timeout=300,
         execute_patch=False,
         command_env="LLM_WIKI_CONTENT_CORRECTION_REVIEW_CMD",
+        model_role=(
+            "mutation_escalation"
+            if len(mutations) > 1
+            or any(
+                replacement.action == "supersede"
+                for mutation in mutations
+                for replacement in mutation.replacements
+            )
+            else "mutation_approver"
+        ),
     )
 
 
@@ -1286,6 +1296,7 @@ def run_frontier_classification_judge(
         timeout=300,
         execute_patch=False,
         command_env="LLM_WIKI_CONTENT_CORRECTION_REVIEW_CMD",
+        model_role="semantic_judge",
     )
 
 

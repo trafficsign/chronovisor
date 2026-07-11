@@ -17,6 +17,7 @@ Options:
       --skip-git-repo-check
       --ephemeral
       --ignore-rules
+      --disable <FEATURE>
   -s, --sandbox <SANDBOX_MODE>
       --output-schema <FILE>
   -o, --output-last-message <FILE>
@@ -28,6 +29,33 @@ def test_frontier_timeout_is_capped_by_sleep_cycle_deadline(monkeypatch) -> None
     monkeypatch.setattr(frontier_review.time, "monotonic", lambda: 100.0)
 
     assert frontier_review._bounded_timeout(3600) == 12
+
+
+def test_frontier_invocation_disables_hooks_and_uses_selected_model(tmp_path: Path) -> None:
+    invocation = frontier_review._build_codex_exec_invocation(
+        "/bin/codex",
+        repo_root=tmp_path,
+        schema_path=tmp_path / "schema.json",
+        output_path=tmp_path / "output.json",
+        execute_patch=False,
+        preflight={"codex": {"exec_help": {"output": CODEX_EXEC_HELP}}},
+        model="gpt-5.6-luna",
+        reasoning_effort="low",
+    )
+
+    cmd = invocation["cmd"]
+    assert cmd[cmd.index("--disable") : cmd.index("--disable") + 2] == ["--disable", "hooks"]
+    assert cmd[cmd.index("--model") : cmd.index("--model") + 2] == ["--model", "gpt-5.6-luna"]
+    assert 'model_reasoning_effort="low"' in cmd
+
+
+def test_frontier_env_marks_internal_children_and_disables_stop_work(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_WIKI_INTERNAL_FRONTIER", raising=False)
+    env = frontier_review._frontier_env()
+
+    assert env["LLM_WIKI_INTERNAL_FRONTIER"] == "1"
+    assert env["CODEX_WIKI_SAVE_ENABLED"] == "0"
+    assert env["LLM_WIKI_CONTENT_CORRECTION_ENABLED"] == "0"
 
 
 def _preflight_response(cmd: list[str]) -> SimpleNamespace | None:

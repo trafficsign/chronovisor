@@ -80,6 +80,12 @@ const els = {
   modelConfigured: document.getElementById("model-configured"),
   modelMissing: document.getElementById("model-missing"),
   modelGrid: document.getElementById("model-grid"),
+  modelLabCaption: document.getElementById("model-lab-caption"),
+  modelLabRoles: document.getElementById("model-lab-roles"),
+  modelLabReplays: document.getElementById("model-lab-replays"),
+  modelLabCandidates: document.getElementById("model-lab-candidates"),
+  modelLabCanaries: document.getElementById("model-lab-canaries"),
+  modelLabGrid: document.getElementById("model-lab-grid"),
   recallPanel: document.getElementById("recall-panel"),
   recallCaption: document.getElementById("recall-caption"),
   recallR3: document.getElementById("recall-r3"),
@@ -1517,6 +1523,38 @@ function renderModelStatus(modelStatus) {
     });
 }
 
+function renderModelLab(lab) {
+  const policy = lab.policy || {};
+  const roles = policy.roles || {};
+  const candidates = Array.isArray(lab.candidates) ? lab.candidates : [];
+  const canaries = policy.canaries || {};
+  if (els.modelLabCaption) els.modelLabCaption.textContent = lab.status === "ok" ? `updated ${fmt(policy.updated_at, "now")}` : fmt(lab.status, "unavailable");
+  if (els.modelLabRoles) els.modelLabRoles.textContent = Object.keys(roles).length;
+  if (els.modelLabReplays) els.modelLabReplays.textContent = fmt(lab.replay_cases, 0);
+  if (els.modelLabCandidates) els.modelLabCandidates.textContent = candidates.length;
+  if (els.modelLabCanaries) els.modelLabCanaries.textContent = Object.keys(canaries).length;
+  if (!els.modelLabGrid) return;
+  els.modelLabGrid.innerHTML = "";
+  Object.entries(roles).forEach(([role, selected]) => {
+    const item = document.createElement("div");
+    item.className = "model-row loaded";
+    const main = document.createElement("div");
+    main.className = "model-main";
+    const name = document.createElement("strong");
+    name.className = "model-name";
+    name.textContent = role.replaceAll("_", " ");
+    const meta = document.createElement("span");
+    meta.className = "model-meta";
+    meta.textContent = `${fmt(selected.model, "--")} · ${fmt(selected.effort, "--")}`;
+    main.append(name, meta);
+    const state = document.createElement("span");
+    state.className = "model-state";
+    state.textContent = canaries[role] ? "CANARY" : "ACTIVE";
+    item.append(main, state);
+    els.modelLabGrid.append(item);
+  });
+}
+
 function pctLabel(value) {
   if (!numeric(value)) return "--";
   return `${(value * 100).toFixed(1)}%`;
@@ -1769,6 +1807,7 @@ function render(snapshot) {
   renderKnowledgeMix(snapshot.knowledge_mix || {});
   renderHealth(snapshot.health || {});
   renderModelStatus(modelStatus);
+  renderModelLab(snapshot.model_lab || {});
   renderEvents(snapshot.events || []);
   drawLineChart(els.pendingChart, snapshot.save_history || {}, status);
   drawBatchChart(els.batchChart, metrics, status);

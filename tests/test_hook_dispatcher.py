@@ -188,3 +188,15 @@ def test_stop_dispatch_requires_env_without_unified_config(monkeypatch, tmp_path
     output = json.loads(capsys.readouterr().out)
 
     assert output["tasks"] == []
+
+
+def test_internal_frontier_stop_never_spawns_tasks(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("LLM_WIKI_INTERNAL_FRONTIER", "1")
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+
+    assert hook_dispatcher.main([
+        "--host", "codex", "--event", "Stop", "--hook", "--dry-run", "--format", "json",
+    ]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output == {"status": "suppressed", "reason": "internal_frontier", "tasks": []}
