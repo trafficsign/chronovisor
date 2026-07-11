@@ -48,6 +48,7 @@ SELF_HEAL_FAILED_STATUSES = {
 }
 FRONTIER_PREFLIGHT_TTL_SECONDS = 300
 FRONTIER_ACTIVITY_STALE_SECONDS = 6 * 60 * 60
+ACTIVE_BATCH_STAGES = {"batch", "raw", "triage", "generate", "apply"}
 _FRONTIER_PREFLIGHT_CACHE: dict[str, Any] | None = None
 _FRONTIER_PREFLIGHT_CACHE_AT = 0.0
 
@@ -1279,6 +1280,22 @@ def _model_lab_snapshot() -> dict[str, Any]:
         return {"status": "error", "error": exc.__class__.__name__, "policy": {"roles": {}}, "candidates": [], "history": []}
 
 
+def _mark_batch_activity(status: dict[str, Any]) -> None:
+    """Distinguish a retained completed batch from a currently running one."""
+
+    batch = status.get("batch")
+    if not isinstance(batch, dict):
+        return
+    annotated = dict(batch)
+    annotated["active"] = bool(
+        batch.get("total")
+        and status.get("state") == "running"
+        and status.get("stage") in ACTIVE_BATCH_STAGES
+        and status.get("current_job_id")
+    )
+    status["batch"] = annotated
+
+
 def build_snapshot() -> dict[str, Any]:
     init_wiki()
     status = runtime_status.read_status()
@@ -1309,6 +1326,7 @@ def build_snapshot() -> dict[str, Any]:
         status["stage"] = "review"
         latest_review = frontier_activity.get("latest") or {}
         status["updated_at"] = latest_review.get("started_at") or status.get("updated_at")
+    _mark_batch_activity(status)
 
     runtime_metrics = runtime_status.read_metrics(limit=240)
     drain_metrics = _drain_history(limit=240)

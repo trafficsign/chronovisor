@@ -786,7 +786,7 @@ function drawBatchChart(canvas, rows, status) {
     });
 
   const batch = status.batch || {};
-  if (batch.total) {
+  if (batch.active === true) {
     completed.push({
       label: "live",
       sub: `${batch.index || 0}/${batch.total}`,

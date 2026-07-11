@@ -11,6 +11,35 @@ from types import SimpleNamespace
 from llm_wiki_mcp import dashboard, runtime_status
 
 
+def test_mark_batch_activity_requires_a_running_batch_job() -> None:
+    completed = {
+        "state": "idle",
+        "stage": "idle",
+        "current_job_id": None,
+        "batch": {"index": 2, "total": 2, "succeeded": 2, "failed": 0},
+    }
+    dashboard._mark_batch_activity(completed)
+    assert completed["batch"]["active"] is False
+
+    running = {
+        "state": "running",
+        "stage": "raw",
+        "current_job_id": "job-1",
+        "batch": {"index": 1, "total": 2, "succeeded": 0, "failed": 0},
+    }
+    dashboard._mark_batch_activity(running)
+    assert running["batch"]["active"] is True
+
+    waiting = {
+        "state": "running",
+        "stage": "waiting",
+        "current_job_id": None,
+        "batch": {"index": 2, "total": 2, "succeeded": 2, "failed": 0},
+    }
+    dashboard._mark_batch_activity(waiting)
+    assert waiting["batch"]["active"] is False
+
+
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:
     wiki_root = tmp_path / "wiki"
     raw_dir = wiki_root / "raw"
