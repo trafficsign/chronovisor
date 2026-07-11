@@ -197,6 +197,21 @@ def _is_transient_read_back_packet(packet: dict[str, Any]) -> bool:
     return bool(READ_BACK_TRANSIENT_PATTERN.search(text))
 
 
+def _is_empty_query_read_back_packet(packet: dict[str, Any]) -> bool:
+    if packet.get("failure_class") != "read_back.repeated_miss":
+        return False
+    failure = _read_back_failure_from_packet(packet)
+    reason = _canonical_read_back_reason(failure.get("reason"))
+    if reason == "empty-query":
+        return True
+    if reason != "unknown":
+        return False
+    return "empty-query" in _read_back_packet_diagnostic_text(
+        packet,
+        failure,
+    ).casefold()
+
+
 def _read_back_packet_diagnostic_text(
     packet: dict[str, Any],
     failure: dict[str, Any],
@@ -246,6 +261,12 @@ def _is_unverifiable_query_hint_read_back_packet(packet: dict[str, Any]) -> bool
             _read_back_packet_diagnostic_text(packet, failure)
         )
     )
+
+
+def _frontier_nonconvergence_should_reenter_local(packet: dict[str, Any]) -> bool:
+    if packet.get("failure_class") != "ingest.frontier_nonconvergent":
+        return False
+    return "frontier call budget exhausted" in str(packet.get("error") or "").casefold()
 
 
 def _retire_non_actionable_read_back_packet(
@@ -335,6 +356,27 @@ def _retire_transient_read_back_packet(
         ),
         resolution="transient_read_back_rejected",
         outcome_kind="transient_read_back_retired",
+        dry_run=dry_run,
+    )
+
+
+def _retire_empty_query_read_back_packet(
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    return _retire_non_actionable_read_back_packet(
+        packet_path,
+        packet,
+        reason="empty_query_read_back_failure",
+        summary=(
+            "empty-query read-back failures have no repairable query or raw "
+            "mutation; read-back repair rejects them locally and frontier is "
+            "not applicable"
+        ),
+        resolution="empty_query_read_back_rejected",
+        outcome_kind="empty_query_read_back_retired",
         dry_run=dry_run,
     )
 
@@ -933,6 +975,12 @@ def _handle_packet_unlocked(
             packet,
             dry_run=dry_run,
         )
+    if _is_empty_query_read_back_packet(packet):
+        return _retire_empty_query_read_back_packet(
+            packet_path,
+            packet,
+            dry_run=dry_run,
+        )
     if _is_exhausted_query_hint_read_back_packet(packet):
         return _retire_exhausted_query_hint_read_back_packet(
             packet_path,
@@ -986,7 +1034,10 @@ def _handle_packet_unlocked(
             human_boundary_reclassified_at=datetime.now().isoformat(timespec="seconds"),
             next_attempt_at=None,
         )
-    frontier_only = packet.get("status") in FRONTIER_ONLY_STATUSES
+    frontier_only = (
+        packet.get("status") in FRONTIER_ONLY_STATUSES
+        and not _frontier_nonconvergence_should_reenter_local(packet)
+    )
     decision: LocalRepairDecision | None = None
     persisted_decision = packet.get("local_decision")
     local_decision = dict(persisted_decision) if isinstance(persisted_decision, dict) else None

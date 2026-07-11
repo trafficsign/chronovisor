@@ -154,6 +154,34 @@ def test_missing_update_without_candidate_retries_create_safe_raw(
     assert decision.confidence >= 0.85
 
 
+def test_frontier_budget_nonconvergence_retries_raw_deterministically(
+    isolated_wiki: Path,
+) -> None:
+    from llm_wiki_mcp.local_repair import propose_repair
+
+    packet = {
+        "failure_class": "ingest.frontier_nonconvergent",
+        "fingerprint": "ingest.frontier_nonconvergent",
+        "attempts": 1,
+        "error": (
+            "frontier ingest review did not converge after 2 frontier calls: "
+            "frontier call budget exhausted; route the raw to local self-heal "
+            "instead of calling frontier again"
+        ),
+        "requested_page_id": None,
+        "similar_existing_pages": [],
+    }
+
+    def stale_qwen(*_args, **_kwargs) -> str:
+        raise AssertionError("frontier budget exhaustion must not ask Qwen")
+
+    decision = propose_repair(packet, generator=stale_qwen, use_qwen=True)
+
+    assert decision.status == "resolved"
+    assert decision.action == "retry_raw"
+    assert decision.confidence >= 0.85
+
+
 def test_missing_update_with_unsafe_page_id_still_escalates(
     isolated_wiki: Path,
 ) -> None:
@@ -227,6 +255,78 @@ def test_missing_update_retry_raw_restores_raw_and_retries(
     assert (isolated_wiki / "raw" / "new-topic.md").exists()
     updated_packet = json.loads(packet_path.read_text())
     assert updated_packet["status"] == "local_repair_applied"
+
+
+def test_frontier_nonconvergence_restores_raw_without_frontier(
+    isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet = {
+        "failure_id": "frontier-loop",
+        "raw_file": "frontier-loop.md",
+        "failure_class": "ingest.frontier_nonconvergent",
+        "fingerprint": "ingest.frontier_nonconvergent",
+        "attempts": 1,
+        "error": (
+            "frontier ingest review did not converge after 2 frontier calls: "
+            "frontier call budget exhausted; route the raw to local self-heal "
+            "instead of calling frontier again"
+        ),
+        "requested_page_id": None,
+        "similar_existing_pages": [],
+        "status": "frontier_running",
+        "frontier_attempts": 1,
+        "self_heal_attempts": 1,
+        "lease_expires_at": "2000-01-01T00:00:00",
+        "local_decision": {
+            "status": "escalate",
+            "action": "escalate_to_frontier",
+            "confidence": 0.7,
+            "reason": "stale model decision",
+            "source": "qwen",
+        },
+    }
+    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "frontier-loop.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    quarantined = (
+        isolated_wiki
+        / "runtime"
+        / "failures"
+        / "quarantined-raw"
+        / "frontier-loop.md"
+    )
+    quarantined.parent.mkdir(parents=True, exist_ok=True)
+    quarantined.write_text("raw body", encoding="utf-8")
+
+    monkeypatch.setattr(
+        self_heal,
+        "_retry_ingest",
+        lambda *, dry_run: {"triggered": True, "files_processed": ["frontier-loop.md"]},
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("frontier nonconvergence must re-enter local repair")
+        ),
+    )
+
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=True,
+        enable_frontier=True,
+        dry_run=False,
+    )
+
+    updated_packet = json.loads(packet_path.read_text())
+    assert result["status"] == "local_repair_applied"
+    assert result["action"]["action"] == "retry_raw"
+    assert not quarantined.exists()
+    assert (isolated_wiki / "raw" / "frontier-loop.md").exists()
+    assert updated_packet["status"] == "local_repair_applied"
+    assert updated_packet["local_decision"]["source"] == "deterministic"
 
 
 def test_sandbox_drill_runs_pending_raw_to_self_heal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -963,6 +1063,83 @@ def test_transient_read_back_packet_is_retired_without_frontier(
     assert updated["status"] == "frontier_rejected"
     assert updated["frontier_status"] == "not_required"
     assert updated["frontier_attempts"] == 1
+    assert updated["lease_owner"] is None
+    assert updated["lease_expires_at"] is None
+    assert Path(result["rejected_action_path"]).exists()
+
+
+def test_empty_query_read_back_packet_is_retired_without_frontier(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(
+        json.dumps(
+            {
+                "failure_id": "read-back",
+                "raw_file": "read-back-empty",
+                "failure_class": "read_back.repeated_miss",
+                "fingerprint": "read_back.repeated_miss:read-back-key",
+                "attempts": 2,
+                "error": (
+                    "ingest read-back repair exhausted its bounded attempts: "
+                    "empty-query"
+                ),
+                "status": "frontier_running",
+                "frontier_attempts": 2,
+                "self_heal_attempts": 2,
+                "lease_expires_at": "2000-01-01T00:00:00",
+                "local_decision": {
+                    "status": "escalate",
+                    "action": "escalate_to_frontier",
+                    "confidence": 1.0,
+                    "reason": "bounded operational repair attempts were exhausted",
+                    "source": "deterministic",
+                },
+                "raw_preview": json.dumps(
+                    {
+                        "failure": {"page_id": "empty", "reason": "empty-query"},
+                        "ledger_entry": {
+                            "attempts": 2,
+                            "failure": {
+                                "page_id": "empty",
+                                "reason": "empty-query",
+                            },
+                            "last_error": "empty-query",
+                            "status": "quarantined",
+                        },
+                    }
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "propose_repair",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty-query read-back packets must not run local repair")
+        ),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty-query read-back packets must not call frontier")
+        ),
+    )
+
+    result = self_heal.handle_packet(packet_path, use_qwen=False)
+
+    updated = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert result["status"] == "frontier_rejected"
+    assert result["reason"] == "empty_query_read_back_failure"
+    assert updated["status"] == "frontier_rejected"
+    assert updated["frontier_status"] == "not_required"
+    assert updated["frontier_attempts"] == 2
     assert updated["lease_owner"] is None
     assert updated["lease_expires_at"] is None
     assert Path(result["rejected_action_path"]).exists()

@@ -42,6 +42,8 @@ If apply.update_target_not_found has no similar_existing_pages and the requested
 page id is safe ASCII kebab-case, retry_raw is allowed because ingest can
 retype a missing update into a create.
 If a code change is required, escalate_to_frontier.
+If ingest.frontier_nonconvergent was caused by frontier call budget exhaustion,
+retry_raw is allowed; do not escalate the packet back to frontier.
 """
 
 
@@ -155,6 +157,23 @@ def _is_create_safe_page_id(page_id: str | None) -> bool:
 def deterministic_repair(packet: dict[str, Any]) -> LocalRepairDecision:
     failure_class = packet.get("failure_class")
     candidates = packet.get("similar_existing_pages")
+    error_text = str(packet.get("error") or "").casefold()
+    if (
+        failure_class == "ingest.frontier_nonconvergent"
+        and "frontier call budget exhausted" in error_text
+    ):
+        return LocalRepairDecision(
+            status="resolved",
+            action="retry_raw",
+            confidence=0.88,
+            requested_page_id=packet.get("requested_page_id"),
+            reason=(
+                "ingest already exhausted its bounded frontier review budget; "
+                "restore the raw for local replay instead of escalating the "
+                "self-heal packet back to frontier"
+            ),
+            source="deterministic",
+        )
     if (
         failure_class == "apply.update_target_not_found"
         and isinstance(candidates, list)
