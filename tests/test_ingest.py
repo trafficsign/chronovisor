@@ -1510,6 +1510,78 @@ class TestRunIngestPartialFailure:
 
 
 class TestRunIngestFrontierDisposition:
+    def test_frontier_content_replacement_is_re_reviewed_before_apply(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [{
+            "type": "create",
+            "filename": "memory/observed-tools.md",
+            "title": "Observed tools",
+            "summary": "visible and responsive tools",
+        }]
+        triage_calls: list[str] = []
+
+        def fake_triage(content: str, **_kwargs):
+            triage_calls.append(content)
+            return plan
+
+        monkeypatch.setattr(ingest, "_triage", fake_triage)
+        monkeypatch.setattr(
+            ingest,
+            "_generate_one",
+            lambda op, *_args, **_kwargs: {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Observed tools\nupdated: 2026-07-11\n---\n"
+                    "Tool A was visible but failed and should not be used.\n"
+                ),
+            },
+        )
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        reviews: list[dict] = []
+        replacement = (
+            "---\ntitle: Observed tools\nupdated: 2026-07-11\n---\n"
+            "Tool A was visible. Tool B was confirmed responsive.\n"
+        )
+
+        def reviewer(proposal: dict) -> dict:
+            reviews.append(proposal)
+            proposed = proposal["prepared_operations"][0]["proposed_text"]
+            if "should not be used" in proposed:
+                return {
+                    "decision": "retry",
+                    "summary": "Replace the unsupported recommendation.",
+                    "failed_operations_disposition": "none",
+                    "replacement_operations": [{
+                        "filename": "memory/observed-tools.md",
+                        "content": replacement,
+                    }],
+                }
+            return {
+                "decision": "apply_available",
+                "summary": "The replacement is narrowly grounded.",
+                "failed_operations_disposition": "none",
+                "replacement_operations": [],
+            }
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(
+            "Tool A visible; Tool B responsive.",
+            job.job_id,
+            frontier_reviewer=reviewer,
+        )
+
+        assert jobs.job_store.get(job.job_id).status == jobs.JobStatus.COMPLETED
+        assert len(reviews) == 2
+        assert len(triage_calls) == 1
+        page = isolated_wiki / "pages" / "memory" / "observed-tools.md"
+        written = page.read_text(encoding="utf-8")
+        assert "Tool B was confirmed responsive." in written
+        assert "should not be used" not in written
+
     def test_frontier_invalid_tag_uses_minimal_repair_before_regeneration(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
