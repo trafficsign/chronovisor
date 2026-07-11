@@ -459,6 +459,42 @@ def validate_user_evidence_quotes(
         raise ClaudeCodeSaveError(f"memory writer {exc}") from exc
 
 
+def run_grounded_memory_writer(
+    prompt: str,
+    transcript_slice: TranscriptSlice,
+    *,
+    model: str,
+    reasoning_effort: str,
+    timeout: int,
+) -> WriterResult:
+    effective_prompt = prompt
+    last_error: ClaudeCodeSaveError | None = None
+    for attempt in range(2):
+        writer = run_memory_writer(
+            effective_prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            timeout=timeout,
+        )
+        try:
+            validate_user_evidence_quotes(writer, transcript_slice)
+            return writer
+        except ClaudeCodeSaveError as exc:
+            last_error = exc
+            if attempt:
+                break
+            effective_prompt = (
+                prompt
+                + "\n\nYour previous structured answer was rejected by the deterministic grounding gate:\n"
+                + str(exc)
+                + "\nRegenerate the full JSON. Copy evidence_quotes character-for-character from USER text. "
+                "Remove any content or keyword literal that is not explicitly present in those exact quotes. "
+                "Do not paraphrase quotes. If no grounded durable memory remains, return should_save=false.\n"
+            )
+    assert last_error is not None
+    raise last_error
+
+
 def extract_json_object(output: str) -> Any:
     text = output.strip()
     if text.startswith("```"):
@@ -841,13 +877,13 @@ def _run_save_transaction(
             "transcript_preview": format_transcript(transcript_slice.records)[:4000],
         }
 
-    writer = run_memory_writer(
+    writer = run_grounded_memory_writer(
         prompt,
+        transcript_slice,
         model=getattr(args, "model", DEFAULT_MEMORY_MODEL),
         reasoning_effort=getattr(args, "reasoning_effort", DEFAULT_REASONING_EFFORT),
         timeout=getattr(args, "timeout", DEFAULT_TIMEOUT_SECONDS),
     )
-    validate_user_evidence_quotes(writer, transcript_slice)
     writer_result = {
         "should_save": writer.should_save,
         "keywords": writer.keywords,

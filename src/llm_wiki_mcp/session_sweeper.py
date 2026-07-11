@@ -7,6 +7,7 @@ import json
 import time
 from argparse import Namespace
 from datetime import datetime, timezone
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 STATUS_FILE = WIKI_ROOT / "runtime" / "session-sweeper-latest.json"
+STATE_FILE = WIKI_ROOT / "runtime" / "session-sweeper-state.json"
 
 
 def _is_user_codex_session(path: Path) -> bool:
@@ -108,12 +110,40 @@ def _run_one(host: str, path: Path) -> dict[str, Any]:
 
 def run_sweeper(*, limit: int = 4, idle_seconds: int = 300, write: bool = True) -> dict[str, Any]:
     pending = discover_pending(idle_seconds=idle_seconds)
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {"version": 1, "failures": {}}
+    failures = state.get("failures")
+    if not isinstance(failures, dict):
+        failures = {}
+        state["failures"] = failures
     results: list[dict[str, Any]] = []
-    for host, path in pending[: max(0, limit)]:
+    now = datetime.now(timezone.utc)
+    for host, path in pending:
+        if len(results) >= max(0, limit):
+            break
+        failure_state = failures.get(str(path))
+        if isinstance(failure_state, dict):
+            try:
+                if datetime.fromisoformat(str(failure_state.get("next_retry_at"))) > now:
+                    continue
+            except (TypeError, ValueError):
+                pass
         try:
             result = _run_one(host, path)
             results.append({"host": host, "session_file": str(path), **result})
+            failures.pop(str(path), None)
         except Exception as exc:
+            previous = failures.get(str(path))
+            attempts = int(previous.get("attempts") or 0) + 1 if isinstance(previous, dict) else 1
+            delay = min(6 * 3600, 60 * (2 ** min(attempts - 1, 8)))
+            failures[str(path)] = {
+                "attempts": attempts,
+                "last_error": f"{exc.__class__.__name__}: {exc}",
+                "updated_at": now.isoformat(timespec="seconds"),
+                "next_retry_at": (now + timedelta(seconds=delay)).isoformat(timespec="seconds"),
+            }
             results.append({
                 "host": host,
                 "session_file": str(path),
@@ -129,6 +159,7 @@ def run_sweeper(*, limit: int = 4, idle_seconds: int = 300, write: bool = True) 
     }
     if write:
         STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
         atomic_write(STATUS_FILE, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     return payload
 
