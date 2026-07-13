@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -37,6 +38,7 @@ REVIEW_DIFF_CHARS = 30_000
 CORRECTABLE_SYSTEM_PAGE_IDS = frozenset(
     {"user-profile", "current-state", "lessons-learned"}
 )
+_LOCK_STATE = threading.local()
 
 
 class PageMutationError(RuntimeError):
@@ -107,23 +109,54 @@ class PreparedPageMutation:
 
 
 @contextmanager
-def wiki_mutation_lock(path: Path | None = None) -> Iterator[None]:
-    """Serialize cooperating Wiki writers around compare-and-replace operations."""
+def _reentrant_exclusive_lock(lock_path: Path) -> Iterator[None]:
+    """Hold one process lock, allowing only same-thread nested entry."""
 
-    lock_path = path or WIKI_MUTATION_LOCK
+    lock_path = lock_path.resolve(strict=False)
+    process_id = os.getpid()
+    state_pid = getattr(_LOCK_STATE, "process_id", None)
+    if state_pid != process_id:
+        # A fork must never inherit the parent's in-memory ownership claim.
+        _LOCK_STATE.process_id = process_id
+        _LOCK_STATE.depths = {}
+    depths: dict[str, int] = _LOCK_STATE.depths
+    identity = os.fspath(lock_path)
+    depth = depths.get(identity, 0)
+    if depth:
+        depths[identity] = depth + 1
+        try:
+            yield
+        finally:
+            remaining = depths[identity] - 1
+            if remaining:
+                depths[identity] = remaining
+            else:
+                depths.pop(identity, None)
+        return
+
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+b")
     locked = False
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         locked = True
+        depths[identity] = 1
         yield
     finally:
         try:
+            depths.pop(identity, None)
             if locked:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
+
+
+@contextmanager
+def wiki_mutation_lock(path: Path | None = None) -> Iterator[None]:
+    """Serialize writers; nested same-thread mutations share the outer lease."""
+
+    with _reentrant_exclusive_lock(path or WIKI_MUTATION_LOCK):
+        yield
 
 
 @contextmanager
@@ -136,20 +169,8 @@ def decision_authority_lock(path: Path | None = None) -> Iterator[None]:
     durably committed.
     """
 
-    lock_path = path or DECISION_AUTHORITY_LOCK
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+b")
-    locked = False
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        locked = True
+    with _reentrant_exclusive_lock(path or DECISION_AUTHORITY_LOCK):
         yield
-    finally:
-        try:
-            if locked:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()
 
 
 def _sha256_bytes(value: bytes) -> str:

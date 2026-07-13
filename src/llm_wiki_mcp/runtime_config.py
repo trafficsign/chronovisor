@@ -30,6 +30,7 @@ DEFAULT_DECISION_CHALLENGER_MODEL = "gpt-oss:20b"
 DEFAULT_DECISION_TIE_BREAK_MODEL = "gemma4:26b"
 DEFAULT_HEAVY_NUM_CTX = 32_768
 DEFAULT_HEAVY_KEEP_ALIVE = "20m"
+MAX_SEMANTIC_PROJECTION_CHILD_BYTES = 24_000
 DEFAULT_RUNTIME_SOURCE = "git+ssh://git@github.com/trafficsign/llm-wiki-mcp"
 RUNTIME_PACKAGE = "llm-wiki-mcp"
 
@@ -143,13 +144,16 @@ class IngestConfig:
     model: str = DEFAULT_INGEST_MODEL
     keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
     temperature: float = 0.3
-    # Keep the heavy runner on one allocation. Ollama replaces a loaded
-    # runner when the requested context changes, which caused the same 35B
-    # model to flap between ingest and audit calls.
+    # Ingest selects the smallest safe 32K/64K/128K/256K bucket from the
+    # complete request envelope. A larger compatible resident runner is
+    # reused so a backlog grows monotonically instead of reloading per raw.
     num_ctx: int = DEFAULT_HEAVY_NUM_CTX
-    max_num_ctx: int = DEFAULT_HEAVY_NUM_CTX
+    max_num_ctx: int = 262_144
     num_predict: int = 8_192
     read_timeout_ms: int = 660_000
+    memory_reserve_gib: int = 16
+    max_related_context_bytes: int = 8_192
+    semantic_projection_max_child_bytes: int = MAX_SEMANTIC_PROJECTION_CHILD_BYTES
 
 
 @dataclass(frozen=True)
@@ -298,6 +302,20 @@ def _bounded_float(
     return default
 
 
+def _bounded_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int) and minimum <= value <= maximum:
+        return value
+    return default
+
+
 def load_ingest_config(path: Path | str | None = None) -> IngestConfig:
     data = load_toml_file(path)
     section = data.get("ingest")
@@ -331,6 +349,22 @@ def load_ingest_config(path: Path | str | None = None) -> IngestConfig:
         ),
         read_timeout_ms=_positive_int(
             section.get("read_timeout_ms"), IngestConfig.read_timeout_ms, minimum=1_000
+        ),
+        memory_reserve_gib=_positive_int(
+            section.get("memory_reserve_gib"),
+            IngestConfig.memory_reserve_gib,
+            minimum=1,
+        ),
+        max_related_context_bytes=_positive_int(
+            section.get("max_related_context_bytes"),
+            IngestConfig.max_related_context_bytes,
+            minimum=1_024,
+        ),
+        semantic_projection_max_child_bytes=_bounded_int(
+            section.get("semantic_projection_max_child_bytes"),
+            IngestConfig.semantic_projection_max_child_bytes,
+            minimum=2_048,
+            maximum=MAX_SEMANTIC_PROJECTION_CHILD_BYTES,
         ),
     )
 

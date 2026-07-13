@@ -274,10 +274,40 @@ lanes quarantine before inference rather than falling back to bootstrap models.
 ## Ingest Model
 
 The page-generation path reads `[ingest]` from `~/.wiki/config.toml`. The
-production profile keeps `num_ctx` and `max_num_ctx` at the same fixed value so
-Ollama can reuse one loaded Ornith 35B runner instead of replacing it when call
-context changes. Oversized inputs fail closed or are chunked by their producing
-lane. Decision routing uses the measured grow-only policy above instead.
+production profile selects the smallest safe 32K/64K/128K/256K context bucket
+for the complete request envelope. A compatible larger resident Ornith 35B
+runner is reused, so backlog processing grows monotonically rather than
+shrinking and reloading between raws. The 256K bucket evicts unrelated Ollama
+runners before admission. Inputs that cannot fit fail closed; deterministic
+transcript captures are projected to complete, byte-exact user/assistant text
+while the lossless raw remains on disk. Every recognized transcript projection
+is first materialized as one verified content-addressed child; oversized
+projections fan out on record boundaries, with only a single oversized record
+split at UTF-8 boundaries. Tool/event-only captures receive a durable
+content-addressed no-op receipt. A parent is retired only after every child or
+no-op artifact passes exact read-back verification.
+All default-transport `LocalStructuredSession` lanes use the same measured
+residency broker as ingest. The broker holds one exclusive process-wide lease
+for the complete initial-plus-repair session, selects the smallest complete
+context bucket, and reuses a compatible larger resident runner. Lint, tagging,
+recall, and correction therefore cannot race the same Ornith tag at different
+`num_ctx` values and force runner reloads.
+
+Page apply and raw retirement are joined by a durable completion ACK under
+`runtime/raw-completion-acks/`. The ACK binds every logical source filename and
+byte hash to the completed job outcome and observed page postimages. It is
+published and read back before `processed_raw_files` changes. If the state write
+is interrupted, the next tick validates the ACK and performs only raw retirement;
+it does not repeat projection, model inference, or page mutation. Recorded
+postimages prove the publication-time outcome but are not a lock on later,
+legitimate updates to the same page.
+If the process stops after a reviewed page effect but before the ACK exists,
+the next attempt checks the content-bound terminal proposal/review before
+triage. A fully applied page postimage, or a current-authority confirmed no-op,
+can then complete the job and publish the ACK with zero model calls. Incomplete,
+legacy, stale-authority, malformed, or changed proofs re-enter the ordinary
+fail-closed path and can never receive this shortcut.
+
 Changing the ingest model does not require a semantic reindex unless
 `[embedding].model` also changes.
 
@@ -612,11 +642,21 @@ Frontier/Codex execution is a separate repair plane, not the highest tier of a
 routine review ladder. The system incident supervisor can create an eligible
 packet only for a true system-code failure with all of the following evidence:
 
-- at least three occurrences across at least two distinct input/run identifiers;
+- a supervisor-owned deterministic reproduction receipt, regardless of how many
+  logical inputs share the failure fingerprint; cross-input clustering remains
+  observability and is never Frontier eligibility by itself;
 - at least two failed deterministic local repair/recheck attempts;
-- a reproduction command, failing test, or reproduction artifact;
+- a bound failing pytest node and reproduction artifact; the executable command
+  is derived by the host as `uv run pytest -q <nodeid>` and arbitrary receipt
+  argv is rejected;
 - no authentication, billing/quota, Keychain, credential, content, semantic,
   structured-output, or model-disagreement failure class.
+
+No operational runtime failure qualifies by raw-count clustering alone.
+Artifact conflict, capacity, internal, schema, and legacy classes all require a
+deterministic reproduction receipt. Packet, supervisor state, artifact, command,
+failing test, and reproduction digest are cross-bound before the repair job can
+enter the frontier guard.
 
 `llm-wiki-self-heal` additionally requires the explicit
 `--enable-frontier-repair` capability. `RepairIncidentEvidence` then passes a

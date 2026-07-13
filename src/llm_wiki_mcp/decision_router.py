@@ -46,6 +46,7 @@ from llm_wiki_mcp.local_structured import (
     LocalStructuredSession,
     STRUCTURED_GENERATION_POLICY_VERSION,
     ValidationIssue,
+    preflight_structured_request,
     required_structured_context_tokens,
     structured_generation_policy,
     structured_generation_policy_sha256,
@@ -1972,6 +1973,7 @@ class DecisionRouter:
             max_input_chars=self.config.max_input_chars,
             max_output_chars=self.config.max_output_chars,
             max_feedback_chars=self.config.max_feedback_chars,
+            resource_managed=self.live_resource_control,
         )
 
     def _vote(
@@ -2057,6 +2059,35 @@ class DecisionRouter:
         system: str | None,
     ) -> tuple[int, int]:
         return decision_request_context(self.config, prompt, schema, system)
+
+    def _no_probe_residency_plan(
+        self,
+        num_ctx: int,
+        *,
+        source: str,
+    ) -> ollama.ModelResidencyPlan:
+        """Return auditable zero-admission state without a live resource probe."""
+
+        models = (
+            self.config.primary_model,
+            self.config.challenger_model,
+            self.config.tie_break_model,
+        )
+        return ollama.ModelResidencyPlan(
+            num_ctx=num_ctx,
+            max_resident_models=0,
+            capacity_bytes=0,
+            reserve_bytes=self.config.memory_reserve_gib * ollama.GIB,
+            available_bytes=0,
+            total_bytes=0,
+            estimated_model_bytes=tuple((model, 0) for model in models),
+            role_contexts=tuple((model, num_ctx) for model in models),
+            resident_models=(),
+            calibrated_models=(),
+            source=source,
+            forced_single=True,
+            reuse_larger_context=self.reuse_larger_context,
+        )
 
     def _residency_plan(self, num_ctx: int) -> ollama.ModelResidencyPlan:
         models = (
@@ -3131,16 +3162,34 @@ class DecisionRouter:
             effective_system,
         )
         eviction_events: list[dict[str, Any]] = []
-        try:
-            required_num_ctx, selected_num_ctx = self._request_context(
+        request_preflight = (
+            None
+            if self.config_error
+            else preflight_structured_request(
                 prompt,
                 schema,
-                effective_system,
+                system=effective_system,
+                max_input_chars=self.config.max_input_chars,
             )
-        except Exception:
+        )
+        if request_preflight is not None and request_preflight.ok:
+            try:
+                required_num_ctx, selected_num_ctx = self._request_context(
+                    prompt,
+                    schema,
+                    effective_system,
+                )
+            except Exception:
+                required_num_ctx = self.config.num_ctx + 1
+                selected_num_ctx = self.config.num_ctx
+            residency_plan = self._residency_plan(selected_num_ctx)
+        else:
             required_num_ctx = self.config.num_ctx + 1
             selected_num_ctx = self.config.num_ctx
-        residency_plan = self._residency_plan(selected_num_ctx)
+            residency_plan = self._no_probe_residency_plan(
+                selected_num_ctx,
+                source="request_preflight_failed_no_probe",
+            )
 
         def finalize(result: DecisionRouterResult) -> DecisionRouterResult:
             if result.ok:
@@ -3317,6 +3366,16 @@ class DecisionRouter:
         if self.config_error:
             return finalize(
                 self._quarantined((), f"router_config_invalid:{self.config_error}")
+            )
+        if request_preflight is not None and not request_preflight.ok:
+            return finalize(
+                self._quarantined(
+                    (),
+                    "structured_request_preflight_failed:"
+                    f"{request_preflight.failure_class}:"
+                    f"{request_preflight.failure_reason}",
+                    failure_class=(request_preflight.failure_class or "input_invalid"),
+                )
             )
         if required_num_ctx > self.config.num_ctx:
             return finalize(

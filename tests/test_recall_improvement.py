@@ -4,6 +4,7 @@ import hashlib
 import json
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -131,33 +132,29 @@ def test_default_improvement_models_use_ornith_and_gemma_pair(monkeypatch) -> No
 
 
 def test_ollama_proposer_accepts_direct_override_response(monkeypatch) -> None:
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            pass
+    captured: dict[str, object] = {}
 
-        def json(self):
-            return {
-                "response": "```json\n"
-                + json.dumps(
-                    {"search_threshold": 0.25, "read_threshold": 0.7, "top_k": 8}
-                )
-                + "\n```"
-            }
+    class FakeSession:
+        def __init__(self, **kwargs: object) -> None:
+            captured["session"] = kwargs
 
-    class FakeClient:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
+        def run(
+            self,
+            prompt: str,
+            schema: dict[str, object],
+            **kwargs: object,
+        ) -> SimpleNamespace:
+            captured["prompt"] = prompt
+            captured["schema"] = schema
+            captured["run"] = kwargs
+            return SimpleNamespace(
+                ok=True,
+                value={"search_threshold": 0.25, "read_threshold": 0.7},
+                failure_class=None,
+                failure_reason=None,
+            )
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            pass
-
-        def post(self, *args, **kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr(recall_improvement.httpx, "Client", FakeClient)
+    monkeypatch.setattr(recall_improvement, "LocalStructuredSession", FakeSession)
 
     proposal = recall_improvement._call_ollama_proposer(
         model="gemma4:26b-mxfp8",
@@ -171,6 +168,17 @@ def test_ollama_proposer_accepts_direct_override_response(monkeypatch) -> None:
     assert proposal.model == "gemma4:26b-mxfp8"
     assert proposal.overrides == {"search_threshold": 0.25, "read_threshold": 0.7}
     assert "directly" in proposal.rationale
+    session = captured["session"]
+    assert isinstance(session, dict)
+    assert session["role"] == "recall_policy_proposer"
+    assert session["num_ctx"] == 32768
+    assert "transport" not in session
+    schema = captured["schema"]
+    assert isinstance(schema, dict)
+    assert "search_threshold" in schema["properties"]
+    run = captured["run"]
+    assert isinstance(run, dict)
+    assert run["value_validator"] is recall_improvement._proposal_value_issues
 
 
 def test_proposal_prompt_includes_adoption_gate_and_rejection_blockers() -> None:

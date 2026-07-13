@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -35,11 +37,16 @@ SCHEMA = {
 
 
 class QueueTransport:
-    def __init__(self, *responses: str | Exception) -> None:
+    def __init__(
+        self,
+        *responses: str | ollama.ChatResponse | ollama.GenerateResponse | Exception,
+    ) -> None:
         self.responses = deque(responses)
         self.requests: list[ChatRequest] = []
 
-    def __call__(self, request: ChatRequest) -> str:
+    def __call__(
+        self, request: ChatRequest
+    ) -> str | ollama.ChatResponse | ollama.GenerateResponse:
         self.requests.append(request)
         response = self.responses.popleft()
         if isinstance(response, Exception):
@@ -572,6 +579,273 @@ def test_ollama_context_accounting_fails_closed_after_unexpected_shift() -> None
 
     assert result.ok is False
     assert result.failure_class == "context_truncation_suspected"
+
+
+def test_chat_incomplete_completion_rejects_valid_json_without_repair() -> None:
+    transport = QueueTransport(
+        ollama.ChatResponse(
+            content='{"decision":"apply","summary":"unsafe"}',
+            done=False,
+        )
+    )
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "completion_incomplete"
+    assert result.attempts == ()
+    assert len(transport.requests) == 1
+
+
+def test_generate_incomplete_stream_rejects_valid_json_without_repair() -> None:
+    transport = QueueTransport(
+        ollama.GenerateResponse(
+            content='{"decision":"apply","summary":"unsafe"}',
+            done=False,
+            streamed=True,
+        )
+    )
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "stream_incomplete"
+    assert result.attempts == ()
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        ollama.ChatResponse(
+            content='{"decision":"apply","summary":"unsafe"}',
+            done=True,
+            done_reason="length",
+        ),
+        ollama.GenerateResponse(
+            content='{"decision":"apply","summary":"unsafe"}',
+            done=True,
+            done_reason="max_tokens",
+        ),
+    ],
+)
+def test_output_limit_reason_repairs_without_parsing_or_replaying_partial(
+    response: ollama.ChatResponse | ollama.GenerateResponse,
+) -> None:
+    partial = response.content
+    transport = QueueTransport(
+        response,
+        '{"decision":"apply","summary":"complete"}',
+    )
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.value == {"decision": "apply", "summary": "complete"}
+    assert len(result.attempts) == 2
+    assert result.attempts[0].issues[0].keyword == "completionMetadata"
+    assert len(transport.requests) == 2
+    repair_messages = transport.requests[1].messages
+    assert all(message["content"] != partial for message in repair_messages)
+    assert "Previous response omitted" in repair_messages[-2]["content"]
+    assert "output limit" in repair_messages[-1]["content"]
+
+
+def test_output_limit_on_every_turn_fails_operationally_after_bounded_repairs() -> None:
+    responses = [
+        ollama.GenerateResponse(
+            content=f'{{"decision":"apply","summary":"partial-{index}"}}',
+            done=True,
+            done_reason="length",
+        )
+        for index in range(3)
+    ]
+    transport = QueueTransport(*responses)
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "output_truncated"
+    assert len(result.attempts) == 3
+    assert len(transport.requests) == 3
+    for request, previous in zip(transport.requests[1:], responses[:2], strict=True):
+        assert all(
+            message["content"] != previous.content for message in request.messages
+        )
+
+
+def test_default_transport_reuses_larger_resident_context_without_eviction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    planner_calls: list[dict[str, Any]] = []
+    chat_contexts: list[int] = []
+
+    def planner(_models: list[str], **kwargs: Any) -> SimpleNamespace:
+        planner_calls.append(kwargs)
+        return SimpleNamespace(
+            max_resident_models=1,
+            initial_eviction_models=(),
+            context_for=lambda _model: 114_688,
+        )
+
+    def chat(_messages: list[dict[str, str]], **kwargs: Any) -> ollama.ChatResponse:
+        chat_contexts.append(kwargs["num_ctx"])
+        return ollama.ChatResponse(
+            content='{"decision":"apply","summary":"ok"}',
+            done=True,
+            done_reason="stop",
+        )
+
+    monkeypatch.setattr(ollama, "plan_model_residency", planner)
+    monkeypatch.setattr(ollama, "chat", chat)
+    monkeypatch.setattr(
+        ollama,
+        "unload_named_model",
+        lambda _model: pytest.fail("compatible larger runner must not be unloaded"),
+    )
+
+    result = LocalStructuredSession(
+        model="local:test",
+        audit_root=tmp_path / "audit",
+        num_ctx=32_768,
+        num_predict=256,
+        max_input_chars=20_000,
+        max_output_chars=1_000,
+        max_feedback_chars=2_000,
+        resource_min_num_ctx=32_768,
+        resource_max_num_ctx=114_688,
+        resource_memory_reserve_gib=8,
+    ).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert chat_contexts == [114_688]
+    assert planner_calls == [
+        {
+            "num_ctx": 32_768,
+            "max_num_ctx": 114_688,
+            "reserve_bytes": 8 * ollama.GIB,
+            "configured_max_resident": 1,
+            "reuse_larger_context": True,
+        }
+    ]
+
+
+def test_default_transport_oversize_input_has_no_runner_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    planner_calls: list[object] = []
+    unload_calls: list[object] = []
+    chat_calls: list[object] = []
+
+    def planner(*args: object, **kwargs: object) -> None:
+        planner_calls.append((args, kwargs))
+        pytest.fail("oversize input must fail before residency planning")
+
+    def unload(*args: object, **kwargs: object) -> bool:
+        unload_calls.append((args, kwargs))
+        pytest.fail("oversize input must not evict a runner")
+
+    def chat(*args: object, **kwargs: object) -> None:
+        chat_calls.append((args, kwargs))
+        pytest.fail("oversize input must not reach Ollama")
+
+    monkeypatch.setattr(ollama, "plan_model_residency", planner)
+    monkeypatch.setattr(ollama, "unload_named_model", unload)
+    monkeypatch.setattr(ollama, "chat", chat)
+
+    result = LocalStructuredSession(
+        model="local:test",
+        audit_root=tmp_path / "audit",
+        num_ctx=32_768,
+        num_predict=256,
+        max_input_chars=256,
+        max_output_chars=1_000,
+        max_feedback_chars=2_000,
+        resource_min_num_ctx=32_768,
+        resource_max_num_ctx=114_688,
+    ).run("oversized-user-input" * 100, SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "input_too_large"
+    assert planner_calls == []
+    assert unload_calls == []
+    assert chat_calls == []
+    assert ollama.model_resource_lease_mode() is None
+
+
+def test_default_transport_holds_exclusive_lease_across_all_repair_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    large_entered = threading.Event()
+    release_large = threading.Event()
+    small_entered = threading.Event()
+    call_order: list[int] = []
+    failures: list[BaseException] = []
+    results: dict[str, Any] = {}
+    large_calls = 0
+
+    def planner(_models: list[str], **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            max_resident_models=1,
+            initial_eviction_models=(),
+            context_for=lambda _model: kwargs["num_ctx"],
+        )
+
+    def chat(_messages: list[dict[str, str]], **kwargs: Any) -> ollama.ChatResponse:
+        nonlocal large_calls
+        context = kwargs["num_ctx"]
+        call_order.append(context)
+        if context == 114_688:
+            large_calls += 1
+            if large_calls == 1:
+                large_entered.set()
+                assert release_large.wait(timeout=5)
+                return ollama.ChatResponse(content="{}")
+            return ollama.ChatResponse(
+                content='{"decision":"apply","summary":"repaired"}'
+            )
+        small_entered.set()
+        return ollama.ChatResponse(content='{"decision":"defer","summary":"small"}')
+
+    monkeypatch.setattr(ollama, "plan_model_residency", planner)
+    monkeypatch.setattr(ollama, "chat", chat)
+
+    def run(name: str, context: int) -> None:
+        try:
+            results[name] = LocalStructuredSession(
+                model="local:test",
+                audit_root=tmp_path / name,
+                num_ctx=context,
+                num_predict=256,
+                max_input_chars=20_000,
+                max_output_chars=1_000,
+                max_feedback_chars=2_000,
+                resource_min_num_ctx=context,
+                resource_max_num_ctx=context,
+            ).run("decide", SCHEMA)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failures.append(exc)
+
+    large = threading.Thread(target=run, args=("large", 114_688))
+    small = threading.Thread(target=run, args=("small", 32_768))
+    large.start()
+    assert large_entered.wait(timeout=5)
+    small.start()
+    assert not small_entered.wait(timeout=0.1)
+    release_large.set()
+    large.join(timeout=5)
+    small.join(timeout=5)
+
+    assert not large.is_alive()
+    assert not small.is_alive()
+    assert failures == []
+    assert results["large"].ok is True
+    assert results["large"].repair_turns == 1
+    assert results["small"].ok is True
+    assert call_order == [114_688, 114_688, 32_768]
 
 
 def test_unsupported_schema_keyword_fails_before_transport() -> None:

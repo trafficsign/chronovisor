@@ -518,6 +518,50 @@ def test_disabled_repair_lane_starts_no_process(
     assert result.frontier_failure["failure_class"] == "frontier_repair_policy_disabled"
 
 
+def test_missing_reproduction_command_is_rejected_before_baseline_or_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp.frontier_guard import (
+        RepairIncidentEvidence,
+        repair_fingerprint,
+    )
+
+    incident = RepairIncidentEvidence(
+        component="watchdog.health_snapshot",
+        fingerprint=repair_fingerprint("watchdog.health_snapshot", "missing-command"),
+        failure_class="system_health_snapshot_exception",
+        occurrence_count=3,
+        distinct_inputs=("input-a", "input-b"),
+        local_repair_attempts=2,
+        local_repair_evidence=("a" * 64, "b" * 64),
+        reproduction_command=("pytest", "tests/test_ingest.py"),
+        notes={
+            "producer": "trusted_watchdog",
+            "incident_key": "missing-command",
+        },
+    )
+    object.__setattr__(incident, "reproduction_command", ())
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("invalid reproduction evidence must spend no token")
+
+    monkeypatch.setattr(frontier_review, "_capture_repair_baseline", forbidden)
+    monkeypatch.setattr(frontier_review, "_run_codex", forbidden)
+
+    result = frontier_review.run_frontier_review(
+        {"failure_class": "system_health_snapshot_exception"},
+        None,
+        repo_root=tmp_path,
+        evidence=incident,
+    )
+
+    assert result.execution_started is False
+    assert result.frontier_failure["failure_class"] == (
+        "frontier_guard_evidence_invalid"
+    )
+
+
 def test_validated_repair_incident_gets_exactly_one_guarded_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1017,8 +1061,10 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
         ),
     )
     monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
-    monkeypatch.setattr(frontier_review.subprocess, "run", forbidden_subprocess)
-    monkeypatch.setattr(frontier_review.shutil, "which", forbidden_subprocess)
+    # Block the actual Frontier entrypoint without sabotaging the local
+    # residency broker's harmless host-memory probes (which also use the
+    # process/shutil modules).
+    monkeypatch.setattr(frontier_review, "_run_codex", forbidden_subprocess)
     monkeypatch.setenv("LLM_WIKI_TEST_STRUCTURED_REVIEW_CMD", "/bin/forbidden")
     schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
@@ -1126,12 +1172,21 @@ def test_structured_review_local_model_failures_quarantine_without_tie_or_fronti
     )
     monkeypatch.setattr(ollama, "chat", failed_chat)
     monkeypatch.setattr(
-        frontier_review.subprocess,
-        "run",
+        frontier_review,
+        "_run_codex",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("local failures must not fall back to frontier")
         ),
     )
+    monkeypatch.setattr(
+        decision_router,
+        "resolve_router_policy",
+        lambda config, **_kwargs: decision_router.RouterPolicyResolution(
+            config=config,
+            source="adopted_artifact",
+        ),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "shadow")
     schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
     result = frontier_review.run_structured_review(

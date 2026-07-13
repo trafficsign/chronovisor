@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import decision_router, frontier_review
+from llm_wiki_mcp import decision_policy, decision_router, frontier_review
 from llm_wiki_mcp.decision_policy import (
     DECISION_POLICIES,
     decision_policy_snapshot,
@@ -62,7 +62,9 @@ def test_unknown_lane_fails_closed_without_starting_models(
     )
 
     assert result["decision"] == "needs_retry"
-    assert result["frontier_failure"]["failure_class"] == "local_decision_policy_blocked"
+    assert (
+        result["frontier_failure"]["failure_class"] == "local_decision_policy_blocked"
+    )
     assert FakeRouter.calls == 0
 
 
@@ -73,6 +75,7 @@ def test_shadow_lane_collects_vote_but_cannot_authorize_mutation(
     FakeRouter.calls = 0
     FakeRouter.source = "bootstrap_current_policy"
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
+    monkeypatch.setattr(decision_policy, "load_toml_file", lambda *_args: {})
 
     result = frontier_review.run_structured_review(
         "review",
@@ -104,7 +107,10 @@ def test_enabled_lane_requires_adopted_artifact(
     )
 
     assert result["decision"] == "needs_retry"
-    assert result["frontier_failure"]["failure_class"] == "local_decision_artifact_required"
+    assert (
+        result["frontier_failure"]["failure_class"]
+        == "local_decision_artifact_required"
+    )
 
 
 def test_enabled_lane_can_return_only_adopted_consensus(
@@ -165,6 +171,7 @@ def test_every_production_structured_review_call_names_a_lane() -> None:
 def test_policy_snapshot_separates_structured_shadow_from_deterministic_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(decision_policy, "load_toml_file", lambda *_args: {})
     for lane in DECISION_POLICIES:
         monkeypatch.delenv(
             "LLM_WIKI_DECISION_POLICY_" + lane.upper(),
@@ -201,7 +208,9 @@ def test_schema_mismatch_stops_before_any_model(
         decision_lane="recall_auto_apply",
     )
 
-    assert result["frontier_failure"]["failure_class"] == "local_decision_schema_mismatch"
+    assert (
+        result["frontier_failure"]["failure_class"] == "local_decision_schema_mismatch"
+    )
     assert FakeRouter.calls == 0
 
 
@@ -220,5 +229,8 @@ def test_non_structured_lane_cannot_enter_model_router(
     )
 
     assert result["decision"] == "needs_retry"
-    assert result["frontier_failure"]["failure_class"] == "local_decision_policy_kind_invalid"
+    assert (
+        result["frontier_failure"]["failure_class"]
+        == "local_decision_policy_kind_invalid"
+    )
     assert FakeRouter.calls == 0

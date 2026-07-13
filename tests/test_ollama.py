@@ -48,11 +48,21 @@ class _StreamClient:
                 {
                     "response": "lo",
                     "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 11,
                     "eval_count": 2,
                     "eval_duration": 1_000_000_000,
                 },
             ]
         )
+
+
+class _IncompleteStreamClient(_StreamClient):
+    def stream(
+        self, _method: str, _path: str, *, json: dict, timeout: object
+    ) -> _StreamResponse:
+        self.payload = json
+        return _StreamResponse([{"response": "partial", "done": False}])
 
 
 class _PostResponse:
@@ -75,11 +85,19 @@ class _PostClient:
 
 
 class _ChatResponse:
-    def __init__(self, content: str) -> None:
+    def __init__(
+        self,
+        content: str,
+        *,
+        done: bool | None = True,
+        done_reason: str | None = "stop",
+    ) -> None:
         self.content = content
+        self.done = done
+        self.done_reason = done_reason
 
     def json(self) -> dict:
-        return {
+        body = {
             "message": {
                 "role": "assistant",
                 "content": self.content,
@@ -88,21 +106,38 @@ class _ChatResponse:
             "prompt_eval_count": 42,
             "eval_count": 7,
         }
+        if self.done is not None:
+            body["done"] = self.done
+        if self.done_reason is not None:
+            body["done_reason"] = self.done_reason
+        return body
 
     def raise_for_status(self) -> None:
         return None
 
 
 class _ChatClient:
-    def __init__(self, content: str) -> None:
+    def __init__(
+        self,
+        content: str,
+        *,
+        done: bool | None = True,
+        done_reason: str | None = "stop",
+    ) -> None:
         self.content = content
+        self.done = done
+        self.done_reason = done_reason
         self.path = None
         self.payload = None
 
     def post(self, path: str, *, json: dict, timeout: object) -> _ChatResponse:
         self.path = path
         self.payload = json
-        return _ChatResponse(self.content)
+        return _ChatResponse(
+            self.content,
+            done=self.done,
+            done_reason=self.done_reason,
+        )
 
 
 class _TagsResponse:
@@ -216,6 +251,8 @@ def test_generate_streams_progress_and_returns_text(monkeypatch) -> None:
     assert client.payload["stream"] is True
     assert client.payload["model"] == "qwen3.6:35b-a3b-mxfp8"
     assert client.payload["keep_alive"] == "10m"
+    assert client.payload["shift"] is False
+    assert client.payload["truncate"] is False
     assert client.payload["options"]["temperature"] == 0.1
     assert client.payload["options"]["num_predict"] == 128
     assert client.payload["options"]["num_ctx"] == 2048
@@ -223,6 +260,75 @@ def test_generate_streams_progress_and_returns_text(monkeypatch) -> None:
     assert updates[-1]["active"] is False
     assert updates[-1]["generated_chars"] == 5
     assert updates[-1]["eval_count"] == 2
+
+
+def test_generate_forwards_per_request_runtime_overrides(monkeypatch) -> None:
+    client = _StreamClient()
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    result = ollama.generate(
+        "prompt",
+        progress_callback=lambda _event: None,
+        model="ornith:override",
+        num_ctx=65536,
+        num_predict=2048,
+        keep_alive="90s",
+        read_timeout_ms=180000,
+        temperature=0,
+        seed=0,
+    )
+
+    assert result == "hello"
+    assert client.payload["model"] == "ornith:override"
+    assert client.payload["keep_alive"] == "90s"
+    assert client.payload["shift"] is False
+    assert client.payload["truncate"] is False
+    assert client.payload["options"] == {
+        "temperature": 0,
+        "num_predict": 2048,
+        "num_ctx": 65536,
+        "seed": 0,
+    }
+
+
+def test_generate_can_return_explicit_completion_metadata(monkeypatch) -> None:
+    client = _StreamClient()
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    result = ollama.generate(
+        "prompt",
+        progress_callback=lambda _event: None,
+        return_metadata=True,
+    )
+
+    assert result == ollama.GenerateResponse(
+        content="hello",
+        done=True,
+        done_reason="stop",
+        prompt_eval_count=11,
+        eval_count=2,
+        streamed=True,
+    )
+
+
+def test_generate_metadata_preserves_incomplete_stream_for_fail_closed_caller(
+    monkeypatch,
+) -> None:
+    client = _IncompleteStreamClient()
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    result = ollama.generate(
+        "prompt",
+        progress_callback=lambda _event: None,
+        return_metadata=True,
+    )
+
+    assert result == ollama.GenerateResponse(
+        content="partial",
+        done=False,
+        done_reason=None,
+        streamed=True,
+    )
 
 
 def test_num_ctx_grows_for_long_prompts_without_crossing_cap() -> None:
@@ -260,6 +366,8 @@ def test_chat_uses_fixed_structured_options_and_returns_final_content(
     assert client.payload["messages"] == [{"role": "user", "content": "decide"}]
     assert client.payload["stream"] is False
     assert client.payload["think"] is False
+    assert client.payload["shift"] is False
+    assert client.payload["truncate"] is False
     assert client.payload["format"] == schema
     assert client.payload["keep_alive"] == "20m"
     assert client.payload["options"] == {
@@ -338,6 +446,33 @@ def test_chat_can_return_context_accounting(monkeypatch) -> None:
     assert result.content == '{"decision":"apply"}'
     assert result.prompt_eval_count == 42
     assert result.eval_count == 7
+    assert result.done is True
+    assert result.done_reason == "stop"
+
+
+def test_chat_metadata_treats_missing_done_as_incomplete(monkeypatch) -> None:
+    client = _ChatClient(
+        '{"decision":"apply"}',
+        done=None,
+        done_reason=None,
+    )
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    result = ollama.chat(
+        [{"role": "user", "content": "decide"}],
+        model="ornith:test",
+        format={"type": "object"},
+        num_ctx=4096,
+        num_predict=128,
+        keep_alive="20m",
+        read_timeout_ms=120000,
+        max_output_chars=1000,
+        return_metadata=True,
+    )
+
+    assert isinstance(result, ollama.ChatResponse)
+    assert result.done is False
+    assert result.done_reason is None
 
 
 def test_chat_metadata_returns_oversize_content_for_bounded_session_repair(
@@ -414,15 +549,22 @@ def test_resource_lease_blocks_exclusive_across_threads(tmp_path, monkeypatch) -
 def test_resource_lease_reentry_and_upgrade_policy(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
 
+    assert ollama.model_resource_lease_mode() is None
     with ollama.model_resource_lease(exclusive=True):
+        assert ollama.model_resource_lease_mode() == "exclusive"
         with ollama.model_resource_lease(exclusive=False):
+            assert ollama.model_resource_lease_mode() == "exclusive"
             with ollama.model_resource_lease(exclusive=True):
+                assert ollama.model_resource_lease_mode() == "exclusive"
                 pass
+    assert ollama.model_resource_lease_mode() is None
 
     with ollama.model_resource_lease(exclusive=False):
+        assert ollama.model_resource_lease_mode() == "shared"
         with pytest.raises(RuntimeError, match="cannot upgrade"):
             with ollama.model_resource_lease(exclusive=True):
                 pass
+    assert ollama.model_resource_lease_mode() is None
 
 
 def test_resource_lease_blocks_another_process(tmp_path, monkeypatch) -> None:

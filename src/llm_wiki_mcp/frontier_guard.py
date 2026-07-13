@@ -82,7 +82,17 @@ _TRUSTED_PRODUCER_CONTRACTS = frozenset(
             "watchdog.health_snapshot",
             "system_health_snapshot_exception",
         ),
+        (
+            "trusted_operational_failure_supervisor",
+            "ingest.operational_runtime",
+            "system_operational_failure",
+        ),
     }
+)
+_TRUSTED_OPERATIONAL_CONTRACT = (
+    "trusted_operational_failure_supervisor",
+    "ingest.operational_runtime",
+    "system_operational_failure",
 )
 
 
@@ -177,7 +187,9 @@ class RepairIncidentEvidence:
         object.__setattr__(self, "failure_class", str(self.failure_class).strip())
         object.__setattr__(self, "role", str(self.role).strip())
         object.__setattr__(self, "incident_kind", str(self.incident_kind).strip())
-        object.__setattr__(self, "distinct_inputs", _clean_sequence(self.distinct_inputs))
+        object.__setattr__(
+            self, "distinct_inputs", _clean_sequence(self.distinct_inputs)
+        )
         object.__setattr__(
             self,
             "local_repair_evidence",
@@ -210,7 +222,9 @@ class RepairIncidentEvidence:
 
     @property
     def incident_key(self) -> str:
-        value = self.notes.get("incident_key") if isinstance(self.notes, Mapping) else None
+        value = (
+            self.notes.get("incident_key") if isinstance(self.notes, Mapping) else None
+        )
         return str(value or "").strip()
 
     @property
@@ -233,20 +247,52 @@ class RepairIncidentEvidence:
             errors.append("fingerprint must be a stable printable value (1-512 chars)")
         if not self.failure_class:
             errors.append("failure_class is required")
-        producer = self.notes.get("producer") if isinstance(self.notes, Mapping) else None
-        if (producer, self.component, self.failure_class) not in _TRUSTED_PRODUCER_CONTRACTS:
+        producer = (
+            self.notes.get("producer") if isinstance(self.notes, Mapping) else None
+        )
+        if (
+            producer,
+            self.component,
+            self.failure_class,
+        ) not in _TRUSTED_PRODUCER_CONTRACTS:
             errors.append(
                 "evidence must come from an allowlisted trusted system-incident producer"
             )
         if not self.incident_key or not _FINGERPRINT_RE.fullmatch(self.incident_key):
             errors.append("trusted evidence requires a stable printable incident_key")
-        normalized_failure = self.failure_class.lower().replace("-", "_").replace(" ", "_")
-        failure_tokens = frozenset(normalized_failure.split("_"))
-        if _HUMAN_BOUNDARY_TOKENS & failure_tokens or any(
-            marker in normalized_failure for marker in _HUMAN_BOUNDARY_MARKERS
+        contract = (producer, self.component, self.failure_class)
+        source_failure = (
+            self.notes.get("source_failure_class")
+            if isinstance(self.notes, Mapping)
+            else None
+        )
+        normalized_failures = tuple(
+            str(value).lower().replace("-", "_").replace(" ", "_")
+            for value in (self.failure_class, source_failure)
+            if value is not None
+        )
+        if any(
+            _HUMAN_BOUNDARY_TOKENS & frozenset(normalized.split("_"))
+            or any(marker in normalized for marker in _HUMAN_BOUNDARY_MARKERS)
+            for normalized in normalized_failures
         ):
             errors.append(
                 "auth, billing, quota, keychain, and credential failures are human boundaries"
+            )
+        deterministic_evidence = (
+            self.notes.get("deterministic_reproduction_evidence")
+            if isinstance(self.notes, Mapping)
+            else None
+        )
+        deterministic_reproduction = (
+            contract == _TRUSTED_OPERATIONAL_CONTRACT
+            and self.notes.get("deterministic_reproduction_verified") is True
+            and isinstance(deterministic_evidence, str)
+            and _SHA256_RE.fullmatch(deterministic_evidence) is not None
+        )
+        if contract == _TRUSTED_OPERATIONAL_CONTRACT and not deterministic_reproduction:
+            errors.append(
+                "operational repair requires a supervisor-verified deterministic reproduction receipt"
             )
         if (
             isinstance(self.occurrence_count, bool)
@@ -260,11 +306,28 @@ class RepairIncidentEvidence:
             isinstance(self.occurrence_count, int)
             and not isinstance(self.occurrence_count, bool)
             and self.all_local_models_unavailable is not True
-            and self.occurrence_count < 3
+            and self.occurrence_count
+            < (
+                1
+                if deterministic_reproduction
+                else 2
+                if contract == _TRUSTED_OPERATIONAL_CONTRACT
+                else 3
+            )
         ):
-            errors.append("occurrence_count must be at least 3")
-        if self.distinct_input_count < 2:
-            errors.append("at least 2 distinct input identifiers are required")
+            minimum = (
+                1
+                if deterministic_reproduction
+                else 2
+                if contract == _TRUSTED_OPERATIONAL_CONTRACT
+                else 3
+            )
+            errors.append(f"occurrence_count must be at least {minimum}")
+        minimum_distinct_inputs = 1 if deterministic_reproduction else 2
+        if self.distinct_input_count < minimum_distinct_inputs:
+            errors.append(
+                f"at least {minimum_distinct_inputs} distinct input identifiers are required"
+            )
         if (
             isinstance(self.local_repair_attempts, bool)
             or not isinstance(self.local_repair_attempts, int)
@@ -274,22 +337,35 @@ class RepairIncidentEvidence:
         if (
             len(self.local_repair_evidence) != self.local_repair_attempts
             or len(set(self.local_repair_evidence)) != self.local_repair_attempts
-            or any(not _SHA256_RE.fullmatch(item) for item in self.local_repair_evidence)
+            or any(
+                not _SHA256_RE.fullmatch(item) for item in self.local_repair_evidence
+            )
         ):
             errors.append(
                 "each local repair attempt requires one unique SHA-256 evidence digest"
             )
-        if self.all_local_models_unavailable is True and not self.local_unavailability_artifact:
-            errors.append("all-local-unavailable requires a health-check artifact")
-        if not (
-            self.reproduction_command
-            or self.failing_test
-            or self.reproduction_artifact
+        if (
+            self.all_local_models_unavailable is True
+            and not self.local_unavailability_artifact
         ):
-            errors.append("a reproduction command, failing test, or artifact is required")
+            errors.append("all-local-unavailable requires a health-check artifact")
+        if not self.reproduction_command:
+            errors.append("a trusted reproduction command is required")
+        elif any(
+            len(argument) > 4096
+            or any(
+                ord(character) < 32 or ord(character) == 127 for character in argument
+            )
+            for argument in self.reproduction_command
+        ):
+            errors.append(
+                "reproduction command arguments must be printable and <=4096 chars"
+            )
         for input_id in self.distinct_inputs:
             if len(input_id) > 512 or any(ord(char) < 32 for char in input_id):
-                errors.append("distinct input identifiers must be printable and <=512 chars")
+                errors.append(
+                    "distinct input identifiers must be printable and <=512 chars"
+                )
                 break
         try:
             json.dumps(self.notes, ensure_ascii=False, sort_keys=True)
@@ -347,8 +423,10 @@ def _utc_now(value: datetime | None = None) -> datetime:
 
 
 def _timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -500,7 +578,9 @@ class FrontierGuard:
         try:
             value = json.loads(self.state_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise FrontierStateError(f"cannot read frontier guard state: {exc}") from exc
+            raise FrontierStateError(
+                f"cannot read frontier guard state: {exc}"
+            ) from exc
         if not isinstance(value, dict):
             raise FrontierStateError("frontier guard state must be an object")
         if value.get("schema_version") != SCHEMA_VERSION:
@@ -557,7 +637,9 @@ class FrontierGuard:
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
             for event in events:
                 handle.write(
-                    json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                    json.dumps(
+                        event, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    )
                     + "\n"
                 )
             handle.flush()
@@ -590,7 +672,10 @@ class FrontierGuard:
         events: list[dict[str, Any]] = []
         active_id = state.get("active_incident_id")
         incident = state.get("incidents", {}).get(active_id) if active_id else None
-        if not isinstance(incident, dict) or incident.get("status") not in {"reserved", "started"}:
+        if not isinstance(incident, dict) or incident.get("status") not in {
+            "reserved",
+            "started",
+        }:
             if active_id is not None:
                 state["active_incident_id"] = None
             return events
@@ -656,7 +741,10 @@ class FrontierGuard:
         prior = state.get("fingerprints", {}).get(evidence.fingerprint_key)
         if isinstance(prior, dict):
             last_started = _parse_timestamp(prior.get("last_started_at"))
-            if last_started is not None and now - last_started < self.fingerprint_cooldown:
+            if (
+                last_started is not None
+                and now - last_started < self.fingerprint_cooldown
+            ):
                 raise PermitDenied(
                     "fingerprint_cooldown",
                     incident_id=str(prior.get("last_incident_id") or "") or None,
@@ -709,7 +797,9 @@ class FrontierGuard:
         effective_owner_pid = owner_pid or os.getpid()
         if effective_owner_pid <= 0:
             raise ValueError("owner_pid must be positive")
-        effective_owner = (owner or f"{socket.gethostname()}:{effective_owner_pid}").strip()
+        effective_owner = (
+            owner or f"{socket.gethostname()}:{effective_owner_pid}"
+        ).strip()
         if not effective_owner:
             raise ValueError("owner is required")
         incident_id = uuid4().hex
@@ -796,9 +886,13 @@ class FrontierGuard:
                 incident = self._owned_incident(state, incident_id, token)
                 status = str(incident.get("status"))
                 if status == "started" or incident.get("started_at"):
-                    raise PermitDenied("incident_already_started", incident_id=incident_id)
+                    raise PermitDenied(
+                        "incident_already_started", incident_id=incident_id
+                    )
                 if status != "reserved":
-                    raise PermitDenied(f"incident_not_startable:{status}", incident_id=incident_id)
+                    raise PermitDenied(
+                        f"incident_not_startable:{status}", incident_id=incident_id
+                    )
                 if state.get("active_incident_id") != incident_id:
                     raise PermitDenied("incident_not_active", incident_id=incident_id)
                 evidence = RepairIncidentEvidence(
@@ -815,7 +909,9 @@ class FrontierGuard:
                         incident["evidence"]["reproduction"]["command"]
                     ),
                     failing_test=incident["evidence"]["reproduction"]["failing_test"],
-                    reproduction_artifact=incident["evidence"]["reproduction"]["artifact"],
+                    reproduction_artifact=incident["evidence"]["reproduction"][
+                        "artifact"
+                    ],
                     all_local_models_unavailable=incident["evidence"][
                         "all_local_models_unavailable"
                     ],

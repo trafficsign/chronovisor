@@ -105,12 +105,15 @@ def test_reused_orchestrator_pid_clears_stale_live_status(monkeypatch) -> None:
 
 
 def test_original_orchestrator_process_keeps_live_status(monkeypatch) -> None:
+    from llm_wiki_mcp import orchestrator
+
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(
         dashboard,
         "_process_started_at",
         lambda _pid: datetime.fromisoformat("2026-07-11T16:59:50"),
     )
+    monkeypatch.setattr(orchestrator, "ingest_process_lease_is_held", lambda _pid: True)
     status = dashboard._canonicalize_runtime_status(
         {"state": "idle", "stage": "waiting"},
         {
@@ -123,6 +126,36 @@ def test_original_orchestrator_process_keeps_live_status(monkeypatch) -> None:
 
     assert status["state"] == "running"
     assert status["current_job_id"] == "job-1"
+
+
+def test_live_long_lived_process_without_ingest_lease_is_idle(monkeypatch) -> None:
+    from llm_wiki_mcp import orchestrator
+
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        dashboard,
+        "_process_started_at",
+        lambda _pid: datetime.fromisoformat("2026-07-11T16:59:50"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "ingest_process_lease_is_held",
+        lambda _pid: False,
+    )
+
+    status = dashboard._canonicalize_runtime_status(
+        {"state": "running", "stage": "raw", "current_job_id": "job-1"},
+        {
+            "current_job_id": "job-1",
+            "current_job_pid": 4242,
+            "current_job_started_at": "2026-07-11T17:00:00",
+        },
+        pending=1,
+    )
+
+    assert status["state"] == "idle"
+    assert status["stage"] == "waiting"
+    assert status["current_job_id"] is None
 
 
 def test_snapshot_component_error_boundary_returns_structured_error() -> None:
@@ -1271,6 +1304,91 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
             "source": "codex",
         },
     ]
+
+
+def test_save_history_excludes_generated_semantic_projection_children(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    raw_dir = wiki_root / "raw"
+    raw_dir.mkdir(parents=True)
+    parent_name = "20260704-120000-codex-parent-aaaaaaaa.md"
+    child_name = f"semantic-{'a' * 64}-child-00000001-{'b' * 64}.md"
+    (raw_dir / parent_name).write_text("parent", encoding="utf-8")
+    (raw_dir / child_name).write_text("derived child", encoding="utf-8")
+
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+
+    history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
+
+    assert dashboard._raw_source_label(child_name) == "projection"
+    assert history["totals"]["raw_saved"] == 1
+    assert history["totals"]["raw_bytes"] == len("parent")
+    assert history["sources"] == [{"name": "codex", "count": 1}]
+    assert [segment["name"] for segment in history["days"][0]["raw_segments"]] == [
+        parent_name
+    ]
+
+
+def test_save_history_expands_fragment_group_status_and_processed_wins(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    raw_dir = wiki_root / "raw"
+    logs_dir = wiki_root / "logs"
+    raw_dir.mkdir(parents=True)
+    logs_dir.mkdir()
+    fragment_names = [
+        "20260704-120000-codex-fragment-one-aaaaaaaa.md",
+        "20260704-120001-codex-fragment-two-bbbbbbbb.md",
+    ]
+    for name in fragment_names:
+        (raw_dir / name).write_text("raw", encoding="utf-8")
+    failed = {
+        "timestamp": "2026-07-04T12:30:00",
+        "result": {
+            "per_raw": [
+                {
+                    "filename": fragment_names[0],
+                    "source_files": fragment_names,
+                    "succeeded": False,
+                }
+            ]
+        },
+    }
+    drain_log = logs_dir / "ingest-drain-20260704.jsonl"
+    drain_log.write_text(json.dumps(failed) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+
+    failed_history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
+    assert failed_history["totals"]["failed_bytes"] == 6
+    assert failed_history["totals"]["pending_bytes"] == 0
+
+    succeeded = {
+        "timestamp": "2026-07-04T12:31:00",
+        "result": {
+            "per_raw": [
+                {
+                    "filename": fragment_names[0],
+                    "source_files": fragment_names,
+                    "succeeded": True,
+                }
+            ]
+        },
+    }
+    drain_log.write_text(
+        json.dumps(failed) + "\n" + json.dumps(succeeded) + "\n",
+        encoding="utf-8",
+    )
+    processed_history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
+    assert processed_history["totals"]["processed_bytes"] == 6
+    assert processed_history["totals"]["failed_bytes"] == 0
+    assert processed_history["totals"]["pending_bytes"] == 0
 
 
 def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:

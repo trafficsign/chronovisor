@@ -20,11 +20,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from llm_wiki_mcp import decision_authority
 from llm_wiki_mcp.convergence import is_human_required_result
 from llm_wiki_mcp.feedback_ledger import active_feedback_rows
+from llm_wiki_mcp.local_structured import LocalStructuredSession, ValidationIssue
 from llm_wiki_mcp.recall_eval import (
     RecallExample,
     build_dataset,
@@ -393,29 +392,45 @@ def _allowed_field_summary() -> dict[str, dict[str, Any]]:
     return out
 
 
-def _strip_json_fence(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        stripped = "\n".join(lines).strip()
-    return stripped
-
-
 def _proposal_schema() -> dict[str, Any]:
+    override_properties: dict[str, dict[str, Any]] = {}
+    for field, spec in ALLOWED_POLICY_FIELDS.items():
+        wanted = spec["type"]
+        field_schema: dict[str, Any] = {
+            "type": (
+                "boolean"
+                if wanted is bool
+                else "integer"
+                if wanted is int
+                else "number"
+            )
+        }
+        if "min" in spec:
+            field_schema["minimum"] = spec["min"]
+        if "max" in spec:
+            field_schema["maximum"] = spec["max"]
+        override_properties[field] = field_schema
+
+    # The documented wrapper remains the preferred response, while direct
+    # policy fields stay schema-valid for backward compatibility.  Semantic
+    # validation below still fails closed when neither form contains an
+    # allowed override.
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["summary", "rationale", "risk", "audit_recommended", "overrides"],
+        "minProperties": 1,
         "properties": {
             "summary": {"type": "string"},
             "rationale": {"type": "string"},
             "risk": {"type": "string", "enum": ["low", "medium", "high"]},
             "audit_recommended": {"type": "boolean"},
-            "overrides": {"type": "object"},
+            "overrides": {
+                "type": "object",
+                "additionalProperties": False,
+                "minProperties": 1,
+                "properties": override_properties,
+            },
+            **override_properties,
         },
     }
 
@@ -480,6 +495,21 @@ def _proposal_overrides(parsed: Any) -> tuple[dict[str, Any], bool]:
     return {}, False
 
 
+def _proposal_value_issues(value: Any) -> list[ValidationIssue]:
+    overrides, _direct = _proposal_overrides(value)
+    if overrides:
+        return []
+    return [
+        ValidationIssue(
+            pointer="",
+            keyword="required",
+            expected="at least one allowed recall policy override",
+            received={"type": type(value).__name__},
+            message="proposal contained no valid overrides",
+        )
+    ]
+
+
 def _call_ollama_proposer(
     *,
     model: str,
@@ -492,8 +522,6 @@ def _call_ollama_proposer(
     recent_rejection_blockers: dict[str, Any] | None = None,
     timeout_seconds: float = 180.0,
 ) -> PolicyProposal:
-    from llm_wiki_mcp.ollama import OLLAMA_URL, model_resource_lease
-
     prompt = _proposal_prompt(
         model=model,
         baseline_policy=baseline_policy,
@@ -504,30 +532,42 @@ def _call_ollama_proposer(
         min_improvement=min_improvement,
         recent_rejection_blockers=recent_rejection_blockers,
     )
-    timeout = httpx.Timeout(connect=10.0, read=timeout_seconds, write=10.0, pool=10.0)
     started = time.perf_counter()
     try:
-        with model_resource_lease(exclusive=False):
-            with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
-                resp = client.post(
-                    "/api/generate",
-                    json={
-                        "model": model,
-                        "prompt": json.dumps(prompt, ensure_ascii=False),
-                        "stream": False,
-                        "think": False,
-                        "keep_alive": "20m",
-                        "format": _proposal_schema(),
-                        "options": {
-                            "temperature": 0.2,
-                            "num_ctx": 32768,
-                            "num_predict": 1024,
-                        },
-                    },
-                )
-                resp.raise_for_status()
-        raw = resp.json().get("response", "{}")
-        parsed = json.loads(_strip_json_fence(str(raw)))
+        result = LocalStructuredSession(
+            model=model,
+            role="recall_policy_proposer",
+            num_ctx=32_768,
+            num_predict=1_024,
+            keep_alive="20m",
+            read_timeout_ms=max(200, int(timeout_seconds * 1_000)),
+            max_input_chars=262_144,
+            max_output_chars=8_000,
+            max_feedback_chars=2_000,
+        ).run(
+            json.dumps(prompt, ensure_ascii=False),
+            _proposal_schema(),
+            value_validator=_proposal_value_issues,
+        )
+        if not result.ok:
+            elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+            failure_class = result.failure_class or "structured_failure"
+            return PolicyProposal(
+                source="ollama",
+                model=model,
+                proposal_id=f"{model}:error",
+                summary="proposal failed",
+                rationale=(
+                    f"{failure_class}: "
+                    f"{result.failure_reason or 'proposal generation failed'} "
+                    f"after {elapsed_ms}ms"
+                )[:400],
+                overrides={},
+                risk="high",
+                audit_recommended=True,
+                error=failure_class,
+            )
+        parsed = result.value
         overrides, direct_overrides = _proposal_overrides(parsed)
         if not overrides:
             raise ValueError("proposal contained no valid overrides")

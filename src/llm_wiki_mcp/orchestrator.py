@@ -6,15 +6,20 @@ this module handles when to trigger them.
 
 import json
 import os
+import fcntl
+import hashlib
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
+from functools import wraps
 from pathlib import Path
 
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, LOG_FILE
 from llm_wiki_mcp.ollama import is_available
 from llm_wiki_mcp import runtime_status
+from llm_wiki_mcp.link_fix import atomic_write
 
 # Config
 INGEST_THRESHOLD = 5  # Trigger ingest after N raw files
@@ -28,12 +33,97 @@ STATE_FILE = WIKI_ROOT / ".orchestrator_state.json"
 # cross-call truth (current_job_id), this lock just serializes the
 # read-modify-write around it.
 _INGEST_LOCK = threading.Lock()
+_INGEST_PROCESS_LEASE_ACTIVE = False
+
+
+class _CompletionAckResumed(Exception):
+    """Internal control signal: semantic work was already durably completed."""
+
+
+@contextmanager
+def _cross_process_ingest_lease():
+    """Fail closed when another process already owns the ingest batch."""
+
+    global _INGEST_PROCESS_LEASE_ACTIVE
+
+    lock_path = WIKI_ROOT / "runtime" / "ingest-orchestrator.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+")
+    except OSError as exc:
+        yield False, f"ingest process lock unavailable: {type(exc).__name__}: {exc}"
+        return
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False, "another ingest process holds the cross-process lease"
+            return
+        _INGEST_PROCESS_LEASE_ACTIVE = True
+        try:
+            yield True, None
+        finally:
+            _INGEST_PROCESS_LEASE_ACTIVE = False
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def ingest_process_lease_is_held(owner_pid: object) -> bool:
+    """Return whether an ingest call still owns the OS process lease.
+
+    PID liveness alone is insufficient for MCP processes because the process
+    can outlive a failed ingest call.  The flock is the authoritative batch
+    lifetime signal.  The in-process flag avoids probing our own flock through
+    another descriptor, whose semantics vary across supported POSIX systems.
+    """
+
+    if owner_pid == os.getpid():
+        return _INGEST_PROCESS_LEASE_ACTIVE
+    lock_path = WIKI_ROOT / "runtime" / "ingest-orchestrator.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        try:
+            return False
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _serialize_ingest_across_processes(function):
+    """Keep one batch owner across MCP, dashboard, and launchd processes."""
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _cross_process_ingest_lease() as (acquired, reason):
+            if not acquired:
+                return {"triggered": False, "reason": reason}
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def _load_state() -> dict:
     """Load orchestrator state."""
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
+        state = json.loads(STATE_FILE.read_text())
+        # Legacy releases counted triage failures across unrelated raws and
+        # used that batch-global counter to dead-letter the next batch.  The
+        # per-raw failure supervisor now owns retry and quarantine decisions,
+        # so discard the unsafe legacy field as soon as state is loaded.
+        state.pop("triage_failure_count", None)
+        return state
     return {
         "last_ingest": None,
         "last_lint": None,
@@ -42,7 +132,6 @@ def _load_state() -> dict:
         "current_job_id": None,
         "current_job_pid": None,
         "current_job_started_at": None,
-        "triage_failure_count": 0,
     }
 
 
@@ -77,13 +166,40 @@ def _lock_is_fresh_in_live_process(state: dict) -> bool:
     age = (datetime.now() - started_at).total_seconds()
     if age > STALE_LOCK_MAX_AGE_SECONDS:
         return False
-    return _pid_is_alive(state.get("current_job_pid"))
+    pid = state.get("current_job_pid")
+    return _pid_is_alive(pid) and ingest_process_lease_is_held(pid)
 
 
 def _clear_current_job(state: dict) -> None:
     state["current_job_id"] = None
     state["current_job_pid"] = None
     state["current_job_started_at"] = None
+
+
+def _publish_ingest_reservation(state: dict) -> None:
+    """Publish the slot and clear an uncertain post-commit write failure.
+
+    ``atomic_write`` can durably replace the state file and then report a
+    directory-fsync failure.  Treat that as an uncertain commit: read the
+    state back and remove only our own pending reservation before propagating
+    the exception.  A later call also repairs any residue after obtaining the
+    authoritative process lease.
+    """
+
+    try:
+        _save_state(state)
+    except BaseException:
+        try:
+            observed = _load_state()
+            if (
+                observed.get("current_job_id") == "__pending__"
+                and observed.get("current_job_pid") == os.getpid()
+            ):
+                _clear_current_job(observed)
+                _save_state(observed)
+        except Exception:
+            pass
+        raise
 
 
 def reset_stale_lock() -> None:
@@ -106,6 +222,7 @@ def reset_stale_lock() -> None:
         _save_state(state)
         return
     from llm_wiki_mcp.jobs import job_store  # local import to avoid cycle
+
     if job_store.get(cur) is None:
         _clear_current_job(state)
         _save_state(state)
@@ -113,7 +230,10 @@ def reset_stale_lock() -> None:
 
 def _save_state(state: dict) -> None:
     """Save orchestrator state."""
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    from llm_wiki_mcp.link_fix import atomic_write
+
+    state.pop("triage_failure_count", None)
+    atomic_write(STATE_FILE, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
 
 
 def get_pending_raw_files() -> list[Path]:
@@ -124,11 +244,19 @@ def get_pending_raw_files() -> list[Path]:
     """
     from llm_wiki_mcp.raw_replay import is_raw_retracted
 
+    from llm_wiki_mcp.failure_supervisor import operational_deferred_raw_files
+
     state = _load_state()
     processed = set(state.get("processed_raw_files", []))
+    raw_paths = sorted(RAW_DIR.glob("*.md"))
+    operational_deferred = operational_deferred_raw_files(raw_paths)
     pending = []
-    for f in sorted(RAW_DIR.glob("*.md")):
-        if f.name not in processed and not is_raw_retracted(f):
+    for f in raw_paths:
+        if (
+            f.name not in processed
+            and f.name not in operational_deferred
+            and not is_raw_retracted(f)
+        ):
             pending.append(f)
     return pending
 
@@ -153,16 +281,22 @@ def should_lint() -> tuple[bool, str]:
     hours_since = (datetime.now() - last_lint_dt).total_seconds() / 3600
 
     if hours_since >= LINT_INTERVAL_HOURS:
-        return True, f"{hours_since:.1f} hours since last lint (threshold: {LINT_INTERVAL_HOURS}h)"
-    return False, f"Only {hours_since:.1f}h since last lint (threshold: {LINT_INTERVAL_HOURS}h)"
+        return (
+            True,
+            f"{hours_since:.1f} hours since last lint (threshold: {LINT_INTERVAL_HOURS}h)",
+        )
+    return (
+        False,
+        f"Only {hours_since:.1f}h since last lint (threshold: {LINT_INTERVAL_HOURS}h)",
+    )
 
 
 def mark_raw_processed(filenames: list[str]) -> None:
     """Mark raw files as processed.
 
-    Public, batch-level API used by quarantine and (legacy) full-batch
-    ingest paths. Updates the processed set, refreshes ``last_ingest``,
-    AND clears ``current_job_id`` + resets ``triage_failure_count``.
+    Public, batch-level API used by legacy full-batch ingest paths. Updates
+    the processed set, refreshes ``last_ingest``, and clears
+    ``current_job_id``.
     The per-raw synchronous ingest loop in :func:`run_pending_ingest`
     does NOT call this — it uses :func:`_mark_one_raw_processed` so a
     single raw's success doesn't release the batch-wide in-flight slot.
@@ -173,7 +307,6 @@ def mark_raw_processed(filenames: list[str]) -> None:
     state["processed_raw_files"] = sorted(processed)
     state["last_ingest"] = datetime.now().isoformat()
     _clear_current_job(state)
-    state["triage_failure_count"] = 0
     _save_state(state)
 
 
@@ -181,18 +314,15 @@ def _mark_one_raw_processed(filename: str) -> None:
     """Per-raw success mark — does NOT touch ``current_job_id``.
 
     Used by :func:`run_pending_ingest`'s synchronous serial loop. Each
-    raw's ``on_complete`` callback marks just that file processed and
-    clears the triage failure counter (success means the queue head is
-    healthy), but leaves ``current_job_id`` intact so the batch-wide
-    in-flight marker survives until the loop's outer ``finally`` clears
-    it.
+    raw's ``on_complete`` callback marks just that file processed, but leaves
+    ``current_job_id`` intact so the batch-wide in-flight marker survives
+    until the loop's outer ``finally`` clears it.
     """
     state = _load_state()
     processed = set(state.get("processed_raw_files", []))
     processed.add(filename)
     state["processed_raw_files"] = sorted(processed)
     state["last_ingest"] = datetime.now().isoformat()
-    state["triage_failure_count"] = 0
     _save_state(state)
 
 
@@ -203,46 +333,18 @@ def _mark_raws_processed_preserving_lock(filenames: list[str]) -> None:
     processed.update(filenames)
     state["processed_raw_files"] = sorted(processed)
     state["last_ingest"] = datetime.now().isoformat()
-    state["triage_failure_count"] = 0
     _save_state(state)
 
 
-def _update_triage_failure_count(failed: bool, triage_failed: bool) -> None:
-    """Per-raw triage counter update — does NOT touch ``current_job_id``.
+def _raws_are_durably_processed(filenames: list[str]) -> bool:
+    """Confirm a processed mark after an ambiguous post-commit I/O error."""
 
-    Mirror of :func:`_release_lock`'s counter logic without the lock-clear
-    side effect, for use inside the per-raw loop where the batch holds the
-    in-flight slot for its full duration.
-    """
-    if not failed:
+    try:
         state = _load_state()
-        state["triage_failure_count"] = 0
-        _save_state(state)
-    elif triage_failed:
-        state = _load_state()
-        state["triage_failure_count"] = state.get("triage_failure_count", 0) + 1
-        _save_state(state)
-
-
-def _release_lock(failed: bool = False, triage_failed: bool = False) -> None:
-    """Clear the in-flight job marker after a job finishes.
-
-    Counter semantics: only ``triage_failed`` increments
-    ``triage_failure_count``. A triage failure means the *content* is
-    unprocessable, so repeated occurrences justify quarantine. Generate
-    parse errors, apply errors, or Ollama-unavailable are transient or
-    per-op and must NOT push raws toward dead-letter.
-
-    A successful run (failed=False) clears the counter so transient
-    failures don't accumulate.
-    """
-    state = _load_state()
-    _clear_current_job(state)
-    if not failed:
-        state["triage_failure_count"] = 0
-    elif triage_failed:
-        state["triage_failure_count"] = state.get("triage_failure_count", 0) + 1
-    _save_state(state)
+    except Exception:
+        return False
+    processed = state.get("processed_raw_files")
+    return isinstance(processed, list) and set(filenames) <= set(processed)
 
 
 def _orch_log(message: str) -> None:
@@ -278,17 +380,13 @@ def get_ollama_status() -> dict:
     }
 
 
-# How many consecutive triage failures we tolerate before quarantining the
-# offending raws so the queue can keep moving.
-TRIAGE_FAILURE_QUARANTINE_THRESHOLD = 3
-
-
 @dataclass(frozen=True)
 class _PendingRawUnit:
     paths: tuple[Path, ...]
     content: str | None = None
     raw_keywords: tuple[str, ...] | None = None
     fragment_record_sha256: str | None = None
+    reassembled_record_bytes: bytes | None = None
 
     @property
     def representative(self) -> Path:
@@ -299,12 +397,6 @@ class _PendingRawUnit:
         return [path.name for path in self.paths]
 
 
-def _raw_ingest_input_limit() -> int:
-    from llm_wiki_mcp.runtime_config import load_decision_router_config
-
-    return max(1, load_decision_router_config().max_input_chars)
-
-
 def _quarantine_capture_fragment_paths(
     paths: list[Path],
     *,
@@ -312,55 +404,201 @@ def _quarantine_capture_fragment_paths(
     reason: str,
     details: dict | None = None,
 ) -> dict:
-    """Preserve a complete unsafe fragment set with a durable reason manifest."""
+    """Preserve unsafe fragments with a durable intent-first transaction."""
 
-    dead_letter_dir = (
-        RAW_DIR
-        / ".dead-letter"
-        / "raw-capture-fragments"
-        / record_sha256
-    )
+    dead_letter_dir = RAW_DIR / ".dead-letter" / "raw-capture-fragments" / record_sha256
     dead_letter_dir.mkdir(parents=True, exist_ok=True)
-    moved: list[dict[str, str]] = []
-    for src in paths:
-        if not src.exists():
-            continue
+    source_paths = tuple(
+        sorted(
+            dict.fromkeys(path for path in paths if path.exists()),
+            key=lambda path: path.name,
+        )
+    )
+    planned: list[dict[str, object]] = []
+    reserved_destinations: set[str] = set()
+    for src in source_paths:
+        source_bytes = src.read_bytes()
         dst = dead_letter_dir / src.name
         duplicate = 1
-        while dst.exists():
+        while dst.exists() or dst.name in reserved_destinations:
             dst = dead_letter_dir / f"{src.name}.duplicate-{duplicate}"
             duplicate += 1
-        try:
-            src.rename(dst)
-        except OSError:
-            continue
-        moved.append({"source": src.name, "preserved_as": dst.name})
+        reserved_destinations.add(dst.name)
+        planned.append(
+            {
+                "source": src.name,
+                "preserved_as": dst.name,
+                "file_bytes": len(source_bytes),
+                "file_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            }
+        )
 
-    filenames = [row["source"] for row in moved]
-    if filenames:
-        _mark_raws_processed_preserving_lock(filenames)
     manifest = {
         "schema_version": 1,
         "kind": "raw_capture_fragment_quarantine",
+        "status": "prepared",
         "created_at": datetime.now().isoformat(),
         "record_sha256": record_sha256,
         "reason": reason,
         "details": details or {},
-        "files": moved,
+        "files": planned,
     }
     manifest_path = dead_letter_dir / "manifest.json"
-    temporary = dead_letter_dir / ".manifest.json.tmp"
-    temporary.write_text(
+    if manifest_path.exists():
+        existing = _read_fragment_quarantine_manifest(manifest_path)
+        if existing.get("status") == "prepared":
+            return _resume_capture_fragment_quarantine(manifest_path)
+        operation_id = hashlib.sha256(
+            json.dumps(
+                {
+                    "record_sha256": record_sha256,
+                    "reason": reason,
+                    "files": planned,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        manifest_path = dead_letter_dir / f"manifest-{operation_id}.json"
+        if manifest_path.exists():
+            existing = _read_fragment_quarantine_manifest(manifest_path)
+            if existing.get("status") == "prepared":
+                return _resume_capture_fragment_quarantine(manifest_path)
+            return _fragment_quarantine_result(manifest_path, existing)
+
+    # The atomic, fsynced manifest is the transaction intent. No source move
+    # may happen before this publication succeeds.
+    atomic_write(
+        manifest_path,
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
-    temporary.replace(manifest_path)
+    return _resume_capture_fragment_quarantine(manifest_path)
+
+
+def _read_fragment_quarantine_manifest(manifest_path: Path) -> dict:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or payload.get("kind") != "raw_capture_fragment_quarantine"
+        or not isinstance(payload.get("record_sha256"), str)
+        or not isinstance(payload.get("reason"), str)
+        or not isinstance(payload.get("files"), list)
+    ):
+        raise RuntimeError(
+            f"invalid fragment quarantine manifest: {manifest_path.name}"
+        )
+    # Legacy v1 manifests had no status and were already complete.
+    if "status" not in payload:
+        payload["status"] = "completed"
+    if payload.get("status") not in {"prepared", "completed"}:
+        raise RuntimeError(f"invalid fragment quarantine status: {manifest_path.name}")
+    return payload
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fragment_quarantine_result(manifest_path: Path, manifest: dict) -> dict:
+    files = manifest.get("files") or []
+    filenames = [
+        row.get("source")
+        for row in files
+        if isinstance(row, dict) and isinstance(row.get("source"), str)
+    ]
     return {
-        "record_sha256": record_sha256,
-        "reason": reason,
+        "record_sha256": manifest["record_sha256"],
+        "reason": manifest["reason"],
         "files": filenames,
         "manifest": str(manifest_path),
+        "status": manifest.get("status", "completed"),
     }
+
+
+def _resume_capture_fragment_quarantine(manifest_path: Path) -> dict:
+    """Complete one prepared move transaction idempotently."""
+
+    manifest = _read_fragment_quarantine_manifest(manifest_path)
+    if manifest["status"] == "completed":
+        return _fragment_quarantine_result(manifest_path, manifest)
+    dead_letter_dir = manifest_path.parent
+    filenames: list[str] = []
+    for row in manifest["files"]:
+        if not isinstance(row, dict):
+            raise RuntimeError("fragment quarantine file intent is malformed")
+        source = row.get("source")
+        preserved_as = row.get("preserved_as")
+        expected_bytes = row.get("file_bytes")
+        expected_sha256 = row.get("file_sha256")
+        if (
+            not isinstance(source, str)
+            or Path(source).name != source
+            or not isinstance(preserved_as, str)
+            or Path(preserved_as).name != preserved_as
+            or isinstance(expected_bytes, bool)
+            or not isinstance(expected_bytes, int)
+            or not isinstance(expected_sha256, str)
+        ):
+            raise RuntimeError("fragment quarantine file intent is malformed")
+        src = RAW_DIR / source
+        dst = dead_letter_dir / preserved_as
+        if src.exists() and dst.exists():
+            raise RuntimeError(
+                f"fragment quarantine source and destination both exist: {source}"
+            )
+        if src.exists():
+            source_bytes = src.read_bytes()
+            if (
+                len(source_bytes) != expected_bytes
+                or hashlib.sha256(source_bytes).hexdigest() != expected_sha256
+            ):
+                raise RuntimeError(
+                    f"fragment quarantine source changed after intent: {source}"
+                )
+            src.rename(dst)
+            _fsync_directory(RAW_DIR)
+            _fsync_directory(dead_letter_dir)
+        elif not dst.exists():
+            raise RuntimeError(
+                f"fragment quarantine evidence missing at both paths: {source}"
+            )
+        destination_bytes = dst.read_bytes()
+        if (
+            len(destination_bytes) != expected_bytes
+            or hashlib.sha256(destination_bytes).hexdigest() != expected_sha256
+        ):
+            raise RuntimeError(
+                f"fragment quarantine destination verification failed: {preserved_as}"
+            )
+        filenames.append(source)
+
+    _mark_raws_processed_preserving_lock(filenames)
+    completed = dict(manifest)
+    completed["status"] = "completed"
+    completed["completed_at"] = datetime.now().isoformat()
+    atomic_write(
+        manifest_path,
+        json.dumps(completed, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    return _fragment_quarantine_result(manifest_path, completed)
+
+
+def _resume_prepared_capture_fragment_quarantines() -> list[dict]:
+    root = RAW_DIR / ".dead-letter" / "raw-capture-fragments"
+    if not root.is_dir():
+        return []
+    resumed: list[dict] = []
+    for manifest_path in sorted(root.glob("*/manifest*.json")):
+        manifest = _read_fragment_quarantine_manifest(manifest_path)
+        if manifest["status"] == "prepared":
+            resumed.append(_resume_capture_fragment_quarantine(manifest_path))
+    return resumed
 
 
 def _prepare_pending_raw_units(
@@ -397,28 +635,31 @@ def _prepare_pending_raw_units(
             fragment_paths.add(path)
 
     units = [
-        _PendingRawUnit(paths=(path,))
-        for path in pending
-        if path not in fragment_paths
+        _PendingRawUnit(paths=(path,)) for path in pending if path not in fragment_paths
     ]
-    try:
-        groups = group_capture_fragments(fragments)
-    except RawCaptureFragmentError as exc:
-        # Duplicate indices are not independently meaningful. Preserve every
-        # claimed transport fragment rather than leaking any one into ingest.
-        paths = sorted(fragment_paths, key=lambda path: path.name)
-        if paths:
+    grouped_fragments: dict[object, list] = {}
+    for fragment in fragments:
+        grouped_fragments.setdefault(fragment.identity, []).append(fragment)
+    groups = []
+    for rows in sorted(
+        grouped_fragments.values(),
+        key=lambda items: min(item.path.name for item in items),
+    ):
+        try:
+            groups.extend(group_capture_fragments(rows))
+        except RawCaptureFragmentError as exc:
+            # Duplicate indices invalidate only their own source-record group.
+            # Never let one malformed transport identity mutate unrelated raws.
+            paths = sorted((row.path for row in rows), key=lambda path: path.name)
             quarantined.append(
                 _quarantine_capture_fragment_paths(
                     paths,
-                    record_sha256="malformed-duplicate-fragment-index",
+                    record_sha256=rows[0].identity.record_sha256,
                     reason="fragment_group_invalid",
                     details={"error": str(exc)},
                 )
             )
-        return sorted(units, key=lambda unit: unit.representative.name), quarantined, deferred
 
-    input_limit = _raw_ingest_input_limit()
     for group in groups:
         if not group.complete:
             deferred.append(
@@ -431,7 +672,8 @@ def _prepare_pending_raw_units(
             )
             continue
         try:
-            record_text = group.assemble_text()
+            record_bytes = group.assemble_bytes()
+            ingest_content = group.ingest_content()
         except RawCaptureFragmentError as exc:
             quarantined.append(
                 _quarantine_capture_fragment_paths(
@@ -439,23 +681,6 @@ def _prepare_pending_raw_units(
                     record_sha256=group.identity.record_sha256,
                     reason="fragment_integrity_failure",
                     details={"error": str(exc)},
-                )
-            )
-            continue
-        ingest_content = group.ingest_content()
-        if len(ingest_content) > input_limit:
-            quarantined.append(
-                _quarantine_capture_fragment_paths(
-                    list(group.paths),
-                    record_sha256=group.identity.record_sha256,
-                    reason="reassembled_input_limit_exceeded",
-                    details={
-                        "record_chars": len(record_text),
-                        "ingest_chars": len(ingest_content),
-                        "record_bytes": group.identity.record_bytes,
-                        "max_input_chars": input_limit,
-                        "fragment_count": group.identity.fragment_count,
-                    },
                 )
             )
             continue
@@ -470,39 +695,14 @@ def _prepare_pending_raw_units(
                     "transcript-reassembled",
                 ),
                 fragment_record_sha256=group.identity.record_sha256,
+                reassembled_record_bytes=record_bytes,
             )
         )
     units.sort(key=lambda unit: unit.representative.name)
     return units, quarantined, deferred
 
 
-def _quarantine_pending_raws(filenames: list[str]) -> Path:
-    """Move raws that keep killing triage into a dead-letter folder.
-
-    Marks them processed so the orchestrator stops retrying them, but keeps
-    the source bytes on disk under ``raw/.dead-letter/`` so we can inspect
-    or re-feed them after fixing the parser.
-    """
-    dead_letter_dir = RAW_DIR / ".dead-letter"
-    dead_letter_dir.mkdir(exist_ok=True)
-    moved: list[str] = []
-    for name in filenames:
-        src = RAW_DIR / name
-        if not src.exists():
-            continue
-        dst = dead_letter_dir / name
-        try:
-            src.rename(dst)
-            moved.append(name)
-        except OSError:
-            continue
-    if moved:
-        # Mark as processed so get_pending_raw_files() skips them even if a
-        # future operation copies them back into raw/.
-        mark_raw_processed(moved)
-    return dead_letter_dir
-
-
+@_serialize_ingest_across_processes
 def run_pending_ingest(force: bool = False) -> dict:
     """Run ingest on all pending raw files if threshold is met.
 
@@ -528,6 +728,18 @@ def run_pending_ingest(force: bool = False) -> dict:
     callers can inspect partial outcomes without re-loading job state.
     """
     with _INGEST_LOCK:
+        try:
+            resumed_fragment_quarantines = (
+                _resume_prepared_capture_fragment_quarantines()
+            )
+        except Exception as exc:
+            return {
+                "triggered": False,
+                "reason": (
+                    "prepared capture fragment quarantine could not resume: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            }
         if force:
             pending_now = get_pending_raw_files()
             if not pending_now:
@@ -564,18 +776,20 @@ def run_pending_ingest(force: bool = False) -> dict:
 
         state = _load_state()
         if state.get("current_job_id"):
-            runtime_status.safe_write_status(
-                state="running",
-                stage="locked",
-                pending=len(get_pending_raw_files()),
-                current_job_id=state.get("current_job_id"),
-                current_job_pid=state.get("current_job_pid"),
-                ollama=get_ollama_status(),
+            # This function already owns the authoritative cross-process
+            # flock.  Therefore no batch represented only by durable state can
+            # still be active; it is residue from an interrupted prior call
+            # (including the same long-lived MCP PID).  Repair it before
+            # reserving the new batch instead of permanently rejecting work.
+            stale_job_id = state.get("current_job_id")
+            _clear_current_job(state)
+            _save_state(state)
+            runtime_status.safe_append_event(
+                "warn",
+                "orchestrator | cleared stranded ingest reservation",
+                source="orchestrator",
+                stale_job_id=stale_job_id,
             )
-            return {
-                "triggered": False,
-                "reason": f"ingest job {state['current_job_id']} already in flight",
-            }
 
         pending = get_pending_raw_files()
         pending_before_count = len(pending)
@@ -626,44 +840,45 @@ def run_pending_ingest(force: bool = False) -> dict:
                 "fragment_deferred": fragment_deferred,
             }
 
-        # Quarantine if this same head-of-queue keeps blowing up triage.
-        if state.get("triage_failure_count", 0) >= TRIAGE_FAILURE_QUARANTINE_THRESHOLD:
-            quarantine_dir = _quarantine_pending_raws(filenames)
-            runtime_status.safe_append_event(
-                "warn",
-                f"orchestrator | quarantined {len(filenames)} raws",
-                source="orchestrator",
-                raw_files=filenames,
-                quarantine_dir=str(quarantine_dir),
-            )
-            return {
-                "triggered": False,
-                "reason": (
-                    f"quarantined {len(filenames)} raws after "
-                    f"{state['triage_failure_count']} consecutive triage failures "
-                    f"→ {quarantine_dir}"
-                ),
-                "quarantined": filenames,
-            }
-
-        # Reserve the batch-wide in-flight slot BEFORE entering the loop.
-        # Cleared in the outer ``finally`` regardless of how we exit.
-        reserved_state = _load_state()
-        reserved_state["current_job_id"] = "__pending__"
-        reserved_state["current_job_pid"] = os.getpid()
-        reserved_state["current_job_started_at"] = datetime.now().isoformat()
-        _save_state(reserved_state)
-
         # Lazy imports keep module-level cycles minimal and isolate test
-        # patches that swap these out.
+        # patches that swap these out.  Resolve every fallible prerequisite
+        # before publishing the durable in-flight reservation; otherwise a
+        # long-lived MCP process can leave a false-live ``__pending__`` slot.
         from llm_wiki_mcp.ingest import run_ingest
-        from llm_wiki_mcp.jobs import job_store
+        from llm_wiki_mcp.jobs import JobStatus, job_store
         from llm_wiki_mcp.frontmatter import parse as _frontmatter_parse
+        from llm_wiki_mcp.raw_semantic_projection import (
+            ProjectionCapacityError,
+            ProjectionConflictError,
+            RawSemanticProjectionError,
+            project_parent_raw,
+            project_reassembled_raws,
+            verify_projection_bundle,
+        )
+        from llm_wiki_mcp.runtime_config import load_ingest_config
+        from llm_wiki_mcp.raw_completion_ack import (
+            RawCompletionAckError,
+            RawCompletionStatePending,
+            load_valid_receipt,
+            publish_receipt,
+            receipt_path,
+            receipt_summary,
+        )
 
+        initial_ollama_status = get_ollama_status()
         per_raw: list[dict] = []
         job_ids: list[str] = []
         succeeded_filenames: list[str] = []
         batch_started = time.time()
+
+        # Reserve the batch-wide in-flight slot only after all prerequisites
+        # succeeded.  From this point the loop's outer ``finally`` owns release.
+        reserved_state = _load_state()
+        reserved_state["current_job_id"] = "__pending__"
+        reserved_state["current_job_pid"] = os.getpid()
+        reserved_state["current_job_started_at"] = datetime.now().isoformat()
+        _publish_ingest_reservation(reserved_state)
+
         runtime_status.safe_write_status(
             state="running",
             stage="batch",
@@ -680,7 +895,7 @@ def run_pending_ingest(force: bool = False) -> dict:
                 "failed": 0,
                 "files": filenames,
             },
-            ollama=get_ollama_status(),
+            ollama=initial_ollama_status,
             llm=None,
         )
 
@@ -698,12 +913,14 @@ def run_pending_ingest(force: bool = False) -> dict:
                     )
                 except Exception as e:
                     _orch_log(f"orchestrator | failed to read raw {fname}: {e}")
-                    per_raw.append({
-                        "filename": fname,
-                        "source_files": source_filenames,
-                        "succeeded": False,
-                        "error": f"read error: {e}",
-                    })
+                    per_raw.append(
+                        {
+                            "filename": fname,
+                            "source_files": source_filenames,
+                            "succeeded": False,
+                            "error": f"read error: {e}",
+                        }
+                    )
                     continue
 
                 # Extract raw_keywords from frontmatter, falling back to the
@@ -749,33 +966,242 @@ def run_pending_ingest(force: bool = False) -> dict:
                     visible_state["current_job_started_at"] = datetime.now().isoformat()
                 _save_state(visible_state)
 
-                # Mutable flag the on_complete closure flips on success.
-                # Wrapped in a list so the closure can mutate it without
-                # ``nonlocal`` gymnastics across the loop iterations.
+                # The flag is flipped only after the processed-state write is
+                # durable.  A published receipt with an interrupted state write
+                # therefore remains a failed job and can resume ACK-only on the
+                # next tick without repeating semantic work.
                 raw_success_flag = [False]
+                completion_ack_summary: list[dict | None] = [None]
 
-                def _on_complete(names=source_filenames, flag=raw_success_flag):
+                def _on_complete(
+                    names=source_filenames,
+                    paths=unit.paths,
+                    flag=raw_success_flag,
+                    summary_holder=completion_ack_summary,
+                    current_job_id=job.job_id,
+                ):
+                    completed_job = job_store.get(current_job_id)
+                    # on_complete is itself the terminal success contract.  The
+                    # real ingest path has already persisted COMPLETED; keeping
+                    # this normalization also supports deterministic callback
+                    # implementations used by embedders and tests.
+                    if completed_job is not None and completed_job.status is not (
+                        JobStatus.COMPLETED
+                    ):
+                        job_store.update(
+                            current_job_id,
+                            status=JobStatus.COMPLETED,
+                            completed_at=datetime.now().isoformat(),
+                        )
+                        completed_job = job_store.get(current_job_id)
+                    receipt, payload = publish_receipt(paths, completed_job)
+                    try:
+                        _mark_raws_processed_preserving_lock(list(names))
+                    except Exception as exc:
+                        if not _raws_are_durably_processed(list(names)):
+                            raise RawCompletionStatePending(
+                                "raw completion ACK state pending: "
+                                f"{type(exc).__name__}: {exc}"
+                            ) from exc
                     flag[0] = True
-                    _mark_raws_processed_preserving_lock(list(names))
+                    summary_holder[0] = receipt_summary(receipt, payload)
 
-                def _on_finally(failed: bool, triage_failed: bool):
-                    _update_triage_failure_count(failed, triage_failed)
-
+                projection_summary: dict | None = None
+                projection_failed = False
+                projection_group_quarantine: dict | None = None
                 try:
-                    run_ingest(
-                        raw_text,
-                        job.job_id,
-                        on_complete=_on_complete,
-                        on_finally=_on_finally,
-                        metadata={"raw_keywords": raw_keywords, "source_raw": fname},
+                    durable_receipt = load_valid_receipt(unit.paths)
+                    if durable_receipt is not None:
+                        durable_receipt_path = receipt_path(unit.paths)
+                        try:
+                            _mark_raws_processed_preserving_lock(source_filenames)
+                        except Exception as exc:
+                            if not _raws_are_durably_processed(source_filenames):
+                                raise RawCompletionStatePending(
+                                    "raw completion ACK state pending: "
+                                    f"{type(exc).__name__}: {exc}"
+                                ) from exc
+                        raw_success_flag[0] = True
+                        resumed_summary = receipt_summary(
+                            durable_receipt_path, durable_receipt
+                        )
+                        resumed_summary["resumed"] = True
+                        completion_ack_summary[0] = resumed_summary
+                        job_store.update(
+                            job.job_id,
+                            status=JobStatus.COMPLETED,
+                            processor="durable-raw-ack",
+                            stage="completion-ack",
+                            completed_at=datetime.now().isoformat(),
+                            pages_created=[],
+                            pages_updated=[],
+                            result={"raw_completion_ack": resumed_summary},
+                        )
+                        raise _CompletionAckResumed
+
+                    max_child_bytes = (
+                        load_ingest_config().semantic_projection_max_child_bytes
                     )
+                    if unit.reassembled_record_bytes is not None:
+                        projection = project_reassembled_raws(
+                            unit.paths,
+                            unit.reassembled_record_bytes,
+                            output_dir=RAW_DIR,
+                            max_child_bytes=max_child_bytes,
+                        )
+                    else:
+                        projection = project_parent_raw(
+                            raw_path,
+                            output_dir=RAW_DIR,
+                            max_child_bytes=max_child_bytes,
+                        )
+                    projection_summary = {
+                        "kind": projection.kind,
+                        "manifest_path": (
+                            str(projection.manifest_path)
+                            if projection.manifest_path is not None
+                            else None
+                        ),
+                        "projection_paths": [
+                            str(path) for path in projection.projection_paths
+                        ],
+                        "child_paths": [str(path) for path in projection.child_paths],
+                        "noop_receipt_path": (
+                            str(projection.noop_receipt_path)
+                            if projection.noop_receipt_path is not None
+                            else None
+                        ),
+                        "parent_sha256": projection.parent_sha256,
+                        "projection_sha256": projection.projection_sha256,
+                        "record_count": projection.record_count,
+                        "selected_record_count": projection.selected_record_count,
+                        "child_count": projection.child_count,
+                        "role_counts": dict(projection.role_counts),
+                    }
+                    if projection.kind in {"noop", "children"}:
+                        if projection.manifest_path is None:
+                            raise RuntimeError(
+                                "semantic projection delegation has no manifest"
+                            )
+                        verified_manifest = verify_projection_bundle(
+                            projection.manifest_path
+                        )
+                        expected_status = (
+                            "noop" if projection.kind == "noop" else "delegated"
+                        )
+                        if (
+                            verified_manifest.get("status") != expected_status
+                            or verified_manifest.get("source_sha256")
+                            != projection.parent_sha256
+                            or verified_manifest.get("projection_sha256")
+                            != projection.projection_sha256
+                            or len(verified_manifest.get("children") or [])
+                            != projection.child_count
+                        ):
+                            raise RuntimeError(
+                                "semantic projection read-back does not match result"
+                            )
+                        job_store.update(
+                            job.job_id,
+                            status=JobStatus.COMPLETED,
+                            processor="deterministic-projection",
+                            stage="projection",
+                            completed_at=datetime.now().isoformat(),
+                            pages_created=[],
+                            pages_updated=[],
+                            result={"projection": projection_summary},
+                        )
+                        _on_complete()
+                    elif projection.kind == "passthrough":
+                        if projection.child_paths and (
+                            "transcript-semantic-projection" not in raw_keywords
+                        ):
+                            raw_keywords.append("transcript-semantic-projection")
+                    else:
+                        raise RuntimeError(
+                            f"unknown semantic projection kind: {projection.kind!r}"
+                        )
+                except _CompletionAckResumed:
+                    pass
+                except RawCompletionAckError as e:
+                    projection_failed = True
+                    job_store.update(
+                        job.job_id,
+                        status=JobStatus.FAILED,
+                        stage="completion-ack",
+                        completed_at=datetime.now().isoformat(),
+                        error=str(e),
+                    )
+                    _orch_log(f"orchestrator | raw {fname} completion ACK failed: {e}")
                 except Exception as e:
-                    # ``run_ingest`` already routes its own exceptions through
-                    # job_store.update(FAILED) + on_finally; this catch is a
-                    # belt-and-braces guard against a callback raising past
-                    # the inner try/finally. Log and continue to the next raw
-                    # so one bad raw can't strand the whole batch.
-                    _orch_log(f"orchestrator | raw {fname} ingest exception: {e}")
+                    projection_failed = True
+                    if isinstance(e, ProjectionConflictError):
+                        projection_failure_cause = "artifact_conflict"
+                    elif isinstance(e, ProjectionCapacityError):
+                        projection_failure_cause = "capacity"
+                    elif isinstance(e, RawSemanticProjectionError):
+                        projection_failure_cause = "source_invalid"
+                    elif isinstance(e, OSError):
+                        projection_failure_cause = "interrupted"
+                    else:
+                        projection_failure_cause = "internal_error"
+                    projection_error = (
+                        "raw semantic projection failed "
+                        f"[{projection_failure_cause}]: {type(e).__name__}: {e}"
+                    )
+                    if (
+                        projection_failure_cause == "source_invalid"
+                        and unit.reassembled_record_bytes is not None
+                        and unit.fragment_record_sha256 is not None
+                    ):
+                        projection_group_quarantine = (
+                            _quarantine_capture_fragment_paths(
+                                list(unit.paths),
+                                record_sha256=unit.fragment_record_sha256,
+                                reason="semantic_projection_source_invalid",
+                                details={
+                                    "error_type": type(e).__name__,
+                                    "error_sha256": hashlib.sha256(
+                                        str(e).encode("utf-8", errors="replace")
+                                    ).hexdigest(),
+                                },
+                            )
+                        )
+                    job_store.update(
+                        job.job_id,
+                        status=JobStatus.FAILED,
+                        stage="projection",
+                        completed_at=datetime.now().isoformat(),
+                        error=projection_error,
+                    )
+                    _orch_log(f"orchestrator | raw {fname} projection exception: {e}")
+
+                if not projection_failed and not raw_success_flag[0]:
+                    try:
+                        run_ingest(
+                            raw_text,
+                            job.job_id,
+                            on_complete=_on_complete,
+                            metadata={
+                                "raw_keywords": raw_keywords,
+                                "source_raw": fname,
+                            },
+                        )
+                    except Exception as e:
+                        # ``run_ingest`` already routes its own exceptions
+                        # through job_store.update(FAILED); this catch is a
+                        # final guard so one bad raw cannot strand the batch.
+                        current_job = job_store.get(job.job_id)
+                        if current_job is None or current_job.status is not (
+                            JobStatus.FAILED
+                        ):
+                            job_store.update(
+                                job.job_id,
+                                status=JobStatus.FAILED,
+                                completed_at=datetime.now().isoformat(),
+                                error=str(e),
+                            )
+                        _orch_log(f"orchestrator | raw {fname} ingest exception: {e}")
 
                 supervision = None
                 if raw_success_flag[0]:
@@ -784,59 +1210,53 @@ def run_pending_ingest(force: bool = False) -> dict:
                     try:
                         from llm_wiki_mcp.failure_supervisor import reset_raw_failure
 
-                        reset_raw_failure(fname)
+                        for source_filename in source_filenames:
+                            reset_raw_failure(source_filename)
                     except Exception as e:
                         _orch_log(
                             f"orchestrator | failure supervisor reset failed "
                             f"for {fname}: {e}"
                         )
                 else:
-                    try:
-                        from llm_wiki_mcp.failure_supervisor import (
-                            record_raw_failure,
-                            result_to_dict,
-                        )
+                    if projection_group_quarantine is not None:
+                        supervision = {
+                            "raw_file": fname,
+                            "failure_class": ("raw.semantic_projection_source_invalid"),
+                            "fingerprint": (
+                                "raw.semantic_projection_source_invalid:"
+                                + hashlib.sha256(
+                                    unit.fragment_record_sha256.encode("utf-8")
+                                ).hexdigest()[:16]
+                            ),
+                            "attempts": 1,
+                            "quarantined": True,
+                            "packet_path": None,
+                            "quarantine_path": projection_group_quarantine["manifest"],
+                            "tracked": True,
+                            "transient": False,
+                        }
+                    else:
+                        try:
+                            from llm_wiki_mcp.failure_supervisor import (
+                                record_raw_failure,
+                                result_to_dict,
+                            )
 
-                        job_record = job_store.get(job.job_id)
-                        supervision = result_to_dict(
-                            record_raw_failure(
-                                raw_path=raw_path,
-                                error=job_record.error if job_record else None,
-                                job_id=job.job_id,
-                                raw_text=raw_text,
+                            job_record = job_store.get(job.job_id)
+                            supervision = result_to_dict(
+                                record_raw_failure(
+                                    raw_path=raw_path,
+                                    error=job_record.error if job_record else None,
+                                    job_id=job.job_id,
+                                    raw_text=raw_text,
+                                    related_raw_paths=unit.paths,
+                                )
                             )
-                        )
-                        if (
-                            isinstance(supervision, dict)
-                            and supervision.get("quarantined") is True
-                            and len(source_filenames) > 1
-                        ):
-                            fragment_paths = [
-                                path for path in unit.paths if path.exists()
-                            ]
-                            quarantined_representative = supervision.get(
-                                "quarantine_path"
+                        except Exception as e:
+                            _orch_log(
+                                f"orchestrator | failure supervisor failed for "
+                                f"{fname}: {e}"
                             )
-                            if isinstance(quarantined_representative, str):
-                                quarantined_path = Path(quarantined_representative)
-                                if quarantined_path.exists():
-                                    fragment_paths.append(quarantined_path)
-                            _quarantine_capture_fragment_paths(
-                                fragment_paths,
-                                record_sha256=(
-                                    unit.fragment_record_sha256
-                                    or f"failed-{raw_path.stem}"
-                                ),
-                                reason="reassembled_ingest_failure",
-                                details={
-                                    "failure_class": supervision.get("failure_class")
-                                },
-                            )
-                    except Exception as e:
-                        _orch_log(
-                            f"orchestrator | failure supervisor failed "
-                            f"for {fname}: {e}"
-                        )
 
                 raw_result = {
                     "filename": fname,
@@ -848,8 +1268,12 @@ def run_pending_ingest(force: bool = False) -> dict:
                     raw_result["reassembled_fragment_record_sha256"] = (
                         unit.fragment_record_sha256
                     )
+                if projection_summary is not None:
+                    raw_result["projection"] = projection_summary
                 if supervision is not None:
                     raw_result["supervision"] = supervision
+                if completion_ack_summary[0] is not None:
+                    raw_result["completion_ack"] = completion_ack_summary[0]
                 per_raw.append(raw_result)
                 runtime_status.safe_append_event(
                     "success" if raw_success_flag[0] else "warn",
@@ -911,12 +1335,11 @@ def run_pending_ingest(force: bool = False) -> dict:
             "files_attempted": filenames,
             "files_processed": succeeded_filenames,
             "files_quarantined": [
-                name
-                for row in fragment_quarantined
-                for name in row.get("files", [])
+                name for row in fragment_quarantined for name in row.get("files", [])
             ],
             "fragment_quarantined": fragment_quarantined,
             "fragment_deferred": fragment_deferred,
+            "fragment_quarantine_transactions_resumed": (resumed_fragment_quarantines),
             "per_raw": per_raw,
             "processor": get_ollama_status()["processor"],
             "elapsed_seconds": round(elapsed, 2),
@@ -956,6 +1379,7 @@ def run_lint_if_due(*, dry_run: bool = False) -> dict:
     issues = check()
     try:
         from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
+
         snapshot = (
             {"status": "skipped", "reason": "dry_run"}
             if dry_run

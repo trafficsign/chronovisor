@@ -757,6 +757,50 @@ def test_memory_probe_failure_quarantines_before_any_inference(
     assert transport.requests == []
 
 
+def test_oversize_request_quarantines_before_probe_eviction_or_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[Any, ...]] = []
+    transport = EventTransport({}, events)
+    planner_calls: list[object] = []
+    unload_calls: list[object] = []
+    monkeypatch.setattr(
+        ollama,
+        "model_resource_lease",
+        lambda **_kwargs: nullcontext(),
+    )
+
+    def planner(*args: object, **kwargs: object) -> ollama.ModelResidencyPlan:
+        planner_calls.append((args, kwargs))
+        pytest.fail("oversize request must fail before residency planning")
+
+    def unload(*args: object, **kwargs: object) -> bool:
+        unload_calls.append((args, kwargs))
+        pytest.fail("oversize request must not evict a runner")
+
+    result = DecisionRouter(
+        config=_config(max_input_chars=4_096),
+        transport=transport,
+        audit_root=tmp_path / "audit",
+        resolve_adoption=False,
+        record_replay=False,
+        residency_planner=planner,
+        model_unloader=unload,
+        live_resource_control=True,
+    ).decide("oversized-user-input" * 1_000, SCHEMA)
+
+    assert result.status == "quarantined"
+    assert result.failure_class == "input_too_large"
+    assert result.votes == ()
+    assert result.residency is not None
+    assert result.residency["source"] == "request_preflight_failed_no_probe"
+    assert planner_calls == []
+    assert unload_calls == []
+    assert transport.requests == []
+    assert events == []
+
+
 def test_single_resident_unload_failure_quarantines_before_next_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

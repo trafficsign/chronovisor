@@ -6,6 +6,7 @@ import json
 import re
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date
 from difflib import SequenceMatcher
@@ -33,9 +34,10 @@ from llm_wiki_mcp.local_structured import (
     ChatRequest,
     ChatTransport,
     LocalStructuredSession,
+    required_structured_context_tokens,
 )
 from llm_wiki_mcp.runtime_config import load_ingest_config
-from llm_wiki_mcp import decision_authority, runtime_status
+from llm_wiki_mcp import decision_authority, ollama as ollama_runtime, runtime_status
 from llm_wiki_mcp.entities import patch_entities_frontmatter
 
 
@@ -161,7 +163,15 @@ def _generate_with_progress(
     system: str | None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     format: dict[str, Any] | str | None = None,
-) -> str:
+    model: str | None = None,
+    num_ctx: int | None = None,
+    num_predict: int | None = None,
+    keep_alive: str | None = None,
+    read_timeout_ms: int | None = None,
+    temperature: int | float | None = None,
+    seed: int | None = None,
+    return_metadata: bool = False,
+) -> str | ollama_runtime.GenerateResponse:
     kwargs: dict[str, Any] = {}
     if progress_callback is not None and _supports_keyword(
         generate, "progress_callback"
@@ -169,6 +179,23 @@ def _generate_with_progress(
         kwargs["progress_callback"] = progress_callback
     if format is not None and _supports_keyword(generate, "format"):
         kwargs["format"] = format
+    optional = {
+        "model": model,
+        "num_ctx": num_ctx,
+        "num_predict": num_predict,
+        "keep_alive": keep_alive,
+        "read_timeout_ms": read_timeout_ms,
+        "temperature": temperature,
+        "seed": seed,
+        "return_metadata": return_metadata,
+    }
+    for name, value in optional.items():
+        if (
+            value is not None
+            and (name != "return_metadata" or value is True)
+            and _supports_keyword(generate, name)
+        ):
+            kwargs[name] = value
     try:
         return generate(prompt, system=system, **kwargs)
     except Exception as e:
@@ -177,21 +204,37 @@ def _generate_with_progress(
         raise
 
 
+_DEFAULT_GENERATE_WITH_PROGRESS = _generate_with_progress
+
+
 def _structured_generate_transport(
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> ChatTransport:
     """Adapt the legacy generate fixture/progress seam to chat-style history."""
 
-    def transport(request: ChatRequest) -> str:
+    def transport(
+        request: ChatRequest,
+    ) -> str | ollama_runtime.ChatResponse | ollama_runtime.GenerateResponse:
         system = request.messages[0]["content"] if request.messages else ""
         transcript = "\n\n".join(
             f"<{message['role'].upper()}>\n{message['content']}"
             for message in request.messages[1:]
         )
-        kwargs: dict[str, Any] = {
-            "system": system,
+        kwargs: dict[str, Any] = {"system": system}
+        optional = {
             "progress_callback": progress_callback,
+            "model": request.model,
+            "num_ctx": request.num_ctx,
+            "num_predict": request.num_predict,
+            "keep_alive": request.keep_alive,
+            "read_timeout_ms": request.read_timeout_ms,
+            "temperature": request.temperature,
+            "seed": request.seed,
+            "return_metadata": True,
         }
+        for name, value in optional.items():
+            if value is not None and _supports_keyword(_generate_with_progress, name):
+                kwargs[name] = value
         # Existing tests and callers can still replace the historical helper
         # with a narrower fixture. Production receives Ollama's JSON schema.
         if _supports_keyword(_generate_with_progress, "format"):
@@ -214,6 +257,8 @@ def _triage_with_progress(
         kwargs["progress_callback"] = progress_callback
     if frontier_feedback and _supports_keyword(_triage, "frontier_feedback"):
         kwargs["frontier_feedback"] = frontier_feedback
+    if _supports_keyword(_triage, "raise_on_failure"):
+        kwargs["raise_on_failure"] = True
     return _triage(content, **kwargs)
 
 
@@ -319,12 +364,147 @@ TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
 }
 
 
+_INGEST_CONTEXT_BUCKETS = (32_768, 65_536, 131_072, 262_144)
+_TRIAGE_RAW_FAILURE_CLASSES = frozenset({"repair_exhausted", "repeated_output"})
+
+
+class IngestContextCapacityError(RuntimeError):
+    """Raised before inference when no configured context bucket can fit."""
+
+
+class IngestTriageFailure(RuntimeError):
+    """Preserve one structured-session failure across the ingest boundary."""
+
+    def __init__(self, failure_class: str, reason: str) -> None:
+        self.failure_class = failure_class or "unknown"
+        self.reason = reason or "structured triage failed"
+        super().__init__(
+            f"triage structured failure [{self.failure_class}]: {self.reason}"
+        )
+
+    @property
+    def raw_failure(self) -> bool:
+        return self.failure_class in _TRIAGE_RAW_FAILURE_CLASSES
+
+
+def ingest_context_buckets(*, num_ctx: int, max_num_ctx: int) -> tuple[int, ...]:
+    """Return monotonic ingest buckets within the configured model envelope."""
+
+    candidates = (num_ctx, *_INGEST_CONTEXT_BUCKETS, max_num_ctx)
+    buckets = tuple(
+        sorted({value for value in candidates if num_ctx <= value <= max_num_ctx})
+    )
+    return buckets or (max_num_ctx,)
+
+
+def _select_ingest_context(
+    required: int,
+    *,
+    num_ctx: int,
+    max_num_ctx: int,
+) -> int:
+    for bucket in ingest_context_buckets(
+        num_ctx=num_ctx,
+        max_num_ctx=max_num_ctx,
+    ):
+        if bucket >= required:
+            return bucket
+    raise IngestContextCapacityError(
+        f"required context {required} exceeds configured max_num_ctx {max_num_ctx}"
+    )
+
+
+def _admit_ingest_context(config: Any, requested_num_ctx: int) -> int:
+    """Use the shared measured-residency planner for one ingest runner."""
+
+    def evict_unrelated_residents() -> int:
+        try:
+            resident_models = ollama_runtime.resident_model_rows()
+        except Exception as exc:
+            raise IngestTriageFailure(
+                "capacity_unavailable",
+                f"resident model probe failed: {type(exc).__name__}: {exc}",
+            ) from exc
+        evicted = 0
+        for model in sorted(resident_models):
+            if model == config.model:
+                continue
+            if not ollama_runtime.unload_named_model(model):
+                raise IngestTriageFailure(
+                    "capacity_unavailable",
+                    f"unable to verify ingest runner eviction: {model}",
+                )
+            evicted += 1
+        return evicted
+
+    def residency_plan():
+        try:
+            return ollama_runtime.plan_model_residency(
+                [config.model],
+                num_ctx=requested_num_ctx,
+                max_num_ctx=config.max_num_ctx,
+                reserve_bytes=config.memory_reserve_gib * ollama_runtime.GIB,
+                configured_max_resident=1,
+                reuse_larger_context=True,
+            )
+        except Exception as exc:
+            raise IngestTriageFailure(
+                "capacity_unavailable",
+                f"residency planning failed: {type(exc).__name__}: {exc}",
+            ) from exc
+
+    # The 256K bucket is intentionally a one-runner mode. Its KV allocation is
+    # the only ingest envelope large enough for legacy 120KB captures, so
+    # keeping unrelated decision/recall runners resident would recreate the
+    # memory-pressure failure this admission gate exists to prevent.
+    if requested_num_ctx >= 262_144:
+        evict_unrelated_residents()
+    plan = residency_plan()
+    # Smaller buckets normally coexist with recall/decision runners. If live
+    # headroom cannot fit even one ingest runner, reclaim only unrelated Ollama
+    # residents and re-plan from fresh measured memory before deferring. This
+    # avoids a permanent low-context stall without evicting healthy models on
+    # every request.
+    if plan.max_resident_models < 1 and requested_num_ctx < 262_144:
+        if evict_unrelated_residents() > 0:
+            plan = residency_plan()
+    if plan.max_resident_models < 1:
+        raise IngestTriageFailure(
+            "capacity_unavailable",
+            "measured memory admission cannot fit one ingest runner",
+        )
+    for model in plan.initial_eviction_models:
+        if not ollama_runtime.unload_named_model(model):
+            raise IngestTriageFailure(
+                "capacity_unavailable",
+                f"unable to verify incompatible ingest runner eviction: {model}",
+            )
+    return max(requested_num_ctx, plan.context_for(config.model))
+
+
+def _emit_triage_failure(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    failure: IngestTriageFailure,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        {
+            "event": "error",
+            "active": False,
+            "failure_class": failure.failure_class,
+            "error": failure.reason,
+        }
+    )
+
+
 def _triage(
     content: str,
     *,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     frontier_feedback: str | None = None,
     transport: ChatTransport | None = None,
+    raise_on_failure: bool = False,
 ) -> list[dict] | None:
     """Stage 1: Analyze raw content and return a plan, or None on parse failure.
 
@@ -387,24 +567,72 @@ Raw session data to triage:
 Analyze the raw data above. Output a JSON array of page operations (create/update)."""
 
     config = load_ingest_config()
-    result = LocalStructuredSession(
-        model=config.model,
-        transport=transport or _structured_generate_transport(progress_callback),
-        role="ingest_triage",
-        num_ctx=config.num_ctx,
-        num_predict=min(config.num_predict, 2_048),
-        keep_alive=config.keep_alive,
-        read_timeout_ms=config.read_timeout_ms,
-        max_input_chars=17_000,
+    triage_num_predict = min(config.num_predict, 2_048)
+    required_num_ctx = required_structured_context_tokens(
+        prompt,
+        TRIAGE_PLAN_SCHEMA,
+        system=TRIAGE_SYSTEM_PROMPT,
+        num_predict=triage_num_predict,
         max_output_chars=4_000,
         max_feedback_chars=2_400,
-    ).run(prompt, TRIAGE_PLAN_SCHEMA, system=TRIAGE_SYSTEM_PROMPT)
+    )
+    try:
+        selected_num_ctx = _select_ingest_context(
+            required_num_ctx,
+            num_ctx=config.num_ctx,
+            max_num_ctx=config.max_num_ctx,
+        )
+        live_transport = (
+            transport is None
+            and _generate_with_progress is _DEFAULT_GENERATE_WITH_PROGRESS
+        )
+        lease = (
+            ollama_runtime.model_resource_lease(exclusive=True)
+            if live_transport
+            else nullcontext()
+        )
+        with lease:
+            if live_transport:
+                selected_num_ctx = _admit_ingest_context(config, selected_num_ctx)
+            result = LocalStructuredSession(
+                model=config.model,
+                transport=transport
+                or _structured_generate_transport(progress_callback),
+                role="ingest_triage",
+                num_ctx=selected_num_ctx,
+                num_predict=triage_num_predict,
+                keep_alive=config.keep_alive,
+                read_timeout_ms=config.read_timeout_ms,
+                # Context preflight below remains the authoritative bound. This
+                # independent byte cap prevents an input larger than the exact
+                # admitted runner from reaching Ollama.
+                max_input_chars=selected_num_ctx,
+                max_output_chars=4_000,
+                max_feedback_chars=2_400,
+            ).run(prompt, TRIAGE_PLAN_SCHEMA, system=TRIAGE_SYSTEM_PROMPT)
+    except IngestContextCapacityError as exc:
+        failure = IngestTriageFailure("context_window_exceeded", str(exc))
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure from exc
+        return None
+    except IngestTriageFailure as failure:
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise
+        return None
     if not result.ok:
+        failure = IngestTriageFailure(
+            result.failure_class or "unknown",
+            result.failure_reason or "structured triage failed",
+        )
         _safe_log(
             "ingest | triage structured session failed "
-            f"({result.failure_class or 'unknown'}: "
-            f"{(result.failure_reason or '')[:160]})"
+            f"({failure.failure_class}: {failure.reason[:160]})"
         )
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure
         return None
     raw_plan = result.value
     if not isinstance(raw_plan, list):
@@ -748,9 +976,50 @@ def _dedupe_create_ops_with_existing(plan: list[dict], raw_content: str) -> list
 # ---------------------------------------------------------------------------
 
 
-def _build_focused_context(op: dict, raw_content: str) -> str:
+def _complete_related_context(
+    heading: str,
+    paths: list[Path],
+    *,
+    max_bytes: int | None,
+    excluded: set[Path] | None = None,
+) -> list[str]:
+    """Select only complete related-page blocks within a deterministic budget.
+
+    Related pages are optional retrieval context, but a partial page is
+    misleading evidence.  Skip a page when its complete UTF-8 bytes do not fit
+    instead of prefix-truncating it.  The current update target is handled
+    separately and is never subject to this budget.
+    """
+
+    selected: list[str] = []
+    used_bytes = 0
+    excluded_paths = {path.resolve(strict=False) for path in (excluded or set())}
+    for path in paths:
+        if path.resolve(strict=False) in excluded_paths:
+            continue
+        block = "\n".join(
+            [
+                f"--- [[{page_id_from_path(path)}]] ---",
+                path.read_text(),
+            ]
+        )
+        block_bytes = len(block.encode("utf-8"))
+        if max_bytes is not None and used_bytes + block_bytes > max_bytes:
+            continue
+        selected.append(block)
+        used_bytes += block_bytes
+    return [heading, *selected] if selected else []
+
+
+def _build_focused_context(
+    op: dict,
+    raw_content: str,
+    *,
+    max_bytes: int | None = None,
+) -> str:
     """Build context focused on a single page operation."""
-    lines = []
+    lines: list[str] = []
+    current_path: Path | None = None
 
     # For updates, include the current page content
     if op.get("type") == "update":
@@ -758,6 +1027,7 @@ def _build_focused_context(op: dict, raw_content: str) -> str:
         page_id = filename.replace(".md", "").split("/")[-1]
         existing_path = find_page(page_id)
         if existing_path:
+            current_path = existing_path
             lines.append(f"--- Current content of [[{page_id}]] ---")
             lines.append(existing_path.read_text())
             lines.append("--- End current content ---\n")
@@ -767,11 +1037,14 @@ def _build_focused_context(op: dict, raw_content: str) -> str:
     if keywords:
         related = _search_related_pages(keywords, top_n=5)
         if related:
-            lines.append("Related existing pages for cross-referencing:")
-            for path in related:
-                content = path.read_text()
-                lines.append(f"\n--- [[{page_id_from_path(path)}]] ---")
-                lines.append(content)
+            lines.extend(
+                _complete_related_context(
+                    "Related existing pages for cross-referencing:",
+                    related,
+                    max_bytes=max_bytes,
+                    excluded={current_path} if current_path is not None else None,
+                )
+            )
     elif op.get("type") == "create":
         # For creates without keywords, use title words as fallback
         title = op.get("title", "")
@@ -779,12 +1052,58 @@ def _build_focused_context(op: dict, raw_content: str) -> str:
             title_keywords = [w for w in title.split() if len(w) >= 2]
             related = _search_related_pages(title_keywords, top_n=3)
             if related:
-                lines.append("Related existing pages:")
-                for path in related:
-                    lines.append(f"\n--- [[{page_id_from_path(path)}]] ---")
-                    lines.append(path.read_text())
+                lines.extend(
+                    _complete_related_context(
+                        "Related existing pages:",
+                        related,
+                        max_bytes=max_bytes,
+                    )
+                )
 
     return "\n".join(lines)
+
+
+def _required_generate_context_tokens(
+    prompt: str,
+    system: str | None,
+    *,
+    num_predict: int,
+) -> int:
+    """Return a tokenizer-independent upper bound for legacy generation."""
+
+    prompt_bytes = len(prompt.encode("utf-8"))
+    system_bytes = len(system.encode("utf-8")) if system else 0
+    return prompt_bytes + system_bytes + num_predict + 256
+
+
+def _generation_completion_failure(
+    response: ollama_runtime.GenerateResponse,
+) -> tuple[str, str] | None:
+    """Validate Ollama's explicit terminal metadata before page parsing."""
+
+    reason = (response.done_reason or "").strip().casefold().replace("-", "_")
+    known_limit = {
+        "length",
+        "max_length",
+        "max_token",
+        "max_tokens",
+        "num_predict",
+        "token_limit",
+    }
+    if reason in known_limit or (
+        reason and ("token" in reason or "length" in reason) and reason != "stop"
+    ):
+        return (
+            "output_truncated",
+            f"Ollama stopped at an output limit (done_reason={reason!r})",
+        )
+    if response.done is not True:
+        return (
+            "stream_incomplete" if response.streamed else "completion_incomplete",
+            "Ollama response did not contain an explicit completed turn "
+            f"(done={response.done!r}, done_reason={response.done_reason!r})",
+        )
+    return None
 
 
 def _search_related_pages(
@@ -855,12 +1174,13 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
 
     Op-type rules:
     - ``create``: body MUST contain a frontmatter block with ``title:``. We accept
-      strict (`=== NEW PAGE: ... ===`), lenient (`=== anything ===`), or
-      no-wrapper formats — but reject anything without frontmatter so we never
-      persist refusals or malformed pages.
+      strict (`=== NEW PAGE: ... ===`) or lenient (`=== anything ===`) wrappers,
+      but always require an explicit ``=== END PAGE ===`` close before content
+      can be persisted.
     - ``update``: body MUST NOT contain a frontmatter block. Stray FM is
       stripped here as a belt-and-braces against UPDATE_SYSTEM_PROMPT
-      drift. Empty body after stripping → reject.
+      drift. The explicit close is required and an empty body after stripping
+      is rejected.
     """
     if not output:
         return None
@@ -892,39 +1212,6 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
         )
         if m:
             body = m.group(1).strip() or None
-
-    # 3. Fallback: bare frontmatter-led page with no wrapper.
-    if body is None and _has_frontmatter(text):
-        body = (
-            re.sub(r"\n=+\s*END[^\n]*\s*=+\s*$", "", text, flags=re.IGNORECASE).strip()
-            or None
-        )
-
-    # 4. Truncation fallback: the wrapper opened (``=== ... ===``) but the
-    #    model ran out of tokens before emitting ``=== END PAGE ===``. Patterns
-    #    1 and 2 require the close, and pattern 3 requires the body to start
-    #    with ``---\n`` — none of them salvage this very common Ollama failure
-    #    mode. Peel the leading wrapper line and trust the remainder; the
-    #    op-type contract check at the bottom (frontmatter required for
-    #    create, no FM for update) still gates output.
-    if body is None:
-        m = re.match(r"===[^\n]*===\n(.*)$", text, re.DOTALL)
-        if m:
-            candidate = m.group(1).strip()
-            # Strip any partial trailing close fence: anything from the last
-            # ``\n=`` to EOF. This covers full ``=== END PAGE ===``, partials
-            # like ``=== EN`` or ``===`` alone, and any other ``=``-prefixed
-            # truncation tail, without touching mid-body lines.
-            candidate = re.sub(r"\n=[^\n]*$", "", candidate).strip()
-            body = candidate or None
-
-    # 5. Ollama often follows the update *content* contract but drops the
-    # wrapper entirely, returning bare Markdown such as ``## New section``.
-    # For updates this is safe to accept because the existing page already
-    # supplies frontmatter and the cleanup below still rejects empty or
-    # partial-frontmatter bodies. Creates remain strict.
-    if body is None and op_type == "update" and not _has_frontmatter(text):
-        body = text
 
     if body is None:
         return None
@@ -965,7 +1252,11 @@ def _generate_one(
     field is omitted from the output, distinguishing it from an explicit
     empty list which would survive as ``[]``.
     """
-    context = _build_focused_context(op, raw_content)
+    config = load_ingest_config()
+    context_kwargs: dict[str, Any] = {}
+    if _supports_keyword(_build_focused_context, "max_bytes"):
+        context_kwargs["max_bytes"] = config.max_related_context_bytes
+    context = _build_focused_context(op, raw_content, **context_kwargs)
 
     op_type = op.get("type", "create").lower()
     if op_type not in ("create", "update"):
@@ -1012,11 +1303,101 @@ Generate the page content based on the raw data and context above."""
     system_prompt = (
         UPDATE_SYSTEM_PROMPT if op_type == "update" else GENERATE_SYSTEM_PROMPT
     )
+    required_num_ctx = _required_generate_context_tokens(
+        prompt,
+        system_prompt,
+        num_predict=config.num_predict,
+    )
+    try:
+        selected_num_ctx = _select_ingest_context(
+            required_num_ctx,
+            num_ctx=config.num_ctx,
+            max_num_ctx=config.max_num_ctx,
+        )
+    except IngestContextCapacityError as exc:
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "error",
+                    "active": False,
+                    "failure_class": "context_window_exceeded",
+                    "error": str(exc),
+                }
+            )
+        raise RuntimeError(f"ingest generation context_window_exceeded: {exc}") from exc
 
     try:
-        output = _generate_with_progress(
-            prompt, system=system_prompt, progress_callback=progress_callback
+        live_transport = _generate_with_progress is _DEFAULT_GENERATE_WITH_PROGRESS
+        lease = (
+            ollama_runtime.model_resource_lease(exclusive=True)
+            if live_transport
+            else nullcontext()
         )
+        with lease:
+            if live_transport:
+                try:
+                    selected_num_ctx = _admit_ingest_context(
+                        config,
+                        selected_num_ctx,
+                    )
+                except IngestTriageFailure as exc:
+                    raise RuntimeError(
+                        "ingest generation capacity_unavailable: " + exc.reason
+                    ) from exc
+            generate_kwargs: dict[str, Any] = {
+                "system": system_prompt,
+                "progress_callback": progress_callback,
+            }
+            optional = {
+                "model": config.model,
+                "num_ctx": selected_num_ctx,
+                "num_predict": config.num_predict,
+                "keep_alive": config.keep_alive,
+                "read_timeout_ms": config.read_timeout_ms,
+                "temperature": config.temperature,
+            }
+            for name, value in optional.items():
+                if _supports_keyword(_generate_with_progress, name):
+                    generate_kwargs[name] = value
+            if _supports_keyword(_generate_with_progress, "return_metadata"):
+                generate_kwargs["return_metadata"] = True
+            output = _generate_with_progress(prompt, **generate_kwargs)
+            if isinstance(output, ollama_runtime.GenerateResponse):
+                completion_failure = _generation_completion_failure(output)
+                if completion_failure is not None:
+                    failure_class, failure_reason = completion_failure
+                    if progress_callback is not None:
+                        progress_callback(
+                            {
+                                "event": "error",
+                                "active": False,
+                                "failure_class": failure_class,
+                                "error": failure_reason,
+                            }
+                        )
+                    raise RuntimeError(
+                        f"ingest generation {failure_class}: {failure_reason}"
+                    )
+                output = output.content
+            if not isinstance(output, str):
+                raise RuntimeError(
+                    "ingest generation completion_incomplete: "
+                    "transport returned non-string content"
+                )
+    except RuntimeError as e:
+        if str(e).startswith(
+            (
+                "ingest generation capacity_unavailable:",
+                "ingest generation context_window_exceeded:",
+                "ingest generation completion_incomplete:",
+                "ingest generation stream_incomplete:",
+                "ingest generation output_truncated:",
+            )
+        ):
+            _safe_log(f"ingest | generate preflight failed for {filename}: {e}")
+            raise
+        _safe_log(f"ingest | generate failed for {filename}: {e}")
+        return None
     except Exception as e:
         _safe_log(f"ingest | generate failed for {filename}: {e}")
         return None
@@ -1427,22 +1808,46 @@ def _generate_recall_metadata(
             "title": title,
             "body": body[:2500],
         }
+        prompt_text = json.dumps(prompt, ensure_ascii=False)
         config = load_ingest_config()
-        result = LocalStructuredSession(
-            model=config.model,
-            transport=transport or _structured_generate_transport(),
-            role="ingest_recall_metadata",
-            num_ctx=config.num_ctx,
-            num_predict=min(config.num_predict, 1_024),
-            keep_alive=config.keep_alive,
-            read_timeout_ms=config.read_timeout_ms,
-            max_input_chars=16_000,
+        metadata_num_predict = min(config.num_predict, 1_024)
+        required_num_ctx = required_structured_context_tokens(
+            prompt_text,
+            RECALL_METADATA_SCHEMA,
+            system=None,
+            num_predict=metadata_num_predict,
             max_output_chars=1_600,
             max_feedback_chars=1_600,
-        ).run(
-            json.dumps(prompt, ensure_ascii=False),
-            RECALL_METADATA_SCHEMA,
         )
+        selected_num_ctx = _select_ingest_context(
+            required_num_ctx,
+            num_ctx=config.num_ctx,
+            max_num_ctx=config.max_num_ctx,
+        )
+        live_transport = (
+            transport is None
+            and _generate_with_progress is _DEFAULT_GENERATE_WITH_PROGRESS
+        )
+        lease = (
+            ollama_runtime.model_resource_lease(exclusive=True)
+            if live_transport
+            else nullcontext()
+        )
+        with lease:
+            if live_transport:
+                selected_num_ctx = _admit_ingest_context(config, selected_num_ctx)
+            result = LocalStructuredSession(
+                model=config.model,
+                transport=transport or _structured_generate_transport(),
+                role="ingest_recall_metadata",
+                num_ctx=selected_num_ctx,
+                num_predict=metadata_num_predict,
+                keep_alive=config.keep_alive,
+                read_timeout_ms=config.read_timeout_ms,
+                max_input_chars=16_000,
+                max_output_chars=1_600,
+                max_feedback_chars=1_600,
+            ).run(prompt_text, RECALL_METADATA_SCHEMA)
         if not result.ok or not isinstance(result.value, dict):
             return fallback
         parsed = result.value
@@ -2607,6 +3012,236 @@ def _prepared_plan_is_fully_applied(
     return True
 
 
+def _load_strict_ingest_proposal_for_recovery(
+    path: Path,
+    *,
+    source_key: str,
+    raw_content: str,
+    raw_keywords: list[str] | None,
+) -> tuple[dict[str, Any], list[PreparedIngestOperation]]:
+    """Load one current proposal artifact without consulting model output.
+
+    The ordinary retry path may replace an incomplete proposal after another
+    bounded local attempt.  Pre-triage completion recovery is more privileged:
+    it can retire a raw without asking a model again, so every artifact field
+    that binds the raw and exact page postimages must already be intact.
+    """
+
+    try:
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise IngestApplyError(
+            "pre-triage terminal proposal artifact is unreadable: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    expected_top_level = {
+        "schema_version",
+        "kind",
+        "source_key",
+        "proposal_sha256",
+        "proposal",
+    }
+    if not isinstance(artifact, dict) or set(artifact) != expected_top_level:
+        raise IngestApplyError(
+            "pre-triage terminal proposal artifact schema is invalid"
+        )
+    proposal = artifact.get("proposal")
+    proposal_sha256 = (
+        _canonical_json_sha256(proposal) if isinstance(proposal, dict) else None
+    )
+    expected_raw_sha256 = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
+    if (
+        artifact.get("schema_version") != INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
+        or artifact.get("kind") != "ingest_frontier_proposal_artifact"
+        or artifact.get("source_key") != source_key
+        or artifact.get("proposal_sha256") != proposal_sha256
+        or not isinstance(proposal, dict)
+        or proposal.get("schema_version") != INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
+        or proposal.get("kind") != "ingest_semantic_mutation_proposal"
+        or proposal.get("source_key") != source_key
+        or proposal.get("raw_content") != raw_content
+        or proposal.get("raw_sha256") != expected_raw_sha256
+        or proposal.get("raw_keywords") != list(raw_keywords or [])
+    ):
+        raise IngestApplyError(
+            "pre-triage terminal proposal artifact binding is invalid"
+        )
+    required_proposal_fields = {
+        "schema_version",
+        "kind",
+        "source_key",
+        "source_raw",
+        "raw_content",
+        "raw_sha256",
+        "raw_keywords",
+        "local_disposition",
+        "triage_plan",
+        "failed_operation_specs",
+        "local_generated_operations",
+        "prepared_operations",
+        "link_reconciliation",
+    }
+    if not required_proposal_fields <= set(proposal) or set(proposal) - (
+        required_proposal_fields | {"audit_decision"}
+    ):
+        raise IngestApplyError("pre-triage terminal proposal payload schema is invalid")
+    if (
+        proposal.get("source_raw") is not None
+        and not isinstance(proposal.get("source_raw"), str)
+    ) or not isinstance(proposal.get("local_disposition"), str):
+        raise IngestApplyError("pre-triage terminal proposal metadata is invalid")
+    for field in (
+        "triage_plan",
+        "failed_operation_specs",
+        "local_generated_operations",
+        "prepared_operations",
+    ):
+        if not isinstance(proposal.get(field), list):
+            raise IngestApplyError(f"pre-triage terminal proposal {field} is invalid")
+    if not isinstance(proposal.get("link_reconciliation"), dict) or (
+        "audit_decision" in proposal
+        and not isinstance(proposal.get("audit_decision"), dict)
+    ):
+        raise IngestApplyError("pre-triage terminal proposal audit metadata is invalid")
+    planned = _prepared_from_review_payload(proposal.get("prepared_operations"))
+    if planned is None:
+        raise IngestApplyError(
+            "pre-triage terminal proposal page postimages are invalid"
+        )
+    target_paths = [str(item.path.resolve(strict=False)) for item in planned]
+    page_ids = [item.page_id for item in planned]
+    if len(target_paths) != len(set(target_paths)) or len(page_ids) != len(
+        set(page_ids)
+    ):
+        raise IngestApplyError(
+            "pre-triage terminal proposal has duplicate page targets"
+        )
+    return proposal, planned
+
+
+def _load_pretriage_terminal_recovery(
+    raw_content: str,
+    raw_keywords: list[str] | None,
+    *,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Return a model-free terminal recovery only when its proof is complete.
+
+    A proposal without a current terminal review remains ordinary retry work.
+    Legacy review artifacts are likewise left to the normal local-consensus
+    path.  A malformed *current* artifact fails closed instead of being
+    overwritten and silently treated as new work.
+    """
+
+    source_key = _ingest_source_key(raw_content, raw_keywords)
+    proposal_path, review_path = _ingest_artifact_paths(source_key)
+    if not proposal_path.exists():
+        if review_path.exists():
+            raise IngestApplyError(
+                "pre-triage terminal review exists without its proposal artifact"
+            )
+        return None
+
+    proposal, planned = _load_strict_ingest_proposal_for_recovery(
+        proposal_path,
+        source_key=source_key,
+        raw_content=raw_content,
+        raw_keywords=raw_keywords,
+    )
+    if not review_path.exists():
+        return None
+    try:
+        review_candidate = json.loads(review_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise IngestApplyError(
+            "pre-triage terminal review artifact is unreadable: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(review_candidate, dict):
+        raise IngestApplyError("pre-triage terminal review artifact is not an object")
+    review_version = review_candidate.get("schema_version")
+    if (
+        isinstance(review_version, int)
+        and not isinstance(review_version, bool)
+        and review_version < INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION
+    ):
+        # Historical frontier-shaped verdicts have no local authority seal.
+        # They are neither trusted nor treated as corruption; the normal local
+        # path will replace them after a fresh adopted-consensus decision.
+        return None
+    expected_review_fields = {
+        "schema_version",
+        "kind",
+        "source_key",
+        "proposal_sha256",
+        "review",
+        "authority",
+    }
+    if set(review_candidate) != expected_review_fields:
+        raise IngestApplyError("pre-triage terminal review artifact schema is invalid")
+    proposal_sha256 = _canonical_json_sha256(proposal)
+    review_artifact = _load_ingest_review_artifact(
+        review_path,
+        source_key=source_key,
+        proposal_sha256=proposal_sha256,
+    )
+    if review_artifact is None or review_artifact != review_candidate:
+        raise IngestApplyError("pre-triage terminal review artifact binding is invalid")
+    review = review_artifact.get("review")
+    authority = review_artifact.get("authority")
+    if not isinstance(review, dict) or not isinstance(authority, dict):
+        raise IngestApplyError("pre-triage terminal review proof is missing")
+    normalized_review = _normalize_ingest_frontier_review(review, proposal=proposal)
+    if normalized_review != review:
+        raise IngestApplyError(
+            "pre-triage terminal review is not canonical for its proposal"
+        )
+    decision = review.get("decision")
+    if decision not in {"apply_available", "confirmed_noop"}:
+        return None
+    if decision == "apply_available":
+        if not planned or not _prepared_plan_is_fully_applied(planned):
+            return None
+    else:
+        current_authority, current_authority_error = _current_ingest_review_authority(
+            reviewer=reviewer
+        )
+        if current_authority_error is not None or (
+            decision_authority.compare_semantic_authority(
+                authority,
+                current_authority,
+                lane="ingest_reconciliation",
+            )
+            is not None
+        ):
+            return None
+
+    created = [item.page_id for item in planned if item.op_type == "create"]
+    updated = [item.page_id for item in planned if item.op_type == "update"]
+    audit = proposal.get("audit_decision")
+    failed_specs = proposal.get("failed_operation_specs")
+    return {
+        "status": decision,
+        "source_key": source_key,
+        "proposal_sha256": proposal_sha256,
+        "review": review,
+        "authority": authority,
+        "created": created,
+        "updated": updated,
+        "audit": dict(audit) if isinstance(audit, dict) else {},
+        "failed_operation_specs": (
+            list(failed_specs) if isinstance(failed_specs, list) else []
+        ),
+        "recovered_artifact": True,
+        "reused_review": True,
+        "recovery_basis": (
+            "exact_postimages_already_applied"
+            if decision == "apply_available"
+            else "durable_confirmed_noop"
+        ),
+    }
+
+
 def _normalize_ingest_frontier_review(
     value: object,
     *,
@@ -3391,6 +4026,145 @@ def _verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> 
     return {"checked": checked, "passed": passed, "failed": failed}
 
 
+def _refresh_ingest_derived_artifacts(
+    changed_pages: list[str],
+    *,
+    source_raw: str | None,
+) -> dict[str, Any]:
+    """Refresh rebuildable indexes and return the normal read-back result."""
+
+    try:
+        _rebuild_index()
+    except Exception as exc:
+        _safe_log(f"ingest | index.md rebuild failed (non-fatal): {exc}")
+
+    try:
+        from llm_wiki_mcp.index_store import get_store
+
+        get_store().refresh()
+    except Exception as exc:
+        _safe_log(f"ingest | index_store refresh failed: {exc}")
+
+    if changed_pages:
+        try:
+            from llm_wiki_mcp.search import update_embeddings
+
+            update_embeddings(page_ids=changed_pages)
+        except Exception:
+            pass
+        try:
+            from llm_wiki_mcp.claims import append_page_claims
+
+            append_page_claims(
+                changed_pages,
+                source_raw=source_raw or "",
+                op="ingest",
+            )
+        except Exception as exc:
+            _safe_log(f"ingest | claim ledger failed (non-fatal): {exc}")
+        try:
+            from llm_wiki_mcp.state_register import refresh_state_register
+
+            refresh_state_register(changed_pages, source_raw=source_raw or "")
+        except Exception as exc:
+            _safe_log(f"ingest | state register refresh failed (non-fatal): {exc}")
+    return _verify_changed_pages_read_back(changed_pages)
+
+
+def _complete_pretriage_terminal_recovery(
+    recovery: dict[str, Any],
+    *,
+    raw_content: str,
+    raw_keywords: list[str] | None,
+    source_raw: str | None,
+    job_id: str,
+    on_complete: Callable[[], Any] | None,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Finish a proven prior effect and publish its raw ACK under locks."""
+
+    changed_pages = list(recovery.get("created") or []) + list(
+        recovery.get("updated") or []
+    )
+
+    from llm_wiki_mcp.page_mutation import (
+        decision_authority_lock,
+        wiki_mutation_lock,
+    )
+
+    # Match the normal effect lock order.  The authority lease prevents a
+    # terminal review artifact from being replaced while the page lease keeps
+    # exact postimages stable through job completion and ACK publication.
+    with decision_authority_lock():
+        page_lease = (
+            wiki_mutation_lock()
+            if recovery.get("status") == "apply_available"
+            else nullcontext()
+        )
+        with page_lease:
+            verified = _load_pretriage_terminal_recovery(
+                raw_content,
+                raw_keywords,
+                reviewer=reviewer,
+            )
+            if verified is None or verified != recovery:
+                raise IngestApplyError(
+                    "pre-triage terminal recovery proof changed before raw retirement"
+                )
+            # Derived refresh is intentionally inside the same proof/effect
+            # locks. A stale or concurrently replaced terminal artifact must
+            # fail before even rebuildable claims/index side effects occur.
+            read_back_result = _refresh_ingest_derived_artifacts(
+                changed_pages,
+                source_raw=source_raw,
+            )
+            final_verified = _load_pretriage_terminal_recovery(
+                raw_content,
+                raw_keywords,
+                reviewer=reviewer,
+            )
+            if final_verified is None or final_verified != recovery:
+                raise IngestApplyError(
+                    "pre-triage terminal recovery proof changed during derived refresh"
+                )
+            job_result: dict[str, Any] = {
+                "frontier": {
+                    "status": recovery.get("status"),
+                    "proposal_sha256": recovery.get("proposal_sha256"),
+                    "source_key": recovery.get("source_key"),
+                    "review": recovery.get("review"),
+                    "recovered_artifact": True,
+                    "reused_review": True,
+                },
+                "audit": recovery.get("audit"),
+                "pretriage_recovery": {
+                    "basis": recovery.get("recovery_basis"),
+                    "model_calls": 0,
+                },
+            }
+            failed_specs = list(recovery.get("failed_operation_specs") or [])
+            if failed_specs:
+                job_result.update({"partial": True, "failed_ops": failed_specs})
+            if read_back_result.get("failed"):
+                job_result["read_back"] = read_back_result
+            job_store.update(
+                job_id,
+                status=JobStatus.COMPLETED,
+                processor="durable-ingest-recovery",
+                stage="pre-triage-recovery",
+                completed_at=_now(),
+                pages_created=list(recovery.get("created") or []),
+                pages_updated=list(recovery.get("updated") or []),
+                result=job_result,
+            )
+            if on_complete:
+                # For orchestrated raws this publishes the content-bound ACK
+                # before the processed-state transition.  Any callback error
+                # escapes and the outer job boundary records FAILED.
+                on_complete()
+    return job_result
+
+
 # ---------------------------------------------------------------------------
 # Main entry point — two-stage pipeline
 # ---------------------------------------------------------------------------
@@ -3651,11 +4425,10 @@ def run_ingest(
 
       * ``failed`` — True for any non-success terminal state.
       * ``triage_failed`` — True only when triage (stage 1) could not produce
-        a parseable plan. The orchestrator counts these specifically: a
-        triage failure means the raw content itself is unprocessable, so
-        repeated occurrences justify quarantine. Other failures (Ollama
-        unavailable, generate parse, apply error) are transient or per-op
-        and must not feed the dead-letter counter.
+        a parseable plan. Callers may use this for diagnostics, but retry and
+        quarantine decisions are owned by the per-raw failure supervisor,
+        keyed by raw filename and stable failure fingerprint. Failures from
+        unrelated raws must never be aggregated into a batch mutation.
 
     ``metadata`` is a keyword-only optional dict carrying side-channel data
     that should be attached to the resulting operations. Currently supports
@@ -3684,6 +4457,51 @@ def run_ingest(
             source_raw = source_candidate
 
     try:
+        terminal_recovery = _load_pretriage_terminal_recovery(
+            content,
+            raw_keywords_for_ops,
+            reviewer=frontier_reviewer,
+        )
+        if terminal_recovery is not None:
+            runtime_status.safe_write_status(
+                state="running",
+                stage="pre-triage-recovery",
+                current_job_id=job_id,
+                current_raw=source_raw,
+                current_op=None,
+                llm=None,
+            )
+            recovered_result = _complete_pretriage_terminal_recovery(
+                terminal_recovery,
+                raw_content=content,
+                raw_keywords=raw_keywords_for_ops,
+                source_raw=source_raw,
+                job_id=job_id,
+                on_complete=on_complete,
+                reviewer=frontier_reviewer,
+            )
+            runtime_status.safe_write_status(
+                state="running",
+                stage="complete",
+                current_job_id=job_id,
+                current_raw=source_raw,
+                current_op=None,
+                llm=None,
+                last_success={
+                    "job_id": job_id,
+                    "raw": source_raw,
+                    "created": list(terminal_recovery.get("created") or []),
+                    "updated": list(terminal_recovery.get("updated") or []),
+                    "frontier_status": terminal_recovery.get("status"),
+                    "audit": terminal_recovery.get("audit"),
+                    "recovery_basis": terminal_recovery.get("recovery_basis"),
+                    "model_calls": 0,
+                    "read_back": recovered_result.get("read_back"),
+                },
+            )
+            failed = False
+            return
+
         processor = "ollama" if is_available() else "unavailable"
         job_store.update(job_id, processor=processor)
         if processor == "unavailable":
@@ -3715,35 +4533,29 @@ def run_ingest(
                     f"{convergence_attempt}/{_MAX_FRONTIER_CONVERGENCE_ATTEMPTS} started"
                 )
             )
-            raw_plan = _triage_with_progress(
-                content,
-                _llm_progress_callback(
-                    phase=(
-                        "triage"
-                        if convergence_attempt == 1
-                        else "frontier-regenerate-triage"
+            try:
+                raw_plan = _triage_with_progress(
+                    content,
+                    _llm_progress_callback(
+                        phase=(
+                            "triage"
+                            if convergence_attempt == 1
+                            else "frontier-regenerate-triage"
+                        ),
+                        target="operation plan",
+                        job_id=job_id,
+                        source_raw=source_raw,
                     ),
-                    target="operation plan",
-                    job_id=job_id,
-                    source_raw=source_raw,
-                ),
-                frontier_feedback=frontier_feedback,
-            )
-            if raw_plan is None:
-                if convergence_attempt < _MAX_FRONTIER_CONVERGENCE_ATTEMPTS:
-                    frontier_feedback = (
-                        "The previous triage response was not valid JSON matching the "
-                        "operation schema. Return only a complete JSON array; preserve "
-                        "the raw evidence exactly and do not add unsupported facts."
-                    )
-                    _safe_log("ingest | triage parse failed; regenerating in same job")
-                    continue
-                triage_failed = True
+                    frontier_feedback=frontier_feedback,
+                )
+            except IngestTriageFailure as triage_error:
+                triage_failed = triage_error.raw_failure
+                error = str(triage_error)
                 job_store.update(
                     job_id,
                     status=JobStatus.FAILED,
                     completed_at=_now(),
-                    error="triage parse failed after convergence attempts",
+                    error=error,
                 )
                 runtime_status.safe_write_status(
                     state="error",
@@ -3751,10 +4563,33 @@ def run_ingest(
                     current_job_id=job_id,
                     current_raw=source_raw,
                     current_op=None,
-                    last_error="triage parse failed after convergence attempts",
+                    last_error=error,
                     llm=None,
                 )
-                _safe_log("ingest | triage: parse failed after convergence attempts")
+                _safe_log(f"ingest | triage: {error}")
+                return
+            if raw_plan is None:
+                triage_failed = True
+                error = (
+                    "triage structured failure [unknown]: triage returned no plan "
+                    "after its bounded same-session repair turns"
+                )
+                job_store.update(
+                    job_id,
+                    status=JobStatus.FAILED,
+                    completed_at=_now(),
+                    error=error,
+                )
+                runtime_status.safe_write_status(
+                    state="error",
+                    stage="triage",
+                    current_job_id=job_id,
+                    current_raw=source_raw,
+                    current_op=None,
+                    last_error=error,
+                    llm=None,
+                )
+                _safe_log(f"ingest | triage: {error}")
                 return
 
             plan = _normalize_triage_plan(raw_plan)
@@ -3879,41 +4714,11 @@ def run_ingest(
         # pending forever and re-create the same pages on retry. Use
         # _safe_log so a logging error in a side-effect handler doesn't
         # promote a derived-artifact failure into a hard ingest failure.
-        try:
-            _rebuild_index()
-        except Exception as e:
-            _safe_log(f"ingest | index.md rebuild failed (non-fatal): {e}")
-
-        try:
-            from llm_wiki_mcp.index_store import get_store
-
-            get_store().refresh()
-        except Exception as e:
-            _safe_log(f"ingest | index_store refresh failed: {e}")
-
         changed_pages = created + updated
-        if changed_pages:
-            try:
-                from llm_wiki_mcp.search import update_embeddings
-
-                update_embeddings(page_ids=changed_pages)
-            except Exception:
-                pass
-            try:
-                from llm_wiki_mcp.claims import append_page_claims
-
-                append_page_claims(
-                    changed_pages, source_raw=source_raw or "", op="ingest"
-                )
-            except Exception as e:
-                _safe_log(f"ingest | claim ledger failed (non-fatal): {e}")
-            try:
-                from llm_wiki_mcp.state_register import refresh_state_register
-
-                refresh_state_register(changed_pages, source_raw=source_raw or "")
-            except Exception as e:
-                _safe_log(f"ingest | state register refresh failed (non-fatal): {e}")
-        read_back_result = _verify_changed_pages_read_back(changed_pages)
+        read_back_result = _refresh_ingest_derived_artifacts(
+            changed_pages,
+            source_raw=source_raw,
+        )
 
         # Build job result. Frontier metadata deliberately excludes the raw
         # and page bodies; their exact durable bundle stays in the artifact.
@@ -4006,10 +4811,12 @@ def run_ingest(
                     result=job_result,
                 )
                 if on_complete:
-                    try:
-                        on_complete()
-                    except Exception as cb_err:
-                        _safe_log(f"ingest | on_complete callback failed: {cb_err}")
+                    # Raw retirement is the second half of the durable apply
+                    # transaction.  Its callback publishes the completion ACK
+                    # and then marks the source processed.  Swallowing an ACK
+                    # failure here reports a false success and replays the
+                    # already-applied mutation on the next tick.
+                    on_complete()
                 noop_callback_completed = True
         else:
             job_store.update(
@@ -4035,7 +4842,6 @@ def run_ingest(
             _safe_log(
                 f"ingest | completed: {len(created)} created, {len(updated)} updated"
             )
-        failed = False
         runtime_status.safe_write_status(
             state="running",
             stage="complete",
@@ -4063,10 +4869,8 @@ def run_ingest(
         )
 
         if on_complete and not noop_callback_completed:
-            try:
-                on_complete()
-            except Exception as cb_err:
-                _safe_log(f"ingest | on_complete callback failed: {cb_err}")
+            on_complete()
+        failed = False
 
     except Exception as e:
         job_store.update(

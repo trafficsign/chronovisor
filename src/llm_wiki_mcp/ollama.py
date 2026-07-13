@@ -104,6 +104,24 @@ class ChatResponse:
     content: str
     prompt_eval_count: int | None = None
     eval_count: int | None = None
+    # Defaults preserve compatibility with in-process transports that created
+    # ``ChatResponse`` before completion metadata was exposed.  The real HTTP
+    # adapter always supplies these fields explicitly and treats an omitted
+    # Ollama ``done`` flag as incomplete.
+    done: bool = True
+    done_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class GenerateResponse:
+    """Generate content plus Ollama's explicit completion accounting."""
+
+    content: str
+    done: bool
+    done_reason: str | None = None
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+    streamed: bool = False
 
 
 GIB = 1024**3
@@ -223,6 +241,18 @@ def model_resource_lease(*, exclusive: bool) -> Iterator[None]:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         _PROCESS_RESOURCE_LOCK.release(exclusive=exclusive)
+
+
+def model_resource_lease_mode() -> str | None:
+    """Return the current thread's nested resource-lease mode, if any."""
+
+    if int(getattr(_RESOURCE_LEASE_STATE, "depth", 0)) < 1:
+        return None
+    return (
+        "exclusive"
+        if bool(getattr(_RESOURCE_LEASE_STATE, "exclusive", False))
+        else "shared"
+    )
 
 
 def is_available() -> bool:
@@ -665,6 +695,13 @@ def _ollama_resource_rows() -> tuple[dict[str, int], dict[str, tuple[int, int]]]
     return installed, resident
 
 
+def resident_model_rows() -> dict[str, tuple[int, int]]:
+    """Return a read-only snapshot of resident model size and context rows."""
+
+    _installed, resident = _ollama_resource_rows()
+    return dict(resident)
+
+
 def build_model_residency_plan(
     models: Sequence[str],
     *,
@@ -998,7 +1035,15 @@ def _generate_unlocked(
     *,
     format: dict | str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
-) -> str:
+    model: str | None = None,
+    num_ctx: int | None = None,
+    num_predict: int | None = None,
+    keep_alive: str | None = None,
+    read_timeout_ms: int | None = None,
+    temperature: int | float | None = None,
+    seed: int | None = None,
+    return_metadata: bool = False,
+) -> str | GenerateResponse:
     """Call Ollama generate API.
 
     Uses keep_alive="5m" to keep model loaded for 5 minutes after use.
@@ -1010,26 +1055,67 @@ def _generate_unlocked(
     still returning the final response string for existing callers.
     """
     config = load_ingest_config()
-    num_ctx = _num_ctx_for_prompt(prompt, system, config)
+    selected_model = (
+        model.strip() if isinstance(model, str) and model.strip() else config.model
+    )
+    selected_num_ctx = (
+        num_ctx
+        if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) and num_ctx > 0
+        else _num_ctx_for_prompt(prompt, system, config)
+    )
+    selected_num_predict = (
+        num_predict
+        if isinstance(num_predict, int)
+        and not isinstance(num_predict, bool)
+        and num_predict > 0
+        else config.num_predict
+    )
+    selected_keep_alive = (
+        keep_alive
+        if isinstance(keep_alive, str) and keep_alive.strip()
+        else config.keep_alive
+    )
+    selected_read_timeout_ms = (
+        read_timeout_ms
+        if isinstance(read_timeout_ms, int)
+        and not isinstance(read_timeout_ms, bool)
+        and read_timeout_ms > 0
+        else config.read_timeout_ms
+    )
+    selected_temperature = (
+        temperature
+        if isinstance(temperature, (int, float)) and not isinstance(temperature, bool)
+        else config.temperature
+    )
+    if seed is not None and (
+        isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
+    ):
+        raise ValueError("generate seed must be a non-negative integer")
     prompt_chars = len(prompt) + (len(system) if system else 0)
     log.info(
         "generate num_ctx=%d prompt_chars=%d model=%s",
-        num_ctx,
+        selected_num_ctx,
         prompt_chars,
-        config.model,
+        selected_model,
     )
     payload = {
-        "model": config.model,
+        "model": selected_model,
         "prompt": prompt,
         "stream": progress_callback is not None,
         "think": False,
-        "keep_alive": config.keep_alive,
+        # Never let Ollama silently discard the oldest input to satisfy a
+        # smaller runner. Ingest performs its own fail-closed context sizing.
+        "shift": False,
+        "truncate": False,
+        "keep_alive": selected_keep_alive,
         "options": {
-            "temperature": config.temperature,
-            "num_predict": config.num_predict,
-            "num_ctx": num_ctx,
+            "temperature": selected_temperature,
+            "num_predict": selected_num_predict,
+            "num_ctx": selected_num_ctx,
         },
     }
+    if seed is not None:
+        payload["options"]["seed"] = seed
     if system:
         payload["system"] = system
     if format is not None:
@@ -1037,7 +1123,10 @@ def _generate_unlocked(
 
     # Timeout: 60s for model load + 600s for generation
     timeout = httpx.Timeout(
-        connect=10.0, read=config.read_timeout_ms / 1000, write=10.0, pool=10.0
+        connect=10.0,
+        read=selected_read_timeout_ms / 1000,
+        write=10.0,
+        pool=10.0,
     )
     if progress_callback is not None:
         chunks = 0
@@ -1064,7 +1153,7 @@ def _generate_unlocked(
                     chunks += 1
                     chars += len(piece)
 
-                done = bool(data.get("done"))
+                done = data.get("done") is True
                 now = time.monotonic()
                 elapsed = max(0.001, now - started)
                 if done or now - last_emit >= 0.75:
@@ -1105,8 +1194,39 @@ def _generate_unlocked(
                     "error": "stream ended before done",
                 },
             )
+            if return_metadata:
+                return GenerateResponse(
+                    content="".join(pieces),
+                    done=False,
+                    done_reason=None,
+                    streamed=True,
+                )
             raise RuntimeError("Ollama stream ended before done")
-        return "".join(pieces)
+        content = "".join(pieces)
+        if not return_metadata:
+            return content
+        return GenerateResponse(
+            content=content,
+            done=final_payload.get("done") is True,
+            done_reason=(
+                str(final_payload["done_reason"])
+                if isinstance(final_payload.get("done_reason"), str)
+                else None
+            ),
+            prompt_eval_count=(
+                int(final_payload["prompt_eval_count"])
+                if isinstance(final_payload.get("prompt_eval_count"), int)
+                and not isinstance(final_payload.get("prompt_eval_count"), bool)
+                else None
+            ),
+            eval_count=(
+                int(final_payload["eval_count"])
+                if isinstance(final_payload.get("eval_count"), int)
+                and not isinstance(final_payload.get("eval_count"), bool)
+                else None
+            ),
+            streamed=True,
+        )
 
     resp = _client().post(
         "/api/generate",
@@ -1114,7 +1234,33 @@ def _generate_unlocked(
         timeout=timeout,
     )
     resp.raise_for_status()
-    return resp.json()["response"]
+    body = resp.json()
+    if not isinstance(body, dict) or not isinstance(body.get("response"), str):
+        raise RuntimeError("Ollama generate response is missing response content")
+    content = str(body["response"])
+    if not return_metadata:
+        return content
+    return GenerateResponse(
+        content=content,
+        done=body.get("done") is True,
+        done_reason=(
+            str(body["done_reason"])
+            if isinstance(body.get("done_reason"), str)
+            else None
+        ),
+        prompt_eval_count=(
+            int(body["prompt_eval_count"])
+            if isinstance(body.get("prompt_eval_count"), int)
+            and not isinstance(body.get("prompt_eval_count"), bool)
+            else None
+        ),
+        eval_count=(
+            int(body["eval_count"])
+            if isinstance(body.get("eval_count"), int)
+            and not isinstance(body.get("eval_count"), bool)
+            else None
+        ),
+    )
 
 
 def generate(
@@ -1123,13 +1269,29 @@ def generate(
     *,
     format: dict | str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
-) -> str:
+    model: str | None = None,
+    num_ctx: int | None = None,
+    num_predict: int | None = None,
+    keep_alive: str | None = None,
+    read_timeout_ms: int | None = None,
+    temperature: int | float | None = None,
+    seed: int | None = None,
+    return_metadata: bool = False,
+) -> str | GenerateResponse:
     with model_resource_lease(exclusive=False):
         return _generate_unlocked(
             prompt,
             system,
             format=format,
             progress_callback=progress_callback,
+            model=model,
+            num_ctx=num_ctx,
+            num_predict=num_predict,
+            keep_alive=keep_alive,
+            read_timeout_ms=read_timeout_ms,
+            temperature=temperature,
+            seed=seed,
+            return_metadata=return_metadata,
         )
 
 
@@ -1168,6 +1330,8 @@ def _chat_unlocked(
         "messages": [dict(message) for message in messages],
         "stream": False,
         "think": False,
+        "shift": False,
+        "truncate": False,
         "format": format,
         "keep_alive": keep_alive,
         "options": {
@@ -1207,9 +1371,22 @@ def _chat_unlocked(
     return ChatResponse(
         content=content,
         prompt_eval_count=(
-            prompt_eval_count if isinstance(prompt_eval_count, int) else None
+            prompt_eval_count
+            if isinstance(prompt_eval_count, int)
+            and not isinstance(prompt_eval_count, bool)
+            else None
         ),
-        eval_count=eval_count if isinstance(eval_count, int) else None,
+        eval_count=(
+            eval_count
+            if isinstance(eval_count, int) and not isinstance(eval_count, bool)
+            else None
+        ),
+        done=body.get("done") is True,
+        done_reason=(
+            str(body["done_reason"])
+            if isinstance(body.get("done_reason"), str)
+            else None
+        ),
     )
 
 

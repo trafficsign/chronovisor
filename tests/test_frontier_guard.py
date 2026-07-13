@@ -64,11 +64,48 @@ def evidence(
         ({"failure_class": "keychain_permission_required"}, "human boundaries"),
     ],
 )
-def test_repair_evidence_is_strict(
-    overrides: dict[str, object], message: str
-) -> None:
+def test_repair_evidence_is_strict(overrides: dict[str, object], message: str) -> None:
     with pytest.raises(EvidenceValidationError, match=message):
         evidence(**overrides)
+
+
+def test_failing_test_or_artifact_cannot_replace_reproduction_command() -> None:
+    with pytest.raises(EvidenceValidationError, match="reproduction command"):
+        evidence(
+            reproduction_command=(),
+            failing_test="tests/test_ingest.py::test_schema_contract",
+            reproduction_artifact="runtime/reproduction.json",
+        )
+
+
+def test_operational_evidence_requires_supervisor_verified_receipt() -> None:
+    with pytest.raises(
+        EvidenceValidationError,
+        match="supervisor-verified deterministic reproduction receipt",
+    ):
+        RepairIncidentEvidence(
+            component="ingest.operational_runtime",
+            fingerprint=repair_fingerprint("operational", "schema"),
+            failure_class="system_operational_failure",
+            occurrence_count=2,
+            distinct_inputs=("input-a", "input-b"),
+            local_repair_attempts=2,
+            local_repair_evidence=("a" * 64, "b" * 64),
+            reproduction_command=(
+                "uv",
+                "run",
+                "pytest",
+                "-q",
+                "tests/test_ingest.py::test_schema_contract",
+            ),
+            failing_test="tests/test_ingest.py::test_schema_contract",
+            reproduction_artifact="runtime/reproduction.json",
+            notes={
+                "producer": "trusted_operational_failure_supervisor",
+                "incident_key": "operational-schema",
+                "source_failure_class": "ingest.runtime_schema_invalid",
+            },
+        )
 
 
 def test_all_local_unavailable_is_the_only_occurrence_threshold_bypass() -> None:
@@ -103,7 +140,10 @@ def test_reserve_does_not_spend_budget_and_start_records_pid_owner(
 
     finished = permit.finish("failed", now=BASE + timedelta(seconds=2))
     assert finished["status"] == "failed"
-    assert guard.inspect(now=BASE + timedelta(seconds=2)).state["active_incident_id"] is None
+    assert (
+        guard.inspect(now=BASE + timedelta(seconds=2)).state["active_incident_id"]
+        is None
+    )
 
 
 def test_unstarted_release_does_not_consume_global_budget(tmp_path: Path) -> None:
@@ -142,13 +182,17 @@ def test_started_incident_cannot_execute_twice_and_state_survives_reopen(
         permit.start(pid=os.getpid(), now=BASE + timedelta(seconds=1))
     assert denied.value.reason == "incident_already_started"
 
-    permit.finish("succeeded", details={"commit": "abc123"}, now=BASE + timedelta(seconds=2))
+    permit.finish(
+        "succeeded", details={"commit": "abc123"}, now=BASE + timedelta(seconds=2)
+    )
     reopened = FrontierGuard(root)
     state = reopened.inspect(now=BASE + timedelta(seconds=3)).state
     assert state["incidents"][permit.incident_id]["status"] == "succeeded"
     assert state["incidents"][permit.incident_id]["result"] == {"commit": "abc123"}
 
-    events = [json.loads(line) for line in reopened.events_file.read_text().splitlines()]
+    events = [
+        json.loads(line) for line in reopened.events_file.read_text().splitlines()
+    ]
     assert [event["event"] for event in events] == [
         "incident_reserved",
         "incident_started",
@@ -175,7 +219,9 @@ def test_fingerprint_cooldown_and_global_daily_budget_are_durable(
         reopened.reserve(evidence("other"), now=BASE + timedelta(hours=23))
     assert other_denied.value.reason == "global_24h_budget"
 
-    next_day = reopened.reserve(evidence("other"), now=BASE + timedelta(hours=24, seconds=1))
+    next_day = reopened.reserve(
+        evidence("other"), now=BASE + timedelta(hours=24, seconds=1)
+    )
     assert next_day.status == "reserved"
     next_day.release(now=BASE + timedelta(hours=24, seconds=2))
 
@@ -218,27 +264,22 @@ def test_dry_inspect_projects_recovery_without_any_filesystem_write(
     guard = FrontierGuard(root, default_lease=timedelta(seconds=1))
     permit = guard.reserve(evidence(), now=BASE)
     permit.start(pid=os.getpid(), now=BASE, lease=timedelta(seconds=1))
-    before = {
-        path.name: path.read_bytes()
-        for path in root.iterdir()
-        if path.is_file()
-    }
+    before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
 
     projected = FrontierGuard(root).inspect(
         dry_run=True,
         now=BASE + timedelta(seconds=2),
     )
-    after = {
-        path.name: path.read_bytes()
-        for path in root.iterdir()
-        if path.is_file()
-    }
+    after = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
     assert projected.would_abandon == (permit.incident_id,)
     assert projected.state["incidents"][permit.incident_id]["status"] == "abandoned"
     assert before == after
-    assert json.loads(guard.state_file.read_text())["incidents"][permit.incident_id][
-        "status"
-    ] == "started"
+    assert (
+        json.loads(guard.state_file.read_text())["incidents"][permit.incident_id][
+            "status"
+        ]
+        == "started"
+    )
 
 
 def test_context_manager_abandons_unfinished_started_incident(tmp_path: Path) -> None:

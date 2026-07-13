@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -117,7 +118,9 @@ def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) 
     ) -> tuple[list[ScoredPage], str]:
         del query, top_n, semantic, fusion_weights
         return [
-            ScoredPage("career-note", "Career Note", "career", "", 1.0, sensitivity="high"),
+            ScoredPage(
+                "career-note", "Career Note", "career", "", 1.0, sensitivity="high"
+            ),
             ScoredPage("work-note", "Work Note", "ai", "", 0.5),
         ], "hybrid"
 
@@ -137,7 +140,9 @@ def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) 
     assert [result.page_id for result in results] == ["work-note"]
 
 
-def test_search_candidates_allows_sensitive_pages_when_prompt_requests_it(monkeypatch) -> None:
+def test_search_candidates_allows_sensitive_pages_when_prompt_requests_it(
+    monkeypatch,
+) -> None:
     from llm_wiki_mcp import recall_runtime
 
     def fake_search(
@@ -148,7 +153,11 @@ def test_search_candidates_allows_sensitive_pages_when_prompt_requests_it(monkey
         fusion_weights: dict[str, float],
     ) -> tuple[list[ScoredPage], str]:
         del query, top_n, semantic, fusion_weights
-        return [ScoredPage("career-note", "Career Note", "career", "", 1.0, sensitivity="high")], "hybrid"
+        return [
+            ScoredPage(
+                "career-note", "Career Note", "career", "", 1.0, sensitivity="high"
+            )
+        ], "hybrid"
 
     monkeypatch.setattr(recall_runtime, "run_search", fake_search)
 
@@ -264,7 +273,9 @@ def test_judge_timeout_can_fall_back_when_fail_silent_disabled(monkeypatch) -> N
 def test_judge_can_lower_search_zone_to_none(monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 
-    def no_recall_judge(*_args: object, **_kwargs: object) -> tuple[float, list[str], str]:
+    def no_recall_judge(
+        *_args: object, **_kwargs: object
+    ) -> tuple[float, list[str], str]:
         return 0.2, [], "不要"
 
     monkeypatch.setattr(recall_runtime, "run_local_judge", no_recall_judge)
@@ -287,7 +298,9 @@ def test_judge_can_lower_search_zone_to_none(monkeypatch) -> None:
 def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 
-    def unexpected_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
+    def unexpected_judge(
+        *_args: object, **_kwargs: object
+    ) -> tuple[None, list[str], str]:
         raise AssertionError("auto judge should not run for obvious read prompts")
 
     monkeypatch.setattr(recall_runtime, "run_local_judge", unexpected_judge)
@@ -392,35 +405,32 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
 
     captured: dict[str, object] = {}
 
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            return None
+    class FakeSession:
+        def __init__(self, **kwargs: object) -> None:
+            captured["session"] = kwargs
 
-        def json(self) -> dict[str, str]:
-            return {
-                "response": json.dumps(
-                    {"decision": "none", "confidence": 0.2, "reason": "不要", "queries": []},
-                    ensure_ascii=False,
-                )
-            }
+        def run(
+            self,
+            prompt: str,
+            schema: dict[str, object],
+            *,
+            system: str | None = None,
+        ) -> SimpleNamespace:
+            captured["prompt"] = json.loads(prompt)
+            captured["schema"] = schema
+            captured["system"] = system
+            return SimpleNamespace(
+                ok=True,
+                value={
+                    "decision": "none",
+                    "confidence": 0.2,
+                    "reason": "不要",
+                    "queries": [],
+                },
+                failure_class=None,
+            )
 
-    class FakeClient:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            captured["client_args"] = args
-            captured["client_kwargs"] = kwargs
-
-        def __enter__(self) -> "FakeClient":
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def post(self, path: str, *, json: dict[str, object]) -> FakeResponse:
-            captured["path"] = path
-            captured["payload"] = json
-            return FakeResponse()
-
-    monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
+    monkeypatch.setattr(recall_runtime, "LocalStructuredSession", FakeSession)
     policy = RecallPolicy(
         judge_model="qwen3.5:4b-mlx",
         judge_think=False,
@@ -430,59 +440,47 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
     )
 
     score, queries, reason = run_local_judge(
-        RecallRequest(host="test", event="UserPromptSubmit", prompt="LLM Wiki の運用どうする?"),
+        RecallRequest(
+            host="test", event="UserPromptSubmit", prompt="LLM Wiki の運用どうする?"
+        ),
         0.5,
         policy,
     )
 
-    payload = captured["payload"]
-    assert isinstance(payload, dict)
     assert score == 0.2
     assert queries == []
     assert reason == "不要"
-    assert captured["path"] == "/api/generate"
-    assert payload["model"] == "qwen3.5:4b-mlx"
-    assert payload["think"] is False
-    assert payload["options"] == {
-        "temperature": 0,
-        "num_ctx": 2048,
-        "num_predict": 128,
-    }
+    session = captured["session"]
+    assert isinstance(session, dict)
+    assert session["model"] == "qwen3.5:4b-mlx"
+    assert session["role"] == "recall_judge"
+    assert session["num_ctx"] == 2048
+    assert session["num_predict"] == 128
+    assert "transport" not in session
+    assert isinstance(captured["system"], str)
 
 
 def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            return None
+    class FakeSession:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
 
-        def json(self) -> dict[str, str]:
-            return {
-                "response": json.dumps(
-                    {"decision": "none", "confidence": 0.9, "reason": "不要"},
-                    ensure_ascii=False,
-                )
-            }
+        def run(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                ok=True,
+                value={"decision": "none", "confidence": 0.9, "reason": "不要"},
+                failure_class=None,
+            )
 
-    class FakeClient:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            return None
-
-        def __enter__(self) -> "FakeClient":
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def post(self, _path: str, *, json: dict[str, object]) -> FakeResponse:
-            return FakeResponse()
-
-    monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
+    monkeypatch.setattr(recall_runtime, "LocalStructuredSession", FakeSession)
     policy = RecallPolicy(judge_model="qwen3.5:4b-mlx", judge_timeout_ms=2000)
 
     score, _queries, reason = run_local_judge(
-        RecallRequest(host="test", event="UserPromptSubmit", prompt="LLM Wiki の運用どうする?"),
+        RecallRequest(
+            host="test", event="UserPromptSubmit", prompt="LLM Wiki の運用どうする?"
+        ),
         0.5,
         policy,
     )
@@ -494,20 +492,20 @@ def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
 def test_query_rewriter_timeout_falls_back_with_reason(monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 
-    class FakeClient:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            return None
+    captured: dict[str, object] = {}
 
-        def __enter__(self) -> "FakeClient":
-            return self
+    class FakeSession:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
 
-        def __exit__(self, *args: object) -> None:
-            return None
+        def run(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                ok=False,
+                value=None,
+                failure_class="completion_incomplete",
+            )
 
-        def post(self, _path: str, *, json: dict[str, object]) -> object:
-            raise recall_runtime.httpx.ReadTimeout("cold model")
-
-    monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
+    monkeypatch.setattr(recall_runtime, "LocalStructuredSession", FakeSession)
 
     queries, confidence, reason = run_query_rewriter(
         RecallRequest(host="test", event="UserPromptSubmit", prompt="前のあれ"),
@@ -518,33 +516,25 @@ def test_query_rewriter_timeout_falls_back_with_reason(monkeypatch) -> None:
 
     assert queries == []
     assert confidence == 0.0
-    assert reason == "rewrite fallback: ReadTimeout"
+    assert reason == "rewrite fallback: completion_incomplete"
+    assert captured["role"] == "recall_query_rewriter"
+    assert "transport" not in captured
 
 
 def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 
     captured: list[dict[str, object]] = []
+    real_session = recall_runtime.LocalStructuredSession
 
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            return None
+    class FakeSession:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs)
 
-    class FakeClient:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            return None
+        def run(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(ok=True, value={}, failure_class=None)
 
-        def __enter__(self) -> "FakeClient":
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def post(self, _path: str, *, json: dict[str, object]) -> FakeResponse:
-            captured.append(json)
-            return FakeResponse()
-
-    monkeypatch.setattr(recall_runtime.httpx, "Client", FakeClient)
+    monkeypatch.setattr(recall_runtime, "LocalStructuredSession", FakeSession)
 
     result = warm_recall_model(
         RecallPolicy(
@@ -556,7 +546,19 @@ def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert result["models"] == ["judge-model", "rewrite-model"]
-    assert [payload["keep_alive"] for payload in captured] == ["1h", "1h"]
+    assert [session["keep_alive"] for session in captured] == ["1h", "1h"]
+    assert [session["num_ctx"] for session in captured] == [4096, 4096]
+    assert all(session["num_ctx"] != 128 for session in captured)
+    assert all(session["role"] == "recall_warmup" for session in captured)
+    assert all("transport" not in session for session in captured)
+    for session_kwargs in captured:
+        session = real_session(**session_kwargs)
+        failure, _schema, _messages = session._prepare_initial_request(
+            "Warm the model and return an empty JSON object.",
+            {"type": "object", "maxProperties": 0},
+            system=None,
+        )
+        assert failure is None
 
 
 def test_run_recall_records_rewrite_fallback_metrics(monkeypatch) -> None:
@@ -565,7 +567,9 @@ def test_run_recall_records_rewrite_fallback_metrics(monkeypatch) -> None:
     def fake_search(**_kwargs: object) -> tuple[list[ScoredPage], str]:
         return [], "bm25"
 
-    def timeout_rewriter(*_args: object, **_kwargs: object) -> tuple[list[str], float, str]:
+    def timeout_rewriter(
+        *_args: object, **_kwargs: object
+    ) -> tuple[list[str], float, str]:
         return [], 0.0, "rewrite fallback: ReadTimeout"
 
     monkeypatch.setattr(recall_runtime, "run_search", fake_search)
@@ -713,7 +717,9 @@ def test_feedback_exact_false_positive_suppresses_repeat(tmp_path, monkeypatch) 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
     prompt = "昨日LLM Wikiの recall hook が誤発火した内部通知"
-    append_feedback("false-positive", "exact repeat should not recall", prompt=prompt, host="test")
+    append_feedback(
+        "false-positive", "exact repeat should not recall", prompt=prompt, host="test"
+    )
 
     policy = RecallPolicy(judge_mode="off", log_decisions=False)
     result = run_recall(
@@ -901,7 +907,9 @@ def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
     assert "前回の話" in feedback_file.read_text()
 
 
-def test_missed_feedback_prompt_only_records_without_expected(tmp_path, monkeypatch) -> None:
+def test_missed_feedback_prompt_only_records_without_expected(
+    tmp_path, monkeypatch
+) -> None:
     from llm_wiki_mcp import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
@@ -918,7 +926,9 @@ def test_missed_feedback_prompt_only_records_without_expected(tmp_path, monkeypa
     assert record["snapshot"] is None
 
 
-def test_page_ignored_feedback_records_explicit_negative_pages(tmp_path, monkeypatch) -> None:
+def test_page_ignored_feedback_records_explicit_negative_pages(
+    tmp_path, monkeypatch
+) -> None:
     from llm_wiki_mcp import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
@@ -935,7 +945,9 @@ def test_page_ignored_feedback_records_explicit_negative_pages(tmp_path, monkeyp
     assert record["expected_pages"] == []
 
 
-def test_recent_cli_lists_latest_recall_decisions(tmp_path, monkeypatch, capsys) -> None:
+def test_recent_cli_lists_latest_recall_decisions(
+    tmp_path, monkeypatch, capsys
+) -> None:
     from llm_wiki_mcp import recall_runtime
 
     log_file = tmp_path / "recall-log.jsonl"
@@ -1017,20 +1029,23 @@ def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> N
         + "\n"
     )
 
-    assert main(
-        [
-            "--feedback",
-            "missed",
-            "--prompt",
-            "前に話した recall gate",
-            "--expected-page",
-            "llm-wiki-recall-configuration",
-            "--expected-query",
-            "recall gate model",
-            "--ref",
-            "20260602T100000-deadbeef",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "--feedback",
+                "missed",
+                "--prompt",
+                "前に話した recall gate",
+                "--expected-page",
+                "llm-wiki-recall-configuration",
+                "--expected-query",
+                "recall gate model",
+                "--ref",
+                "20260602T100000-deadbeef",
+            ]
+        )
+        == 0
+    )
     output = json.loads(capsys.readouterr().out)
     record = json.loads(feedback_file.read_text().splitlines()[-1])
 
@@ -1043,7 +1058,9 @@ def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> N
     assert record["snapshot"]["judge_reason"] == "不要"
 
 
-def test_missed_candidate_feedback_does_not_suppress_runtime(tmp_path, monkeypatch) -> None:
+def test_missed_candidate_feedback_does_not_suppress_runtime(
+    tmp_path, monkeypatch
+) -> None:
     from llm_wiki_mcp import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"

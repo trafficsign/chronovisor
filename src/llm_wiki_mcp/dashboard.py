@@ -34,6 +34,9 @@ from llm_wiki_mcp.wiki import LOG_FILE, WIKI_ROOT, init_wiki
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
 LOG_LINE_RE = re.compile(r"^- \[(?P<time>[^\]]+)\] (?P<message>.*)$")
 RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
+SEMANTIC_PROJECTION_CHILD_RE = re.compile(
+    r"^semantic-[0-9a-f]{64}-child-[0-9]{8}-[0-9a-f]{64}\.md$"
+)
 LOG_PAGE_CHANGE_RE = re.compile(
     r"^- \[(?P<time>[^\]]+)\] ingest \| (?P<kind>created|updated) (?P<page>.+)$"
 )
@@ -545,6 +548,8 @@ def _raw_file_date(path: Path) -> date | None:
 
 def _raw_source_label(filename: str) -> str:
     lower = filename.lower()
+    if SEMANTIC_PROJECTION_CHILD_RE.fullmatch(lower):
+        return "projection"
     if "claude-code" in lower:
         return "claude-code"
     if "codex" in lower:
@@ -661,6 +666,13 @@ def _save_history_snapshot(
     raw_status: dict[str, str] = {}
     if raw_dir.exists():
         for path in raw_dir.glob("*.md"):
+            # Projection children are generated processing artifacts.  The
+            # original lossless parent is already counted as the save, so
+            # including children would double-count bytes and invent a
+            # "manual" user save on the projection date.  Queue cardinality
+            # remains visible through the canonical pending counter.
+            if SEMANTIC_PROJECTION_CHILD_RE.fullmatch(path.name.lower()):
+                continue
             raw_date = _raw_file_date(path)
             if raw_date is None or raw_date < start or raw_date > end:
                 continue
@@ -738,12 +750,24 @@ def _save_history_snapshot(
                         if not isinstance(item, dict):
                             continue
                         filename = item.get("filename") or item.get("raw_file")
-                        if not isinstance(filename, str):
-                            continue
+                        source_files = item.get("source_files")
+                        status_filenames = (
+                            [name for name in source_files if isinstance(name, str)]
+                            if isinstance(source_files, list)
+                            else []
+                        )
+                        if (
+                            isinstance(filename, str)
+                            and filename not in status_filenames
+                        ):
+                            status_filenames.append(filename)
                         if item.get("succeeded") is True:
-                            raw_status[filename] = "processed"
-                        elif raw_status.get(filename) != "processed":
-                            raw_status[filename] = "failed"
+                            for status_filename in status_filenames:
+                                raw_status[status_filename] = "processed"
+                        else:
+                            for status_filename in status_filenames:
+                                if raw_status.get(status_filename) != "processed":
+                                    raw_status[status_filename] = "failed"
                 else:
                     processed_names = {
                         name for name in processed_files if isinstance(name, str)
@@ -1805,8 +1829,15 @@ def _canonicalize_runtime_status(
     canonical = dict(status)
     job_id = orch_state.get("current_job_id")
     job_pid = orch_state.get("current_job_pid")
+    try:
+        from llm_wiki_mcp.orchestrator import ingest_process_lease_is_held
+
+        lease_active = ingest_process_lease_is_held(job_pid)
+    except Exception:
+        lease_active = False
     job_active = bool(
         job_id
+        and lease_active
         and _job_process_identity_matches(
             job_pid,
             orch_state.get("current_job_started_at"),

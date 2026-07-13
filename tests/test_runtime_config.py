@@ -144,6 +144,9 @@ num_ctx = 32768
 max_num_ctx = 131072
 num_predict = 4096
 read_timeout_ms = 120000
+memory_reserve_gib = 24
+max_related_context_bytes = 12288
+semantic_projection_max_child_bytes = 16384
 """,
         encoding="utf-8",
     )
@@ -159,6 +162,33 @@ read_timeout_ms = 120000
     assert cfg.max_num_ctx == 131072
     assert cfg.num_predict == 4096
     assert cfg.read_timeout_ms == 120000
+    assert cfg.memory_reserve_gib == 24
+    assert cfg.max_related_context_bytes == 12288
+    assert cfg.semantic_projection_max_child_bytes == 16384
+
+
+def test_ingest_config_defaults_to_dynamic_context_envelope(tmp_path: Path) -> None:
+    cfg = runtime_config.load_ingest_config(tmp_path / "missing.toml")
+
+    assert cfg.num_ctx == 32768
+    assert cfg.max_num_ctx == 262144
+    assert cfg.memory_reserve_gib == 16
+    assert cfg.max_related_context_bytes == 8192
+    assert cfg.semantic_projection_max_child_bytes == 24000
+
+
+def test_ingest_projection_child_envelope_rejects_unsafe_override(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[ingest]\nsemantic_projection_max_child_bytes = 48000\n",
+        encoding="utf-8",
+    )
+
+    cfg = runtime_config.load_ingest_config(config)
+
+    assert cfg.semantic_projection_max_child_bytes == 24000
 
 
 def test_ingest_audit_config_reads_risk_sampling_knobs(tmp_path: Path) -> None:

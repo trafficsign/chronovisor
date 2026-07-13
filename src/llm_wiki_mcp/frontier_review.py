@@ -2220,6 +2220,7 @@ def run_frontier_review(
     cooldown and the daily budget are durable across processes.
     """
     from llm_wiki_mcp.frontier_guard import (
+        EvidenceValidationError,
         FrontierGuard,
         FrontierGuardError,
         PermitDenied,
@@ -2249,6 +2250,29 @@ def run_frontier_review(
             "frontier_guard_evidence_required",
             "local_quarantined",
             "frontier code repair requires validated system incident evidence",
+            human_required=False,
+        )
+        return _failure_result(summary=failure.summary, failure=failure)
+
+    # Validate again immediately before any baseline work, permit reservation,
+    # or child process can occur.  The postcondition always executes this
+    # command; admitting evidence without it would spend frontier tokens on a
+    # result that is guaranteed to be rejected afterward.
+    try:
+        evidence.validate()
+    except (EvidenceValidationError, TypeError, ValueError) as exc:
+        failure = _frontier_failure(
+            "frontier_guard_evidence_invalid",
+            "local_quarantined",
+            f"frontier code repair evidence is invalid: {exc}",
+            human_required=False,
+        )
+        return _failure_result(summary=failure.summary, failure=failure)
+    if not evidence.reproduction_command:
+        failure = _frontier_failure(
+            "frontier_guard_reproduction_command_required",
+            "local_quarantined",
+            "frontier code repair requires a trusted reproduction command before execution",
             human_required=False,
         )
         return _failure_result(summary=failure.summary, failure=failure)

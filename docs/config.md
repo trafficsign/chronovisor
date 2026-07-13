@@ -24,15 +24,22 @@ document_prefix = ""
 query_prefix = ""
 
 [ingest]
-# Keep one fixed allocation for the heavy runner. Changing num_ctx between
-# calls makes Ollama replace the loaded runner and causes avoidable model flap.
+# Select the smallest safe bucket for each complete ingest request. A larger
+# resident runner is reused so a backlog grows monotonically rather than
+# shrinking and reloading between raws.
 model = "maxwell1500/ornith-35b:Q5_K_M"
 keep_alive = "20m"
 temperature = 0.3
 num_ctx = 32768
-max_num_ctx = 32768
+max_num_ctx = 262144
 num_predict = 8192
 read_timeout_ms = 660000
+memory_reserve_gib = 16
+max_related_context_bytes = 8192
+# Verified transcript captures are delegated as content-addressed semantic
+# children. 24 KB is the hard safe ceiling for the downstream decision
+# envelope; lower values create more byte-exact children and never truncate.
+semantic_projection_max_child_bytes = 24000
 
 [decision_router]
 # Routine structured decisions require a two-vote local quorum. The complete

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from llm_wiki_mcp import ollama
 from llm_wiki_mcp.ingest import (
     IngestApplyError,
     _apply_operations,
@@ -205,67 +206,46 @@ class TestExtractPageBody:
         )
         assert out is None
 
-    def test_create_truncated_no_close_recovers(self) -> None:
-        # The most common Ollama failure mode: wrapper opened, full
-        # frontmatter + content emitted, but model ran out of tokens
-        # before "=== END PAGE ===". Without the truncation fallback all
-        # three earlier patterns fail and the body is silently discarded.
+    def test_create_truncated_no_close_rejected(self) -> None:
         out = _extract_page_body(
             "=== NEW PAGE: personal/smoking-habit-analysis.md ===\n"
             "---\ntitle: Smoking Habit Analysis\nupdated: 2026-04-29\n---\n"
             "\n# 概要\n\nニコチンの半減期は短い",
             op_type="create",
         )
-        assert out is not None
-        assert out.startswith("---\ntitle: Smoking Habit")
-        assert "ニコチンの半減期" in out
+        assert out is None
 
-    def test_create_truncated_partial_close_fence_stripped(self) -> None:
-        # Output ends with a partially-emitted close fence ("=== EN").
-        # We must strip it rather than letting it leak into the body.
+    def test_create_truncated_partial_close_fence_rejected(self) -> None:
         out = _extract_page_body(
             "=== NEW PAGE: foo.md ===\n"
             "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
             "\nbody text.\n=== EN",
             op_type="create",
         )
-        assert out is not None
-        assert "=== EN" not in out
-        assert out.rstrip().endswith("body text.")
+        assert out is None
 
-    def test_create_new_keyword_dropped_with_truncation(self) -> None:
-        # gemma sometimes drops the "NEW" keyword and uses the filename
-        # as the wrapper label. Combined with truncation, all three
-        # earlier patterns fail. Truncation fallback peels generic
-        # "=== ... ===" wrappers so this still recovers.
+    def test_create_generic_wrapper_without_close_rejected(self) -> None:
         out = _extract_page_body(
             "=== user-profile-background PAGE: user-profile-background ===\n"
             "---\ntitle: User Profile\nupdated: 2026-04-29\n---\n"
             "\nbody",
             op_type="create",
         )
-        assert out is not None
-        assert "title: User Profile" in out
+        assert out is None
 
-    def test_update_truncated_no_close_recovers(self) -> None:
-        # Same truncation pattern for updates: no frontmatter expected,
-        # so the contract check passes any non-empty body.
+    def test_update_truncated_no_close_rejected(self) -> None:
         out = _extract_page_body(
             "=== UPDATE PAGE: foo.md ===\n\n## new section\n\nnotes...",
             op_type="update",
         )
-        assert out is not None
-        assert "## new section" in out
-        assert "title:" not in out
+        assert out is None
 
-    def test_update_bare_markdown_recovers(self) -> None:
-        # Qwen often follows the body contract but omits the wrapper
-        # entirely. For updates that is acceptable Markdown to append.
+    def test_update_bare_markdown_without_close_rejected(self) -> None:
         out = _extract_page_body(
             "## 6.5 Stop Hook 最適化\n\n本文だけ返ってきたケース。",
             op_type="update",
         )
-        assert out == "## 6.5 Stop Hook 最適化\n\n本文だけ返ってきたケース。"
+        assert out is None
 
     def test_create_truncated_broken_frontmatter_still_rejected(self) -> None:
         # Truncation BEFORE the closing "---" of the frontmatter cannot
@@ -1893,6 +1873,55 @@ class TestUnclosedFence:
 
 
 class TestRunIngestPartialFailure:
+    def test_completion_callback_failure_overrides_completed_job(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Applied pages remain durable, but raw ACK failure is job failure."""
+
+        from llm_wiki_mcp import ingest, jobs
+
+        monkeypatch.setattr(
+            ingest,
+            "_triage",
+            lambda _content: [
+                {
+                    "type": "create",
+                    "filename": "memory/ack-boundary.md",
+                    "title": "ACK Boundary",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_generate_one",
+            lambda op, _raw, **_kwargs: {
+                "type": "create",
+                "filename": op["filename"],
+                "content": ("---\ntitle: ACK Boundary\nupdated: 2026-07-14\n---\nbody"),
+            },
+        )
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        finally_calls: list[dict[str, bool]] = []
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest(
+            "raw completion boundary",
+            job.job_id,
+            on_complete=lambda: (_ for _ in ()).throw(
+                RuntimeError("durable ACK write failed")
+            ),
+            on_finally=lambda failed, triage_failed: finally_calls.append(
+                {"failed": failed, "triage_failed": triage_failed}
+            ),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished is not None
+        assert finished.status == jobs.JobStatus.FAILED
+        assert finished.error == "durable ACK write failed"
+        assert finally_calls == [{"failed": True, "triage_failed": False}]
+        assert (isolated_wiki / "pages" / "memory" / "ack-boundary.md").exists()
+
     def test_confirmed_noop_revalidates_authority_before_retiring_raw(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2941,7 +2970,11 @@ class TestRawKeywordsMetadataPropagation:
         monkeypatch.setattr(
             ingest,
             "generate",
-            lambda *_a, **_kw: "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
+            lambda *_a, **_kw: (
+                "=== NEW PAGE: misc/p0.md ===\n"
+                "---\ntitle: P\nupdated: 2026-04-28\n---\nbody\n"
+                "=== END PAGE ==="
+            ),
         )
 
         result = ingest._generate_one(op, "raw content", raw_keywords=None)
@@ -2960,7 +2993,11 @@ class TestRawKeywordsMetadataPropagation:
         monkeypatch.setattr(
             ingest,
             "generate",
-            lambda *_a, **_kw: "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
+            lambda *_a, **_kw: (
+                "=== NEW PAGE: misc/p0.md ===\n"
+                "---\ntitle: P\nupdated: 2026-04-28\n---\nbody\n"
+                "=== END PAGE ==="
+            ),
         )
 
         result = ingest._generate_one(op, "raw content", raw_keywords=[])
@@ -2992,11 +3029,11 @@ class TestRawKeywordsMetadataPropagation:
         monkeypatch.setattr(ingest, "_generate_one", stub_generate)
         monkeypatch.setattr(ingest, "is_available", lambda: True)
 
-        for bad in ("not-a-list", 42, None, ["ok", 123], {"k": "v"}):
+        for index, bad in enumerate(("not-a-list", 42, None, ["ok", 123], {"k": "v"})):
             captured.clear()
             job = jobs.job_store.create(processor="ollama")
             ingest.run_ingest(
-                "raw content",
+                f"raw content {index}",
                 job.job_id,
                 metadata={"raw_keywords": bad},
             )
@@ -3010,13 +3047,60 @@ class TestRawKeywordsMetadataPropagation:
 
 class TestOrchestrator:
     @staticmethod
+    def _write_transcript_raw(
+        raw_dir: Path,
+        *,
+        name: str,
+        records: list[dict],
+    ) -> Path:
+        from llm_wiki_mcp.save_transaction import (
+            attach_save_transaction_marker,
+            make_save_transaction,
+        )
+
+        body = "\n".join(
+            [
+                "---",
+                "raw_keywords: [Codex, transcript-delta]",
+                "---",
+                "# Codex Session Transcript Delta",
+                "",
+                "## Transcript Delta",
+                "",
+                "```json",
+                json.dumps(records, ensure_ascii=False, indent=2),
+                "```",
+                "",
+            ]
+        )
+        transaction = make_save_transaction(
+            host="codex",
+            session_file=Path("/tmp/session.jsonl"),
+            session_id=name,
+            after_line=0,
+            until_line=1,
+        )
+        path = raw_dir / name
+        path.write_text(
+            attach_save_transaction_marker(transaction, body),
+            encoding="utf-8",
+        )
+        return path
+
+    @staticmethod
     def _write_capture_fragments(
         raw_dir: Path,
         *,
         record_text: str,
         fragment_bytes: int,
         omit_indices: set[int] | None = None,
+        prefix: str = "fragment",
     ) -> tuple[str, list[Path]]:
+        from llm_wiki_mcp.save_transaction import (
+            attach_save_transaction_marker,
+            make_save_transaction,
+        )
+
         record = record_text.encode("utf-8")
         record_sha256 = hashlib.sha256(record).hexdigest()
         chunks = [
@@ -3041,19 +3125,29 @@ class TestOrchestrator:
                 "encoding": "base64",
                 "data": base64.b64encode(chunk).decode("ascii"),
             }
-            path = raw_dir / f"fragment-{index}.md"
-            path.write_text(
+            path = raw_dir / f"{prefix}-{index}.md"
+            body = (
                 "---\nraw_keywords: [Codex, transcript-fragment]\n---\n"
                 "# Codex Oversized Transcript Record Fragment\n\n"
                 "```json\n"
                 + json.dumps(payload, ensure_ascii=False, indent=2)
-                + "\n```\n",
+                + "\n```\n"
+            )
+            transaction = make_save_transaction(
+                host="codex",
+                session_file=Path("/tmp/session.jsonl"),
+                session_id=f"{prefix}-session-{index}",
+                after_line=41,
+                until_line=42,
+            )
+            path.write_text(
+                attach_save_transaction_marker(transaction, body),
                 encoding="utf-8",
             )
             paths.append(path)
         return record_sha256, paths
 
-    def test_complete_fragment_group_is_reassembled_before_ingest(
+    def test_complete_fragment_group_is_projected_then_child_is_ingested(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from llm_wiki_mcp import ingest as ingest_mod, orchestrator
@@ -3080,27 +3174,197 @@ class TestOrchestrator:
 
         monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
         monkeypatch.setattr(orchestrator, "is_available", lambda: True)
-        monkeypatch.setattr(orchestrator, "_raw_ingest_input_limit", lambda: 10_000)
 
-        result = orchestrator.run_pending_ingest(force=True)
+        delegated = orchestrator.run_pending_ingest(force=True)
 
+        assert observed == []
+        assert delegated["files_processed"] == sorted(path.name for path in paths)
+        projection = delegated["per_raw"][0]["projection"]
+        assert projection["kind"] == "children"
+        assert projection["child_count"] == 1
+        pending_children = orchestrator.get_pending_raw_files()
+        assert pending_children == [Path(projection["child_paths"][0])]
+        assert all(path.exists() for path in paths)
+
+        processed = orchestrator.run_pending_ingest(force=True)
+
+        assert processed["files_processed"] == [pending_children[0].name]
         assert len(observed) == 1
-        assert record in observed[0][0]
+        assert "remember the whole record" in observed[0][0]
         assert '"data"' not in observed[0][0]
-        assert observed[0][1]["raw_keywords"] == [
-            "Codex",
-            "transcript-delta",
-            "transcript-reassembled",
-        ]
-        assert result["files_processed"] == sorted(path.name for path in paths)
+        assert observed[0][1]["raw_keywords"] == ["transcript-semantic-projection"]
         assert orchestrator.get_pending_raw_files() == []
 
-    def test_over_limit_fragment_group_is_quarantined_without_model_call(
+    def test_fragment_projection_resumes_group_ack_without_reprojection(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import (
+            ingest as ingest_mod,
+            orchestrator,
+            raw_completion_ack,
+            raw_semantic_projection,
+        )
+
+        record = json.dumps(
+            [{"line": 7, "role": "user", "text": "remember projected record"}],
+            ensure_ascii=False,
+        )
+        _record_sha256, paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=record,
+            fragment_bytes=11,
+            prefix="ack-fragment",
+        )
+        original_project = raw_semantic_projection.project_reassembled_raws
+        calls = {"projection": 0}
+
+        def counted_projection(*args, **kwargs):
+            calls["projection"] += 1
+            return original_project(*args, **kwargs)
+
+        monkeypatch.setattr(
+            raw_semantic_projection,
+            "project_reassembled_raws",
+            counted_projection,
+        )
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail(
+                "fragment ACK recovery reached model ingest"
+            ),
+        )
+        monkeypatch.setattr(orchestrator, "is_available", lambda: False)
+        real_save_state = orchestrator._save_state
+        source_names = {path.name for path in paths}
+        injected = {"done": False}
+
+        def fail_group_processed_mark(state: dict) -> None:
+            processed = set(state.get("processed_raw_files", []))
+            if not injected["done"] and source_names <= processed:
+                injected["done"] = True
+                raise OSError("injected fragment ACK state failure")
+            real_save_state(state)
+
+        monkeypatch.setattr(orchestrator, "_save_state", fail_group_processed_mark)
+
+        first = orchestrator.run_pending_ingest(force=True)
+
+        assert first["per_raw"][0]["succeeded"] is False
+        assert first["per_raw"][0]["supervision"]["failure_class"] == (
+            "ingest.raw_completion_ack_state_pending"
+        )
+        assert calls["projection"] == 1
+        assert raw_completion_ack.receipt_path(paths).is_file()
+        [child_path] = [
+            path
+            for path in orchestrator.get_pending_raw_files()
+            if path.name.startswith("semantic-") and path.suffix == ".md"
+        ]
+        # The child is a separate semantic unit; remove it from this ACK-only
+        # recovery assertion so no unrelated model work shares the next batch.
+        child_state = orchestrator._load_state()
+        child_state["processed_raw_files"] = sorted(
+            set(child_state.get("processed_raw_files", [])) | {child_path.name}
+        )
+        orchestrator._save_state(child_state)
+
+        second = orchestrator.run_pending_ingest(force=True)
+
+        assert set(second["files_processed"]) == source_names
+        assert second["per_raw"][0]["completion_ack"]["resumed"] is True
+        assert second["per_raw"][0]["completion_ack"]["source_files"] == sorted(
+            source_names
+        )
+        assert calls["projection"] == 1
+
+    def test_verified_transcript_parent_delegates_byte_exact_child(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from llm_wiki_mcp import ingest as ingest_mod, orchestrator
 
-        record = json.dumps([{"role": "user", "text": "X" * 200}])
+        raw_path = self._write_transcript_raw(
+            isolated_wiki / "raw",
+            name="verified-transcript.md",
+            records=[
+                {"line": 1, "role": "user", "text": "記憶して🙂\\literal"},
+                {"line": 2, "role": "tool", "text": "SECRET-TOOL-PROTOCOL"},
+                {"line": 3, "role": "assistant", "text": "了解した"},
+            ],
+        )
+        original = raw_path.read_bytes()
+        observed: list[tuple[str, dict]] = []
+
+        def fake_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            observed.append((content, metadata or {}))
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        delegated = orchestrator.run_pending_ingest(force=True)
+
+        assert observed == []
+        assert delegated["files_processed"] == [raw_path.name]
+        projection = delegated["per_raw"][0]["projection"]
+        assert projection["kind"] == "children"
+        assert Path(projection["manifest_path"]).exists()
+        assert raw_path.read_bytes() == original
+
+        processed = orchestrator.run_pending_ingest(force=True)
+
+        assert processed["files_processed"] == [Path(projection["child_paths"][0]).name]
+        assert len(observed) == 1
+        child = json.loads(observed[0][0])
+        projected_text = [row["text"] for row in child["records"]]
+        assert projected_text == ["記憶して🙂\\literal", "了解した"]
+        assert "SECRET-TOOL-PROTOCOL" not in observed[0][0]
+        assert orchestrator.get_pending_raw_files() == []
+
+    def test_tool_only_transcript_uses_durable_noop_without_model(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+
+        raw_path = self._write_transcript_raw(
+            isolated_wiki / "raw",
+            name="tool-only-transcript.md",
+            records=[
+                {"line": 1, "role": "tool", "text": "tool output"},
+                {"line": 2, "role": "event", "text": "reasoning event"},
+                {"line": 3, "role": "assistant", "text": "   "},
+            ],
+        )
+        original = raw_path.read_bytes()
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail("tool-only raw reached model"),
+        )
+        monkeypatch.setattr(orchestrator, "is_available", lambda: False)
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert result["files_processed"] == [raw_path.name]
+        projection = result["per_raw"][0]["projection"]
+        assert projection["kind"] == "noop"
+        assert Path(projection["manifest_path"]).exists()
+        assert Path(projection["noop_receipt_path"]).exists()
+        assert projection["selected_record_count"] == 0
+        assert raw_path.read_bytes() == original
+        assert orchestrator.get_pending_raw_files() == []
+
+    def test_over_limit_fragment_group_fans_out_without_quarantine(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator, runtime_config
+
+        record = json.dumps([{"role": "user", "text": "X" * 6_000}])
         record_sha256, paths = self._write_capture_fragments(
             isolated_wiki / "raw",
             record_text=record,
@@ -3112,24 +3376,35 @@ class TestOrchestrator:
             lambda *_args, **_kwargs: pytest.fail("fragment leaked into model ingest"),
         )
         monkeypatch.setattr(orchestrator, "is_available", lambda: True)
-        monkeypatch.setattr(orchestrator, "_raw_ingest_input_limit", lambda: 50)
+        monkeypatch.setattr(
+            runtime_config,
+            "load_ingest_config",
+            lambda: runtime_config.IngestConfig(
+                semantic_projection_max_child_bytes=2_048
+            ),
+        )
 
         result = orchestrator.run_pending_ingest(force=True)
 
         assert result["triggered"] is True
-        assert result["files_quarantined"] == sorted(path.name for path in paths)
-        assert orchestrator.get_pending_raw_files() == []
-        manifest = (
+        assert result["files_quarantined"] == []
+        assert result["files_processed"] == sorted(path.name for path in paths)
+        projection = result["per_raw"][0]["projection"]
+        assert projection["kind"] == "children"
+        assert projection["child_count"] > 1
+        assert len(orchestrator.get_pending_raw_files()) == projection["child_count"]
+        assert all(
+            path.name.startswith("semantic-")
+            for path in orchestrator.get_pending_raw_files()
+        )
+        dead_letter = (
             isolated_wiki
             / "raw"
             / ".dead-letter"
             / "raw-capture-fragments"
             / record_sha256
-            / "manifest.json"
         )
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-        assert payload["reason"] == "reassembled_input_limit_exceeded"
-        assert payload["details"]["max_input_chars"] == 50
+        assert not dead_letter.exists()
 
     def test_incomplete_fragment_group_is_deferred_without_model_call(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -3149,7 +3424,6 @@ class TestOrchestrator:
             lambda *_args, **_kwargs: pytest.fail("incomplete fragments reached model"),
         )
         monkeypatch.setattr(orchestrator, "is_available", lambda: True)
-        monkeypatch.setattr(orchestrator, "_raw_ingest_input_limit", lambda: 10_000)
 
         result = orchestrator.run_pending_ingest(force=True)
 
@@ -3157,13 +3431,15 @@ class TestOrchestrator:
         assert result["fragment_deferred"][0]["missing_indices"] == [2]
         assert orchestrator.get_pending_raw_files() == sorted(paths)
 
-    def test_failed_reassembled_group_is_quarantined_as_one_complete_set(
+    def test_failed_fragment_projection_is_deferred_without_moving_group(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from llm_wiki_mcp import (
             failure_supervisor,
             ingest as ingest_mod,
             orchestrator,
+            raw_semantic_projection,
+            self_heal,
         )
 
         record = json.dumps([{"role": "user", "text": "grounded record"}])
@@ -3173,43 +3449,96 @@ class TestOrchestrator:
             fragment_bytes=9,
         )
 
-        def fake_run_ingest(
-            _content, _job_id, on_complete=None, on_finally=None, *, metadata=None
-        ):
-            del on_complete, metadata
-            if on_finally:
-                on_finally(failed=True, triage_failed=False)
+        projection_calls = 0
 
-        def fake_record_raw_failure(*, raw_path, **_kwargs):
-            quarantine = (
-                isolated_wiki
-                / "runtime"
-                / "failures"
-                / "quarantined-raw"
-                / raw_path.name
+        def fail_projection(*_args, **_kwargs):
+            nonlocal projection_calls
+            projection_calls += 1
+            raise raw_semantic_projection.ProjectionConflictError(
+                "injected projection conflict"
             )
-            quarantine.parent.mkdir(parents=True, exist_ok=True)
-            raw_path.rename(quarantine)
-            return {
-                "quarantined": True,
-                "quarantine_path": str(quarantine),
-                "failure_class": "semantic.test_failure",
-            }
 
-        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
-        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
-        monkeypatch.setattr(orchestrator, "_raw_ingest_input_limit", lambda: 10_000)
         monkeypatch.setattr(
-            failure_supervisor,
-            "record_raw_failure",
-            fake_record_raw_failure,
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail(
+                "failed projection reached model ingest"
+            ),
         )
-        monkeypatch.setattr(failure_supervisor, "result_to_dict", lambda value: value)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(
+            raw_semantic_projection,
+            "project_reassembled_raws",
+            fail_projection,
+        )
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+
+        result = orchestrator.run_pending_ingest(force=True)
+        second = orchestrator.run_pending_ingest(force=True)
+
+        assert result["per_raw"][0]["succeeded"] is False
+        assert result["per_raw"][0]["supervision"]["failure_class"] == (
+            "ingest.runtime_semantic_projection_artifact_conflict"
+        )
+        assert result["per_raw"][0]["supervision"]["quarantined"] is False
+        assert projection_calls == 1
+        assert second["triggered"] is False
+        assert second["reason"] == "no pending raws"
+        assert orchestrator.get_pending_raw_files() == []
+        assert all(path.exists() for path in paths)
+        deferred = failure_supervisor.operational_deferred_raw_files(paths)
+        assert set(deferred) == {path.name for path in paths}
+        dead_letter = (
+            isolated_wiki
+            / "raw"
+            / ".dead-letter"
+            / "raw-capture-fragments"
+            / record_sha256
+        )
+        assert not dead_letter.exists()
+
+    def test_fragment_source_invalid_quarantines_whole_logical_group_atomically(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import (
+            ingest as ingest_mod,
+            orchestrator,
+            raw_semantic_projection,
+        )
+
+        record_sha256, paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=json.dumps([{"role": "user", "text": "invalid source"}]),
+            fragment_bytes=8,
+        )
+
+        def fail_source(*_args, **_kwargs):
+            raise raw_semantic_projection.RawSemanticProjectionError(
+                "verified fragment envelope is invalid"
+            )
+
+        monkeypatch.setattr(
+            raw_semantic_projection,
+            "project_reassembled_raws",
+            fail_source,
+        )
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail(
+                "source-invalid fragment group reached model ingest"
+            ),
+        )
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
 
         result = orchestrator.run_pending_ingest(force=True)
 
-        assert result["per_raw"][0]["succeeded"] is False
-        assert orchestrator.get_pending_raw_files() == []
+        supervision = result["per_raw"][0]["supervision"]
+        assert supervision["failure_class"] == (
+            "raw.semantic_projection_source_invalid"
+        )
+        assert supervision["quarantined"] is True
+        assert all(not path.exists() for path in paths)
         dead_letter = (
             isolated_wiki
             / "raw"
@@ -3220,10 +3549,183 @@ class TestOrchestrator:
         manifest = json.loads(
             (dead_letter / "manifest.json").read_text(encoding="utf-8")
         )
-        assert manifest["reason"] == "reassembled_ingest_failure"
+        assert manifest["status"] == "completed"
         assert {row["source"] for row in manifest["files"]} == {
             path.name for path in paths
         }
+        state = orchestrator._load_state()
+        assert set(path.name for path in paths) <= set(state["processed_raw_files"])
+        assert orchestrator.get_pending_raw_files() == []
+
+    def test_invalid_fragment_group_cannot_quarantine_unrelated_group(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+
+        bad_sha256, bad_paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=json.dumps([{"role": "user", "text": "bad group"}]),
+            fragment_bytes=12,
+            prefix="bad",
+        )
+        duplicate = isolated_wiki / "raw" / "bad-duplicate.md"
+        duplicate.write_bytes(bad_paths[0].read_bytes())
+        _good_sha256, good_paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=json.dumps([{"role": "user", "text": "good group"}]),
+            fragment_bytes=11,
+            prefix="good",
+        )
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail(
+                "delegated fragment parent reached model"
+            ),
+        )
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert set(result["files_quarantined"]) == {
+            *(path.name for path in bad_paths),
+            duplicate.name,
+        }
+        assert result["files_processed"] == sorted(path.name for path in good_paths)
+        assert all(path.exists() for path in good_paths)
+        assert not any(path.exists() for path in bad_paths)
+        assert not duplicate.exists()
+        bad_dead_letter = (
+            isolated_wiki
+            / "raw"
+            / ".dead-letter"
+            / "raw-capture-fragments"
+            / bad_sha256
+        )
+        assert bad_dead_letter.exists()
+        assert all(
+            path.name.startswith("semantic-")
+            for path in orchestrator.get_pending_raw_files()
+        )
+
+    def test_fragment_quarantine_intent_publish_failure_moves_nothing(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        record_sha256, paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=json.dumps([{"role": "user", "text": "unsafe"}]),
+            fragment_bytes=12,
+        )
+
+        def fail_publish(_path: Path, _content: str) -> None:
+            raise OSError("injected manifest fsync failure")
+
+        monkeypatch.setattr(orchestrator, "atomic_write", fail_publish)
+
+        with pytest.raises(OSError, match="manifest fsync failure"):
+            orchestrator._quarantine_capture_fragment_paths(
+                paths,
+                record_sha256=record_sha256,
+                reason="fragment_integrity_failure",
+            )
+
+        assert all(path.exists() for path in paths)
+        dead_letter = (
+            isolated_wiki
+            / "raw"
+            / ".dead-letter"
+            / "raw-capture-fragments"
+            / record_sha256
+        )
+        assert not list(dead_letter.glob("*.md"))
+        assert not list(dead_letter.glob("manifest*.json"))
+
+    def test_fragment_quarantine_partial_move_resumes_on_next_run(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+
+        record_sha256, paths = self._write_capture_fragments(
+            isolated_wiki / "raw",
+            record_text=json.dumps([{"role": "user", "text": "unsafe payload"}]),
+            fragment_bytes=10,
+        )
+        original_rename = Path.rename
+        moves = 0
+
+        def flaky_rename(path: Path, target: Path) -> Path:
+            nonlocal moves
+            if path in paths:
+                moves += 1
+                if moves == 2:
+                    raise OSError("injected move crash")
+            return original_rename(path, target)
+
+        monkeypatch.setattr(Path, "rename", flaky_rename)
+        with pytest.raises(OSError, match="move crash"):
+            orchestrator._quarantine_capture_fragment_paths(
+                paths,
+                record_sha256=record_sha256,
+                reason="fragment_integrity_failure",
+            )
+
+        dead_letter = (
+            isolated_wiki
+            / "raw"
+            / ".dead-letter"
+            / "raw-capture-fragments"
+            / record_sha256
+        )
+        manifest_path = dead_letter / "manifest.json"
+        prepared = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert prepared["status"] == "prepared"
+        assert sum(path.exists() for path in paths) == len(paths) - 1
+
+        monkeypatch.setattr(Path, "rename", original_rename)
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail("resumed fragments reached model"),
+        )
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert result == {"triggered": False, "reason": "no pending raws"}
+        completed = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert completed["status"] == "completed"
+        assert isinstance(completed["completed_at"], str)
+        assert not any(path.exists() for path in paths)
+        assert all(
+            (dead_letter / row["preserved_as"]).exists() for row in completed["files"]
+        )
+        state = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+        assert set(path.name for path in paths) <= set(state["processed_raw_files"])
+
+    def test_cross_process_lease_defers_without_touching_pending_raw(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from contextlib import contextmanager
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+
+        raw_path = isolated_wiki / "raw" / "pending.md"
+        raw_path.write_text("pending evidence", encoding="utf-8")
+
+        @contextmanager
+        def busy_lease():
+            yield False, "injected busy lease"
+
+        monkeypatch.setattr(orchestrator, "_cross_process_ingest_lease", busy_lease)
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail("busy lease reached ingest"),
+        )
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert result == {"triggered": False, "reason": "injected busy lease"}
+        assert orchestrator.get_pending_raw_files() == [raw_path]
 
     def test_retracted_raw_is_not_pending_and_body_is_preserved(
         self, isolated_wiki: Path
@@ -3313,7 +3815,7 @@ class TestOrchestrator:
             jobs.job_store._jobs.pop(job.job_id, None)
 
     def test_reset_stale_lock_keeps_live_cross_process_lock(
-        self, isolated_wiki: Path
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from llm_wiki_mcp import orchestrator
 
@@ -3322,9 +3824,79 @@ class TestOrchestrator:
         state["current_job_pid"] = os.getpid()
         state["current_job_started_at"] = datetime.now().isoformat()
         orchestrator._save_state(state)
+        monkeypatch.setattr(
+            orchestrator,
+            "ingest_process_lease_is_held",
+            lambda _pid: True,
+        )
 
         orchestrator.reset_stale_lock()
         assert orchestrator._load_state()["current_job_id"] == "job-in-another-process"
+
+    def test_reset_stale_lock_clears_same_live_pid_without_process_lease(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        state = orchestrator._load_state()
+        state["current_job_id"] = "stranded-in-long-lived-mcp"
+        state["current_job_pid"] = os.getpid()
+        state["current_job_started_at"] = datetime.now().isoformat()
+        orchestrator._save_state(state)
+        monkeypatch.setattr(
+            orchestrator,
+            "ingest_process_lease_is_held",
+            lambda _pid: False,
+        )
+
+        orchestrator.reset_stale_lock()
+
+        assert orchestrator._load_state()["current_job_id"] is None
+
+    def test_uncertain_reservation_write_clears_slot_and_next_run_succeeds(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+
+        raw_path = isolated_wiki / "raw" / "reservation-recovery.md"
+        raw_path.write_text("stable source", encoding="utf-8")
+        real_save_state = orchestrator._save_state
+        injected = {"done": False}
+
+        def fail_after_reservation_replace(state: dict) -> None:
+            real_save_state(state)
+            if not injected["done"] and state.get("current_job_id") == "__pending__":
+                injected["done"] = True
+                raise OSError("injected reservation directory fsync failure")
+
+        monkeypatch.setattr(
+            orchestrator,
+            "_save_state",
+            fail_after_reservation_replace,
+        )
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        with pytest.raises(OSError, match="reservation directory fsync failure"):
+            orchestrator.run_pending_ingest(force=True)
+
+        stranded = orchestrator._load_state()
+        assert stranded["current_job_id"] is None
+        assert stranded["current_job_pid"] is None
+        assert orchestrator._INGEST_PROCESS_LEASE_ACTIVE is False
+
+        monkeypatch.setattr(orchestrator, "_save_state", real_save_state)
+
+        def succeed(
+            _content, _job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            if on_complete:
+                on_complete()
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", succeed)
+        recovered = orchestrator.run_pending_ingest(force=True)
+
+        assert recovered["files_processed"] == [raw_path.name]
+        assert orchestrator.get_pending_raw_files() == []
 
     def test_reset_stale_lock_clears_dead_cross_process_lock(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -3400,24 +3972,48 @@ class TestOrchestrator:
             or "pending" in second["reason"].lower()
         )
 
-    def test_release_lock_only_counts_triage_failures(
-        self, isolated_wiki: Path
+    def test_legacy_triage_counter_cannot_quarantine_unattempted_raws(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from llm_wiki_mcp import orchestrator
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
 
-        # Non-triage failure (e.g. apply error, generate parse) must NOT
-        # advance the dead-letter counter.
-        orchestrator._release_lock(failed=True, triage_failed=False)
-        assert orchestrator._load_state()["triage_failure_count"] == 0
+        paths = [isolated_wiki / "raw" / f"raw-{index}.md" for index in range(2)]
+        for path in paths:
+            path.write_text(path.stem, encoding="utf-8")
+        orchestrator.STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "last_ingest": None,
+                    "last_lint": None,
+                    "processed_raw_files": [],
+                    "current_job_id": None,
+                    "current_job_pid": None,
+                    "current_job_started_at": None,
+                    "triage_failure_count": 3,
+                }
+            ),
+            encoding="utf-8",
+        )
+        calls: list[str] = []
 
-        # Triage failure does advance.
-        orchestrator._release_lock(failed=True, triage_failed=True)
-        orchestrator._release_lock(failed=True, triage_failed=True)
-        assert orchestrator._load_state()["triage_failure_count"] == 2
+        def fake_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            del job_id, on_finally, metadata
+            calls.append(content)
+            if on_complete:
+                on_complete()
 
-        # Success resets.
-        orchestrator._release_lock(failed=False)
-        assert orchestrator._load_state()["triage_failure_count"] == 0
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert sorted(calls) == ["raw-0", "raw-1"]
+        assert result["files_processed"] == [path.name for path in paths]
+        assert not (isolated_wiki / "raw" / ".dead-letter").exists()
+        persisted = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+        assert "triage_failure_count" not in persisted
 
 
 # ---------------------------------------------------------------------------
@@ -3430,6 +4026,445 @@ class TestPerRawOrchestrator:
     level: each raw's keywords reach run_ingest as its own metadata,
     success and failure are tracked per-file, and legacy raws written
     before the field rename are still readable."""
+
+    @staticmethod
+    def _install_single_page_ingest(
+        monkeypatch: pytest.MonkeyPatch,
+        wiki_root: Path,
+    ) -> dict[str, int]:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+        from llm_wiki_mcp.jobs import JobStatus, job_store
+
+        calls = {"ingest": 0, "mutation": 0}
+
+        def fake_run_ingest(
+            _content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            del metadata
+            calls["ingest"] += 1
+            page = wiki_root / "pages" / "ack-page.md"
+            calls["mutation"] += 1
+            page.write_text(
+                f"---\ntitle: ACK Page\n---\nmutation {calls['mutation']}\n",
+                encoding="utf-8",
+            )
+            job_store.update(
+                job_id,
+                status=JobStatus.COMPLETED,
+                completed_at=datetime.now().isoformat(),
+                pages_created=["ack-page"],
+                pages_updated=[],
+                result={"test_apply": True},
+            )
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        return calls
+
+    @staticmethod
+    def _seed_applied_terminal_artifact(
+        wiki_root: Path,
+        *,
+        raw_content: str,
+        source_raw: str,
+        page_id: str = "pretriage-recovery",
+    ) -> tuple[Path, dict[str, object]]:
+        from llm_wiki_mcp import ingest
+
+        page_path = wiki_root / "pages" / "memory" / f"{page_id}.md"
+        page_body = (
+            "---\n"
+            f"title: {page_id}\n"
+            "updated: 2026-07-14\n"
+            "---\n"
+            "durable postimage before ACK\n"
+        )
+        result = ingest._review_and_apply_ingest_operations(
+            [
+                {
+                    "type": "create",
+                    "filename": f"memory/{page_id}.md",
+                    "content": page_body,
+                }
+            ],
+            raw_content=raw_content,
+            source_raw=source_raw,
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "terminal local approval before simulated crash",
+                "failed_operations_disposition": "none",
+            },
+        )
+        assert result["status"] == "apply_available"
+        assert "durable postimage before ACK" in page_path.read_text(encoding="utf-8")
+        return page_path, result
+
+    def test_state_write_failure_resumes_durable_ack_without_duplicate_apply(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator, raw_completion_ack
+        from llm_wiki_mcp.jobs import JobStatus, job_store
+
+        raw_path = isolated_wiki / "raw" / "ack-state-failure.md"
+        raw_path.write_text("stable source bytes", encoding="utf-8")
+        calls = self._install_single_page_ingest(monkeypatch, isolated_wiki)
+        real_save_state = orchestrator._save_state
+        injected = {"done": False}
+
+        def fail_first_processed_mark(state: dict) -> None:
+            if not injected["done"] and raw_path.name in state.get(
+                "processed_raw_files", []
+            ):
+                injected["done"] = True
+                raise OSError("injected processed-state write failure")
+            real_save_state(state)
+
+        monkeypatch.setattr(orchestrator, "_save_state", fail_first_processed_mark)
+
+        first = orchestrator.run_pending_ingest(force=True)
+
+        assert first["per_raw"][0]["succeeded"] is False
+        assert first["per_raw"][0]["supervision"]["failure_class"] == (
+            "ingest.raw_completion_ack_state_pending"
+        )
+        first_job = job_store.get(first["per_raw"][0]["job_id"])
+        assert first_job is not None and first_job.status == JobStatus.FAILED
+        assert calls == {"ingest": 1, "mutation": 1}
+        assert raw_path in orchestrator.get_pending_raw_files()
+        assert raw_completion_ack.receipt_path([raw_path]).is_file()
+
+        # Another raw may legitimately update the same page before this ACK is
+        # retried.  The recorded postimage proves what the first job committed;
+        # it is not a CAS precondition for retiring that first source later.
+        page = isolated_wiki / "pages" / "ack-page.md"
+        page.write_text(
+            "---\ntitle: ACK Page\n---\nnewer mutation from raw B\n",
+            encoding="utf-8",
+        )
+
+        second = orchestrator.run_pending_ingest(force=True)
+
+        assert second["files_processed"] == [raw_path.name]
+        assert second["per_raw"][0]["succeeded"] is True
+        assert second["per_raw"][0]["completion_ack"]["resumed"] is True
+        assert calls == {"ingest": 1, "mutation": 1}
+        assert "newer mutation from raw B" in page.read_text(encoding="utf-8")
+        assert orchestrator.get_pending_raw_files() == []
+
+    def test_applied_artifact_recovers_before_model_and_ack_protects_later_update(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, orchestrator, raw_completion_ack
+
+        raw_path = isolated_wiki / "raw" / "pretriage-crash.md"
+        raw_content = "page applied, process crashed before raw ACK"
+        raw_path.write_text(raw_content, encoding="utf-8")
+        page_path, _seed = self._seed_applied_terminal_artifact(
+            isolated_wiki,
+            raw_content=raw_content,
+            source_raw=raw_path.name,
+        )
+
+        model_calls = {"availability": 0, "triage": 0, "generation": 0}
+
+        def forbidden_availability() -> bool:
+            model_calls["availability"] += 1
+            raise AssertionError("terminal recovery reached Ollama availability")
+
+        def forbidden_triage(*_args, **_kwargs):
+            model_calls["triage"] += 1
+            raise AssertionError("terminal recovery repeated triage")
+
+        def forbidden_generation(*_args, **_kwargs):
+            model_calls["generation"] += 1
+            raise AssertionError("terminal recovery repeated generation")
+
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(ingest, "is_available", forbidden_availability)
+        monkeypatch.setattr(ingest, "_triage_with_progress", forbidden_triage)
+        monkeypatch.setattr(ingest, "_generate_local_operations", forbidden_generation)
+        monkeypatch.setattr(
+            ingest,
+            "_refresh_ingest_derived_artifacts",
+            lambda *_args, **_kwargs: {"checked": 0, "passed": 0, "failed": []},
+        )
+
+        recovered = orchestrator.run_pending_ingest(force=True)
+
+        assert recovered["files_processed"] == [raw_path.name]
+        assert recovered["per_raw"][0]["succeeded"] is True
+        assert recovered["per_raw"][0]["completion_ack"]["resumed"] is False
+        assert model_calls == {"availability": 0, "triage": 0, "generation": 0}
+        assert raw_completion_ack.receipt_path([raw_path]).is_file()
+
+        # A later raw is allowed to change the same page. Even if the first
+        # processed-state mark is lost afterward, its ACK-only replay must not
+        # restore the older postimage or run a model.
+        later_body = (
+            "---\ntitle: pretriage-recovery\nupdated: 2026-07-15\n---\n"
+            "newer same-page update\n"
+        )
+        page_path.write_text(later_body, encoding="utf-8")
+        state = orchestrator._load_state()
+        state["processed_raw_files"].remove(raw_path.name)
+        orchestrator._save_state(state)
+
+        ack_only = orchestrator.run_pending_ingest(force=True)
+
+        assert ack_only["files_processed"] == [raw_path.name]
+        assert ack_only["per_raw"][0]["completion_ack"]["resumed"] is True
+        assert page_path.read_text(encoding="utf-8") == later_body
+        assert model_calls == {"availability": 0, "triage": 0, "generation": 0}
+
+    def test_pretriage_terminal_recovery_rejects_tampered_current_review(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.jobs import JobStatus, job_store
+
+        raw_content = "tampered terminal artifact must not reach a model"
+        _page, seeded = self._seed_applied_terminal_artifact(
+            isolated_wiki,
+            raw_content=raw_content,
+            source_raw="tampered-terminal.md",
+            page_id="tampered-terminal",
+        )
+        _proposal_path, review_path = ingest._ingest_artifact_paths(
+            str(seeded["source_key"])
+        )
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        review["proposal_sha256"] = "0" * 64
+        review_path.write_text(json.dumps(review), encoding="utf-8")
+        model_calls: list[str] = []
+        monkeypatch.setattr(
+            ingest,
+            "is_available",
+            lambda: model_calls.append("availability") or True,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_triage_with_progress",
+            lambda *_args, **_kwargs: model_calls.append("triage") or [],
+        )
+        job = job_store.create(processor="unavailable")
+
+        ingest.run_ingest(raw_content, job.job_id)
+
+        finished = job_store.get(job.job_id)
+        assert finished is not None and finished.status is JobStatus.FAILED
+        assert "terminal review artifact binding is invalid" in str(finished.error)
+        assert model_calls == []
+
+    def test_pretriage_proof_race_has_no_model_or_derived_side_effect(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.jobs import JobStatus, job_store
+
+        raw_content = "terminal proof changes before the recovery lock"
+        self._seed_applied_terminal_artifact(
+            isolated_wiki,
+            raw_content=raw_content,
+            source_raw="proof-race.md",
+            page_id="proof-race",
+        )
+        real_loader = ingest._load_pretriage_terminal_recovery
+        loads = 0
+
+        def changing_proof(*args, **kwargs):
+            nonlocal loads
+            loads += 1
+            if loads == 1:
+                return real_loader(*args, **kwargs)
+            return None
+
+        derived_calls: list[str] = []
+        monkeypatch.setattr(
+            ingest,
+            "_load_pretriage_terminal_recovery",
+            changing_proof,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_refresh_ingest_derived_artifacts",
+            lambda *_args, **_kwargs: derived_calls.append("refresh") or {},
+        )
+        monkeypatch.setattr(
+            ingest,
+            "is_available",
+            lambda: pytest.fail("proof-race recovery reached Ollama"),
+        )
+        job = job_store.create(processor="unavailable")
+
+        ingest.run_ingest(raw_content, job.job_id)
+
+        finished = job_store.get(job.job_id)
+        assert finished is not None and finished.status is JobStatus.FAILED
+        assert "proof changed before raw retirement" in str(finished.error)
+        assert loads == 2
+        assert derived_calls == []
+
+    def test_confirmed_noop_terminal_artifact_recovers_before_model(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.jobs import JobStatus, job_store
+
+        raw_content = "durably reviewed as a semantic noop"
+
+        def reviewer(_proposal: dict[str, object]) -> dict[str, object]:
+            return {
+                "decision": "confirmed_noop",
+                "summary": "no durable memory effect required",
+                "failed_operations_disposition": "none",
+            }
+
+        seeded = ingest._review_and_apply_ingest_operations(
+            [],
+            raw_content=raw_content,
+            reviewer=reviewer,
+            local_disposition="triage_no_operations",
+        )
+        assert seeded["status"] == "confirmed_noop"
+        monkeypatch.setattr(
+            ingest,
+            "is_available",
+            lambda: pytest.fail("confirmed-noop recovery reached Ollama"),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_refresh_ingest_derived_artifacts",
+            lambda *_args, **_kwargs: {"checked": 0, "passed": 0, "failed": []},
+        )
+        completed_callbacks: list[str] = []
+        job = job_store.create(processor="unavailable")
+
+        ingest.run_ingest(
+            raw_content,
+            job.job_id,
+            on_complete=lambda: completed_callbacks.append("completed"),
+            frontier_reviewer=reviewer,
+        )
+
+        finished = job_store.get(job.job_id)
+        assert finished is not None and finished.status is JobStatus.COMPLETED
+        assert finished.processor == "durable-ingest-recovery"
+        assert finished.result["pretriage_recovery"] == {
+            "basis": "durable_confirmed_noop",
+            "model_calls": 0,
+        }
+        assert completed_callbacks == ["completed"]
+
+    def test_unfinished_proposal_is_not_a_pretriage_terminal_recovery(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        raw_content = "proposal exists but no terminal review"
+        result = ingest._review_and_apply_ingest_operations(
+            [],
+            raw_content=raw_content,
+            reviewer=lambda _proposal: {
+                "decision": "retry",
+                "summary": "not terminal",
+                "failed_operations_disposition": "none",
+            },
+            local_disposition="triage_no_operations",
+        )
+        assert result["status"] == "needs_retry"
+        assert (
+            ingest._load_pretriage_terminal_recovery(
+                raw_content,
+                None,
+                reviewer=None,
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("corruption", ["receipt", "source"])
+    def test_invalid_or_source_mismatched_receipt_fails_closed_without_model(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        corruption: str,
+    ) -> None:
+        from llm_wiki_mcp import (
+            orchestrator,
+            raw_completion_ack,
+            self_heal,
+        )
+
+        raw_path = isolated_wiki / "raw" / f"ack-{corruption}.md"
+        raw_path.write_text("original source", encoding="utf-8")
+        calls = self._install_single_page_ingest(monkeypatch, isolated_wiki)
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        completed = orchestrator.run_pending_ingest(force=True)
+        assert completed["files_processed"] == [raw_path.name]
+
+        state = orchestrator._load_state()
+        state["processed_raw_files"].remove(raw_path.name)
+        orchestrator._save_state(state)
+        receipt = raw_completion_ack.receipt_path([raw_path])
+        if corruption == "receipt":
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+            payload["receipt_sha256"] = "0" * 64
+            receipt.write_text(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        else:
+            raw_path.write_text("changed source", encoding="utf-8")
+
+        failed = orchestrator.run_pending_ingest(force=True)
+
+        assert failed["per_raw"][0]["succeeded"] is False
+        assert failed["per_raw"][0]["supervision"]["failure_class"] == (
+            "ingest.raw_completion_receipt_invalid"
+        )
+        assert calls == {"ingest": 1, "mutation": 1}
+        assert orchestrator.get_pending_raw_files() == []
+
+    def test_receipt_publication_failure_defers_without_reingest(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import (
+            orchestrator,
+            raw_completion_ack,
+            self_heal,
+        )
+
+        raw_path = isolated_wiki / "raw" / "ack-publish-failure.md"
+        raw_path.write_text("source survives", encoding="utf-8")
+        calls = self._install_single_page_ingest(monkeypatch, isolated_wiki)
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(
+            raw_completion_ack,
+            "atomic_write",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("injected receipt disk failure")
+            ),
+        )
+
+        first = orchestrator.run_pending_ingest(force=True)
+        second = orchestrator.run_pending_ingest(force=True)
+
+        assert first["per_raw"][0]["succeeded"] is False
+        assert first["per_raw"][0]["supervision"]["failure_class"] == (
+            "ingest.raw_completion_receipt_publish_failed"
+        )
+        assert second == {"triggered": False, "reason": "no pending raws"}
+        assert calls == {"ingest": 1, "mutation": 1}
+        assert raw_path.exists()
 
     def test_attribution_two_raws_distinct_keywords(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -3574,6 +4609,51 @@ class TestPerRawOrchestrator:
         assert "broken.md" in pending
         assert "ok.md" not in pending
 
+    def test_distinct_triage_failures_are_retried_per_raw_without_bulk_quarantine(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator, ingest as ingest_mod
+        from llm_wiki_mcp.jobs import JobStatus, job_store
+
+        paths = [isolated_wiki / "raw" / f"bad-{index}.md" for index in range(4)]
+        for path in paths:
+            path.write_text(path.stem, encoding="utf-8")
+
+        def fake_run_ingest(
+            content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            del content, on_complete, metadata
+            job_store.update(
+                job_id,
+                status=JobStatus.FAILED,
+                error="triage parse failed after convergence attempts",
+            )
+            if on_finally:
+                on_finally(failed=True, triage_failed=True)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        first = orchestrator.run_pending_ingest(force=True)
+        second = orchestrator.run_pending_ingest(force=True)
+
+        assert [row["supervision"]["attempts"] for row in first["per_raw"]] == [
+            1,
+            1,
+            1,
+            1,
+        ]
+        assert [row["supervision"]["attempts"] for row in second["per_raw"]] == [
+            2,
+            2,
+            2,
+            2,
+        ]
+        assert all(path.exists() for path in paths)
+        assert orchestrator.get_pending_raw_files() == paths
+        dead_letter = isolated_wiki / "raw" / ".dead-letter"
+        assert not dead_letter.exists() or list(dead_letter.glob("*.md")) == []
+
     def test_repeated_apply_failure_quarantines_raw(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3705,6 +4785,750 @@ class TestPerRawOrchestrator:
         assert result.transient is True
         assert raw_path.exists()
         assert not (isolated_wiki / "runtime" / "failures" / "state.json").exists()
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "triage structured failure [capacity_unavailable]: no runner fits",
+            "triage structured failure [transport_error]: connection reset",
+            "triage structured failure [transport_timeout]: request timed out",
+            "ingest generation capacity_unavailable: no runner fits",
+        ],
+    )
+    def test_transient_runtime_failure_stays_pending_without_quarantine(
+        self, isolated_wiki: Path, error: str
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor
+
+        raw_path = isolated_wiki / "raw" / "large.md"
+        raw_path.write_text("large source", encoding="utf-8")
+
+        result = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=error,
+            raw_text="large source",
+        )
+
+        assert result.attempts == 0
+        assert result.tracked is False
+        assert result.transient is True
+        assert result.quarantined is False
+        assert raw_path.exists()
+        assert not (isolated_wiki / "runtime" / "failures" / "state.json").exists()
+
+    @pytest.mark.parametrize(
+        ("error", "expected_class"),
+        [
+            (
+                "triage structured failure [schema_invalid]: malformed schema",
+                "ingest.runtime_schema_invalid",
+            ),
+            (
+                "triage structured failure [input_invalid]: prompt is not text",
+                "ingest.runtime_input_invalid",
+            ),
+            (
+                "triage structured failure [input_too_large]: input too large",
+                "ingest.runtime_input_too_large",
+            ),
+            (
+                "triage structured failure [feedback_too_large]: feedback too large",
+                "ingest.runtime_feedback_too_large",
+            ),
+            (
+                "triage structured failure [output_too_large]: output too large",
+                "ingest.runtime_output_too_large",
+            ),
+            (
+                "triage structured failure [value_validation_error]: validator failed",
+                "ingest.runtime_value_validation_error",
+            ),
+            (
+                "triage structured failure [context_truncation_suspected]: shifted",
+                "ingest.runtime_context_truncation_suspected",
+            ),
+            (
+                "triage structured failure [context_window_exceeded]: input too large",
+                "ingest.runtime_context_window_exceeded",
+            ),
+            (
+                "triage structured failure [stream_incomplete]: stream ended early",
+                "ingest.runtime_stream_incomplete",
+            ),
+            (
+                "triage structured failure [completion_incomplete]: done missing",
+                "ingest.runtime_completion_incomplete",
+            ),
+            (
+                "triage structured failure [output_truncated]: token limit",
+                "ingest.runtime_output_truncated",
+            ),
+            (
+                "ingest generation context_window_exceeded: input too large",
+                "ingest.generation_context_window_exceeded",
+            ),
+            (
+                "ingest generation completion_incomplete: done missing",
+                "ingest.generation_completion_incomplete",
+            ),
+            (
+                "ingest generation stream_incomplete: stream ended early",
+                "ingest.generation_stream_incomplete",
+            ),
+            (
+                "ingest generation output_truncated: token limit",
+                "ingest.generation_output_truncated",
+            ),
+        ],
+    )
+    def test_operational_runtime_failure_queues_self_heal_once_without_quarantine(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        error: str,
+        expected_class: str,
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        raw_path = isolated_wiki / "raw" / "large.md"
+        raw_path.write_text("large source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(self_heal, "start_background", started.append)
+
+        first = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=error,
+            job_id="job-1",
+            raw_text="large source",
+        )
+        second = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=error,
+            job_id="job-2",
+            raw_text="large source",
+        )
+
+        assert first.failure_class == expected_class
+        assert first.attempts == 1
+        assert first.tracked is True
+        assert first.transient is False
+        assert first.quarantined is False
+        assert first.quarantine_path is None
+        assert first.packet_path is not None
+        assert second.packet_path == first.packet_path
+        assert second.attempts == 1
+        assert second.tracked is True
+        assert second.quarantined is False
+        assert raw_path.exists()
+        assert started == [Path(first.packet_path)]
+
+        packets_dir = isolated_wiki / "runtime" / "failures" / "packets"
+        assert list(packets_dir.glob("*.json")) == [Path(first.packet_path)]
+        state = json.loads(
+            (isolated_wiki / "runtime" / "failures" / "state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        entry = state["failures"][raw_path.name]
+        assert entry["attempts"] == 1
+        assert entry["self_heal_queued"] is True
+        assert entry["packet_path"] == first.packet_path
+        assert entry["launch_status"] == "started"
+        assert entry["launch_error"] is None
+
+    def test_same_operational_fingerprint_across_raws_reuses_one_self_heal(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        first_raw = isolated_wiki / "raw" / "first.md"
+        second_raw = isolated_wiki / "raw" / "second.md"
+        first_raw.write_text("first source", encoding="utf-8")
+        second_raw.write_text("second source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(self_heal, "start_background", started.append)
+        error = "triage structured failure [schema_invalid]: malformed schema"
+
+        first = failure_supervisor.record_raw_failure(
+            raw_path=first_raw,
+            error=error,
+            raw_text="first source",
+        )
+        second = failure_supervisor.record_raw_failure(
+            raw_path=second_raw,
+            error=error,
+            raw_text="second source",
+        )
+
+        assert first.packet_path is not None
+        assert second.packet_path == first.packet_path
+        assert started == [Path(first.packet_path)]
+        assert first_raw.exists()
+        assert second_raw.exists()
+        packets_dir = isolated_wiki / "runtime" / "failures" / "packets"
+        assert list(packets_dir.glob("*.json")) == [Path(first.packet_path)]
+        state = json.loads(
+            (isolated_wiki / "runtime" / "failures" / "state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert state["failures"][first_raw.name]["packet_path"] == first.packet_path
+        assert state["failures"][second_raw.name]["packet_path"] == first.packet_path
+        assert list(state["operational_failures"]) == ["ingest.runtime_schema_invalid"]
+
+    def test_operational_self_heal_launch_failure_is_durable_and_not_retried(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        raw_path = isolated_wiki / "raw" / "system-defect.md"
+        raw_path.write_text("valid source", encoding="utf-8")
+        starts = 0
+
+        def fail_start(_packet_path: Path) -> None:
+            nonlocal starts
+            starts += 1
+            raise RuntimeError("queue ledger unavailable")
+
+        monkeypatch.setattr(self_heal, "start_background", fail_start)
+        error = "triage structured failure [schema_invalid]: malformed schema"
+
+        first = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=error,
+            raw_text="valid source",
+        )
+        second = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=error,
+            raw_text="valid source",
+        )
+
+        assert starts == 1
+        assert first.packet_path == second.packet_path
+        assert raw_path.exists()
+        state = json.loads(
+            (isolated_wiki / "runtime" / "failures" / "state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        entry = state["failures"][raw_path.name]
+        assert entry["self_heal_queued"] is True
+        assert entry["launch_status"] == "failed"
+        assert entry["launch_error"] == "RuntimeError: queue ledger unavailable"
+        events = [
+            json.loads(line)
+            for line in (isolated_wiki / "runtime" / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert [
+            row
+            for row in events
+            if row.get("outcome_kind") == "self_heal_launch_failed"
+        ]
+
+    def test_operational_defer_skips_second_run_and_repair_success_retries(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import (
+            ingest as ingest_mod,
+            orchestrator,
+            self_heal,
+        )
+        from llm_wiki_mcp.jobs import JobStatus, job_store
+
+        raw_path = isolated_wiki / "raw" / "operational.md"
+        raw_path.write_text("valid source", encoding="utf-8")
+        calls = 0
+
+        def run_ingest(
+            _content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                job_store.update(
+                    job_id,
+                    status=JobStatus.FAILED,
+                    error=(
+                        "triage structured failure [schema_invalid]: malformed schema"
+                    ),
+                )
+                return
+            if on_complete:
+                on_complete()
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+
+        first = orchestrator.run_pending_ingest(force=True)
+        second = orchestrator.run_pending_ingest(force=True)
+
+        assert calls == 1
+        assert second == {"triggered": False, "reason": "no pending raws"}
+        packet_path = Path(first["per_raw"][0]["supervision"]["packet_path"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet["status"] = "local_repair_applied"
+        packet_path.write_text(json.dumps(packet), encoding="utf-8")
+
+        third = orchestrator.run_pending_ingest(force=True)
+
+        assert calls == 2
+        assert third["files_processed"] == [raw_path.name]
+        assert raw_path.exists()
+        assert orchestrator.get_pending_raw_files() == []
+
+    def test_projection_failure_class_separates_source_from_runtime_defects(
+        self,
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor
+
+        conflict = failure_supervisor.classify_failure(
+            "raw semantic projection failed [artifact_conflict]: "
+            "ProjectionConflictError: conflict"
+        )
+        malformed = failure_supervisor.classify_failure(
+            "raw semantic projection failed [source_invalid]: "
+            "RawSemanticProjectionError: malformed"
+        )
+
+        assert conflict.failure_class == (
+            "ingest.runtime_semantic_projection_artifact_conflict"
+        )
+        assert malformed.failure_class == "raw.semantic_projection_source_invalid"
+        assert ":projectionconflicterror:" in conflict.fingerprint
+        assert conflict.fingerprint != malformed.fingerprint
+        assert (
+            malformed.failure_class
+            not in failure_supervisor.OPERATIONAL_SELF_HEAL_FAILURE_CLASSES
+        )
+
+    def test_repeated_failure_after_repair_success_queues_fresh_packet(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        raw_path = isolated_wiki / "raw" / "still-broken.md"
+        raw_path.write_text("valid source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(self_heal, "start_background", started.append)
+        error = "triage structured failure [schema_invalid]: malformed schema"
+
+        first = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=error,
+            raw_text="valid source",
+        )
+        assert first.packet_path is not None
+        first_packet = Path(first.packet_path)
+        payload = json.loads(first_packet.read_text(encoding="utf-8"))
+        payload["status"] = "frontier_approved"
+        first_packet.write_text(json.dumps(payload), encoding="utf-8")
+
+        second = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=error,
+            raw_text="valid source",
+        )
+
+        assert second.packet_path is not None
+        assert second.packet_path != first.packet_path
+        assert started == [first_packet, Path(second.packet_path)]
+        assert raw_path.exists()
+
+    def test_valid_projection_child_bundle_releases_old_projection_failure(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import (
+            failure_supervisor,
+            ingest as ingest_mod,
+            orchestrator,
+            raw_semantic_projection,
+            self_heal,
+        )
+
+        parent = TestOrchestrator._write_transcript_raw(
+            isolated_wiki / "raw",
+            name="verified-transcript.md",
+            records=[{"line": 1, "role": "user", "text": "remember"}],
+        )
+        projection = raw_semantic_projection.project_parent_raw(
+            parent,
+            output_dir=isolated_wiki / "raw",
+            max_child_bytes=24_000,
+        )
+        child = projection.child_paths[0]
+        orchestrator.mark_raw_processed([parent.name])
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+
+        recorded = failure_supervisor.record_raw_failure(
+            raw_path=child,
+            error=(
+                "raw semantic projection failed: ProjectionConflictError: "
+                "manifest-first crash"
+            ),
+            raw_text=child.read_text(encoding="utf-8"),
+        )
+
+        assert recorded.failure_class == ("ingest.runtime_semantic_projection_failure")
+        assert ":projectionconflicterror:" in recorded.fingerprint
+        assert orchestrator.get_pending_raw_files() == [child]
+        # Dashboard/pending reads are intentionally read-only; successful
+        # ingest owns the durable state cleanup.
+        state = json.loads(
+            (isolated_wiki / "runtime" / "failures" / "state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert child.name in state["failures"]
+
+        def succeed(
+            _content, _job_id, on_complete=None, on_finally=None, *, metadata=None
+        ):
+            if on_complete:
+                on_complete()
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", succeed)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        processed = orchestrator.run_pending_ingest(force=True)
+
+        assert processed["files_processed"] == [child.name]
+        state = json.loads(
+            (isolated_wiki / "runtime" / "failures" / "state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert child.name not in state["failures"]
+
+    def test_tampered_projection_child_is_never_quarantined_as_source_raw(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import (
+            ingest as ingest_mod,
+            orchestrator,
+            raw_semantic_projection,
+            self_heal,
+        )
+
+        parent = TestOrchestrator._write_transcript_raw(
+            isolated_wiki / "raw",
+            name="tampered-child-parent.md",
+            records=[{"line": 1, "role": "user", "text": "preserved parent"}],
+        )
+        projection = raw_semantic_projection.project_parent_raw(
+            parent,
+            output_dir=isolated_wiki / "raw",
+            max_child_bytes=24_000,
+        )
+        child = projection.child_paths[0]
+        orchestrator.mark_raw_processed([parent.name])
+        child.write_text("tampered derived artifact", encoding="utf-8")
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: pytest.fail(
+                "tampered projection child reached model ingest"
+            ),
+        )
+
+        first = orchestrator.run_pending_ingest(force=True)
+        second = orchestrator.run_pending_ingest(force=True)
+        third = orchestrator.run_pending_ingest(force=True)
+
+        supervision = first["per_raw"][0]["supervision"]
+        assert supervision["failure_class"] == (
+            "ingest.runtime_semantic_projection_artifact_conflict"
+        )
+        assert supervision["quarantined"] is False
+        assert second == {"triggered": False, "reason": "no pending raws"}
+        assert third == second
+        assert parent.exists()
+        assert child.exists()
+        assert not (isolated_wiki / "raw" / ".dead-letter" / child.name).exists()
+
+    def test_completed_projection_parent_bundle_retries_after_commit_crash(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import (
+            failure_supervisor,
+            raw_semantic_projection,
+            self_heal,
+        )
+
+        parent = TestOrchestrator._write_transcript_raw(
+            isolated_wiki / "raw",
+            name="completed-parent.md",
+            records=[{"line": 1, "role": "user", "text": "remember exactly"}],
+        )
+        raw_semantic_projection.project_parent_raw(
+            parent,
+            output_dir=isolated_wiki / "raw",
+            max_child_bytes=24_000,
+        )
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        recorded = failure_supervisor.record_raw_failure(
+            raw_path=parent,
+            error=(
+                "raw semantic projection failed [internal_error]: "
+                "RuntimeError: commit callback failed"
+            ),
+            raw_text=parent.read_text(encoding="utf-8"),
+        )
+
+        assert recorded.failure_class == (
+            "ingest.runtime_semantic_projection_internal_error"
+        )
+        assert raw_semantic_projection.projection_bundle_state_for_parent(parent) == (
+            "completed"
+        )
+        assert failure_supervisor.operational_deferred_raw_files([parent]) == {}
+
+    def test_incomplete_projection_parent_bundle_is_resumable_but_tamper_is_not(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import (
+            failure_supervisor,
+            raw_semantic_projection,
+            self_heal,
+        )
+
+        parent = TestOrchestrator._write_transcript_raw(
+            isolated_wiki / "raw",
+            name="incomplete-parent.md",
+            records=[{"line": 1, "role": "user", "text": "x" * 5_000}],
+        )
+        original_publish = raw_semantic_projection._atomic_create_or_verify
+
+        def fail_first_child(target: Path, payload: bytes) -> bool:
+            if "-child-" in target.name:
+                raise RuntimeError("injected publication interruption")
+            return original_publish(target, payload)
+
+        monkeypatch.setattr(
+            raw_semantic_projection,
+            "_atomic_create_or_verify",
+            fail_first_child,
+        )
+        with pytest.raises(RuntimeError, match="injected"):
+            raw_semantic_projection.project_parent_raw(
+                parent,
+                output_dir=isolated_wiki / "raw",
+                max_child_bytes=1_400,
+            )
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        failure_supervisor.record_raw_failure(
+            raw_path=parent,
+            error=(
+                "raw semantic projection failed [internal_error]: "
+                "RuntimeError: injected publication interruption"
+            ),
+            raw_text=parent.read_text(encoding="utf-8"),
+        )
+
+        assert raw_semantic_projection.projection_bundle_state_for_parent(parent) == (
+            "incomplete"
+        )
+        assert failure_supervisor.operational_deferred_raw_files([parent]) == {}
+
+        monkeypatch.setattr(
+            raw_semantic_projection,
+            "_atomic_create_or_verify",
+            original_publish,
+        )
+        resumed = raw_semantic_projection.project_parent_raw(
+            parent,
+            output_dir=isolated_wiki / "raw",
+            max_child_bytes=3_000,
+        )
+        resumed.child_paths[0].write_text("tampered", encoding="utf-8")
+        assert raw_semantic_projection.projection_bundle_state_for_parent(parent) == (
+            "invalid"
+        )
+        assert failure_supervisor.operational_deferred_raw_files([parent]) != {}
+
+    def test_projection_directory_fsync_failure_keeps_parent_pending_then_resumes(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import orchestrator, raw_semantic_projection
+
+        parent = TestOrchestrator._write_transcript_raw(
+            isolated_wiki / "raw",
+            name="projection-fsync-parent.md",
+            records=[{"line": 1, "role": "user", "text": "durable memory"}],
+        )
+        original_fsync_directory = raw_semantic_projection._fsync_directory
+
+        def fail_directory_sync(_path: Path) -> None:
+            raise OSError("injected projection directory fsync failure")
+
+        monkeypatch.setattr(
+            raw_semantic_projection,
+            "_fsync_directory",
+            fail_directory_sync,
+        )
+        monkeypatch.setattr(orchestrator, "is_available", lambda: False)
+
+        failed = orchestrator.run_pending_ingest(force=True)
+
+        assert failed["files_processed"] == []
+        assert failed["per_raw"][0]["succeeded"] is False
+        assert failed["per_raw"][0]["supervision"]["failure_class"] == (
+            "ingest.runtime_semantic_projection_interrupted"
+        )
+        assert parent.name not in orchestrator._load_state()["processed_raw_files"]
+        assert parent in orchestrator.get_pending_raw_files()
+
+        monkeypatch.setattr(
+            raw_semantic_projection,
+            "_fsync_directory",
+            original_fsync_directory,
+        )
+        resumed = orchestrator.run_pending_ingest(force=True)
+
+        assert resumed["files_processed"] == [parent.name]
+        assert parent.name in orchestrator._load_state()["processed_raw_files"]
+        assert raw_semantic_projection.projection_bundle_state_for_parent(parent) == (
+            "completed"
+        )
+
+    def test_projection_internal_failure_without_manifest_stays_deferred(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        parent = isolated_wiki / "raw" / "no-manifest-parent.md"
+        parent.write_text("valid source with no projection intent", encoding="utf-8")
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        failure_supervisor.record_raw_failure(
+            raw_path=parent,
+            error=(
+                "raw semantic projection failed [internal_error]: "
+                "RuntimeError: invariant broken"
+            ),
+            raw_text=parent.read_text(encoding="utf-8"),
+        )
+
+        assert failure_supervisor.operational_deferred_raw_files([parent]) == {
+            parent.name: "pending_local_repair"
+        }
+
+    def test_deferred_snapshot_cannot_overwrite_concurrent_failure_writer(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+        from llm_wiki_mcp import failure_supervisor
+
+        deferred_raw = isolated_wiki / "raw" / "deferred.md"
+        writer_raw = isolated_wiki / "raw" / "writer.md"
+        deferred_raw.write_text("deferred", encoding="utf-8")
+        writer_raw.write_text("writer", encoding="utf-8")
+        state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "failures": {
+                        deferred_raw.name: {
+                            "fingerprint": "ingest.runtime_schema_invalid",
+                            "failure_class": "ingest.runtime_schema_invalid",
+                            "self_heal_queued": True,
+                            "packet_path": None,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_load = failure_supervisor._load_state
+        snapshot_loaded = threading.Event()
+        release_reader = threading.Event()
+
+        def slow_load():
+            snapshot = original_load()
+            if threading.current_thread().name == "deferred-reader":
+                snapshot_loaded.set()
+                assert release_reader.wait(timeout=5)
+            return snapshot
+
+        monkeypatch.setattr(failure_supervisor, "_load_state", slow_load)
+        reader = threading.Thread(
+            target=failure_supervisor.operational_deferred_raw_files,
+            args=([deferred_raw],),
+            name="deferred-reader",
+        )
+        writer = threading.Thread(
+            target=failure_supervisor.record_raw_failure,
+            kwargs={
+                "raw_path": writer_raw,
+                "error": "independent deterministic failure",
+                "raw_text": "writer",
+            },
+            name="failure-writer",
+        )
+
+        reader.start()
+        assert snapshot_loaded.wait(timeout=5)
+        writer.start()
+        assert writer.is_alive()
+        release_reader.set()
+        reader.join(timeout=5)
+        writer.join(timeout=5)
+
+        assert not reader.is_alive()
+        assert not writer.is_alive()
+        state = original_load()
+        assert deferred_raw.name in state["failures"]
+        assert writer_raw.name in state["failures"]
+
+    @pytest.mark.parametrize(
+        "packet_state",
+        [
+            "missing",
+            "invalid",
+            "pending_local_repair",
+            "local_quarantined",
+            "frontier_quarantined",
+            "human_required",
+        ],
+    )
+    def test_operational_packet_state_is_fail_closed_deferred(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        packet_state: str,
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        raw_path = isolated_wiki / "raw" / "deferred.md"
+        raw_path.write_text("valid source", encoding="utf-8")
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        result = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error="triage structured failure [schema_invalid]: malformed schema",
+            raw_text="valid source",
+        )
+        assert result.packet_path is not None
+        packet_path = Path(result.packet_path)
+        if packet_state == "missing":
+            packet_path.unlink()
+            expected = "packet_missing"
+        elif packet_state == "invalid":
+            packet_path.write_text("not-json", encoding="utf-8")
+            expected = "packet_invalid"
+        else:
+            packet = json.loads(packet_path.read_text(encoding="utf-8"))
+            packet["status"] = packet_state
+            packet_path.write_text(json.dumps(packet), encoding="utf-8")
+            expected = packet_state
+
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
+            raw_path.name: expected
+        }
+        assert raw_path.exists()
 
     def test_serial_execution_no_concurrent_threads(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -4052,15 +5876,200 @@ class TestTriagePlanSchema:
         assert ingest._triage("raw content", transport=transport) is None
         assert len(transport.requests) == 1
 
-    def test_live_triage_oversized_input_never_calls_transport(
-        self, isolated_wiki: Path
+    def test_live_triage_grows_context_for_large_input(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        transport = _QueueStructuredTransport("[]")
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: IngestConfig(num_ctx=32768, max_num_ctx=262144),
+        )
+
+        assert ingest._triage("x" * 20_000, transport=transport) == []
+        assert len(transport.requests) == 1
+        assert transport.requests[0].num_ctx == 65536
+
+    def test_live_triage_over_configured_cap_clears_progress(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        transport = _QueueStructuredTransport("[]")
+        progress: list[dict] = []
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: IngestConfig(num_ctx=32768, max_num_ctx=32768),
+        )
+
+        assert (
+            ingest._triage(
+                "x" * 20_000,
+                transport=transport,
+                progress_callback=progress.append,
+            )
+            is None
+        )
+        assert transport.requests == []
+        assert progress[-1]["active"] is False
+        assert progress[-1]["failure_class"] == "context_window_exceeded"
+
+    @pytest.mark.parametrize(
+        ("required", "expected"),
+        [
+            (1, 32768),
+            (32768, 32768),
+            (32769, 65536),
+            (65537, 131072),
+            (131073, 262144),
+        ],
+    )
+    def test_ingest_context_bucket_boundaries(
+        self, required: int, expected: int
     ) -> None:
         from llm_wiki_mcp import ingest
 
-        transport = _QueueStructuredTransport("[]")
+        assert (
+            ingest._select_ingest_context(
+                required,
+                num_ctx=32768,
+                max_num_ctx=262144,
+            )
+            == expected
+        )
 
-        assert ingest._triage("x" * 20_000, transport=transport) is None
-        assert transport.requests == []
+    def test_ingest_context_over_max_fails_closed(self) -> None:
+        from llm_wiki_mcp import ingest
+
+        with pytest.raises(ingest.IngestContextCapacityError):
+            ingest._select_ingest_context(
+                262145,
+                num_ctx=32768,
+                max_num_ctx=262144,
+            )
+
+    def test_structured_transport_forwards_complete_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.local_structured import ChatRequest
+
+        captured: dict = {}
+
+        def fake_generate(prompt: str, **kwargs) -> str:
+            captured["prompt"] = prompt
+            captured.update(kwargs)
+            return "[]"
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+
+        def callback(_event: dict) -> None:
+            return None
+
+        request = ChatRequest(
+            model="ornith:test",
+            messages=(
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "user"},
+            ),
+            schema={"type": "array"},
+            num_ctx=131072,
+            num_predict=2048,
+            keep_alive="90s",
+            read_timeout_ms=180000,
+            max_output_chars=4000,
+            temperature=0,
+            seed=0,
+        )
+
+        assert ingest._structured_generate_transport(callback)(request) == "[]"
+        assert captured == {
+            "prompt": "<USER>\nuser",
+            "system": "system",
+            "progress_callback": callback,
+            "model": "ornith:test",
+            "num_ctx": 131072,
+            "num_predict": 2048,
+            "keep_alive": "90s",
+            "read_timeout_ms": 180000,
+            "temperature": 0,
+            "seed": 0,
+            "return_metadata": True,
+            "format": {"type": "array"},
+        }
+
+    def test_structured_transport_preserves_completion_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, ollama
+        from llm_wiki_mcp.local_structured import ChatRequest
+
+        response = ollama.GenerateResponse(
+            content="[]",
+            done=False,
+            done_reason=None,
+        )
+
+        def fake_generate(_prompt: str, **kwargs):
+            assert kwargs["return_metadata"] is True
+            return response
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+        request = ChatRequest(
+            model="ornith:test",
+            messages=(
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "user"},
+            ),
+            schema={"type": "array"},
+            num_ctx=131072,
+            num_predict=2048,
+            keep_alive="90s",
+            read_timeout_ms=180000,
+            max_output_chars=4000,
+        )
+
+        assert ingest._structured_generate_transport()(request) is response
+
+    def test_structured_transport_supports_narrow_generate_fixture(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.local_structured import ChatRequest
+
+        captured: dict[str, str] = {}
+
+        def narrow_generate(prompt: str, *, system: str | None) -> str:
+            captured["prompt"] = prompt
+            captured["system"] = system or ""
+            return "[]"
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", narrow_generate)
+        request = ChatRequest(
+            model="ornith:test",
+            messages=(
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "user"},
+            ),
+            schema={"type": "array"},
+            num_ctx=131072,
+            num_predict=2048,
+            keep_alive="90s",
+            read_timeout_ms=180000,
+            max_output_chars=4000,
+            temperature=0,
+            seed=0,
+        )
+
+        assert (
+            ingest._structured_generate_transport(lambda _event: None)(request) == "[]"
+        )
+        assert captured == {"prompt": "<USER>\nuser", "system": "system"}
 
     def test_empty_plan_passes(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
@@ -4090,7 +6099,432 @@ class TestTriagePlanSchema:
         assert _validate_triage_plan([{"type": "create", "filename": 123}]) is None
 
 
+class TestIngestContextAdmission:
+    def test_high_context_evicts_every_other_resident_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, ollama
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        config = IngestConfig(
+            model="ornith:ingest",
+            num_ctx=32768,
+            max_num_ctx=262144,
+            memory_reserve_gib=16,
+        )
+        unloaded: list[str] = []
+        planned: dict = {}
+        monkeypatch.setattr(
+            ollama,
+            "resident_model_rows",
+            lambda: {
+                "ornith:ingest": (30 * ollama.GIB, 32768),
+                "decision:35b": (30 * ollama.GIB, 32768),
+                "recall:9b": (9 * ollama.GIB, 8192),
+            },
+        )
+        monkeypatch.setattr(
+            ollama,
+            "unload_named_model",
+            lambda model: unloaded.append(model) or True,
+        )
+
+        def fake_plan(models, **kwargs):
+            planned["models"] = models
+            planned.update(kwargs)
+            return ollama.ModelResidencyPlan(
+                num_ctx=262144,
+                max_resident_models=1,
+                capacity_bytes=80 * ollama.GIB,
+                reserve_bytes=16 * ollama.GIB,
+                available_bytes=80 * ollama.GIB,
+                total_bytes=128 * ollama.GIB,
+                estimated_model_bytes=(("ornith:ingest", 60 * ollama.GIB),),
+                role_contexts=(("ornith:ingest", 262144),),
+                resident_models=("ornith:ingest",),
+                calibrated_models=("ornith:ingest",),
+                source="test",
+                reuse_larger_context=True,
+            )
+
+        monkeypatch.setattr(ollama, "plan_model_residency", fake_plan)
+
+        assert ingest._admit_ingest_context(config, 262144) == 262144
+        assert unloaded == ["decision:35b", "recall:9b"]
+        assert planned["models"] == ["ornith:ingest"]
+        assert planned["num_ctx"] == 262144
+        assert planned["max_num_ctx"] == 262144
+        assert planned["configured_max_resident"] == 1
+        assert planned["reuse_larger_context"] is True
+
+    def test_lower_context_reclaims_unrelated_models_only_after_initial_stall(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, ollama
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        config = IngestConfig(
+            model="ornith:ingest",
+            num_ctx=32768,
+            max_num_ctx=262144,
+            memory_reserve_gib=16,
+        )
+        unloaded: list[str] = []
+        plan_calls: list[dict] = []
+        monkeypatch.setattr(
+            ollama,
+            "resident_model_rows",
+            lambda: {
+                "decision:35b": (30 * ollama.GIB, 65536),
+                "recall:9b": (9 * ollama.GIB, 8192),
+            },
+        )
+        monkeypatch.setattr(
+            ollama,
+            "unload_named_model",
+            lambda model: unloaded.append(model) or True,
+        )
+
+        def fake_plan(models, **kwargs):
+            plan_calls.append({"models": models, **kwargs})
+            admitted = int(len(plan_calls) > 1)
+            return ollama.ModelResidencyPlan(
+                num_ctx=65536,
+                max_resident_models=admitted,
+                capacity_bytes=60 * ollama.GIB,
+                reserve_bytes=16 * ollama.GIB,
+                available_bytes=60 * ollama.GIB,
+                total_bytes=128 * ollama.GIB,
+                estimated_model_bytes=(("ornith:ingest", 30 * ollama.GIB),),
+                role_contexts=(("ornith:ingest", 65536),),
+                resident_models=(),
+                calibrated_models=(("ornith:ingest",) if admitted else ()),
+                source="test",
+                reuse_larger_context=True,
+            )
+
+        monkeypatch.setattr(ollama, "plan_model_residency", fake_plan)
+
+        assert ingest._admit_ingest_context(config, 65536) == 65536
+        assert len(plan_calls) == 2
+        assert unloaded == ["decision:35b", "recall:9b"]
+
+    def test_stage_two_uses_related_budget_and_dynamic_bucket(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        related = _seed_page(
+            isolated_wiki,
+            "memory/large-related.md",
+            "---\ntitle: Related\nupdated: 2026-01-01\n---\n" + "z" * 20000,
+        )
+        captured: dict = {}
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: IngestConfig(
+                num_ctx=32768,
+                max_num_ctx=262144,
+                num_predict=8192,
+                max_related_context_bytes=512,
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_search_related_pages",
+            lambda *_args, **_kwargs: [related],
+        )
+
+        def fake_generate(prompt: str, **kwargs) -> str:
+            captured["prompt"] = prompt
+            captured.update(kwargs)
+            return (
+                "=== NEW PAGE: memory/new.md ===\n"
+                "---\ntitle: New\nupdated: 2026-01-01\n---\nbody\n"
+                "=== END PAGE ==="
+            )
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+
+        result = ingest._generate_one(
+            {
+                "type": "create",
+                "filename": "memory/new.md",
+                "title": "New",
+                "keywords": ["related"],
+            },
+            "r" * 40000,
+        )
+
+        assert result is not None
+        assert captured["num_ctx"] == 65536
+        assert "z" * 1000 not in captured["prompt"]
+        assert "r" * 40000 in captured["prompt"]
+
+    @pytest.mark.parametrize(
+        ("response", "failure_class"),
+        [
+            (
+                ollama.GenerateResponse(
+                    content=(
+                        "=== NEW PAGE: memory/new.md ===\n"
+                        "---\ntitle: New\nupdated: 2026-01-01\n---\nbody\n"
+                        "=== END PAGE ==="
+                    ),
+                    done=False,
+                ),
+                "completion_incomplete",
+            ),
+            (
+                ollama.GenerateResponse(
+                    content=(
+                        "=== NEW PAGE: memory/new.md ===\n"
+                        "---\ntitle: New\nupdated: 2026-01-01\n---\nbody\n"
+                        "=== END PAGE ==="
+                    ),
+                    done=False,
+                    streamed=True,
+                ),
+                "stream_incomplete",
+            ),
+            (
+                ollama.GenerateResponse(
+                    content=(
+                        "=== NEW PAGE: memory/new.md ===\n"
+                        "---\ntitle: New\nupdated: 2026-01-01\n---\nbody\n"
+                        "=== END PAGE ==="
+                    ),
+                    done=True,
+                    done_reason="length",
+                ),
+                "output_truncated",
+            ),
+        ],
+    )
+    def test_stage_two_rejects_incomplete_completion_before_page_parse(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        response: ollama.GenerateResponse,
+        failure_class: str,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        calls = 0
+
+        def fake_generate(_prompt: str, **kwargs):
+            nonlocal calls
+            calls += 1
+            assert kwargs["return_metadata"] is True
+            return response
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"ingest generation {failure_class}:",
+        ):
+            ingest._generate_one(
+                {
+                    "type": "create",
+                    "filename": "memory/new.md",
+                    "title": "New",
+                },
+                "raw",
+            )
+
+        assert calls == 1
+
+    def test_related_budget_never_truncates_current_update_target(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        target_body = "target-byte-exact-" + "T" * 4_000
+        target = _seed_page(
+            isolated_wiki,
+            "memory/target.md",
+            "---\ntitle: Target\nupdated: 2026-01-01\n---\n" + target_body,
+        )
+        related = _seed_page(
+            isolated_wiki,
+            "memory/related.md",
+            "---\ntitle: Related\nupdated: 2026-01-01\n---\n" + "R" * 2_000,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_search_related_pages",
+            lambda *_args, **_kwargs: [target, related],
+        )
+
+        context = ingest._build_focused_context(
+            {
+                "type": "update",
+                "filename": "memory/target.md",
+                "keywords": ["target"],
+            },
+            "raw",
+            max_bytes=64,
+        )
+
+        assert target_body in context
+        assert "R" * 100 not in context
+        assert context.count("Current content of [[target]]") == 1
+
+    def test_related_budget_selects_only_complete_page_blocks(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        too_large = _seed_page(
+            isolated_wiki,
+            "memory/too-large.md",
+            "---\ntitle: Too large\nupdated: 2026-01-01\n---\n" + "L" * 1_000,
+        )
+        complete = _seed_page(
+            isolated_wiki,
+            "memory/complete.md",
+            "---\ntitle: Complete\nupdated: 2026-01-01\n---\nsmall-body",
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_search_related_pages",
+            lambda *_args, **_kwargs: [too_large, complete],
+        )
+
+        context = ingest._build_focused_context(
+            {
+                "type": "create",
+                "filename": "memory/new.md",
+                "keywords": ["memory"],
+            },
+            "raw",
+            max_bytes=256,
+        )
+
+        assert "[[complete]]" in context
+        assert "small-body" in context
+        assert "[[too-large]]" not in context
+        assert "L" * 20 not in context
+
+    def test_generation_capacity_failure_is_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.jobs import job_store
+
+        calls = 0
+
+        def fail_once(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError(
+                "ingest generation capacity_unavailable: measured memory admission failed"
+            )
+
+        monkeypatch.setattr(ingest, "_generate_one_with_progress", fail_once)
+        job_id = job_store.create(processor="test").job_id
+
+        with pytest.raises(RuntimeError, match="capacity_unavailable"):
+            ingest._generate_local_operations(
+                [{"type": "create", "filename": "memory/new.md"}],
+                content="raw",
+                raw_keywords=None,
+                source_raw="raw.md",
+                job_id=job_id,
+                frontier_feedback=None,
+            )
+        assert calls == 1
+
+
 class TestRecallMetadataStructuredSession:
+    def test_live_metadata_reuses_larger_resident_context(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from contextlib import contextmanager
+        from llm_wiki_mcp import ingest, ollama
+        from llm_wiki_mcp.local_structured import LocalStructuredResult
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        planned: list[dict] = []
+        sessions: list[dict] = []
+        leases: list[bool] = []
+
+        @contextmanager
+        def fake_lease(*, exclusive: bool = False):
+            leases.append(exclusive)
+            yield
+
+        class FakeSession:
+            def __init__(self, **kwargs):
+                sessions.append(kwargs)
+
+            def run(self, _prompt, _schema):
+                return LocalStructuredResult(
+                    ok=True,
+                    model="ornith:test",
+                    value={
+                        "summary": "summary",
+                        "recall_questions": ["question"],
+                    },
+                )
+
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: IngestConfig(
+                model="ornith:test",
+                num_ctx=32768,
+                max_num_ctx=262144,
+            ),
+        )
+        monkeypatch.setattr(ingest.ollama_runtime, "model_resource_lease", fake_lease)
+        monkeypatch.setattr(
+            ollama,
+            "unload_named_model",
+            lambda model: pytest.fail(f"metadata shrank/reloaded resident {model}"),
+        )
+
+        def plan(models, **kwargs):
+            planned.append({"models": models, **kwargs})
+            return ollama.ModelResidencyPlan(
+                num_ctx=32768,
+                max_resident_models=1,
+                capacity_bytes=80 * ollama.GIB,
+                reserve_bytes=16 * ollama.GIB,
+                available_bytes=80 * ollama.GIB,
+                total_bytes=128 * ollama.GIB,
+                estimated_model_bytes=(("ornith:test", 30 * ollama.GIB),),
+                role_contexts=(("ornith:test", 65536),),
+                resident_models=("ornith:test",),
+                calibrated_models=("ornith:test",),
+                source="test",
+                reuse_larger_context=True,
+            )
+
+        monkeypatch.setattr(ollama, "plan_model_residency", plan)
+        monkeypatch.setattr(ingest, "LocalStructuredSession", FakeSession)
+
+        result = ingest._generate_recall_metadata("Title", "Body", "page-id")
+
+        assert result == {
+            "summary": "summary",
+            "recall_questions": ["question"],
+        }
+        assert planned[0]["num_ctx"] == 32768
+        assert planned[0]["reuse_larger_context"] is True
+        assert leases == [True]
+        assert sessions[0]["num_ctx"] == 65536
+
     def test_malformed_json_is_repaired_in_same_session(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

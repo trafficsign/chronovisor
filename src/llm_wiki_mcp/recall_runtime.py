@@ -22,10 +22,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from llm_wiki_mcp.index_store import get_store
 from llm_wiki_mcp.jsonl_write import append_jsonl_durable
+from llm_wiki_mcp.local_structured import LocalStructuredSession
 from llm_wiki_mcp.runtime_config import (
     active_config_file,
     normalize_recall_config,
@@ -668,37 +667,28 @@ def run_local_judge(
         schema["properties"]["queries"] = {"type": "array", "items": {"type": "string"}}
 
     try:
-        from llm_wiki_mcp.ollama import OLLAMA_URL, model_resource_lease
-
-        timeout_seconds = max(0.2, policy.judge_timeout_ms / 1000)
-        timeout = httpx.Timeout(
-            connect=min(1.0, timeout_seconds),
-            read=timeout_seconds,
-            write=1.0,
-            pool=0.5,
+        result = LocalStructuredSession(
+            model=policy.judge_model,
+            role="recall_judge",
+            num_ctx=policy.judge_num_ctx,
+            num_predict=policy.judge_num_predict,
+            keep_alive=policy.judge_keep_alive,
+            read_timeout_ms=max(200, policy.judge_timeout_ms),
+            max_input_chars=16_384,
+            max_output_chars=384,
+            max_feedback_chars=512,
+        ).run(
+            json.dumps(prompt, ensure_ascii=False),
+            schema,
+            system=system,
         )
-        with model_resource_lease(exclusive=False):
-            with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
-                resp = client.post(
-                    "/api/generate",
-                    json={
-                        "model": policy.judge_model,
-                        "system": system,
-                        "prompt": json.dumps(prompt, ensure_ascii=False),
-                        "stream": False,
-                        "think": policy.judge_think,
-                        "keep_alive": policy.judge_keep_alive,
-                        "format": schema,
-                        "options": {
-                            "temperature": 0,
-                            "num_ctx": policy.judge_num_ctx,
-                            "num_predict": policy.judge_num_predict,
-                        },
-                    },
-                )
-                resp.raise_for_status()
-        raw = resp.json().get("response", "{}")
-        parsed = json.loads(raw)
+        if not result.ok:
+            return (
+                None,
+                [],
+                f"judge unavailable: {result.failure_class or 'structured_failure'}",
+            )
+        parsed = result.value
         decision = parsed.get("decision")
         if decision not in {"none", "search", "read"}:
             return None, [], "judge returned no valid decision"
@@ -809,35 +799,24 @@ def run_query_rewriter(
         "required": ["queries", "confidence"],
     }
     try:
-        from llm_wiki_mcp.ollama import OLLAMA_URL, model_resource_lease
-
-        timeout_seconds = max(0.2, policy.rewrite_timeout_ms / 1000)
-        timeout = httpx.Timeout(
-            connect=min(1.0, timeout_seconds),
-            read=timeout_seconds,
-            write=1.0,
-            pool=0.5,
-        )
-        with model_resource_lease(exclusive=False):
-            with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
-                resp = client.post(
-                    "/api/generate",
-                    json={
-                        "model": policy.rewrite_model or policy.judge_model,
-                        "prompt": json.dumps(prompt, ensure_ascii=False),
-                        "stream": False,
-                        "think": False,
-                        "keep_alive": policy.judge_keep_alive,
-                        "format": schema,
-                        "options": {
-                            "temperature": 0,
-                            "num_ctx": policy.judge_num_ctx,
-                            "num_predict": 96,
-                        },
-                    },
-                )
-                resp.raise_for_status()
-        parsed = json.loads(resp.json().get("response", "{}"))
+        result = LocalStructuredSession(
+            model=policy.rewrite_model or policy.judge_model,
+            role="recall_query_rewriter",
+            num_ctx=policy.judge_num_ctx,
+            num_predict=96,
+            keep_alive=policy.judge_keep_alive,
+            read_timeout_ms=max(200, policy.rewrite_timeout_ms),
+            max_input_chars=16_384,
+            max_output_chars=384,
+            max_feedback_chars=512,
+        ).run(json.dumps(prompt, ensure_ascii=False), schema)
+        if not result.ok:
+            return (
+                [],
+                0.0,
+                f"rewrite fallback: {result.failure_class or 'structured_failure'}",
+            )
+        parsed = result.value
         raw_queries = parsed.get("queries")
         queries = (
             [q for q in raw_queries if isinstance(q, str) and q.strip()]
@@ -861,42 +840,35 @@ def run_query_rewriter(
 
 def warm_recall_model(policy: RecallPolicy) -> dict[str, Any]:
     """Warm the gate/rewrite Ollama model so sync recall avoids cold starts."""
-    from llm_wiki_mcp.ollama import OLLAMA_URL, model_resource_lease
-
     started = time.monotonic()
     models = _dedupe_queries(
         [policy.judge_model, policy.rewrite_model or policy.judge_model],
         limit=2,
     )
-    timeout_seconds = max(1.0, policy.warmup_timeout_ms / 1000)
-    timeout = httpx.Timeout(
-        connect=min(3.0, timeout_seconds),
-        read=timeout_seconds,
-        write=3.0,
-        pool=1.0,
-    )
     warmed: list[str] = []
     errors: dict[str, str] = {}
     for model in models:
         try:
-            with model_resource_lease(exclusive=False):
-                with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
-                    resp = client.post(
-                        "/api/generate",
-                        json={
-                            "model": model,
-                            "prompt": "warmup",
-                            "stream": False,
-                            "think": False,
-                            "keep_alive": policy.judge_keep_alive,
-                            "options": {
-                                "temperature": 0,
-                                "num_ctx": 128,
-                                "num_predict": 1,
-                            },
-                        },
-                    )
-                    resp.raise_for_status()
+            result = LocalStructuredSession(
+                model=model,
+                role="recall_warmup",
+                num_ctx=policy.judge_num_ctx,
+                num_predict=16,
+                keep_alive=policy.judge_keep_alive,
+                read_timeout_ms=max(1_000, policy.warmup_timeout_ms),
+                # The fixed structured system plus this tiny prompt is already
+                # about 415 UTF-8 bytes.  Keep the cap small, but large enough
+                # for the real preflight instead of only the mocked transport.
+                max_input_chars=512,
+                max_output_chars=128,
+                max_feedback_chars=512,
+            ).run(
+                "Warm the model and return an empty JSON object.",
+                {"type": "object", "maxProperties": 0},
+            )
+            if not result.ok:
+                errors[model] = result.failure_class or "structured_failure"
+                continue
             warmed.append(model)
         except Exception as exc:
             errors[model] = exc.__class__.__name__

@@ -35,6 +35,16 @@ SAFE_ACTIVITY_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 STRUCTURED_GENERATION_POLICY_VERSION = 1
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
+_DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
+_DEFAULT_STRUCTURED_CONTEXT_BUCKETS = (
+    16_384,
+    32_768,
+    65_536,
+    98_304,
+    114_688,
+    131_072,
+    262_144,
+)
 
 _JSON_TYPES = {"object", "array", "string", "number", "integer", "boolean", "null"}
 _ANNOTATION_KEYWORDS = {
@@ -193,8 +203,62 @@ class ChatRequest:
     think: bool = False
 
 
+@dataclass(frozen=True)
+class StructuredRequestPreflight:
+    """Pure initial-envelope validation shared by every live resource path."""
+
+    failure_class: str | None
+    failure_reason: str | None
+    schema: dict[str, Any] | None
+    messages: tuple[dict[str, str], ...]
+    input_bytes: int
+
+    @property
+    def ok(self) -> bool:
+        return self.failure_class is None
+
+
 class ChatTransport(Protocol):
-    def __call__(self, request: ChatRequest) -> str | ollama.ChatResponse: ...
+    def __call__(
+        self, request: ChatRequest
+    ) -> str | ollama.ChatResponse | ollama.GenerateResponse: ...
+
+
+_TRUNCATED_DONE_REASONS = {
+    "length",
+    "max_length",
+    "max_token",
+    "max_tokens",
+    "num_predict",
+    "token_limit",
+}
+
+
+def _completion_failure(
+    response: ollama.ChatResponse | ollama.GenerateResponse,
+) -> tuple[str, str] | None:
+    """Return a fail-closed completion error before JSON is inspected."""
+
+    reason = (response.done_reason or "").strip().casefold().replace("-", "_")
+    if reason in _TRUNCATED_DONE_REASONS or (
+        reason and ("token" in reason or "length" in reason) and reason != "stop"
+    ):
+        return (
+            "output_truncated",
+            f"Ollama stopped at an output limit (done_reason={reason!r})",
+        )
+    if response.done is not True:
+        failure_class = (
+            "stream_incomplete"
+            if isinstance(response, ollama.GenerateResponse) and response.streamed
+            else "completion_incomplete"
+        )
+        return (
+            failure_class,
+            "Ollama response did not contain an explicit completed turn "
+            f"(done={response.done!r}, done_reason={response.done_reason!r})",
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -298,6 +362,90 @@ def _estimated_message_tokens(messages: Sequence[Mapping[str, str]]) -> int:
     return total
 
 
+def preflight_structured_request(
+    prompt: object,
+    schema: Mapping[str, Any],
+    *,
+    system: str | None,
+    max_input_chars: int,
+) -> StructuredRequestPreflight:
+    """Validate one initial structured envelope without probing Ollama.
+
+    ``max_input_chars`` is the historical public name for the fixed UTF-8 byte
+    cap.  The returned messages are the exact messages later sent by
+    :class:`LocalStructuredSession`, so callers can reject a request before
+    residency planning or eviction without maintaining a second size formula.
+    """
+
+    if (
+        isinstance(max_input_chars, bool)
+        or not isinstance(max_input_chars, int)
+        or max_input_chars < 1
+    ):
+        raise ValueError("max_input_chars must be a positive integer")
+    if not isinstance(prompt, str):
+        return StructuredRequestPreflight(
+            failure_class="input_invalid",
+            failure_reason="prompt must be a string",
+            schema=None,
+            messages=(),
+            input_bytes=0,
+        )
+    if system is not None and not isinstance(system, str):
+        return StructuredRequestPreflight(
+            failure_class="input_invalid",
+            failure_reason="system must be a string or None",
+            schema=None,
+            messages=(),
+            input_bytes=0,
+        )
+    try:
+        validate_schema_definition(schema)
+        schema_copy = json.loads(_canonical_json(schema))
+    except (SchemaDefinitionError, TypeError, ValueError) as exc:
+        return StructuredRequestPreflight(
+            failure_class="schema_invalid",
+            failure_reason=str(exc),
+            schema=None,
+            messages=(),
+            input_bytes=0,
+        )
+
+    structured_system = _STRUCTURED_SYSTEM.format(
+        schema=json.dumps(
+            schema_copy,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+    )
+    if system and system.strip():
+        structured_system = f"{system.strip()}\n\n{structured_system}"
+    messages = (
+        {"role": "system", "content": structured_system},
+        {"role": "user", "content": prompt},
+    )
+    input_bytes = sum(len(message["content"].encode("utf-8")) for message in messages)
+    if input_bytes > max_input_chars:
+        return StructuredRequestPreflight(
+            failure_class="input_too_large",
+            failure_reason=(
+                "initial system and user input exceed the fixed UTF-8 byte cap "
+                f"({input_bytes}>{max_input_chars})"
+            ),
+            schema=None,
+            messages=(),
+            input_bytes=input_bytes,
+        )
+    return StructuredRequestPreflight(
+        failure_class=None,
+        failure_reason=None,
+        schema=schema_copy,
+        messages=messages,
+        input_bytes=input_bytes,
+    )
+
+
 def required_structured_context_tokens(
     prompt: str,
     schema: Mapping[str, Any],
@@ -325,6 +473,179 @@ def required_structured_context_tokens(
         + num_predict
         + CONTEXT_SAFETY_TOKENS
     )
+
+
+@dataclass(frozen=True)
+class _StructuredResourceRequest:
+    requested_num_ctx: int
+    max_num_ctx: int
+    reserve_bytes: int
+
+
+class _StructuredResourceError(RuntimeError):
+    def __init__(self, failure_class: str, reason: str) -> None:
+        self.failure_class = failure_class
+        super().__init__(reason)
+
+
+def _default_transport_resource_request(
+    *,
+    model: str,
+    configured_num_ctx: int,
+    prompt: str,
+    schema: Mapping[str, Any],
+    system: str | None,
+    num_predict: int,
+    max_output_chars: int,
+    max_feedback_chars: int,
+    min_num_ctx_override: int | None,
+    max_num_ctx_override: int | None,
+    memory_reserve_gib_override: int | None,
+) -> _StructuredResourceRequest:
+    """Size a standalone live session from its complete repair envelope."""
+
+    # Resolve every configured role for this exact tag.  The same Ornith tag
+    # currently serves both the 32K ingest lane and the 114688 decision lane,
+    # so the shared broker must see the union of their supported contexts.
+    from llm_wiki_mcp.runtime_config import (
+        load_decision_router_config,
+        load_ingest_config,
+    )
+
+    minimums = [configured_num_ctx]
+    maximums = [configured_num_ctx]
+    reserve_gib = [_DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB]
+    try:
+        ingest_config = load_ingest_config()
+        if model == ingest_config.model:
+            minimums.append(ingest_config.num_ctx)
+            maximums.append(ingest_config.max_num_ctx)
+            reserve_gib.append(ingest_config.memory_reserve_gib)
+        decision_config = load_decision_router_config()
+        if model in {
+            decision_config.primary_model,
+            decision_config.challenger_model,
+            decision_config.tie_break_model,
+        }:
+            minimums.append(decision_config.min_num_ctx)
+            maximums.append(decision_config.num_ctx)
+            reserve_gib.append(decision_config.memory_reserve_gib)
+    except Exception:
+        # Explicit per-session bounds and the historical configured context
+        # remain a safe fixed-context fallback if runtime config is unreadable.
+        pass
+
+    min_num_ctx = (
+        min_num_ctx_override if min_num_ctx_override is not None else min(minimums)
+    )
+    max_num_ctx = (
+        max_num_ctx_override if max_num_ctx_override is not None else max(maximums)
+    )
+    if min_num_ctx > max_num_ctx:
+        raise _StructuredResourceError(
+            "capacity_unavailable",
+            "structured resource context bounds are inconsistent "
+            f"({min_num_ctx}>{max_num_ctx})",
+        )
+    required_num_ctx = required_structured_context_tokens(
+        prompt,
+        schema,
+        system=system,
+        num_predict=num_predict,
+        max_output_chars=max_output_chars,
+        max_feedback_chars=max_feedback_chars,
+    )
+    buckets = tuple(
+        sorted(
+            {
+                min_num_ctx,
+                configured_num_ctx,
+                max_num_ctx,
+                *_DEFAULT_STRUCTURED_CONTEXT_BUCKETS,
+            }
+        )
+    )
+    requested_num_ctx = next(
+        (
+            bucket
+            for bucket in buckets
+            if min_num_ctx <= bucket <= max_num_ctx and bucket >= required_num_ctx
+        ),
+        0,
+    )
+    if requested_num_ctx < 1:
+        raise _StructuredResourceError(
+            "context_window_exceeded",
+            "complete structured repair envelope exceeds the configured context "
+            f"ceiling ({required_num_ctx}>{max_num_ctx})",
+        )
+    selected_reserve_gib = (
+        memory_reserve_gib_override
+        if memory_reserve_gib_override is not None
+        else max(reserve_gib)
+    )
+    return _StructuredResourceRequest(
+        requested_num_ctx=requested_num_ctx,
+        max_num_ctx=max_num_ctx,
+        reserve_bytes=selected_reserve_gib * ollama.GIB,
+    )
+
+
+@contextmanager
+def _default_transport_resource_broker(
+    *,
+    model: str,
+    request: _StructuredResourceRequest,
+) -> Iterator[int]:
+    """Exclusively admit one live runner for an entire repair session."""
+
+    if ollama.model_resource_lease_mode() == "shared":
+        raise _StructuredResourceError(
+            "capacity_unavailable",
+            "standalone structured session cannot upgrade a shared model lease",
+        )
+    with ollama.model_resource_lease(exclusive=True):
+        try:
+            plan = ollama.plan_model_residency(
+                [model],
+                num_ctx=request.requested_num_ctx,
+                max_num_ctx=request.max_num_ctx,
+                reserve_bytes=request.reserve_bytes,
+                configured_max_resident=1,
+                reuse_larger_context=True,
+            )
+        except Exception as exc:
+            raise _StructuredResourceError(
+                "capacity_unavailable",
+                "structured residency planning failed: "
+                f"{type(exc).__name__}: {str(exc)[:500]}",
+            ) from exc
+        if plan.max_resident_models < 1:
+            raise _StructuredResourceError(
+                "capacity_unavailable",
+                "measured memory admission cannot fit one structured runner",
+            )
+        for eviction_model in plan.initial_eviction_models:
+            if not ollama.unload_named_model(eviction_model):
+                raise _StructuredResourceError(
+                    "capacity_unavailable",
+                    "unable to verify incompatible structured runner eviction: "
+                    f"{eviction_model}",
+                )
+        admitted_num_ctx = max(
+            request.requested_num_ctx,
+            plan.context_for(model),
+        )
+        if admitted_num_ctx > request.max_num_ctx:
+            raise _StructuredResourceError(
+                "capacity_unavailable",
+                "residency planner returned a context above the configured ceiling "
+                f"({admitted_num_ctx}>{request.max_num_ctx})",
+            )
+        # The exclusive lease deliberately spans every validation repair turn.
+        # Inner ollama.chat() shared leases are reentrant and cannot let another
+        # context request replace this runner between turns.
+        yield admitted_num_ctx
 
 
 def _audit_role(row: Mapping[str, Any]) -> str:
@@ -1260,6 +1581,14 @@ Re-evaluate the original request, keep the semantic decision faithful, retain
 all required fields, shorten free-text fields, and add no prose or markdown.
 """
 
+_TRUNCATED_REPAIR_TEMPLATE = """\
+Your previous response stopped at the model output limit before explicit
+completion (done_reason={done_reason}). Return a compact, complete JSON value
+matching the schema. Re-evaluate the original request, keep the semantic
+decision faithful, retain all required fields, shorten free-text fields, and
+add no prose or markdown.
+"""
+
 
 class LocalStructuredSession:
     """Run one model for an initial response plus at most two repairs."""
@@ -1278,6 +1607,10 @@ class LocalStructuredSession:
         max_input_chars: int = 65_536,
         max_output_chars: int = 8_000,
         max_feedback_chars: int = 2_000,
+        resource_managed: bool = False,
+        resource_min_num_ctx: int | None = None,
+        resource_max_num_ctx: int | None = None,
+        resource_memory_reserve_gib: int | None = None,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model is required")
@@ -1296,9 +1629,31 @@ class LocalStructuredSession:
             for value in numeric_limits.values()
         ):
             raise ValueError("structured session limits must be positive integers")
+        if not isinstance(resource_managed, bool):
+            raise ValueError("resource_managed must be a boolean")
+        resource_limits = {
+            "resource_min_num_ctx": resource_min_num_ctx,
+            "resource_max_num_ctx": resource_max_num_ctx,
+            "resource_memory_reserve_gib": resource_memory_reserve_gib,
+        }
+        if any(
+            value is not None
+            and (isinstance(value, bool) or not isinstance(value, int) or value < 1)
+            for value in resource_limits.values()
+        ):
+            raise ValueError("structured resource limits must be positive integers")
+        if (
+            resource_min_num_ctx is not None
+            and resource_max_num_ctx is not None
+            and resource_min_num_ctx > resource_max_num_ctx
+        ):
+            raise ValueError(
+                "resource_min_num_ctx must not exceed resource_max_num_ctx"
+            )
         self.model = model.strip()
         self.role = role.strip()
-        self.transport = transport or _default_transport
+        self._uses_default_transport = transport is None
+        self.transport = transport if transport is not None else _default_transport
         self.audit_store = LocalConsensusAuditStore(audit_root)
         self.num_ctx = num_ctx
         self.num_predict = num_predict
@@ -1307,6 +1662,10 @@ class LocalStructuredSession:
         self.max_input_chars = max_input_chars
         self.max_output_chars = max_output_chars
         self.max_feedback_chars = max_feedback_chars
+        self.resource_managed = resource_managed
+        self.resource_min_num_ctx = resource_min_num_ctx
+        self.resource_max_num_ctx = resource_max_num_ctx
+        self.resource_memory_reserve_gib = resource_memory_reserve_gib
 
     def _failure(
         self,
@@ -1322,6 +1681,44 @@ class LocalStructuredSession:
             failure_reason=reason,
         )
 
+    def _prepare_initial_request(
+        self,
+        prompt: object,
+        schema: Mapping[str, Any],
+        *,
+        system: str | None,
+    ) -> tuple[
+        LocalStructuredResult | None,
+        dict[str, Any] | None,
+        list[dict[str, str]],
+    ]:
+        """Validate the immutable request envelope without touching Ollama.
+
+        The default-transport resource broker and the actual session use this
+        same preflight. An input over the fixed UTF-8 byte cap must not resize
+        or evict a resident runner merely to discover the failure later.
+        """
+        preflight = preflight_structured_request(
+            prompt,
+            schema,
+            system=system,
+            max_input_chars=self.max_input_chars,
+        )
+        if not preflight.ok:
+            return (
+                self._failure(
+                    preflight.failure_class or "input_invalid",
+                    preflight.failure_reason or "structured request preflight failed",
+                ),
+                None,
+                [],
+            )
+        return (
+            None,
+            preflight.schema,
+            [dict(message) for message in preflight.messages],
+        )
+
     def _run_impl(
         self,
         prompt: str,
@@ -1329,32 +1726,20 @@ class LocalStructuredSession:
         *,
         system: str | None = None,
         value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
+        num_ctx: int | None = None,
     ) -> LocalStructuredResult:
-        if not isinstance(prompt, str):
-            return self._failure("input_invalid", "prompt must be a string")
-        try:
-            validate_schema_definition(schema)
-            schema_copy = json.loads(_canonical_json(schema))
-        except (SchemaDefinitionError, TypeError, ValueError) as exc:
-            return self._failure("schema_invalid", str(exc))
-
-        structured_system = _STRUCTURED_SYSTEM.format(
-            schema=json.dumps(schema_copy, ensure_ascii=False, sort_keys=True, indent=2)
+        effective_num_ctx = self.num_ctx if num_ctx is None else num_ctx
+        preflight_failure, schema_copy, messages = self._prepare_initial_request(
+            prompt,
+            schema,
+            system=system,
         )
-        if system and system.strip():
-            structured_system = f"{system.strip()}\n\n{structured_system}"
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": structured_system},
-            {"role": "user", "content": prompt},
-        ]
-        base_input_bytes = sum(
-            len(message["content"].encode("utf-8")) for message in messages
-        )
-        if base_input_bytes > self.max_input_chars:
+        if preflight_failure is not None:
+            return preflight_failure
+        if schema_copy is None:  # Defensive: success always returns a schema.
             return self._failure(
-                "input_too_large",
-                "initial system and user input exceed the fixed UTF-8 byte cap "
-                f"({base_input_bytes}>{self.max_input_chars})",
+                "schema_invalid",
+                "validated schema was not materialized",
             )
         base_input_tokens = _estimated_message_tokens(messages)
         worst_case_history_tokens = base_input_tokens + MAX_REPAIR_TURNS * (
@@ -1362,14 +1747,14 @@ class LocalStructuredSession:
         )
         if (
             worst_case_history_tokens + self.num_predict + CONTEXT_SAFETY_TOKENS
-            > self.num_ctx
+            > effective_num_ctx
         ):
             return self._failure(
                 "context_window_exceeded",
                 "initial input plus two fixed UTF-8 byte-bounded repair histories "
                 "and output reservation exceed num_ctx "
                 f"({worst_case_history_tokens}+{self.num_predict}+"
-                f"{CONTEXT_SAFETY_TOKENS}>{self.num_ctx})",
+                f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
             )
 
         attempts: list[StructuredAttempt] = []
@@ -1379,20 +1764,20 @@ class LocalStructuredSession:
             estimated_input_tokens = _estimated_message_tokens(messages)
             if (
                 estimated_input_tokens + self.num_predict + CONTEXT_SAFETY_TOKENS
-                > self.num_ctx
+                > effective_num_ctx
             ):
                 return self._failure(
                     "context_window_exceeded",
                     "conservative prompt estimate plus output reservation exceeds "
                     f"num_ctx ({estimated_input_tokens}+{self.num_predict}+"
-                    f"{CONTEXT_SAFETY_TOKENS}>{self.num_ctx})",
+                    f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
                     attempts,
                 )
             request = ChatRequest(
                 model=self.model,
                 messages=tuple(dict(message) for message in messages),
                 schema=schema_copy,
-                num_ctx=self.num_ctx,
+                num_ctx=effective_num_ctx,
                 num_predict=self.num_predict,
                 keep_alive=self.keep_alive,
                 read_timeout_ms=self.read_timeout_ms,
@@ -1416,17 +1801,82 @@ class LocalStructuredSession:
                     f"{type(exc).__name__}: {str(exc)[:500]}",
                     attempts,
                 )
-            if isinstance(transport_output, ollama.ChatResponse):
+            if isinstance(
+                transport_output, (ollama.ChatResponse, ollama.GenerateResponse)
+            ):
+                completion_failure = _completion_failure(transport_output)
+                if completion_failure is not None:
+                    failure_class, failure_reason = completion_failure
+                    if failure_class != "output_truncated":
+                        return self._failure(failure_class, failure_reason, attempts)
+                    raw_output = transport_output.content
+                    output_sha256 = hashlib.sha256(
+                        raw_output.encode("utf-8")
+                    ).hexdigest()
+                    issue = ValidationIssue(
+                        pointer="",
+                        keyword="completionMetadata",
+                        expected={"done": True, "done_reason": "stop"},
+                        received={
+                            "type": "output_truncated",
+                            "done": transport_output.done,
+                            "done_reason": transport_output.done_reason,
+                            "length": len(raw_output.encode("utf-8")),
+                            "sha256": output_sha256,
+                        },
+                        message=failure_reason,
+                    )
+                    attempts.append(
+                        StructuredAttempt(
+                            index=index,
+                            valid=False,
+                            output_sha256=output_sha256,
+                            output_chars=len(raw_output),
+                            normalized=False,
+                            error_fingerprint=_fingerprint_issues([issue]),
+                            issues=(issue,),
+                        )
+                    )
+                    if index == MAX_RESPONSES - 1:
+                        return self._failure(
+                            "output_truncated",
+                            "initial response and compact repairs stopped at the "
+                            "model output limit",
+                            attempts,
+                        )
+                    repair_prompt = _TRUNCATED_REPAIR_TEMPLATE.format(
+                        done_reason=transport_output.done_reason or "unknown",
+                    )
+                    feedback_bytes = len(repair_prompt.encode("utf-8"))
+                    if feedback_bytes > self.max_feedback_chars:
+                        return self._failure(
+                            "feedback_too_large",
+                            "compact-output feedback exceeded the fixed UTF-8 "
+                            "byte cap "
+                            f"({feedback_bytes}>{self.max_feedback_chars})",
+                            attempts,
+                        )
+                    # Never place the partial completion in history.  The same
+                    # model gets the original evidence plus a bounded redacted
+                    # marker and an explicit request for a shorter full value.
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": _OVERSIZE_ASSISTANT_PLACEHOLDER,
+                        }
+                    )
+                    messages.append({"role": "user", "content": repair_prompt})
+                    continue
                 raw_output = transport_output.content
                 prompt_eval_count = transport_output.prompt_eval_count
                 eval_count = transport_output.eval_count
                 if (
                     prompt_eval_count is not None
-                    and prompt_eval_count >= self.num_ctx - CONTEXT_SAFETY_TOKENS
+                    and prompt_eval_count >= effective_num_ctx - CONTEXT_SAFETY_TOKENS
                 ) or (
                     prompt_eval_count is not None
                     and eval_count is not None
-                    and prompt_eval_count + eval_count > self.num_ctx
+                    and prompt_eval_count + eval_count > effective_num_ctx
                 ):
                     return self._failure(
                         "context_truncation_suspected",
@@ -1583,12 +2033,66 @@ class LocalStructuredSession:
             role=self.role,
             model=self.model,
         ):
-            result = self._run_impl(
-                prompt,
-                schema,
-                system=system,
-                value_validator=value_validator,
-            )
+            run_kwargs = {
+                "system": system,
+                "value_validator": value_validator,
+            }
+            if not self._uses_default_transport:
+                result = self._run_impl(prompt, schema, **run_kwargs)
+            elif self.resource_managed:
+                if ollama.model_resource_lease_mode() != "exclusive":
+                    result = self._failure(
+                        "capacity_unavailable",
+                        "resource-managed structured session requires an active "
+                        "exclusive model lease",
+                    )
+                else:
+                    result = self._run_impl(prompt, schema, **run_kwargs)
+            else:
+                # Keep deterministic request failures side-effect free. This
+                # includes the fixed byte cap: an oversized request must not
+                # reach planning or evict a resident runner.
+                preflight_failure, _schema_copy, _messages = (
+                    self._prepare_initial_request(prompt, schema, system=system)
+                )
+                if preflight_failure is not None:
+                    result = preflight_failure
+                else:
+                    try:
+                        resource_request = _default_transport_resource_request(
+                            model=self.model,
+                            configured_num_ctx=self.num_ctx,
+                            prompt=prompt,
+                            schema=schema,
+                            system=system,
+                            num_predict=self.num_predict,
+                            max_output_chars=self.max_output_chars,
+                            max_feedback_chars=self.max_feedback_chars,
+                            min_num_ctx_override=self.resource_min_num_ctx,
+                            max_num_ctx_override=self.resource_max_num_ctx,
+                            memory_reserve_gib_override=(
+                                self.resource_memory_reserve_gib
+                            ),
+                        )
+                    except _StructuredResourceError as exc:
+                        result = self._failure(exc.failure_class, str(exc))
+                    else:
+                        try:
+                            with _default_transport_resource_broker(
+                                model=self.model,
+                                request=resource_request,
+                            ) as admitted_num_ctx:
+                                result = self._run_impl(
+                                    prompt,
+                                    schema,
+                                    num_ctx=admitted_num_ctx,
+                                    **run_kwargs,
+                                )
+                        except _StructuredResourceError as exc:
+                            result = self._failure(
+                                exc.failure_class,
+                                str(exc),
+                            )
         try:
             self.audit_store.record_session(
                 request_sha256=request_sha256,
@@ -1614,9 +2118,11 @@ __all__ = [
     "STRUCTURED_GENERATION_SEED",
     "STRUCTURED_GENERATION_TEMPERATURE",
     "SchemaDefinitionError",
+    "StructuredRequestPreflight",
     "StructuredAttempt",
     "ValidationIssue",
     "normalize_json_output",
+    "preflight_structured_request",
     "required_structured_context_tokens",
     "structured_generation_policy",
     "structured_generation_policy_sha256",

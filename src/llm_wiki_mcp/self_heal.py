@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -94,6 +95,19 @@ READ_BACK_UNVERIFIABLE_QUERY_HINT_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+_TRUSTED_REPAIR_PACKET_CONTRACTS = {
+    (
+        "trusted_watchdog",
+        "watchdog.health_snapshot",
+        "system_health_snapshot_exception",
+    ): "trusted-watchdog",
+    (
+        "trusted_operational_failure_supervisor",
+        "ingest.operational_runtime",
+        "system_operational_failure",
+    ): "trusted-operational-supervisor",
+}
 
 
 def _repo_root() -> Path:
@@ -981,6 +995,146 @@ def _queue_frontier(
     return target
 
 
+def _trusted_repair_packet_job_id(
+    packet: dict[str, Any],
+    evidence_payload: dict[str, Any],
+) -> str | None:
+    notes = evidence_payload.get("notes")
+    if not isinstance(notes, dict):
+        return None
+    contract = (
+        notes.get("producer"),
+        evidence_payload.get("component"),
+        evidence_payload.get("failure_class"),
+    )
+    expected_job_id = _TRUSTED_REPAIR_PACKET_CONTRACTS.get(contract)
+    if expected_job_id is None or packet.get("job_id") != expected_job_id:
+        return None
+    if packet.get("failure_class") != evidence_payload.get("failure_class"):
+        return None
+    if contract[0] == "trusted_operational_failure_supervisor":
+        if (
+            packet.get("source_failure_class") != notes.get("source_failure_class")
+            or packet.get("source_fingerprint") != notes.get("source_fingerprint")
+            or not isinstance(packet.get("source_packet_paths"), list)
+            or not packet.get("source_packet_paths")
+            or not isinstance(packet.get("raw_files"), list)
+            or not packet.get("raw_files")
+        ):
+            return None
+    return expected_job_id
+
+
+def _is_operational_source_packet(packet: dict[str, Any]) -> bool:
+    try:
+        from llm_wiki_mcp.failure_supervisor import (
+            OPERATIONAL_SELF_HEAL_FAILURE_CLASSES,
+        )
+    except ImportError:
+        return False
+    return packet.get("failure_class") in OPERATIONAL_SELF_HEAL_FAILURE_CLASSES
+
+
+def _operational_attempt_evidence(
+    packet: dict[str, Any],
+    decision: dict[str, Any],
+    attempt: int,
+) -> str:
+    payload = {
+        "attempt": attempt,
+        "failure_class": packet.get("failure_class"),
+        "fingerprint": packet.get("fingerprint"),
+        "decision": decision,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _next_operational_attempt_evidence(
+    packet: dict[str, Any],
+    decision: dict[str, Any],
+    attempt: int,
+) -> list[str] | None:
+    if not _is_operational_source_packet(packet):
+        return None
+    current = packet.get("operational_local_repair_evidence")
+    evidence = (
+        [
+            value
+            for value in current
+            if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+        ]
+        if isinstance(current, list)
+        else []
+    )
+    receipt = _operational_attempt_evidence(packet, decision, attempt)
+    if receipt not in evidence:
+        evidence.append(receipt)
+    return evidence[-16:]
+
+
+def _promote_operational_source_packet(
+    packet_path: Path,
+    packet: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not _is_operational_source_packet(packet):
+        return None
+    try:
+        from llm_wiki_mcp.system_incident_supervisor import (
+            supervise_operational_failure_packet,
+        )
+
+        incident = supervise_operational_failure_packet(packet_path)
+    except Exception as exc:
+        runtime_status.safe_append_event(
+            "warn",
+            f"self-heal | operational incident bridge failed: {exc.__class__.__name__}",
+            source="self-heal",
+            packet=str(packet_path),
+            outcome_kind="operational_incident_bridge_failed",
+        )
+        return {
+            "status": "attention",
+            "reason": "operational_incident_bridge_failed",
+            "error_type": exc.__class__.__name__,
+        }
+    incident_path = incident.get("packet_path")
+    if isinstance(incident_path, str) and incident_path:
+        _update_packet(
+            packet_path,
+            packet,
+            system_incident_packet_path=incident_path,
+            system_incident_fingerprint=incident.get("fingerprint"),
+            system_incident_status=incident.get("status"),
+        )
+    return incident
+
+
+def _sync_system_incident_outcome(packet_path: Path) -> dict[str, Any] | None:
+    try:
+        from llm_wiki_mcp.system_incident_supervisor import (
+            sync_operational_incident_outcome,
+        )
+
+        result = sync_operational_incident_outcome(packet_path)
+    except Exception as exc:
+        runtime_status.safe_append_event(
+            "warn",
+            f"self-heal | operational incident sync failed: {exc.__class__.__name__}",
+            source="self-heal",
+            packet=str(packet_path),
+            outcome_kind="operational_incident_sync_failed",
+        )
+        return None
+    return result if result.get("reason") != "not_operational_incident" else None
+
+
 def _repair_incident_evidence(packet: dict[str, Any]) -> RepairIncidentEvidence:
     """Return the strict repair-plane evidence carried by ``packet``.
 
@@ -1013,18 +1167,9 @@ def _repair_incident_evidence(packet: dict[str, Any]) -> RepairIncidentEvidence:
             [f"repair_evidence is missing required fields: {', '.join(missing)}"]
         )
 
-    notes = payload.get("notes")
-    trusted_contract = (
-        packet.get("job_id") == "trusted-watchdog"
-        and packet.get("failure_class") == "system_health_snapshot_exception"
-        and payload.get("component") == "watchdog.health_snapshot"
-        and payload.get("failure_class") == "system_health_snapshot_exception"
-        and isinstance(notes, dict)
-        and notes.get("producer") == "trusted_watchdog"
-    )
-    if not trusted_contract:
+    if _trusted_repair_packet_job_id(packet, payload) is None:
         raise EvidenceValidationError(
-            ["packet was not emitted by the allowlisted trusted watchdog producer"]
+            ["packet was not emitted by an allowlisted trusted incident producer"]
         )
 
     packet_fingerprint = packet.get("fingerprint")
@@ -1254,6 +1399,46 @@ def _handle_packet_unlocked(
     if human_boundary is not None:
         return human_boundary
     repair_evidence, frontier_ineligible_reason = _frontier_eligibility(packet)
+    if (
+        repair_evidence is not None
+        and repair_evidence.notes.get("producer")
+        == "trusted_operational_failure_supervisor"
+    ):
+        try:
+            from llm_wiki_mcp.system_incident_supervisor import (
+                validate_operational_incident_packet,
+            )
+
+            validate_operational_incident_packet(packet_path)
+        except Exception as exc:
+            validation_error = (
+                f"trusted operational incident read-back failed: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+            if dry_run:
+                return {
+                    "packet": str(packet_path),
+                    "failure_id": packet.get("failure_id"),
+                    "status": "dry_run",
+                    "projected_status": "frontier_quarantined",
+                    "reason": "operational_incident_evidence_invalid",
+                    "frontier_eligibility_error": validation_error,
+                }
+            _update_packet(
+                packet_path,
+                packet,
+                status="frontier_quarantined",
+                next_attempt_at=None,
+                frontier_eligibility_error=validation_error,
+                quarantined_at=datetime.now().isoformat(timespec="seconds"),
+            )
+            return {
+                "packet": str(packet_path),
+                "failure_id": packet.get("failure_id"),
+                "status": "frontier_quarantined",
+                "reason": "operational_incident_evidence_invalid",
+                "frontier_eligibility_error": validation_error,
+            }
     if _is_transient_read_back_packet(packet):
         return _retire_transient_read_back_packet(
             packet_path,
@@ -1438,6 +1623,18 @@ def _handle_packet_unlocked(
     if not frontier_only:
         assert decision is not None
         local_attempt = int(packet.get("local_repair_attempts") or 0) + 1
+        operational_attempt_evidence = _next_operational_attempt_evidence(
+            packet,
+            local_decision or {},
+            local_attempt,
+        )
+        operational_updates = (
+            {
+                "operational_local_repair_evidence": operational_attempt_evidence,
+            }
+            if operational_attempt_evidence is not None
+            else {}
+        )
         try:
             with _local_decision_effect(decision):
                 _update_packet(
@@ -1449,6 +1646,7 @@ def _handle_packet_unlocked(
                     last_attempt_at=datetime.now().isoformat(timespec="seconds"),
                     next_attempt_at=None,
                     **_lease_updates(lease_owner),
+                    **operational_updates,
                 )
                 decision_path = _save_local_decision(packet_path, decision)
                 result["local_decision_path"] = str(decision_path)
@@ -1549,8 +1747,15 @@ def _handle_packet_unlocked(
             result["status"] = "local_repair_failed"
             result["local_error"] = str(exc)
             return result
+        incident_result = (
+            _promote_operational_source_packet(packet_path, packet)
+            if terminal
+            else None
+        )
         result["status"] = status
         result["reason"] = local_failure_reason
+        if incident_result is not None:
+            result["system_incident"] = incident_result
         if repair_evidence is None:
             result["frontier_eligibility_error"] = frontier_ineligible_reason
         return result
@@ -1935,16 +2140,24 @@ def handle_packet(
             and not legacy_non_external_human
             and not resumable_terminal
         ):
-            return {
+            result = {
                 "packet": str(packet_path),
                 "failure_id": current.get("failure_id"),
                 "status": current_status,
                 "cached": True,
             }
+            source_sync = _sync_system_incident_outcome(packet_path)
+            if source_sync is not None:
+                result["operational_source_sync"] = source_sync
+            return result
         # The packet is read inside the lock by the implementation.  This is
         # the CAS boundary that prevents a stale pre-lock snapshot from being
         # applied after another worker completes.
-        return _handle_packet_unlocked(packet_path, **kwargs)
+        result = _handle_packet_unlocked(packet_path, **kwargs)
+        source_sync = _sync_system_incident_outcome(packet_path)
+        if source_sync is not None:
+            result["operational_source_sync"] = source_sync
+        return result
 
 
 def run_pending(
@@ -2075,15 +2288,25 @@ def enqueue_system_code_repair(packet_path: Path) -> dict[str, Any]:
 
     resolved = packet_path.expanduser().resolve(strict=False)
     packet = _read_json(resolved)
-    evidence = _repair_incident_evidence(packet)
+    _repair_incident_evidence(packet)
+    payload = packet.get("repair_evidence")
     if (
-        evidence.component != "watchdog.health_snapshot"
-        or evidence.notes.get("producer") != "trusted_watchdog"
-        or packet.get("job_id") != "trusted-watchdog"
+        not isinstance(payload, dict)
+        or _trusted_repair_packet_job_id(packet, payload) is None
     ):
         raise EvidenceValidationError(
-            ["only trusted watchdog health incidents may be durably enqueued"]
+            ["only allowlisted trusted system incidents may be durably enqueued"]
         )
+    notes = payload.get("notes")
+    if (
+        isinstance(notes, dict)
+        and notes.get("producer") == "trusted_operational_failure_supervisor"
+    ):
+        from llm_wiki_mcp.system_incident_supervisor import (
+            validate_operational_incident_packet,
+        )
+
+        validate_operational_incident_packet(resolved)
     return enqueue_job(
         name="system-code-repair",
         module="llm_wiki_mcp.self_heal",
@@ -2093,9 +2316,52 @@ def enqueue_system_code_repair(packet_path: Path) -> dict[str, Any]:
     )
 
 
+def _promote_due_operational_sources(*, limit: int) -> list[dict[str, Any]]:
+    promoted: list[dict[str, Any]] = []
+    if limit <= 0 or not _packet_dir().exists():
+        return promoted
+    for path in sorted(_packet_dir().glob("*.json")):
+        if len(promoted) >= limit:
+            break
+        try:
+            packet = _read_json(path)
+        except Exception:
+            continue
+        if packet.get(
+            "status"
+        ) != "local_quarantined" or not _is_operational_source_packet(packet):
+            continue
+        with _packet_lock(path) as acquired:
+            if not acquired:
+                continue
+            current = _read_json(path)
+            if current.get("status") != "local_quarantined":
+                continue
+            result = _promote_operational_source_packet(path, current)
+            if result is not None and result.get("packet_path"):
+                promoted.append({"packet": str(path), **result})
+    return promoted
+
+
+def _sync_completed_operational_incidents(*, limit: int) -> list[dict[str, Any]]:
+    synced: list[dict[str, Any]] = []
+    if limit <= 0 or not _packet_dir().exists():
+        return synced
+    for path in sorted(_packet_dir().glob("system-operational-*.json")):
+        if len(synced) >= limit:
+            break
+        result = _sync_system_incident_outcome(path)
+        if result is not None:
+            synced.append({"packet": str(path), **result})
+    return synced
+
+
 def enqueue_due_system_repairs(*, limit: int = 2) -> dict[str, Any]:
     """Requeue guard-deferred incidents only when their durable time is due."""
 
+    bounded_limit = max(0, limit)
+    operational_promotions = _promote_due_operational_sources(limit=bounded_limit)
+    operational_source_sync = _sync_completed_operational_incidents(limit=bounded_limit)
     queued: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     due_paths: list[Path] = []
@@ -2105,7 +2371,7 @@ def enqueue_due_system_repairs(*, limit: int = 2) -> dict[str, Any]:
                 due_paths.append(path)
         except Exception:
             continue
-        if len(due_paths) >= max(0, limit):
+        if len(due_paths) >= bounded_limit:
             break
     for path in due_paths:
         try:
@@ -2130,6 +2396,8 @@ def enqueue_due_system_repairs(*, limit: int = 2) -> dict[str, Any]:
         "status": "ok" if not errors else "attention",
         "queued": queued,
         "errors": errors,
+        "operational_promotions": operational_promotions,
+        "operational_source_sync": operational_source_sync,
     }
 
 

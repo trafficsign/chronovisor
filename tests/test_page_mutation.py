@@ -26,11 +26,43 @@ def _patch_pages(monkeypatch, pages: Path) -> None:
     monkeypatch.setattr(
         page_mutation,
         "find_page",
-        lambda page_id: (pages / f"{page_id}.md") if (pages / f"{page_id}.md").exists() else None,
+        lambda page_id: (
+            (pages / f"{page_id}.md") if (pages / f"{page_id}.md").exists() else None
+        ),
     )
 
 
-def test_prepare_and_apply_exact_replacement_adds_marker(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("lock_name", "path_name"),
+    [
+        ("wiki_mutation_lock", "wiki.lock"),
+        ("decision_authority_lock", "authority.lock"),
+    ],
+)
+def test_file_locks_reuse_same_thread_outer_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lock_name: str,
+    path_name: str,
+) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr(
+        page_mutation.fcntl,
+        "flock",
+        lambda _fd, operation: calls.append(operation),
+    )
+    lock = getattr(page_mutation, lock_name)
+
+    with lock(tmp_path / path_name):
+        with lock(tmp_path / path_name):
+            pass
+
+    assert calls == [page_mutation.fcntl.LOCK_EX, page_mutation.fcntl.LOCK_UN]
+
+
+def test_prepare_and_apply_exact_replacement_adds_marker(
+    tmp_path: Path, monkeypatch
+) -> None:
     pages = tmp_path / "pages"
     pages.mkdir()
     path = pages / "memory.md"
@@ -82,7 +114,12 @@ def test_allowlisted_memory_system_page_can_be_corrected(
 
     prepared = page_mutation.prepare_page_mutation(
         "user-profile",
-        [{"old_text": "Preferred editor is Vim.", "new_text": "Preferred editor is Helix."}],
+        [
+            {
+                "old_text": "Preferred editor is Vim.",
+                "new_text": "Preferred editor is Helix.",
+            }
+        ],
         correction_id="corr-system-memory",
     )
     result = page_mutation.apply_prepared_mutations([prepared])
@@ -186,7 +223,8 @@ def test_constraint_is_fsynced_before_page_marker_is_written(
     def inspect_registry_before_write(target: Path, content: str) -> None:
         registry = page_mutation.correction_constraints_file()
         observed["registry_before_page"] = (
-            registry.exists() and '"correction_id": "corr-order"' in registry.read_text()
+            registry.exists()
+            and '"correction_id": "corr-order"' in registry.read_text()
         )
         real_atomic_write(target, content)
 
@@ -212,7 +250,9 @@ def test_torn_constraint_tail_is_delimited_and_retry_constraint_stays_active(
     )
     registry = page_mutation.correction_constraints_file()
     registry.parent.mkdir(parents=True, exist_ok=True)
-    registry.write_bytes(b'{"kind":"content_correction_constraint","correction_id":"torn"')
+    registry.write_bytes(
+        b'{"kind":"content_correction_constraint","correction_id":"torn"'
+    )
     real_atomic_write = page_mutation.atomic_write
     failed_once = False
 
@@ -241,7 +281,9 @@ def test_torn_constraint_tail_is_delimited_and_retry_constraint_stays_active(
     assert "New fact." in written
 
 
-def test_apply_refuses_concurrent_change_without_overwrite(tmp_path: Path, monkeypatch) -> None:
+def test_apply_refuses_concurrent_change_without_overwrite(
+    tmp_path: Path, monkeypatch
+) -> None:
     pages = tmp_path / "pages"
     pages.mkdir()
     path = pages / "memory.md"
@@ -252,7 +294,9 @@ def test_apply_refuses_concurrent_change_without_overwrite(tmp_path: Path, monke
         [{"old_text": "Old fact.", "new_text": "New fact."}],
         correction_id="corr-2",
     )
-    path.write_text(path.read_text(encoding="utf-8") + "Foreign edit.\n", encoding="utf-8")
+    path.write_text(
+        path.read_text(encoding="utf-8") + "Foreign edit.\n", encoding="utf-8"
+    )
 
     result = page_mutation.apply_prepared_mutations([prepared])
 
@@ -261,7 +305,9 @@ def test_apply_refuses_concurrent_change_without_overwrite(tmp_path: Path, monke
     assert "New fact." not in path.read_text(encoding="utf-8")
 
 
-def test_second_write_failure_rolls_back_first_owned_write(tmp_path: Path, monkeypatch) -> None:
+def test_second_write_failure_rolls_back_first_owned_write(
+    tmp_path: Path, monkeypatch
+) -> None:
     pages = tmp_path / "pages"
     pages.mkdir()
     first = pages / "first.md"
@@ -351,7 +397,9 @@ def test_each_page_is_cas_checked_immediately_before_write(
     def change_second_after_first_write(path: Path, content: str) -> None:
         real_atomic_write(path, content)
         if path == first:
-            second.write_text(second.read_text(encoding="utf-8") + "Foreign edit.\n", encoding="utf-8")
+            second.write_text(
+                second.read_text(encoding="utf-8") + "Foreign edit.\n", encoding="utf-8"
+            )
 
     monkeypatch.setattr(page_mutation, "atomic_write", change_second_after_first_write)
 
@@ -412,10 +460,17 @@ def test_prepare_requires_old_claim_removed_from_active_frontmatter(
     )
     _patch_pages(monkeypatch, pages)
 
-    with pytest.raises(page_mutation.PageMutationError, match="frontmatter fields: summary"):
+    with pytest.raises(
+        page_mutation.PageMutationError, match="frontmatter fields: summary"
+    ):
         page_mutation.prepare_page_mutation(
             "memory",
-            [{"old_text": "Installed RAM is 16GB.", "new_text": "Installed RAM is 32GB."}],
+            [
+                {
+                    "old_text": "Installed RAM is 16GB.",
+                    "new_text": "Installed RAM is 32GB.",
+                }
+            ],
             correction_id="corr-active-meta",
         )
 
@@ -459,9 +514,10 @@ def test_review_payload_includes_middle_claim_context_and_bound_diff(
     assert "New middle claim." in replacement["after_context"]["context"]
     assert "-Old middle claim." in replacement["unified_diff_hunk"]
     assert "+New middle claim." in replacement["unified_diff_hunk"]
-    assert payload["unified_diff_sha256"] == hashlib.sha256(
-        payload["unified_diff"].encode("utf-8")
-    ).hexdigest()
+    assert (
+        payload["unified_diff_sha256"]
+        == hashlib.sha256(payload["unified_diff"].encode("utf-8")).hexdigest()
+    )
 
 
 def test_already_applied_review_payload_keeps_after_context(
