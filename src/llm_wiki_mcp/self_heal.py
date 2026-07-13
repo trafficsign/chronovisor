@@ -851,6 +851,11 @@ def apply_local_decision(
 ) -> dict[str, Any]:
     """Apply a whitelisted local repair action."""
 
+    if _is_operational_source_packet(packet):
+        raise ValueError(
+            "operational source packets require the guarded system-incident lane"
+        )
+
     if decision.action == "resolve_update_target":
         if not decision.requested_page_id or not decision.target_page_id:
             raise ValueError("resolve_update_target requires requested and target ids")
@@ -1560,7 +1565,8 @@ def _handle_packet_unlocked(
         # complete in the local data plane.  A legacy one-model generator is a
         # test/compatibility seam and is never mutation authority.
         will_apply_local = (
-            decision.status == "resolved"
+            not _is_operational_source_packet(packet)
+            and decision.status == "resolved"
             and decision.action
             in {"resolve_update_target", "retry_raw", "quarantine_raw"}
             and decision.source in {"deterministic", "local_consensus"}

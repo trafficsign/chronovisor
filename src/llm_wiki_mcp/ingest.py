@@ -1460,6 +1460,45 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
     return _validate_generated_page_output(output, op_type=op_type).body
 
 
+def _repair_transport_attested_page_boundary(
+    output: str,
+    response: ollama_runtime.GenerateResponse,
+    *,
+    op_type: str,
+) -> tuple[str, _PageBodyValidation] | None:
+    """Restore only a missing terminal marker on an explicit completed turn.
+
+    The marker is a serialization boundary, not source evidence.  Ollama's
+    ``done=True`` plus ``done_reason=stop`` is a stronger transport-level
+    completion signal than asking the model to echo the same fixed suffix on
+    another probabilistic turn.  We still fail closed unless adding that one
+    line makes the *entire* strict page validator pass; existing/misplaced end
+    markers, partial frontmatter, incomplete fences, and malformed wrappers
+    therefore remain model-repair failures.
+    """
+
+    reason = (response.done_reason or "").strip().casefold().replace("-", "_")
+    if response.done is not True or reason != "stop":
+        return None
+    initial = _validate_generated_page_output(output, op_type=op_type)
+    if initial.failure_class != "missing_end_marker":
+        return None
+    if re.search(
+        r"^===\s*END\s+PAGE\s*===\s*$",
+        normalized := output.replace("\r\n", "\n").replace("\r", "\n"),
+        re.MULTILINE | re.IGNORECASE,
+    ):
+        return None
+    marker_like = re.compile(r"^\s*=+\s*END\b", re.IGNORECASE)
+    if any(marker_like.match(line) for line in normalized.split("\n")):
+        return None
+    repaired = output.rstrip() + "\n=== END PAGE ==="
+    validation = _validate_generated_page_output(repaired, op_type=op_type)
+    if validation.body is None:
+        return None
+    return repaired, validation
+
+
 def _page_generation_transcript(messages: list[dict[str, str]]) -> str:
     """Serialize client-side page history for Ollama's generate endpoint."""
 
@@ -1642,7 +1681,9 @@ Generate the page content based on the raw data and context above."""
                     _page_generation_transcript(messages),
                     **generate_kwargs,
                 )
+                response_metadata: ollama_runtime.GenerateResponse | None = None
                 if isinstance(output, ollama_runtime.GenerateResponse):
+                    response_metadata = output
                     completion_failure = _generation_completion_failure(output)
                     if completion_failure is not None:
                         failure_class, failure_reason = completion_failure
@@ -1710,8 +1751,22 @@ Generate the page content based on the raw data and context above."""
                         "transport returned non-string content"
                     )
 
-                output_sha256 = hashlib.sha256(output.encode("utf-8")).hexdigest()
                 validation = _validate_generated_page_output(output, op_type=op_type)
+                if response_metadata is not None:
+                    boundary_repair = _repair_transport_attested_page_boundary(
+                        output,
+                        response_metadata,
+                        op_type=op_type,
+                    )
+                    if boundary_repair is not None:
+                        output, validation = boundary_repair
+                        if diagnostics is not None:
+                            diagnostics["transport_boundary_repaired"] = True
+                        _safe_log(
+                            "ingest | restored transport-attested end marker for "
+                            f"{filename}"
+                        )
+                output_sha256 = hashlib.sha256(output.encode("utf-8")).hexdigest()
                 if validation.body is not None:
                     if diagnostics is not None:
                         diagnostics.update(
@@ -4617,10 +4672,33 @@ def _frontier_feedback_text(result: dict[str, Any]) -> str:
     return "The previous proposal was not safe or complete enough to apply."
 
 
+def _structured_frontier_failure_class(result: dict[str, Any]) -> str | None:
+    """Return a stable control-plane reason from a structured review failure."""
+
+    review = result.get("review")
+    for candidate in (result, review):
+        if not isinstance(candidate, dict):
+            continue
+        frontier_failure = candidate.get("frontier_failure")
+        if isinstance(frontier_failure, dict) and frontier_failure:
+            failure_class = str(frontier_failure.get("failure_class") or "").strip()
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", failure_class):
+                return failure_class.casefold()
+            return "structured_review_failure"
+    return None
+
+
 def _frontier_retry_is_actionable(result: dict[str, Any]) -> bool:
     """False when regenerating local content cannot repair the frontier lane."""
 
     if str(result.get("status") or "") == "quarantined":
+        return False
+    if _structured_frontier_failure_class(result) is not None:
+        # A structured reviewer failure is control-plane evidence, not
+        # semantic feedback about the generated page.  Regenerating the same
+        # page cannot repair schema, quorum, transport, authority, or policy
+        # failures and only burns the second review call before the raw is
+        # mislabeled as non-convergent.
         return False
     feedback = _frontier_feedback_text(result).casefold()
     infrastructure_markers = (
@@ -4814,6 +4892,54 @@ def _generate_local_operations(
             )
         job_store.update(job_id, completed_ops=i + 1)
     return operations, failed_specs
+
+
+def _all_generation_failure_error(
+    plan: list[dict],
+    operations: list[dict],
+    failed_specs: list[dict],
+) -> str | None:
+    """Describe an all-generation runtime failure before semantic review.
+
+    A reviewer cannot safely approve an empty postimage merely because the
+    page generator failed.  Surface the bounded local failure directly so the
+    failure supervisor can defer the valid raw behind one operational repair
+    packet instead of quarantining it as a semantic disagreement.
+    """
+
+    if not plan or operations or not failed_specs:
+        return None
+    classes = {
+        str(spec.get("failure_class") or "validation_failed").casefold()
+        for spec in failed_specs
+    }
+    operational_priority = (
+        "transport_error",
+        "repeated_output",
+        "repair_exhausted",
+        "validation_failed",
+    )
+    failure_class = next(
+        (candidate for candidate in operational_priority if candidate in classes),
+        None,
+    )
+    if failure_class is None:
+        return None
+    representative = next(
+        (
+            spec
+            for spec in failed_specs
+            if str(spec.get("failure_class") or "validation_failed").casefold()
+            == failure_class
+        ),
+        failed_specs[0],
+    )
+    filename = str(representative.get("filename") or "unknown")
+    reason = str(representative.get("error") or "bounded page generation failed")[:500]
+    return (
+        f"ingest generation {failure_class}: all {len(plan)} planned page "
+        f"operations failed locally; first={filename}: {reason}"
+    )
 
 
 def run_ingest(
@@ -5042,6 +5168,14 @@ def run_ingest(
             else:
                 all_operations, failed_op_specs = [], []
 
+            generation_error = _all_generation_failure_error(
+                plan,
+                all_operations,
+                failed_op_specs,
+            )
+            if generation_error is not None:
+                raise IngestApplyError(generation_error)
+
             failed_ops = [spec["filename"] for spec in failed_op_specs]
             runtime_status.safe_write_status(
                 state="running",
@@ -5124,8 +5258,14 @@ def run_ingest(
                     )
             frontier_feedback = _frontier_feedback_text(frontier_result)
             if not _frontier_retry_is_actionable(frontier_result):
+                structured_failure = _structured_frontier_failure_class(frontier_result)
+                typed_feedback = (
+                    f"{structured_failure}: {frontier_feedback}"
+                    if structured_failure is not None
+                    else frontier_feedback
+                )
                 raise IngestApplyError(
-                    "local consensus authority unavailable: " + frontier_feedback
+                    "local consensus authority unavailable: " + typed_feedback
                 )
             if frontier_budget.used >= frontier_budget.limit:
                 raise IngestApplyError(

@@ -98,6 +98,10 @@ OPERATIONAL_SELF_HEAL_FAILURE_CLASSES = {
     "ingest.generation_stream_incomplete",
     "ingest.generation_completion_incomplete",
     "ingest.generation_output_truncated",
+    "ingest.generation_transport_error",
+    "ingest.generation_repeated_output",
+    "ingest.generation_repair_exhausted",
+    "ingest.generation_validation_failed",
     # A missing/corrupt receipt after apply is a control-plane defect, never a
     # reason to blame or quarantine the immutable source raw.
     "ingest.raw_completion_receipt_publish_failed",
@@ -273,7 +277,8 @@ def classify_failure(message: str | None) -> FailureRecord:
     generation_failure = re.search(
         r"ingest generation (capacity_unavailable|context_window_exceeded|"
         r"context_truncation_suspected|feedback_too_large|stream_incomplete|"
-        r"completion_incomplete|output_truncated):",
+        r"completion_incomplete|output_truncated|transport_error|"
+        r"repeated_output|repair_exhausted|validation_failed):",
         msg,
         flags=re.IGNORECASE,
     )

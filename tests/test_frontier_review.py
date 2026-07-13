@@ -1246,6 +1246,53 @@ def test_structured_review_rejects_incomplete_approved_json(
     assert result["human_required"] is False
 
 
+def test_local_structured_result_preserves_optional_schema_properties() -> None:
+    from llm_wiki_mcp.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+
+    schema = INGEST_FRONTIER_DECISION_SCHEMA
+
+    result = frontier_review._validated_structured_result(
+        {
+            "decision": "apply_available",
+            "summary": "required fields are valid",
+            "failed_operations_disposition": "none",
+            "tests_run": [],
+            "risk": None,
+            "notes": None,
+        },
+        schema,
+        reviewer="local_consensus",
+    )
+
+    assert result == {
+        "decision": "apply_available",
+        "summary": "required fields are valid",
+        "failed_operations_disposition": "none",
+        "tests_run": [],
+        "risk": None,
+        "notes": None,
+        "reviewer": "local_consensus",
+    }
+    assert "frontier_failure" not in result
+    assert "repair_option_id" not in result
+    assert "invalid_tags" not in result
+    assert "replacement_operations" not in result
+
+
+def test_ingest_structured_failure_envelope_uses_retry_decision() -> None:
+    from llm_wiki_mcp.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+
+    result = frontier_review._validated_structured_result(
+        None,
+        INGEST_FRONTIER_DECISION_SCHEMA,
+        reviewer="local_consensus",
+    )
+
+    assert result["decision"] == "retry"
+    assert result["failed_operations_disposition"] == "none"
+    assert result["frontier_failure"]["failure_class"] == "schema_invalid"
+
+
 def test_structured_review_forwards_optional_system_to_local_router(
     tmp_path: Path,
     monkeypatch,

@@ -742,8 +742,14 @@ def build_model_residency_plan(
     configured_max_resident: int,
     source: str = "measured",
     reuse_larger_context: bool = True,
+    reuse_context_ceilings: Mapping[str, int] | None = None,
 ) -> ModelResidencyPlan:
-    """Choose a 1/2/3-runner cap from context-scaled model footprints."""
+    """Choose a 1/2/3-runner cap from context-scaled model footprints.
+
+    ``max_num_ctx`` is the absolute ceiling. When per-model reuse ceilings are
+    supplied, an omitted or invalid model entry fails closed to the requested
+    context instead of inheriting another role's larger allowance.
+    """
 
     ordered = tuple(dict.fromkeys(model for model in models if model))
     if not ordered:
@@ -775,11 +781,23 @@ def build_model_residency_plan(
         )
     )
     context_floor_set = set(context_floor_models)
+    default_reuse_ceiling = max_num_ctx if reuse_context_ceilings is None else num_ctx
+    reuse_ceiling_by_model: dict[str, int] = {}
+    for model in ordered:
+        candidate = default_reuse_ceiling
+        if reuse_context_ceilings is not None:
+            candidate = reuse_context_ceilings.get(model, default_reuse_ceiling)
+        if isinstance(candidate, bool) or not isinstance(candidate, int):
+            candidate = num_ctx
+        reuse_ceiling_by_model[model] = min(
+            max_num_ctx,
+            max(num_ctx, candidate),
+        )
     selected_resident_contexts = {
         model: (
             resident_ctx
             if reuse_larger_context
-            and num_ctx <= resident_ctx <= max_num_ctx
+            and num_ctx <= resident_ctx <= reuse_ceiling_by_model[model]
             and resident_size > 0
             else num_ctx
         )
@@ -916,6 +934,7 @@ def plan_model_residency(
     reserve_bytes: int,
     configured_max_resident: int,
     reuse_larger_context: bool = True,
+    reuse_context_ceilings: Mapping[str, int] | None = None,
 ) -> ModelResidencyPlan:
     """Probe live host/Ollama state and return a fail-safe residency plan."""
 
@@ -959,6 +978,7 @@ def plan_model_residency(
         configured_max_resident=configured_max_resident,
         source=source,
         reuse_larger_context=reuse_larger_context,
+        reuse_context_ceilings=reuse_context_ceilings,
     )
     if (
         memory.total_bytes <= 0

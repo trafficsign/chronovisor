@@ -358,17 +358,7 @@ def test_generate_one_repairs_missing_end_marker_in_same_logical_session(
 
     def fake_generate(prompt: str, **kwargs):
         prompts.append(prompt)
-        response = next(responses)
-        if op_type == "create":
-            assert kwargs["return_metadata"] is True
-            return ingest.ollama_runtime.GenerateResponse(
-                content=response,
-                done=True,
-                done_reason="stop",
-                prompt_eval_count=9_226,
-                eval_count=1_170,
-            )
-        return response
+        return next(responses)
 
     monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
     diagnostics: dict = {}
@@ -393,6 +383,105 @@ def test_generate_one_repairs_missing_end_marker_in_same_logical_session(
     assert "final non-whitespace line" in prompts[1]
     assert diagnostics["attempts"] == 2
     assert diagnostics["repair_turns"] == 1
+
+
+@pytest.mark.parametrize(
+    ("op_type", "filename", "output"),
+    [
+        (
+            "create",
+            "memory/transport-complete-create.md",
+            "=== NEW PAGE: memory/transport-complete-create.md ===\n"
+            "---\ntitle: Complete create\nupdated: 2026-07-14\n"
+            "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文",
+        ),
+        (
+            "update",
+            "memory/transport-complete-update.md",
+            "=== UPDATE PAGE: memory/transport-complete-update.md ===\n## 追記\n\n本文",
+        ),
+    ],
+)
+def test_generate_one_restores_only_transport_attested_terminal_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    op_type: str,
+    filename: str,
+    output: str,
+) -> None:
+    from llm_wiki_mcp import ingest
+
+    calls = 0
+
+    def fake_generate(_prompt: str, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["return_metadata"] is True
+        return ingest.ollama_runtime.GenerateResponse(
+            content=output,
+            done=True,
+            done_reason="stop",
+            prompt_eval_count=1_000,
+            eval_count=200,
+        )
+
+    monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+    diagnostics: dict = {}
+
+    result = ingest._generate_one(
+        {
+            "type": op_type,
+            "filename": filename,
+            "title": "Transport complete",
+            "summary": "restore one deterministic serialization boundary",
+        },
+        "grounded raw",
+        diagnostics=diagnostics,
+    )
+
+    assert result is not None
+    assert calls == 1
+    assert diagnostics["attempts"] == 1
+    assert diagnostics["repair_turns"] == 0
+    assert diagnostics["transport_boundary_repaired"] is True
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        ("=== UPDATE PAGE: memory/misplaced.md ===\nbody\n=== END PAGE ===\nextra"),
+        "```markdown\n=== UPDATE PAGE: memory/open-fence.md ===\nbody",
+        "=== UPDATE PAGE: memory/bad-wrapper.md ===\n",
+        "=== UPDATE PAGE: memory/partial-marker.md ===\nbody\n=== END PA",
+        (
+            "=== UPDATE PAGE: memory/interior-partial-marker.md ===\n"
+            "body\n=== END PA\ncontinued"
+        ),
+        "=== UPDATE PAGE: memory/short-fence.md ===\nbody\n== END PAGE ===",
+        "=== UPDATE PAGE: memory/long-fence.md ===\nbody\n==== END PAGE ===",
+        "=== UPDATE PAGE: memory/trailing-marker.md ===\nbody\n=== END PAGE === trailing",
+        "=== UPDATE PAGE: memory/single-fence.md ===\nbody\n= END PAGE =",
+        "=== UPDATE PAGE: memory/plural-marker.md ===\nbody\n=== END PAGES ===",
+    ],
+)
+def test_transport_attested_boundary_repair_remains_fail_closed(
+    output: str,
+) -> None:
+    from llm_wiki_mcp import ingest
+
+    response = ingest.ollama_runtime.GenerateResponse(
+        content=output,
+        done=True,
+        done_reason="stop",
+    )
+
+    assert (
+        ingest._repair_transport_attested_page_boundary(
+            output,
+            response,
+            op_type="update",
+        )
+        is None
+    )
 
 
 def test_generate_one_stops_when_repair_repeats_same_invalid_output(
@@ -506,10 +595,15 @@ def test_generate_one_holds_one_exclusive_lease_across_repair_session(
 
     invalid = (
         "=== NEW PAGE: memory/leased.md ===\n"
-        "---\ntitle: Leased\nupdated: 2026-07-14\n"
-        "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文"
+        "本文だけでCREATE frontmatterがない\n"
+        "=== END PAGE ==="
     )
-    valid = invalid + "\n=== END PAGE ==="
+    valid = (
+        "=== NEW PAGE: memory/leased.md ===\n"
+        "---\ntitle: Leased\nupdated: 2026-07-14\n"
+        "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文\n"
+        "=== END PAGE ==="
+    )
     responses = iter([invalid, valid])
     events: list[tuple[str, object]] = []
 
@@ -2247,6 +2341,156 @@ class TestUnclosedFence:
 
 
 class TestRunIngestPartialFailure:
+    def test_all_generation_failure_uses_matching_representative(self) -> None:
+        from llm_wiki_mcp import ingest
+
+        error = ingest._all_generation_failure_error(
+            [{"filename": "memory/first.md"}, {"filename": "memory/second.md"}],
+            [],
+            [
+                {
+                    "filename": "memory/first.md",
+                    "failure_class": "validation_failed",
+                    "error": "first validation detail",
+                },
+                {
+                    "filename": "memory/second.md",
+                    "failure_class": "transport_error",
+                    "error": "second transport detail",
+                },
+            ],
+        )
+
+        assert error is not None
+        assert error.startswith("ingest generation transport_error:")
+        assert "first=memory/second.md: second transport detail" in error
+
+    def test_all_generation_failure_bypasses_semantic_review(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        monkeypatch.setattr(
+            ingest,
+            "_triage",
+            lambda _content: [
+                {
+                    "type": "update",
+                    "filename": "memory/generation-failed.md",
+                    "title": "Generation failed",
+                }
+            ],
+        )
+
+        def failed_generation(_op, _raw, *, diagnostics=None, **_kwargs):
+            assert diagnostics is not None
+            diagnostics.update(
+                {
+                    "failure_class": "repair_exhausted",
+                    "reason": "the page boundary remained invalid",
+                    "attempts": 3,
+                }
+            )
+            return None
+
+        monkeypatch.setattr(ingest, "_generate_one", failed_generation)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        review_calls: list[object] = []
+        monkeypatch.setattr(
+            ingest,
+            "_review_and_apply_ingest_operations",
+            lambda *_args, **_kwargs: review_calls.append(True),
+        )
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest("grounded raw", job.job_id)
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert str(finished.error).startswith(
+            "ingest generation repair_exhausted: all 1 planned page operations"
+        )
+        assert review_calls == []
+
+    def test_structured_review_failure_does_not_regenerate_or_exhaust_budget(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, frontier_review, ingest, jobs
+
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/reviewer-control-failure.md",
+                "title": "Reviewer control failure",
+            }
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content, **_kwargs: plan)
+        generation_calls: list[str] = []
+
+        def generate(op, _raw, **_kwargs):
+            generation_calls.append(op["filename"])
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Reviewer control failure\nupdated: 2026-07-14\n"
+                    "---\nbody\n"
+                ),
+            }
+
+        review_calls: list[dict] = []
+
+        def reviewer(proposal: dict) -> dict:
+            review_calls.append(proposal)
+            return frontier_review._validated_structured_result(
+                None,
+                ingest.INGEST_FRONTIER_DECISION_SCHEMA,
+                reviewer="local_consensus",
+            )
+
+        monkeypatch.setattr(ingest, "_generate_one", generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest(
+            "grounded source",
+            job.job_id,
+            frontier_reviewer=reviewer,
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert generation_calls == ["memory/reviewer-control-failure.md"]
+        assert len(review_calls) == 1
+        assert str(finished.error).startswith(
+            "local consensus authority unavailable: schema_invalid: "
+        )
+        assert "did not converge" not in str(finished.error)
+        classified = failure_supervisor.classify_failure(finished.error)
+        assert classified.failure_class == (
+            "ingest.runtime_local_consensus_authority_unavailable"
+        )
+        assert classified.fingerprint.endswith(":schema_invalid")
+
+    def test_structured_frontier_failure_is_not_actionable_page_feedback(
+        self,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        assert (
+            ingest._frontier_retry_is_actionable(
+                {
+                    "status": "needs_retry",
+                    "review": {
+                        "decision": "retry",
+                        "summary": "repair the response",
+                        "frontier_failure": {"failure_class": "schema_invalid"},
+                    },
+                }
+            )
+            is False
+        )
+
     def test_completion_callback_failure_overrides_completed_job(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5261,6 +5505,61 @@ class TestPerRawOrchestrator:
         assert failure_supervisor.operational_deferred_raw_files(
             [first_raw, second_raw, recurring_raw]
         ) == {recurring_raw.name: "pending_local_repair"}
+
+    def test_generation_repair_exhaustion_is_operational_not_bad_raw(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        raw_path = isolated_wiki / "raw" / "generation-contract.md"
+        raw_path.write_text("grounded source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(self_heal, "start_background", started.append)
+
+        result = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=(
+                "ingest generation repair_exhausted: all 1 planned page "
+                "operations failed locally"
+            ),
+            raw_text="grounded source",
+        )
+
+        assert result.failure_class == "ingest.generation_repair_exhausted"
+        assert result.quarantined is False
+        assert result.packet_path is not None
+        assert raw_path.exists()
+        assert started == [Path(result.packet_path)]
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
+            raw_path.name: "pending_local_repair"
+        }
+
+    def test_generation_transport_error_is_operational_not_transient(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        raw_path = isolated_wiki / "raw" / "generation-transport.md"
+        raw_path.write_text("grounded source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(self_heal, "start_background", started.append)
+
+        result = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error="ingest generation transport_error: Ollama connection reset",
+            raw_text="grounded source",
+        )
+
+        assert result.failure_class == "ingest.generation_transport_error"
+        assert result.tracked is True
+        assert result.transient is False
+        assert result.quarantined is False
+        assert result.packet_path is not None
+        assert raw_path.exists()
+        assert started == [Path(result.packet_path)]
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
+            raw_path.name: "pending_local_repair"
+        }
 
     def test_ollama_unavailable_stays_pending_without_self_heal_packet(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

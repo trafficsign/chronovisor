@@ -15,7 +15,7 @@ from llm_wiki_mcp.local_structured import (
     ChatRequest,
     required_structured_context_tokens,
 )
-from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+from llm_wiki_mcp.runtime_config import DecisionRouterConfig, IngestConfig
 
 
 PRIMARY = "primary:test"
@@ -235,6 +235,72 @@ def test_production_residency_plan_reuses_a_larger_context_bucket() -> None:
     assert plan.reuse_larger_context is True
 
 
+def test_production_residency_plan_limits_larger_reuse_per_model() -> None:
+    plan = ollama.build_model_residency_plan(
+        MODELS,
+        num_ctx=98_304,
+        max_num_ctx=262_144,
+        memory=ollama.MemorySnapshot(
+            total_bytes=128 * ollama.GIB,
+            available_bytes=80 * ollama.GIB,
+            source="test",
+        ),
+        installed_sizes={model: 10 * ollama.GIB for model in MODELS},
+        resident={
+            PRIMARY: (20 * ollama.GIB, 131_072),
+            CHALLENGER: (24 * ollama.GIB, 262_144),
+            TIE_BREAK: (18 * ollama.GIB, 131_072),
+        },
+        calibrated_sizes={
+            (CHALLENGER, 98_304): 14 * ollama.GIB,
+        },
+        reserve_bytes=16 * ollama.GIB,
+        configured_max_resident=3,
+        reuse_context_ceilings={
+            PRIMARY: 262_144,
+            CHALLENGER: 131_072,
+            TIE_BREAK: 131_072,
+        },
+    )
+
+    assert dict(plan.role_contexts) == {
+        PRIMARY: 131_072,
+        CHALLENGER: 98_304,
+        TIE_BREAK: 131_072,
+    }
+    assert plan.initial_eviction_models == (CHALLENGER,)
+
+
+def test_per_model_reuse_ceilings_fail_closed_and_clamp_to_global_max() -> None:
+    plan = ollama.build_model_residency_plan(
+        MODELS,
+        num_ctx=98_304,
+        max_num_ctx=131_072,
+        memory=ollama.MemorySnapshot(
+            total_bytes=128 * ollama.GIB,
+            available_bytes=80 * ollama.GIB,
+            source="test",
+        ),
+        installed_sizes={model: 10 * ollama.GIB for model in MODELS},
+        resident={model: (20 * ollama.GIB, 131_072) for model in MODELS},
+        calibrated_sizes={},
+        reserve_bytes=16 * ollama.GIB,
+        configured_max_resident=3,
+        reuse_context_ceilings={
+            PRIMARY: 999_999,
+            CHALLENGER: "invalid",  # type: ignore[dict-item]
+            # TIE_BREAK is deliberately omitted.
+        },
+    )
+
+    assert dict(plan.role_contexts) == {
+        PRIMARY: 131_072,
+        CHALLENGER: 98_304,
+        TIE_BREAK: 98_304,
+    }
+    assert plan.initial_eviction_models == (CHALLENGER, TIE_BREAK)
+
+
 def test_exact_bucket_evaluation_can_disable_larger_context_reuse() -> None:
     plan = ollama.build_model_residency_plan(
         MODELS,
@@ -376,6 +442,146 @@ def test_router_wires_explicit_production_and_evaluation_residency_modes() -> No
     evaluation._residency_plan(16_384)
 
     assert observed_modes == [True, False]
+
+
+def test_router_production_reuses_an_ingest_sized_resident_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[int, dict[str, int]]] = []
+
+    monkeypatch.setattr(
+        "llm_wiki_mcp.decision_router.load_ingest_config",
+        lambda: IngestConfig(model=PRIMARY, max_num_ctx=262_144),
+    )
+
+    def planner(_models: tuple[str, ...], **kwargs: Any) -> ollama.ModelResidencyPlan:
+        observed.append((kwargs["max_num_ctx"], dict(kwargs["reuse_context_ceilings"])))
+        return _plan(1)
+
+    production = DecisionRouter(
+        config=_config(),
+        transport=EventTransport({}, []),
+        resolve_adoption=False,
+        record_replay=False,
+        residency_planner=planner,
+        live_resource_control=True,
+        reuse_larger_context=True,
+    )
+    evaluation = DecisionRouter(
+        config=_config(),
+        transport=EventTransport({}, []),
+        audit_role="model_eval",
+        resolve_adoption=False,
+        record_replay=False,
+        residency_planner=planner,
+        live_resource_control=True,
+        reuse_larger_context=False,
+    )
+
+    production._residency_plan(98_304)
+    evaluation._residency_plan(98_304)
+
+    assert observed == [
+        (
+            262_144,
+            {PRIMARY: 262_144, CHALLENGER: 131_072, TIE_BREAK: 131_072},
+        ),
+        (
+            131_072,
+            {PRIMARY: 131_072, CHALLENGER: 131_072, TIE_BREAK: 131_072},
+        ),
+    ]
+
+
+def test_router_does_not_share_ingest_ceiling_with_a_different_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, int] = {}
+    monkeypatch.setattr(
+        "llm_wiki_mcp.decision_router.load_ingest_config",
+        lambda: IngestConfig(model="other:test", max_num_ctx=262_144),
+    )
+
+    def planner(_models: tuple[str, ...], **kwargs: Any) -> ollama.ModelResidencyPlan:
+        observed.update(kwargs["reuse_context_ceilings"])
+        return _plan(1)
+
+    router = DecisionRouter(
+        config=_config(),
+        transport=EventTransport({}, []),
+        resolve_adoption=False,
+        record_replay=False,
+        residency_planner=planner,
+        live_resource_control=True,
+    )
+
+    router._residency_plan(98_304)
+
+    assert observed == {model: 131_072 for model in MODELS}
+
+
+def test_router_duplicate_model_keeps_the_largest_role_reuse_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, int] = {}
+    monkeypatch.setattr(
+        "llm_wiki_mcp.decision_router.load_ingest_config",
+        lambda: IngestConfig(model=PRIMARY, max_num_ctx=262_144),
+    )
+
+    def planner(_models: tuple[str, ...], **kwargs: Any) -> ollama.ModelResidencyPlan:
+        observed.update(kwargs["reuse_context_ceilings"])
+        return _plan(1)
+
+    router = DecisionRouter(
+        config=_config(challenger_model=PRIMARY),
+        transport=EventTransport({}, []),
+        resolve_adoption=False,
+        record_replay=False,
+        residency_planner=planner,
+        live_resource_control=True,
+    )
+
+    router._residency_plan(98_304)
+
+    assert observed == {PRIMARY: 262_144, TIE_BREAK: 131_072}
+
+
+def test_router_preserves_legacy_exact_signature_residency_planner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[int, int, bool]] = []
+    monkeypatch.setattr(
+        "llm_wiki_mcp.decision_router.load_ingest_config",
+        lambda: IngestConfig(model=PRIMARY, max_num_ctx=262_144),
+    )
+
+    def planner(
+        _models: tuple[str, ...],
+        *,
+        num_ctx: int,
+        max_num_ctx: int,
+        reserve_bytes: int,
+        configured_max_resident: int,
+        reuse_larger_context: bool,
+    ) -> ollama.ModelResidencyPlan:
+        del reserve_bytes, configured_max_resident
+        observed.append((num_ctx, max_num_ctx, reuse_larger_context))
+        return _plan(1)
+
+    router = DecisionRouter(
+        config=_config(),
+        transport=EventTransport({}, []),
+        resolve_adoption=False,
+        record_replay=False,
+        residency_planner=planner,
+        live_resource_control=True,
+    )
+
+    plan = router._residency_plan(98_304)
+
+    assert plan.source == "test"
+    assert observed == [(98_304, 131_072, True)]
 
 
 @pytest.mark.parametrize(

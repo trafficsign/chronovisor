@@ -908,8 +908,15 @@ def _structured_validation_error(
 def _failure_default(name: str, schema: dict[str, Any], summary: str) -> Any:
     enum = schema.get("enum")
     if isinstance(enum, list) and enum:
-        if "needs_retry" in enum:
-            return "needs_retry"
+        if name == "decision":
+            for safe_decision in (
+                "needs_retry",
+                "retry",
+                "rejected",
+                "quarantined",
+            ):
+                if safe_decision in enum:
+                    return safe_decision
         return enum[0]
     expected = schema.get("type")
     types = expected if isinstance(expected, list) else [expected]
@@ -969,7 +976,6 @@ def _validated_structured_result(
     *,
     reviewer: str,
 ) -> dict[str, Any]:
-    strict_schema, _repair = _strict_schema_with_repair(schema)
     if parsed is None:
         failure = _frontier_failure(
             "schema_invalid",
@@ -979,7 +985,13 @@ def _validated_structured_result(
         return _structured_failure_payload(
             schema, summary=failure.summary, failure=failure, reviewer=reviewer
         )
-    error = _structured_validation_error(parsed, strict_schema)
+    # The local router already validates against the caller's production
+    # schema.  ``_strict_schema_with_repair`` exists only for frontier CLI
+    # providers that require every property to appear in their output schema;
+    # applying that provider compatibility rewrite here silently turns
+    # legitimate optional fields (for example ingest repair instructions)
+    # into required result fields after a successful local quorum.
+    error = _structured_validation_error(parsed, schema)
     if error:
         failure = _frontier_failure(
             "schema_invalid",

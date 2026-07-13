@@ -168,6 +168,89 @@ def _mark_system_code_repair(
     packet_path.write_text(json.dumps(packet), encoding="utf-8")
 
 
+def test_operational_source_rejects_direct_raw_action(
+    isolated_wiki: Path,
+) -> None:
+    from llm_wiki_mcp import self_heal
+    from llm_wiki_mcp.local_repair import LocalRepairDecision
+
+    packet = {
+        "failure_class": "ingest.generation_transport_error",
+        "raw_file": "generation-transport.md",
+    }
+    decision = LocalRepairDecision(
+        status="resolved",
+        action="retry_raw",
+        confidence=1.0,
+        reason="retry the raw",
+        source="deterministic",
+    )
+
+    with pytest.raises(ValueError, match="guarded system-incident lane"):
+        self_heal.apply_local_decision(packet, decision)
+
+
+def test_operational_source_routes_resolved_raw_action_to_system_incident(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+    from llm_wiki_mcp.local_repair import LocalRepairDecision
+
+    packet_path = _write_packet(isolated_wiki)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet.update(
+        {
+            "failure_class": "ingest.generation_transport_error",
+            "fingerprint": "ingest.generation_transport_error:connection-reset",
+            "raw_file": "generation-transport.md",
+        }
+    )
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    raw_path = isolated_wiki / "raw" / "generation-transport.md"
+    raw_path.write_text("grounded source", encoding="utf-8")
+    decision = LocalRepairDecision(
+        status="resolved",
+        action="retry_raw",
+        confidence=1.0,
+        reason="retry the raw",
+        source="deterministic",
+    )
+    monkeypatch.setattr(self_heal, "propose_repair", lambda *_args, **_kwargs: decision)
+    monkeypatch.setattr(
+        self_heal,
+        "apply_local_decision",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("operational raw action must not be applied directly")
+        ),
+    )
+    promoted: list[tuple[Path, str]] = []
+
+    def promote(path: Path, current: dict) -> dict:
+        promoted.append((path, current["failure_class"]))
+        return {
+            "status": "pending",
+            "packet_path": str(path.with_name("system-operational.json")),
+        }
+
+    monkeypatch.setattr(self_heal, "_promote_operational_source_packet", promote)
+
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=False,
+        max_attempts=1,
+        backoff_base_seconds=0,
+    )
+
+    updated = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert result["status"] == "local_quarantined"
+    assert result["system_incident"]["status"] == "pending"
+    assert updated["status"] == "local_quarantined"
+    assert raw_path.exists()
+    assert promoted == [(packet_path, "ingest.generation_transport_error")]
+
+
 def test_deterministic_single_alias_repair_applies_locally_without_frontier(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 import time
@@ -56,6 +57,7 @@ from llm_wiki_mcp.local_structured import (
 from llm_wiki_mcp.runtime_config import (
     DecisionRouterConfig,
     load_decision_router_config,
+    load_ingest_config,
 )
 
 AgreementKey = Callable[[Any], Any]
@@ -2111,14 +2113,59 @@ class DecisionRouter:
                 reuse_larger_context=self.reuse_larger_context,
             )
         try:
-            return self.residency_planner(
-                models,
-                num_ctx=num_ctx,
-                max_num_ctx=self.config.num_ctx,
-                reserve_bytes=self.config.memory_reserve_gib * ollama.GIB,
-                configured_max_resident=self.config.max_resident_models,
-                reuse_larger_context=self.reuse_larger_context,
+            decision_ceiling = max(num_ctx, self.config.num_ctx)
+            reuse_context_ceilings: dict[str, int] = {}
+            for model in models:
+                reuse_context_ceilings[model] = max(
+                    reuse_context_ceilings.get(model, 0),
+                    decision_ceiling,
+                )
+            if self.reuse_larger_context:
+                try:
+                    ingest_config = load_ingest_config()
+                except Exception:
+                    ingest_config = None
+                if (
+                    ingest_config is not None
+                    and ingest_config.model == self.config.primary_model
+                    and not isinstance(ingest_config.max_num_ctx, bool)
+                    and isinstance(ingest_config.max_num_ctx, int)
+                ):
+                    reuse_context_ceilings[self.config.primary_model] = max(
+                        reuse_context_ceilings.get(self.config.primary_model, 0),
+                        decision_ceiling,
+                        ingest_config.max_num_ctx,
+                    )
+            try:
+                planner_parameters = inspect.signature(
+                    self.residency_planner
+                ).parameters.values()
+            except (TypeError, ValueError):
+                planner_parameters = ()
+            supports_per_model_ceilings = any(
+                parameter.name == "reuse_context_ceilings"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in planner_parameters
             )
+            planner_kwargs: dict[str, Any] = {
+                "num_ctx": num_ctx,
+                # A legacy planner only understands one ceiling shared by all
+                # roles.  Giving it the ingest-primary ceiling would let an
+                # oversized challenger or tie runner bypass the role-specific
+                # safety contract, so legacy injectors stay at the decision
+                # ceiling even when that means forfeiting cross-lane reuse.
+                "max_num_ctx": (
+                    max(reuse_context_ceilings.values())
+                    if supports_per_model_ceilings
+                    else decision_ceiling
+                ),
+                "reserve_bytes": self.config.memory_reserve_gib * ollama.GIB,
+                "configured_max_resident": self.config.max_resident_models,
+                "reuse_larger_context": self.reuse_larger_context,
+            }
+            if supports_per_model_ceilings:
+                planner_kwargs["reuse_context_ceilings"] = reuse_context_ceilings
+            return self.residency_planner(models, **planner_kwargs)
         except Exception:
             return ollama.ModelResidencyPlan(
                 num_ctx=num_ctx,
