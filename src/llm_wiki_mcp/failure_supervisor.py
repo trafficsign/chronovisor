@@ -76,6 +76,10 @@ SEMANTIC_PROJECTION_OPERATIONAL_FAILURE_CLASSES = {
 # still valid source material and must never be quarantined as the cause.
 OPERATIONAL_SELF_HEAL_FAILURE_CLASSES = {
     *SEMANTIC_PROJECTION_OPERATIONAL_FAILURE_CLASSES,
+    # The immutable raw cannot repair a missing, stale, or internally
+    # inconsistent local-consensus authority artifact.  Queue one
+    # control-plane repair packet and keep every affected raw in place.
+    "ingest.runtime_local_consensus_authority_unavailable",
     "ingest.runtime_schema_invalid",
     "ingest.runtime_input_invalid",
     "ingest.runtime_input_too_large",
@@ -278,6 +282,24 @@ def classify_failure(message: str | None) -> FailureRecord:
         return FailureRecord(
             failure_class=f"ingest.generation_{local_class}",
             fingerprint=f"ingest.generation_{local_class}",
+            message=msg,
+        )
+
+    authority_unavailable = re.search(
+        r"local consensus authority unavailable:\s*(.*)",
+        msg,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if authority_unavailable:
+        detail = authority_unavailable.group(1).strip().casefold()
+        reason_match = re.match(r"([a-z][a-z0-9_.-]{0,127})\s*:", detail)
+        reason_code = reason_match.group(1) if reason_match else "unknown"
+        failure_class = "ingest.runtime_local_consensus_authority_unavailable"
+        return FailureRecord(
+            failure_class=failure_class,
+            # Bind the control-plane cause, not the raw filename or prose, so
+            # simultaneous raws share one operational self-heal packet.
+            fingerprint=f"{failure_class}:{reason_code}",
             message=msg,
         )
 

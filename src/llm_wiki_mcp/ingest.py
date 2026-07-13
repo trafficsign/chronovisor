@@ -4624,7 +4624,11 @@ def _frontier_retry_is_actionable(result: dict[str, Any]) -> bool:
         return False
     feedback = _frontier_feedback_text(result).casefold()
     infrastructure_markers = (
+        "adoption artifact",
+        "adoption_artifact",
         "artifact write failed",
+        "authority changed",
+        "authority is missing",
         "frontier reviewer failed",
         "local consensus reviewer failed",
         "transport",
@@ -4750,10 +4754,12 @@ def _generate_local_operations(
 ) -> tuple[list[dict], list[dict]]:
     """Generate every operation through one bounded logical model session."""
 
+    generation_stage = "local-regenerate" if frontier_feedback else "generate"
+    generation_phase = "local-regenerate-generate" if frontier_feedback else "generate"
     job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
     runtime_status.safe_write_status(
         state="running",
-        stage="generate",
+        stage=generation_stage,
         current_job_id=job_id,
         current_raw=source_raw,
         current_op=None,
@@ -4765,7 +4771,7 @@ def _generate_local_operations(
         fname = op.get("filename", "?")
         runtime_status.safe_write_status(
             state="running",
-            stage="generate",
+            stage=generation_stage,
             current_job_id=job_id,
             current_raw=source_raw,
             current_op=fname,
@@ -4778,7 +4784,7 @@ def _generate_local_operations(
             content,
             raw_keywords=raw_keywords,
             progress_callback=_llm_progress_callback(
-                phase="generate",
+                phase=generation_phase,
                 target=fname,
                 job_id=job_id,
                 source_raw=source_raw,
@@ -4913,9 +4919,33 @@ def run_ingest(
         if processor == "unavailable":
             raise RuntimeError("ollama unavailable; no fallback processor configured")
 
-        # A local-consensus rejection is feedback, not a terminal batch failure.
-        # Re-run triage and generation inside the same job with the exact
-        # critique, capped so a bad raw cannot create an unbounded model loop.
+        # Production semantic ingest cannot succeed without an adopted local
+        # authority.  Resolve that proof before spending any triage or page-
+        # generation tokens.  Tests and explicit dependency injection retain
+        # their isolated reviewer boundary.
+        if getattr(_review_and_apply_ingest_operations, "__module__", None) == __name__:
+            review_authority, review_authority_error = _current_ingest_review_authority(
+                reviewer=frontier_reviewer
+            )
+            review_authority_shape_error = (
+                _ingest_review_authority_shape_error(review_authority)
+                if review_authority is not None
+                else None
+            )
+            review_authority_problem = (
+                review_authority_error
+                or review_authority_shape_error
+                or (None if review_authority is not None else "authority is missing")
+            )
+            if review_authority_problem is not None:
+                raise IngestApplyError(
+                    "local consensus authority unavailable: " + review_authority_problem
+                )
+
+        # Triage chooses the mutation target once.  A local-consensus rejection
+        # critiques the generated postimage, so later attempts regenerate only
+        # that postimage with the exact feedback. Re-running triage can silently
+        # switch pages and can misattribute a control-plane failure to the raw.
         frontier_feedback: str | None = None
         frontier_result: dict[str, Any] | None = None
         frontier_budget = _FrontierCallBudget()
@@ -4923,7 +4953,10 @@ def run_ingest(
         all_operations: list[dict] = []
         failed_op_specs: list[dict] = []
         for convergence_attempt in range(1, _MAX_FRONTIER_CONVERGENCE_ATTEMPTS + 1):
-            job_store.update(job_id, stage="triage")
+            job_store.update(
+                job_id,
+                stage="triage" if convergence_attempt == 1 else "generate",
+            )
             runtime_status.safe_write_status(
                 state="running",
                 stage="triage" if convergence_attempt == 1 else "local-regenerate",
@@ -4939,68 +4972,64 @@ def run_ingest(
                     f"{convergence_attempt}/{_MAX_FRONTIER_CONVERGENCE_ATTEMPTS} started"
                 )
             )
-            try:
-                raw_plan = _triage_with_progress(
-                    content,
-                    _llm_progress_callback(
-                        phase=(
-                            "triage"
-                            if convergence_attempt == 1
-                            else "local-regenerate-triage"
+            if convergence_attempt == 1:
+                try:
+                    raw_plan = _triage_with_progress(
+                        content,
+                        _llm_progress_callback(
+                            phase="triage",
+                            target="operation plan",
+                            job_id=job_id,
+                            source_raw=source_raw,
                         ),
-                        target="operation plan",
-                        job_id=job_id,
-                        source_raw=source_raw,
-                    ),
-                    frontier_feedback=frontier_feedback,
-                )
-            except IngestTriageFailure as triage_error:
-                triage_failed = triage_error.raw_failure
-                error = str(triage_error)
-                job_store.update(
-                    job_id,
-                    status=JobStatus.FAILED,
-                    completed_at=_now(),
-                    error=error,
-                )
-                runtime_status.safe_write_status(
-                    state="error",
-                    stage="triage",
-                    current_job_id=job_id,
-                    current_raw=source_raw,
-                    current_op=None,
-                    last_error=error,
-                    llm=None,
-                )
-                _safe_log(f"ingest | triage: {error}")
-                return
-            if raw_plan is None:
-                triage_failed = True
-                error = (
-                    "triage structured failure [unknown]: triage returned no plan "
-                    "after its bounded same-session repair turns"
-                )
-                job_store.update(
-                    job_id,
-                    status=JobStatus.FAILED,
-                    completed_at=_now(),
-                    error=error,
-                )
-                runtime_status.safe_write_status(
-                    state="error",
-                    stage="triage",
-                    current_job_id=job_id,
-                    current_raw=source_raw,
-                    current_op=None,
-                    last_error=error,
-                    llm=None,
-                )
-                _safe_log(f"ingest | triage: {error}")
-                return
+                    )
+                except IngestTriageFailure as triage_error:
+                    triage_failed = triage_error.raw_failure
+                    error = str(triage_error)
+                    job_store.update(
+                        job_id,
+                        status=JobStatus.FAILED,
+                        completed_at=_now(),
+                        error=error,
+                    )
+                    runtime_status.safe_write_status(
+                        state="error",
+                        stage="triage",
+                        current_job_id=job_id,
+                        current_raw=source_raw,
+                        current_op=None,
+                        last_error=error,
+                        llm=None,
+                    )
+                    _safe_log(f"ingest | triage: {error}")
+                    return
+                if raw_plan is None:
+                    triage_failed = True
+                    error = (
+                        "triage structured failure [unknown]: triage returned no plan "
+                        "after its bounded same-session repair turns"
+                    )
+                    job_store.update(
+                        job_id,
+                        status=JobStatus.FAILED,
+                        completed_at=_now(),
+                        error=error,
+                    )
+                    runtime_status.safe_write_status(
+                        state="error",
+                        stage="triage",
+                        current_job_id=job_id,
+                        current_raw=source_raw,
+                        current_op=None,
+                        last_error=error,
+                        llm=None,
+                    )
+                    _safe_log(f"ingest | triage: {error}")
+                    return
 
-            plan = _normalize_triage_plan(raw_plan)
-            plan = _dedupe_create_ops_with_existing(plan, content)
-            _safe_log(f"ingest | triage: {len(plan)} operations planned")
+                plan = _normalize_triage_plan(raw_plan)
+                plan = _dedupe_create_ops_with_existing(plan, content)
+                _safe_log(f"ingest | triage: {len(plan)} operations planned")
             if plan:
                 all_operations, failed_op_specs = _generate_local_operations(
                     plan,
@@ -5096,7 +5125,14 @@ def run_ingest(
             frontier_feedback = _frontier_feedback_text(frontier_result)
             if not _frontier_retry_is_actionable(frontier_result):
                 raise IngestApplyError(
-                    "local consensus ingest review deferred: " + frontier_feedback
+                    "local consensus authority unavailable: " + frontier_feedback
+                )
+            if frontier_budget.used >= frontier_budget.limit:
+                raise IngestApplyError(
+                    "local consensus ingest review did not converge after "
+                    f"{frontier_budget.used} local review calls: structured review "
+                    f"budget exhausted ({frontier_budget.used}/{frontier_budget.limit}); "
+                    + frontier_feedback
                 )
             _safe_log(
                 "ingest | local consensus requested regeneration: "

@@ -51,9 +51,8 @@ page id is safe ASCII kebab-case, retry_raw is allowed because ingest can
 retype a missing update into a create.
 If a code change appears necessary, propose_test_case.  Routine packets never
 invoke a frontier model; only the separate trusted system-incident lane may do so.
-If ingest local-consensus nonconvergence was caused by the bounded review budget,
-retry_raw is allowed; do not escalate the packet to frontier. Legacy packets may
-still use the older ingest.frontier_nonconvergent spelling.
+If ingest.frontier_nonconvergent was caused by frontier call budget exhaustion,
+retry_raw is allowed; do not escalate the packet back to frontier.
 Apply these status/action pairs exactly:
 - exactly one authorized similar_existing_pages candidate for
   apply.update_target_not_found -> resolved + resolve_update_target, echo the

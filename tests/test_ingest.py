@@ -3013,6 +3013,8 @@ class TestRunIngestFrontierDisposition:
 
         def fake_triage(_content: str, *, frontier_feedback=None):
             triage_feedback.append(frontier_feedback)
+            if len(triage_feedback) > 1:
+                raise AssertionError("content feedback must not re-run triage")
             return plan
 
         def fake_generate(
@@ -3070,17 +3072,17 @@ class TestRunIngestFrontierDisposition:
         assert finished.status == jobs.JobStatus.COMPLETED
         assert completed == [True]
         assert len(reviews) == 2
-        assert triage_feedback == [
+        assert triage_feedback == [None]
+        assert generate_feedback == [
             None,
             "Remove the unsupported inference; keep only the grounded fact.",
         ]
-        assert generate_feedback == triage_feedback
         assert any(
             update.get("stage") == "local-regenerate" for update in status_updates
         )
         assert any(
             isinstance(update.get("llm"), dict)
-            and update["llm"].get("phase") == "local-regenerate-triage"
+            and update["llm"].get("phase") == "local-regenerate-generate"
             for update in status_updates
         )
         assert not any(
@@ -3094,6 +3096,43 @@ class TestRunIngestFrontierDisposition:
         page = isolated_wiki / "pages" / "memory" / "converged.md"
         assert "grounded fact" in page.read_text(encoding="utf-8")
         assert "unsupported inference" not in page.read_text(encoding="utf-8")
+
+    def test_invalid_local_authority_fails_before_triage_or_generation(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        calls: list[str] = []
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (
+                None,
+                "adoption_artifact_invalid:evaluation evidence is inconsistent",
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_triage",
+            lambda *_args, **_kwargs: calls.append("triage") or [],
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_generate_one",
+            lambda *_args, **_kwargs: calls.append("generate") or None,
+        )
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest("grounded raw", job.job_id)
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert calls == []
+        assert finished.error == (
+            "local consensus authority unavailable: "
+            "adoption_artifact_invalid:evaluation evidence is inconsistent"
+        )
 
     def test_local_noop_requires_frontier_confirmation(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -5159,6 +5198,47 @@ class TestPerRawOrchestrator:
         packet = json.loads(Path(result.packet_path).read_text(encoding="utf-8"))
         assert packet["fingerprint"] == "ingest.local_consensus_nonconvergent"
         assert not raw_path.exists()
+
+    def test_invalid_local_authority_is_one_operational_failure_not_bad_raws(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        first_raw = isolated_wiki / "raw" / "first-authority-failure.md"
+        second_raw = isolated_wiki / "raw" / "second-authority-failure.md"
+        first_raw.write_text("first grounded source", encoding="utf-8")
+        second_raw.write_text("second grounded source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(self_heal, "start_background", started.append)
+        error = (
+            "local consensus authority unavailable: "
+            "adoption_artifact_invalid:evaluation evidence is inconsistent"
+        )
+
+        first = failure_supervisor.record_raw_failure(
+            raw_path=first_raw,
+            error=error,
+            raw_text="first grounded source",
+        )
+        second = failure_supervisor.record_raw_failure(
+            raw_path=second_raw,
+            error=error,
+            raw_text="second grounded source",
+        )
+
+        assert first.failure_class == (
+            "ingest.runtime_local_consensus_authority_unavailable"
+        )
+        assert first.fingerprint.endswith(":adoption_artifact_invalid")
+        assert first.quarantined is False
+        assert second.packet_path == first.packet_path
+        assert started == [Path(str(first.packet_path))]
+        assert first_raw.exists()
+        assert second_raw.exists()
+        deferred = failure_supervisor.operational_deferred_raw_files(
+            [first_raw, second_raw]
+        )
+        assert set(deferred) == {first_raw.name, second_raw.name}
 
     def test_ollama_unavailable_stays_pending_without_self_heal_packet(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
