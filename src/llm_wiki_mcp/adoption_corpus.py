@@ -1058,7 +1058,11 @@ def _candidate_contract_case_identities(
 
 
 def _historical_candidates(source: Path) -> tuple[list[_Candidate], dict[str, Any]]:
-    corpus = load_replay_corpus(source)
+    corpus = load_replay_corpus(
+        source,
+        exclude_stale_historical_identity=True,
+        allow_empty_after_stale_exclusion=True,
+    )
     reachable: list[tuple[_Candidate, str, str | None]] = []
     exclusion_reasons: Counter[str] = Counter()
     loader_usable_source_counts = Counter(
@@ -1200,6 +1204,7 @@ def _historical_candidates(source: Path) -> tuple[list[_Candidate], dict[str, An
     source_info["adoption_eligibility"] = {
         "input_total_cases": input_total,
         "loader_excluded_cases": int(source_info.get("excluded_cases") or 0),
+        "loader_excluded_reasons": dict(source_info.get("excluded_reasons") or {}),
         "loader_usable_cases": loader_usable,
         "runtime_reachable_cases": runtime_reachable_cases,
         "eligible_cases": len(rows),

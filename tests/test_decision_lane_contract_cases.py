@@ -25,19 +25,131 @@ from llm_wiki_mcp.decision_lane_contracts import (
     model_backed_lane_names,
 )
 from llm_wiki_mcp.decision_lane_prompts import (
+    INGEST_PROPOSAL_SCHEMA_VERSION,
+    INGEST_REPAIR_HOST_BLOCK,
+    INGEST_REPAIR_MODEL_BLOCK,
     INGEST_REPAIR_OPTION_ID_RE,
     INGEST_REPAIR_OPTION_POLICY_VERSION,
+    INGEST_REVIEW_MODEL_BLOCK,
+    _exact_text_change_projection,
+    _frontmatter_identity_fields,
+    build_ingest_review_projection,
     build_ingest_reconciliation_prompt,
     build_raw_replay_reconciliation_prompt,
+    canonical_json_sha256,
+    validate_ingest_review_projection,
 )
 from llm_wiki_mcp.decision_router import (
+    _strip_ingest_repair_host_block,
+    decision_system_with_policy,
     decision_context_buckets,
     decision_request_context,
     decision_request_fingerprint_sha256,
 )
+from llm_wiki_mcp.local_structured import (
+    StructuredRequestPreflight,
+    preflight_structured_request,
+)
 from llm_wiki_mcp.decision_policy import DECISION_POLICIES
 from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
 from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+
+
+def _json_prompt_block(prompt: str, marker: str) -> dict[str, object]:
+    return json.loads(prompt.split(f"<{marker}>\n", 1)[1].split(f"\n</{marker}>", 1)[0])
+
+
+def _host_repair_preflight(prompt: str) -> dict[str, object]:
+    sealed = _json_prompt_block(prompt, INGEST_REPAIR_HOST_BLOCK)
+    return dict(sealed["full_preflight"])
+
+
+def _render_projected_parts(parts: list[dict[str, object]], *, raw: str) -> str:
+    rendered: list[str] = []
+    for part in parts:
+        if part["kind"] == "literal":
+            rendered.append(str(part["text"]))
+        else:
+            assert part["kind"] == "raw_content_ref"
+            assert part["sha256"] == hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            assert part["utf8_bytes"] == len(raw.encode("utf-8"))
+            rendered.append(raw)
+    return "".join(rendered)
+
+
+def _assert_exact_bounded_context(
+    document: str,
+    context: dict[str, object],
+    *,
+    raw: str,
+) -> str:
+    rendered = _render_projected_parts(context["parts"], raw=raw)
+    start, end = context["utf8_range"]
+    assert document.encode("utf-8")[start:end].decode("utf-8") == rendered
+    assert len(rendered.encode("utf-8")) <= 256
+    return rendered
+
+
+def _complete_create_ingest_proposal(
+    *,
+    raw: str,
+    operations: list[dict[str, object]],
+    triage_plan: list[dict[str, object]],
+) -> dict[str, object]:
+    prepared = []
+    for index, operation in enumerate(operations):
+        filename = str(operation["filename"])
+        proposed = str(operation["content"])
+        prepared.append(
+            {
+                "op_type": "create",
+                "path": filename,
+                "page_id": filename.rsplit("/", 1)[-1].removesuffix(".md"),
+                "source_operation_index": index,
+                "source_operation_type": "create",
+                "source_filename": filename,
+                "preimage_exists": False,
+                "previous_text": None,
+                "previous_sha256": None,
+                "proposed_text": proposed,
+                "proposed_sha256": hashlib.sha256(proposed.encode("utf-8")).hexdigest(),
+                "new_tags": [],
+            }
+        )
+    return {
+        "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
+        "kind": "ingest_semantic_mutation_proposal",
+        "source_key": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "source_raw": "raw/contracts.md",
+        "raw_content": raw,
+        "raw_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "raw_keywords": [],
+        "local_disposition": "operations_available",
+        "triage_plan": triage_plan,
+        "failed_operation_specs": [],
+        "local_generated_operations": operations,
+        "prepared_operations": prepared,
+        "link_reconciliation": {"resolved": 0, "rewritten": 0, "unwrapped": 0},
+        "audit_decision": {"required": True},
+    }
+
+
+def _ingest_model_preflight(
+    proposal: dict[str, object],
+) -> tuple[str, str, StructuredRequestPreflight]:
+    prompt = build_ingest_reconciliation_prompt(proposal)
+    schema = production_decision_schemas()["ingest_reconciliation"]
+    bound_prompt, bound_system = bind_lane_contract_request(
+        "ingest_reconciliation", prompt, schema, None
+    )
+    model_prompt = _strip_ingest_repair_host_block(bound_prompt)
+    preflight = preflight_structured_request(
+        model_prompt,
+        schema,
+        system=decision_system_with_policy(schema, bound_system),
+        max_input_chars=DecisionRouterConfig().max_input_chars,
+    )
+    return prompt, model_prompt, preflight
 
 
 def test_contract_cases_cover_every_model_backed_lane_independently() -> None:
@@ -256,7 +368,7 @@ def test_lane_contract_case_source_version_tracks_the_resealed_cases() -> None:
     assert LANE_CONTRACT_CASE_VERSION == 20
     assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v20"
     assert set(LANE_PROMPT_POLICY_VERSIONS) == set(model_backed_lane_names())
-    assert LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] == 11
+    assert LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] == 13
     assert LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] == 8
     assert {
         version
@@ -665,15 +777,18 @@ def test_recall_improvement_regression_is_stopped_before_model_audit() -> None:
     assert checks["latency_ok"] is False
 
 
-def test_ingest_contracts_use_byte_exact_production_proposals() -> None:
+def test_ingest_contracts_use_complete_hash_bound_review_projections() -> None:
     cases = [
         case
         for case in decision_lane_contract_case_specs()
         if case.lane == "ingest_reconciliation"
     ]
     required = {
+        "projection_policy_version",
         "schema_version",
         "kind",
+        "full_proposal_kind",
+        "full_proposal_sha256",
         "source_key",
         "source_raw",
         "raw_content",
@@ -686,27 +801,59 @@ def test_ingest_contracts_use_byte_exact_production_proposals() -> None:
         "prepared_operations",
         "link_reconciliation",
         "audit_decision",
+        "projection_sha256",
     }
     prepared_required = {
+        "index",
         "op_type",
         "path",
         "page_id",
+        "source_operation_index",
+        "source_operation_type",
+        "source_filename",
         "preimage_exists",
-        "previous_text",
-        "previous_sha256",
-        "proposed_text",
-        "proposed_sha256",
         "new_tags",
+        "previous_utf8_bytes",
+        "proposed_utf8_bytes",
+        "previous_sha256",
+        "proposed_sha256",
+        "preimage_binding_verified",
+        "proposed_hash_verified",
+        "metadata_verified",
+        "page_identity",
+        "previous_ends_with_newline",
+        "proposed_ends_with_newline",
+        "previous_content_sha256",
+        "proposed_content_sha256",
+        "exact_change_hunks",
+        "exact_change_hunks_sha256",
+        "coverage_receipt",
+        "coverage_status",
     }
 
     assert len(cases) > CASES_PER_MODEL_BACKED_LANE
     for case in cases:
-        proposal = json.loads(case.prompt.split("Exact proposal:\n", 1)[1])
+        proposal = _json_prompt_block(case.prompt, INGEST_REVIEW_MODEL_BLOCK)
         assert set(proposal) == required
-        assert proposal["kind"] == "ingest_semantic_mutation_proposal"
+        assert proposal["kind"] == "ingest_semantic_mutation_review_projection"
+        assert proposal["full_proposal_kind"] == "ingest_semantic_mutation_proposal"
         assert (
             proposal["raw_sha256"]
             == hashlib.sha256(proposal["raw_content"].encode("utf-8")).hexdigest()
+        )
+        projection_core = dict(proposal)
+        projection_sha256 = projection_core.pop("projection_sha256")
+        assert (
+            projection_sha256
+            == hashlib.sha256(
+                json.dumps(
+                    projection_core,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
         )
         assert proposal["local_disposition"] in {
             "operations_available",
@@ -716,13 +863,25 @@ def test_ingest_contracts_use_byte_exact_production_proposals() -> None:
         }
         for prepared in proposal["prepared_operations"]:
             assert set(prepared) == prepared_required
+            assert prepared["preimage_binding_verified"] is True
+            assert prepared["proposed_hash_verified"] is True
+            assert prepared["metadata_verified"] is True
+            assert prepared["coverage_status"] == "complete"
+            assert prepared["coverage_receipt"]["all_opcodes_contiguous"] is True
             assert (
-                prepared["previous_sha256"]
-                == hashlib.sha256(prepared["previous_text"].encode("utf-8")).hexdigest()
+                prepared["coverage_receipt"]["all_equal_spans_byte_identical"] is True
             )
             assert (
-                prepared["proposed_sha256"]
-                == hashlib.sha256(prepared["proposed_text"].encode("utf-8")).hexdigest()
+                prepared["exact_change_hunks_sha256"]
+                == hashlib.sha256(
+                    json.dumps(
+                        prepared["exact_change_hunks"],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest()
             )
 
     grounded_apply = next(
@@ -731,9 +890,16 @@ def test_ingest_contracts_use_byte_exact_production_proposals() -> None:
         if case.expected["decision"] == "apply_available"
         and case.expected["failed_operations_disposition"] == "none"
     )
-    apply_proposal = json.loads(grounded_apply.prompt.split("Exact proposal:\n", 1)[1])
+    apply_proposal = _json_prompt_block(
+        grounded_apply.prompt, INGEST_REVIEW_MODEL_BLOCK
+    )
     [prepared] = apply_proposal["prepared_operations"]
-    assert apply_proposal["raw_content"] in prepared["proposed_text"]
+    rendered_parts = [
+        part
+        for hunk in prepared["exact_change_hunks"]
+        for part in hunk["proposed_changed_parts"]
+    ]
+    assert any(part["kind"] == "raw_content_ref" for part in rendered_parts)
 
     repair = next(
         case
@@ -741,13 +907,9 @@ def test_ingest_contracts_use_byte_exact_production_proposals() -> None:
         if case.expected.get("invalid_tags")
         and case.expected.get("replacement_operations")
     )
-    repair_proposal = json.loads(repair.prompt.split("Exact proposal:\n", 1)[1])
+    repair_proposal = _json_prompt_block(repair.prompt, INGEST_REVIEW_MODEL_BLOCK)
     [replacement] = repair.expected["replacement_operations"]
-    preflight = json.loads(
-        repair.prompt.split("<DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON>\n", 1)[
-            1
-        ].split("\n</DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON>", 1)[0]
-    )
+    preflight = _host_repair_preflight(repair.prompt)
     assert repair.expected["decision"] == "retry"
     assert repair.expected["invalid_tags"] == ["d/finance"]
     assert preflight["status"] == "none"
@@ -789,6 +951,714 @@ def test_ingest_contracts_use_byte_exact_production_proposals() -> None:
     assert repair_proposal["raw_content"] in replacement["content"]
 
 
+def test_ingest_review_projection_recomputes_and_rejects_tampering() -> None:
+    raw = "The runtime keeps exact change evidence."
+    previous = "---\ntitle: Runtime\n---\nOld body without the fact."
+    proposed = previous + "\n" + raw + "\n"
+    proposal = {
+        "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
+        "kind": "ingest_semantic_mutation_proposal",
+        "source_key": "source",
+        "source_raw": "raw.md",
+        "raw_content": raw,
+        "raw_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "raw_keywords": ["runtime"],
+        "local_disposition": "operations_available",
+        "triage_plan": [],
+        "failed_operation_specs": [],
+        "local_generated_operations": [
+            {
+                "type": "update",
+                "filename": "runtime.md",
+                "content": raw,
+                "raw_keywords": ["runtime"],
+            }
+        ],
+        "prepared_operations": [
+            {
+                "op_type": "update",
+                "path": "/wiki/pages/runtime.md",
+                "page_id": "runtime",
+                "source_operation_index": 0,
+                "source_operation_type": "update",
+                "source_filename": "runtime.md",
+                "preimage_exists": True,
+                "previous_text": previous,
+                "previous_sha256": hashlib.sha256(previous.encode("utf-8")).hexdigest(),
+                "proposed_text": proposed,
+                "proposed_sha256": hashlib.sha256(proposed.encode("utf-8")).hexdigest(),
+                "new_tags": [],
+            }
+        ],
+        "link_reconciliation": {"resolved": 0, "rewritten": 0, "unwrapped": 0},
+        "audit_decision": {"required": True},
+    }
+
+    projection = build_ingest_review_projection(proposal)
+
+    assert validate_ingest_review_projection(proposal, projection) is True
+    [hunk] = projection["prepared_operations"][0]["exact_change_hunks"]
+    assert (
+        _render_projected_parts(hunk["proposed_changed_parts"], raw=raw) == f"\n{raw}\n"
+    )
+    assert any(
+        part["kind"] == "raw_content_ref" for part in hunk["proposed_changed_parts"]
+    )
+    assert proposal["prepared_operations"][0]["previous_text"] == previous
+    assert proposal["prepared_operations"][0]["proposed_text"] == proposed
+    tampered = json.loads(json.dumps(projection))
+    tampered["prepared_operations"][0]["exact_change_hunks"][0][
+        "proposed_changed_parts"
+    ].append({"kind": "literal", "text": "\n+tampered"})
+    assert validate_ingest_review_projection(proposal, tampered) is False
+
+
+def test_ingest_review_projection_keeps_full_page_identity_for_distant_hunk() -> None:
+    raw = "The generic state is now current."
+    frontmatter = "---\ntitle: Alice account state\ntags: [d/account]\n---\n"
+    previous = frontmatter + ("Unchanged history.\n" * 200) + "State: old\n"
+    proposed = previous.removesuffix("State: old\n") + "State: current\n"
+    proposal = {
+        "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
+        "kind": "ingest_semantic_mutation_proposal",
+        "source_key": "identity-source",
+        "source_raw": "raw.md",
+        "raw_content": raw,
+        "raw_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "raw_keywords": ["Alice"],
+        "local_disposition": "operations_available",
+        "triage_plan": [],
+        "failed_operation_specs": [],
+        "local_generated_operations": [
+            {"type": "update", "filename": "alice.md", "content": "State: current\n"}
+        ],
+        "prepared_operations": [
+            {
+                "op_type": "update",
+                "path": "alice.md",
+                "page_id": "alice",
+                "source_operation_index": 0,
+                "source_operation_type": "update",
+                "source_filename": "alice.md",
+                "preimage_exists": True,
+                "previous_text": previous,
+                "previous_sha256": hashlib.sha256(previous.encode("utf-8")).hexdigest(),
+                "proposed_text": proposed,
+                "proposed_sha256": hashlib.sha256(proposed.encode("utf-8")).hexdigest(),
+                "new_tags": ["d/account"],
+            }
+        ],
+        "link_reconciliation": {"resolved": 0, "rewritten": 0, "unwrapped": 0},
+        "audit_decision": {"required": True},
+    }
+
+    projection = build_ingest_review_projection(proposal)
+    [prepared] = projection["prepared_operations"]
+
+    assert prepared["page_identity"] == {
+        "mode": "shared",
+        "previous_frontmatter_utf8_bytes": len(frontmatter.encode("utf-8")),
+        "previous_frontmatter_sha256": hashlib.sha256(
+            frontmatter.encode("utf-8")
+        ).hexdigest(),
+        "proposed_frontmatter_utf8_bytes": len(frontmatter.encode("utf-8")),
+        "proposed_frontmatter_sha256": hashlib.sha256(
+            frontmatter.encode("utf-8")
+        ).hexdigest(),
+        "identity_fields": "title: Alice account state\n",
+        "identity_fields_utf8_bytes": len("title: Alice account state\n".encode()),
+        "identity_fields_sha256": hashlib.sha256(
+            "title: Alice account state\n".encode()
+        ).hexdigest(),
+    }
+    assert "Alice account state" not in json.dumps(
+        prepared["exact_change_hunks"], ensure_ascii=False
+    )
+
+
+def test_frontmatter_identity_fields_require_exact_top_level_keys() -> None:
+    frontmatter = (
+        "---\n"
+        "subtitle: Not a title\n"
+        "title: Exact title\n"
+        "title_suffix: Not a title\n"
+        "canonical: canonical-page\n"
+        "canonical_notes: not identity\n"
+        "slug: exact-slug\n"
+        "slug_history: [old-slug]\n"
+        "page_id: exact-page\n"
+        "page_id_backup: old-page\n"
+        "aliases:\n  - exact-alias\n"
+        "---\n"
+    )
+
+    assert _frontmatter_identity_fields(frontmatter) == (
+        "title: Exact title\n"
+        "canonical: canonical-page\n"
+        "slug: exact-slug\n"
+        "page_id: exact-page\n"
+        "aliases:\n  - exact-alias\n"
+    )
+
+
+def test_frontmatter_only_hunks_do_not_duplicate_large_metadata_context() -> None:
+    raw = "Grounded body update."
+    keywords = ", ".join(f"keyword-{index}" for index in range(300))
+    previous = (
+        "---\ntitle: Stable identity\nupdated: 2026-07-13\n"
+        f"raw_keywords: [{keywords}]\n---\nOld body.\n"
+    )
+    proposed = previous.replace("updated: 2026-07-13", "updated: 2026-07-14").replace(
+        "Old body.", raw
+    )
+    proposal = {
+        "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
+        "kind": "ingest_semantic_mutation_proposal",
+        "source_key": "metadata-context-source",
+        "source_raw": "raw.md",
+        "raw_content": raw,
+        "raw_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+        "raw_keywords": [],
+        "local_disposition": "operations_available",
+        "triage_plan": [],
+        "failed_operation_specs": [],
+        "local_generated_operations": [
+            {"type": "update", "filename": "stable.md", "content": raw + "\n"}
+        ],
+        "prepared_operations": [
+            {
+                "op_type": "update",
+                "path": "stable.md",
+                "page_id": "stable",
+                "source_operation_index": 0,
+                "source_operation_type": "update",
+                "source_filename": "stable.md",
+                "preimage_exists": True,
+                "previous_text": previous,
+                "previous_sha256": hashlib.sha256(previous.encode()).hexdigest(),
+                "proposed_text": proposed,
+                "proposed_sha256": hashlib.sha256(proposed.encode()).hexdigest(),
+                "new_tags": [],
+            }
+        ],
+        "link_reconciliation": {"resolved": 0, "rewritten": 0, "unwrapped": 0},
+        "audit_decision": {"required": True},
+    }
+
+    projection = build_ingest_review_projection(proposal)
+    hunks = projection["prepared_operations"][0]["exact_change_hunks"]
+    frontmatter_hunk = next(hunk for hunk in hunks if "change_context" not in hunk)
+    body_hunk = next(hunk for hunk in hunks if "change_context" in hunk)
+
+    assert "change_context" not in frontmatter_hunk
+    assert (
+        _render_projected_parts(frontmatter_hunk["previous_changed_parts"], raw=raw)
+        == "updated: 2026-07-13\n"
+    )
+    assert (
+        _render_projected_parts(frontmatter_hunk["proposed_changed_parts"], raw=raw)
+        == "updated: 2026-07-14\n"
+    )
+    assert body_hunk["change_context"]["mode"] == "shared"
+    assert "keyword-0" not in json.dumps(hunks, ensure_ascii=False)
+
+
+def test_large_frontmatter_field_keeps_key_and_local_change_context() -> None:
+    raw = "The taxonomy metadata changed."
+    keywords = ", ".join(f"keyword-{index}" for index in range(300))
+    previous = (
+        f"---\ntitle: Stable identity\nraw_keywords: [{keywords}]\n---\nStable body.\n"
+    )
+    proposed = previous.replace("keyword-150", "topic-150")
+    proposal = {
+        "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
+        "kind": "ingest_semantic_mutation_proposal",
+        "source_key": "large-field-context-source",
+        "source_raw": "raw.md",
+        "raw_content": raw,
+        "raw_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+        "raw_keywords": [],
+        "local_disposition": "operations_available",
+        "triage_plan": [],
+        "failed_operation_specs": [],
+        "local_generated_operations": [
+            {"type": "update", "filename": "stable.md", "content": raw + "\n"}
+        ],
+        "prepared_operations": [
+            {
+                "op_type": "update",
+                "path": "stable.md",
+                "page_id": "stable",
+                "source_operation_index": 0,
+                "source_operation_type": "update",
+                "source_filename": "stable.md",
+                "preimage_exists": True,
+                "previous_text": previous,
+                "previous_sha256": hashlib.sha256(previous.encode()).hexdigest(),
+                "proposed_text": proposed,
+                "proposed_sha256": hashlib.sha256(proposed.encode()).hexdigest(),
+                "new_tags": [],
+            }
+        ],
+        "link_reconciliation": {"resolved": 0, "rewritten": 0, "unwrapped": 0},
+        "audit_decision": {"required": True},
+    }
+
+    projection = build_ingest_review_projection(proposal)
+    [hunk] = projection["prepared_operations"][0]["exact_change_hunks"]
+    field_context = hunk["frontmatter_field_context"]
+
+    assert field_context["previous_fields"] == ["raw_keywords"]
+    assert field_context["proposed_fields"] == ["raw_keywords"]
+    assert "keyword-149" in field_context["previous_before"]
+    assert field_context["previous_before"] == field_context["proposed_before"]
+    assert field_context["previous_after"].startswith("-150, keyword-151")
+    assert field_context["previous_after"] == field_context["proposed_after"]
+    assert "keyword-151" in field_context["previous_after"]
+    assert len(json.dumps(hunk, ensure_ascii=False).encode()) < 2_000
+
+
+def test_deterministic_repair_preserves_exact_raw_whitespace() -> None:
+    raw = "  Exact raw with leading spaces.  \n\n"
+    proposal = _complete_create_ingest_proposal(
+        raw=raw,
+        operations=[
+            {
+                "type": "create",
+                "filename": "memory/exact-whitespace.md",
+                "content": (
+                    "---\ntitle: Exact whitespace\n"
+                    "tags: [d/configuration, t/reference]\n---\n"
+                    f"{raw}Unsupported suffix.\n"
+                ),
+            }
+        ],
+        triage_plan=[],
+    )
+
+    prompt = build_ingest_reconciliation_prompt(proposal)
+    preflight = _host_repair_preflight(prompt)
+    [replacement] = preflight["replacement_operations"]
+
+    assert replacement["content"].endswith("---\n" + raw)
+    assert not replacement["content"].endswith(raw + "\n")
+
+
+@pytest.mark.parametrize("change_kind", ["same_line_replace", "line_insert"])
+def test_ingest_change_hunks_include_bounded_semantic_page_context(
+    change_kind: str,
+) -> None:
+    raw = "New grounded fact"
+    if change_kind == "same_line_replace":
+        previous = (
+            "A" * 600
+            + " Subject decides old value while existing context remains. "
+            + "B" * 600
+        )
+        proposed = previous.replace("old value", "new value")
+        expected_before = "Subject decides "
+        expected_after = " value while existing context remains."
+    else:
+        previous = (
+            "P" * 600
+            + "\nTarget page heading\n"
+            + "Existing tail context\n"
+            + "S" * 600
+        )
+        proposed = previous.replace(
+            "Target page heading\n",
+            f"Target page heading\n{raw}\n",
+        )
+        expected_before = "Target page heading\n"
+        expected_after = "Existing tail context\n"
+
+    projection = _exact_text_change_projection(
+        previous,
+        proposed,
+        raw_content=raw,
+    )
+    [hunk] = projection["exact_change_hunks"]
+
+    assert hunk["context_parts_complete"] is True
+    context = hunk["change_context"]
+    assert context["mode"] == "shared"
+    for document, prefix in ((previous, "previous"), (proposed, "proposed")):
+        before = _assert_exact_bounded_context(
+            document,
+            {
+                "parts": context["before"]["parts"],
+                "utf8_range": context["before"][f"{prefix}_utf8_range"],
+            },
+            raw=raw,
+        )
+        after = _assert_exact_bounded_context(
+            document,
+            {
+                "parts": context["after"]["parts"],
+                "utf8_range": context["after"][f"{prefix}_utf8_range"],
+            },
+            raw=raw,
+        )
+        assert before.endswith(expected_before)
+        assert after.startswith(expected_after)
+
+
+def test_ingest_review_projection_accepts_production_create_absent_preimage() -> None:
+    raw = "A production create retains its complete postimage."
+    content = f"---\ntitle: Create\n---\n{raw}\n"
+    proposal = _complete_create_ingest_proposal(
+        raw=raw,
+        operations=[
+            {
+                "type": "create",
+                "filename": "memory/create.md",
+                "content": content,
+            }
+        ],
+        triage_plan=[],
+    )
+
+    projection = build_ingest_review_projection(proposal)
+    [prepared] = projection["prepared_operations"]
+
+    assert prepared["coverage_status"] == "complete"
+    assert prepared["preimage_exists"] is False
+    assert prepared["previous_sha256"] is None
+    assert prepared["preimage_binding_verified"] is True
+    assert prepared["previous_utf8_bytes"] == 0
+    [hunk] = prepared["exact_change_hunks"]
+    assert _render_projected_parts(hunk["previous_changed_parts"], raw=raw) == ""
+    assert _render_projected_parts(hunk["proposed_changed_parts"], raw=raw) == content
+    assert any(
+        part["kind"] == "raw_content_ref" for part in hunk["proposed_changed_parts"]
+    )
+    assert projection["full_proposal_sha256"] == canonical_json_sha256(proposal)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["create_preimage", "update_hash", "binding", "bool_binding"],
+)
+def test_ingest_review_projection_fails_before_transport_on_invalid_proof(
+    failure: str,
+) -> None:
+    raw = "A proof mismatch must never reach a model."
+    content = f"---\ntitle: Proof\n---\n{raw}\n"
+    proposal = _complete_create_ingest_proposal(
+        raw=raw,
+        operations=[
+            {
+                "type": "create",
+                "filename": "memory/proof.md",
+                "content": content,
+            }
+        ],
+        triage_plan=[],
+    )
+    prepared = proposal["prepared_operations"][0]
+    if failure == "create_preimage":
+        prepared["previous_text"] = ""
+        prepared["previous_sha256"] = hashlib.sha256(b"").hexdigest()
+    elif failure == "update_hash":
+        prepared["op_type"] = "update"
+        prepared["preimage_exists"] = True
+        prepared["previous_text"] = "before\n"
+        prepared["previous_sha256"] = "0" * 64
+    elif failure == "binding":
+        prepared["source_operation_index"] = 1
+    else:
+        prepared["source_operation_index"] = True
+
+    with pytest.raises(ValueError, match="incomplete or invalid proof"):
+        build_ingest_reconciliation_prompt(proposal)
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"schema_version": INGEST_PROPOSAL_SCHEMA_VERSION + 1},
+        {"kind": "stale_ingest_proposal"},
+        {"raw_sha256": "0" * 64},
+        {"raw_content": None},
+    ],
+)
+def test_ingest_review_projection_rejects_invalid_proposal_envelope(
+    patch: dict[str, object],
+) -> None:
+    raw = "The proposal envelope must bind exact raw evidence."
+    content = f"---\ntitle: Envelope\n---\n{raw}\n"
+    proposal = _complete_create_ingest_proposal(
+        raw=raw,
+        operations=[
+            {
+                "type": "create",
+                "filename": "memory/envelope.md",
+                "content": content,
+            }
+        ],
+        triage_plan=[],
+    )
+    proposal.update(patch)
+
+    with pytest.raises(ValueError, match="envelope is invalid or stale"):
+        build_ingest_reconciliation_prompt(proposal)
+
+
+@pytest.mark.parametrize(
+    ("previous", "proposed", "previous_changed", "proposed_changed"),
+    [
+        ("a\r\n", "a\n", "\r", ""),
+        ("a\n", "a", "\n", ""),
+        ("a\r", "a\n", "\r", "\n"),
+    ],
+)
+def test_ingest_review_projection_keeps_newline_only_changes_visible(
+    previous: str,
+    proposed: str,
+    previous_changed: str,
+    proposed_changed: str,
+) -> None:
+    raw = "newline preservation"
+    proposal = {
+        "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
+        "kind": "ingest_semantic_mutation_proposal",
+        "source_key": "newline",
+        "source_raw": "raw/newline.md",
+        "raw_content": raw,
+        "raw_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "raw_keywords": [],
+        "local_disposition": "operations_available",
+        "triage_plan": [],
+        "failed_operation_specs": [],
+        "local_generated_operations": [
+            {"type": "update", "filename": "newline.md", "content": proposed}
+        ],
+        "prepared_operations": [
+            {
+                "op_type": "update",
+                "path": "newline.md",
+                "page_id": "newline",
+                "source_operation_index": 0,
+                "source_operation_type": "update",
+                "source_filename": "newline.md",
+                "preimage_exists": True,
+                "previous_text": previous,
+                "previous_sha256": hashlib.sha256(previous.encode("utf-8")).hexdigest(),
+                "proposed_text": proposed,
+                "proposed_sha256": hashlib.sha256(proposed.encode("utf-8")).hexdigest(),
+                "new_tags": [],
+            }
+        ],
+        "link_reconciliation": {"resolved": 0, "rewritten": 0, "unwrapped": 0},
+        "audit_decision": {"required": True},
+    }
+
+    projection = build_ingest_review_projection(proposal)
+    [prepared] = projection["prepared_operations"]
+    [hunk] = prepared["exact_change_hunks"]
+
+    assert (
+        _render_projected_parts(hunk["previous_changed_parts"], raw=raw)
+        == previous_changed
+    )
+    assert (
+        _render_projected_parts(hunk["proposed_changed_parts"], raw=raw)
+        == proposed_changed
+    )
+    assert prepared["coverage_receipt"]["changed_opcode_count"] == 1
+    assert prepared["coverage_receipt"]["all_changed_spans_rendered"] is True
+
+
+def test_large_ingest_review_projection_fits_current_router_input_cap() -> None:
+    raw = "\n".join(f"raw fact {index}: durable evidence" for index in range(500))
+    prepared = []
+    generated = []
+    for index, line_count in enumerate((550, 650, 1_150, 3_900, 400)):
+        page_id = f"large-page-{index}"
+        previous = "".join(
+            f"existing {index} line {line}\n" for line in range(line_count)
+        )
+        addition = f"\n## New evidence {index}\nraw fact {index}: durable evidence\n"
+        proposed = previous + addition
+        prepared.append(
+            {
+                "op_type": "update",
+                "path": f"/wiki/pages/{page_id}.md",
+                "page_id": page_id,
+                "source_operation_index": index,
+                "source_operation_type": "update",
+                "source_filename": f"{page_id}.md",
+                "preimage_exists": True,
+                "previous_text": previous,
+                "previous_sha256": hashlib.sha256(previous.encode("utf-8")).hexdigest(),
+                "proposed_text": proposed,
+                "proposed_sha256": hashlib.sha256(proposed.encode("utf-8")).hexdigest(),
+                "new_tags": [],
+            }
+        )
+        generated.append(
+            {
+                "type": "update",
+                "filename": f"{page_id}.md",
+                "content": addition,
+                "raw_keywords": ["durable"],
+            }
+        )
+    proposal = {
+        "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
+        "kind": "ingest_semantic_mutation_proposal",
+        "source_key": "large-source",
+        "source_raw": "large-raw.md",
+        "raw_content": raw,
+        "raw_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "raw_keywords": ["durable"],
+        "local_disposition": "operations_available",
+        "triage_plan": [],
+        "failed_operation_specs": [],
+        "local_generated_operations": generated,
+        "prepared_operations": prepared,
+        "link_reconciliation": {"resolved": 0, "rewritten": 0, "unwrapped": 0},
+        "audit_decision": {"required": True},
+    }
+    legacy_bytes = len(
+        json.dumps(proposal, ensure_ascii=False, indent=2).encode("utf-8")
+    )
+    prompt = build_ingest_reconciliation_prompt(proposal)
+    schema = production_decision_schemas()["ingest_reconciliation"]
+    bound_prompt, bound_system = bind_lane_contract_request(
+        "ingest_reconciliation", prompt, schema, None
+    )
+    effective_system = decision_system_with_policy(schema, bound_system)
+    model_prompt = _strip_ingest_repair_host_block(bound_prompt)
+    preflight = preflight_structured_request(
+        model_prompt,
+        schema,
+        system=effective_system,
+        max_input_chars=DecisionRouterConfig().max_input_chars,
+    )
+
+    assert legacy_bytes > 300_000
+    assert preflight.ok is True
+    assert preflight.input_bytes < DecisionRouterConfig().max_input_chars
+    assert all(
+        operation["coverage_status"] == "complete"
+        for operation in _json_prompt_block(prompt, INGEST_REVIEW_MODEL_BLOCK)[
+            "prepared_operations"
+        ]
+    )
+
+
+def test_large_tagged_create_with_same_line_suffix_fits_router_input_cap() -> None:
+    raw = " ".join(f"durable-{index}" for index in range(2_100))
+    content = (
+        "---\ntitle: Large repair\n"
+        "tags: [d/configuration, d/finance, t/reference, s/evergreen]\n---\n"
+        f"{raw} Unsupported generated suffix.\n"
+    )
+    proposal = _complete_create_ingest_proposal(
+        raw=raw,
+        operations=[
+            {
+                "type": "create",
+                "filename": "memory/large-repair.md",
+                "content": content,
+            }
+        ],
+        triage_plan=[],
+    )
+    prompt = build_ingest_reconciliation_prompt(proposal)
+    schema = production_decision_schemas()["ingest_reconciliation"]
+    bound_prompt, bound_system = bind_lane_contract_request(
+        "ingest_reconciliation", prompt, schema, None
+    )
+    model_prompt = _strip_ingest_repair_host_block(bound_prompt)
+    preflight = preflight_structured_request(
+        model_prompt,
+        schema,
+        system=decision_system_with_policy(schema, bound_system),
+        max_input_chars=DecisionRouterConfig().max_input_chars,
+    )
+    repair_projection = _json_prompt_block(prompt, INGEST_REPAIR_MODEL_BLOCK)
+    full_preflight = _host_repair_preflight(prompt)
+
+    assert len(prompt.encode("utf-8")) > len(model_prompt.encode("utf-8")) * 2
+    assert f"<{INGEST_REPAIR_HOST_BLOCK}>" not in model_prompt
+    assert preflight.ok is True
+    assert preflight.input_bytes < DecisionRouterConfig().max_input_chars
+    assert full_preflight["replacement_operations"]
+    assert (
+        repair_projection["deterministic_repair_option"]["coverage_status"]
+        == "complete"
+    )
+    mutation_ids = [
+        mutation["mutation_id"] for mutation in repair_projection["mutations"]
+    ]
+    assert len(mutation_ids) == len(set(mutation_ids))
+
+
+def test_eight_tagged_creates_fit_router_input_cap() -> None:
+    raw = " ".join(f"fact-{index}" for index in range(500))
+    operations = [
+        {
+            "type": "create",
+            "filename": f"memory/multi-create-{index}.md",
+            "content": (
+                f"---\ntitle: Multi create {index}\n"
+                "tags: [d/configuration, d/finance, t/reference, s/evergreen]\n"
+                f"---\n{raw}\n"
+            ),
+        }
+        for index in range(8)
+    ]
+    proposal = _complete_create_ingest_proposal(
+        raw=raw,
+        operations=operations,
+        triage_plan=[],
+    )
+
+    prompt, model_prompt, preflight = _ingest_model_preflight(proposal)
+
+    assert preflight.ok is True
+    assert preflight.input_bytes < DecisionRouterConfig().max_input_chars
+    assert len(prompt.encode("utf-8")) > len(model_prompt.encode("utf-8")) * 2
+    review_projection = _json_prompt_block(prompt, INGEST_REVIEW_MODEL_BLOCK)
+    assert len(review_projection["prepared_operations"]) == 8
+    assert all(
+        any(
+            part["kind"] == "raw_content_ref"
+            for hunk in operation["exact_change_hunks"]
+            for part in hunk["proposed_changed_parts"]
+        )
+        for operation in review_projection["prepared_operations"]
+    )
+
+
+def test_single_near_max_raw_create_fits_router_input_cap() -> None:
+    raw = " ".join(f"fact-{index}" for index in range(7_000))
+    proposal = _complete_create_ingest_proposal(
+        raw=raw,
+        operations=[
+            {
+                "type": "create",
+                "filename": "memory/near-max-raw.md",
+                "content": (
+                    "---\ntitle: Near max raw\n"
+                    "tags: [d/configuration, d/finance, t/reference, s/evergreen]\n"
+                    f"---\n{raw}\n"
+                ),
+            }
+        ],
+        triage_plan=[],
+    )
+
+    prompt, model_prompt, preflight = _ingest_model_preflight(proposal)
+
+    assert preflight.ok is True
+    assert preflight.input_bytes < DecisionRouterConfig().max_input_chars
+    assert preflight.input_bytes > DecisionRouterConfig().max_input_chars * 3 // 4
+    assert len(prompt.encode("utf-8")) > len(model_prompt.encode("utf-8")) * 2
+
+
 def test_ingest_prompt_orders_quarantine_retry_and_safe_apply() -> None:
     prompts = [
         case.prompt
@@ -797,7 +1667,31 @@ def test_ingest_prompt_orders_quarantine_retry_and_safe_apply() -> None:
     ]
 
     assert prompts
-    assert all("Apply this decision table in order:" in prompt for prompt in prompts)
+    assert all(
+        "Apply this decision table in order; stop at the first matching step:"
+        in prompt
+        for prompt in prompts
+    )
+    assert all(
+        "Only if step 1 is false: if readable, internally consistent evidence has a\n"
+        "   failed local operation another local attempt could resolve, choose retry\n"
+        "   with retry_required."
+        in prompt
+        for prompt in prompts
+    )
+    assert all(
+        "A coherent report that incompatible states are both current still matches\n"
+        "   step 1 when no provenance resolves which state is authoritative."
+        in prompt
+        for prompt in prompts
+    )
+    assert all(
+        prompt.index(f"</{INGEST_REVIEW_MODEL_BLOCK}>")
+        < prompt.index(
+            "Apply this decision table in order; stop at the first matching step:"
+        )
+        for prompt in prompts
+    )
     assert all(
         "choose quarantined with failed_operations_disposition=retry_required" in prompt
         for prompt in prompts
@@ -807,6 +1701,22 @@ def test_ingest_prompt_orders_quarantine_retry_and_safe_apply() -> None:
         "Do not return\ninvalid_tags or replacement_operations yourself" in prompt
         for prompt in prompts
     )
+
+
+def test_ingest_quarantine_precedes_retryable_generation_failure() -> None:
+    case = next(
+        case
+        for case in decision_lane_contract_case_specs()
+        if case.lane == "ingest_reconciliation"
+        and case.expected["decision"] == "quarantined"
+    )
+    projection = _json_prompt_block(case.prompt, INGEST_REVIEW_MODEL_BLOCK)
+
+    assert projection["local_disposition"] == "all_generation_failed"
+    assert projection["failed_operation_specs"]
+    assert "Current setting: enabled." in projection["raw_content"]
+    assert "Current setting: disabled." in projection["raw_content"]
+    assert "neither has a source" in projection["raw_content"]
 
 
 @pytest.mark.parametrize(
@@ -838,34 +1748,31 @@ def test_ingest_preflight_never_lets_negative_triage_authorize_tag_deletion(
     title: str,
     body: str,
 ) -> None:
-    prompt = build_ingest_reconciliation_prompt(
+    operations = [
         {
-            "raw_content": raw,
-            "triage_plan": [
+            "type": "create",
+            "filename": "memory/microfinance-policy.md",
+            "content": (
+                f"---\ntitle: {title}\n"
+                "tags: [d/configuration, d/finance, t/reference, "
+                "s/evergreen]\n---\n"
+                f"{body}\n"
+            ),
+        }
+    ]
+    prompt = build_ingest_reconciliation_prompt(
+        _complete_create_ingest_proposal(
+            raw=raw,
+            triage_plan=[
                 {
                     "filename": "memory/microfinance-policy.md",
                     "summary": "Record the runtime; the raw contains no finance subject.",
                 }
             ],
-            "local_generated_operations": [
-                {
-                    "type": "create",
-                    "filename": "memory/microfinance-policy.md",
-                    "content": (
-                        f"---\ntitle: {title}\n"
-                        "tags: [d/configuration, d/finance, t/reference, "
-                        "s/evergreen]\n---\n"
-                        f"{body}\n"
-                    ),
-                }
-            ],
-        }
+            operations=operations,
+        )
     )
-    preflight = json.loads(
-        prompt.split("<DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON>\n", 1)[1].split(
-            "\n</DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON>", 1
-        )[0]
-    )
+    preflight = _json_prompt_block(prompt, INGEST_REPAIR_MODEL_BLOCK)
 
     assert preflight["tag_authority"] == "local_quorum_only"
     assert "invalid_tags" not in preflight
@@ -896,17 +1803,13 @@ def test_ingest_preflight_scopes_a_shared_tag_option_to_one_filename() -> None:
         },
     ]
     prompt = build_ingest_reconciliation_prompt(
-        {
-            "raw_content": raw,
-            "triage_plan": [],
-            "local_generated_operations": operations,
-        }
+        _complete_create_ingest_proposal(
+            raw=raw,
+            triage_plan=[],
+            operations=operations,
+        )
     )
-    preflight = json.loads(
-        prompt.split("<DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON>\n", 1)[1].split(
-            "\n</DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON>", 1
-        )[0]
-    )
+    preflight = _host_repair_preflight(prompt)
     shared_options = [
         option
         for option in preflight["semantic_tag_options"]
@@ -954,8 +1857,8 @@ def test_lane_overlay_excludes_the_infeasible_16k_bucket() -> None:
         for case in decision_lane_contract_case_specs()
     )
     assert buckets == {
-        32_768: 97,
-        65_536: 1,
+        32_768: 96,
+        65_536: 2,
         98_304: 1,
         114_688: 1,
     }

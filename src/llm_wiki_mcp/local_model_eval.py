@@ -48,6 +48,7 @@ from llm_wiki_mcp.decision_router import (
     DecisionRouterResult,
     ModelObserver,
     decision_context_buckets,
+    decision_effective_request,
     decision_request_fingerprint_sha256,
     decision_request_context,
 )
@@ -82,6 +83,7 @@ ARTIFACT_SCHEMA_VERSION = 12
 # for the same temperature-zero request and made a safety veto nondeterministic.
 EVALUATOR_POLICY_VERSION = 20
 LEGACY_REPLAY_PROMPT_LIMIT = 50_000
+STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION = "stale_historical_request_identity"
 # This is deliberately not configurable from the CLI.  A tiny hand-picked
 # slice is useful for smoke testing, but it must never become an adoption
 # artifact merely because every answer in that slice happened to agree.
@@ -548,6 +550,8 @@ def load_replay_corpus(
     offset: int = 0,
     limit: int = 0,
     required_schema_manifest: Mapping[str, str] | None = None,
+    exclude_stale_historical_identity: bool = False,
+    allow_empty_after_stale_exclusion: bool = False,
 ) -> ReplayCorpus:
     """Load and validate replay JSONL without invoking any model."""
 
@@ -662,6 +666,26 @@ def load_replay_corpus(
             raise ReplayInputError(
                 f"line {line_number}: source must be a non-empty string or null"
             )
+        normalized_source = (
+            source_name.strip() if isinstance(source_name, str) else None
+        )
+        is_deterministic_contract = normalized_source == LANE_CONTRACT_SOURCE
+        may_exclude_stale_identity = (
+            exclude_stale_historical_identity and not is_deterministic_contract
+        )
+
+        def reject_or_exclude_stale_identity(message: str) -> bool:
+            if may_exclude_stale_identity:
+                excluded_reasons[STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION] = (
+                    excluded_reasons.get(
+                        STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION,
+                        0,
+                    )
+                    + 1
+                )
+                return True
+            raise ReplayInputError(f"line {line_number}: {message}")
+
         if evidence_provenance is not None and not isinstance(
             evidence_provenance, dict
         ):
@@ -681,9 +705,10 @@ def load_replay_corpus(
                 or not isinstance(declared_lane_contract_effect, str)
                 or not declared_lane_contract_effect
             ):
-                raise ReplayInputError(
-                    f"line {line_number}: lane contract metadata is incomplete"
-                )
+                if reject_or_exclude_stale_identity(
+                    "lane contract metadata is incomplete"
+                ):
+                    continue
             try:
                 validate_declared_lane_contract(
                     lane=decision_lane,
@@ -691,10 +716,11 @@ def load_replay_corpus(
                     schema=schema,
                 )
             except ValueError as exc:
-                raise ReplayInputError(
-                    f"line {line_number}: invalid lane contract metadata: {exc}"
-                ) from exc
-        if source_name == LANE_CONTRACT_SOURCE:
+                if reject_or_exclude_stale_identity(
+                    f"invalid lane contract metadata: {exc}"
+                ):
+                    continue
+        if is_deterministic_contract:
             if not all(value is not None for value in lane_fields):
                 raise ReplayInputError(
                     f"line {line_number}: deterministic lane contract row lacks identity"
@@ -719,21 +745,90 @@ def load_replay_corpus(
         schema_copy = json.loads(_canonical_json(schema))
         expected_copy = json.loads(_canonical_json(expected))
         signature = _decision_signature(expected_copy, schema_copy)
-        effective_request_sha256 = decision_request_fingerprint_sha256(
-            prompt=prompt,
-            schema=schema_copy,
-            system=system,
-            decision_lane=decision_lane if isinstance(decision_lane, str) else None,
-        )
+        try:
+            effective_model_prompt, effective_model_system = decision_effective_request(
+                prompt=prompt,
+                schema=schema_copy,
+                system=system,
+                decision_lane=(
+                    decision_lane if isinstance(decision_lane, str) else None
+                ),
+            )
+            effective_request_sha256 = decision_request_fingerprint_sha256(
+                prompt=prompt,
+                schema=schema_copy,
+                system=system,
+                decision_lane=(
+                    decision_lane if isinstance(decision_lane, str) else None
+                ),
+            )
+        except ValueError as exc:
+            if reject_or_exclude_stale_identity(
+                f"invalid effective request identity: {exc}"
+            ):
+                continue
+            raise AssertionError("unreachable") from exc
+        evidence_mismatches: list[str] = []
+        if "effective_model_prompt_chars" in row:
+            declared = row["effective_model_prompt_chars"]
+            if (
+                isinstance(declared, bool)
+                or not isinstance(declared, int)
+                or declared != len(effective_model_prompt)
+            ):
+                evidence_mismatches.append("effective_model_prompt_chars")
+        if "effective_model_prompt_sha256" in row:
+            declared = row["effective_model_prompt_sha256"]
+            if (
+                declared
+                != hashlib.sha256(effective_model_prompt.encode("utf-8")).hexdigest()
+            ):
+                evidence_mismatches.append("effective_model_prompt_sha256")
+        if "effective_model_system" in row:
+            if row["effective_model_system"] != effective_model_system:
+                evidence_mismatches.append("effective_model_system")
+        if "effective_model_system_chars" in row:
+            declared = row["effective_model_system_chars"]
+            expected_chars = (
+                len(effective_model_system)
+                if isinstance(effective_model_system, str)
+                else 0
+            )
+            if (
+                isinstance(declared, bool)
+                or not isinstance(declared, int)
+                or declared != expected_chars
+            ):
+                evidence_mismatches.append("effective_model_system_chars")
+        if "effective_model_system_sha256" in row:
+            expected_sha256 = (
+                hashlib.sha256(effective_model_system.encode("utf-8")).hexdigest()
+                if isinstance(effective_model_system, str)
+                else None
+            )
+            if row["effective_model_system_sha256"] != expected_sha256:
+                evidence_mismatches.append("effective_model_system_sha256")
+        if "host_sidecar_present" in row:
+            declared = row["host_sidecar_present"]
+            if not isinstance(declared, bool) or declared is not (
+                effective_model_prompt != prompt
+            ):
+                evidence_mismatches.append("host_sidecar_present")
+        if evidence_mismatches and reject_or_exclude_stale_identity(
+            "effective model request evidence mismatch: "
+            + ", ".join(evidence_mismatches)
+        ):
+            continue
         declared_request_sha256 = row.get("effective_request_sha256")
         if declared_request_sha256 is not None and (
             not isinstance(declared_request_sha256, str)
             or re.fullmatch(r"[0-9a-f]{64}", declared_request_sha256) is None
             or declared_request_sha256 != effective_request_sha256
         ):
-            raise ReplayInputError(
-                f"line {line_number}: effective request fingerprint mismatch"
-            )
+            if reject_or_exclude_stale_identity(
+                "effective request fingerprint mismatch"
+            ):
+                continue
         expected_effect = _semantic_effect(
             expected_copy,
             schema_copy,
@@ -744,9 +839,10 @@ def load_replay_corpus(
             isinstance(declared_lane_contract_effect, str)
             and declared_lane_contract_effect != expected_effect
         ):
-            raise ReplayInputError(
-                f"line {line_number}: lane contract effect no longer matches evaluator"
-            )
+            if reject_or_exclude_stale_identity(
+                "lane contract effect no longer matches evaluator"
+            ):
+                continue
         rows.append(
             ReplayCase(
                 index=index,
@@ -762,7 +858,7 @@ def load_replay_corpus(
                     else None,
                 ),
                 role=role,
-                source=source_name.strip() if isinstance(source_name, str) else None,
+                source=normalized_source,
                 contract_id=contract_id if isinstance(contract_id, str) else None,
                 decision_lane=(
                     decision_lane if isinstance(decision_lane, str) else None
@@ -844,7 +940,15 @@ def load_replay_corpus(
     )
     end = None if limit == 0 else offset + limit
     selected = tuple(rows[offset:end])
-    if not selected:
+    empty_is_migration_only = bool(
+        allow_empty_after_stale_exclusion
+        and exclude_stale_historical_identity
+        and not rows
+        and total_cases > 0
+        and excluded_reasons.get(STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION)
+        == total_cases
+    )
+    if not selected and not empty_is_migration_only:
         raise ReplayInputError(
             "selection is empty "
             f"(total={total_cases}, usable={len(rows)}, "
@@ -3388,6 +3492,7 @@ __all__ = [
     "ReplayCorpus",
     "ReplayInputError",
     "ResumeMismatchError",
+    "STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION",
     "evaluate_replays",
     "fetch_local_model_metadata",
     "inspect_replays",

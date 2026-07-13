@@ -29,13 +29,17 @@ from llm_wiki_mcp.decision_lane_contract_cases import (
     decision_lane_contract_case_manifest_sha256,
 )
 from llm_wiki_mcp.decision_lane_prompts import (
+    INGEST_REPAIR_HOST_BLOCK,
+    INGEST_REPAIR_MODEL_BLOCK,
     INGEST_REPAIR_OPTION_ID_RE,
     INGEST_REPAIR_OPTION_POLICY_VERSION,
+    INGEST_REPAIR_PROJECTION_POLICY_VERSION,
+    INGEST_REVIEW_MODEL_BLOCK,
+    build_ingest_repair_projection,
     ingest_repair_option_id,
 )
 from llm_wiki_mcp.decision_schema_manifest import (
     NON_DECISION_FIELDS,
-    canonical_ingest_repair_arrays,
     decision_signature_value,
     default_decision_value,
     production_decision_schemas,
@@ -69,7 +73,7 @@ AUDIT_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 ADOPTION_ARTIFACT_SCHEMA_VERSION = 12
 DECISION_SEMANTICS_POLICY_VERSION = 11
 QUORUM_SAFETY_POLICY_VERSION = 1
-DECISION_REQUEST_FINGERPRINT_VERSION = 3
+DECISION_REQUEST_FINGERPRINT_VERSION = 4
 MIN_ADOPTION_USABLE_CASES = 100
 MIN_CASES_PER_PRODUCTION_SCHEMA = 5
 REQUIRED_ADOPTION_CHECKS = frozenset(
@@ -468,6 +472,28 @@ def decision_system_with_policy(
     return f"{base.rstrip()}\n\n{overlay}".lstrip()
 
 
+def decision_effective_request(
+    *,
+    prompt: str,
+    schema: Mapping[str, Any],
+    system: str | None,
+    decision_lane: str | None = None,
+) -> tuple[str, str | None]:
+    """Rebuild the exact prompt and system sent to a local model."""
+
+    if decision_lane is not None:
+        prompt, system = bind_lane_contract_request(
+            decision_lane,
+            prompt,
+            schema,
+            system,
+        )
+        if decision_lane == "ingest_reconciliation":
+            _ingest_reconciliation_repair_contract(prompt)
+            prompt = _strip_ingest_repair_host_block(prompt)
+    return prompt, decision_system_with_policy(schema, system)
+
+
 def decision_request_fingerprint_sha256(
     *,
     prompt: str,
@@ -484,14 +510,12 @@ def decision_request_fingerprint_sha256(
     attached at routing time.
     """
 
-    if decision_lane is not None:
-        prompt, system = bind_lane_contract_request(
-            decision_lane,
-            prompt,
-            schema,
-            system,
-        )
-    effective_system = decision_system_with_policy(schema, system)
+    prompt, effective_system = decision_effective_request(
+        prompt=prompt,
+        schema=schema,
+        system=system,
+        decision_lane=decision_lane,
+    )
     normalized_system = (
         effective_system.strip()
         if isinstance(effective_system, str) and effective_system.strip()
@@ -522,14 +546,12 @@ def decision_request_context(
 ) -> tuple[int, int]:
     """Return the exact required tokens and smallest configured bucket."""
 
-    if decision_lane is not None:
-        prompt, system = bind_lane_contract_request(
-            decision_lane,
-            prompt,
-            schema,
-            system,
-        )
-    effective_system = decision_system_with_policy(schema, system)
+    prompt, effective_system = decision_effective_request(
+        prompt=prompt,
+        schema=schema,
+        system=system,
+        decision_lane=decision_lane,
+    )
     required = required_structured_context_tokens(
         prompt,
         schema,
@@ -754,8 +776,11 @@ def _content_correction_value_validator(
 @dataclass(frozen=True)
 class _IngestRepairOption:
     option_id: str
+    kind: str
+    filename: str | None
     invalid_tags: list[Any]
     replacement_operations: list[Any]
+    action_sha256: str
 
 
 @dataclass(frozen=True)
@@ -768,11 +793,42 @@ class _IngestRepairContract:
         return matches[0] if len(matches) == 1 else None
 
 
-def _ingest_reconciliation_repair_contract(prompt: str) -> _IngestRepairContract:
-    """Rebuild every trusted option ID from the exact preflight bytes."""
+def _strip_ingest_repair_host_block(prompt: str) -> str:
+    """Remove exactly one sealed repair sidecar before model inference."""
 
-    preflight = _prompt_json_block(prompt, "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON")
-    expected_preflight_keys = {
+    pattern = re.compile(
+        rf"\n?<{re.escape(INGEST_REPAIR_HOST_BLOCK)}>\n"
+        rf".*?\n</{re.escape(INGEST_REPAIR_HOST_BLOCK)}>\n?",
+        re.DOTALL,
+    )
+    stripped, count = pattern.subn("\n", prompt)
+    if count != 1:
+        raise ValueError("ingest repair host preflight block count is not one")
+    return stripped.rstrip() + "\n"
+
+
+def _ingest_reconciliation_repair_contract(prompt: str) -> _IngestRepairContract:
+    """Compile exact host arrays and cross-check the model projection."""
+
+    sealed = _prompt_json_block(prompt, INGEST_REPAIR_HOST_BLOCK)
+    model = _prompt_json_block(prompt, INGEST_REPAIR_MODEL_BLOCK)
+    review = _prompt_json_block(prompt, INGEST_REVIEW_MODEL_BLOCK)
+    expected_sealed_keys = {
+        "schema_version",
+        "full_preflight",
+        "full_proposal_sha256",
+        "review_projection_sha256",
+        "local_generated_operations",
+    }
+    if (
+        not isinstance(sealed, Mapping)
+        or set(sealed) != expected_sealed_keys
+        or sealed.get("schema_version") != 1
+        or not isinstance(sealed.get("local_generated_operations"), list)
+    ):
+        raise ValueError("sealed ingest repair preflight is invalid")
+    full = sealed.get("full_preflight")
+    expected_full_keys = {
         "status",
         "tag_authority",
         "repair_option_policy_version",
@@ -780,109 +836,212 @@ def _ingest_reconciliation_repair_contract(prompt: str) -> _IngestRepairContract
         "replacement_operations",
         "semantic_tag_options",
     }
+    expected_model_keys = {
+        "projection_policy_version",
+        "status",
+        "tag_authority",
+        "repair_option_policy_version",
+        "full_preflight_sha256",
+        "full_proposal_sha256",
+        "review_projection_sha256",
+        "deterministic_repair_option_id",
+        "deterministic_repair_option",
+        "semantic_tag_options",
+        "mutations",
+        "mutation_context_source",
+        "projection_sha256",
+    }
     if (
-        not isinstance(preflight, Mapping)
-        or preflight.get("status")
-        not in {
-            "none",
-            "repair_required",
-        }
-        or set(preflight) != expected_preflight_keys
+        not isinstance(full, Mapping)
+        or set(full) != expected_full_keys
+        or full.get("status") not in {"none", "repair_required"}
+        or not isinstance(model, Mapping)
+        or set(model) != expected_model_keys
+        or not isinstance(review, Mapping)
     ):
         raise ValueError("deterministic ingest repair preflight is invalid")
-    expected_replacements = preflight.get("replacement_operations")
-    semantic_options = preflight.get("semantic_tag_options")
+    model_core = {
+        key: value for key, value in model.items() if key != "projection_sha256"
+    }
+    review_core = {
+        key: value for key, value in review.items() if key != "projection_sha256"
+    }
     if (
-        preflight.get("tag_authority") != "local_quorum_only"
-        or preflight.get("repair_option_policy_version")
+        model.get("projection_policy_version")
+        != INGEST_REPAIR_PROJECTION_POLICY_VERSION
+        or model.get("projection_sha256") != _sha256_json(model_core)
+        or review.get("projection_sha256") != _sha256_json(review_core)
+        or model.get("full_preflight_sha256") != _sha256_json(full)
+        or model.get("full_proposal_sha256") != review.get("full_proposal_sha256")
+        or model.get("review_projection_sha256") != review.get("projection_sha256")
+        or sealed.get("full_proposal_sha256") != review.get("full_proposal_sha256")
+        or sealed.get("review_projection_sha256") != review.get("projection_sha256")
+        or model.get("status") != full.get("status")
+        or model.get("tag_authority") != "local_quorum_only"
+        or full.get("tag_authority") != "local_quorum_only"
+        or model.get("repair_option_policy_version")
         != INGEST_REPAIR_OPTION_POLICY_VERSION
-        or not isinstance(expected_replacements, list)
-        or not isinstance(semantic_options, list)
+        or full.get("repair_option_policy_version")
+        != INGEST_REPAIR_OPTION_POLICY_VERSION
+    ):
+        raise ValueError("ingest repair projection binding is invalid")
+    expected_model = build_ingest_repair_projection(
+        {
+            "local_generated_operations": sealed["local_generated_operations"],
+            "raw_content": review.get("raw_content"),
+        },
+        full_preflight=dict(full),
+        review_projection=dict(review),
+    )
+    if _canonical_json(model) != _canonical_json(expected_model):
+        raise ValueError("ingest repair projection does not match sealed evidence")
+
+    replacements = full.get("replacement_operations")
+    semantic_full = full.get("semantic_tag_options")
+    semantic_model = model.get("semantic_tag_options")
+    mutations = model.get("mutations")
+    if (
+        not isinstance(replacements, list)
+        or not isinstance(semantic_full, list)
+        or not isinstance(semantic_model, list)
+        or not isinstance(mutations, list)
     ):
         raise ValueError("deterministic ingest repair bounds are invalid")
-    repair_required = preflight.get("status") == "repair_required"
-    if repair_required is not bool(expected_replacements):
+    repair_required = full.get("status") == "repair_required"
+    if repair_required is not bool(replacements):
         raise ValueError("deterministic ingest repair status is inconsistent")
 
+    mutation_ids: set[str] = set()
+    for mutation in mutations:
+        if (
+            not isinstance(mutation, Mapping)
+            or mutation.get("coverage_status") != "complete"
+            or not isinstance(mutation.get("mutation_id"), str)
+            or not str(mutation["mutation_id"]).startswith("rm_")
+            or mutation["mutation_id"] in mutation_ids
+        ):
+            raise ValueError("ingest repair mutation projection is invalid")
+        mutation_ids.add(str(mutation["mutation_id"]))
+
     options: list[_IngestRepairOption] = []
-    deterministic_id = preflight.get("deterministic_repair_option_id")
-    if expected_replacements:
+
+    def compile_option(
+        *,
+        kind: str,
+        option_id: Any,
+        filename: Any,
+        invalid_tags: Any,
+        option_replacements: Any,
+        projected: Any,
+    ) -> None:
+        if (
+            not isinstance(option_id, str)
+            or INGEST_REPAIR_OPTION_ID_RE.fullmatch(option_id) is None
+            or not isinstance(invalid_tags, list)
+            or not isinstance(option_replacements, list)
+            or not isinstance(projected, Mapping)
+            or projected.get("coverage_status") != "complete"
+            or projected.get("repair_option_id") != option_id
+            or projected.get("kind") != kind
+            or projected.get("filename") != filename
+            or projected.get("invalid_tags") != invalid_tags
+            or not isinstance(projected.get("mutation_ids"), list)
+            or not projected.get("mutation_ids")
+            or any(
+                not isinstance(value, str) or value not in mutation_ids
+                for value in projected["mutation_ids"]
+            )
+        ):
+            raise ValueError("ingest repair option projection is invalid")
         expected_id = ingest_repair_option_id(
-            kind="deterministic",
-            filename=None,
-            invalid_tags=[],
-            replacement_operations=expected_replacements,
+            kind=kind,
+            filename=filename,
+            invalid_tags=invalid_tags,
+            replacement_operations=option_replacements,
         )
-        if deterministic_id != expected_id:
-            raise ValueError("deterministic ingest repair option id is invalid")
+        action_core = {
+            "policy_version": INGEST_REPAIR_OPTION_POLICY_VERSION,
+            "kind": kind,
+            "filename": filename,
+            "invalid_tags": invalid_tags,
+            "replacement_operations": option_replacements,
+        }
+        action_sha256 = _sha256_json(action_core)
+        if (
+            option_id != expected_id
+            or projected.get("action_sha256") != action_sha256
+            or option_id != "rp_" + action_sha256[:32]
+        ):
+            raise ValueError("ingest repair option identity is invalid")
         options.append(
             _IngestRepairOption(
-                option_id=expected_id,
-                invalid_tags=[],
-                replacement_operations=expected_replacements,
+                option_id=option_id,
+                kind=kind,
+                filename=filename,
+                invalid_tags=list(invalid_tags),
+                replacement_operations=list(option_replacements),
+                action_sha256=action_sha256,
             )
         )
-    elif deterministic_id is not None:
+
+    deterministic_id = full.get("deterministic_repair_option_id")
+    deterministic_model = model.get("deterministic_repair_option")
+    if replacements:
+        if deterministic_id != model.get("deterministic_repair_option_id"):
+            raise ValueError("deterministic ingest repair option id is stale")
+        compile_option(
+            kind="deterministic",
+            option_id=deterministic_id,
+            filename=None,
+            invalid_tags=[],
+            option_replacements=replacements,
+            projected=deterministic_model,
+        )
+    elif deterministic_id is not None or deterministic_model is not None:
         raise ValueError("empty deterministic ingest repair exposes an option id")
 
-    for option in semantic_options:
-        if not isinstance(option, Mapping) or set(option) != {
+    if len(semantic_full) != len(semantic_model):
+        raise ValueError("semantic ingest repair projection count is invalid")
+    for full_option, projected in zip(semantic_full, semantic_model, strict=True):
+        if not isinstance(full_option, Mapping) or set(full_option) != {
             "repair_option_id",
             "filename",
             "invalid_tags",
             "replacement_operations",
         }:
             raise ValueError("semantic ingest tag option is invalid")
-        option_id = option.get("repair_option_id")
-        filename = option.get("filename")
-        tags = option.get("invalid_tags")
-        replacements = option.get("replacement_operations")
+        filename = full_option.get("filename")
+        tags = full_option.get("invalid_tags")
+        option_replacements = full_option.get("replacement_operations")
         if (
-            not isinstance(option_id, str)
-            or INGEST_REPAIR_OPTION_ID_RE.fullmatch(option_id) is None
-            or not isinstance(filename, str)
+            not isinstance(filename, str)
             or not filename
             or not isinstance(tags, list)
             or len(tags) != 1
             or not isinstance(tags[0], str)
-            or not isinstance(replacements, list)
+            or not isinstance(option_replacements, list)
             or not any(
                 isinstance(replacement, Mapping)
                 and replacement.get("filename") == filename
-                for replacement in replacements
-            )
-            or option_id
-            != ingest_repair_option_id(
-                kind="semantic_tag",
-                filename=filename,
-                invalid_tags=tags,
-                replacement_operations=replacements,
+                for replacement in option_replacements
             )
         ):
             raise ValueError("semantic ingest tag option is invalid")
-        options.append(
-            _IngestRepairOption(
-                option_id=option_id,
-                invalid_tags=tags,
-                replacement_operations=replacements,
-            )
+        compile_option(
+            kind="semantic_tag",
+            option_id=full_option.get("repair_option_id"),
+            filename=filename,
+            invalid_tags=tags,
+            option_replacements=option_replacements,
+            projected=projected,
         )
+
     option_ids = [row.option_id for row in options]
-    if len(set(option_ids)) != len(option_ids):
-        raise ValueError("deterministic ingest repair option ids are duplicated")
-    action_keys = [
-        _canonical_json(
-            canonical_ingest_repair_arrays(
-                {
-                    "invalid_tags": row.invalid_tags,
-                    "replacement_operations": row.replacement_operations,
-                }
-            )
-        )
-        for row in options
-    ]
-    if len(set(action_keys)) != len(action_keys):
-        raise ValueError("deterministic ingest repair actions are ambiguous")
+    action_hashes = [row.action_sha256 for row in options]
+    if len(option_ids) != len(set(option_ids)) or len(action_hashes) != len(
+        set(action_hashes)
+    ):
+        raise ValueError("deterministic ingest repair options are ambiguous")
     return _IngestRepairContract(
         repair_required=repair_required,
         options=tuple(options),
@@ -893,11 +1052,12 @@ def _ingest_reconciliation_value_validator(
     prompt: str,
     *,
     materialized: bool = False,
+    contract: _IngestRepairContract | None = None,
 ) -> Callable[[Any], Sequence[ValidationIssue]]:
-    """Require model selection by ID, then verify the host materialized bytes."""
+    """Require a trusted selector, then verify exact host materialization."""
 
     try:
-        contract = _ingest_reconciliation_repair_contract(prompt)
+        effective_contract = contract or _ingest_reconciliation_repair_contract(prompt)
     except Exception as exc:
         preparation_error = str(exc)
 
@@ -923,18 +1083,18 @@ def _ingest_reconciliation_value_validator(
         arrays_present = "invalid_tags" in value or "replacement_operations" in value
         repair_selected = bool(option_id or arrays_present)
         selected_option = (
-            contract.option(option_id) if isinstance(option_id, str) else None
+            effective_contract.option(option_id) if isinstance(option_id, str) else None
         )
         materialized_option = next(
             (
                 row
-                for row in contract.options
+                for row in effective_contract.options
                 if actual_tags == row.invalid_tags
                 and actual_replacements == row.replacement_operations
             ),
             None,
         )
-        if not contract.repair_required and not repair_selected:
+        if not effective_contract.repair_required and not repair_selected:
             return ()
 
         issues: list[ValidationIssue] = []
@@ -1007,8 +1167,13 @@ def _ingest_reconciliation_value_validator(
     return validate
 
 
-def _materialize_ingest_repair_option(prompt: str, value: Any) -> Any:
-    """Replace one validated model selector with its exact trusted action."""
+def _materialize_ingest_repair_option(
+    prompt: str,
+    value: Any,
+    *,
+    contract: _IngestRepairContract | None = None,
+) -> Any:
+    """Replace one validated selector with exact sealed host-owned arrays."""
 
     if not isinstance(value, Mapping):
         return value
@@ -1017,8 +1182,8 @@ def _materialize_ingest_repair_option(prompt: str, value: Any) -> Any:
         return value
     if not isinstance(option_id, str):
         raise ValueError("ingest repair option id is not a string")
-    contract = _ingest_reconciliation_repair_contract(prompt)
-    option = contract.option(option_id)
+    effective_contract = contract or _ingest_reconciliation_repair_contract(prompt)
+    option = effective_contract.option(option_id)
     if option is None:
         raise ValueError("ingest repair option id is not uniquely bounded")
     if "invalid_tags" in value or "replacement_operations" in value:
@@ -1043,11 +1208,16 @@ def _materialize_ingest_repair_option(prompt: str, value: Any) -> Any:
 def _decision_value_validator(
     decision_lane: str | None,
     prompt: str,
+    *,
+    ingest_repair_contract: _IngestRepairContract | None = None,
 ) -> Callable[[Any], Sequence[ValidationIssue]] | None:
     if decision_lane == "content_correction_review":
         return _content_correction_value_validator(prompt)
     if decision_lane == "ingest_reconciliation":
-        return _ingest_reconciliation_value_validator(prompt)
+        return _ingest_reconciliation_value_validator(
+            prompt,
+            contract=ingest_repair_contract,
+        )
     return None
 
 
@@ -1990,18 +2160,24 @@ class DecisionRouter:
         system: str | None,
         agreement_key: AgreementKey | None,
         decision_lane: str | None,
+        ingest_repair_contract: _IngestRepairContract | None,
     ) -> DecisionVote:
         result = self._session(model, keep_alive, role, num_ctx).run(
             prompt,
             schema,
             system=system,
-            value_validator=_decision_value_validator(decision_lane, prompt),
+            value_validator=_decision_value_validator(
+                decision_lane,
+                prompt,
+                ingest_repair_contract=ingest_repair_contract,
+            ),
         )
         if result.ok and decision_lane == "ingest_reconciliation":
             try:
                 materialized = _materialize_ingest_repair_option(
                     prompt,
                     result.value,
+                    contract=ingest_repair_contract,
                 )
                 post_issues = list(validate_json(materialized, schema))
                 if not post_issues:
@@ -2009,6 +2185,7 @@ class DecisionRouter:
                         _ingest_reconciliation_value_validator(
                             prompt,
                             materialized=True,
+                            contract=ingest_repair_contract,
                         )(materialized)
                     )
                 if post_issues:
@@ -3144,6 +3321,8 @@ class DecisionRouter:
         effective_lane = (
             decision_lane if decision_lane is not None else self.decision_lane
         )
+        ingest_repair_contract: _IngestRepairContract | None = None
+        replay_prompt = prompt
         if effective_lane is not None:
             try:
                 prompt, system = bind_lane_contract_request(
@@ -3156,7 +3335,13 @@ class DecisionRouter:
                     # The host-owned repair bounds are part of the trusted
                     # request contract. Reject malformed or stale option
                     # schemas before spending a model token.
-                    _ingest_reconciliation_repair_contract(prompt)
+                    ingest_repair_contract = _ingest_reconciliation_repair_contract(
+                        prompt
+                    )
+                    replay_prompt = prompt
+                    prompt = _strip_ingest_repair_host_block(prompt)
+                else:
+                    replay_prompt = prompt
             except ValueError as exc:
                 return self._quarantined(
                     (),
@@ -3174,6 +3359,8 @@ class DecisionRouter:
                 system=system,
                 agreement_key=agreement_key,
                 decision_lane=effective_lane,
+                ingest_repair_contract=ingest_repair_contract,
+                replay_prompt=replay_prompt,
             )
         if self.live_resource_control:
             with ollama.model_resource_lease(exclusive=True):
@@ -3183,6 +3370,8 @@ class DecisionRouter:
                     system=system,
                     agreement_key=agreement_key,
                     decision_lane=effective_lane,
+                    ingest_repair_contract=ingest_repair_contract,
+                    replay_prompt=replay_prompt,
                 )
         return self._decide_locked(
             prompt,
@@ -3190,6 +3379,8 @@ class DecisionRouter:
             system=system,
             agreement_key=agreement_key,
             decision_lane=effective_lane,
+            ingest_repair_contract=ingest_repair_contract,
+            replay_prompt=replay_prompt,
         )
 
     def _decide_locked(
@@ -3200,6 +3391,8 @@ class DecisionRouter:
         system: str | None = None,
         agreement_key: AgreementKey | None = None,
         decision_lane: str | None = None,
+        ingest_repair_contract: _IngestRepairContract | None = None,
+        replay_prompt: str | None = None,
     ) -> DecisionRouterResult:
         started = time.monotonic()
         effective_system = decision_system_with_policy(schema, system)
@@ -3360,6 +3553,7 @@ class DecisionRouter:
             if self.record_replay and result.ok and isinstance(result.value, Mapping):
                 try:
                     from llm_wiki_mcp import wiki
+                    from llm_wiki_mcp.local_model_eval import replay_semantic_effect
                     from llm_wiki_mcp.model_lab import record_local_replay_case
 
                     replay_path = self.replay_path
@@ -3377,14 +3571,25 @@ class DecisionRouter:
                                 / "model-lab"
                                 / "replay.jsonl"
                             )
+                    replay_input_prompt = replay_prompt or prompt
+                    contract_effect = (
+                        replay_semantic_effect(
+                            result.value,
+                            schema,
+                            prompt=replay_input_prompt,
+                            decision_lane=decision_lane,
+                        )
+                        if decision_lane is not None
+                        else None
+                    )
                     record_local_replay_case(
                         role=self.audit_role,
-                        prompt=prompt,
+                        prompt=replay_input_prompt,
                         schema=schema,
                         result=result.value,
                         models=[vote.model for vote in result.votes],
                         latency_seconds=time.monotonic() - started,
-                        system=effective_system,
+                        system=system,
                         policy_source=self.policy.source,
                         policy_artifact_sha256=self.policy.artifact_sha256,
                         decision_lane=decision_lane,
@@ -3393,6 +3598,15 @@ class DecisionRouter:
                             if decision_lane is not None
                             else None
                         ),
+                        lane_contract_effect=contract_effect,
+                        effective_request_sha256=decision_request_fingerprint_sha256(
+                            prompt=replay_input_prompt,
+                            schema=schema,
+                            system=system,
+                            decision_lane=decision_lane,
+                        ),
+                        effective_model_prompt=prompt,
+                        effective_model_system=effective_system,
                         replay_file=replay_path,
                     )
                 except Exception:
@@ -3519,6 +3733,7 @@ class DecisionRouter:
                     system=effective_system,
                     agreement_key=key,
                     decision_lane=decision_lane,
+                    ingest_repair_contract=ingest_repair_contract,
                 )
             )
         )
@@ -3552,6 +3767,7 @@ class DecisionRouter:
                     system=effective_system,
                     agreement_key=key,
                     decision_lane=decision_lane,
+                    ingest_repair_contract=ingest_repair_contract,
                 )
             )
         )
@@ -3621,6 +3837,7 @@ class DecisionRouter:
                     system=effective_system,
                     agreement_key=key,
                     decision_lane=decision_lane,
+                    ingest_repair_contract=ingest_repair_contract,
                 )
             )
         )
@@ -3672,6 +3889,7 @@ __all__ = [
     "ModelMetadataProvider",
     "RouterPolicyResolution",
     "canonical_agreement_signature",
+    "decision_effective_request",
     "decision_request_fingerprint_sha256",
     "decision_system_with_policy",
     "default_agreement_value",

@@ -92,6 +92,9 @@ OPERATIONAL_SELF_HEAL_FAILURE_CLASSES = {
     "ingest.runtime_stream_incomplete",
     "ingest.runtime_completion_incomplete",
     "ingest.runtime_output_truncated",
+    "ingest.runtime_triage_repair_exhausted",
+    "ingest.runtime_triage_repeated_output",
+    "ingest.runtime_triage_unknown",
     "ingest.generation_context_window_exceeded",
     "ingest.generation_context_truncation_suspected",
     "ingest.generation_feedback_too_large",
@@ -264,8 +267,8 @@ def classify_failure(message: str | None) -> FailureRecord:
         local_class = structured_failure.group(1).strip().casefold()
         if local_class in {"repair_exhausted", "repeated_output", "unknown"}:
             return FailureRecord(
-                failure_class="triage.structured_invalid",
-                fingerprint=f"triage.structured_invalid:{local_class}",
+                failure_class=f"ingest.runtime_triage_{local_class}",
+                fingerprint=f"ingest.runtime_triage_{local_class}",
                 message=msg,
             )
         return FailureRecord(

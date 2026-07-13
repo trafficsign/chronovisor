@@ -24,6 +24,7 @@ from llm_wiki_mcp.decision_router import (
     DecisionRouterResult,
     REQUIRED_ADOPTION_CHECKS,
     canonical_agreement_signature,
+    decision_effective_request,
     decision_request_context,
     decision_request_fingerprint_sha256,
     decision_system_with_policy,
@@ -37,7 +38,12 @@ from llm_wiki_mcp.decision_schema_manifest import (
     decision_signature_value,
     production_decision_schemas,
 )
-from llm_wiki_mcp.decision_lane_prompts import ingest_repair_option_id
+from llm_wiki_mcp.decision_lane_prompts import (
+    INGEST_PROPOSAL_SCHEMA_VERSION,
+    INGEST_REPAIR_HOST_BLOCK,
+    build_ingest_reconciliation_prompt,
+    ingest_repair_option_id,
+)
 from llm_wiki_mcp.local_structured import (
     ChatRequest,
     STRUCTURED_GENERATION_POLICY_VERSION,
@@ -164,7 +170,7 @@ def _sha256_json(value: object) -> str:
 
 
 def test_prompt_json_block_ignores_closing_marker_inside_json_string() -> None:
-    marker = "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON"
+    marker = INGEST_REPAIR_HOST_BLOCK
     injected_marker = f"</{marker}>"
     payload = {
         "status": "none",
@@ -191,11 +197,8 @@ def _ingest_repair_case() -> tuple[dict[str, object], dict[str, object], str]:
         and candidate.row["expected"].get("invalid_tags") == ["d/finance"]
     )
     expected = dict(row["expected"])
-    preflight = json.loads(
-        str(row["prompt"])
-        .split("<DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON>\n", 1)[1]
-        .split("\n</DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON>", 1)[0]
-    )
+    sealed = _prompt_json_block(str(row["prompt"]), INGEST_REPAIR_HOST_BLOCK)
+    preflight = sealed["full_preflight"]
     option = next(
         item
         for item in preflight["semantic_tag_options"]
@@ -207,6 +210,69 @@ def _ingest_repair_case() -> tuple[dict[str, object], dict[str, object], str]:
     selection.pop("replacement_operations")
     selection["repair_option_id"] = option["repair_option_id"]
     return row, selection, option["repair_option_id"]
+
+
+def _deterministic_ingest_repair_case() -> tuple[
+    dict[str, object], dict[str, object], dict[str, object]
+]:
+    row, selection, _option_id = _ingest_repair_case()
+    raw = "The exact durable fact uses local inference."
+    proposed = (
+        "---\ntitle: Local inference\n"
+        "tags: [d/configuration, t/reference, s/evergreen]\n---\n"
+        f"{raw}\nUnsupported generated claim.\n"
+    )
+    operation = {
+        "type": "create",
+        "filename": "memory/local-inference.md",
+        "content": proposed,
+        "raw_keywords": ["local-inference"],
+    }
+    proposal = {
+        "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
+        "kind": "ingest_semantic_mutation_proposal",
+        "source_key": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "source_raw": "raw/local-inference.md",
+        "raw_content": raw,
+        "raw_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "raw_keywords": ["local-inference"],
+        "local_disposition": "operations_available",
+        "triage_plan": [],
+        "failed_operation_specs": [],
+        "local_generated_operations": [operation],
+        "prepared_operations": [
+            {
+                "op_type": "create",
+                "path": "memory/local-inference.md",
+                "page_id": "local-inference",
+                "source_operation_index": 0,
+                "source_operation_type": "create",
+                "source_filename": "memory/local-inference.md",
+                "preimage_exists": False,
+                "previous_text": None,
+                "previous_sha256": None,
+                "proposed_text": proposed,
+                "proposed_sha256": hashlib.sha256(proposed.encode("utf-8")).hexdigest(),
+                "new_tags": [],
+            }
+        ],
+        "link_reconciliation": {"resolved": 0, "rewritten": 0, "unwrapped": 0},
+        "audit_decision": {"required": True},
+    }
+    prompt = build_ingest_reconciliation_prompt(proposal)
+    sealed = _prompt_json_block(prompt, INGEST_REPAIR_HOST_BLOCK)
+    preflight = sealed["full_preflight"]
+    deterministic_id = str(preflight["deterministic_repair_option_id"])
+    model_selection = dict(selection, repair_option_id=deterministic_id)
+    expected = dict(selection)
+    expected.pop("repair_option_id", None)
+    expected.pop("invalid_tags", None)
+    expected["replacement_operations"] = preflight["replacement_operations"]
+    return (
+        {**row, "prompt": prompt},
+        model_selection,
+        expected,
+    )
 
 
 def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum() -> None:
@@ -231,52 +297,21 @@ def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum() -
     ).decide(str(row["prompt"]), dict(row["schema"]))
 
     assert result.ok is True
+    assert result.num_ctx == 32_768
     assert result.decision == expected
     assert all(vote.result.value == expected for vote in result.votes)
     assert all(vote.result.first_pass_valid for vote in result.votes)
     assert all("repair_option_id" not in vote.result.value for vote in result.votes)
 
 
-def test_ingest_deterministic_repair_option_id_materializes_base_action() -> None:
+def test_ingest_repair_host_sidecar_is_never_sent_to_models() -> None:
     row, selection, _option_id = _ingest_repair_case()
-    marker = "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON"
-    opening = f"<{marker}>\n"
-    closing = f"\n</{marker}>"
-    prefix, remainder = str(row["prompt"]).split(opening, 1)
-    encoded_preflight, suffix = remainder.split(closing, 1)
-    preflight = json.loads(encoded_preflight)
-    replacement = dict(
-        preflight["semantic_tag_options"][0]["replacement_operations"][0]
-    )
-    replacement["content"] = replacement["content"].replace(
-        "\nOllama serves local inference",
-        "\nA bounded deterministic repair. Ollama serves local inference",
-        1,
-    )
-    preflight["status"] = "repair_required"
-    preflight["replacement_operations"] = [replacement]
-    preflight["deterministic_repair_option_id"] = ingest_repair_option_id(
-        kind="deterministic",
-        filename=None,
-        invalid_tags=[],
-        replacement_operations=preflight["replacement_operations"],
-    )
-    prompt = (
-        prefix
-        + opening
-        + json.dumps(preflight, ensure_ascii=False, sort_keys=True, indent=2)
-        + closing
-        + suffix
-    )
-    base_selection = dict(selection)
-    base_selection["repair_option_id"] = preflight["deterministic_repair_option_id"]
-    expected = dict(row["expected"])
-    expected.pop("invalid_tags")
-    expected["replacement_operations"] = preflight["replacement_operations"]
+    sealed = _prompt_json_block(str(row["prompt"]), INGEST_REPAIR_HOST_BLOCK)
+    sealed_json = json.dumps(sealed, ensure_ascii=False, sort_keys=True)
     transport = ModelTransport(
         {
-            "ornith:test": [json.dumps(base_selection)],
-            "gpt-oss:test": [json.dumps(base_selection)],
+            "ornith:test": [json.dumps(selection)],
+            "gpt-oss:test": [json.dumps(selection)],
         }
     )
 
@@ -284,7 +319,92 @@ def test_ingest_deterministic_repair_option_id_materializes_base_action() -> Non
         config=_config(max_input_chars=50_000, num_ctx=32_768),
         transport=transport,
         decision_lane="ingest_reconciliation",
-    ).decide(prompt, dict(row["schema"]))
+    ).decide(str(row["prompt"]), dict(row["schema"]))
+
+    assert result.ok is True
+    assert len(transport.requests) == 2
+    for request in transport.requests:
+        serialized = json.dumps(request.messages, ensure_ascii=False, sort_keys=True)
+        assert INGEST_REPAIR_HOST_BLOCK not in serialized
+        assert sealed_json not in serialized
+
+
+def test_ingest_replay_accounts_effective_model_prompt_but_retains_host_contract(
+    tmp_path: Path,
+) -> None:
+    row, selection, _option_id = _ingest_repair_case()
+    full_prompt = str(row["prompt"])
+    replay_path = tmp_path / "model-lab" / "replay.jsonl"
+    transport = ModelTransport(
+        {
+            "ornith:test": [json.dumps(selection)],
+            "gpt-oss:test": [json.dumps(selection)],
+        }
+    )
+
+    result = DecisionRouter(
+        config=_config(max_input_chars=50_000, num_ctx=32_768),
+        transport=transport,
+        audit_role="ingest_reconciliation",
+        replay_path=replay_path,
+        decision_lane="ingest_reconciliation",
+    ).decide(full_prompt, dict(row["schema"]))
+
+    assert result.ok is True
+    replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    model_prompt = transport.requests[0].messages[-1]["content"]
+    assert INGEST_REPAIR_HOST_BLOCK in replay["prompt"]
+    assert INGEST_REPAIR_HOST_BLOCK not in model_prompt
+    assert full_prompt in replay["prompt"]
+    assert replay["prompt"].startswith("<LLM_WIKI_LANE_REQUEST ")
+    assert replay["effective_model_prompt_chars"] == len(model_prompt)
+    assert (
+        replay["effective_model_prompt_sha256"]
+        == hashlib.sha256(model_prompt.encode("utf-8")).hexdigest()
+    )
+    assert replay["host_sidecar_present"] is True
+    assert replay["prompt_truncated"] is False
+    effective_prompt, effective_system = decision_effective_request(
+        prompt=replay["prompt"],
+        schema=dict(row["schema"]),
+        system=replay["system"],
+        decision_lane="ingest_reconciliation",
+    )
+    assert effective_prompt == model_prompt
+    assert replay["effective_model_system"] == effective_system
+    assert replay["effective_model_system_chars"] == len(effective_system or "")
+    assert (
+        replay["effective_model_system_sha256"]
+        == hashlib.sha256((effective_system or "").encode("utf-8")).hexdigest()
+    )
+    corpus = load_replay_corpus(replay_path)
+    assert len(corpus.cases) == 1
+    assert corpus.cases[0].self_labeled is True
+    assert corpus.cases[0].lane_contract_effect == replay_semantic_effect(
+        result.value,
+        dict(row["schema"]),
+        prompt=replay["prompt"],
+        decision_lane="ingest_reconciliation",
+    )
+    assert (
+        corpus.cases[0].effective_request_sha256 == replay["effective_request_sha256"]
+    )
+
+
+def test_ingest_deterministic_repair_option_id_materializes_base_action() -> None:
+    row, selection, expected = _deterministic_ingest_repair_case()
+    transport = ModelTransport(
+        {
+            "ornith:test": [json.dumps(selection)],
+            "gpt-oss:test": [json.dumps(selection)],
+        }
+    )
+
+    result = DecisionRouter(
+        config=_config(max_input_chars=50_000, num_ctx=32_768),
+        transport=transport,
+        decision_lane="ingest_reconciliation",
+    ).decide(str(row["prompt"]), dict(row["schema"]))
 
     assert result.ok is True
     assert result.decision == expected
@@ -305,20 +425,22 @@ def test_ingest_repair_option_contract_rejects_legacy_semantic_receipts(
     extra_key: str,
 ) -> None:
     row, selection, _option_id = _ingest_repair_case()
-    marker = "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON"
+    marker = INGEST_REPAIR_HOST_BLOCK
     opening = f"<{marker}>\n"
     closing = f"\n</{marker}>"
     prefix, remainder = str(row["prompt"]).split(opening, 1)
     encoded_preflight, suffix = remainder.split(closing, 1)
-    preflight = json.loads(encoded_preflight)
+    sealed = json.loads(encoded_preflight)
+    preflight = sealed["full_preflight"]
     if target == "preflight":
         preflight[extra_key] = False
     else:
         preflight["semantic_tag_options"][0][extra_key] = None
+    sealed["full_preflight"] = preflight
     prompt = (
         prefix
         + opening
-        + json.dumps(preflight, ensure_ascii=False, sort_keys=True, indent=2)
+        + json.dumps(sealed, ensure_ascii=False, sort_keys=True, indent=2)
         + closing
         + suffix
     )
@@ -354,37 +476,18 @@ def test_ingest_repair_option_validator_rejects_invented_mixed_and_terminal_ids(
     # retry instead of forcing a semantic deletion.
     assert validator(missing) == ()
 
-    marker = "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON"
-    opening = f"<{marker}>\n"
-    closing = f"\n</{marker}>"
-    prefix, remainder = str(row["prompt"]).split(opening, 1)
-    encoded_preflight, suffix = remainder.split(closing, 1)
-    preflight = json.loads(encoded_preflight)
-    deterministic_replacement = dict(
-        preflight["semantic_tag_options"][0]["replacement_operations"][0]
+    deterministic_row, deterministic_selection, _expected = (
+        _deterministic_ingest_repair_case()
     )
-    preflight["status"] = "repair_required"
-    preflight["replacement_operations"] = [deterministic_replacement]
-    preflight["deterministic_repair_option_id"] = ingest_repair_option_id(
-        kind="deterministic",
-        filename=None,
-        invalid_tags=[],
-        replacement_operations=preflight["replacement_operations"],
-    )
-    repair_required_prompt = (
-        prefix
-        + opening
-        + json.dumps(preflight, ensure_ascii=False, sort_keys=True, indent=2)
-        + closing
-        + suffix
-    )
+    deterministic_missing = dict(deterministic_selection)
+    deterministic_missing.pop("repair_option_id")
     repair_required_validator = _decision_value_validator(
-        "ingest_reconciliation", repair_required_prompt
+        "ingest_reconciliation", str(deterministic_row["prompt"])
     )
     assert repair_required_validator is not None
-    assert [issue.pointer for issue in repair_required_validator(missing)] == [
-        "/repair_option_id"
-    ]
+    assert [
+        issue.pointer for issue in repair_required_validator(deterministic_missing)
+    ] == ["/repair_option_id"]
 
     invented = dict(selection, repair_option_id="rp_" + "0" * 32)
     assert [issue.pointer for issue in validator(invented)] == ["/repair_option_id"]
@@ -428,6 +531,7 @@ def test_ingest_repair_option_feedback_is_small_and_repairs_only_the_selector() 
     ).decide(str(row["prompt"]), dict(row["schema"]))
 
     assert result.ok is True
+    assert result.num_ctx == 32_768
     assert result.votes[0].result.repair_turns == 1
     feedback = transport.requests[1].messages[-1]["content"]
     feedback_bytes = len(feedback.encode("utf-8"))
@@ -442,19 +546,21 @@ def test_ingest_repair_option_feedback_is_small_and_repairs_only_the_selector() 
 
 def test_ingest_repair_option_duplicate_id_contract_fails_closed() -> None:
     row, selection, option_id = _ingest_repair_case()
-    marker = "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON"
+    marker = INGEST_REPAIR_HOST_BLOCK
     opening = f"<{marker}>\n"
     closing = f"\n</{marker}>"
     prefix, remainder = str(row["prompt"]).split(opening, 1)
     encoded_preflight, suffix = remainder.split(closing, 1)
-    preflight = json.loads(encoded_preflight)
+    sealed = json.loads(encoded_preflight)
+    preflight = sealed["full_preflight"]
     duplicate = json.loads(json.dumps(preflight["semantic_tag_options"][0]))
     duplicate["repair_option_id"] = option_id
     preflight["semantic_tag_options"].append(duplicate)
+    sealed["full_preflight"] = preflight
     prompt = (
         prefix
         + opening
-        + json.dumps(preflight, ensure_ascii=False, sort_keys=True, indent=2)
+        + json.dumps(sealed, ensure_ascii=False, sort_keys=True, indent=2)
         + closing
         + suffix
     )
@@ -467,12 +573,13 @@ def test_ingest_repair_option_duplicate_id_contract_fails_closed() -> None:
 
 def test_ingest_repair_option_distinct_ids_for_same_effect_fail_closed() -> None:
     row, selection, _option_id = _ingest_repair_case()
-    marker = "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON"
+    marker = INGEST_REPAIR_HOST_BLOCK
     opening = f"<{marker}>\n"
     closing = f"\n</{marker}>"
     prefix, remainder = str(row["prompt"]).split(opening, 1)
     encoded_preflight, suffix = remainder.split(closing, 1)
-    preflight = json.loads(encoded_preflight)
+    sealed = json.loads(encoded_preflight)
+    preflight = sealed["full_preflight"]
     duplicate = json.loads(json.dumps(preflight["semantic_tag_options"][0]))
     duplicate["replacement_operations"][0]["content"] += "\n"
     duplicate["repair_option_id"] = ingest_repair_option_id(
@@ -482,10 +589,11 @@ def test_ingest_repair_option_distinct_ids_for_same_effect_fail_closed() -> None
         replacement_operations=duplicate["replacement_operations"],
     )
     preflight["semantic_tag_options"].append(duplicate)
+    sealed["full_preflight"] = preflight
     prompt = (
         prefix
         + opening
-        + json.dumps(preflight, ensure_ascii=False, sort_keys=True, indent=2)
+        + json.dumps(sealed, ensure_ascii=False, sort_keys=True, indent=2)
         + closing
         + suffix
     )
@@ -2538,7 +2646,20 @@ def test_classification_policy_is_in_request_hash_context_and_replay(
         == DECISION_SEMANTICS_POLICY_VERSION
     )
     replay = json.loads(replay_path.read_text(encoding="utf-8"))
-    assert replay["system"] == effective_system
+    assert replay["system"] == original_system
+    assert replay["effective_model_system"] == effective_system
+    assert replay["effective_model_system_chars"] == len(effective_system)
+    assert (
+        replay["effective_model_system_sha256"]
+        == hashlib.sha256(effective_system.encode("utf-8")).hexdigest()
+    )
+    assert replay["effective_request_sha256"] == (
+        decision_request_fingerprint_sha256(
+            prompt=prompt,
+            schema=FRONTIER_CLASSIFICATION_SCHEMA,
+            system=original_system,
+        )
+    )
 
 
 def test_compatible_but_distinct_classification_noops_need_exact_quorum() -> None:

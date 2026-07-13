@@ -72,8 +72,8 @@ _LANE_SEMANTICS: dict[str, LaneSemantics] = {
         "approved authorizes only the exact CAS-bound entity proposal; rejected is no mutation; preflight failures never reach the model.",
     ),
     "ingest_reconciliation": LaneSemantics(
-        "One exact ingest proposal containing raw evidence, triage, operation failures, page preimages, and proposed postimages.",
-        "Apply or confirm no-op only when every local failure is explicitly unnecessary and no repair instruction remains; select at most one host-hash repair option ID, whose exact arrays are materialized only after local quorum, while every repair requires retry and a fresh exact postimage.",
+        "One host-verified ingest review projection containing exact raw evidence, triage, operation failures, full pre/post hashes, and every untruncated byte-changing hunk; byte-identical equal spans remain in the full CAS artifact.",
+        "Apply or confirm no-op only when projection coverage and bindings are complete, every visible change is grounded, every local failure is explicitly unnecessary, and no repair instruction remains; select at most one host-hash repair option ID, whose exact arrays are materialized only after local quorum, while every repair requires retry and a fresh exact postimage.",
         "apply_available mutates the exact prepared pages; confirmed_noop preserves pages; retry/quarantined hold the raw.",
     ),
     "lint_safe_semantic_mutation": LaneSemantics(
@@ -145,13 +145,14 @@ _LANE_SEMANTICS: dict[str, LaneSemantics] = {
 
 # Model-visible prompt-contract versions are lane scoped. Version 7 preserves
 # the exact request identity proven by the v43 corpus for unchanged lanes.
-# Ingest advanced to 11 for host-materialized repair selectors without
-# heuristic semantic receipts, while raw replay advanced to 8 for
+# Ingest advanced to 13 for complete hash-bound change projections,
+# host-materialized repair selectors, and explicit source-contradiction
+# precedence, while raw replay advanced to 8 for
 # process_missing/verified-receipt semantics. Future
 # changes bump only the affected lane and still invalidate the aggregate
 # manifest and adoption artifact.
 LANE_PROMPT_POLICY_VERSIONS: dict[str, int] = {lane: 7 for lane in _LANE_SEMANTICS}
-LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] = 11
+LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] = 13
 LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] = 8
 
 

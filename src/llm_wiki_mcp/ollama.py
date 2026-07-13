@@ -1506,7 +1506,8 @@ Rules:
 - Include brief summary of what knowledge each page should contain
 - Include keywords for finding related existing pages
 - Use only these five object keys: type, filename, title, keywords, summary
-- Every create MUST include non-empty title, keywords, and summary fields
+- Every operation, including updates, MUST include non-empty title, keywords,
+  and summary fields
 
 Output format (JSON array only):
 [

@@ -943,6 +943,78 @@ def _seed_page(wiki_root: Path, rel: str, body: str) -> Path:
     return path
 
 
+def _write_legacy_v1_ingest_proposal(
+    *,
+    raw_content: str,
+    operations: list[dict],
+    raw_keywords: list[str] | None = None,
+    source_raw: str | None = None,
+) -> tuple[Path, Path, dict[str, object]]:
+    """Write the provenance-free proposal shape emitted before schema v2."""
+
+    from llm_wiki_mcp import ingest
+
+    planned, totals = ingest._prepare_operations(operations)
+    proposal = ingest._build_ingest_frontier_proposal(
+        raw_content=raw_content,
+        raw_keywords=raw_keywords,
+        source_raw=source_raw,
+        operations=operations,
+        planned=planned,
+        link_totals=totals,
+    )
+    proposal["schema_version"] = 1
+    prepared_rows = proposal["prepared_operations"]
+    assert isinstance(prepared_rows, list)
+    for row in prepared_rows:
+        assert isinstance(row, dict)
+        row.pop("source_operation_index")
+        row.pop("source_operation_type")
+        row.pop("source_filename")
+    source_key = str(proposal["source_key"])
+    proposal_path, review_path = ingest._ingest_artifact_paths(source_key)
+    ingest._write_ingest_artifact(
+        proposal_path,
+        {
+            "schema_version": 1,
+            "kind": "ingest_frontier_proposal_artifact",
+            "source_key": source_key,
+            "proposal_sha256": ingest._canonical_json_sha256(proposal),
+            "proposal": proposal,
+        },
+    )
+    return proposal_path, review_path, proposal
+
+
+def _downgrade_ingest_proposal_artifact_to_v1(
+    proposal_path: Path,
+) -> dict[str, object]:
+    """Preserve proposal bytes except for the schema-v1 provenance omission."""
+
+    from llm_wiki_mcp import ingest
+
+    artifact = json.loads(proposal_path.read_text(encoding="utf-8"))
+    proposal = artifact["proposal"]
+    proposal["schema_version"] = 1
+    for row in proposal["prepared_operations"]:
+        row.pop("source_operation_index")
+        row.pop("source_operation_type")
+        row.pop("source_filename")
+    artifact["schema_version"] = 1
+    artifact["proposal_sha256"] = ingest._canonical_json_sha256(proposal)
+    ingest._write_ingest_artifact(proposal_path, artifact)
+    return artifact
+
+
+def test_ingest_artifact_schema_tracks_proposal_envelope_schema() -> None:
+    from llm_wiki_mcp import ingest
+    from llm_wiki_mcp.decision_lane_prompts import INGEST_PROPOSAL_SCHEMA_VERSION
+
+    assert (
+        ingest.INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION == INGEST_PROPOSAL_SCHEMA_VERSION
+    )
+
+
 class TestApplyOperations:
     def test_create_writes_atomically(self, isolated_wiki: Path) -> None:
         ops = [
@@ -1961,7 +2033,246 @@ class TestIngestFrontierGate:
 # ---------------------------------------------------------------------------
 
 
+class TestIngestProposalSchemaCompatibility:
+    def test_v2_prepared_payload_rejects_bool_source_index(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        operations = [TestIngestFrontierGate._create_op()]
+        planned, totals = ingest._prepare_operations(operations)
+        proposal = ingest._build_ingest_frontier_proposal(
+            raw_content="bool is not an operation index",
+            raw_keywords=None,
+            source_raw="raw/bool-index.md",
+            operations=operations,
+            planned=planned,
+            link_totals=totals,
+        )
+        [row] = proposal["prepared_operations"]
+        row["source_operation_index"] = True
+
+        assert (
+            ingest._prepared_from_review_payload(proposal["prepared_operations"])
+            is None
+        )
+
+    def test_v1_unreviewed_five_update_incident_is_replaced_by_v2(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        raw_content = "legacy five-page incident pending without a review"
+        raw_keywords = ["ingest-frontier", "schema-v1"]
+        operations: list[dict] = []
+        for index in range(5):
+            _seed_page(
+                isolated_wiki,
+                f"memory/legacy-incident-{index}.md",
+                (
+                    "---\n"
+                    f"title: Legacy incident {index}\n"
+                    "updated: 2026-07-11\n"
+                    "---\n"
+                    f"preimage {index}\n"
+                ),
+            )
+            operations.append(
+                {
+                    "type": "update",
+                    "filename": f"memory/legacy-incident-{index}.md",
+                    "content": f"grounded addition {index}\n",
+                }
+            )
+        proposal_path, _review_path, legacy_proposal = _write_legacy_v1_ingest_proposal(
+            raw_content=raw_content,
+            raw_keywords=raw_keywords,
+            source_raw="semantic-legacy-incident.md",
+            operations=operations,
+        )
+        legacy_rows = legacy_proposal["prepared_operations"]
+        assert isinstance(legacy_rows, list) and len(legacy_rows) == 5
+        assert all("source_operation_index" not in row for row in legacy_rows)
+
+        assert (
+            ingest._load_pretriage_terminal_recovery(
+                raw_content,
+                raw_keywords,
+                reviewer=None,
+            )
+            is None
+        )
+
+        replaced = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw_content,
+            raw_keywords=raw_keywords,
+            source_raw="semantic-legacy-incident.md",
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "replace unreviewed legacy proposal",
+                "failed_operations_disposition": "none",
+            },
+        )
+
+        assert replaced["status"] == "apply_available"
+        artifact = json.loads(proposal_path.read_text(encoding="utf-8"))
+        assert artifact["schema_version"] == 2
+        assert artifact["proposal"]["schema_version"] == 2
+        assert all(
+            {
+                "source_operation_index",
+                "source_operation_type",
+                "source_filename",
+            }
+            <= row.keys()
+            for row in artifact["proposal"]["prepared_operations"]
+        )
+
+    def test_v1_legacy_review_is_replaced_by_current_sealed_review(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        raw_content = "legacy review has no local authority seal"
+        target = _seed_page(
+            isolated_wiki,
+            "memory/legacy-review.md",
+            "---\ntitle: Legacy review\nupdated: 2026-07-11\n---\nold\n",
+        )
+        operations = [
+            {
+                "type": "update",
+                "filename": "memory/legacy-review.md",
+                "content": "new grounded fact\n",
+            }
+        ]
+        proposal_path, review_path, proposal = _write_legacy_v1_ingest_proposal(
+            raw_content=raw_content,
+            operations=operations,
+        )
+        ingest._write_ingest_artifact(
+            review_path,
+            {
+                "schema_version": 1,
+                "kind": "ingest_frontier_review_artifact",
+                "source_key": proposal["source_key"],
+                "proposal_sha256": ingest._canonical_json_sha256(proposal),
+                "review": {"decision": "approved"},
+            },
+        )
+
+        assert (
+            ingest._load_pretriage_terminal_recovery(
+                raw_content,
+                None,
+                reviewer=None,
+            )
+            is None
+        )
+        replaced = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw_content,
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "replace legacy unsealed review",
+                "failed_operations_disposition": "none",
+            },
+        )
+
+        assert replaced["status"] == "apply_available"
+        assert "new grounded fact" in target.read_text(encoding="utf-8")
+        assert json.loads(proposal_path.read_text())["schema_version"] == 2
+        assert json.loads(review_path.read_text())["schema_version"] == 2
+
+    def test_v1_current_sealed_review_recovers_exact_postimage_without_rebind(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        raw_content = "legacy proposal applied before raw acknowledgement"
+        seeded = ingest._review_and_apply_ingest_operations(
+            [TestIngestFrontierGate._create_op()],
+            raw_content=raw_content,
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "durable terminal approval",
+                "failed_operations_disposition": "none",
+            },
+        )
+        proposal_path, review_path = ingest._ingest_artifact_paths(seeded["source_key"])
+        current_review = json.loads(review_path.read_text(encoding="utf-8"))
+        legacy_artifact = _downgrade_ingest_proposal_artifact_to_v1(proposal_path)
+        legacy_proposal = legacy_artifact["proposal"]
+        legacy_sha256 = legacy_artifact["proposal_sha256"]
+        sealed_review = ingest._sealed_ingest_review_artifact(
+            source_key=seeded["source_key"],
+            proposal_sha256=legacy_sha256,
+            review=current_review["review"],
+            authority=current_review["authority"],
+        )
+        ingest._write_ingest_artifact(review_path, sealed_review)
+
+        recovered = ingest._load_pretriage_terminal_recovery(
+            raw_content,
+            None,
+            reviewer=None,
+        )
+
+        assert isinstance(legacy_proposal, dict)
+        assert all(
+            "source_operation_index" not in row
+            for row in legacy_proposal["prepared_operations"]
+        )
+        assert recovered is not None
+        assert recovered["status"] == "apply_available"
+        assert recovered["proposal_sha256"] == legacy_sha256
+        assert recovered["recovery_basis"] == "exact_postimages_already_applied"
+        assert json.loads(review_path.read_text())["proposal_sha256"] == legacy_sha256
+
+
 class TestIngestProposalRollback:
+    def test_v1_provenance_free_update_artifact_can_be_rolled_back(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        target = _seed_page(
+            isolated_wiki,
+            "memory/legacy-rollback.md",
+            "---\ntitle: Legacy rollback\nupdated: 2026-07-11\n---\nold fact\n",
+        )
+        previous = target.read_text(encoding="utf-8")
+        applied = ingest._review_and_apply_ingest_operations(
+            [
+                {
+                    "type": "update",
+                    "filename": "memory/legacy-rollback.md",
+                    "content": "new fact\n",
+                }
+            ],
+            raw_content="legacy rollback source",
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "apply before legacy rollback",
+                "failed_operations_disposition": "none",
+            },
+        )
+        proposal_path, _review_path = ingest._ingest_artifact_paths(
+            applied["source_key"]
+        )
+        legacy = _downgrade_ingest_proposal_artifact_to_v1(proposal_path)
+
+        rolled_back = ingest.rollback_ingest_proposal_artifact(
+            proposal_path,
+            reason="recover a schema-v1 incident",
+        )
+
+        assert legacy["schema_version"] == 1
+        assert rolled_back["status"] == "rolled_back"
+        assert rolled_back["pages"] == ["legacy-rollback"]
+        assert target.read_text(encoding="utf-8") == previous
+
     def test_exact_applied_postimages_can_be_rolled_back_idempotently(
         self, isolated_wiki: Path
     ) -> None:
@@ -3167,6 +3478,57 @@ class TestRunIngestFrontierDisposition:
         )
         assert repaired == operations
         assert replaced == []
+
+    def test_repair_postimages_preserve_authorized_bytes_exactly(self) -> None:
+        from llm_wiki_mcp import ingest
+
+        create_replacement = "---\ntitle: Exact\n---\nExact body.\n\n"
+        update_replacement = "Exact addendum.  \n\n"
+        operations = [
+            {
+                "type": "create",
+                "filename": "memory/exact.md",
+                "content": "---\ntitle: Exact\n---\nOld body.\n",
+            },
+            {
+                "type": "update",
+                "filename": "memory/update.md",
+                "content": "Old addendum.\n",
+            },
+        ]
+        result = {
+            "review": {
+                "decision": "retry",
+                "invalid_tags": [],
+                "replacement_operations": [
+                    {
+                        "filename": "memory/exact.md",
+                        "content": create_replacement,
+                    },
+                    {
+                        "filename": "memory/update.md",
+                        "content": update_replacement,
+                    },
+                ],
+            }
+        }
+
+        repaired, replaced = ingest._apply_frontier_replacement_operations(
+            operations,
+            result,
+        )
+
+        assert replaced == ["memory/exact.md", "memory/update.md"]
+        assert repaired[0]["content"] == create_replacement
+        assert repaired[1]["content"] == update_replacement
+
+        result["review"]["replacement_operations"][1]["content"] = (
+            "---\ntitle: Not body only\n---\nExact addendum.\n"
+        )
+        assert ingest._apply_frontier_replacement_operations(operations, result) == (
+            operations,
+            [],
+        )
 
     def test_frontier_content_replacement_preserves_unrejected_taxonomy(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -5691,6 +6053,18 @@ class TestPerRawOrchestrator:
                 "ingest.runtime_output_truncated",
             ),
             (
+                "triage structured failure [repair_exhausted]: invalid twice",
+                "ingest.runtime_triage_repair_exhausted",
+            ),
+            (
+                "triage structured failure [repeated_output]: same invalid JSON",
+                "ingest.runtime_triage_repeated_output",
+            ),
+            (
+                "triage structured failure [unknown]: no structured plan",
+                "ingest.runtime_triage_unknown",
+            ),
+            (
                 "ingest generation context_window_exceeded: input too large",
                 "ingest.generation_context_window_exceeded",
             ),
@@ -6597,9 +6971,16 @@ class TestTriagePlanSchema:
 
         encoded = json.dumps(TRIAGE_PLAN_SCHEMA, sort_keys=True)
         assert TRIAGE_PLAN_SCHEMA["items"]["additionalProperties"] is False
+        assert TRIAGE_PLAN_SCHEMA["items"]["required"] == [
+            "type",
+            "filename",
+            "title",
+            "keywords",
+            "summary",
+        ]
         for repetition_bound in ("minItems", "maxItems", "minLength", "maxLength"):
             assert repetition_bound not in encoded
-        assert _TRIAGE_PLAN_VALIDATION_SCHEMA["maxItems"] == 32
+        assert _TRIAGE_PLAN_VALIDATION_SCHEMA["maxItems"] == 8
         properties = _TRIAGE_PLAN_VALIDATION_SCHEMA["items"]["properties"]
         assert properties["filename"]["maxLength"] == 200
         assert properties["title"]["maxLength"] == 300
@@ -6622,17 +7003,37 @@ class TestTriagePlanSchema:
         ]
         assert _validate_triage_plan(plan) == plan
 
-    def test_more_than_32_operations_is_rejected_by_host_validator(self) -> None:
+    def test_more_than_8_operations_is_rejected_by_host_validator(self) -> None:
         from llm_wiki_mcp.ingest import _triage_plan_validation_issues
 
         plan = [
-            {"type": "update", "filename": f"page-{index}.md"} for index in range(33)
+            {"type": "update", "filename": f"page-{index}.md"} for index in range(9)
         ]
 
         issues = _triage_plan_validation_issues(plan)
 
         assert [(issue.pointer, issue.keyword, issue.expected) for issue in issues] == [
-            ("", "maxItems", 32)
+            ("", "maxItems", 8)
+        ]
+
+    def test_host_validator_enforces_the_session_output_budget(self) -> None:
+        from llm_wiki_mcp.ingest import _triage_plan_validation_issues
+
+        plan = [
+            {
+                "type": "update",
+                "filename": f"page-{index}.md",
+                "title": f"Page {index}",
+                "keywords": ["page"],
+                "summary": "x" * 1_000,
+            }
+            for index in range(8)
+        ]
+
+        issues = _triage_plan_validation_issues(plan)
+
+        assert [(issue.pointer, issue.keyword, issue.expected) for issue in issues] == [
+            ("", "maxUtf8Bytes", 8_000)
         ]
 
     @pytest.mark.parametrize(
@@ -6669,13 +7070,47 @@ class TestTriagePlanSchema:
             for issue in issues
         )
 
+    @pytest.mark.parametrize(
+        ("field_patch", "pointer"),
+        [
+            ({"filename": "   "}, "/0/filename"),
+            ({"title": "   "}, "/0/title"),
+            ({"summary": "   "}, "/0/summary"),
+            ({"keywords": ["   "]}, "/0/keywords/0"),
+        ],
+    )
+    def test_host_validator_rejects_whitespace_only_fields(
+        self, field_patch: dict, pointer: str
+    ) -> None:
+        from llm_wiki_mcp.ingest import _triage_plan_validation_issues
+
+        operation = {
+            "type": "update",
+            "filename": "bounded.md",
+            "title": "Bounded",
+            "keywords": ["bounded"],
+            "summary": "Update bounded knowledge.",
+            **field_patch,
+        }
+
+        issues = _triage_plan_validation_issues([operation])
+
+        assert any(issue.pointer == pointer for issue in issues)
+
     def test_live_triage_repairs_host_bounded_oversized_plan(
         self, isolated_wiki: Path
     ) -> None:
         from llm_wiki_mcp import ingest
 
         invalid = [
-            {"type": "update", "filename": f"page-{index}.md"} for index in range(33)
+            {
+                "type": "update",
+                "filename": f"page-{index}.md",
+                "title": f"Page {index}",
+                "keywords": ["page"],
+                "summary": "Update the page.",
+            }
+            for index in range(9)
         ]
         transport = _QueueStructuredTransport(json.dumps(invalid), "[]")
 
@@ -6684,6 +7119,33 @@ class TestTriagePlanSchema:
         feedback = transport.requests[1].messages[-1]["content"]
         assert '"keyword":"maxItems"' in feedback
         assert '"pointer":""' in feedback
+
+    def test_live_triage_repairs_whitespace_only_field(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        _seed_page(
+            isolated_wiki,
+            "bounded.md",
+            "---\ntitle: Bounded\nupdated: 2026-01-01\n---\nExisting body.",
+        )
+
+        invalid = [
+            {
+                "type": "update",
+                "filename": "bounded.md",
+                "title": "   ",
+                "keywords": ["bounded"],
+                "summary": "Update bounded knowledge.",
+            }
+        ]
+        valid = [{**invalid[0], "title": "Bounded"}]
+        transport = _QueueStructuredTransport(json.dumps(invalid), json.dumps(valid))
+
+        assert ingest._triage("raw content", transport=transport) == valid
+        feedback = transport.requests[1].messages[-1]["content"]
+        assert '"pointer":"/0/title"' in feedback
 
     def test_live_triage_missing_update_is_retyped_to_create(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -6694,6 +7156,8 @@ class TestTriagePlanSchema:
             {
                 "type": "update",
                 "filename": "career-transition-strategy-2026.md",
+                "title": "Career Transition Strategy 2026",
+                "keywords": ["career", "transition", "strategy", "2026"],
                 "summary": "Career transition strategy memory",
             }
         ]
@@ -7090,6 +7554,97 @@ class TestTriagePlanSchema:
         )
 
         assert ingest._structured_generate_transport()(request) is response
+
+    def test_native_structured_transport_preserves_chat_roles(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.local_structured import ChatRequest
+
+        captured: dict = {}
+
+        def fake_chat(messages, **kwargs):
+            captured["messages"] = messages
+            captured.update(kwargs)
+            return "[]"
+
+        monkeypatch.setattr(ingest.ollama_runtime, "chat", fake_chat)
+        request = ChatRequest(
+            model="ornith:test",
+            messages=(
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "original"},
+                {"role": "assistant", "content": '{"bad":true}'},
+                {"role": "user", "content": "validator feedback"},
+            ),
+            schema={"type": "array"},
+            num_ctx=65536,
+            num_predict=2048,
+            keep_alive="90s",
+            read_timeout_ms=180000,
+            max_output_chars=4000,
+            temperature=0,
+            seed=0,
+        )
+
+        assert ingest._structured_chat_transport()(request) == "[]"
+        assert captured["messages"] == [dict(message) for message in request.messages]
+        assert captured["return_metadata"] is True
+        assert captured["format"] == request.schema
+
+    def test_production_triage_selects_native_chat_transport(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from contextlib import nullcontext
+        from llm_wiki_mcp import ingest
+
+        native = _QueueStructuredTransport("[]")
+        monkeypatch.setattr(ingest, "_structured_chat_transport", lambda: native)
+        monkeypatch.setattr(
+            ingest.ollama_runtime,
+            "model_resource_lease",
+            lambda **_kwargs: nullcontext(),
+        )
+        monkeypatch.setattr(
+            ingest, "_admit_ingest_context", lambda _config, selected: selected
+        )
+
+        assert ingest._triage("ephemeral raw", raise_on_failure=True) == []
+        assert len(native.requests) == 1
+        assert [message["role"] for message in native.requests[0].messages] == [
+            "system",
+            "user",
+        ]
+
+    def test_successful_triage_clears_live_progress(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp import ingest
+
+        events: list[dict] = []
+        transport = _QueueStructuredTransport("[]")
+
+        assert (
+            ingest._triage(
+                "ephemeral raw", transport=transport, progress_callback=events.append
+            )
+            == []
+        )
+        assert events[-1]["event"] == "done"
+        assert events[-1]["active"] is False
+
+    def test_failed_triage_clears_live_progress(self, isolated_wiki: Path) -> None:
+        from llm_wiki_mcp import ingest
+
+        events: list[dict] = []
+        transport = _QueueStructuredTransport(RuntimeError("connection reset"))
+
+        assert (
+            ingest._triage(
+                "ephemeral raw", transport=transport, progress_callback=events.append
+            )
+            is None
+        )
+        assert events[-1]["event"] == "error"
+        assert events[-1]["active"] is False
 
     def test_structured_transport_supports_narrow_generate_fixture(
         self, monkeypatch: pytest.MonkeyPatch

@@ -76,8 +76,8 @@ weights, rewrite settings, or context style.
 # Make one immutable candidate config first. Its [decision_router] section
 # must contain the intended production values and adoption_artifact = "".
 CANDIDATE_CONFIG="$HOME/.wiki/runtime/model-lab/decision-router-candidate.toml"
-CORPUS="$HOME/.wiki/runtime/model-lab/adoption-corpus-v53.jsonl"
-ARTIFACT="$HOME/.wiki/runtime/model-lab/local-eval/adoption-v53-evaluator20.json"
+CORPUS="$HOME/.wiki/runtime/model-lab/adoption-corpus-v55.jsonl"
+ARTIFACT="$HOME/.wiki/runtime/model-lab/local-eval/adoption-v55-evaluator20.json"
 chmod 600 "$CANDIDATE_CONFIG"
 
 # Preflight the deterministic selection without replacing the durable corpus.
@@ -128,9 +128,9 @@ request-fingerprint policy, or candidate config changes; do not overwrite a
 corpus after an evaluation has started. The same immutable candidate config
 must be supplied to both the compiler and every fresh or resumed evaluator
 invocation. A config change is a new evaluation identity, never a resumable
-continuation. The current v53 identity uses artifact schema 12, evaluator
+continuation. The current v54 identity uses artifact schema 12, evaluator
 policy 20, decision-semantics policy 11, quorum-safety policy 1, action-
-signature policy 5, effective-request-fingerprint policy 3, structured-
+signature policy 5, effective-request-fingerprint policy 4, structured-
 generation policy 1, lane-contract registry policy 9, lane-contract case policy
 20 with source `deterministic_lane_contract_v20`, residency policy 2, and
 `num_predict = 3072`. Evaluator policy 20 seals explicit deterministic seed 0,
@@ -140,8 +140,9 @@ artifact identity.
 Registry policy 9 is aggregate artifact/run identity only and is not
 rendered into model requests. The model-visible prompt-contract version is
 lane-scoped: 17 lanes remain at version 7, `ingest_reconciliation` is at version
-11, and `raw_replay_reconciliation` is at version 8. This preserves the already-proven
-effective requests for unchanged lanes while resealing only the changed lanes.
+13, and `raw_replay_reconciliation` is at version 8. Unchanged lane prompt
+bytes remain stable, but effective-request fingerprint policy 4 intentionally
+reseals every lane identity and the aggregate canonical case manifest.
 
 When one lane's prompt, system policy, effect semantics, or request envelope
 changes, increment only that lane's prompt-contract version, compile a new
@@ -149,11 +150,14 @@ versioned corpus, and run a fresh evaluator artifact. The changed per-lane hash
 updates the aggregate manifest and artifact identity automatically; do not put
 the registry version into every model request, because that would invalidate
 all 19 lanes. Increment the registry policy itself only when the registry or
-artifact identity contract changes. The fixed v53 baseline contains 100
+artifact identity contract changes. The fixed v55 baseline contains 100
 canonical cases spanning all 19 model-backed lanes and all four executable
 context buckets. Legacy replay rows are included only when their independent
 provenance, contract identity, expected effect, and action signature all match
-the current policy; the v53 corpus admits none of the 36 stale historical rows.
+the current policy. During compilation only, non-deterministic historical rows
+with stale lane or request identity are counted and excluded; deterministic
+contract fixtures, the frozen corpus, evaluation, and runtime loading remain
+strict. The v55 corpus admits no stale historical rows.
 
 Canonical fixtures must be reachable through the same deterministic preflight
 as production. Entity-backfill missing, malformed, truncated, or alias-
@@ -175,6 +179,21 @@ Repair-option policy 2 deliberately exposes no regex-derived or host-authored
 semantic contradiction receipt. Every structurally valid one-tag option stays
 visible, and the two local models must independently choose from the exact raw
 and page bytes. Extra legacy receipt fields fail closed before inference.
+
+The ingest review projection never sends full unchanged page bodies. It emits
+every exact changed byte, hashes every omitted equal span, and binds each
+generated operation bijectively to its prepared CAS postimage. Body hunks carry
+up to 256 exact UTF-8 bytes of surrounding context on each side. Frontmatter-
+only hunks do not duplicate large metadata such as `raw_keywords`; instead,
+`page_identity` exposes complete exact identity nodes (`title`, aliases,
+permalink, canonical id/slug) once and seals the full pre/post frontmatter by
+byte length and SHA-256. A changed frontmatter node up to 512 bytes is shown
+whole. Larger nodes retain the exact field name plus 96 bytes of local context
+on both sides of the exact changed span, without copying neighboring metadata.
+Repair projections refer to that hash-bound review operation rather than
+copying the same context into every selectable repair.
+If this complete deterministic projection still exceeds the fixed input or
+context ceiling, the request fails closed before inference.
 
 `llm-wiki-local-model-eval --dry-run` validates and counts the compiled cases,
 while `--list` prints redacted case metadata; neither performs inference. A
@@ -203,10 +222,22 @@ proven intact.
 
 Every successful routine `DecisionRouter` result appends one replay case using
 the already-completed local votes; this collection step performs no additional
-inference. Prompts within the fixed 50,000-character evidence cap are retained
-losslessly. Longer prompts are explicitly marked `prompt_truncated=true` and
-are excluded from adoption evaluation. Production quorum, replay recording,
-and evaluation all use the same schema-derived action signature. Exact approved
+inference. The fixed 50,000-character evidence cap applies to the exact prompt
+sent to the model. For ingest repair, a larger full host-bound prompt is still
+retained losslessly when only its sealed host-only sidecar exceeds the cap; the
+row records the effective model prompt's length and SHA-256 separately and is
+not marked truncated. A model-visible prompt over the cap, or an over-cap
+system prompt, is retained only as a marked tail with
+`prompt_truncated=true` and is excluded from adoption evaluation. Production
+rows retain the lane-bound pre-semantic system for exact rebinding, plus the
+effective model system, lane effect, request fingerprint, and prompt/system
+lengths and SHA-256 values actually sent. The strict loader recomputes each
+present field; stale or tampered evidence is rejected. Only the adoption-corpus
+compiler may count and exclude non-deterministic historical rows whose old
+request identity can no longer be reconstructed, and an all-stale historical
+file still compiles the canonical contract-only corpus. Production quorum,
+replay recording, and evaluation all use the same schema-derived action
+signature. Exact approved
 mutation targets remain action-bearing fields. `semantic_checks`, however, are
 diagnostic authorization evidence and are intentionally excluded from that
 signature: after action agreement, the agreeing votes are conservatively
@@ -264,7 +295,7 @@ Increasing the resident count also requires spare capacity of at least 2 GiB or
 10% of the proposed resident set, whichever is larger, so small memory changes
 do not flap repeatedly between two and three runners.
 
-After the v53/evaluator-policy-20 artifact reports `adopted=true`, nominate it in
+After the v55/evaluator-policy-20 artifact reports `adopted=true`, nominate it in
 `decision_router.adoption_artifact`, revalidate it through a fresh runtime, and
 promote all 19 model-backed semantic lanes from `shadow` to `enabled`. Together
 with the five deterministic/guarded lanes, the post-adoption production state

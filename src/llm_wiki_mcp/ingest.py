@@ -40,6 +40,7 @@ from llm_wiki_mcp.local_structured import (
 )
 from llm_wiki_mcp.runtime_config import load_ingest_config
 from llm_wiki_mcp import decision_authority, ollama as ollama_runtime, runtime_status
+from llm_wiki_mcp.decision_lane_prompts import INGEST_PROPOSAL_SCHEMA_VERSION
 from llm_wiki_mcp.entities import patch_entities_frontmatter
 
 
@@ -246,6 +247,37 @@ def _structured_generate_transport(
     return transport
 
 
+def _structured_chat_transport() -> ChatTransport:
+    """Preserve native chat roles for production structured repair turns.
+
+    The historical ingest seam above flattens messages into one generate
+    transcript so narrow test fixtures can keep replacing
+    ``_generate_with_progress``.  Production must not use that compatibility
+    path: Ollama's chat endpoint retains the assistant response and the exact
+    validator feedback as separate roles, which is the contract
+    ``LocalStructuredSession`` repairs against.
+    """
+
+    def transport(
+        request: ChatRequest,
+    ) -> str | ollama_runtime.ChatResponse:
+        return ollama_runtime.chat(
+            [dict(message) for message in request.messages],
+            model=request.model,
+            format=request.schema,
+            num_ctx=request.num_ctx,
+            num_predict=request.num_predict,
+            keep_alive=request.keep_alive,
+            read_timeout_ms=request.read_timeout_ms,
+            max_output_chars=request.max_output_chars,
+            temperature=request.temperature,
+            seed=request.seed,
+            return_metadata=True,
+        )
+
+    return transport
+
+
 def _triage_with_progress(
     content: str,
     progress_callback: Callable[[dict[str, Any]], None] | None,
@@ -344,16 +376,23 @@ def _llm_progress_callback(
 
 
 _TRIAGE_CATALOG_TOP_N = 100
+_TRIAGE_MAX_OPERATIONS = 8
+_TRIAGE_MAX_OUTPUT_BYTES = 8_000
+_TRIAGE_MAX_FEEDBACK_BYTES = 4_000
+_TRIAGE_NUM_PREDICT = 4_096
 
 # Canonical post-response contract.  This is deliberately separate from the
 # grammar schema below: llama.cpp expands nested numeric repetition bounds and
 # rejects their product before inference on Ollama 0.31.1.
 _TRIAGE_PLAN_VALIDATION_SCHEMA: dict[str, Any] = {
     "type": "array",
-    "maxItems": 32,
+    "maxItems": _TRIAGE_MAX_OPERATIONS,
     "items": {
         "type": "object",
         "additionalProperties": False,
+        # Direct callers may still validate legacy update operations that do
+        # not carry display metadata. The production wire schema below is
+        # stricter and always requires all five fields.
         "required": ["type", "filename"],
         "properties": {
             "type": {"type": "string", "enum": ["create", "update"]},
@@ -380,7 +419,11 @@ TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
         # absent.  The structured session returns this exact schema violation
         # to the model on the next bounded repair turn.
         "additionalProperties": False,
-        "required": ["type", "filename"],
+        # A uniform five-field wire contract avoids conditional grammar while
+        # still making every response usable by the generation stage. Numeric
+        # bounds remain host-side because nested repetition bounds are rejected
+        # by llama.cpp before inference on the deployed Ollama version.
+        "required": ["type", "filename", "title", "keywords", "summary"],
         "properties": {
             "type": {"type": "string", "enum": ["create", "update"]},
             # Do not encode numeric repetition bounds in the grammar sent to
@@ -401,7 +444,6 @@ TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
 
 
 _INGEST_CONTEXT_BUCKETS = (32_768, 65_536, 131_072, 262_144)
-_TRIAGE_RAW_FAILURE_CLASSES = frozenset({"repair_exhausted", "repeated_output"})
 
 
 class IngestContextCapacityError(RuntimeError):
@@ -417,10 +459,6 @@ class IngestTriageFailure(RuntimeError):
         super().__init__(
             f"triage structured failure [{self.failure_class}]: {self.reason}"
         )
-
-    @property
-    def raw_failure(self) -> bool:
-        return self.failure_class in _TRIAGE_RAW_FAILURE_CLASSES
 
 
 def ingest_context_buckets(*, num_ctx: int, max_num_ctx: int) -> tuple[int, ...]:
@@ -603,14 +641,14 @@ Raw session data to triage:
 Analyze the raw data above. Output a JSON array of page operations (create/update)."""
 
     config = load_ingest_config()
-    triage_num_predict = min(config.num_predict, 2_048)
+    triage_num_predict = min(config.num_predict, _TRIAGE_NUM_PREDICT)
     required_num_ctx = required_structured_context_tokens(
         prompt,
         TRIAGE_PLAN_SCHEMA,
         system=TRIAGE_SYSTEM_PROMPT,
         num_predict=triage_num_predict,
-        max_output_chars=4_000,
-        max_feedback_chars=2_400,
+        max_output_chars=_TRIAGE_MAX_OUTPUT_BYTES,
+        max_feedback_chars=_TRIAGE_MAX_FEEDBACK_BYTES,
     )
     try:
         selected_num_ctx = _select_ingest_context(
@@ -630,10 +668,16 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
         with lease:
             if live_transport:
                 selected_num_ctx = _admit_ingest_context(config, selected_num_ctx)
+            session_transport = transport
+            if session_transport is None:
+                session_transport = (
+                    _structured_chat_transport()
+                    if live_transport
+                    else _structured_generate_transport(progress_callback)
+                )
             result = LocalStructuredSession(
                 model=config.model,
-                transport=transport
-                or _structured_generate_transport(progress_callback),
+                transport=session_transport,
                 role="ingest_triage",
                 num_ctx=selected_num_ctx,
                 num_predict=triage_num_predict,
@@ -643,8 +687,8 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
                 # independent byte cap prevents an input larger than the exact
                 # admitted runner from reaching Ollama.
                 max_input_chars=selected_num_ctx,
-                max_output_chars=4_000,
-                max_feedback_chars=2_400,
+                max_output_chars=_TRIAGE_MAX_OUTPUT_BYTES,
+                max_feedback_chars=_TRIAGE_MAX_FEEDBACK_BYTES,
             ).run(
                 prompt,
                 TRIAGE_PLAN_SCHEMA,
@@ -678,11 +722,26 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
     raw_plan = result.value
     if not isinstance(raw_plan, list):
         _safe_log("ingest | triage structured session returned a non-array")
+        failure = IngestTriageFailure(
+            "value_validation_error", "triage returned non-array"
+        )
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure
         return None
     validated = _validate_triage_plan(raw_plan, coerce_missing_updates=True)
     if validated is None:
         _safe_log(f"ingest | triage schema invalid (preview: {str(raw_plan)[:120]!r})")
+        failure = IngestTriageFailure(
+            "value_validation_error",
+            "triage post-validation diverged from the structured-session validator",
+        )
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure
         return None
+    if progress_callback is not None:
+        progress_callback({"event": "done", "active": False})
     return validated
 
 
@@ -702,10 +761,9 @@ def _triage_plan_validation_issues(value: Any) -> list[ValidationIssue]:
     """Return exact semantic-plan violations for same-session repair.
 
     JSON Schema owns the basic container and scalar types.  This host
-    validator adds operation-aware rules that the intentionally small schema
-    subset cannot express: create operations require a non-empty title,
-    summary, and keyword list, while legacy update targets retain their looser
-    filename contract.  Keeping the same checks here and in
+    validator adds operation-aware and whitespace-aware rules that the
+    intentionally small grammar schema cannot express. Keeping the same checks
+    here and in
     :func:`_validate_triage_plan` prevents a schema-valid but unusable plan from
     escaping the repair session and becoming an opaque outer retry.
     """
@@ -723,6 +781,28 @@ def _triage_plan_validation_issues(value: Any) -> list[ValidationIssue]:
     )
     if root_limit is not None:
         return [root_limit]
+    try:
+        plan_bytes = len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError):
+        plan_bytes = 0
+    if plan_bytes > _TRIAGE_MAX_OUTPUT_BYTES:
+        return [
+            ValidationIssue(
+                pointer="",
+                keyword="maxUtf8Bytes",
+                expected=_TRIAGE_MAX_OUTPUT_BYTES,
+                received={"type": "array", "utf8_bytes": plan_bytes},
+                message="triage plan exceeds the fixed UTF-8 output budget",
+            )
+        ]
     for index, entry in enumerate(value):
         pointer = f"/{index}"
         if not isinstance(entry, dict):
@@ -733,7 +813,13 @@ def _triage_plan_validation_issues(value: Any) -> list[ValidationIssue]:
         if isinstance(filename, str):
             fn = filename.strip()
             filename_error: tuple[str, Any, str] | None = None
-            if any(ord(char) < 0x20 or char == "\x7f" for char in fn):
+            if filename and not fn:
+                filename_error = (
+                    "minLength",
+                    1,
+                    "filename must contain a non-whitespace character",
+                )
+            elif any(ord(char) < 0x20 or char == "\x7f" for char in fn):
                 filename_error = (
                     "pattern",
                     "no ASCII control characters",
@@ -762,26 +848,50 @@ def _triage_plan_validation_issues(value: Any) -> list[ValidationIssue]:
                         message=message,
                     )
                 )
-
-        if op_type != "create":
-            continue
-        required_fields = (
-            ("title", "a non-empty page title string"),
-            ("summary", "a non-empty grounded summary string"),
-            ("keywords", "a non-empty list of non-empty keyword strings"),
-        )
-        for field, description in required_fields:
-            if field in entry:
-                continue
-            issues.append(
-                ValidationIssue(
-                    pointer=f"{pointer}/{field}",
-                    keyword="required",
-                    expected=description,
-                    received={"type": "missing"},
-                    message=f"create operation requires {description}",
+        for field in ("title", "summary"):
+            field_value = entry.get(field)
+            if isinstance(field_value, str) and field_value and not field_value.strip():
+                issues.append(
+                    ValidationIssue(
+                        pointer=f"{pointer}/{field}",
+                        keyword="minLength",
+                        expected=1,
+                        received={"type": "string", "value": field_value},
+                        message=f"{field} must contain a non-whitespace character",
+                    )
                 )
+        keywords = entry.get("keywords")
+        if isinstance(keywords, list):
+            for keyword_index, keyword in enumerate(keywords):
+                if not isinstance(keyword, str) or not keyword or keyword.strip():
+                    continue
+                issues.append(
+                    ValidationIssue(
+                        pointer=f"{pointer}/keywords/{keyword_index}",
+                        keyword="minLength",
+                        expected=1,
+                        received={"type": "string", "value": keyword},
+                        message="keyword must contain a non-whitespace character",
+                    )
+                )
+        if op_type == "create":
+            required_fields = (
+                ("title", "a non-empty page title string"),
+                ("summary", "a non-empty grounded summary string"),
+                ("keywords", "a non-empty list of non-empty keyword strings"),
             )
+            for field, description in required_fields:
+                if field in entry:
+                    continue
+                issues.append(
+                    ValidationIssue(
+                        pointer=f"{pointer}/{field}",
+                        keyword="required",
+                        expected=description,
+                        received={"type": "missing"},
+                        message=f"create operation requires {description}",
+                    )
+                )
     return issues
 
 
@@ -808,9 +918,9 @@ def _validate_triage_plan(
       quarantine while still leaving legacy or ambiguous update targets
       fail-closed.
 
-    Anything else (string entries, nonsense types, missing filenames,
-    control chars) returns ``None`` so the caller treats it as a triage
-    failure and counts it toward dead-letter quarantine.
+    Anything else (string entries, nonsense types, missing fields, control
+    chars) returns ``None`` so the caller treats it as an operational triage
+    contract failure while leaving the immutable raw in place.
 
     Empty plan ([]) is valid and means "nothing wiki-worthy".
     """
@@ -1986,6 +2096,9 @@ class PreparedIngestOperation:
     new_body: str
     previous_text: str | None
     new_tags: tuple[str, ...] = ()
+    source_operation_index: int = -1
+    source_operation_type: str = ""
+    source_filename: str = ""
 
     @property
     def previous_sha256(self) -> str | None:
@@ -2004,6 +2117,9 @@ class PreparedIngestOperation:
             "op_type": self.op_type,
             "path": self.path.relative_to(PAGES_DIR.resolve()).as_posix(),
             "page_id": self.page_id,
+            "source_operation_index": self.source_operation_index,
+            "source_operation_type": self.source_operation_type,
+            "source_filename": self.source_filename,
             "preimage_exists": self.previous_text is not None,
             "previous_text": self.previous_text,
             "previous_sha256": self.previous_sha256,
@@ -2512,8 +2628,10 @@ def _prepare_operations(
 
     totals = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
 
-    for op in operations:
-        op_type = op["type"]
+    for source_operation_index, op in enumerate(operations):
+        source_operation_type = op["type"]
+        source_filename = op["filename"]
+        op_type = source_operation_type
         full_path = _safe_resolve_page_path(op["filename"])
         page_id = full_path.stem
 
@@ -2591,6 +2709,9 @@ def _prepare_operations(
                     new_body=body.rstrip() + "\n",
                     previous_text=None,
                     new_tags=new_tags,
+                    source_operation_index=source_operation_index,
+                    source_operation_type=source_operation_type,
+                    source_filename=source_filename,
                 )
             )
 
@@ -2645,6 +2766,9 @@ def _prepare_operations(
                     page_id=page_id,
                     new_body=new_body,
                     previous_text=previous_text_for_rollback,
+                    source_operation_index=source_operation_index,
+                    source_operation_type=source_operation_type,
+                    source_filename=source_filename,
                 )
             )
 
@@ -2700,6 +2824,9 @@ def _prepare_operations(
                 new_body=constrained_body,
                 previous_text=entry.previous_text,
                 new_tags=entry.new_tags,
+                source_operation_index=entry.source_operation_index,
+                source_operation_type=entry.source_operation_type,
+                source_filename=entry.source_filename,
             )
         )
 
@@ -2879,7 +3006,8 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     return _apply_prepared_operations(planned, link_totals=totals)
 
 
-INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION = 1
+INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION = INGEST_PROPOSAL_SCHEMA_VERSION
+_INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION = 1
 INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION = 2
 INGEST_FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -2935,14 +3063,9 @@ INGEST_FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
 
 
 def _canonical_json_sha256(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    from llm_wiki_mcp.decision_lane_prompts import canonical_json_sha256
+
+    return canonical_json_sha256(value)
 
 
 def _ingest_source_key(raw_content: str, raw_keywords: list[str] | None) -> str:
@@ -2981,6 +3104,8 @@ def _write_ingest_artifact(path: Path, payload: dict[str, Any]) -> None:
 
 def _prepared_from_review_payload(
     rows: object,
+    *,
+    require_source_provenance: bool = True,
 ) -> list[PreparedIngestOperation] | None:
     if not isinstance(rows, list):
         return None
@@ -2991,6 +3116,19 @@ def _prepared_from_review_payload(
         op_type = row.get("op_type")
         relative_path = row.get("path")
         page_id = row.get("page_id")
+        provenance_fields = (
+            "source_operation_index",
+            "source_operation_type",
+            "source_filename",
+        )
+        provenance_present = tuple(field in row for field in provenance_fields)
+        if require_source_provenance and not all(provenance_present):
+            return None
+        if any(provenance_present) and not all(provenance_present):
+            return None
+        source_operation_index = row.get("source_operation_index", -1)
+        source_operation_type = row.get("source_operation_type", "")
+        source_filename = row.get("source_filename", "")
         previous_text = row.get("previous_text")
         proposed_text = row.get("proposed_text")
         new_tags_raw = row.get("new_tags", [])
@@ -2999,6 +3137,17 @@ def _prepared_from_review_payload(
             or not isinstance(relative_path, str)
             or not isinstance(page_id, str)
             or not page_id
+            or (
+                all(provenance_present)
+                and (
+                    not isinstance(source_operation_index, int)
+                    or isinstance(source_operation_index, bool)
+                    or source_operation_index < 0
+                    or source_operation_type not in {"create", "update"}
+                    or not isinstance(source_filename, str)
+                    or not source_filename
+                )
+            )
             or not isinstance(proposed_text, str)
             or (previous_text is not None and not isinstance(previous_text, str))
             or not isinstance(new_tags_raw, list)
@@ -3018,6 +3167,9 @@ def _prepared_from_review_payload(
             new_body=proposed_text,
             previous_text=previous_text,
             new_tags=tuple(new_tags_raw),
+            source_operation_index=source_operation_index,
+            source_operation_type=source_operation_type,
+            source_filename=source_filename,
         )
         if (
             row.get("preimage_exists") is not (previous_text is not None)
@@ -3066,21 +3218,34 @@ def rollback_ingest_proposal_artifact(
             "artifact": str(artifact_path),
         }
     proposal_sha256 = _canonical_json_sha256(proposal)
+    artifact_version = artifact.get("schema_version")
     source_key = proposal.get("source_key")
     if (
-        artifact.get("schema_version") != INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
+        not isinstance(artifact_version, int)
+        or isinstance(artifact_version, bool)
+        or artifact_version
+        not in {
+            _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION,
+            INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+        }
         or artifact.get("kind") != "ingest_frontier_proposal_artifact"
         or not isinstance(source_key, str)
         or not source_key
         or artifact.get("source_key") != source_key
         or artifact.get("proposal_sha256") != proposal_sha256
+        or proposal.get("schema_version") != artifact_version
     ):
         return {
             "status": "invalid_artifact",
             "reason": "artifact identity or digest mismatch",
             "artifact": str(artifact_path),
         }
-    planned = _prepared_from_review_payload(proposal.get("prepared_operations"))
+    planned = _prepared_from_review_payload(
+        proposal.get("prepared_operations"),
+        require_source_provenance=(
+            artifact_version >= INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
+        ),
+    )
     if not planned:
         return {
             "status": "invalid_artifact",
@@ -3280,6 +3445,10 @@ def _load_ingest_proposal(
     source_key: str,
     raw_content: str,
 ) -> tuple[dict[str, Any], list[PreparedIngestOperation]] | None:
+    from llm_wiki_mcp.decision_lane_prompts import (
+        validate_ingest_proposal_envelope,
+    )
+
     try:
         artifact = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -3295,7 +3464,9 @@ def _load_ingest_proposal(
         or artifact.get("kind") != "ingest_frontier_proposal_artifact"
         or artifact.get("source_key") != source_key
         or artifact.get("proposal_sha256") != proposal_sha256
+        or not validate_ingest_proposal_envelope(proposal)
         or proposal.get("source_key") != source_key
+        or proposal.get("raw_content") != raw_content
         or proposal.get("raw_sha256")
         != hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
     ):
@@ -3484,7 +3655,7 @@ def _load_strict_ingest_proposal_for_recovery(
     raw_content: str,
     raw_keywords: list[str] | None,
 ) -> tuple[dict[str, Any], list[PreparedIngestOperation]]:
-    """Load one current proposal artifact without consulting model output.
+    """Load one versioned terminal proposal without consulting model output.
 
     The ordinary retry path may replace an incomplete proposal after another
     bounded local attempt.  Pre-triage completion recovery is more privileged:
@@ -3514,14 +3685,21 @@ def _load_strict_ingest_proposal_for_recovery(
     proposal_sha256 = (
         _canonical_json_sha256(proposal) if isinstance(proposal, dict) else None
     )
+    artifact_version = artifact.get("schema_version")
     expected_raw_sha256 = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
     if (
-        artifact.get("schema_version") != INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
+        not isinstance(artifact_version, int)
+        or isinstance(artifact_version, bool)
+        or artifact_version
+        not in {
+            _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION,
+            INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+        }
         or artifact.get("kind") != "ingest_frontier_proposal_artifact"
         or artifact.get("source_key") != source_key
         or artifact.get("proposal_sha256") != proposal_sha256
         or not isinstance(proposal, dict)
-        or proposal.get("schema_version") != INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
+        or proposal.get("schema_version") != artifact_version
         or proposal.get("kind") != "ingest_semantic_mutation_proposal"
         or proposal.get("source_key") != source_key
         or proposal.get("raw_content") != raw_content
@@ -3568,7 +3746,12 @@ def _load_strict_ingest_proposal_for_recovery(
         and not isinstance(proposal.get("audit_decision"), dict)
     ):
         raise IngestApplyError("pre-triage terminal proposal audit metadata is invalid")
-    planned = _prepared_from_review_payload(proposal.get("prepared_operations"))
+    planned = _prepared_from_review_payload(
+        proposal.get("prepared_operations"),
+        require_source_provenance=(
+            artifact_version >= INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
+        ),
+    )
     if planned is None:
         raise IngestApplyError(
             "pre-triage terminal proposal page postimages are invalid"
@@ -3607,13 +3790,30 @@ def _load_pretriage_terminal_recovery(
             )
         return None
 
-    proposal, planned = _load_strict_ingest_proposal_for_recovery(
-        proposal_path,
-        source_key=source_key,
-        raw_content=raw_content,
-        raw_keywords=raw_keywords,
-    )
+    try:
+        proposal_candidate = json.loads(proposal_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise IngestApplyError(
+            "pre-triage terminal proposal artifact is unreadable: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(proposal_candidate, dict):
+        raise IngestApplyError(
+            "pre-triage terminal proposal artifact schema is invalid"
+        )
+    proposal_version = proposal_candidate.get("schema_version")
     if not review_path.exists():
+        if proposal_version == _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION:
+            # A v1 proposal without a durable authority seal never authorized
+            # an effect.  Its rows predate source-operation provenance, so the
+            # ordinary path may safely replace it with a complete v2 proposal.
+            return None
+        _load_strict_ingest_proposal_for_recovery(
+            proposal_path,
+            source_key=source_key,
+            raw_content=raw_content,
+            raw_keywords=raw_keywords,
+        )
         return None
     try:
         review_candidate = json.loads(review_path.read_text(encoding="utf-8"))
@@ -3633,7 +3833,21 @@ def _load_pretriage_terminal_recovery(
         # Historical frontier-shaped verdicts have no local authority seal.
         # They are neither trusted nor treated as corruption; the normal local
         # path will replace them after a fresh adopted-consensus decision.
+        if proposal_version == _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION:
+            return None
+        _load_strict_ingest_proposal_for_recovery(
+            proposal_path,
+            source_key=source_key,
+            raw_content=raw_content,
+            raw_keywords=raw_keywords,
+        )
         return None
+    proposal, planned = _load_strict_ingest_proposal_for_recovery(
+        proposal_path,
+        source_key=source_key,
+        raw_content=raw_content,
+        raw_keywords=raw_keywords,
+    )
     expected_review_fields = {
         "schema_version",
         "kind",
@@ -4781,7 +4995,7 @@ def _apply_frontier_replacement_operations(
         if op_type == "create":
             if not _has_frontmatter(content):
                 return operations, []
-            normalized_content = content.strip()
+            normalized_content = content
             original_content = existing[filename].get("content")
             if isinstance(original_content, str) and _has_frontmatter(original_content):
                 original_meta, _ = parse(original_content)
@@ -4801,9 +5015,13 @@ def _apply_frontier_replacement_operations(
                         return operations, []
                     tag_changed_files.append(filename)
         elif op_type == "update":
-            normalized_content = _strip_all_frontmatter(content).strip()
-            if not normalized_content:
+            # Repair arrays are hash-bound host postimages. Normalizing them
+            # after quorum would apply bytes different from the authorized
+            # action, so update repairs must already be body-only and are
+            # preserved byte-for-byte.
+            if _strip_all_frontmatter(content) != content or not content.strip():
                 return operations, []
+            normalized_content = content
         else:
             return operations, []
         replacements[filename] = normalized_content
@@ -5110,7 +5328,7 @@ def run_ingest(
                         ),
                     )
                 except IngestTriageFailure as triage_error:
-                    triage_failed = triage_error.raw_failure
+                    triage_failed = True
                     error = str(triage_error)
                     job_store.update(
                         job_id,

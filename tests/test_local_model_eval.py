@@ -1964,7 +1964,7 @@ def test_replay_reports_cross_role_effective_request_duplicates_and_conflicts(
         required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
     )
 
-    assert DECISION_REQUEST_FINGERPRINT_VERSION == 3
+    assert DECISION_REQUEST_FINGERPRINT_VERSION == 4
     assert inspection["effective_request_fingerprints"] == {
         "version": DECISION_REQUEST_FINGERPRINT_VERSION,
         "unique_requests": 2,
@@ -2019,6 +2019,55 @@ def test_declared_effective_request_fingerprint_must_match(
             source,
             required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
         )
+
+
+def test_effective_model_request_evidence_is_recomputed_when_present(
+    tmp_path: Path,
+) -> None:
+    prompt = "complete replay request"
+    system = "trusted base system"
+    row = _row(prompt)
+    row.update(
+        {
+            "system": system,
+            "effective_model_prompt_chars": len(prompt),
+            "effective_model_prompt_sha256": hashlib.sha256(
+                prompt.encode("utf-8")
+            ).hexdigest(),
+            "effective_model_system": system,
+            "effective_model_system_chars": len(system),
+            "effective_model_system_sha256": hashlib.sha256(
+                system.encode("utf-8")
+            ).hexdigest(),
+            "host_sidecar_present": False,
+        }
+    )
+    manifest = {"test_schema": schema_sha256(SCHEMA)}
+    source = _replay(tmp_path / "valid.jsonl", row)
+
+    inspection = inspect_replays(source, required_schema_manifest=manifest)
+
+    assert inspection["usable_cases"] == 1
+    tampered_values = {
+        "effective_model_prompt_chars": len(prompt) + 1,
+        "effective_model_prompt_sha256": "0" * 64,
+        "effective_model_system": "different system",
+        "effective_model_system_chars": len(system) + 1,
+        "effective_model_system_sha256": "0" * 64,
+        "host_sidecar_present": True,
+    }
+    for field, value in tampered_values.items():
+        tampered = json.loads(json.dumps(row))
+        tampered[field] = value
+        tampered_source = _replay(tmp_path / f"tampered-{field}.jsonl", tampered)
+        with pytest.raises(
+            ReplayInputError,
+            match=f"effective model request evidence mismatch: {field}",
+        ):
+            inspect_replays(
+                tampered_source,
+                required_schema_manifest=manifest,
+            )
 
 
 def test_action_only_local_repair_signature_is_valid_replay_evidence(

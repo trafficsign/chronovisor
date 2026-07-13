@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -290,13 +291,19 @@ def record_local_replay_case(
     policy_artifact_sha256: str | None = None,
     decision_lane: str | None = None,
     lane_contract_sha256: str | None = None,
+    lane_contract_effect: str | None = None,
+    effective_request_sha256: str | None = None,
+    effective_model_prompt: str | None = None,
+    effective_model_system: str | None = None,
     replay_file: Path | None = None,
 ) -> bool:
     """Append one successful local-consensus decision without another LLM call.
 
-    Prompts over the fixed evidence cap are retained only as an explicitly
-    marked tail.  The replay evaluator excludes those rows, so this diagnostic
-    record can never masquerade as complete adoption evidence.
+    Adoptability is bounded by the exact prompt sent to the model. A larger
+    host-bound prompt may be retained losslessly when only its sealed sidecar
+    exceeds the cap; the effective prompt length and digest prove that the
+    model-visible request stayed complete. Truly oversized model prompts are
+    retained only as an explicitly marked tail and excluded by the evaluator.
     """
 
     if (
@@ -307,6 +314,38 @@ def record_local_replay_case(
         or not isinstance(schema, Mapping)
         or not isinstance(result, Mapping)
         or (system is not None and not isinstance(system, str))
+        or (
+            effective_model_system is not None
+            and not isinstance(effective_model_system, str)
+        )
+        or (
+            effective_model_prompt is not None
+            and (
+                not isinstance(effective_model_prompt, str)
+                or not effective_model_prompt
+            )
+        )
+        or (
+            effective_request_sha256 is not None
+            and (
+                not isinstance(effective_request_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", effective_request_sha256) is None
+            )
+        )
+    ):
+        return False
+    lane_metadata = (
+        decision_lane,
+        lane_contract_sha256,
+        lane_contract_effect,
+    )
+    if any(value is not None for value in lane_metadata) and (
+        not isinstance(decision_lane, str)
+        or not decision_lane
+        or not isinstance(lane_contract_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", lane_contract_sha256) is None
+        or not isinstance(lane_contract_effect, str)
+        or not lane_contract_effect
     ):
         return False
     expected = decision_signature(result, schema)
@@ -315,8 +354,12 @@ def record_local_replay_case(
     model_tags = [model for model in models if isinstance(model, str) and model]
     if len(model_tags) < 2:
         return False
-    prompt_truncated = len(prompt) > REPLAY_PROMPT_LIMIT or (
-        isinstance(system, str) and len(system) > REPLAY_PROMPT_LIMIT
+    model_prompt = effective_model_prompt or prompt
+    model_system = (
+        effective_model_system if effective_model_system is not None else system
+    )
+    prompt_truncated = len(model_prompt) > REPLAY_PROMPT_LIMIT or (
+        isinstance(model_system, str) and len(model_system) > REPLAY_PROMPT_LIMIT
     )
     target = replay_file or REPLAY_FILE
     _append_jsonl(
@@ -332,16 +375,40 @@ def record_local_replay_case(
             "role": role,
             "decision_lane": decision_lane,
             "lane_contract_sha256": lane_contract_sha256,
+            "lane_contract_effect": lane_contract_effect,
+            "effective_request_sha256": effective_request_sha256,
             "model": "local_consensus",
             "models": model_tags,
             "effort": "local",
-            "prompt": prompt[-REPLAY_PROMPT_LIMIT:],
+            # The full host-bound prompt is required to validate and replay
+            # lane contracts. When its sealed host-only sidecar is large but
+            # the actual model request is bounded, retain the full prompt and
+            # base adoptability on the effective model prompt instead.
+            "prompt": (prompt[-REPLAY_PROMPT_LIMIT:] if prompt_truncated else prompt),
             "system": (
                 system[-REPLAY_PROMPT_LIMIT:] if isinstance(system, str) else None
             ),
+            "effective_model_system": (
+                model_system[-REPLAY_PROMPT_LIMIT:]
+                if isinstance(model_system, str)
+                else None
+            ),
             "prompt_truncated": prompt_truncated,
             "prompt_original_chars": len(prompt),
+            "effective_model_prompt_chars": len(model_prompt),
+            "effective_model_prompt_sha256": hashlib.sha256(
+                model_prompt.encode("utf-8")
+            ).hexdigest(),
+            "host_sidecar_present": model_prompt != prompt,
             "system_original_chars": len(system) if isinstance(system, str) else 0,
+            "effective_model_system_chars": (
+                len(model_system) if isinstance(model_system, str) else 0
+            ),
+            "effective_model_system_sha256": (
+                hashlib.sha256(model_system.encode("utf-8")).hexdigest()
+                if isinstance(model_system, str)
+                else None
+            ),
             "schema": dict(schema),
             "expected": expected,
             "latency_seconds": round(max(0.0, latency_seconds), 3),

@@ -33,6 +33,7 @@ from llm_wiki_mcp.decision_schema_manifest import (
 )
 from llm_wiki_mcp.local_model_eval import (
     ReplayInputError,
+    STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION,
     inspect_replays,
     load_replay_corpus,
 )
@@ -149,6 +150,29 @@ def _independent_bound_row() -> dict[str, object]:
     return row
 
 
+def _current_historical_lane_row() -> dict[str, object]:
+    candidate = next(
+        row
+        for row in contract_candidates()
+        if row.row.get("decision_lane") == "ingest_reconciliation"
+    )
+    row = json.loads(json.dumps(candidate.row))
+    row["source"] = "local_consensus"
+    for key in (
+        "contract_id",
+        "contract_version",
+        "lane_contract_case_manifest_sha256",
+    ):
+        row.pop(key, None)
+    return row
+
+
+def _stale_historical_lane_row() -> dict[str, object]:
+    row = _current_historical_lane_row()
+    row["lane_contract_sha256"] = "0" * 64
+    return row
+
+
 def _correction_prompt(
     correction_prompt: str,
     *,
@@ -246,6 +270,114 @@ def test_compiler_is_deterministic_contract_only_and_source_read_only(
     assert second["output_sha256"] == first["output_sha256"]
     assert output.stat().st_mode & 0o777 == 0o600
     assert inspect_replays(output)["usable_cases"] == first["selected_cases"]
+
+
+def test_historical_compiler_excludes_stale_lane_identity_but_keeps_contracts(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path / "replay.jsonl")
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(_stale_historical_lane_row(), ensure_ascii=False) + "\n"
+        )
+
+    result = compile_adoption_corpus(
+        source,
+        tmp_path / "adoption.jsonl",
+        minimum_cases=100,
+    )
+
+    assert result["historical_cases"] == 0
+    assert result["contract_cases"] == len(contract_candidates())
+    assert result["source"]["excluded_reasons"] == {
+        STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION: 1
+    }
+    eligibility = result["source"]["adoption_eligibility"]
+    assert eligibility["loader_excluded_cases"] == 1
+    assert eligibility["loader_excluded_reasons"] == {
+        STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION: 1
+    }
+
+
+def test_default_replay_loader_rejects_stale_historical_lane_identity(
+    tmp_path: Path,
+) -> None:
+    source = _write_rows(
+        tmp_path / "stale-historical.jsonl",
+        [_stale_historical_lane_row()],
+    )
+
+    with pytest.raises(ReplayInputError, match="invalid lane contract metadata"):
+        load_replay_corpus(source)
+
+
+def test_historical_compiler_accepts_source_containing_only_stale_identity(
+    tmp_path: Path,
+) -> None:
+    source = _write_rows(
+        tmp_path / "only-stale-historical.jsonl",
+        [_stale_historical_lane_row()],
+    )
+
+    result = compile_adoption_corpus(
+        source,
+        tmp_path / "adoption.jsonl",
+        minimum_cases=100,
+    )
+
+    assert result["historical_cases"] == 0
+    assert result["contract_cases"] == len(contract_candidates())
+    assert result["source"]["adoption_eligibility"]["loader_excluded_reasons"] == {
+        STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION: 1
+    }
+
+
+def test_historical_compiler_keeps_deterministic_lane_cases_strict(
+    tmp_path: Path,
+) -> None:
+    row = json.loads(json.dumps(contract_candidates()[0].row))
+    row["lane_contract_case_manifest_sha256"] = "0" * 64
+    source = _write_rows(tmp_path / "stale-contract.jsonl", [row])
+
+    with pytest.raises(
+        ReplayInputError,
+        match="stale deterministic lane case identity",
+    ):
+        compile_adoption_corpus(
+            source,
+            tmp_path / "adoption.jsonl",
+            minimum_cases=100,
+        )
+
+
+@pytest.mark.parametrize("migration", ["missing_host_sidecar", "v3_fingerprint"])
+def test_historical_compiler_excludes_stale_request_identity_migrations(
+    tmp_path: Path,
+    migration: str,
+) -> None:
+    row = _current_historical_lane_row()
+    if migration == "missing_host_sidecar":
+        row["prompt"] = "legacy ingest policy 11 prompt without sealed host evidence"
+        row.pop("effective_request_sha256", None)
+    else:
+        row["effective_request_sha256"] = "0" * 64
+    source = _source(tmp_path / "replay.jsonl")
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    result = compile_adoption_corpus(
+        source,
+        tmp_path / "adoption.jsonl",
+        minimum_cases=100,
+    )
+
+    assert result["historical_cases"] == 0
+    assert result["source"]["excluded_reasons"] == {
+        STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION: 1
+    }
+    assert result["source"]["adoption_eligibility"]["loader_excluded_reasons"] == {
+        STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION: 1
+    }
 
 
 def test_compiler_rejects_existing_symlink_output(tmp_path: Path) -> None:

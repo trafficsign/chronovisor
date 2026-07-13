@@ -24,6 +24,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from llm_wiki_mcp.decision_lane_prompts import (
+    INGEST_PROPOSAL_SCHEMA_VERSION,
     build_autonomy_duplicate_review_prompt,
     build_autonomy_retention_review_prompt,
     build_identity_preflight_receipt,
@@ -780,6 +781,7 @@ def _ingest_prepared_update(
     page_id: str,
     previous_text: str,
     proposed_text: str,
+    source_operation_index: int = 0,
 ) -> dict[str, Any]:
     """Mirror ``PreparedIngestOperation.review_payload`` for one update."""
 
@@ -787,6 +789,9 @@ def _ingest_prepared_update(
         "op_type": "update",
         "path": f"memory/{page_id}.md",
         "page_id": page_id,
+        "source_operation_index": source_operation_index,
+        "source_operation_type": "update",
+        "source_filename": f"memory/{page_id}.md",
         "preimage_exists": True,
         "previous_text": previous_text,
         "previous_sha256": hashlib.sha256(previous_text.encode("utf-8")).hexdigest(),
@@ -801,6 +806,7 @@ def _ingest_prepared_create(
     page_id: str,
     proposed_text: str,
     new_tags: list[str],
+    source_operation_index: int = 0,
 ) -> dict[str, Any]:
     """Mirror ``PreparedIngestOperation.review_payload`` for one create."""
 
@@ -808,9 +814,12 @@ def _ingest_prepared_create(
         "op_type": "create",
         "path": f"memory/{page_id}.md",
         "page_id": page_id,
+        "source_operation_index": source_operation_index,
+        "source_operation_type": "create",
+        "source_filename": f"memory/{page_id}.md",
         "preimage_exists": False,
-        "previous_text": "",
-        "previous_sha256": hashlib.sha256(b"").hexdigest(),
+        "previous_text": None,
+        "previous_sha256": None,
         "proposed_text": proposed_text,
         "proposed_sha256": hashlib.sha256(proposed_text.encode("utf-8")).hexdigest(),
         "new_tags": list(new_tags),
@@ -832,7 +841,7 @@ def _ingest_proposal(
     raw_keywords = ["llm-wiki", "ingest-contract"]
     source_key = _sha256_json({"raw_sha256": raw_sha256, "raw_keywords": raw_keywords})
     return {
-        "schema_version": 1,
+        "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
         "kind": "ingest_semantic_mutation_proposal",
         "source_key": source_key,
         "source_raw": f"raw/contracts/{source_key}.md",
@@ -1010,8 +1019,10 @@ def _ingest_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
         (
             _ingest_proposal(
                 raw_content=(
-                    "The same setting is both enabled and disabled now; no source "
-                    "or timestamp identifies which statement is authoritative."
+                    "Current setting: enabled.\n"
+                    "Current setting: disabled.\n"
+                    "Both are asserted as current, but neither has a source, "
+                    "timestamp, or provenance that establishes authority."
                 ),
                 triage_plan=[
                     {

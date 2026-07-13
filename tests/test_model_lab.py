@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -182,3 +183,54 @@ def test_local_consensus_replay_marks_truncated_system_as_non_adoptable(
     assert row["prompt_truncated"] is True
     assert row["prompt_original_chars"] == len("complete prompt")
     assert row["system_original_chars"] == 50_001
+
+
+def test_host_sidecar_does_not_false_truncate_bounded_model_prompt(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    model_prompt = "bounded model request"
+    host_bound_prompt = model_prompt + "\n" + ("h" * 60_000)
+    base_system = "lane-bound base system"
+    effective_system = base_system + "\n\neffective decision overlay"
+
+    written = model_lab.record_local_replay_case(
+        role="content_correction",
+        prompt=host_bound_prompt,
+        effective_model_prompt=model_prompt,
+        system=base_system,
+        effective_model_system=effective_system,
+        schema={
+            "type": "object",
+            "properties": {"decision": {"type": "string"}},
+        },
+        result={"decision": "apply"},
+        models=["ornith:test", "gpt-oss:test"],
+        latency_seconds=1.0,
+        decision_lane="content_correction_classification",
+        lane_contract_sha256="a" * 64,
+        lane_contract_effect="negative_retrieval_feedback",
+        effective_request_sha256="b" * 64,
+    )
+
+    row = json.loads(model_lab.REPLAY_FILE.read_text())
+    assert written is True
+    assert row["prompt"] == host_bound_prompt
+    assert row["prompt_truncated"] is False
+    assert row["prompt_original_chars"] == len(host_bound_prompt)
+    assert row["effective_model_prompt_chars"] == len(model_prompt)
+    assert (
+        row["effective_model_prompt_sha256"]
+        == hashlib.sha256(model_prompt.encode("utf-8")).hexdigest()
+    )
+    assert row["host_sidecar_present"] is True
+    assert row["system"] == base_system
+    assert row["effective_model_system"] == effective_system
+    assert row["effective_model_system_chars"] == len(effective_system)
+    assert (
+        row["effective_model_system_sha256"]
+        == hashlib.sha256(effective_system.encode("utf-8")).hexdigest()
+    )
+    assert row["lane_contract_effect"] == "negative_retrieval_feedback"
+    assert row["effective_request_sha256"] == "b" * 64
