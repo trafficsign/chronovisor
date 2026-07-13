@@ -36,6 +36,7 @@ from llm_wiki_mcp.local_structured import (
     LocalStructuredSession,
     ValidationIssue,
     required_structured_context_tokens,
+    validate_json,
 )
 from llm_wiki_mcp.runtime_config import load_ingest_config
 from llm_wiki_mcp import decision_authority, ollama as ollama_runtime, runtime_status
@@ -344,16 +345,14 @@ def _llm_progress_callback(
 
 _TRIAGE_CATALOG_TOP_N = 100
 
-TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
+# Canonical post-response contract.  This is deliberately separate from the
+# grammar schema below: llama.cpp expands nested numeric repetition bounds and
+# rejects their product before inference on Ollama 0.31.1.
+_TRIAGE_PLAN_VALIDATION_SCHEMA: dict[str, Any] = {
     "type": "array",
     "maxItems": 32,
     "items": {
         "type": "object",
-        # Only these five fields cross the semantic-plan boundary.  Unknown
-        # model keys are not diagnostics: accepting them can hide a malformed
-        # known key (for example ``"keywords: ["``) while the real field is
-        # absent.  The structured session returns this exact schema violation
-        # to the model on the next bounded repair turn.
         "additionalProperties": False,
         "required": ["type", "filename"],
         "properties": {
@@ -367,6 +366,35 @@ TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
                 "items": {"type": "string", "minLength": 1, "maxLength": 200},
             },
             "summary": {"type": "string", "minLength": 1, "maxLength": 2_000},
+        },
+    },
+}
+
+TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        # Only these five fields cross the semantic-plan boundary.  Unknown
+        # model keys are not diagnostics: accepting them can hide a malformed
+        # known key (for example ``"keywords: ["``) while the real field is
+        # absent.  The structured session returns this exact schema violation
+        # to the model on the next bounded repair turn.
+        "additionalProperties": False,
+        "required": ["type", "filename"],
+        "properties": {
+            "type": {"type": "string", "enum": ["create", "update"]},
+            # Do not encode numeric repetition bounds in the grammar sent to
+            # Ollama.  llama.cpp expands nested maxItems/maxLength products
+            # and rejects this otherwise-small schema before inference.  The
+            # same limits are enforced by _triage_plan_validation_issues on
+            # every response and returned as targeted repair feedback.
+            "filename": {"type": "string"},
+            "title": {"type": "string"},
+            "keywords": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "summary": {"type": "string"},
         },
     },
 }
@@ -682,40 +710,30 @@ def _triage_plan_validation_issues(value: Any) -> list[ValidationIssue]:
     escaping the repair session and becoming an opaque outer retry.
     """
 
-    issues: list[ValidationIssue] = []
+    issues = validate_json(value, _TRIAGE_PLAN_VALIDATION_SCHEMA)
     if not isinstance(value, list):
         return issues
+    root_limit = next(
+        (
+            issue
+            for issue in issues
+            if issue.pointer == "" and issue.keyword == "maxItems"
+        ),
+        None,
+    )
+    if root_limit is not None:
+        return [root_limit]
     for index, entry in enumerate(value):
         pointer = f"/{index}"
         if not isinstance(entry, dict):
             continue
-
-        for key in sorted(set(entry) - _TRIAGE_PLAN_FIELDS):
-            issues.append(
-                ValidationIssue(
-                    pointer=f"{pointer}/{key}",
-                    keyword="additionalProperties",
-                    expected=False,
-                    received={"type": type(entry[key]).__name__, "value": entry[key]},
-                    message=(
-                        f"unknown triage field {key!r}; use only type, filename, "
-                        "title, keywords, and summary"
-                    ),
-                )
-            )
 
         op_type = entry.get("type")
         filename = entry.get("filename")
         if isinstance(filename, str):
             fn = filename.strip()
             filename_error: tuple[str, Any, str] | None = None
-            if not fn or len(fn) > _MAX_FILENAME_LEN:
-                filename_error = (
-                    "minLength",
-                    {"minimum": 1, "maximum": _MAX_FILENAME_LEN},
-                    "filename must be non-empty and at most 200 characters",
-                )
-            elif any(ord(char) < 0x20 or char == "\x7f" for char in fn):
+            if any(ord(char) < 0x20 or char == "\x7f" for char in fn):
                 filename_error = (
                     "pattern",
                     "no ASCII control characters",
@@ -742,48 +760,6 @@ def _triage_plan_validation_issues(value: Any) -> list[ValidationIssue]:
                         expected=expected,
                         received={"type": "string", "value": filename},
                         message=message,
-                    )
-                )
-
-        for field, maximum in (("title", 300), ("summary", 2_000)):
-            if field not in entry:
-                continue
-            field_value = entry[field]
-            if (
-                isinstance(field_value, str)
-                and bool(field_value.strip())
-                and len(field_value) <= maximum
-            ):
-                continue
-            issues.append(
-                ValidationIssue(
-                    pointer=f"{pointer}/{field}",
-                    keyword="type",
-                    expected=f"non-empty string with at most {maximum} characters",
-                    received={
-                        "type": type(field_value).__name__,
-                        "value": field_value,
-                    },
-                    message=f"{field} must be a bounded non-empty string",
-                )
-            )
-        if "keywords" in entry:
-            keywords = entry["keywords"]
-            if not (
-                isinstance(keywords, list)
-                and 1 <= len(keywords) <= 32
-                and all(
-                    isinstance(item, str) and bool(item.strip()) and len(item) <= 200
-                    for item in keywords
-                )
-            ):
-                issues.append(
-                    ValidationIssue(
-                        pointer=f"{pointer}/keywords",
-                        keyword="items",
-                        expected="1 to 32 non-empty strings of at most 200 characters",
-                        received={"type": type(keywords).__name__, "value": keywords},
-                        message="keywords must be a bounded non-empty string list",
                     )
                 )
 

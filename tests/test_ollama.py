@@ -10,6 +10,7 @@ import threading
 import time
 from contextlib import contextmanager
 
+import httpx
 import pytest
 
 from llm_wiki_mcp import ollama
@@ -219,6 +220,29 @@ class _ResourceClient:
 def test_triage_prompt_requires_filename_for_updates() -> None:
     assert 'MUST use "filename"' in ollama.TRIAGE_SYSTEM_PROMPT
     assert 'Never emit a "page_id" field' in ollama.TRIAGE_SYSTEM_PROMPT
+
+
+def test_http_error_preserves_ollama_response_detail() -> None:
+    request = httpx.Request("POST", "http://localhost:11434/api/generate")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={
+            "error": (
+                "Failed to initialize samplers: failed to parse grammar\n"
+                "repetition exceeds sane defaults"
+            )
+        },
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "Ollama HTTP 400: Failed to initialize samplers: "
+            "failed to parse grammar repetition exceeds sane defaults"
+        ),
+    ):
+        ollama._raise_for_status_with_detail(response)
 
 
 def test_generation_prompts_forbid_invented_dates() -> None:

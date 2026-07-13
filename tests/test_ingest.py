@@ -6188,6 +6188,24 @@ class _QueueStructuredTransport:
 
 
 class TestTriagePlanSchema:
+    def test_ollama_grammar_schema_uses_host_side_numeric_bounds(self) -> None:
+        from llm_wiki_mcp.ingest import (
+            TRIAGE_PLAN_SCHEMA,
+            _TRIAGE_PLAN_VALIDATION_SCHEMA,
+        )
+
+        encoded = json.dumps(TRIAGE_PLAN_SCHEMA, sort_keys=True)
+        assert TRIAGE_PLAN_SCHEMA["items"]["additionalProperties"] is False
+        for repetition_bound in ("minItems", "maxItems", "minLength", "maxLength"):
+            assert repetition_bound not in encoded
+        assert _TRIAGE_PLAN_VALIDATION_SCHEMA["maxItems"] == 32
+        properties = _TRIAGE_PLAN_VALIDATION_SCHEMA["items"]["properties"]
+        assert properties["filename"]["maxLength"] == 200
+        assert properties["title"]["maxLength"] == 300
+        assert properties["keywords"]["maxItems"] == 32
+        assert properties["keywords"]["items"]["maxLength"] == 200
+        assert properties["summary"]["maxLength"] == 2_000
+
     def test_valid_plan_passes_through(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
@@ -6202,6 +6220,69 @@ class TestTriagePlanSchema:
             {"type": "update", "filename": "bar.md"},
         ]
         assert _validate_triage_plan(plan) == plan
+
+    def test_more_than_32_operations_is_rejected_by_host_validator(self) -> None:
+        from llm_wiki_mcp.ingest import _triage_plan_validation_issues
+
+        plan = [
+            {"type": "update", "filename": f"page-{index}.md"} for index in range(33)
+        ]
+
+        issues = _triage_plan_validation_issues(plan)
+
+        assert [(issue.pointer, issue.keyword, issue.expected) for issue in issues] == [
+            ("", "maxItems", 32)
+        ]
+
+    @pytest.mark.parametrize(
+        ("field_patch", "pointer", "keyword", "expected"),
+        [
+            ({"filename": ""}, "/0/filename", "minLength", 1),
+            ({"filename": "x" * 201}, "/0/filename", "maxLength", 200),
+            ({"title": ""}, "/0/title", "minLength", 1),
+            ({"title": "x" * 301}, "/0/title", "maxLength", 300),
+            ({"keywords": []}, "/0/keywords", "minItems", 1),
+            ({"keywords": ["x"] * 33}, "/0/keywords", "maxItems", 32),
+            ({"keywords": [""]}, "/0/keywords/0", "minLength", 1),
+            ({"keywords": ["x" * 201]}, "/0/keywords/0", "maxLength", 200),
+            ({"summary": ""}, "/0/summary", "minLength", 1),
+            ({"summary": "x" * 2_001}, "/0/summary", "maxLength", 2_000),
+        ],
+    )
+    def test_host_validator_preserves_ollama_omitted_numeric_bound(
+        self,
+        field_patch: dict,
+        pointer: str,
+        keyword: str,
+        expected: int,
+    ) -> None:
+        from llm_wiki_mcp.ingest import _triage_plan_validation_issues
+
+        operation = {"type": "update", "filename": "bounded.md", **field_patch}
+        issues = _triage_plan_validation_issues([operation])
+
+        assert any(
+            issue.pointer == pointer
+            and issue.keyword == keyword
+            and issue.expected == expected
+            for issue in issues
+        )
+
+    def test_live_triage_repairs_host_bounded_oversized_plan(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        invalid = [
+            {"type": "update", "filename": f"page-{index}.md"} for index in range(33)
+        ]
+        transport = _QueueStructuredTransport(json.dumps(invalid), "[]")
+
+        assert ingest._triage("raw content", transport=transport) == []
+        assert len(transport.requests) == 2
+        feedback = transport.requests[1].messages[-1]["content"]
+        assert '"keyword":"maxItems"' in feedback
+        assert '"pointer":""' in feedback
 
     def test_live_triage_missing_update_is_retyped_to_create(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

@@ -195,6 +195,33 @@ def _client() -> httpx.Client:
     return _CLIENT
 
 
+def _raise_for_status_with_detail(response: httpx.Response) -> None:
+    """Preserve Ollama's bounded error body in runtime diagnostics."""
+
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        try:
+            response.read()
+        except Exception:
+            pass
+        detail = ""
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+        if isinstance(body, Mapping) and isinstance(body.get("error"), str):
+            detail = str(body["error"]).strip()
+        if not detail:
+            try:
+                detail = response.text.strip()
+            except Exception:
+                detail = ""
+        detail = re.sub(r"\s+", " ", detail)[:1_000]
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"Ollama HTTP {response.status_code}{suffix}") from exc
+
+
 @contextmanager
 def model_resource_lease(*, exclusive: bool) -> Iterator[None]:
     """Coordinate inference and runner eviction across threads and processes.
@@ -1142,7 +1169,7 @@ def _generate_unlocked(
             json=payload,
             timeout=timeout,
         ) as resp:
-            resp.raise_for_status()
+            _raise_for_status_with_detail(resp)
             for line in resp.iter_lines():
                 if not line:
                     continue
@@ -1233,7 +1260,7 @@ def _generate_unlocked(
         json=payload,
         timeout=timeout,
     )
-    resp.raise_for_status()
+    _raise_for_status_with_detail(resp)
     body = resp.json()
     if not isinstance(body, dict) or not isinstance(body.get("response"), str):
         raise RuntimeError("Ollama generate response is missing response content")
@@ -1348,7 +1375,7 @@ def _chat_unlocked(
         pool=10.0,
     )
     resp = _client().post("/api/chat", json=payload, timeout=timeout)
-    resp.raise_for_status()
+    _raise_for_status_with_detail(resp)
     body = resp.json()
     message = body.get("message") if isinstance(body, dict) else None
     content = message.get("content") if isinstance(message, dict) else None
