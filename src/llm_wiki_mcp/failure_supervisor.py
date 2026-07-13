@@ -644,6 +644,23 @@ def _record_operational_raw_failure(
 
     now = datetime.now().isoformat()
     queued = operational_failures.get(record.fingerprint)
+    if (
+        isinstance(queued, dict)
+        and _packet_status(queued) in REPAIR_SUCCESS_PACKET_STATUSES
+    ):
+        # A completed packet proves only the earlier incident was repaired.
+        # Reusing it for a later recurrence would make the new raw appear
+        # released immediately and would suppress a fresh repair attempt.
+        completed_packet = queued.get("packet_path")
+        if isinstance(completed_packet, str):
+            for source_file, value in list(failures.items()):
+                if (
+                    isinstance(value, dict)
+                    and value.get("packet_path") == completed_packet
+                ):
+                    failures.pop(source_file, None)
+        operational_failures.pop(record.fingerprint, None)
+        queued = None
     if isinstance(queued, dict) and queued.get("self_heal_queued") is True:
         packet_path = queued.get("packet_path")
         bind_raws(

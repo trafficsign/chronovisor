@@ -5240,6 +5240,28 @@ class TestPerRawOrchestrator:
         )
         assert set(deferred) == {first_raw.name, second_raw.name}
 
+        completed_packet_path = Path(str(first.packet_path))
+        completed_packet = json.loads(completed_packet_path.read_text(encoding="utf-8"))
+        completed_packet["status"] = "local_repair_applied"
+        completed_packet_path.write_text(
+            json.dumps(completed_packet, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        recurring_raw = isolated_wiki / "raw" / "recurring-authority-failure.md"
+        recurring_raw.write_text("third grounded source", encoding="utf-8")
+
+        recurring = failure_supervisor.record_raw_failure(
+            raw_path=recurring_raw,
+            error=error,
+            raw_text="third grounded source",
+        )
+
+        assert recurring.packet_path != first.packet_path
+        assert started == [completed_packet_path, Path(str(recurring.packet_path))]
+        assert failure_supervisor.operational_deferred_raw_files(
+            [first_raw, second_raw, recurring_raw]
+        ) == {recurring_raw.name: "pending_local_repair"}
+
     def test_ollama_unavailable_stays_pending_without_self_heal_packet(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
