@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -175,7 +176,9 @@ def test_deterministic_single_alias_repair_applies_locally_without_frontier(
 
     _seed_page(isolated_wiki, "ai/canonical-target.md")
     packet_path = _write_packet(isolated_wiki)
-    quarantined = isolated_wiki / "runtime" / "failures" / "quarantined-raw" / "broken.md"
+    quarantined = (
+        isolated_wiki / "runtime" / "failures" / "quarantined-raw" / "broken.md"
+    )
     quarantined.parent.mkdir(parents=True, exist_ok=True)
     quarantined.write_text("raw body")
 
@@ -217,7 +220,9 @@ def test_drill_returns_local_repair_decision(isolated_wiki: Path) -> None:
     assert result["decision"]["action"] == "resolve_update_target"
 
 
-def test_auto_apply_error_packet_preserves_local_test_case_deterministically(isolated_wiki: Path) -> None:
+def test_auto_apply_error_packet_preserves_local_test_case_deterministically(
+    isolated_wiki: Path,
+) -> None:
     from llm_wiki_mcp.local_repair import propose_repair
 
     packet = {
@@ -232,6 +237,163 @@ def test_auto_apply_error_packet_preserves_local_test_case_deterministically(iso
     assert decision.status == "escalate"
     assert decision.action == "propose_test_case"
     assert decision.confidence >= 0.85
+
+
+def test_local_consensus_repair_carries_authority_seal(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import decision_policy, decision_router, local_repair
+    from llm_wiki_mcp.decision_router import canonical_agreement_signature
+    from llm_wiki_mcp.local_repair import LOCAL_REPAIR_SCHEMA
+
+    models = ["primary-model", "challenger-model", "tie-model"]
+    router_audit = {
+        "source": "adopted_artifact",
+        "artifact_sha256": "d" * 64,
+        "error": None,
+        "models": models,
+    }
+    authority = {
+        "source": "adopted_local_consensus",
+        "authority_version": 1,
+        "lane": "local_repair",
+        "lane_contract_sha256": "a" * 64,
+        "lane_contract_manifest_sha256": "b" * 64,
+        "lane_contract_case_manifest_sha256": "c" * 64,
+        "policy": {
+            "kind": "consensus",
+            "schema_name": "local_repair",
+            "mode": "enabled",
+            "error": None,
+        },
+        "router": router_audit,
+    }
+    policy = decision_policy.DECISION_POLICIES["local_repair"]
+    action = {
+        "status": "resolved",
+        "action": "retry_raw",
+        "confidence": 0.91,
+        "reason": "retry the validated raw packet",
+    }
+    signature = canonical_agreement_signature(action, schema=LOCAL_REPAIR_SCHEMA)
+    agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+
+    class FakePolicy:
+        source = "adopted_artifact"
+
+        @staticmethod
+        def audit_record():
+            return router_audit
+
+    class FakeResult:
+        ok = True
+        decision = action
+
+        @staticmethod
+        def audit_record():
+            return {
+                "status": "agreed",
+                "ok": True,
+                "agreement_sha256": agreement,
+                "failure_class": None,
+                "quarantine_reason": None,
+                "num_ctx": 16_384,
+                "residency": None,
+                "votes": [
+                    {
+                        "role": role,
+                        "model": model,
+                        "valid": index < 2,
+                        "signature_sha256": agreement if index < 2 else None,
+                        "invalid_reason": None,
+                    }
+                    for index, (role, model) in enumerate(
+                        zip(
+                            ("primary", "challenger", "tie_break"),
+                            models,
+                            strict=True,
+                        )
+                    )
+                ],
+            }
+
+    class FakeRouter:
+        policy = FakePolicy()
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def decide(self, *_args, **_kwargs):
+            return FakeResult()
+
+    monkeypatch.setattr(
+        decision_policy,
+        "resolve_decision_policy",
+        lambda _lane: (policy, "enabled", None),
+    )
+    monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
+    monkeypatch.setattr(
+        local_repair,
+        "current_semantic_authority",
+        lambda _lane: (authority, None),
+    )
+
+    decision = local_repair.propose_repair(
+        {"failure_class": "semantic.ambiguous_repair"},
+        use_qwen=True,
+    )
+
+    assert decision.source == "local_consensus"
+    assert decision.authority == authority
+    assert decision.decision_policy["mode"] == "enabled"
+    assert decision.local_consensus["agreement_sha256"] == agreement
+
+
+def test_local_consensus_repair_fails_closed_when_authority_changes_before_effect(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+    from llm_wiki_mcp.local_repair import LocalRepairDecision
+
+    packet_path = _write_packet(isolated_wiki)
+    decision = LocalRepairDecision(
+        status="resolved",
+        action="retry_raw",
+        confidence=0.91,
+        reason="retry",
+        source="local_consensus",
+        authority={
+            "source": "injected_reviewer_boundary",
+            "authority_version": 1,
+            "lane": "local_repair",
+        },
+        decision_policy={},
+        local_consensus={},
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "propose_repair",
+        lambda *_args, **_kwargs: decision,
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "current_semantic_authority",
+        lambda _lane: (None, "decision_lane_not_enabled:local_repair:shadow"),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "apply_local_decision",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale local decision must not be applied")
+        ),
+    )
+
+    result = self_heal.handle_packet(packet_path, use_qwen=True)
+
+    assert result["status"] == "local_repair_failed"
+    assert "decision_lane_not_enabled" in result["local_error"]
 
 
 @pytest.mark.parametrize(
@@ -421,8 +583,7 @@ def test_missing_update_without_candidate_retries_create_safe_raw(
     assert decision.status == "resolved"
     assert decision.action == "retry_raw"
     assert (
-        decision.requested_page_id
-        == "claude-code-vs-claude-code-structural-analysis"
+        decision.requested_page_id == "claude-code-vs-claude-code-structural-analysis"
     )
     assert decision.confidence >= 0.85
 
@@ -472,6 +633,42 @@ def test_missing_update_with_unsafe_page_id_still_escalates(
     assert decision.action == "propose_test_case"
 
 
+def test_missing_update_target_requires_exact_packet_and_request_evidence(
+    isolated_wiki: Path,
+) -> None:
+    from llm_wiki_mcp.local_repair import propose_repair
+
+    missing_request = {
+        "failure_class": "apply.update_target_not_found",
+        "requested_page_id": None,
+        "similar_existing_pages": ["existing-page"],
+    }
+    multiple_candidates = {
+        "failure_class": "apply.update_target_not_found",
+        "requested_page_id": "missing-page",
+        "similar_existing_pages": ["existing-page", "other-page"],
+    }
+
+    missing_request_decision = propose_repair(missing_request, use_qwen=False)
+    multiple_candidate_decision = propose_repair(
+        multiple_candidates,
+        generator=lambda *_args, **_kwargs: json.dumps(
+            {
+                "status": "resolved",
+                "action": "resolve_update_target",
+                "confidence": 0.99,
+                "requested_page_id": "missing-page",
+                "target_page_id": "existing-page",
+                "reason": "picked one candidate",
+            }
+        ),
+        use_qwen=True,
+    )
+
+    assert missing_request_decision.action == "propose_test_case"
+    assert multiple_candidate_decision.action == "propose_test_case"
+
+
 def test_missing_update_retry_raw_restores_raw_and_retries(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -500,11 +697,7 @@ def test_missing_update_retry_raw_restores_raw_and_retries(
     packet_path.parent.mkdir(parents=True, exist_ok=True)
     packet_path.write_text(json.dumps(packet), encoding="utf-8")
     quarantined = (
-        isolated_wiki
-        / "runtime"
-        / "failures"
-        / "quarantined-raw"
-        / "new-topic.md"
+        isolated_wiki / "runtime" / "failures" / "quarantined-raw" / "new-topic.md"
     )
     quarantined.parent.mkdir(parents=True, exist_ok=True)
     quarantined.write_text("raw body", encoding="utf-8")
@@ -560,15 +753,13 @@ def test_frontier_nonconvergence_restores_raw_without_frontier(
             "source": "qwen",
         },
     }
-    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "frontier-loop.json"
+    packet_path = (
+        isolated_wiki / "runtime" / "failures" / "packets" / "frontier-loop.json"
+    )
     packet_path.parent.mkdir(parents=True, exist_ok=True)
     packet_path.write_text(json.dumps(packet), encoding="utf-8")
     quarantined = (
-        isolated_wiki
-        / "runtime"
-        / "failures"
-        / "quarantined-raw"
-        / "frontier-loop.md"
+        isolated_wiki / "runtime" / "failures" / "quarantined-raw" / "frontier-loop.md"
     )
     quarantined.parent.mkdir(parents=True, exist_ok=True)
     quarantined.write_text("raw body", encoding="utf-8")
@@ -863,7 +1054,9 @@ def test_legacy_tool_unavailable_human_packet_reopens_autonomously(
 ) -> None:
     from llm_wiki_mcp import self_heal
 
-    packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "legacy-tool.json"
+    packet_path = (
+        isolated_wiki / "runtime" / "failures" / "packets" / "legacy-tool.json"
+    )
     packet_path.parent.mkdir(parents=True, exist_ok=True)
     packet_path.write_text(
         json.dumps(
@@ -903,11 +1096,11 @@ def test_frontier_quarantine_is_terminal_after_execution_started(
     packet_path.parent.mkdir(parents=True, exist_ok=True)
     packet_path.write_text(
         json.dumps(
-                {
-                    "failure_id": "quarantine",
-                    "failure_class": "adapter_contract_failure",
-                    "fingerprint": "adapter-contract:quarantine",
-                    "status": "frontier_quarantined",
+            {
+                "failure_id": "quarantine",
+                "failure_class": "adapter_contract_failure",
+                "fingerprint": "adapter-contract:quarantine",
+                "status": "frontier_quarantined",
                 "frontier_attempts": 3,
                 "self_heal_attempts": 3,
                 "quarantined_at": "2000-01-01T00:00:00",
@@ -949,13 +1142,13 @@ def test_external_human_boundary_never_calls_frontier(
     packet_path.parent.mkdir(parents=True, exist_ok=True)
     packet_path.write_text(
         json.dumps(
-                {
-                    "failure_id": "oauth",
-                    "failure_class": "oauth_required",
-                    "fingerprint": "oauth-required",
-                    "status": "pending_local_repair",
-                }
-            ),
+            {
+                "failure_id": "oauth",
+                "failure_class": "oauth_required",
+                "fingerprint": "oauth-required",
+                "status": "pending_local_repair",
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -1280,6 +1473,107 @@ def test_guard_denial_does_not_consume_frontier_attempt(
     assert packet["status"] == "repair_deferred"
     assert packet["frontier_attempts"] == 0
     assert packet["self_heal_attempts"] == 0
+
+
+def test_guard_deferred_system_repair_resumes_code_patch_without_local_reproposal(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = _write_packet(isolated_wiki)
+    _mark_system_code_repair(packet_path)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet.update(
+        {
+            "status": "pending_frontier",
+            "frontier_attempts": 0,
+            "local_decision": {
+                "status": "unresolved",
+                "action": "none",
+                "source": "trusted_system_incident_supervisor",
+                "notes": "local repairs exhausted",
+            },
+        }
+    )
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    persisted_decision = dict(packet["local_decision"])
+    persisted_evidence = dict(packet["repair_evidence"])
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        self_heal,
+        "propose_repair",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("deferred system repair must not become routine review")
+        ),
+    )
+
+    def fake_frontier(
+        _packet_path,
+        _packet,
+        local_decision,
+        *,
+        evidence,
+        execute_patch,
+    ):
+        calls.append(
+            {
+                "local_decision": dict(local_decision),
+                "evidence": evidence.to_dict(),
+                "execute_patch": execute_patch,
+            }
+        )
+        if len(calls) == 1:
+            return {
+                "decision": "needs_retry",
+                "summary": "guard cooldown is active",
+                "rescue_status": "repair_deferred",
+                "rescue_attempt": {
+                    "guard_reason": "frontier_cooldown_active",
+                },
+                "frontier_failure": {"failure_class": "frontier_guard_denied"},
+                "execution_started": False,
+            }
+        return {
+            "decision": "approved",
+            "summary": "isolated code repair verified",
+            "human_required": False,
+            "verified": True,
+            "execution_started": True,
+        }
+
+    monkeypatch.setattr(self_heal, "_run_frontier", fake_frontier)
+
+    deferred = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=True,
+        backoff_base_seconds=0,
+    )
+    after_defer = json.loads(packet_path.read_text(encoding="utf-8"))
+
+    assert deferred["status"] == "repair_deferred"
+    assert after_defer["local_decision"] == persisted_decision
+    assert after_defer["repair_evidence"] == persisted_evidence
+    assert after_defer["frontier_attempts"] == 0
+
+    recovered = self_heal.handle_packet(
+        packet_path,
+        use_qwen=False,
+        enable_frontier=True,
+        backoff_base_seconds=0,
+    )
+    after_recovery = json.loads(packet_path.read_text(encoding="utf-8"))
+
+    assert recovered["status"] == "frontier_approved"
+    assert len(calls) == 2
+    assert calls[1]["local_decision"] == persisted_decision
+    assert calls[1]["evidence"] == calls[0]["evidence"]
+    assert calls[1]["execute_patch"] is True
+    assert after_recovery["local_decision"] == persisted_decision
+    assert after_recovery["repair_evidence"] == persisted_evidence
+    assert after_recovery["frontier_attempts"] == 1
 
 
 def test_frontier_exception_after_start_is_terminal_and_releases_running_lease(
@@ -1785,12 +2079,15 @@ def test_background_exit_code_preserves_retry_and_terminal_states() -> None:
     assert self_heal._background_exit_code({"status": "human_required"}) == (
         background_jobs.QUARANTINE_EXIT_CODE
     )
-    assert self_heal._background_exit_code(
-        {
-            "status": "ok",
-            "results": [
-                {"status": "local_repair_applied"},
-                {"status": "frontier_retry"},
-            ],
-        }
-    ) == background_jobs.RETRYABLE_EXIT_CODE
+    assert (
+        self_heal._background_exit_code(
+            {
+                "status": "ok",
+                "results": [
+                    {"status": "local_repair_applied"},
+                    {"status": "frontier_retry"},
+                ],
+            }
+        )
+        == background_jobs.RETRYABLE_EXIT_CODE
+    )

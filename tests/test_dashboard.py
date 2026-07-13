@@ -71,6 +71,60 @@ def test_dead_orchestrator_pid_clears_stale_live_status(monkeypatch) -> None:
     assert status["batch"]["active"] is False
 
 
+def test_reused_orchestrator_pid_clears_stale_live_status(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        dashboard,
+        "_process_started_at",
+        lambda _pid: datetime.fromisoformat("2026-07-11T18:00:00"),
+    )
+    cached = {
+        "state": "running",
+        "stage": "generate",
+        "current_job_id": "job-1",
+        "current_job_pid": 4242,
+        "llm": {"active": True},
+        "batch": {"index": 2, "total": 2, "succeeded": 2, "failed": 0},
+    }
+    orchestrator_state = {
+        "current_job_id": "job-1",
+        "current_job_pid": 4242,
+        "current_job_started_at": "2026-07-11T17:00:00",
+    }
+
+    status = dashboard._canonicalize_runtime_status(
+        cached,
+        orchestrator_state,
+        pending=1,
+    )
+    dashboard._mark_batch_activity(status)
+
+    assert status["state"] == "idle"
+    assert status["current_job_id"] is None
+    assert status["batch"]["active"] is False
+
+
+def test_original_orchestrator_process_keeps_live_status(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        dashboard,
+        "_process_started_at",
+        lambda _pid: datetime.fromisoformat("2026-07-11T16:59:50"),
+    )
+    status = dashboard._canonicalize_runtime_status(
+        {"state": "idle", "stage": "waiting"},
+        {
+            "current_job_id": "job-1",
+            "current_job_pid": 4242,
+            "current_job_started_at": "2026-07-11T17:00:00",
+        },
+        pending=1,
+    )
+
+    assert status["state"] == "running"
+    assert status["current_job_id"] == "job-1"
+
+
 def test_snapshot_component_error_boundary_returns_structured_error() -> None:
     def broken_component():
         raise RuntimeError("duplicate page id")
@@ -166,6 +220,72 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert not (active_dir / "stale.json").exists()
 
 
+def test_local_consensus_snapshot_removes_reused_pid_marker(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    active_dir = wiki_root / "runtime" / "local-consensus" / "active"
+    active_dir.mkdir(parents=True)
+    marker_path = active_dir / "reused.json"
+    marker_path.write_text(
+        json.dumps(
+            {
+                "request_sha256": "a" * 64,
+                "role": "primary",
+                "model": "ornith:test",
+                "started_at": "2026-07-11T17:00:00",
+                "pid": 4242,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        dashboard,
+        "_process_started_at",
+        lambda _pid: datetime.fromisoformat("2026-07-11T18:00:00"),
+    )
+
+    snapshot = dashboard._local_consensus_snapshot()
+
+    assert snapshot["active"] is False
+    assert not marker_path.exists()
+
+
+def test_frontier_activity_snapshot_removes_reused_pid_marker(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    active_dir = wiki_root / "runtime" / "frontier-reviews" / "active"
+    active_dir.mkdir(parents=True)
+    marker_path = active_dir / "reused.json"
+    marker_path.write_text(
+        json.dumps(
+            {
+                "review_id": "review-1",
+                "started_at": "2026-07-11T17:00:00",
+                "pid": 4242,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        dashboard,
+        "_process_started_at",
+        lambda _pid: datetime.fromisoformat("2026-07-11T18:00:00"),
+    )
+
+    snapshot = dashboard._frontier_activity_snapshot()
+
+    assert snapshot["active"] is False
+    assert not marker_path.exists()
+
+
 def test_frontier_repair_snapshot_uses_guard_ledger_and_dead_owner_is_inactive(
     tmp_path: Path,
     monkeypatch,
@@ -234,6 +354,8 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "Frontier reviewing" not in app
     assert "Local consensus reviewing" in app
     assert "Local model evaluation" in app
+    assert "batch.active === true ? 1 : 0" in app
+    assert "batch.total ? 1 : 0" not in app
     assert 'id="local-consensus"' in page
     assert 'id="frontier-repair"' in page
     assert "Frontier Repair" in page
@@ -265,12 +387,20 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(wiki, "INDEX_FILE", wiki_root / "index.md")
     monkeypatch.setattr(wiki, "LOG_FILE", wiki_root / "log.md")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json")
-    monkeypatch.setattr(dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []})
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+    )
+    monkeypatch.setattr(
+        dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []}
+    )
     monkeypatch.setattr(
         dashboard,
         "_model_status_snapshot",
-        lambda ollama=None: {"available": False, "models": [], "summary": {"installed": 0, "loaded": 0}},
+        lambda ollama=None: {
+            "available": False,
+            "models": [],
+            "summary": {"installed": 0, "loaded": 0},
+        },
     )
     monkeypatch.setattr(
         dashboard,
@@ -285,7 +415,9 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
 
     runtime_status.write_status({"state": "running", "stage": "generate"})
     runtime_status.append_event("info", "ingest | stage 1: triage started")
-    runtime_status.append_metric("batch", pending_before=2, pending_after=1, files_processed=1)
+    runtime_status.append_metric(
+        "batch", pending_before=2, pending_after=1, files_processed=1
+    )
     frontier_activity_dir = runtime_dir / "frontier-reviews" / "active"
     frontier_activity_dir.mkdir(parents=True)
     (frontier_activity_dir / "review-1.json").write_text(
@@ -364,9 +496,14 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     assert snapshot["self_heal"]["counts"]["resolved"] == 1
     assert snapshot["self_heal"]["latest"]["raw_file"] == "broken.md"
     assert "alias missing -> ai/target" in snapshot["self_heal"]["latest"]["detail"]
-    assert snapshot["self_heal"]["latest"]["details"]["failure"]["packet_status"] == "local_repair_applied"
+    assert (
+        snapshot["self_heal"]["latest"]["details"]["failure"]["packet_status"]
+        == "local_repair_applied"
+    )
     assert snapshot["self_heal"]["latest"]["details"]["decision"]["source"] == "qwen"
-    assert snapshot["self_heal"]["latest"]["details"]["action"]["retry"]["files_processed"] == ["broken.md"]
+    assert snapshot["self_heal"]["latest"]["details"]["action"]["retry"][
+        "files_processed"
+    ] == ["broken.md"]
     assert snapshot["self_heal"]["watch"]["packets"]["total"] == 1
     assert snapshot["self_heal"]["watch"]["frontier_preflight"]["ok"] is True
     assert snapshot["frontier_review"]["active"] is True
@@ -381,7 +518,9 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     assert snapshot["health"]["error"] == "duplicate page id"
 
 
-def test_snapshot_handler_returns_json_error_instead_of_empty_socket(monkeypatch) -> None:
+def test_snapshot_handler_returns_json_error_instead_of_empty_socket(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         dashboard,
         "build_snapshot",
@@ -432,12 +571,20 @@ def test_build_snapshot_surfaces_frontier_human_required(
     monkeypatch.setattr(wiki, "INDEX_FILE", wiki_root / "index.md")
     monkeypatch.setattr(wiki, "LOG_FILE", wiki_root / "log.md")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json")
-    monkeypatch.setattr(dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []})
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+    )
+    monkeypatch.setattr(
+        dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []}
+    )
     monkeypatch.setattr(
         dashboard,
         "_model_status_snapshot",
-        lambda ollama=None: {"available": False, "models": [], "summary": {"installed": 0, "loaded": 0}},
+        lambda ollama=None: {
+            "available": False,
+            "models": [],
+            "summary": {"installed": 0, "loaded": 0},
+        },
     )
     monkeypatch.setattr(
         dashboard,
@@ -463,13 +610,18 @@ def test_build_snapshot_surfaces_frontier_human_required(
             "rescue_status": "human_required",
             "human_required": True,
             "frontier_failure": {"failure_class": "auth_required"},
-            "access_repair": {"applied": True, "repairs": [{"type": "cli_option_adapted"}]},
+            "access_repair": {
+                "applied": True,
+                "repairs": [{"type": "cli_option_adapted"}],
+            },
         },
         "human_notification": {
             "body": "Codex の認証が切れている可能性があります。ログイン確認が必要です。",
             "delivery": {"sent": True},
         },
-        "pending_frontier_review_path": str(failures_dir / "pending-frontier-review" / "auth1.json"),
+        "pending_frontier_review_path": str(
+            failures_dir / "pending-frontier-review" / "auth1.json"
+        ),
     }
     (packets_dir / "auth1.json").write_text(json.dumps(packet), encoding="utf-8")
     registry_record = {
@@ -497,9 +649,16 @@ def test_build_snapshot_surfaces_frontier_human_required(
     assert self_heal["counts"]["failed"] == 1
     assert self_heal["latest"]["title"] == "Human required"
     assert self_heal["latest"]["details"]["frontier"]["human_required"] is True
-    assert self_heal["latest"]["details"]["frontier"]["access_repair"]["applied"] is True
-    assert self_heal["latest"]["details"]["human_notification"]["delivery"]["sent"] is True
-    assert self_heal["latest"]["details"]["pending_frontier_review_path"] == packet["pending_frontier_review_path"]
+    assert (
+        self_heal["latest"]["details"]["frontier"]["access_repair"]["applied"] is True
+    )
+    assert (
+        self_heal["latest"]["details"]["human_notification"]["delivery"]["sent"] is True
+    )
+    assert (
+        self_heal["latest"]["details"]["pending_frontier_review_path"]
+        == packet["pending_frontier_review_path"]
+    )
     assert self_heal["watch"]["packets"]["failed"] == 1
     assert self_heal["watch"]["frontier_preflight"]["ok"] is False
 
@@ -590,6 +749,19 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
         "configured_models",
         lambda models=None: ("qwen3.6:35b-a3b-mxfp8", "gemma4:26b-mxfp8"),
     )
+    decision_config = SimpleNamespace(
+        primary_model="qwen3.6:35b-a3b-mxfp8",
+        challenger_model="gpt-oss:20b",
+        tie_break_model="gemma4:26b-mxfp8",
+    )
+    monkeypatch.setattr(
+        dashboard, "load_decision_router_config", lambda: decision_config
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "resolve_router_policy",
+        lambda config: SimpleNamespace(config=config),
+    )
     monkeypatch.setattr(dashboard, "embedding_model", lambda: "bge-m3")
     monkeypatch.setattr(
         dashboard,
@@ -600,20 +772,132 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     snapshot = dashboard._model_status_snapshot()
     by_name = {row["name"]: row for row in snapshot["models"]}
 
-    assert snapshot["summary"]["installed"] == 3
+    assert snapshot["summary"]["installed"] == 4
     assert snapshot["summary"]["all_installed"] == 4
-    assert snapshot["summary"]["unused_installed"] == 1
+    assert snapshot["summary"]["unused_installed"] == 0
     assert snapshot["summary"]["loaded"] == 2
-    assert snapshot["summary"]["configured"] == 4
+    assert snapshot["summary"]["configured"] == 5
     assert by_name["qwen3.6:35b-a3b-mxfp8"]["status"] == "loaded"
-    assert by_name["qwen3.6:35b-a3b-mxfp8"]["roles"] == ["ingest", "audit", "improve"]
+    assert by_name["qwen3.6:35b-a3b-mxfp8"]["roles"] == [
+        "ingest",
+        "audit",
+        "improve",
+        "decision-primary",
+    ]
     assert by_name["gemma4:26b-mxfp8"]["status"] == "ready"
-    assert by_name["gemma4:26b-mxfp8"]["roles"] == ["improve"]
+    assert by_name["gemma4:26b-mxfp8"]["roles"] == [
+        "improve",
+        "decision-tie-break",
+    ]
     assert by_name["bge-m3:latest"]["roles"] == ["embed"]
     assert "bge-m3" not in by_name
-    assert "gpt-oss:20b" not in by_name
+    assert by_name["gpt-oss:20b"]["status"] == "ready"
+    assert by_name["gpt-oss:20b"]["roles"] == ["decision-challenger"]
     assert by_name["qwen3.5:4b-mlx"]["status"] == "missing"
     assert by_name["qwen3.5:4b-mlx"]["roles"] == ["gate", "rewrite"]
+
+
+def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
+    bootstrap = SimpleNamespace(
+        primary_model="bootstrap-primary",
+        challenger_model="bootstrap-challenger",
+        tie_break_model="bootstrap-tie",
+    )
+    adopted = SimpleNamespace(
+        primary_model="adopted-primary",
+        challenger_model="adopted-challenger",
+        tie_break_model="adopted-tie",
+    )
+    monkeypatch.setattr(dashboard, "ingest_model", lambda: "")
+    monkeypatch.setattr(
+        dashboard, "load_audit_policy", lambda: SimpleNamespace(enabled=False)
+    )
+    monkeypatch.setattr(
+        dashboard.recall_runtime,
+        "load_policy",
+        lambda: SimpleNamespace(judge_mode="off", rewrite_enabled=False),
+    )
+    monkeypatch.setattr(dashboard, "configured_models", lambda _models=None: ())
+    monkeypatch.setattr(dashboard, "load_decision_router_config", lambda: bootstrap)
+    monkeypatch.setattr(
+        dashboard,
+        "resolve_router_policy",
+        lambda _config: SimpleNamespace(config=adopted),
+    )
+    monkeypatch.setattr(dashboard, "embedding_model", lambda: "")
+    monkeypatch.setattr(
+        dashboard,
+        "load_reranker_config",
+        lambda: SimpleNamespace(enabled=False),
+    )
+
+    roles = dashboard._configured_model_roles()
+
+    assert set(roles) == {
+        "adopted-primary",
+        "adopted-challenger",
+        "adopted-tie",
+    }
+    assert not any(name.startswith("bootstrap-") for name in roles)
+
+
+def test_decision_router_dashboard_resolution_is_cached(monkeypatch) -> None:
+    configured = SimpleNamespace(
+        adoption_artifact="",
+        primary_model="primary",
+        challenger_model="challenger",
+        tie_break_model="tie",
+    )
+    calls = 0
+    monkeypatch.setattr(dashboard, "load_decision_router_config", lambda: configured)
+    monkeypatch.setattr(
+        dashboard,
+        "_DECISION_ROUTER_CACHE",
+        {"key": None, "expires_at": 0.0, "config": None},
+    )
+
+    def resolve(config):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(config=config)
+
+    monkeypatch.setattr(dashboard, "resolve_router_policy", resolve)
+
+    assert dashboard._resolved_decision_router_config() is configured
+    assert dashboard._resolved_decision_router_config() is configured
+    assert calls == 1
+
+
+def test_decision_router_dashboard_cache_ttl_starts_after_resolution(
+    monkeypatch,
+) -> None:
+    configured = SimpleNamespace(
+        adoption_artifact="",
+        primary_model="primary",
+        challenger_model="challenger",
+        tie_break_model="tie",
+    )
+    calls = 0
+    clock = iter((100.0, 120.0, 134.9))
+    monkeypatch.setattr(dashboard, "load_decision_router_config", lambda: configured)
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        dashboard,
+        "_DECISION_ROUTER_CACHE",
+        {"key": None, "expires_at": 0.0, "config": None},
+    )
+
+    def resolve(config):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(config=config)
+
+    monkeypatch.setattr(dashboard, "resolve_router_policy", resolve)
+
+    assert dashboard._resolved_decision_router_config() is configured
+    assert dashboard._resolved_decision_router_config() is configured
+    assert calls == 1
+    assert dashboard._DECISION_ROUTER_CACHE["expires_at"] == 135.0
 
 
 def test_self_heal_snapshot_surfaces_watch_status(tmp_path: Path, monkeypatch) -> None:
@@ -650,13 +934,19 @@ def test_self_heal_snapshot_surfaces_watch_status(tmp_path: Path, monkeypatch) -
         "failure_class": "apply.update_target_not_found",
         "status": "frontier_approved",
     }
-    (packets_dir / "queued1.json").write_text(json.dumps(pending_packet), encoding="utf-8")
+    (packets_dir / "queued1.json").write_text(
+        json.dumps(pending_packet), encoding="utf-8"
+    )
     (packets_dir / "ok1.json").write_text(json.dumps(approved_packet), encoding="utf-8")
     (logs_dir / "ingest-drain-20260704.jsonl").write_text(
         json.dumps(
             {
                 "timestamp": "2026-07-04T19:31:00",
-                "self_heal": {"status": "ok", "packets_seen": 1, "results": [{"status": "pending_frontier"}]},
+                "self_heal": {
+                    "status": "ok",
+                    "packets_seen": 1,
+                    "results": [{"status": "pending_frontier"}],
+                },
             }
         )
         + "\n",
@@ -674,6 +964,52 @@ def test_self_heal_snapshot_surfaces_watch_status(tmp_path: Path, monkeypatch) -
     assert watch["packets"]["failed"] == 0
     assert watch["packets"]["status_counts"]["pending_frontier"] == 1
     assert watch["frontier_preflight"]["ok"] is True
+
+
+def test_repair_deferred_packet_stays_pending_and_warns(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    packets_dir = wiki_root / "runtime" / "failures" / "packets"
+    packets_dir.mkdir(parents=True)
+    packet = {
+        "failure_id": "system-repair-1",
+        "created_at": "2026-07-13T20:00:00",
+        "updated_at": "2026-07-13T20:01:00",
+        "failure_class": "system_health_snapshot_exception",
+        "incident_kind": "system_code_repair",
+        "status": "repair_deferred",
+        "error": "frontier repair cooldown is active",
+    }
+    (packets_dir / "system-repair-1.json").write_text(
+        json.dumps(packet),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(
+        dashboard,
+        "_frontier_preflight_snapshot",
+        lambda: {"ok": True},
+    )
+
+    watch = dashboard._self_heal_watch_snapshot({"system-repair-1": packet})
+    summary = dashboard._packet_summary(packet)
+    self_heal = dashboard._self_heal_snapshot()
+
+    assert watch["packets"]["pending"] == 1
+    assert watch["packets"]["failed"] == 0
+    assert watch["packets"]["status_counts"] == {"repair_deferred": 1}
+    assert watch["packets"]["pending_samples"][0]["status"] == "repair_deferred"
+    assert summary["state"] == "pending"
+    assert summary["level"] == "warn"
+    assert summary["title"] == "Frontier repair deferred"
+    assert self_heal["status"] == "pending"
+    assert self_heal["counts"]["pending"] == 1
+    assert self_heal["counts"]["resolved"] == 0
+    assert self_heal["latest"]["state"] == "pending"
+    assert self_heal["latest"]["level"] == "warn"
+    assert self_heal["latest"]["title"] == "Frontier repair deferred"
 
 
 def test_frontier_dashboard_snapshot_never_runs_codex_preflight(
@@ -782,7 +1118,9 @@ def test_recall_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
     assert recall["calibration"]["last_applied"] is None
 
 
-def test_save_history_snapshot_combines_raw_drain_and_log(tmp_path: Path, monkeypatch) -> None:
+def test_save_history_snapshot_combines_raw_drain_and_log(
+    tmp_path: Path, monkeypatch
+) -> None:
     wiki_root = tmp_path / "wiki"
     raw_dir = wiki_root / "raw"
     logs_dir = wiki_root / "logs"
@@ -949,7 +1287,9 @@ def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
     assert history["days"][0]["raw_segments"] == []
 
 
-def test_knowledge_mix_snapshot_groups_pages_by_category(tmp_path: Path, monkeypatch) -> None:
+def test_knowledge_mix_snapshot_groups_pages_by_category(
+    tmp_path: Path, monkeypatch
+) -> None:
     wiki_root = tmp_path / "wiki"
     pages_dir = wiki_root / "pages"
     (pages_dir / "ai").mkdir(parents=True)

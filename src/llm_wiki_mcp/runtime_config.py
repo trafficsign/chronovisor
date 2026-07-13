@@ -171,14 +171,7 @@ class IngestAuditConfig:
 
 @dataclass(frozen=True)
 class DecisionRouterConfig:
-    """Fixed local-consensus model and resource limits.
-
-    The router deliberately uses one context size for every decision model so
-    repeated calls cannot replace an Ollama runner merely because a caller
-    requested a different context.  Temperature and thinking are not exposed
-    as configuration: structured votes always use temperature 0 and
-    ``think=false``.
-    """
+    """Local-consensus model limits and memory-aware residency policy."""
 
     primary_model: str = DEFAULT_DECISION_PRIMARY_MODEL
     challenger_model: str = DEFAULT_DECISION_CHALLENGER_MODEL
@@ -186,13 +179,21 @@ class DecisionRouterConfig:
     primary_keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
     challenger_keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
     tie_break_keep_alive: str = "2m"
-    num_ctx: int = DEFAULT_HEAVY_NUM_CTX
-    num_predict: int = 2_048
+    # All three adopted decision models support at least 131K.  This is the
+    # ceiling; each request is rounded to the smallest safe bucket so short
+    # jobs do not pay the KV-cache cost of the longest corpus case.
+    num_ctx: int = 114_688
+    min_num_ctx: int = 16_384
+    num_predict: int = 3_072
     read_timeout_ms: int = 660_000
-    max_input_chars: int = 65_536
-    max_output_chars: int = 8_000
+    max_input_chars: int = 93_000
+    max_output_chars: int = 4_000
     max_feedback_chars: int = 2_000
     quorum: int = 2
+    adaptive_residency: bool = True
+    residency_policy_version: int = 2
+    memory_reserve_gib: int = 16
+    max_resident_models: int = 3
     # Empty means the exact TOML/default model triplet is the trusted
     # bootstrap/current policy.  Setting this path only nominates an artifact;
     # DecisionRouter still validates every adoption gate before switching.
@@ -247,7 +248,9 @@ def load_hook_policy(path: Path | str | None = None) -> HookPolicy:
         stop_content_correction=nested_bool(
             data, ("hooks", "stop", "content_correction"), True
         ),
-        stop_recall_improve=nested_bool(data, ("hooks", "stop", "recall_improve"), True),
+        stop_recall_improve=nested_bool(
+            data, ("hooks", "stop", "recall_improve"), True
+        ),
     )
 
 
@@ -260,7 +263,9 @@ def load_embedding_config(path: Path | str | None = None) -> EmbeddingConfig:
     document_prefix = embedding.get("document_prefix")
     query_prefix = embedding.get("query_prefix")
     return EmbeddingConfig(
-        model=model if isinstance(model, str) and model.strip() else DEFAULT_EMBEDDING_MODEL,
+        model=model
+        if isinstance(model, str) and model.strip()
+        else DEFAULT_EMBEDDING_MODEL,
         document_prefix=document_prefix if isinstance(document_prefix, str) else "",
         query_prefix=query_prefix if isinstance(query_prefix, str) else "",
     )
@@ -282,7 +287,9 @@ def _nonnegative_float(value: Any, default: float) -> float:
     return default
 
 
-def _bounded_float(value: Any, default: float, *, minimum: float, maximum: float) -> float:
+def _bounded_float(
+    value: Any, default: float, *, minimum: float, maximum: float
+) -> float:
     if isinstance(value, bool):
         return default
     if isinstance(value, (int, float)):
@@ -299,19 +306,32 @@ def load_ingest_config(path: Path | str | None = None) -> IngestConfig:
 
     model = section.get("model")
     keep_alive = section.get("keep_alive")
-    max_num_ctx = _positive_int(section.get("max_num_ctx"), IngestConfig.max_num_ctx, minimum=2_048)
+    max_num_ctx = _positive_int(
+        section.get("max_num_ctx"), IngestConfig.max_num_ctx, minimum=2_048
+    )
     num_ctx = _positive_int(section.get("num_ctx"), IngestConfig.num_ctx, minimum=2_048)
     if num_ctx > max_num_ctx:
         num_ctx = max_num_ctx
 
     return IngestConfig(
         model=model if isinstance(model, str) and model.strip() else IngestConfig.model,
-        keep_alive=keep_alive if isinstance(keep_alive, str) and keep_alive.strip() else IngestConfig.keep_alive,
-        temperature=_bounded_float(section.get("temperature"), IngestConfig.temperature, minimum=0.0, maximum=2.0),
+        keep_alive=keep_alive
+        if isinstance(keep_alive, str) and keep_alive.strip()
+        else IngestConfig.keep_alive,
+        temperature=_bounded_float(
+            section.get("temperature"),
+            IngestConfig.temperature,
+            minimum=0.0,
+            maximum=2.0,
+        ),
         num_ctx=num_ctx,
         max_num_ctx=max_num_ctx,
-        num_predict=_positive_int(section.get("num_predict"), IngestConfig.num_predict, minimum=128),
-        read_timeout_ms=_positive_int(section.get("read_timeout_ms"), IngestConfig.read_timeout_ms, minimum=1_000),
+        num_predict=_positive_int(
+            section.get("num_predict"), IngestConfig.num_predict, minimum=128
+        ),
+        read_timeout_ms=_positive_int(
+            section.get("read_timeout_ms"), IngestConfig.read_timeout_ms, minimum=1_000
+        ),
     )
 
 
@@ -331,9 +351,7 @@ def load_ingest_audit_config(path: Path | str | None = None) -> IngestAuditConfi
         update_sample_rate=rate(
             "update_sample_rate", IngestAuditConfig.update_sample_rate
         ),
-        noop_sample_rate=rate(
-            "noop_sample_rate", IngestAuditConfig.noop_sample_rate
-        ),
+        noop_sample_rate=rate("noop_sample_rate", IngestAuditConfig.noop_sample_rate),
         adaptive=section.get("adaptive") is not False,
         adaptive_window=_positive_int(
             section.get("adaptive_window"),
@@ -357,9 +375,7 @@ def load_ingest_audit_config(path: Path | str | None = None) -> IngestAuditConfi
         critical_sample_rate=rate(
             "critical_sample_rate", IngestAuditConfig.critical_sample_rate
         ),
-        max_sample_rate=rate(
-            "max_sample_rate", IngestAuditConfig.max_sample_rate
-        ),
+        max_sample_rate=rate("max_sample_rate", IngestAuditConfig.max_sample_rate),
         max_operations_without_audit=_positive_int(
             section.get("max_operations_without_audit"),
             IngestAuditConfig.max_operations_without_audit,
@@ -397,9 +413,7 @@ def load_decision_router_config(
         return value.strip() if isinstance(value, str) and value.strip() else default
 
     return DecisionRouterConfig(
-        primary_model=model(
-            "primary_model", DecisionRouterConfig.primary_model
-        ),
+        primary_model=model("primary_model", DecisionRouterConfig.primary_model),
         challenger_model=model(
             "challenger_model", DecisionRouterConfig.challenger_model
         ),
@@ -419,6 +433,11 @@ def load_decision_router_config(
         ),
         num_ctx=_positive_int(
             section.get("num_ctx"), DecisionRouterConfig.num_ctx, minimum=2_048
+        ),
+        min_num_ctx=_positive_int(
+            section.get("min_num_ctx"),
+            DecisionRouterConfig.min_num_ctx,
+            minimum=2_048,
         ),
         num_predict=_positive_int(
             section.get("num_predict"),
@@ -448,12 +467,170 @@ def load_decision_router_config(
         quorum=_positive_int(
             section.get("quorum"), DecisionRouterConfig.quorum, minimum=2
         ),
+        adaptive_residency=(
+            section["adaptive_residency"]
+            if isinstance(section.get("adaptive_residency"), bool)
+            else DecisionRouterConfig.adaptive_residency
+        ),
+        residency_policy_version=_positive_int(
+            section.get("residency_policy_version"),
+            DecisionRouterConfig.residency_policy_version,
+            minimum=1,
+        ),
+        memory_reserve_gib=_positive_int(
+            section.get("memory_reserve_gib"),
+            DecisionRouterConfig.memory_reserve_gib,
+            minimum=4,
+        ),
+        max_resident_models=min(
+            3,
+            _positive_int(
+                section.get("max_resident_models"),
+                DecisionRouterConfig.max_resident_models,
+                minimum=1,
+            ),
+        ),
         adoption_artifact=(
             str(section.get("adoption_artifact") or "").strip()
             if isinstance(section.get("adoption_artifact"), str)
             else ""
         ),
     )
+
+
+_DECISION_ROUTER_STRING_FIELDS = frozenset(
+    {
+        "primary_model",
+        "challenger_model",
+        "tie_break_model",
+        "tie_model",
+        "primary_keep_alive",
+        "challenger_keep_alive",
+        "tie_break_keep_alive",
+        "tie_keep_alive",
+    }
+)
+_DECISION_ROUTER_INTEGER_BOUNDS = {
+    "num_ctx": (2_048, None),
+    "min_num_ctx": (2_048, None),
+    "num_predict": (128, None),
+    "read_timeout_ms": (1_000, None),
+    "max_input_chars": (4_096, None),
+    "max_output_chars": (256, None),
+    "max_feedback_chars": (512, None),
+    "quorum": (2, 2),
+    "residency_policy_version": (1, None),
+    "memory_reserve_gib": (4, None),
+    "max_resident_models": (1, 3),
+}
+_DECISION_ROUTER_CANDIDATE_FIELDS = (
+    _DECISION_ROUTER_STRING_FIELDS
+    | frozenset(_DECISION_ROUTER_INTEGER_BOUNDS)
+    | {"adaptive_residency", "adoption_artifact"}
+)
+_DECISION_ROUTER_REQUIRED_CANDIDATE_FIELDS = frozenset(
+    {
+        "primary_model",
+        "challenger_model",
+        "primary_keep_alive",
+        "challenger_keep_alive",
+        "num_ctx",
+        "min_num_ctx",
+        "num_predict",
+        "read_timeout_ms",
+        "max_input_chars",
+        "max_output_chars",
+        "max_feedback_chars",
+        "quorum",
+        "adaptive_residency",
+        "residency_policy_version",
+        "memory_reserve_gib",
+        "max_resident_models",
+        "adoption_artifact",
+    }
+)
+
+
+def load_candidate_decision_router_config(path: Path | str) -> DecisionRouterConfig:
+    """Load an explicit replay-gate candidate without permissive fallbacks.
+
+    Production config loading intentionally remains backwards compatible.  A
+    replay gate is different: silently evaluating defaults after a typo or a
+    missing file can spend substantial local compute on the wrong model set.
+    """
+
+    resolved = Path(path).expanduser()
+    try:
+        raw = resolved.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"candidate config is unreadable: {resolved}: {exc}") from exc
+    try:
+        data = tomllib.loads(raw)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(
+            f"candidate config is malformed TOML: {resolved}: {exc}"
+        ) from exc
+    section = data.get("decision_router")
+    if not isinstance(section, dict) or not section:
+        raise ValueError(
+            "candidate config requires a non-empty [decision_router] table"
+        )
+    unknown = sorted(set(section) - _DECISION_ROUTER_CANDIDATE_FIELDS)
+    if unknown:
+        raise ValueError(
+            "candidate config contains unknown [decision_router] fields: "
+            + ", ".join(unknown)
+        )
+    for canonical, alias in (
+        ("tie_break_model", "tie_model"),
+        ("tie_break_keep_alive", "tie_keep_alive"),
+    ):
+        if canonical in section and alias in section:
+            raise ValueError(
+                f"candidate config must not set both {canonical} and {alias}"
+            )
+    for name in _DECISION_ROUTER_STRING_FIELDS:
+        if name in section and (
+            not isinstance(section[name], str) or not section[name].strip()
+        ):
+            raise ValueError(
+                f"candidate config field {name} must be a non-empty string"
+            )
+    for name, (minimum, maximum) in _DECISION_ROUTER_INTEGER_BOUNDS.items():
+        if name not in section:
+            continue
+        value = section[name]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"candidate config field {name} must be an integer")
+        if value < minimum or (maximum is not None and value > maximum):
+            bound = f"{minimum}..{maximum}" if maximum is not None else f">={minimum}"
+            raise ValueError(f"candidate config field {name} must be {bound}")
+    if "adaptive_residency" in section and not isinstance(
+        section["adaptive_residency"], bool
+    ):
+        raise ValueError("candidate config field adaptive_residency must be a boolean")
+    if not isinstance(section.get("adoption_artifact", ""), str):
+        raise ValueError("candidate config field adoption_artifact must be a string")
+    if str(section.get("adoption_artifact", "")).strip():
+        raise ValueError("candidate config adoption_artifact must be empty")
+    missing = sorted(_DECISION_ROUTER_REQUIRED_CANDIDATE_FIELDS - set(section))
+    if "tie_break_model" not in section and "tie_model" not in section:
+        missing.append("tie_break_model")
+    if "tie_break_keep_alive" not in section and "tie_keep_alive" not in section:
+        missing.append("tie_break_keep_alive")
+    if missing:
+        raise ValueError(
+            "candidate config is missing required [decision_router] fields: "
+            + ", ".join(sorted(missing))
+        )
+
+    config = load_decision_router_config(resolved)
+    if config.min_num_ctx > config.num_ctx:
+        raise ValueError("candidate config min_num_ctx must not exceed num_ctx")
+    models = (config.primary_model, config.challenger_model, config.tie_break_model)
+    if len(set(models)) != len(models):
+        raise ValueError("candidate config requires three distinct model roles")
+    return config
 
 
 def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
@@ -470,8 +647,12 @@ def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
     device = reranker.get("device")
     return RerankerConfig(
         enabled=reranker.get("enabled") is True,
-        model=model if isinstance(model, str) and model.strip() else RerankerConfig.model,
-        backend=backend if isinstance(backend, str) and backend.strip() else RerankerConfig.backend,
+        model=model
+        if isinstance(model, str) and model.strip()
+        else RerankerConfig.model,
+        backend=backend
+        if isinstance(backend, str) and backend.strip()
+        else RerankerConfig.backend,
         top_n=_positive_int(reranker.get("top_n"), RerankerConfig.top_n),
         max_length=_positive_int(reranker.get("max_length"), RerankerConfig.max_length),
         batch_size=_positive_int(reranker.get("batch_size"), RerankerConfig.batch_size),
@@ -490,7 +671,9 @@ class NegativeFeedbackConfig:
     max_entries: int = 500
 
 
-def load_negative_feedback_config(path: Path | str | None = None) -> NegativeFeedbackConfig:
+def load_negative_feedback_config(
+    path: Path | str | None = None,
+) -> NegativeFeedbackConfig:
     data = load_toml_file(path)
     search = data.get("search")
     section: Any = None
@@ -512,18 +695,24 @@ def load_negative_feedback_config(path: Path | str | None = None) -> NegativeFee
         kinds=kinds,
         similarity_threshold=(
             float(threshold)
-            if isinstance(threshold, (int, float)) and not isinstance(threshold, bool)
+            if isinstance(threshold, (int, float))
+            and not isinstance(threshold, bool)
             and 0.0 < float(threshold) <= 1.0
             else NegativeFeedbackConfig.similarity_threshold
         ),
         penalty=(
             float(penalty)
-            if isinstance(penalty, (int, float)) and not isinstance(penalty, bool)
+            if isinstance(penalty, (int, float))
+            and not isinstance(penalty, bool)
             and 0.0 < float(penalty) <= 1.0
             else NegativeFeedbackConfig.penalty
         ),
-        max_age_days=_positive_int(section.get("max_age_days"), NegativeFeedbackConfig.max_age_days),
-        max_entries=_positive_int(section.get("max_entries"), NegativeFeedbackConfig.max_entries),
+        max_age_days=_positive_int(
+            section.get("max_age_days"), NegativeFeedbackConfig.max_age_days
+        ),
+        max_entries=_positive_int(
+            section.get("max_entries"), NegativeFeedbackConfig.max_entries
+        ),
     )
 
 
@@ -545,12 +734,27 @@ def normalize_recall_config(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(recall.get("model"), str):
         out["model"] = recall["model"]
 
-    for section in ("thresholds", "budgets", "gate", "policy", "rewrite", "fusion", "calibration"):
+    for section in (
+        "thresholds",
+        "budgets",
+        "gate",
+        "policy",
+        "rewrite",
+        "fusion",
+        "calibration",
+    ):
         if isinstance(recall.get(section), dict):
             out[section] = recall[section]
 
     recall_options: dict[str, Any] = {}
-    for key in ("semantic", "judge_mode", "gate_mode", "context_style", "max_context_chars", "session_ttl_seconds"):
+    for key in (
+        "semantic",
+        "judge_mode",
+        "gate_mode",
+        "context_style",
+        "max_context_chars",
+        "session_ttl_seconds",
+    ):
         if key in recall:
             recall_options[key] = recall[key]
     if recall_options:

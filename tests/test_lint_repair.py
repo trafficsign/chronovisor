@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import pytest
 
 from llm_wiki_mcp import lint_repair
 from llm_wiki_mcp.convergence import CycleBudget, ConvergenceStore, RetryPolicy
+from llm_wiki_mcp.decision_router import canonical_agreement_signature
+from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 
 
@@ -16,7 +19,84 @@ NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 VALID_TAGS = ["d/tools-config", "t/howto", "s/evergreen"]
 
 
-def test_default_local_reviewer_repairs_schema_error_in_same_session(tmp_path: Path) -> None:
+def _semantic_authority(digest: str) -> dict:
+    return {
+        "source": "adopted_local_consensus",
+        "authority_version": 1,
+        "lane": lint_repair.TAG_REPAIR_DECISION_LANE,
+        "lane_contract_sha256": "1" * 64,
+        "lane_contract_manifest_sha256": "2" * 64,
+        "lane_contract_case_manifest_sha256": "3" * 64,
+        "policy": {
+            "kind": "consensus",
+            "schema_name": "lint_tag_repair",
+            "mode": "enabled",
+            "error": None,
+        },
+        "router": {
+            "source": "adopted_artifact",
+            "artifact_sha256": digest,
+            "error": None,
+            "models": ["primary", "challenger", "tie"],
+        },
+    }
+
+
+def _local_consensus_proof(review: dict, authority: dict) -> dict:
+    schema = production_decision_schemas()[authority["policy"]["schema_name"]]
+    signature = canonical_agreement_signature(review, schema=schema)
+    agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    models = authority["router"]["models"]
+    return {
+        "status": "agreed",
+        "ok": True,
+        "agreement_sha256": agreement,
+        "failure_class": None,
+        "quarantine_reason": None,
+        "votes": [
+            {
+                "role": "primary",
+                "model": models[0],
+                "valid": True,
+                "signature_sha256": agreement,
+                "invalid_reason": None,
+            },
+            {
+                "role": "challenger",
+                "model": models[1],
+                "valid": True,
+                "signature_sha256": agreement,
+                "invalid_reason": None,
+            },
+        ],
+    }
+
+
+def _authority_bound_tag_decision(
+    decision: str,
+    authority: dict,
+    *,
+    tags: list[str] | None = None,
+) -> dict:
+    value = {
+        "decision": decision,
+        "tags": list(tags if tags is not None else VALID_TAGS),
+        "reason": "authority-bound exact tag review",
+        "decision_policy": {
+            "lane": authority["lane"],
+            **authority["policy"],
+            "router_policy": authority["router"],
+        },
+    }
+    if decision == "rejected":
+        value["tags"] = []
+    value["local_consensus"] = _local_consensus_proof(value, authority)
+    return value
+
+
+def test_default_local_reviewer_repairs_schema_error_in_same_session(
+    tmp_path: Path,
+) -> None:
     requests = []
     responses = iter(
         [
@@ -81,16 +161,14 @@ def _budget() -> CycleBudget:
     )
 
 
-def _page(path: Path, *, tags: list[str] | None = None, body: str = "# Page\n\nUseful content.\n") -> str:
+def _page(
+    path: Path,
+    *,
+    tags: list[str] | None = None,
+    body: str = "# Page\n\nUseful content.\n",
+) -> str:
     tag_line = "" if tags is None else f"tags: [{', '.join(tags)}]\n"
-    text = (
-        "---\n"
-        "title: Test Page\n"
-        "updated: 2026-01-01\n"
-        f"{tag_line}"
-        "---\n\n"
-        f"{body}"
-    )
+    text = f"---\ntitle: Test Page\nupdated: 2026-01-01\n{tag_line}---\n\n{body}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return text
@@ -158,6 +236,17 @@ def test_normalize_tag_decision_is_fail_closed() -> None:
     assert "duplicate tags" in duplicate_tags["validation_errors"]
 
 
+def test_normalize_tag_decision_preserves_local_consensus_authority_audit() -> None:
+    authority = _semantic_authority("a" * 64)
+    normalized = lint_repair.normalize_tag_decision(
+        _authority_bound_tag_decision("approved", authority)
+    )
+
+    assert normalized["valid"] is True
+    assert normalized["decision_policy"]["router_policy"] == authority["router"]
+    assert normalized["local_consensus"]["status"] == "agreed"
+
+
 def test_local_approved_tags_require_frontier_approval_before_apply(
     tmp_path: Path,
     monkeypatch,
@@ -214,7 +303,8 @@ def test_local_approved_tags_require_frontier_approval_before_apply(
     assert item["status"] == "applied"
     assert item["result"]["review_stage"] == "frontier"
     assert len(frontier_prompts) == 1
-    assert "Local proposal (may be null, malformed, or wrong)" in frontier_prompts[0]
+    assert "Tag review contract version: 2." in frontier_prompts[0]
+    assert "<LOCAL_TAG_PROPOSAL_UNTRUSTED_JSON>" in frontier_prompts[0]
     assert "page is a configuration how-to" in frontier_prompts[0]
 
 
@@ -332,6 +422,13 @@ def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
     assert first["results"][0]["status"] == "budget_exhausted"
     assert item["status"] == "frontier_retry"
     assert artifact.exists()
+    artifact_payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert artifact_payload["schema_version"] == 2
+    assert artifact_payload["authority"] == {
+        "source": "injected_reviewer_boundary",
+        "authority_version": 1,
+        "lane": lint_repair.TAG_REPAIR_DECISION_LANE,
+    }
     assert page_path.read_text(encoding="utf-8") == original
     assert frontier_calls == 1
 
@@ -355,6 +452,168 @@ def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
     assert second["budget"]["used"]["mutation"] == 1
     assert meta["tags"] == VALID_TAGS
     assert frontier_calls == 1
+
+
+def test_stale_durable_verdict_is_not_reused_across_authority_epoch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page_id = "stale-authority"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    original = _page(page_path)
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, [_row(page_id)])
+    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    store = _store(tmp_path)
+    authority_a = _semantic_authority("a" * 64)
+    authority_b = _semantic_authority("b" * 64)
+    current = authority_a
+    reviewer_calls = 0
+
+    def authority(_lane, *, injected_reviewer=False):
+        del injected_reviewer
+        return current, None
+
+    def reviewer(_prompt, _schema):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+        return _authority_bound_tag_decision("approved", current)
+
+    monkeypatch.setattr(lint_repair, "current_semantic_authority", authority)
+    first = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=CycleBudget(
+            max_local_calls=1,
+            max_frontier_calls=1,
+            max_mutations=0,
+            max_elapsed_seconds=60,
+        ),
+        local_reviewer=lambda _prompt, _schema: {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "local proposal",
+        },
+        frontier_reviewer=reviewer,
+        now=NOW,
+    )
+    assert first["results"][0]["status"] == "budget_exhausted"
+    assert reviewer_calls == 1
+    current = authority_b
+
+    second = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=CycleBudget(
+            max_local_calls=0,
+            max_frontier_calls=1,
+            max_mutations=0,
+            max_elapsed_seconds=60,
+        ),
+        local_reviewer=_never,
+        frontier_reviewer=reviewer,
+        now=NOW + timedelta(seconds=901),
+    )
+
+    artifact = lint_repair._review_artifact_path(store, store.list_items()[0]["key"])
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert second["results"][0]["status"] == "budget_exhausted"
+    assert reviewer_calls == 2
+    assert payload["authority"] == authority_b
+    assert page_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+def test_authority_change_before_effect_blocks_page_and_terminal_transition(
+    tmp_path: Path,
+    monkeypatch,
+    decision: str,
+) -> None:
+    page_id = f"authority-race-{decision}"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    original = _page(page_path)
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, [_row(page_id)])
+    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    store = _store(tmp_path)
+    authority_a = _semantic_authority("a" * 64)
+    authority_b = _semantic_authority("b" * 64)
+    authority_calls = 0
+
+    def changing_authority(_lane, *, injected_reviewer=False):
+        nonlocal authority_calls
+        del injected_reviewer
+        authority_calls += 1
+        return (authority_a if authority_calls <= 2 else authority_b), None
+
+    monkeypatch.setattr(
+        lint_repair,
+        "current_semantic_authority",
+        changing_authority,
+    )
+    result = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=_budget(),
+        local_reviewer=lambda _prompt, _schema: {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "local proposal",
+        },
+        frontier_reviewer=lambda _prompt, _schema: _authority_bound_tag_decision(
+            decision,
+            authority_a,
+        ),
+        now=NOW,
+    )
+
+    item = store.list_items()[0]
+    assert result["results"][0]["status"] == "frontier_retry"
+    assert item["status"] == "frontier_retry"
+    assert item["last_failure_class"] == "decision_authority_changed"
+    assert page_path.read_text(encoding="utf-8") == original
+
+
+def test_production_verdict_without_policy_audit_cannot_be_persisted_or_applied(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page_id = "missing-policy-audit"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    original = _page(page_path)
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, [_row(page_id)])
+    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    authority = _semantic_authority("a" * 64)
+    monkeypatch.setattr(
+        lint_repair,
+        "current_semantic_authority",
+        lambda _lane, *, injected_reviewer=False: (authority, None),
+    )
+    store = _store(tmp_path)
+
+    result = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=_budget(),
+        local_reviewer=lambda _prompt, _schema: {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "local proposal",
+        },
+        frontier_reviewer=lambda _prompt, _schema: {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "missing required production policy audit",
+        },
+        now=NOW,
+    )
+
+    item = store.list_items()[0]
+    assert result["results"][0]["status"] == "frontier_error"
+    assert item["last_failure_class"] == "decision_authority_changed"
+    assert not lint_repair._review_artifact_path(store, item["key"]).exists()
+    assert page_path.read_text(encoding="utf-8") == original
 
 
 def test_frontier_artifact_write_failure_is_fail_closed(
@@ -399,7 +658,7 @@ def test_frontier_artifact_write_failure_is_fail_closed(
     assert page_path.read_text(encoding="utf-8") == original
 
 
-def test_invalid_local_proposal_escalates_to_frontier_and_applies(
+def test_invalid_local_proposal_cannot_be_replaced_by_review_panel(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -431,19 +690,19 @@ def test_invalid_local_proposal_escalates_to_frontier_and_applies(
 
     meta, _body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
     item = store.list_items()[0]
-    assert result["applied"] == 1
+    assert result["applied"] == 0
     assert result["escalated"] == 1
     assert result["budget"]["used"] == {
         "local": 1,
         "frontier": 1,
-        "mutation": 1,
+        "mutation": 0,
         "raw_bytes": 0,
     }
-    assert meta["tags"] == VALID_TAGS
-    assert item["status"] == "applied"
+    assert "tags" not in meta
+    assert item["status"] in {"frontier_retry", "quarantined"}
     assert item["local_attempts"] == 1
     assert item["frontier_attempts"] == 1
-    assert item["result"]["review_stage"] == "frontier"
+    assert result["results"][0]["status"] == "frontier_retry"
 
 
 def test_frontier_rejection_is_terminal_and_does_not_mutate_page(
@@ -663,7 +922,9 @@ def test_cas_conflict_quarantines_without_overwriting_concurrent_change(
     _queue(queue_path, [_row(page_id)])
     monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
-    concurrent = "---\ntitle: Concurrent\nupdated: 2026-07-10\n---\n\n# Changed elsewhere\n"
+    concurrent = (
+        "---\ntitle: Concurrent\nupdated: 2026-07-10\n---\n\n# Changed elsewhere\n"
+    )
 
     def local_review(_prompt, _schema):
         return {
@@ -749,10 +1010,15 @@ def test_backoff_row_does_not_starve_later_actionable_row(
     assert second["processed"] == 1
     assert second["deferred"] == 1
     assert second["observed"] == 1
-    assert [result["status"] for result in second["results"]] == ["deferred", "observed"]
+    assert [result["status"] for result in second["results"]] == [
+        "deferred",
+        "observed",
+    ]
 
 
-def test_existing_valid_tags_finish_without_calling_a_model(tmp_path: Path, monkeypatch) -> None:
+def test_existing_valid_tags_finish_without_calling_a_model(
+    tmp_path: Path, monkeypatch
+) -> None:
     page_id = "already-valid"
     page_path = tmp_path / "pages" / f"{page_id}.md"
     original = _page(page_path, tags=VALID_TAGS)
@@ -775,8 +1041,71 @@ def test_existing_valid_tags_finish_without_calling_a_model(tmp_path: Path, monk
     assert result["budget"]["used"]["local"] == 0
     assert result["budget"]["used"]["mutation"] == 0
     assert item["status"] == "applied"
-    assert item["result"]["action"] == "already_resolved"
+    assert item["result"]["action"] == "already_resolved_observed"
+    assert item["result"]["semantic_effect"] is False
+    assert item["result"]["recovery_only"] is False
     assert page_path.read_text(encoding="utf-8") == original
+
+
+def test_exact_already_applied_recovery_only_finalizes_bookkeeping(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page_id = "exact-applied-recovery"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    _page(page_path)
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, [_row(page_id)])
+    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    store = _store(tmp_path)
+    real_complete = store.complete
+
+    def fail_after_page_write(key, status, **kwargs):
+        result = kwargs.get("result")
+        if (
+            status == "applied"
+            and isinstance(result, dict)
+            and result.get("action") == "tag_repair"
+        ):
+            raise RuntimeError("simulated crash after exact page write")
+        return real_complete(key, status, **kwargs)
+
+    monkeypatch.setattr(store, "complete", fail_after_page_write)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        lint_repair.run_lint_repair(
+            queue_file=queue_path,
+            store=store,
+            budget=_budget(),
+            local_reviewer=lambda _prompt, _schema: {
+                "decision": "approved",
+                "tags": VALID_TAGS,
+                "reason": "local proposal",
+            },
+            frontier_reviewer=lambda _prompt, _schema: {
+                "decision": "approved",
+                "tags": VALID_TAGS,
+                "reason": "reviewed exact proposal",
+            },
+            now=NOW,
+        )
+
+    monkeypatch.setattr(store, "complete", real_complete)
+    second = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=_budget(),
+        local_reviewer=_never,
+        frontier_reviewer=_never,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    recovered = second["results"][0]
+    assert recovered["status"] == "exact_already_applied_recovery"
+    assert recovered["state"]["result"]["action"] == ("exact_already_applied_recovery")
+    assert recovered["state"]["result"]["recovery_only"] is True
+    assert recovered["state"]["result"]["semantic_effect"] is False
+    meta, _body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+    assert meta["tags"] == VALID_TAGS
 
 
 def test_missing_page_is_rejected_once(tmp_path: Path, monkeypatch) -> None:

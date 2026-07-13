@@ -8,6 +8,7 @@ end-to-end at runtime, not in CI.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 from pathlib import Path
 
@@ -154,7 +155,9 @@ def test_apply_suggestion_rolls_back_only_its_owned_write_under_lock(
         real_atomic_write(path, content)
         writes += 1
         if writes == 1:
-            target.write_text(target.read_text(encoding="utf-8") + "foreign target edit\n")
+            target.write_text(
+                target.read_text(encoding="utf-8") + "foreign target edit\n"
+            )
 
     monkeypatch.setattr(ol_mod, "atomic_write", change_target_after_source_write)
     suggestion = Suggestion(
@@ -171,7 +174,9 @@ def test_apply_suggestion_rolls_back_only_its_owned_write_under_lock(
     assert source.read_text(encoding="utf-8") == original
 
 
-def test_autonomous_orphan_lane_applies_once(tmp_path: Path, isolated_pages: Path) -> None:
+def test_autonomous_orphan_lane_applies_once(
+    tmp_path: Path, isolated_pages: Path
+) -> None:
     from llm_wiki_mcp.convergence import ConvergenceStore, RetryPolicy
 
     _seed_page(isolated_pages, "source", "durable anchor")
@@ -184,7 +189,10 @@ def test_autonomous_orphan_lane_applies_once(tmp_path: Path, isolated_pages: Pat
         tmp_path / "state.json",
         policy=RetryPolicy(local_base_delay_seconds=0, frontier_base_delay_seconds=0),
     )
-    semantic = lambda _query, _top_n: [_ScoredPage("source", 0.9)]
+
+    def semantic(_query, _top_n):
+        return [_ScoredPage("source", 0.9)]
+
     generated = json.dumps(
         {
             "confidence": 0.92,
@@ -193,7 +201,9 @@ def test_autonomous_orphan_lane_applies_once(tmp_path: Path, isolated_pages: Pat
             "suggested_section": "Related",
         }
     )
-    reviewer = lambda _candidate: {"decision": "approved", "confidence": 0.95, "summary": "ok"}
+
+    def reviewer(_candidate):
+        return {"decision": "approved", "confidence": 0.95, "summary": "ok"}
 
     first = run_autonomous(
         orphan_limit=1,
@@ -422,8 +432,7 @@ class TestScoreCandidate:
         _seed_page(isolated_pages, "src")
         _seed_page(isolated_pages, "orph")
         assert (
-            score_candidate("src", "orph", store, lambda *_a, **_kw: "not json")
-            is None
+            score_candidate("src", "orph", store, lambda *_a, **_kw: "not json") is None
         )
 
     def test_schema_error_is_repaired_in_same_structured_session(
@@ -658,7 +667,10 @@ def _autonomous_fixture(isolated_pages: Path) -> tuple[_FakeStore, object]:
     store.link("other", "source")
     _seed_page(isolated_pages, "source", "durable anchor")
     _seed_page(isolated_pages, "target", "target topic")
-    semantic = lambda _query, _top_n: [_ScoredPage("source", 0.9)]
+
+    def semantic(_query, _top_n):
+        return [_ScoredPage("source", 0.9)]
+
     return store, semantic
 
 
@@ -695,6 +707,219 @@ def test_frontier_approval_is_not_overridden_by_confidence_metadata(
 
     assert result["results"][0]["status"] == "applied"
     assert "[[target" in (isolated_pages / "source.md").read_text(encoding="utf-8")
+    durable = state.list_items()[0]["result"]
+    assert durable["schema_version"] == 2
+    assert durable["authority"] == {
+        "source": "injected_reviewer_boundary",
+        "authority_version": 1,
+        "lane": "orphan_link",
+    }
+
+
+def test_orphan_effect_fails_closed_when_authority_changes_before_apply(
+    tmp_path: Path,
+    isolated_pages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, semantic = _autonomous_fixture(isolated_pages)
+    state = _autonomous_state(tmp_path)
+    authority = {
+        "source": "injected_reviewer_boundary",
+        "authority_version": 1,
+        "lane": "orphan_link",
+    }
+    calls = 0
+
+    def authority_then_disable(_lane: str, *, injected_reviewer: bool = False):
+        nonlocal calls
+        assert injected_reviewer is True
+        calls += 1
+        if calls >= 3:
+            return None, "decision_lane_not_enabled:orphan_link:shadow"
+        return authority, None
+
+    monkeypatch.setattr(ol_mod, "current_semantic_authority", authority_then_disable)
+    result = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: _high_local_suggestion(),
+        semantic_search_fn=semantic,
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "good",
+        },
+        convergence_store=state,
+    )
+
+    assert result["results"][0]["status"] == "frontier_retry"
+    assert "[[target" not in (isolated_pages / "source.md").read_text(encoding="utf-8")
+
+
+def test_orphan_exact_postimage_recovers_before_absent_source_retirement(
+    tmp_path: Path,
+    isolated_pages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, semantic = _autonomous_fixture(isolated_pages)
+    state = _autonomous_state(tmp_path)
+    original_complete = state.complete
+
+    def crash_before_complete(key: str, status: str, **kwargs):
+        result = kwargs.get("result") or {}
+        if status == "applied" and result.get("semantic_effect") is True:
+            raise KeyboardInterrupt()
+        return original_complete(key, status, **kwargs)
+
+    monkeypatch.setattr(state, "complete", crash_before_complete)
+    with pytest.raises(KeyboardInterrupt):
+        run_autonomous(
+            orphan_limit=1,
+            store=store,
+            generate_fn=lambda *_args, **_kwargs: _high_local_suggestion(),
+            semantic_search_fn=semantic,
+            reviewer=lambda _candidate: {
+                "decision": "approved",
+                "confidence": 0.95,
+                "summary": "good",
+            },
+            convergence_store=state,
+        )
+
+    pending = state.list_items()[0]
+    metadata = pending["metadata"]
+    artifact_path = Path(metadata["effect_artifact_path"])
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    source = (isolated_pages / "source.md").read_bytes()
+    assert artifact_path.exists()
+    assert artifact["schema_version"] == 2
+    assert artifact["convergence_key"] == pending["key"]
+    assert artifact["source_postimage_sha256"] == hashlib.sha256(source).hexdigest()
+    assert (isolated_pages / "source.md").read_text().count("[[target") == 1
+
+    # A refreshed index no longer reports the target as orphaned. Recovery
+    # must therefore happen before retire_absent_sources can reject the item.
+    store.link("source", "target")
+    monkeypatch.setattr(state, "complete", original_complete)
+    recovered = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery must not rerun local semantics")
+        ),
+        semantic_search_fn=semantic,
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("recovery must not rerun semantic review")
+        ),
+        convergence_store=state,
+    )
+
+    assert recovered["results"] == [
+        {
+            "key": pending["key"],
+            "orphan": "target",
+            "status": "applied",
+            "recovery_only": True,
+            "semantic_effect": False,
+        }
+    ]
+    durable = state.get(pending["key"])
+    assert durable["result"]["recovery_only"] is True
+    assert durable["result"]["semantic_effect"] is False
+    assert (isolated_pages / "source.md").read_text().count("[[target") == 1
+
+
+def test_orphan_recovery_never_reapplies_when_postimage_is_not_exact(
+    tmp_path: Path,
+    isolated_pages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, semantic = _autonomous_fixture(isolated_pages)
+    state = _autonomous_state(tmp_path)
+    original_complete = state.complete
+
+    def crash_before_complete(key: str, status: str, **kwargs):
+        result = kwargs.get("result") or {}
+        if status == "applied" and result.get("semantic_effect") is True:
+            raise KeyboardInterrupt()
+        return original_complete(key, status, **kwargs)
+
+    monkeypatch.setattr(state, "complete", crash_before_complete)
+    with pytest.raises(KeyboardInterrupt):
+        run_autonomous(
+            orphan_limit=1,
+            store=store,
+            generate_fn=lambda *_args, **_kwargs: _high_local_suggestion(),
+            semantic_search_fn=semantic,
+            reviewer=lambda _candidate: {
+                "decision": "approved",
+                "confidence": 0.95,
+                "summary": "good",
+            },
+            convergence_store=state,
+        )
+    pending = state.list_items()[0]
+    source_path = isolated_pages / "source.md"
+    source_path.write_text(
+        source_path.read_text(encoding="utf-8") + "foreign edit\n",
+        encoding="utf-8",
+    )
+    store.link("source", "target")
+    monkeypatch.setattr(state, "complete", original_complete)
+
+    result = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-exact recovery must not rerun local semantics")
+        ),
+        semantic_search_fn=semantic,
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("non-exact recovery must not rerun semantic review")
+        ),
+        convergence_store=state,
+    )
+
+    assert pending["key"] in result["retired"]
+    assert state.get(pending["key"])["status"] == "rejected"
+    assert source_path.read_text(encoding="utf-8").count("[[target") == 1
+    assert source_path.read_text(encoding="utf-8").endswith("foreign edit\n")
+
+
+def test_terminal_orphan_verdict_is_not_reused_when_lane_becomes_unavailable(
+    tmp_path: Path,
+    isolated_pages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, semantic = _autonomous_fixture(isolated_pages)
+    state = _autonomous_state(tmp_path)
+    kwargs = {
+        "orphan_limit": 1,
+        "store": store,
+        "generate_fn": lambda *_args, **_kwargs: _high_local_suggestion(),
+        "semantic_search_fn": semantic,
+        "reviewer": lambda _candidate: {
+            "decision": "approved",
+            "confidence": 0.95,
+            "summary": "good",
+        },
+        "convergence_store": state,
+    }
+    first = run_autonomous(**kwargs)
+    monkeypatch.setattr(
+        ol_mod,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (
+            None,
+            "decision_lane_not_enabled:orphan_link:shadow",
+        ),
+    )
+
+    second = run_autonomous(**kwargs)
+
+    assert first["results"][0]["status"] == "applied"
+    assert second["results"][0]["status"] == "decision_authority_unavailable"
+    assert second["results"][0].get("cached") is not True
 
 
 def test_malformed_frontier_approval_retries_without_mutation(
@@ -709,7 +934,10 @@ def test_malformed_frontier_approval_retries_without_mutation(
         store=store,
         generate_fn=lambda *_args, **_kwargs: _high_local_suggestion(),
         semantic_search_fn=semantic,
-        reviewer=lambda _candidate: {"decision": "approved", "summary": "missing confidence"},
+        reviewer=lambda _candidate: {
+            "decision": "approved",
+            "summary": "missing confidence",
+        },
         convergence_store=state,
     )
 
@@ -728,7 +956,9 @@ def test_local_model_error_retries_but_valid_low_score_rejects(
     retry = run_autonomous(
         orphan_limit=1,
         store=store,
-        generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+        generate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("offline")
+        ),
         semantic_search_fn=semantic,
         reviewer=lambda _candidate: {
             "decision": "approved",
@@ -760,7 +990,10 @@ def test_local_model_error_retries_but_valid_low_score_rejects(
     )
 
     assert retry["results"][0]["status"] == "frontier_retry"
-    assert retry_state.list_items()[0]["last_failure_class"] == "local_model_or_schema_error"
+    assert (
+        retry_state.list_items()[0]["last_failure_class"]
+        == "local_model_or_schema_error"
+    )
     assert low["results"][0]["status"] == "rejected"
     assert low_state.list_items()[0]["result"]["proposal"]["reason"].startswith(
         "all_local_candidates"

@@ -1,4 +1,5 @@
 """Frontier-model review and autonomous patch execution."""
+
 from __future__ import annotations
 
 import errno
@@ -7,6 +8,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -60,7 +62,9 @@ FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
 
 
 def _bounded_timeout(timeout: int | None) -> int:
-    requested = timeout or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600"))
+    requested = timeout or int(
+        os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600")
+    )
     deadline_raw = os.environ.get("LLM_WIKI_CYCLE_DEADLINE_MONOTONIC")
     if not deadline_raw:
         return max(1, requested)
@@ -69,6 +73,7 @@ def _bounded_timeout(timeout: int | None) -> int:
     except ValueError:
         return max(1, requested)
     return max(1, min(requested, remaining))
+
 
 OFFICIAL_DOC_DOMAINS = {
     "platform.openai.com",
@@ -206,8 +211,13 @@ def is_allowed_official_url(url: str) -> bool:
     host = parsed.netloc.lower()
     if host == "github.com":
         path = parsed.path.lower()
-        return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in OFFICIAL_GITHUB_PREFIXES)
-    return any(host == domain or host.endswith(f".{domain}") for domain in OFFICIAL_DOC_DOMAINS)
+        return any(
+            path == prefix.rstrip("/") or path.startswith(prefix)
+            for prefix in OFFICIAL_GITHUB_PREFIXES
+        )
+    return any(
+        host == domain or host.endswith(f".{domain}") for domain in OFFICIAL_DOC_DOMAINS
+    )
 
 
 def official_frontier_reference_urls() -> list[str]:
@@ -225,11 +235,17 @@ def collect_official_frontier_docs(query: str, *, max_docs: int = 3) -> dict[str
     try:
         import httpx
     except Exception as exc:
-        return {"attempted": False, "reason": f"httpx unavailable: {exc}", "documents": []}
+        return {
+            "attempted": False,
+            "reason": f"httpx unavailable: {exc}",
+            "documents": [],
+        }
 
     documents: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
-    tokens = [token for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", query.lower())[:12]]
+    tokens = [
+        token for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", query.lower())[:12]
+    ]
     for url in official_frontier_reference_urls()[:max_docs]:
         try:
             response = httpx.get(url, timeout=3.0, follow_redirects=True)
@@ -239,15 +255,19 @@ def collect_official_frontier_docs(query: str, *, max_docs: int = 3) -> dict[str
             continue
         final_url = str(response.url)
         if not is_allowed_official_url(final_url):
-            errors.append({"url": url, "error": f"redirected outside allowlist: {final_url}"})
+            errors.append(
+                {"url": url, "error": f"redirected outside allowlist: {final_url}"}
+            )
             continue
         text = _html_to_text(response.text)
         snippet = _best_doc_snippet(text, tokens)
-        documents.append({
-            "url": final_url,
-            "status_code": response.status_code,
-            "snippet": redact_sensitive_text(snippet),
-        })
+        documents.append(
+            {
+                "url": final_url,
+                "status_code": response.status_code,
+                "snippet": redact_sensitive_text(snippet),
+            }
+        )
     return {
         "attempted": True,
         "allowlist": official_frontier_reference_urls(),
@@ -270,12 +290,12 @@ def _best_doc_snippet(text: str, tokens: list[str], *, limit: int = 1200) -> str
     best_score = -1
     for match in re.finditer(r"[.!?]\s+", text):
         idx = match.end()
-        window = lower[idx: idx + limit]
+        window = lower[idx : idx + limit]
         score = sum(1 for token in tokens if token in window)
         if score > best_score:
             best_idx = idx
             best_score = score
-    return text[best_idx: best_idx + limit]
+    return text[best_idx : best_idx + limit]
 
 
 def _frontier_failure(
@@ -312,7 +332,14 @@ def classify_frontier_failure(text: str | None) -> FrontierFailure:
             "frontier structured output schema is invalid for the current API",
             human_required=False,
         )
-    auth_state_markers = ("denied", "expired", "invalid", "missing", "required", "revoked")
+    auth_state_markers = (
+        "denied",
+        "expired",
+        "invalid",
+        "missing",
+        "required",
+        "revoked",
+    )
     if "oauth" in lower and any(
         marker in lower for marker in ("login", "reauth", *auth_state_markers)
     ):
@@ -362,7 +389,11 @@ def classify_frontier_failure(text: str | None) -> FrontierFailure:
             "human_required",
             "credential secret-store permission requires human action",
         )
-    if "unknown option" in lower or "unrecognized option" in lower or "unexpected argument" in lower:
+    if (
+        "unknown option" in lower
+        or "unrecognized option" in lower
+        or "unexpected argument" in lower
+    ):
         return _frontier_failure(
             "cli_option_invalid",
             "pending_frontier_review",
@@ -412,7 +443,9 @@ def _schema_validation_failure(schema: dict[str, Any]) -> FrontierFailure | None
     return None
 
 
-def _strict_schema_with_repair(schema: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _strict_schema_with_repair(
+    schema: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     strict_schema = json.loads(json.dumps(schema))
     properties = strict_schema.get("properties")
     if not isinstance(properties, dict):
@@ -423,17 +456,21 @@ def _strict_schema_with_repair(schema: dict[str, Any]) -> tuple[dict[str, Any], 
     changes: list[dict[str, Any]] = []
     if required != expected_required:
         strict_schema["required"] = expected_required
-        changes.append({
-            "field": "required",
-            "before": required,
-            "after": expected_required,
-        })
+        changes.append(
+            {
+                "field": "required",
+                "before": required,
+                "after": expected_required,
+            }
+        )
     if strict_schema.get("additionalProperties") is not False:
-        changes.append({
-            "field": "additionalProperties",
-            "before": strict_schema.get("additionalProperties"),
-            "after": False,
-        })
+        changes.append(
+            {
+                "field": "additionalProperties",
+                "before": strict_schema.get("additionalProperties"),
+                "after": False,
+            }
+        )
         strict_schema["additionalProperties"] = False
 
     if not changes:
@@ -483,15 +520,25 @@ def _codex_cli_metadata(codex: str) -> dict[str, Any]:
     version = _run_small_command([codex, "--version"])
     if not version["ok"]:
         failure = classify_frontier_failure(version.get("output"))
-        return {"ok": False, "failure": failure.to_dict(), "codex": {"version": version}}
+        return {
+            "ok": False,
+            "failure": failure.to_dict(),
+            "codex": {"version": version},
+        }
 
     help_result = _run_small_command([codex, "exec", "--help"])
     if not help_result["ok"]:
         failure = classify_frontier_failure(help_result.get("output"))
-        return {"ok": False, "failure": failure.to_dict(), "codex": {"help": help_result}}
+        return {
+            "ok": False,
+            "failure": failure.to_dict(),
+            "codex": {"help": help_result},
+        }
 
     help_text = str(help_result.get("output") or "")
-    missing = [option for option in CODEX_REQUIRED_EXEC_OPTIONS if option not in help_text]
+    missing = [
+        option for option in CODEX_REQUIRED_EXEC_OPTIONS if option not in help_text
+    ]
     return {
         "ok": True,
         "codex": {
@@ -514,7 +561,9 @@ def _run_small_command(cmd: list[str]) -> dict[str, Any]:
         )
     except Exception as exc:
         return {"ok": False, "error": str(exc), "command": cmd}
-    output = redact_sensitive_text((completed.stdout or "") + "\n" + (completed.stderr or ""))
+    output = redact_sensitive_text(
+        (completed.stdout or "") + "\n" + (completed.stderr or "")
+    )
     return {
         "ok": completed.returncode == 0,
         "exit_code": completed.returncode,
@@ -547,8 +596,14 @@ def _build_codex_exec_invocation(
     model: str | None = None,
     reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
-    codex_meta = preflight.get("codex") if isinstance(preflight.get("codex"), dict) else {}
-    exec_help_data = codex_meta.get("exec_help") if isinstance(codex_meta.get("exec_help"), dict) else {}
+    codex_meta = (
+        preflight.get("codex") if isinstance(preflight.get("codex"), dict) else {}
+    )
+    exec_help_data = (
+        codex_meta.get("exec_help")
+        if isinstance(codex_meta.get("exec_help"), dict)
+        else {}
+    )
     exec_help = str(exec_help_data.get("output") or "")
     cmd = [codex, "exec"]
     cwd: Path | None = None
@@ -559,84 +614,106 @@ def _build_codex_exec_invocation(
         cmd.extend([cd_option, str(repo_root)])
     else:
         cwd = repo_root
-        repairs.append({
-            "type": "cli_option_adapted",
-            "option": "--cd",
-            "replacement": "subprocess.cwd",
-        })
+        repairs.append(
+            {
+                "type": "cli_option_adapted",
+                "option": "--cd",
+                "replacement": "subprocess.cwd",
+            }
+        )
 
     if _option_supported(exec_help, "--output-schema"):
         cmd.extend(["--output-schema", str(schema_path)])
     else:
-        repairs.append({
-            "type": "cli_option_adapted",
-            "option": "--output-schema",
-            "replacement": "prompt_json_contract",
-        })
+        repairs.append(
+            {
+                "type": "cli_option_adapted",
+                "option": "--output-schema",
+                "replacement": "prompt_json_contract",
+            }
+        )
 
     output_option = _preferred_option(exec_help, "--output-last-message")
     if output_option:
         cmd.extend([output_option, str(output_path)])
     else:
-        repairs.append({
-            "type": "cli_option_adapted",
-            "option": "--output-last-message",
-            "replacement": "stdout_capture",
-        })
+        repairs.append(
+            {
+                "type": "cli_option_adapted",
+                "option": "--output-last-message",
+                "replacement": "stdout_capture",
+            }
+        )
 
     if _option_supported(exec_help, "--skip-git-repo-check"):
         cmd.append("--skip-git-repo-check")
     else:
-        repairs.append({
-            "type": "cli_option_adapted",
-            "option": "--skip-git-repo-check",
-            "replacement": "omitted",
-        })
+        repairs.append(
+            {
+                "type": "cli_option_adapted",
+                "option": "--skip-git-repo-check",
+                "replacement": "omitted",
+            }
+        )
 
     if _option_supported(exec_help, "--ephemeral"):
         cmd.append("--ephemeral")
     else:
-        repairs.append({
-            "type": "cli_option_adapted",
-            "option": "--ephemeral",
-            "replacement": "omitted",
-        })
+        repairs.append(
+            {
+                "type": "cli_option_adapted",
+                "option": "--ephemeral",
+                "replacement": "omitted",
+            }
+        )
 
     if _option_supported(exec_help, "--ignore-rules"):
         cmd.append("--ignore-rules")
     else:
-        repairs.append({
-            "type": "cli_option_adapted",
-            "option": "--ignore-rules",
-            "replacement": "omitted",
-        })
+        repairs.append(
+            {
+                "type": "cli_option_adapted",
+                "option": "--ignore-rules",
+                "replacement": "omitted",
+            }
+        )
 
     # A frontier child must never execute the parent host's Stop hooks. Without
     # this, each review recursively schedules save/correction/review children.
     if _option_supported(exec_help, "--disable"):
         cmd.extend(["--disable", "hooks"])
     else:
-        repairs.append({
-            "type": "cli_option_adapted",
-            "option": "--disable hooks",
-            "replacement": "LLM_WIKI_INTERNAL_FRONTIER guard",
-        })
+        repairs.append(
+            {
+                "type": "cli_option_adapted",
+                "option": "--disable hooks",
+                "replacement": "LLM_WIKI_INTERNAL_FRONTIER guard",
+            }
+        )
 
     if not execute_patch:
         sandbox_option = _preferred_option(exec_help, "--sandbox")
         if sandbox_option:
             cmd.extend([sandbox_option, "read-only"])
         else:
-            repairs.append({
-                "type": "cli_option_adapted",
-                "option": "--sandbox",
-                "replacement": "default_sandbox",
-            })
+            repairs.append(
+                {
+                    "type": "cli_option_adapted",
+                    "option": "--sandbox",
+                    "replacement": "default_sandbox",
+                }
+            )
 
-    model = (model or os.environ.get("LLM_WIKI_FRONTIER_MODEL", DEFAULT_FRONTIER_MODEL)).strip()
-    reasoning_effort = (reasoning_effort or os.environ.get(
-        "LLM_WIKI_FRONTIER_REASONING_EFFORT", DEFAULT_FRONTIER_REASONING_EFFORT,
-    )).strip()
+    model = (
+        model or os.environ.get("LLM_WIKI_FRONTIER_MODEL", DEFAULT_FRONTIER_MODEL)
+    ).strip()
+    reasoning_effort = (
+        reasoning_effort
+        or os.environ.get(
+            "LLM_WIKI_FRONTIER_REASONING_EFFORT",
+            DEFAULT_FRONTIER_REASONING_EFFORT,
+        )
+    ).strip()
     if model:
         cmd.extend(["--model", model])
     if reasoning_effort:
@@ -646,17 +723,21 @@ def _build_codex_exec_invocation(
         if _option_supported(exec_help, "--dangerously-bypass-approvals-and-sandbox"):
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
         else:
-            repairs.append({
-                "type": "cli_option_adapted",
-                "option": "--dangerously-bypass-approvals-and-sandbox",
-                "replacement": "omitted",
-            })
+            repairs.append(
+                {
+                    "type": "cli_option_adapted",
+                    "option": "--dangerously-bypass-approvals-and-sandbox",
+                    "replacement": "omitted",
+                }
+            )
 
     return {
         "cmd": cmd,
         "cwd": str(cwd) if cwd else None,
         "output_path": str(output_path) if output_option else None,
-        "schema_path": str(schema_path) if _option_supported(exec_help, "--output-schema") else None,
+        "schema_path": str(schema_path)
+        if _option_supported(exec_help, "--output-schema")
+        else None,
         "repairs": repairs,
         "source": "codex_exec_help",
     }
@@ -775,7 +856,9 @@ def _structured_validation_error(
     expected = schema.get("type")
     allowed_types = expected if isinstance(expected, list) else [expected]
     allowed_types = [item for item in allowed_types if isinstance(item, str)]
-    if allowed_types and not any(_schema_type_matches(value, item) for item in allowed_types):
+    if allowed_types and not any(
+        _schema_type_matches(value, item) for item in allowed_types
+    ):
         return f"{path}: expected {'|'.join(allowed_types)}"
     if "enum" in schema and value not in schema.get("enum", []):
         return f"{path}: value is outside enum"
@@ -794,7 +877,9 @@ def _structured_validation_error(
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
-                error = _structured_validation_error(item, item_schema, path=f"{path}[{index}]")
+                error = _structured_validation_error(
+                    item, item_schema, path=f"{path}[{index}]"
+                )
                 if error:
                     return error
     if isinstance(value, dict):
@@ -812,7 +897,9 @@ def _structured_validation_error(
         for name, child_schema in properties.items():
             if name not in value or not isinstance(child_schema, dict):
                 continue
-            error = _structured_validation_error(value[name], child_schema, path=f"{path}.{name}")
+            error = _structured_validation_error(
+                value[name], child_schema, path=f"{path}.{name}"
+            )
             if error:
                 return error
     return None
@@ -867,7 +954,9 @@ def _structured_failure_payload(
     if diagnostics:
         redacted = redact_sensitive_text(diagnostics)
         failure_payload["diagnostics_tail"] = redacted[-4000:]
-        failure_payload["diagnostics_sha256"] = hashlib.sha256(redacted.encode("utf-8")).hexdigest()
+        failure_payload["diagnostics_sha256"] = hashlib.sha256(
+            redacted.encode("utf-8")
+        ).hexdigest()
     payload["frontier_failure"] = failure_payload
     payload["human_required"] = failure.human_required
     payload["reviewer"] = reviewer
@@ -1052,7 +1141,11 @@ def _frontier_activity(
             except Exception:
                 pass
         event_level = (
-            "error" if outcome == "error" else "warn" if outcome == "failed" else "success"
+            "error"
+            if outcome == "error"
+            else "warn"
+            if outcome == "failed"
+            else "success"
         )
         runtime_status.safe_append_event(
             event_level,
@@ -1219,12 +1312,15 @@ def _run_codex(
     with tempfile.TemporaryDirectory() as td:
         schema_path = Path(td) / "frontier-decision.schema.json"
         output_path = Path(td) / "frontier-output.json"
-        strict_schema, schema_repair = _strict_schema_with_repair(FRONTIER_DECISION_SCHEMA)
+        strict_schema, schema_repair = _strict_schema_with_repair(
+            FRONTIER_DECISION_SCHEMA
+        )
         schema_path.write_text(
             json.dumps(strict_schema, indent=2) + "\n",
             encoding="utf-8",
         )
         from llm_wiki_mcp.model_lab import resolve_role
+
         model, reasoning_effort = resolve_role("code_repair")
         invocation = _build_codex_exec_invocation(
             codex,
@@ -1319,6 +1415,7 @@ def run_structured_review(
     model_override: str | None = None,
     reasoning_effort_override: str | None = None,
     record_replay: bool = True,
+    system: str | None = None,
 ) -> dict[str, Any]:
     """Resolve a routine structured decision using local models only.
 
@@ -1410,8 +1507,14 @@ def run_structured_review(
         audit_root=audit_root,
         audit_role=decision_lane or model_role,
         record_replay=record_replay,
+        require_adopted=lane_mode == "enabled",
+        decision_lane=decision_lane,
     )
-    routed = router.decide(prompt, schema)
+    routed = (
+        router.decide(prompt, schema)
+        if system is None
+        else router.decide(prompt, schema, system=system)
+    )
     policy_audit["router_policy"] = router.policy.audit_record()
     if lane_mode == "shadow":
         reason = f"decision_lane_shadow:{decision_lane}"
@@ -1457,7 +1560,9 @@ def run_structured_review(
         result["decision_policy"] = policy_audit
         return result
 
-    reason = routed.quarantine_reason or routed.failure_class or "local consensus failed"
+    reason = (
+        routed.quarantine_reason or routed.failure_class or "local consensus failed"
+    )
     failure = _frontier_failure(
         "local_consensus_failed",
         "local_quarantined",
@@ -1503,7 +1608,9 @@ def _capture_repair_baseline(repo_root: Path) -> dict[str, Any]:
         "failure_class": None,
     }
     try:
-        fetched = _git_probe(repo_root, ["fetch", "--quiet", "origin", "main"], timeout=120)
+        fetched = _git_probe(
+            repo_root, ["fetch", "--quiet", "origin", "main"], timeout=120
+        )
         head = _git_probe(repo_root, ["rev-parse", "HEAD"])
         origin = _git_probe(repo_root, ["rev-parse", "origin/main"])
         branch = _git_probe(repo_root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -1583,7 +1690,9 @@ def _isolated_repair_checkout(
         )
         if cloned.returncode != 0:
             raise RuntimeError("failed to create isolated repair checkout")
-        checked_out = _git_probe(checkout, ["checkout", "--quiet", "--detach", baseline_head])
+        checked_out = _git_probe(
+            checkout, ["checkout", "--quiet", "--detach", baseline_head]
+        )
         remote_removed = _git_probe(checkout, ["remote", "remove", "origin"])
         if checked_out.returncode != 0 or remote_removed.returncode != 0:
             raise RuntimeError("failed to isolate repair checkout")
@@ -1646,10 +1755,55 @@ def _launchd_pid(label: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _uv_archive_root(archive_path: str) -> Path | None:
+    """Normalize a uv runtime identity path to its immutable archive root.
+
+    ``runtime_identity()`` reports the Python library directory (for example,
+    ``archive-v0/<id>/lib/python3.13``), while ``ps`` exposes entry points under
+    ``archive-v0/<id>/bin``.  Bind both observations to the exact archive-id
+    path instead of relying on a substring that can also match a sibling id.
+    """
+
+    if not archive_path:
+        return None
+    path = Path(archive_path).expanduser()
+    indices = [index for index, part in enumerate(path.parts) if part == "archive-v0"]
+    if not indices:
+        return None
+    index = indices[-1]
+    if index + 1 >= len(path.parts):
+        return None
+    archive_id = path.parts[index + 1]
+    if archive_id in {"", ".", ".."}:
+        return None
+    return Path(*path.parts[: index + 2])
+
+
+def _command_uses_uv_archive(command: str, archive_root: Path) -> bool:
+    """Return whether a command executes a bin entry point from one archive."""
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    bin_root = archive_root / "bin"
+    names: set[str] = set()
+    for token in tokens:
+        candidate = Path(token)
+        if candidate.parent == bin_root:
+            names.add(candidate.name)
+    has_python = any(
+        name == "python" or re.fullmatch(r"python3(?:\.\d+)?", name) for name in names
+    )
+    has_entrypoint = any(name.startswith("llm-wiki-") for name in names)
+    return has_python and has_entrypoint
+
+
 def _pid_tree_uses_archive(pid: int, archive_path: str) -> bool:
     """Confirm a service or one of its descendants executes from an archive."""
 
-    if not archive_path:
+    archive_root = _uv_archive_root(archive_path)
+    if archive_root is None:
         return False
     completed = subprocess.run(
         ["ps", "-axo", "pid=,ppid=,command="],
@@ -1680,7 +1834,7 @@ def _pid_tree_uses_archive(pid: int, archive_path: str) -> bool:
                 descendants.add(child_pid)
                 changed = True
     return any(
-        archive_path in rows[process_pid][1]
+        _command_uses_uv_archive(rows[process_pid][1], archive_root)
         for process_pid in descendants
         if process_pid in rows
     )
@@ -1826,7 +1980,9 @@ def _publish_verified_candidate(
     checks["push_returncode"] = pushed.returncode
     if pushed.returncode != 0:
         return {"ok": False, "failure": "guarded_push_failed", **checks}
-    advanced = _git_probe(repo_root, ["merge", "--ff-only", candidate_head], timeout=120)
+    advanced = _git_probe(
+        repo_root, ["merge", "--ff-only", candidate_head], timeout=120
+    )
     checks["fast_forward_returncode"] = advanced.returncode
     checks["remote_after"] = _remote_main_sha(repo_root)
     if advanced.returncode != 0:
@@ -1885,7 +2041,8 @@ def _verify_repair_result(
     checks.update(
         {
             "candidate_head": head_sha or None,
-            "candidate_has_no_remote": remotes.returncode == 0 and not remotes.stdout.strip(),
+            "candidate_has_no_remote": remotes.returncode == 0
+            and not remotes.stdout.strip(),
             "candidate_clean": status.returncode == 0 and not status.stdout.strip(),
             "baseline_is_ancestor": ancestry.returncode == 0,
         }
@@ -2096,13 +2253,17 @@ def run_frontier_review(
         )
         return _failure_result(summary=failure.summary, failure=failure)
 
-    baseline = _capture_repair_baseline(repo_root) if execute_patch else {
-        "ok": True,
-        "head": None,
-        "origin_main": None,
-        "clean": True,
-        "review_only": True,
-    }
+    baseline = (
+        _capture_repair_baseline(repo_root)
+        if execute_patch
+        else {
+            "ok": True,
+            "head": None,
+            "origin_main": None,
+            "clean": True,
+            "review_only": True,
+        }
+    )
     if not baseline.get("ok"):
         failure = _frontier_failure(
             "frontier_repair_preflight_failed",
@@ -2122,7 +2283,9 @@ def run_frontier_review(
         with controller.permit(evidence) as permit:
             try:
                 if execute_patch:
-                    with _isolated_repair_checkout(repo_root, baseline) as candidate_root:
+                    with _isolated_repair_checkout(
+                        repo_root, baseline
+                    ) as candidate_root:
                         result = _run_codex(
                             prompt,
                             repo_root=candidate_root,

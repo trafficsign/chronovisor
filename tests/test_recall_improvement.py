@@ -1,12 +1,123 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from contextlib import nullcontext
 from pathlib import Path
+
+import pytest
 
 from llm_wiki_mcp import recall_improvement
 from llm_wiki_mcp.convergence import CycleBudget
+from llm_wiki_mcp.decision_router import canonical_agreement_signature
+from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
 from llm_wiki_mcp.recall_improvement import PolicyProposal
 from llm_wiki_mcp.recall_runtime import RecallPolicy
+
+
+def _improvement_authority(epoch: str) -> dict:
+    return {
+        "source": "adopted_local_consensus",
+        "authority_version": 1,
+        "lane": "recall_improvement",
+        "lane_contract_sha256": "1" * 64,
+        "lane_contract_manifest_sha256": "2" * 64,
+        "lane_contract_case_manifest_sha256": "3" * 64,
+        "policy": {
+            "kind": "local_batch",
+            "schema_name": "generic_decision",
+            "mode": "enabled",
+            "error": None,
+        },
+        "router": {
+            "source": "adopted_artifact",
+            "artifact_sha256": epoch * 64,
+            "error": None,
+            "models": ["primary", "challenger", "tie"],
+        },
+    }
+
+
+def _local_consensus_proof(review: dict, authority: dict) -> dict:
+    schema_name = authority["policy"]["schema_name"]
+    signature = canonical_agreement_signature(
+        review,
+        schema=production_decision_schemas()[schema_name],
+    )
+    agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    models = authority["router"]["models"]
+    return {
+        "status": "agreed",
+        "ok": True,
+        "agreement_sha256": agreement,
+        "failure_class": None,
+        "quarantine_reason": None,
+        "votes": [
+            {
+                "role": "primary",
+                "model": models[0],
+                "valid": True,
+                "signature_sha256": agreement,
+                "invalid_reason": None,
+            },
+            {
+                "role": "challenger",
+                "model": models[1],
+                "valid": True,
+                "signature_sha256": agreement,
+                "invalid_reason": None,
+            },
+        ],
+    }
+
+
+def _improvement_review(authority: dict, *, decision: str = "approved") -> dict:
+    review = {
+        "decision": decision,
+        "summary": "authority-bound recall policy verdict",
+        "tests_run": [],
+        "commit": None,
+        "committed": False,
+        "pushed": False,
+        "risk": None,
+        "notes": None,
+        "decision_policy": {
+            **authority["policy"],
+            "router_policy": authority["router"],
+        },
+    }
+    review["local_consensus"] = _local_consensus_proof(review, authority)
+    return review
+
+
+def _durable_schedule_result(
+    authority: dict,
+    *,
+    decision: str,
+    run_id: str = "held",
+) -> dict:
+    status = (
+        "frontier_quarantined"
+        if decision == "quarantined"
+        else "pending_frontier_review"
+    )
+    candidate_sha256 = hashlib.sha256(decision.encode("utf-8")).hexdigest()
+    review = _improvement_review(authority, decision=decision)
+    return {
+        "ts": "2026-07-11T12:00:00",
+        "run_id": run_id,
+        "status": status,
+        "applied": False,
+        "dataset": {"examples": 1},
+        "best": {"proposal": {"overrides": {"fusion_semantic": 0.7}}},
+        "frontier_audit": {
+            **review,
+            "_artifact_durable": True,
+            "candidate_sha256": candidate_sha256,
+            "_artifact_path": f"/tmp/{candidate_sha256}.json",
+            "_artifact_authority": authority,
+        },
+    }
 
 
 def test_default_improvement_models_use_ornith_and_gemma_pair(monkeypatch) -> None:
@@ -15,7 +126,7 @@ def test_default_improvement_models_use_ornith_and_gemma_pair(monkeypatch) -> No
 
     assert recall_improvement.configured_models() == (
         "maxwell1500/ornith-35b:Q5_K_M",
-        "gemma4:26b-mxfp8",
+        "gemma4:26b",
     )
 
 
@@ -27,7 +138,9 @@ def test_ollama_proposer_accepts_direct_override_response(monkeypatch) -> None:
         def json(self):
             return {
                 "response": "```json\n"
-                + json.dumps({"search_threshold": 0.25, "read_threshold": 0.7, "top_k": 8})
+                + json.dumps(
+                    {"search_threshold": 0.25, "read_threshold": 0.7, "top_k": 8}
+                )
                 + "\n```"
             }
 
@@ -87,7 +200,10 @@ def test_proposal_prompt_includes_adoption_gate_and_rejection_blockers() -> None
 
     gate = prompt["adoption_gate"]
     assert "Your patch is rejected" in " ".join(prompt["rules"])
-    assert "relative_gain >= 0.050" in gate["candidate_must_pass_public_checks"]["dev_improved"]
+    assert (
+        "relative_gain >= 0.050"
+        in gate["candidate_must_pass_public_checks"]["dev_improved"]
+    )
     assert gate["baseline_for_public_gate"]["dev_score"] == 0.0
     assert gate["candidate_must_pass_public_checks"]["private_stability_checks"]
     assert "holdout" not in json.dumps(gate, ensure_ascii=False)
@@ -126,8 +242,20 @@ def test_proposer_visible_rejection_blockers_hide_private_quality_signals() -> N
 def test_candidate_blocker_summary_counts_failed_gate_checks() -> None:
     summary = recall_improvement._candidate_blocker_summary(
         [
-            {"checks": {"dev_improved": False, "latency_ok": False, "holdout_score_ok": True}},
-            {"checks": {"dev_improved": True, "latency_ok": False, "holdout_recall_ok": False}},
+            {
+                "checks": {
+                    "dev_improved": False,
+                    "latency_ok": False,
+                    "holdout_score_ok": True,
+                }
+            },
+            {
+                "checks": {
+                    "dev_improved": True,
+                    "latency_ok": False,
+                    "holdout_recall_ok": False,
+                }
+            },
         ]
     )
 
@@ -166,6 +294,207 @@ def _write_feedback(log_file, feedback_file) -> None:
         + "\n",
         encoding="utf-8",
     )
+
+
+def test_policy_verdict_artifact_is_bound_to_current_adopted_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    record = {
+        "run_id": "authority-run",
+        "dataset": {"examples": 10, "dev": 8, "holdout": 2},
+        "baseline": {"dev": {"score": 0.2}, "holdout": {"score": 0.2}},
+        "failure_samples": [],
+    }
+    best = {
+        "proposal": {"overrides": {"max_pages": 4}, "summary": "widen"},
+        "checks": {"dev_improved": True},
+        "dev": {"score": 0.5},
+        "holdout": {"score": 0.5},
+    }
+    authority_a = _improvement_authority("a")
+    authority_b = _improvement_authority("b")
+    active_authority = {"value": authority_a}
+    monkeypatch.setattr(
+        recall_improvement.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (active_authority["value"], None),
+    )
+    calls: list[str] = []
+
+    def reviewer_a(_prompt, _best) -> dict:
+        calls.append("a")
+        return _improvement_review(authority_a)
+
+    first = recall_improvement.run_frontier_policy_audit(
+        record,
+        best,
+        reasons=["mandatory"],
+        audit_dir=tmp_path / "audits",
+        reviewer=reviewer_a,
+        authority=authority_a,
+    )
+    assert first["_artifact_reused"] is False
+    reused = recall_improvement.load_frontier_policy_audit(
+        record,
+        best,
+        reasons=["mandatory"],
+        audit_dir=tmp_path / "audits",
+        authority=authority_a,
+    )
+    assert reused is not None
+    assert reused["_artifact_reused"] is True
+
+    active_authority["value"] = authority_b
+
+    def reviewer_b(_prompt, _best) -> dict:
+        calls.append("b")
+        return _improvement_review(authority_b)
+
+    second = recall_improvement.run_frontier_policy_audit(
+        record,
+        best,
+        reasons=["mandatory"],
+        audit_dir=tmp_path / "audits",
+        reviewer=reviewer_b,
+        authority=authority_b,
+    )
+
+    assert calls == ["a", "b"]
+    assert second["_artifact_reused"] is False
+    assert second["_artifact_authority"] == authority_b
+    artifact = json.loads(Path(second["_artifact_path"]).read_text(encoding="utf-8"))
+    assert artifact["schema_version"] == 3
+    assert artifact["authority"] == authority_b
+
+
+@pytest.mark.parametrize(
+    "decision",
+    ["approved", "rejected", "quarantined", "needs_retry"],
+)
+def test_policy_verdict_artifact_reuses_every_authority_bound_decision(
+    tmp_path,
+    monkeypatch,
+    decision,
+) -> None:
+    record = {
+        "run_id": f"reuse-{decision}",
+        "dataset": {"examples": 10, "dev": 8, "holdout": 2},
+        "baseline": {"dev": {"score": 0.2}, "holdout": {"score": 0.2}},
+        "failure_samples": [],
+    }
+    best = {
+        "proposal": {"overrides": {"max_pages": 4}, "summary": "widen"},
+        "checks": {"dev_improved": True},
+        "dev": {"score": 0.5},
+        "holdout": {"score": 0.5},
+    }
+    authority = _improvement_authority("a")
+    monkeypatch.setattr(
+        recall_improvement.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority, None),
+    )
+    calls = 0
+
+    def reviewer(_prompt, _best) -> dict:
+        nonlocal calls
+        calls += 1
+        return _improvement_review(authority, decision=decision)
+
+    first = recall_improvement.run_frontier_policy_audit(
+        record,
+        best,
+        reasons=["mandatory"],
+        audit_dir=tmp_path / "audits",
+        reviewer=reviewer,
+        authority=authority,
+    )
+    reused = recall_improvement.run_frontier_policy_audit(
+        record,
+        best,
+        reasons=["mandatory"],
+        audit_dir=tmp_path / "audits",
+        reviewer=reviewer,
+        authority=authority,
+    )
+
+    assert calls == 1
+    assert first["decision"] == decision
+    assert first["_artifact_reused"] is False
+    assert reused["decision"] == decision
+    assert reused["_artifact_reused"] is True
+
+
+def test_policy_verdict_artifact_rejects_old_schema(tmp_path, monkeypatch) -> None:
+    record = {
+        "run_id": "old-schema",
+        "dataset": {"examples": 10, "dev": 8, "holdout": 2},
+        "baseline": {"dev": {"score": 0.2}, "holdout": {"score": 0.2}},
+        "failure_samples": [],
+    }
+    best = {
+        "proposal": {"overrides": {"max_pages": 4}, "summary": "widen"},
+        "checks": {"dev_improved": True},
+        "dev": {"score": 0.5},
+        "holdout": {"score": 0.5},
+    }
+    authority = _improvement_authority("a")
+    monkeypatch.setattr(
+        recall_improvement.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority, None),
+    )
+
+    first = recall_improvement.run_frontier_policy_audit(
+        record,
+        best,
+        reasons=["mandatory"],
+        audit_dir=tmp_path / "audits",
+        reviewer=lambda *_args: _improvement_review(authority),
+        authority=authority,
+    )
+    artifact_path = Path(first["_artifact_path"])
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["schema_version"] = 2
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    assert (
+        recall_improvement.load_frontier_policy_audit(
+            record,
+            best,
+            reasons=["mandatory"],
+            audit_dir=tmp_path / "audits",
+            authority=authority,
+        )
+        is None
+    )
+
+
+def test_active_policy_writer_rechecks_authority_inside_shared_lock(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_a = _improvement_authority("a")
+    authority_b = _improvement_authority("b")
+    active_file = tmp_path / "active-policy.json"
+    monkeypatch.setattr(recall_improvement, "decision_authority_lock", nullcontext)
+    monkeypatch.setattr(
+        recall_improvement.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority_b, None),
+    )
+
+    error = recall_improvement._write_active_policy_under_authority(
+        active_file,
+        {"overrides": {"max_pages": 4}},
+        review=_improvement_review(authority_a),
+        authority=authority_a,
+        injected_reviewer=False,
+    )
+
+    assert error == "decision authority changed before effect"
+    assert not active_file.exists()
 
 
 def test_run_improvement_excludes_page_ignored_from_policy_dataset(tmp_path) -> None:
@@ -255,7 +584,9 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(recall_improvement, "propose_with_models", fake_propose)
     monkeypatch.setattr(recall_improvement, "evaluate_examples", fake_evaluate)
-    monkeypatch.setattr(recall_improvement, "safe_append_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_event", lambda *_args, **_kwargs: None
+    )
 
     active_file = tmp_path / "active-policy.json"
     registry_file = tmp_path / "policy-registry.jsonl"
@@ -327,7 +658,9 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
     assert frontier_calls == 1
 
 
-def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monkeypatch) -> None:
+def test_run_improvement_frontier_rejection_blocks_active_policy(
+    tmp_path, monkeypatch
+) -> None:
     log_file = tmp_path / "recall-log.jsonl"
     feedback_file = tmp_path / "feedback.jsonl"
     _write_feedback(log_file, feedback_file)
@@ -337,7 +670,9 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monke
         "load_policy",
         lambda _config=None: RecallPolicy(log_decisions=False, max_pages=3),
     )
-    monkeypatch.setattr(recall_improvement, "safe_append_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_event", lambda *_args, **_kwargs: None
+    )
 
     def fake_propose(**_kwargs):
         return [
@@ -450,6 +785,31 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monke
         recall_improvement,
         "run_frontier_policy_audit",
         lambda *_args, **_kwargs: {
+            "decision": "quarantined",
+            "summary": "local quorum found a typed policy conflict",
+            "human_required": False,
+        },
+    )
+    quarantined_payload = recall_improvement.run_improvement(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=("qwen",),
+        include_heuristic=False,
+        frontier_mode="always",
+        active_file=tmp_path / "quarantined-active-policy.json",
+        registry_file=tmp_path / "quarantined-policy-registry.jsonl",
+        runs_dir=tmp_path / "quarantined-runs",
+        episodes_file=tmp_path / "quarantined-episodes.jsonl",
+        live_episodes_file=tmp_path / "quarantined-live-episodes.jsonl",
+    )
+    assert quarantined_payload["status"] == "frontier_quarantined"
+    assert quarantined_payload["applied"] is False
+    assert quarantined_payload["active_policy"] is None
+
+    monkeypatch.setattr(
+        recall_improvement,
+        "run_frontier_policy_audit",
+        lambda *_args, **_kwargs: {
             "decision": "approved",
             "summary": "approval was not durably recorded",
         },
@@ -544,7 +904,8 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(tmp_path, monke
 def test_run_due_dry_run_is_read_only(tmp_path, monkeypatch) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     feedback_file.write_text(
-        json.dumps({"kind": "missed_candidate", "prompt": "x"}, ensure_ascii=False) + "\n",
+        json.dumps({"kind": "missed_candidate", "prompt": "x"}, ensure_ascii=False)
+        + "\n",
         encoding="utf-8",
     )
     schedule_file = tmp_path / "schedule-state.json"
@@ -603,7 +964,10 @@ def test_run_due_does_not_count_page_ignored_as_policy_feedback(tmp_path) -> Non
 def test_run_due_executes_and_updates_schedule_when_due(tmp_path, monkeypatch) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     feedback_file.write_text(
-        "\n".join(json.dumps({"kind": "missed_candidate", "prompt": str(i)}) for i in range(3)) + "\n",
+        "\n".join(
+            json.dumps({"kind": "missed_candidate", "prompt": str(i)}) for i in range(3)
+        )
+        + "\n",
         encoding="utf-8",
     )
     schedule_file = tmp_path / "schedule-state.json"
@@ -621,7 +985,9 @@ def test_run_due_executes_and_updates_schedule_when_due(tmp_path, monkeypatch) -
         }
 
     monkeypatch.setattr(recall_improvement, "run_improvement", fake_run_improvement)
-    monkeypatch.setattr(recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None
+    )
 
     payload = recall_improvement.run_due(
         log_file=tmp_path / "recall-log.jsonl",
@@ -640,10 +1006,16 @@ def test_run_due_executes_and_updates_schedule_when_due(tmp_path, monkeypatch) -
     assert seen["models"] == ("qwen", "gemma")
 
 
-def test_run_due_respects_interval_even_with_new_feedback(tmp_path, monkeypatch) -> None:
+def test_run_due_respects_interval_even_with_new_feedback(
+    tmp_path, monkeypatch
+) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     feedback_file.write_text(
-        "\n".join(json.dumps({"kind": "missed_candidate", "prompt": str(i)}) for i in range(20)) + "\n",
+        "\n".join(
+            json.dumps({"kind": "missed_candidate", "prompt": str(i)})
+            for i in range(20)
+        )
+        + "\n",
         encoding="utf-8",
     )
     schedule_file = tmp_path / "schedule-state.json"
@@ -680,16 +1052,18 @@ def test_run_due_respects_interval_even_with_new_feedback(tmp_path, monkeypatch)
     assert state["last_feedback_count"] == 0
 
 
-def test_run_due_preserves_pending_frontier_state_during_backoff(tmp_path, monkeypatch) -> None:
+def test_run_due_preserves_pending_frontier_state_during_backoff(
+    tmp_path, monkeypatch
+) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     feedback_file.write_text(
         json.dumps({"kind": "missed_candidate", "prompt": "x"}) + "\n",
         encoding="utf-8",
     )
     schedule_file = tmp_path / "schedule-state.json"
-    future = (recall_improvement.datetime.now() + recall_improvement.timedelta(hours=1)).isoformat(
-        timespec="seconds"
-    )
+    future = (
+        recall_improvement.datetime.now() + recall_improvement.timedelta(hours=1)
+    ).isoformat(timespec="seconds")
     schedule_file.write_text(
         json.dumps(
             {
@@ -706,7 +1080,9 @@ def test_run_due_preserves_pending_frontier_state_during_backoff(tmp_path, monke
     monkeypatch.setattr(
         recall_improvement,
         "run_improvement",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("backoff must suppress retry")),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("backoff must suppress retry")
+        ),
     )
     result = recall_improvement.run_due(
         feedback_file=feedback_file,
@@ -724,7 +1100,270 @@ def test_run_due_preserves_pending_frontier_state_during_backoff(tmp_path, monke
     assert state["frontier_next_retry_at"] == future
 
 
-def test_run_due_reopens_frontier_quarantine_without_new_feedback(
+@pytest.mark.parametrize(
+    ("decision", "status"),
+    [
+        ("quarantined", "frontier_quarantined"),
+        ("needs_retry", "pending_frontier_review"),
+    ],
+)
+def test_run_due_holds_durable_nonterminal_verdict_without_new_evidence(
+    tmp_path,
+    monkeypatch,
+    decision,
+    status,
+) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        json.dumps({"kind": "missed_candidate", "prompt": "x"}) + "\n",
+        encoding="utf-8",
+    )
+    schedule_file = tmp_path / "schedule-state.json"
+    authority = _improvement_authority("a")
+    monkeypatch.setattr(
+        recall_improvement.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority, None),
+    )
+    calls = 0
+
+    def held(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return _durable_schedule_result(
+            authority,
+            decision=decision,
+            run_id=f"held-{calls}",
+        )
+
+    monkeypatch.setattr(recall_improvement, "run_improvement", held)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None
+    )
+
+    first = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=1,
+        min_interval_hours=0,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+    second = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=1,
+        min_interval_hours=0,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+
+    state = json.loads(schedule_file.read_text(encoding="utf-8"))
+    assert first["status"] == "ran"
+    assert second["status"] == "skipped"
+    assert calls == 1
+    assert state["last_status"] == status
+    assert state["frontier_hold_decision"] == decision
+    assert state["frontier_hold_feedback_count"] == 1
+    assert len(state["frontier_hold_candidate_sha256"]) == 64
+    assert len(state["frontier_hold_authority_sha256"]) == 64
+    assert state["frontier_retry_attempts"] == 0
+    assert state["frontier_quarantine_retry_at"] is None
+    assert second["reasons"]["frontier_durable_hold_pending"] is True
+    assert second["reasons"]["frontier_hold_feedback_release"] is False
+    assert second["reasons"]["frontier_hold_authority_release"] is False
+
+
+def test_run_due_releases_durable_hold_for_new_feedback(tmp_path, monkeypatch) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        json.dumps({"kind": "missed_candidate", "prompt": "first"}) + "\n",
+        encoding="utf-8",
+    )
+    schedule_file = tmp_path / "schedule-state.json"
+    authority = _improvement_authority("a")
+    monkeypatch.setattr(
+        recall_improvement.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority, None),
+    )
+    calls = 0
+
+    def improve(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _durable_schedule_result(authority, decision="needs_retry")
+        return {
+            "ts": "2026-07-11T13:00:00",
+            "run_id": "released-by-feedback",
+            "status": "applied",
+            "applied": True,
+            "dataset": {"examples": 2},
+        }
+
+    monkeypatch.setattr(recall_improvement, "run_improvement", improve)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None
+    )
+    recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=99,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+    with feedback_file.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"kind": "missed_candidate", "prompt": "second"}) + "\n"
+        )
+
+    released = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=99,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+
+    state = json.loads(schedule_file.read_text(encoding="utf-8"))
+    assert released["status"] == "ran"
+    assert released["decision"]["reasons"]["frontier_hold_feedback_release"] is True
+    assert calls == 2
+    assert state["last_status"] == "applied"
+    assert state["frontier_hold_candidate_sha256"] is None
+    assert state["frontier_hold_authority_sha256"] is None
+
+
+def test_run_due_releases_durable_hold_for_authority_change(
+    tmp_path, monkeypatch
+) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        json.dumps({"kind": "missed_candidate", "prompt": "same"}) + "\n",
+        encoding="utf-8",
+    )
+    schedule_file = tmp_path / "schedule-state.json"
+    authority_a = _improvement_authority("a")
+    authority_b = _improvement_authority("b")
+    current_authority = {"value": authority_a}
+    monkeypatch.setattr(
+        recall_improvement.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (current_authority["value"], None),
+    )
+    calls = 0
+
+    def improve(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _durable_schedule_result(authority_a, decision="quarantined")
+        return {
+            "ts": "2026-07-11T13:00:00",
+            "run_id": "released-by-authority",
+            "status": "frontier_rejected",
+            "applied": False,
+            "dataset": {"examples": 1},
+        }
+
+    monkeypatch.setattr(recall_improvement, "run_improvement", improve)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None
+    )
+    recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=1,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+    current_authority["value"] = authority_b
+
+    released = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=99,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+
+    state = json.loads(schedule_file.read_text(encoding="utf-8"))
+    assert released["status"] == "ran"
+    assert released["decision"]["reasons"]["frontier_hold_authority_release"] is True
+    assert calls == 2
+    assert state["last_status"] == "frontier_rejected"
+    assert state["frontier_hold_candidate_sha256"] is None
+    assert state["frontier_hold_authority_sha256"] is None
+
+
+def test_run_due_keeps_hold_when_current_authority_is_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    feedback_file.write_text(
+        json.dumps({"kind": "missed_candidate", "prompt": "first"}) + "\n",
+        encoding="utf-8",
+    )
+    schedule_file = tmp_path / "schedule-state.json"
+    authority = _improvement_authority("a")
+    current_authority = {"value": authority, "error": None}
+    monkeypatch.setattr(
+        recall_improvement.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (
+            current_authority["value"],
+            current_authority["error"],
+        ),
+    )
+    calls = 0
+
+    def improve(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return _durable_schedule_result(authority, decision="needs_retry")
+
+    monkeypatch.setattr(recall_improvement, "run_improvement", improve)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None
+    )
+    recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=1,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+    with feedback_file.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"kind": "missed_candidate", "prompt": "second"}) + "\n"
+        )
+    current_authority["value"] = None
+    current_authority["error"] = "adopted authority unavailable"
+
+    held = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=1,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+
+    assert held["status"] == "skipped"
+    assert held["reasons"]["frontier_hold_feedback_release"] is True
+    assert held["reasons"]["frontier_hold_authority_available"] is False
+    assert calls == 1
+
+
+def test_run_due_retries_legacy_quarantine_once_through_backoff(
     tmp_path, monkeypatch
 ) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
@@ -738,7 +1377,7 @@ def test_run_due_reopens_frontier_quarantine_without_new_feedback(
             {
                 "last_status": "frontier_quarantined",
                 "last_feedback_count": 1,
-                "frontier_retry_candidate": "candidate",
+                "frontier_retry_candidate": "legacy-candidate",
                 "frontier_retry_attempts": 3,
                 "frontier_quarantine_retry_at": "2000-01-01T00:00:00",
             }
@@ -747,35 +1386,49 @@ def test_run_due_reopens_frontier_quarantine_without_new_feedback(
     )
     calls = 0
 
-    def recovered(**_kwargs):
+    def unavailable(**_kwargs):
         nonlocal calls
         calls += 1
         return {
             "ts": "2026-07-11T12:00:00",
-            "run_id": "recovered",
-            "status": "applied",
-            "applied": True,
+            "run_id": "legacy-retry",
+            "status": "pending_frontier_review",
+            "applied": False,
             "dataset": {"examples": 1},
+            "frontier_audit": {"summary": "temporary model outage"},
         }
 
-    monkeypatch.setattr(recall_improvement, "run_improvement", recovered)
-    monkeypatch.setattr(recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None)
-
-    result = recall_improvement.run_due(
+    monkeypatch.setattr(recall_improvement, "run_improvement", unavailable)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None
+    )
+    first = recall_improvement.run_due(
         feedback_file=feedback_file,
         log_file=tmp_path / "log.jsonl",
         min_total_feedback=1,
-        min_new_feedback=5,
+        min_new_feedback=99,
+        schedule_file=schedule_file,
+        lock_file=tmp_path / "run-due.lock",
+    )
+    expired_backoff = json.loads(schedule_file.read_text(encoding="utf-8"))
+    expired_backoff["frontier_next_retry_at"] = "2000-01-01T00:00:00"
+    schedule_file.write_text(json.dumps(expired_backoff), encoding="utf-8")
+    second = recall_improvement.run_due(
+        feedback_file=feedback_file,
+        log_file=tmp_path / "log.jsonl",
+        min_total_feedback=1,
+        min_new_feedback=99,
         schedule_file=schedule_file,
         lock_file=tmp_path / "run-due.lock",
     )
 
     state = json.loads(schedule_file.read_text(encoding="utf-8"))
-    assert result["status"] == "ran"
+    assert first["status"] == "ran"
+    assert second["status"] == "skipped"
     assert calls == 1
-    assert state["last_status"] == "applied"
-    assert state["frontier_retry_attempts"] == 0
-    assert state["frontier_quarantine_retry_at"] is None
+    assert state["frontier_legacy_hold_retried"] is True
+    assert second["reasons"]["frontier_legacy_retry_hold_pending"] is True
+    assert second["reasons"]["frontier_legacy_feedback_release"] is False
 
 
 def test_frontier_quarantine_does_not_ack_unresolved_feedback(
@@ -817,9 +1470,9 @@ def test_frontier_quarantine_does_not_ack_unresolved_feedback(
         "feedback_count": 3,
     }
     candidate_hash = recall_improvement.hashlib.sha256(
-        json.dumps(candidate_payload, ensure_ascii=False, sort_keys=True, default=str).encode(
-            "utf-8"
-        )
+        json.dumps(
+            candidate_payload, ensure_ascii=False, sort_keys=True, default=str
+        ).encode("utf-8")
     ).hexdigest()
     persisted = json.loads(schedule_file.read_text(encoding="utf-8"))
     persisted["frontier_retry_candidate"] = candidate_hash
@@ -830,7 +1483,9 @@ def test_frontier_quarantine_does_not_ack_unresolved_feedback(
         "run_improvement",
         lambda **_kwargs: pending_result,
     )
-    monkeypatch.setattr(recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None
+    )
 
     result = recall_improvement.run_due(
         feedback_file=feedback_file,
@@ -847,7 +1502,9 @@ def test_frontier_quarantine_does_not_ack_unresolved_feedback(
     assert state["frontier_quarantine_retry_at"]
 
 
-def test_run_due_budget_defer_keeps_schedule_byte_for_byte(tmp_path, monkeypatch) -> None:
+def test_run_due_budget_defer_keeps_schedule_byte_for_byte(
+    tmp_path, monkeypatch
+) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     feedback_file.write_text(
         json.dumps({"kind": "missed_candidate", "prompt": "x"}) + "\n",
@@ -879,7 +1536,9 @@ def test_run_due_budget_defer_keeps_schedule_byte_for_byte(tmp_path, monkeypatch
             "dataset": {"examples": 1},
         },
     )
-    monkeypatch.setattr(recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_metric", lambda *_args, **_kwargs: None
+    )
 
     result = recall_improvement.run_due(
         feedback_file=feedback_file,
@@ -898,7 +1557,8 @@ def test_run_due_budget_defer_keeps_schedule_byte_for_byte(tmp_path, monkeypatch
 def test_run_due_skips_when_another_run_holds_lock(tmp_path, monkeypatch) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     feedback_file.write_text(
-        json.dumps({"kind": "missed_candidate", "prompt": "x"}, ensure_ascii=False) + "\n",
+        json.dumps({"kind": "missed_candidate", "prompt": "x"}, ensure_ascii=False)
+        + "\n",
         encoding="utf-8",
     )
     lock_file = tmp_path / "run-due.lock"
@@ -932,8 +1592,24 @@ def test_live_episode_summary_compacts_unlabeled_traffic(tmp_path) -> None:
     path.write_text(
         "\n".join(
             [
-                json.dumps({"ts": "2026-07-05T12:00:00", "host": "codex", "decision": "read", "pages": ["a"], "latency_ms": 10}),
-                json.dumps({"ts": "2026-07-05T12:01:00", "host": "codex", "decision": "none", "pages": [], "latency_ms": 20}),
+                json.dumps(
+                    {
+                        "ts": "2026-07-05T12:00:00",
+                        "host": "codex",
+                        "decision": "read",
+                        "pages": ["a"],
+                        "latency_ms": 10,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-07-05T12:01:00",
+                        "host": "codex",
+                        "decision": "none",
+                        "pages": [],
+                        "latency_ms": 20,
+                    }
+                ),
             ]
         )
         + "\n",

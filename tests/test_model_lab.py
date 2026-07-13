@@ -18,18 +18,31 @@ def _isolate(monkeypatch, tmp_path: Path) -> None:
 
 def _cache(tmp_path: Path) -> Path:
     path = tmp_path / "models_cache.json"
-    path.write_text(json.dumps({
-        "fetched_at": "2026-07-11T00:00:00Z",
-        "models": [
-            {"slug": f"gpt-5.6-{tier}", "visibility": "list", "priority": index,
-             "supported_reasoning_levels": [{"effort": effort} for effort in ["low", "medium", "high"]]}
-            for index, tier in enumerate(["luna", "terra", "sol"], start=1)
-        ],
-    }), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "fetched_at": "2026-07-11T00:00:00Z",
+                "models": [
+                    {
+                        "slug": f"gpt-5.6-{tier}",
+                        "visibility": "list",
+                        "priority": index,
+                        "supported_reasoning_levels": [
+                            {"effort": effort} for effort in ["low", "medium", "high"]
+                        ],
+                    }
+                    for index, tier in enumerate(["luna", "terra", "sol"], start=1)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     return path
 
 
-def test_bootstrap_routes_only_code_repair_to_latest_tier(monkeypatch, tmp_path: Path) -> None:
+def test_bootstrap_routes_only_code_repair_to_latest_tier(
+    monkeypatch, tmp_path: Path
+) -> None:
     _isolate(monkeypatch, tmp_path)
     discovery = model_lab.discover_models([_cache(tmp_path)])
     policy = model_lab.bootstrap_policy(write=True, discovery=discovery)
@@ -125,6 +138,8 @@ def test_local_consensus_replay_over_cap_is_explicitly_non_adoptable(
         result={"action": "retry_raw", "reason": "bounded"},
         models=["ornith:test", "gpt-oss:test"],
         latency_seconds=2.0,
+        policy_source="bootstrap_current_policy",
+        policy_artifact_sha256=None,
     )
 
     row = json.loads(model_lab.REPLAY_FILE.read_text())
@@ -133,6 +148,12 @@ def test_local_consensus_replay_over_cap_is_explicitly_non_adoptable(
     assert row["prompt_truncated"] is True
     assert row["prompt_original_chars"] == 50_001
     assert row["expected"] == {"action": "retry_raw"}
+    assert row["source"] == "local_consensus"
+    assert row["evidence_provenance"] == {
+        "kind": "model_self_label",
+        "policy_source": "bootstrap_current_policy",
+        "policy_artifact_sha256": None,
+    }
 
 
 def test_local_consensus_replay_marks_truncated_system_as_non_adoptable(

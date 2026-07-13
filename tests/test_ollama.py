@@ -3,6 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from contextlib import contextmanager
+
+import pytest
 
 from llm_wiki_mcp import ollama
 from llm_wiki_mcp.runtime_config import IngestConfig
@@ -30,17 +38,21 @@ class _StreamClient:
     def __init__(self) -> None:
         self.payload = None
 
-    def stream(self, _method: str, _path: str, *, json: dict, timeout: object) -> _StreamResponse:
+    def stream(
+        self, _method: str, _path: str, *, json: dict, timeout: object
+    ) -> _StreamResponse:
         self.payload = json
-        return _StreamResponse([
-            {"response": "hel", "done": False},
-            {
-                "response": "lo",
-                "done": True,
-                "eval_count": 2,
-                "eval_duration": 1_000_000_000,
-            },
-        ])
+        return _StreamResponse(
+            [
+                {"response": "hel", "done": False},
+                {
+                    "response": "lo",
+                    "done": True,
+                    "eval_count": 2,
+                    "eval_duration": 1_000_000_000,
+                },
+            ]
+        )
 
 
 class _PostResponse:
@@ -121,6 +133,54 @@ class _TagsClient:
         return _TagsResponse()
 
 
+class _JsonResponse:
+    status_code = 200
+
+    def __init__(self, body: dict) -> None:
+        self.body = body
+
+    def json(self) -> dict:
+        return self.body
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _ResourceClient:
+    def __init__(self, *, resident_size_vram: int, resident_size: int) -> None:
+        self.resident_size_vram = resident_size_vram
+        self.resident_size = resident_size
+
+    def get(self, path: str, *, timeout: object) -> _JsonResponse:
+        assert timeout == 3
+        if path == "/api/tags":
+            return _JsonResponse(
+                {
+                    "models": [
+                        {
+                            "name": "ornith:test",
+                            "model": "ornith:test",
+                            "size": 10,
+                        }
+                    ]
+                }
+            )
+        assert path == "/api/ps"
+        return _JsonResponse(
+            {
+                "models": [
+                    {
+                        "name": "ornith:test",
+                        "model": "ornith:test",
+                        "size_vram": self.resident_size_vram,
+                        "size": self.resident_size,
+                        "context_length": 4096,
+                    }
+                ]
+            }
+        )
+
+
 def test_triage_prompt_requires_filename_for_updates() -> None:
     assert 'MUST use "filename"' in ollama.TRIAGE_SYSTEM_PROMPT
     assert 'Never emit a "page_id" field' in ollama.TRIAGE_SYSTEM_PROMPT
@@ -172,7 +232,9 @@ def test_num_ctx_grows_for_long_prompts_without_crossing_cap() -> None:
     assert ollama._num_ctx_for_prompt("x" * 10_000, None, config) == 4096
 
 
-def test_chat_uses_fixed_structured_options_and_returns_final_content(monkeypatch) -> None:
+def test_chat_uses_fixed_structured_options_and_returns_final_content(
+    monkeypatch,
+) -> None:
     client = _ChatClient('{"decision":"apply"}')
     monkeypatch.setattr(ollama, "_client", lambda: client)
     schema = {
@@ -202,6 +264,7 @@ def test_chat_uses_fixed_structured_options_and_returns_final_content(monkeypatc
     assert client.payload["keep_alive"] == "20m"
     assert client.payload["options"] == {
         "temperature": 0,
+        "seed": 0,
         "num_predict": 1024,
         "num_ctx": 32768,
     }
@@ -211,7 +274,7 @@ def test_chat_enforces_output_char_cap(monkeypatch) -> None:
     client = _ChatClient("x" * 11)
     monkeypatch.setattr(ollama, "_client", lambda: client)
 
-    try:
+    with pytest.raises(ollama.OutputTooLargeError):
         ollama.chat(
             [{"role": "user", "content": "decide"}],
             model="ornith:test",
@@ -222,18 +285,33 @@ def test_chat_enforces_output_char_cap(monkeypatch) -> None:
             read_timeout_ms=120000,
             max_output_chars=10,
         )
-    except ollama.OutputTooLargeError:
-        pass
-    else:
-        raise AssertionError("expected OutputTooLargeError")
+
+
+@pytest.mark.parametrize("seed", [-1, True])
+def test_chat_rejects_invalid_deterministic_seed(monkeypatch, seed: object) -> None:
+    client = _ChatClient('{"decision":"apply"}')
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    with pytest.raises(ValueError, match="seed must be a non-negative integer"):
+        ollama.chat(
+            [{"role": "user", "content": "decide"}],
+            model="ornith:test",
+            format={"type": "object"},
+            num_ctx=32768,
+            num_predict=1024,
+            keep_alive="20m",
+            read_timeout_ms=120000,
+            max_output_chars=1000,
+            seed=seed,  # type: ignore[arg-type]
+        )
+
+    assert client.payload is None
 
 
 def test_model_digests_returns_exact_installed_identities(monkeypatch) -> None:
     monkeypatch.setattr(ollama, "_client", lambda: _TagsClient())
 
-    assert ollama.model_digests(
-        ["ornith:test", "gpt-oss:test", "missing:test"]
-    ) == {
+    assert ollama.model_digests(["ornith:test", "gpt-oss:test", "missing:test"]) == {
         "ornith:test": "ornith-digest",
         "gpt-oss:test": "gpt-oss-digest",
         "missing:test": "",
@@ -262,9 +340,638 @@ def test_chat_can_return_context_accounting(monkeypatch) -> None:
     assert result.eval_count == 7
 
 
+def test_chat_metadata_returns_oversize_content_for_bounded_session_repair(
+    monkeypatch,
+) -> None:
+    client = _ChatClient("x" * 11)
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    result = ollama.chat(
+        [{"role": "user", "content": "decide"}],
+        model="ornith:test",
+        format={"type": "object"},
+        num_ctx=4096,
+        num_predict=128,
+        keep_alive="20m",
+        read_timeout_ms=120000,
+        max_output_chars=10,
+        return_metadata=True,
+    )
+
+    assert isinstance(result, ollama.ChatResponse)
+    assert result.content == "x" * 11
+
+
 def test_embed_uses_explicit_model(monkeypatch) -> None:
     client = _PostClient()
     monkeypatch.setattr(ollama, "_client", lambda: client)
 
     assert ollama.embed(["hello"], model="bge-m3") == [[1.0, 2.0]]
     assert client.payload["model"] == "bge-m3"
+
+
+def test_resource_lease_blocks_exclusive_across_threads(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    shared_entered = threading.Event()
+    release_shared = threading.Event()
+    exclusive_attempted = threading.Event()
+    exclusive_entered = threading.Event()
+    failures: list[BaseException] = []
+
+    def hold_shared() -> None:
+        try:
+            with ollama.model_resource_lease(exclusive=False):
+                shared_entered.set()
+                assert release_shared.wait(timeout=5)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failures.append(exc)
+
+    def take_exclusive() -> None:
+        try:
+            exclusive_attempted.set()
+            with ollama.model_resource_lease(exclusive=True):
+                exclusive_entered.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failures.append(exc)
+
+    reader = threading.Thread(target=hold_shared)
+    writer = threading.Thread(target=take_exclusive)
+    reader.start()
+    assert shared_entered.wait(timeout=5)
+    writer.start()
+    assert exclusive_attempted.wait(timeout=5)
+    assert not exclusive_entered.wait(timeout=0.1)
+    release_shared.set()
+    reader.join(timeout=5)
+    writer.join(timeout=5)
+
+    assert not reader.is_alive()
+    assert not writer.is_alive()
+    assert exclusive_entered.is_set()
+    assert failures == []
+
+
+def test_resource_lease_reentry_and_upgrade_policy(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+
+    with ollama.model_resource_lease(exclusive=True):
+        with ollama.model_resource_lease(exclusive=False):
+            with ollama.model_resource_lease(exclusive=True):
+                pass
+
+    with ollama.model_resource_lease(exclusive=False):
+        with pytest.raises(RuntimeError, match="cannot upgrade"):
+            with ollama.model_resource_lease(exclusive=True):
+                pass
+
+
+def test_resource_lease_blocks_another_process(tmp_path, monkeypatch) -> None:
+    lock_path = tmp_path / "resource.lock"
+    ready_path = tmp_path / "ready"
+    acquired_path = tmp_path / "acquired"
+    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(lock_path))
+    env = os.environ.copy()
+    env.update(
+        {
+            "LEASE_READY_PATH": str(ready_path),
+            "LEASE_ACQUIRED_PATH": str(acquired_path),
+        }
+    )
+    script = """
+import os
+from pathlib import Path
+from llm_wiki_mcp import ollama
+
+Path(os.environ["LEASE_READY_PATH"]).write_text("ready", encoding="utf-8")
+with ollama.model_resource_lease(exclusive=False):
+    Path(os.environ["LEASE_ACQUIRED_PATH"]).write_text("acquired", encoding="utf-8")
+"""
+
+    with ollama.model_resource_lease(exclusive=True):
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 5
+        while not ready_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_path.exists()
+        assert not acquired_path.exists()
+
+    stdout, stderr = process.communicate(timeout=5)
+    assert process.returncode == 0, (stdout, stderr)
+    assert acquired_path.exists()
+
+
+def test_public_heavy_operations_take_expected_resource_lease(monkeypatch) -> None:
+    modes: list[bool] = []
+
+    @contextmanager
+    def record_lease(*, exclusive: bool):
+        modes.append(exclusive)
+        yield
+
+    monkeypatch.setattr(ollama, "model_resource_lease", record_lease)
+    monkeypatch.setattr(ollama, "_generate_unlocked", lambda *_args, **_kwargs: "ok")
+    monkeypatch.setattr(ollama, "_chat_unlocked", lambda *_args, **_kwargs: "ok")
+    monkeypatch.setattr(ollama, "_client", lambda: _PostClient())
+    monkeypatch.setattr(ollama, "_ollama_resource_rows", lambda: ({}, {}))
+
+    assert ollama.generate("prompt") == "ok"
+    assert (
+        ollama.chat(
+            [{"role": "user", "content": "prompt"}],
+            model="ornith:test",
+            format={"type": "object"},
+            num_ctx=4096,
+            num_predict=128,
+            keep_alive="1m",
+            read_timeout_ms=1000,
+            max_output_chars=1000,
+        )
+        == "ok"
+    )
+    assert ollama.embed(["hello"], model="bge-m3") == [[1.0, 2.0]]
+    assert ollama.unload_named_model("ornith:test") is True
+
+    assert modes == [False, False, False, True]
+
+
+@pytest.mark.parametrize("size_vram", [0, 4])
+def test_resource_rows_use_total_size_for_cpu_or_partial_offload(
+    monkeypatch,
+    size_vram: int,
+) -> None:
+    monkeypatch.setattr(
+        ollama,
+        "_client",
+        lambda: _ResourceClient(resident_size_vram=size_vram, resident_size=12),
+    )
+
+    installed, resident = ollama._ollama_resource_rows()
+
+    assert installed == {"ornith:test": 10}
+    assert resident == {"ornith:test": (12, 4096)}
+
+
+def test_macos_memory_snapshot_uses_kernel_pressure_availability(monkeypatch) -> None:
+    class _Darwin:
+        sysname = "Darwin"
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(
+        args: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(tuple(args))
+        if args[0] == "sysctl":
+            stdout = str(128 * ollama.GIB)
+        elif args[0] == "memory_pressure":
+            stdout = (
+                "The system has 137438953472 (8388608 pages with a page size of 16384).\n"
+                "System-wide memory free percentage: 82%\n"
+            )
+        else:  # pragma: no cover - proves vm_stat is not consulted
+            pytest.fail(f"unexpected command: {args}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(ollama.os, "uname", lambda: _Darwin())
+    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+
+    snapshot = ollama.memory_snapshot()
+
+    assert snapshot == ollama.MemorySnapshot(
+        total_bytes=128 * ollama.GIB,
+        available_bytes=(128 * ollama.GIB * 82) // 100,
+        source="macos_memory_pressure",
+    )
+    assert calls == [
+        ("sysctl", "-n", "hw.memsize"),
+        ("memory_pressure", "-Q"),
+    ]
+
+
+def test_macos_memory_snapshot_falls_back_to_vm_stat_on_invalid_pressure_probe(
+    monkeypatch,
+) -> None:
+    class _Darwin:
+        sysname = "Darwin"
+
+    calls: list[str] = []
+
+    def fake_run(
+        args: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args[0])
+        if args[0] == "sysctl":
+            stdout = str(128 * ollama.GIB)
+        elif args[0] == "memory_pressure":
+            stdout = "unexpected output\n"
+        elif args[0] == "vm_stat":
+            stdout = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 100.
+Pages inactive: 200.
+Pages speculative: 25.
+Pages purgeable: 50.
+"""
+        else:  # pragma: no cover - all commands are enumerated above
+            pytest.fail(f"unexpected command: {args}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(ollama.os, "uname", lambda: _Darwin())
+    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+
+    snapshot = ollama.memory_snapshot()
+
+    assert snapshot == ollama.MemorySnapshot(
+        total_bytes=128 * ollama.GIB,
+        available_bytes=375 * 16_384,
+        source="macos_vm_stat",
+    )
+    assert calls == ["sysctl", "memory_pressure", "sysctl", "vm_stat"]
+
+
+def test_macos_memory_snapshot_rejects_pressure_total_from_another_host(
+    monkeypatch,
+) -> None:
+    class _Darwin:
+        sysname = "Darwin"
+
+    def fake_run(
+        args: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if args[0] == "sysctl":
+            stdout = str(128 * ollama.GIB)
+        elif args[0] == "memory_pressure":
+            stdout = (
+                "The system has 68719476736 (4194304 pages with a page size of 16384).\n"
+                "System-wide memory free percentage: 82%\n"
+            )
+        elif args[0] == "vm_stat":
+            stdout = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 100.
+Pages inactive: 200.
+"""
+        else:  # pragma: no cover - all commands are enumerated above
+            pytest.fail(f"unexpected command: {args}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(ollama.os, "uname", lambda: _Darwin())
+    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+
+    snapshot = ollama.memory_snapshot()
+
+    assert snapshot.source == "macos_vm_stat"
+    assert snapshot.available_bytes == 300 * 16_384
+
+
+def test_pressure_aware_snapshot_bootstraps_exactly_one_uncalibrated_runner() -> None:
+    memory = ollama.MemorySnapshot(
+        total_bytes=128 * ollama.GIB,
+        available_bytes=(128 * ollama.GIB * 82) // 100,
+        source="macos_memory_pressure",
+    )
+    plan = ollama.build_model_residency_plan(
+        ["ornith:35b", "gpt-oss:20b", "gemma4:26b"],
+        num_ctx=16_384,
+        max_num_ctx=114_688,
+        memory=memory,
+        installed_sizes={
+            "ornith:35b": 24_729_131_264,
+            "gpt-oss:20b": 13_793_441_244,
+            "gemma4:26b": 17_987_581_215,
+        },
+        resident={},
+        calibrated_sizes={},
+        reserve_bytes=16 * ollama.GIB,
+        configured_max_resident=3,
+    )
+
+    assert plan.estimate("ornith:35b") == 49_458_262_528
+    assert plan.max_resident_models == 1
+    assert plan.forced_single is False
+    assert plan.calibrated_models == ()
+
+
+def test_daemon_identity_ignores_runner_and_changes_on_restart(monkeypatch) -> None:
+    process_table = {
+        "stdout": """
+120 Sun Jul 13 06:00:00 2026 /opt/homebrew/bin/ollama serve
+121 Sun Jul 13 06:00:01 2026 /opt/homebrew/bin/llama-server -c 32768
+"""
+    }
+
+    def fake_run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=process_table["stdout"], stderr=""
+        )
+
+    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+
+    first = ollama._ollama_daemon_process_identity()
+    process_table["stdout"] = """
+121 Sun Jul 13 06:00:01 2026 /opt/homebrew/bin/llama-server -c 32768
+220 Sun Jul 13 07:00:00 2026 /opt/homebrew/bin/ollama serve
+"""
+    second = ollama._ollama_daemon_process_identity()
+
+    assert first != second
+
+
+def test_engine_identity_ignores_caller_env_for_same_daemon(monkeypatch) -> None:
+    class VersionClient:
+        def get(self, path: str, *, timeout: object) -> _JsonResponse:
+            assert path == "/api/version"
+            assert timeout == 3
+            return _JsonResponse({"version": "0.11.0"})
+
+    monkeypatch.setattr(ollama, "_client", lambda: VersionClient())
+    monkeypatch.setattr(
+        ollama, "_ollama_daemon_process_identity", lambda: "daemon-epoch"
+    )
+    monkeypatch.delenv("OLLAMA_KV_CACHE_TYPE", raising=False)
+    default_identity = ollama._ollama_engine_identity()
+
+    monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+    configured_identity = ollama._ollama_engine_identity()
+
+    assert default_identity == configured_identity
+
+
+def test_previous_calibration_schema_is_ignored(tmp_path) -> None:
+    path = tmp_path / "ollama-footprints.json"
+    path.write_text(
+        json.dumps({"schema_version": 1, "entries": [{"size_bytes": 1}]}),
+        encoding="utf-8",
+    )
+
+    assert ollama._read_calibration_payload(path) == {}
+
+
+def test_footprint_calibration_persists_and_invalidates_by_identity(
+    tmp_path, monkeypatch
+) -> None:
+    calibration_file = tmp_path / "ollama-footprints.json"
+    monkeypatch.setenv("LLM_WIKI_OLLAMA_CALIBRATION_FILE", str(calibration_file))
+    previous = dict(ollama._MODEL_FOOTPRINT_CALIBRATION)
+    ollama._MODEL_FOOTPRINT_CALIBRATION.clear()
+    resident: dict[str, tuple[int, int]] = {"ornith:test": (20 * ollama.GIB, 32_768)}
+    monkeypatch.setattr(
+        ollama,
+        "_ollama_resource_rows",
+        lambda: ({"ornith:test": 10 * ollama.GIB}, dict(resident)),
+    )
+    monkeypatch.setattr(
+        ollama, "model_digests", lambda _models: {"ornith:test": "digest-a"}
+    )
+    monkeypatch.setattr(ollama, "_ollama_engine_identity", lambda: "engine-a")
+    monkeypatch.setattr(
+        ollama,
+        "memory_snapshot",
+        lambda: ollama.MemorySnapshot(
+            total_bytes=128 * ollama.GIB,
+            available_bytes=96 * ollama.GIB,
+            source="test",
+        ),
+    )
+    try:
+        assert ollama.observe_model_runtime("ornith:test") == (
+            20 * ollama.GIB,
+            32_768,
+        )
+        assert calibration_file.exists()
+        assert calibration_file.stat().st_mode & 0o777 == 0o600
+
+        ollama._MODEL_FOOTPRINT_CALIBRATION.clear()
+        resident.clear()
+        plan = ollama.plan_model_residency(
+            ["ornith:test"],
+            num_ctx=32_768,
+            max_num_ctx=131_072,
+            reserve_bytes=16 * ollama.GIB,
+            configured_max_resident=1,
+        )
+        assert plan.estimate("ornith:test") == 20 * ollama.GIB
+        assert plan.calibrated_models == ("ornith:test",)
+
+        assert (
+            ollama._matching_persisted_calibrations(
+                installed={"ornith:test": 10 * ollama.GIB},
+                digests={"ornith:test": "digest-b"},
+                engine="engine-a",
+            )
+            == {}
+        )
+        assert (
+            ollama._matching_persisted_calibrations(
+                installed={"ornith:test": 10 * ollama.GIB},
+                digests={"ornith:test": "digest-a"},
+                engine="engine-b",
+            )
+            == {}
+        )
+        assert (
+            ollama._matching_persisted_calibrations(
+                installed={"other:test": 10 * ollama.GIB},
+                digests={"other:test": "digest-a"},
+                engine="engine-a",
+            )
+            == {}
+        )
+
+        different_context = ollama.plan_model_residency(
+            ["ornith:test"],
+            num_ctx=65_536,
+            max_num_ctx=131_072,
+            reserve_bytes=16 * ollama.GIB,
+            configured_max_resident=1,
+        )
+        assert different_context.calibrated_models == ()
+    finally:
+        ollama._MODEL_FOOTPRINT_CALIBRATION.clear()
+        ollama._MODEL_FOOTPRINT_CALIBRATION.update(previous)
+
+
+def test_persisted_footprint_is_readable_from_a_fresh_process(
+    tmp_path, monkeypatch
+) -> None:
+    calibration_file = tmp_path / "ollama-footprints.json"
+    monkeypatch.setenv("LLM_WIKI_OLLAMA_CALIBRATION_FILE", str(calibration_file))
+    ollama._persist_model_calibration(
+        model="ornith:test",
+        context=32_768,
+        installed_size=10,
+        digest="digest-a",
+        engine="engine-a",
+        size_bytes=20,
+    )
+    script = """
+import json
+from llm_wiki_mcp import ollama
+
+rows = ollama._matching_persisted_calibrations(
+    installed={"ornith:test": 10},
+    digests={"ornith:test": "digest-a"},
+    engine="engine-a",
+)
+print(json.dumps({f"{model}:{context}": size for (model, context), size in rows.items()}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+        timeout=5,
+    )
+
+    assert json.loads(result.stdout) == {"ornith:test:32768": 20}
+
+
+def test_unload_fails_closed_on_probe_failure_or_timeout(monkeypatch) -> None:
+    monkeypatch.setattr(ollama, "_client", lambda: _PostClient())
+
+    def failed_probe():
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(ollama, "_ollama_resource_rows", failed_probe)
+    assert ollama.unload_named_model("ornith:test", verify_timeout=0) is False
+
+    monkeypatch.setattr(
+        ollama,
+        "_ollama_resource_rows",
+        lambda: ({"ornith:test": 10}, {"ornith:test": (12, 4096)}),
+    )
+    assert ollama.unload_named_model("ornith:test", verify_timeout=0) is False
+
+
+def test_residency_plan_returns_zero_when_no_runner_fits() -> None:
+    plan = ollama.build_model_residency_plan(
+        ["ornith:test"],
+        num_ctx=32_768,
+        max_num_ctx=131_072,
+        memory=ollama.MemorySnapshot(
+            total_bytes=128 * ollama.GIB,
+            available_bytes=17 * ollama.GIB,
+            source="test",
+        ),
+        installed_sizes={"ornith:test": 20 * ollama.GIB},
+        resident={},
+        calibrated_sizes={
+            ("ornith:test", 32_768): 24 * ollama.GIB,
+        },
+        reserve_bytes=16 * ollama.GIB,
+        configured_max_resident=1,
+    )
+
+    assert plan.capacity_bytes == ollama.GIB
+    assert plan.max_resident_models == 0
+    assert plan.forced_single is True
+
+
+def test_unobserved_context_uses_known_footprint_as_a_lower_bound() -> None:
+    plan = ollama.build_model_residency_plan(
+        ["ornith:test"],
+        num_ctx=65_536,
+        max_num_ctx=131_072,
+        memory=ollama.MemorySnapshot(
+            total_bytes=64 * ollama.GIB,
+            available_bytes=38 * ollama.GIB,
+            source="test",
+        ),
+        installed_sizes={"ornith:test": 20 * ollama.GIB},
+        resident={},
+        calibrated_sizes={
+            ("ornith:test", 32_768): 40 * ollama.GIB,
+        },
+        reserve_bytes=8 * ollama.GIB,
+        configured_max_resident=1,
+    )
+
+    assert plan.capacity_bytes == 30 * ollama.GIB
+    assert plan.estimate("ornith:test") >= 40 * ollama.GIB
+    assert plan.max_resident_models == 0
+
+
+def test_uncalibrated_single_runner_does_not_ignore_current_pressure() -> None:
+    plan = ollama.build_model_residency_plan(
+        ["ornith:test", "challenger:test"],
+        num_ctx=32_768,
+        max_num_ctx=131_072,
+        memory=ollama.MemorySnapshot(
+            total_bytes=128 * ollama.GIB,
+            available_bytes=32 * ollama.GIB,
+            source="test",
+        ),
+        installed_sizes={
+            "ornith:test": 24 * ollama.GIB,
+            "challenger:test": 14 * ollama.GIB,
+        },
+        resident={"embedding:test": (60 * ollama.GIB, 8_192)},
+        calibrated_sizes={},
+        reserve_bytes=16 * ollama.GIB,
+        configured_max_resident=3,
+    )
+
+    assert plan.capacity_bytes == 16 * ollama.GIB
+    assert plan.estimate("ornith:test") == 48 * ollama.GIB
+    assert plan.max_resident_models == 0
+    assert plan.calibrated_models == ()
+
+
+def test_uncalibrated_single_runner_bootstraps_with_current_headroom() -> None:
+    plan = ollama.build_model_residency_plan(
+        ["ornith:test", "challenger:test"],
+        num_ctx=32_768,
+        max_num_ctx=131_072,
+        memory=ollama.MemorySnapshot(
+            total_bytes=128 * ollama.GIB,
+            available_bytes=80 * ollama.GIB,
+            source="test",
+        ),
+        installed_sizes={
+            "ornith:test": 24 * ollama.GIB,
+            "challenger:test": 14 * ollama.GIB,
+        },
+        resident={},
+        calibrated_sizes={},
+        reserve_bytes=16 * ollama.GIB,
+        configured_max_resident=3,
+    )
+
+    assert plan.capacity_bytes == 64 * ollama.GIB
+    assert plan.estimate("ornith:test") == 48 * ollama.GIB
+    assert plan.max_resident_models == 1
+    assert plan.calibrated_models == ()
+
+
+def test_live_residency_probe_failure_returns_zero_runner_plan(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ollama,
+        "memory_snapshot",
+        lambda: ollama.MemorySnapshot(
+            total_bytes=128 * ollama.GIB,
+            available_bytes=96 * ollama.GIB,
+            source="test",
+        ),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "_ollama_resource_rows",
+        lambda: (_ for _ in ()).throw(RuntimeError("probe unavailable")),
+    )
+
+    plan = ollama.plan_model_residency(
+        ["ornith:test"],
+        num_ctx=32_768,
+        max_num_ctx=131_072,
+        reserve_bytes=16 * ollama.GIB,
+        configured_max_resident=1,
+    )
+
+    assert plan.source == "test+ollama_unavailable"
+    assert plan.max_resident_models == 0
+    assert plan.forced_single is True

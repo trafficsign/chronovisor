@@ -347,6 +347,8 @@ def test_gate_defaults_keep_model_resident_and_rewrite_timeout_longer(tmp_path) 
 
     policy = load_policy(config)
 
+    assert policy.judge_model == "ornith:9b-q4_K_M"
+    assert policy.rewrite_model == "ornith:9b-q4_K_M"
     assert policy.judge_keep_alive == "24h"
     assert policy.warmup_timeout_ms == 15000
     assert policy.rewrite_timeout_ms == 3000

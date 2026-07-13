@@ -18,7 +18,11 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
 
 
 def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
@@ -195,7 +199,9 @@ def test_pending_queue_retires_raw_retracted_after_it_was_queued(
     assert retracted.read_text(encoding="utf-8") == retracted_text
 
 
-def test_build_queue_merges_signals_without_resetting_retry_state(tmp_path: Path, monkeypatch) -> None:
+def test_build_queue_merges_signals_without_resetting_retry_state(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260706-codex-a.md"
     raw.write_text("body", encoding="utf-8")
@@ -260,7 +266,9 @@ def test_build_queue_merges_signals_without_resetting_retry_state(tmp_path: Path
     assert row["next_retry_at"] == retry_at
 
 
-def test_legacy_read_back_failure_resolves_raw_from_claim_time(tmp_path: Path, monkeypatch) -> None:
+def test_legacy_read_back_failure_resolves_raw_from_claim_time(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     earlier = paths["raw"] / "20260701-earlier.md"
     later = paths["raw"] / "20260701-later.md"
@@ -382,7 +390,9 @@ def test_autonomous_refresh_retires_legacy_migration_until_explicitly_requested(
     assert reactivated["terminal_reason"] is None
 
 
-def test_autonomous_signal_keeps_matching_legacy_row_pending(tmp_path: Path, monkeypatch) -> None:
+def test_autonomous_signal_keeps_matching_legacy_row_pending(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     legacy = paths["raw"] / "20260701-legacy.md"
     needed = paths["raw"] / "20260702-needed.md"
@@ -427,11 +437,16 @@ def test_autonomous_signal_keeps_matching_legacy_row_pending(tmp_path: Path, mon
     rows = {row["raw"]: row for row in _read_jsonl(paths["queue"])}
     assert rows[legacy.name]["status"] == "not_needed"
     assert rows[needed.name]["status"] == "pending"
-    assert rows[needed.name]["sources"] == ["memory_integrity_miss", "explicit_migration"]
+    assert rows[needed.name]["sources"] == [
+        "memory_integrity_miss",
+        "explicit_migration",
+    ]
     assert rows[needed.name]["priority"] == 200
 
 
-def test_terminal_history_does_not_consume_migration_limit(tmp_path: Path, monkeypatch) -> None:
+def test_terminal_history_does_not_consume_migration_limit(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     completed = paths["raw"] / "20260701-completed.md"
     quarantined = paths["raw"] / "20260702-quarantined.md"
@@ -460,7 +475,9 @@ def test_terminal_history_does_not_consume_migration_limit(tmp_path: Path, monke
     assert rows[pending.name]["status"] == "pending"
 
 
-def test_nonhuman_quarantine_reopens_after_cooldown(tmp_path: Path, monkeypatch) -> None:
+def test_nonhuman_quarantine_reopens_after_cooldown(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260702-quarantined.md"
     raw.write_text("body", encoding="utf-8")
@@ -554,7 +571,9 @@ def test_external_authority_human_required_remains_terminal(
     assert "quarantine_resumed_at" not in row
 
 
-def test_failed_history_restores_attempts_and_backoff_after_queue_loss(tmp_path: Path, monkeypatch) -> None:
+def test_failed_history_restores_attempts_and_backoff_after_queue_loss(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-failed.md"
     raw.write_text("body", encoding="utf-8")
@@ -590,7 +609,9 @@ def test_failed_history_restores_attempts_and_backoff_after_queue_loss(tmp_path:
     assert preview["count"] == 0
 
 
-def test_duplicate_stable_keys_preserve_terminal_lifecycle(tmp_path: Path, monkeypatch) -> None:
+def test_duplicate_stable_keys_preserve_terminal_lifecycle(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-duplicate.md"
     raw.write_text("body", encoding="utf-8")
@@ -603,7 +624,12 @@ def test_duplicate_stable_keys_preserve_terminal_lifecycle(tmp_path: Path, monke
     _write_jsonl(
         paths["queue"],
         [
-            {**base, "status": "completed", "attempts": 1, "completed_at": "2026-07-10T10:00:00+00:00"},
+            {
+                **base,
+                "status": "completed",
+                "attempts": 1,
+                "completed_at": "2026-07-10T10:00:00+00:00",
+            },
             {**base, "status": "pending", "attempts": 0},
         ],
     )
@@ -621,7 +647,9 @@ def test_duplicate_stable_keys_preserve_terminal_lifecycle(tmp_path: Path, monke
     assert row["attempts"] == 1
 
 
-def test_history_and_full_replay_claim_make_pending_rows_exact_once(tmp_path: Path, monkeypatch) -> None:
+def test_history_and_full_replay_claim_make_pending_rows_exact_once(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     a = paths["raw"] / "20260701-a.md"
     b = paths["raw"] / "20260702-b.md"
@@ -661,7 +689,9 @@ def test_history_and_full_replay_claim_make_pending_rows_exact_once(tmp_path: Pa
     }
 
 
-def test_ordinary_replay_claim_after_crash_does_not_suppress_retry(tmp_path: Path, monkeypatch) -> None:
+def test_ordinary_replay_claim_after_crash_does_not_suppress_retry(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-crashed.md"
     raw.write_text("body", encoding="utf-8")
@@ -697,7 +727,9 @@ def test_ordinary_replay_claim_after_crash_does_not_suppress_retry(tmp_path: Pat
     assert row["status"] == "completed"
 
 
-def test_partial_replay_is_terminal_and_does_not_repeat_successful_operations(tmp_path: Path, monkeypatch) -> None:
+def test_partial_replay_is_terminal_and_does_not_repeat_successful_operations(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-partial.md"
     raw.write_text("body", encoding="utf-8")
@@ -753,7 +785,9 @@ def test_partial_replay_is_terminal_and_does_not_repeat_successful_operations(tm
     assert row["attempts"] == 1
 
 
-def test_replay_persists_running_marker_before_ingest(tmp_path: Path, monkeypatch) -> None:
+def test_replay_persists_running_marker_before_ingest(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-running.md"
     raw.write_text("body", encoding="utf-8")
@@ -784,7 +818,9 @@ def test_replay_persists_running_marker_before_ingest(tmp_path: Path, monkeypatc
     assert _read_jsonl(paths["completions"])[0]["status"] == "completed"
 
 
-def test_completion_callback_recovers_crash_before_queue_finalize(tmp_path: Path, monkeypatch) -> None:
+def test_completion_callback_recovers_crash_before_queue_finalize(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-callback-crash.md"
     raw.write_text("body", encoding="utf-8")
@@ -828,6 +864,7 @@ def test_completion_callback_recovers_crash_before_queue_finalize(tmp_path: Path
     [completed] = _read_jsonl(paths["queue"])
     assert completed["status"] == "completed"
     assert completed["completion_evidence"] == "replay_completion_journal"
+    assert completed["recovery_kind"] == "exact_already_applied"
 
 
 def test_unknown_crashed_replay_is_frontier_quarantined_not_blindly_retried(
@@ -841,7 +878,9 @@ def test_unknown_crashed_replay_is_frontier_quarantined_not_blindly_retried(
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
         "llm_wiki_mcp.ingest.run_ingest",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("crash before apply proof")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SystemExit("crash before apply proof")
+        ),
     )
     with pytest.raises(SystemExit):
         raw_replay.run_pending_queue(
@@ -852,14 +891,14 @@ def test_unknown_crashed_replay_is_frontier_quarantined_not_blindly_retried(
             max_runs=1,
             max_bytes=100,
         )
-    monkeypatch.setattr(
-        "llm_wiki_mcp.frontier_review.run_structured_review",
-        lambda *_args, **_kwargs: {
+
+    def reviewer(*_args, **_kwargs):
+        return {
             "decision": "quarantine",
             "confidence": 0.99,
             "reason": "cannot prove that replay is duplicate-safe",
-        },
-    )
+        }
+
     budget = CycleBudget(max_frontier_calls=1, max_mutations=1, max_raw_bytes=100)
 
     recovered = raw_replay.run_pending_queue(
@@ -870,6 +909,7 @@ def test_unknown_crashed_replay_is_frontier_quarantined_not_blindly_retried(
         max_runs=1,
         max_bytes=100,
         budget=budget,
+        frontier_reviewer=reviewer,
     )
 
     assert recovered["runs"] == []
@@ -883,23 +923,19 @@ def test_safe_replay_decision_is_not_blocked_by_confidence_metadata(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import frontier_review
-
     row = {
         "key": "raw-replay:test",
         "raw": "missing.md",
         "status": "indeterminate",
         "frontier_attempts": 0,
     }
-    monkeypatch.setattr(
-        frontier_review,
-        "run_structured_review",
-        lambda *_args, **_kwargs: {
+
+    def reviewer(*_args, **_kwargs):
+        return {
             "decision": "safe_replay",
             "confidence": 0.01,
             "reason": "no mutation evidence exists",
-        },
-    )
+        }
 
     result = raw_replay._review_indeterminate_rows(
         [row],
@@ -908,11 +944,209 @@ def test_safe_replay_decision_is_not_blocked_by_confidence_metadata(
         now=datetime(2026, 7, 11, tzinfo=timezone.utc),
         budget=None,
         retry_delay_seconds=60,
+        reviewer=reviewer,
     )
 
     assert result["reviewed"] == 1
     assert row["status"] == "pending"
     assert row["frontier_decision"] == "safe_replay"
+    assert row["frontier_review_artifact"]["authority"]["source"] == (
+        "injected_reviewer_boundary"
+    )
+
+
+def test_safe_replay_preserves_local_audit_and_revalidates_at_launch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260701-authorized-replay.md"
+    raw.write_text("body", encoding="utf-8")
+    raw_hash = raw_replay._sha256_path(raw)
+    _write_jsonl(
+        paths["queue"],
+        [
+            {
+                "key": raw_replay.stable_key(raw),
+                "raw": raw.name,
+                "path": str(raw),
+                "status": "indeterminate",
+                "attempts": 1,
+                "frontier_attempts": 0,
+                "job_id": "crashed-job",
+                "attempt_id": f"crashed-job:1:{raw_hash[:16]}",
+                "raw_sha256": raw_hash,
+                "sources": ["ingest_failure"],
+                "priority": 300,
+            }
+        ],
+    )
+    local_consensus = {"winner": "safe_replay", "votes": 2}
+    decision_policy = {"mode": "enabled", "kind": "local_batch"}
+
+    def reviewer(*_args, **_kwargs):
+        return {
+            "decision": "safe_replay",
+            "confidence": 0.99,
+            "reason": "no mutation occurred",
+            "local_consensus": local_consensus,
+            "decision_policy": decision_policy,
+        }
+
+    store = _FakeJobStore(result_status=JobStatus.COMPLETED)
+    monkeypatch.setattr(raw_replay, "job_store", store)
+    monkeypatch.setattr(
+        "llm_wiki_mcp.ingest.run_ingest",
+        lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
+    )
+
+    result = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+        frontier_reviewer=reviewer,
+    )
+
+    assert result["count"] == 1
+    assert result["authorization_rejected"] == []
+    [completed] = _read_jsonl(paths["queue"])
+    assert completed["status"] == "completed"
+    assert completed["frontier_authorization_consumed_at"]
+    stored_review = completed["frontier_review_artifact"]["review"]
+    assert stored_review["local_consensus"] == local_consensus
+    assert stored_review["decision_policy"] == decision_policy
+
+
+def test_persisted_injected_safe_replay_cannot_run_without_explicit_boundary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260701-stale-approval.md"
+    raw.write_text("body", encoding="utf-8")
+    raw_hash = raw_replay._sha256_path(raw)
+    row = {
+        "key": raw_replay.stable_key(raw),
+        "raw": raw.name,
+        "path": str(raw),
+        "status": "indeterminate",
+        "attempts": 1,
+        "frontier_attempts": 0,
+        "job_id": "crashed-job",
+        "attempt_id": f"crashed-job:1:{raw_hash[:16]}",
+        "raw_sha256": raw_hash,
+        "sources": ["ingest_failure"],
+        "priority": 300,
+    }
+    normalized = raw_replay._normalize_queue_row(
+        row, now=datetime(2026, 7, 11, tzinfo=timezone.utc)
+    )
+    assert normalized is not None
+    row = normalized
+    raw_replay._review_indeterminate_rows(
+        [row],
+        claims_file=paths["claims"],
+        history_file=paths["history"],
+        now=datetime(2026, 7, 11, tzinfo=timezone.utc),
+        budget=None,
+        retry_delay_seconds=60,
+        reviewer=lambda *_args, **_kwargs: {
+            "decision": "safe_replay",
+            "confidence": 0.99,
+            "reason": "no mutation occurred",
+        },
+    )
+    assert row["status"] == "pending"
+    _write_jsonl(paths["queue"], [row])
+    store = _FakeJobStore(result_status=JobStatus.COMPLETED)
+    monkeypatch.setattr(raw_replay, "job_store", store)
+    monkeypatch.setattr(
+        "llm_wiki_mcp.ingest.run_ingest",
+        lambda *_args, **_kwargs: pytest.fail("stale approval must not launch ingest"),
+    )
+    monkeypatch.setattr(
+        raw_replay,
+        "_current_raw_replay_authority",
+        lambda *, injected_reviewer: (
+            (None, "production authority is unavailable")
+            if not injected_reviewer
+            else pytest.fail("persisted injected approval must not infer injection")
+        ),
+    )
+
+    result = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+    )
+
+    assert result["runs"] == []
+    assert result["authorization_rejected"][0]["reason"] == (
+        "production authority is unavailable"
+    )
+    [rejected] = _read_jsonl(paths["queue"])
+    assert rejected["status"] == "indeterminate"
+    assert rejected["terminal_reason"] == "semantic replay authorization rejected"
+    assert store.created == 0
+
+
+def test_authority_race_after_review_cannot_change_queue_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    row = {
+        "key": "raw:race.md",
+        "raw": "race.md",
+        "status": "indeterminate",
+        "frontier_attempts": 0,
+    }
+    authority, error = raw_replay._current_raw_replay_authority(injected_reviewer=True)
+    assert error is None
+    calls = 0
+
+    def changing_authority(*, injected_reviewer: bool):
+        nonlocal calls
+        assert injected_reviewer is True
+        calls += 1
+        if calls >= 3:
+            return None, "authority changed before effect"
+        return authority, None
+
+    monkeypatch.setattr(
+        raw_replay,
+        "_current_raw_replay_authority",
+        changing_authority,
+    )
+
+    result = raw_replay._review_indeterminate_rows(
+        [row],
+        claims_file=paths["claims"],
+        history_file=paths["history"],
+        now=datetime(2026, 7, 11, tzinfo=timezone.utc),
+        budget=None,
+        retry_delay_seconds=60,
+        reviewer=lambda *_args, **_kwargs: {
+            "decision": "accept_processed",
+            "confidence": 0.99,
+            "reason": "already applied",
+        },
+    )
+
+    assert result["reviewed"] == 1
+    assert row["status"] == "indeterminate"
+    assert row["frontier_decision"] == "needs_retry"
+    assert row["frontier_authority_error"] == "authority changed before effect"
+    assert "frontier_review_artifact" not in row
+    [history] = _read_jsonl(paths["history"])
+    assert history["status"] == "indeterminate"
+    assert history["frontier_authority_error"] == "authority changed before effect"
 
 
 def test_completed_ingest_with_broken_completion_journal_never_becomes_retryable(
@@ -949,7 +1183,9 @@ def test_completed_ingest_with_broken_completion_journal_never_becomes_retryable
     assert row["next_retry_at"] is None
 
 
-def test_run_replay_limit_zero_keeps_legacy_all_raws_behavior(tmp_path: Path, monkeypatch) -> None:
+def test_run_replay_limit_zero_keeps_legacy_all_raws_behavior(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     for name in ("20260701-a.md", "20260702-b.md"):
         (paths["raw"] / name).write_text(name, encoding="utf-8")
@@ -1004,7 +1240,9 @@ def test_dry_run_is_fully_read_only(tmp_path: Path, monkeypatch) -> None:
     assert not preview_path.with_suffix(".jsonl.lock").exists()
 
 
-def test_run_pending_queue_respects_priority_run_and_byte_bounds(tmp_path: Path, monkeypatch) -> None:
+def test_run_pending_queue_respects_priority_run_and_byte_bounds(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     rows = []
     sources = ("ingest_failure", "memory_integrity_miss", "explicit_migration")
@@ -1042,7 +1280,10 @@ def test_run_pending_queue_respects_priority_run_and_byte_bounds(tmp_path: Path,
 
     assert result["count"] == 2
     assert result["bytes"] == 4
-    assert [run["raw"] for run in result["runs"]] == ["20260701-300.md", "20260702-200.md"]
+    assert [run["raw"] for run in result["runs"]] == [
+        "20260701-300.md",
+        "20260702-200.md",
+    ]
     status_by_raw = {row["raw"]: row["status"] for row in _read_jsonl(paths["queue"])}
     assert status_by_raw["20260701-300.md"] == "completed"
     assert status_by_raw["20260702-200.md"] == "completed"
@@ -1218,7 +1459,9 @@ def test_eligibility_union_drains_current_keys_and_prior_auto_lane(
     assert rows[unrelated.name]["status"] == "pending"
 
 
-def test_raw_larger_than_byte_budget_retries_then_quarantines(tmp_path: Path, monkeypatch) -> None:
+def test_raw_larger_than_byte_budget_retries_then_quarantines(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-oversized.md"
     raw.write_bytes(b"x" * 2_000_001)
@@ -1332,7 +1575,9 @@ def test_three_failed_attempts_end_in_quarantine(tmp_path: Path, monkeypatch) ->
     assert len(_read_jsonl(paths["history"])) == 3
 
 
-def test_budget_defer_does_not_consume_replay_attempt(tmp_path: Path, monkeypatch) -> None:
+def test_budget_defer_does_not_consume_replay_attempt(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-budget.md"
     raw.write_text("body", encoding="utf-8")
@@ -1358,7 +1603,9 @@ def test_budget_defer_does_not_consume_replay_attempt(tmp_path: Path, monkeypatc
     assert not paths["history"].exists()
 
 
-def test_zero_byte_replay_still_requires_mutation_budget(tmp_path: Path, monkeypatch) -> None:
+def test_zero_byte_replay_still_requires_mutation_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260701-empty.md"
     raw.write_bytes(b"")

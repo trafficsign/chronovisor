@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 import tempfile
 from dataclasses import dataclass, field
@@ -38,10 +39,16 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from llm_wiki_mcp.decision_authority import (
+    compare_semantic_authority,
+    current_semantic_authority,
+    seal_semantic_artifact,
+    semantic_verdict_authority_error,
+)
 from llm_wiki_mcp.wiki import find_page
 from llm_wiki_mcp.wiki import WIKI_ROOT
 from llm_wiki_mcp.link_fix import atomic_write, protected_spans
-from llm_wiki_mcp.page_mutation import wiki_mutation_lock
+from llm_wiki_mcp.page_mutation import decision_authority_lock, wiki_mutation_lock
 from llm_wiki_mcp.local_structured import ChatRequest, LocalStructuredSession
 from llm_wiki_mcp.runtime_config import (
     load_decision_router_config,
@@ -52,6 +59,7 @@ from llm_wiki_mcp.runtime_config import (
 DECISIONS_FILE = WIKI_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
 PROJECT_ROOT = runtime_repo_root()
 RESOLVER_VERSION = "orphan-link-v1"
+DECISION_LANE = "orphan_link"
 
 ORPHAN_FRONTIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -231,6 +239,7 @@ def gather_candidates(
     """
     if semantic_search_fn is None:
         from llm_wiki_mcp.search import semantic_search
+
         semantic_search_fn = semantic_search
 
     query = _build_query(orphan_id, store)
@@ -266,12 +275,12 @@ def _build_prompt(source_id: str, orphan_id: str, store) -> str:
     orph_meta = store.meta(orphan_id) or {}
     return f"""\
 SOURCE page:
-  title: {src_meta.get('title', source_id)}
+  title: {src_meta.get("title", source_id)}
   body head:
 {_page_head(source_id, max_chars=500)}
 
 TARGET page (orphan, currently has zero inbound links):
-  title: {orph_meta.get('title', orphan_id)}
+  title: {orph_meta.get("title", orphan_id)}
   body head:
 {_page_head(orphan_id, max_chars=500)}
 
@@ -305,6 +314,7 @@ def _score_candidate_outcome(
     last_output: list[str] = []
     transport = None
     if generate_fn is not None:
+
         def transport(request: ChatRequest) -> str:
             system = request.messages[0]["content"] if request.messages else ""
             transcript = "\n\n".join(
@@ -352,7 +362,9 @@ def _score_candidate_outcome(
                 if result.failure_class in {"transport_error", "transport_timeout"}
                 else "schema_error"
             ),
-            "error": result.failure_reason or result.failure_class or "structured review failed",
+            "error": result.failure_reason
+            or result.failure_class
+            or "structured review failed",
             "last_output": last_output[-1] if last_output else "",
         }
     parsed = result.value if isinstance(result.value, dict) else None
@@ -392,6 +404,7 @@ def run_dry_run(
     """
     if store is None:
         from llm_wiki_mcp.index_store import get_store
+
         store = get_store()
         store.refresh()
     orphans = store.orphans(include_system=False)
@@ -498,6 +511,360 @@ def _sanitize_section_heading(value: object) -> str:
     return cleaned or "Related"
 
 
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _render_suggestion_postimage(
+    original: str,
+    orphan_id: str,
+    suggestion: Suggestion,
+) -> str:
+    """Render the exact source-page postimage without mutating the Wiki."""
+    updated = original
+    anchor = suggestion.suggested_anchor.strip()
+    if (
+        "\n" in anchor
+        or "\r" in anchor
+        or "[[" in anchor
+        or "]]" in anchor
+        or len(anchor) > 200
+    ):
+        anchor = ""
+    if anchor:
+        spans = sorted([*protected_spans(original), *_wiki_link_spans(original)])
+        positions = [
+            match.start() for match in re.finditer(re.escape(anchor), original)
+        ]
+        position = next(
+            (
+                pos
+                for pos in positions
+                if not any(
+                    pos < protected_end and pos + len(anchor) > protected_start
+                    for protected_start, protected_end in spans
+                )
+            ),
+            None,
+        )
+        if position is not None:
+            replacement = f"[[{orphan_id}|{anchor}]]"
+            updated = (
+                original[:position] + replacement + original[position + len(anchor) :]
+            )
+    if updated == original:
+        section = _sanitize_section_heading(suggestion.suggested_section)
+        suffix = "" if original.endswith("\n") else "\n"
+        updated = f"{original}{suffix}\n## {section}\n\n- [[{orphan_id}]]\n"
+    return updated
+
+
+def _prepare_suggestion_effect(
+    orphan_id: str,
+    suggestion: Suggestion,
+    *,
+    convergence_key: str,
+    proposal_fingerprint: str,
+    semantic_artifact: Mapping[str, Any],
+    claim_owner: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Build a durable, exact-CAS page effect from current page bytes."""
+    source_path = find_page(suggestion.source_page_id)
+    target_path = find_page(orphan_id)
+    if source_path is None or target_path is None:
+        return None, {"status": "error", "reason": "source_or_target_missing"}
+    try:
+        source_preimage = source_path.read_bytes()
+        target_preimage = target_path.read_bytes()
+        original = source_preimage.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, {"status": "error", "reason": f"read_error:{exc}"}
+    if re.search(r"\[\[" + re.escape(orphan_id) + r"(?:[#|\]])", original):
+        return None, {
+            "status": "already_applied",
+            "source": suggestion.source_page_id,
+            "target": orphan_id,
+            "recovery_only": False,
+            "semantic_effect": False,
+        }
+    postimage = _render_suggestion_postimage(original, orphan_id, suggestion)
+    postimage_bytes = postimage.encode("utf-8")
+    return (
+        {
+            "schema_version": 2,
+            "kind": "orphan_link_page_effect",
+            "convergence_key": convergence_key,
+            "proposal_fingerprint": proposal_fingerprint,
+            "claim_owner": claim_owner,
+            "source_page_id": suggestion.source_page_id,
+            "target_page_id": orphan_id,
+            "source_preimage_sha256": _sha256_bytes(source_preimage),
+            "source_preimage_size": len(source_preimage),
+            "target_preimage_sha256": _sha256_bytes(target_preimage),
+            "target_preimage_size": len(target_preimage),
+            "source_postimage_sha256": _sha256_bytes(postimage_bytes),
+            "source_postimage_size": len(postimage_bytes),
+            "source_postimage": postimage,
+            "semantic_artifact": dict(semantic_artifact),
+        },
+        None,
+    )
+
+
+def _canonical_payload_sha256(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _effect_artifact_path(state: Any, key: str) -> Path:
+    state_file = getattr(state, "state_file", DECISIONS_FILE)
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return Path(state_file).parent / "orphan-link-effects" / f"{digest}.json"
+
+
+def _persist_effect_artifact(path: Path, payload: Mapping[str, Any]) -> str:
+    """Atomically fsync an effect intent before its page CAS can run."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+    return _canonical_payload_sha256(payload)
+
+
+def _load_effect_artifact(
+    metadata: object,
+    *,
+    expected_key: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(metadata, Mapping):
+        return None, "durable orphan effect metadata is missing"
+    path_value = metadata.get("effect_artifact_path")
+    expected_hash = metadata.get("effect_artifact_sha256")
+    expected_proposal = metadata.get("effect_proposal_fingerprint")
+    if not isinstance(path_value, str) or not path_value:
+        return None, "durable orphan effect artifact path is missing"
+    try:
+        payload = json.loads(Path(path_value).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"cannot read durable orphan effect artifact: {exc}"
+    if not isinstance(payload, dict):
+        return None, "durable orphan effect artifact is not an object"
+    if _canonical_payload_sha256(payload) != expected_hash:
+        return None, "durable orphan effect artifact hash mismatch"
+    if (
+        payload.get("schema_version") != 2
+        or payload.get("kind") != "orphan_link_page_effect"
+    ):
+        return None, "durable orphan effect artifact schema mismatch"
+    if payload.get("convergence_key") != expected_key:
+        return None, "durable orphan effect convergence key mismatch"
+    if (
+        not isinstance(expected_proposal, str)
+        or payload.get("proposal_fingerprint") != expected_proposal
+    ):
+        return None, "durable orphan effect proposal fingerprint mismatch"
+    semantic = payload.get("semantic_artifact")
+    if not isinstance(semantic, Mapping):
+        return None, "durable orphan semantic artifact is missing"
+    proposal = semantic.get("proposal")
+    if not isinstance(proposal, Mapping):
+        return None, "durable orphan proposal is missing"
+    if _canonical_payload_sha256(proposal) != expected_proposal:
+        return None, "durable orphan proposal identity mismatch"
+    authority = semantic.get("authority")
+    verdict_error = semantic_verdict_authority_error(
+        semantic.get("frontier"),
+        authority,
+        lane=DECISION_LANE,
+    )
+    if verdict_error is not None:
+        return None, verdict_error
+    return payload, None
+
+
+def _apply_prepared_effect(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply only the exact postimage authorized by a durable effect artifact."""
+    source_id = str(payload.get("source_page_id") or "")
+    target_id = str(payload.get("target_page_id") or "")
+    source_path = find_page(source_id)
+    target_path = find_page(target_id)
+    if source_path is None or target_path is None:
+        return {"status": "error", "reason": "source_or_target_missing"}
+    postimage = payload.get("source_postimage")
+    if not isinstance(postimage, str):
+        return {"status": "error", "reason": "source_postimage_missing"}
+    postimage_bytes = postimage.encode("utf-8")
+    if _sha256_bytes(postimage_bytes) != payload.get("source_postimage_sha256"):
+        return {"status": "error", "reason": "source_postimage_hash_mismatch"}
+    try:
+        with wiki_mutation_lock():
+            source_before = source_path.read_bytes()
+            target_before = target_path.read_bytes()
+            source_hash = _sha256_bytes(source_before)
+            target_hash = _sha256_bytes(target_before)
+            if source_hash == payload.get(
+                "source_postimage_sha256"
+            ) and target_hash == payload.get("target_preimage_sha256"):
+                return {
+                    "status": "already_applied",
+                    "source": source_id,
+                    "target": target_id,
+                    "recovery_only": True,
+                    "semantic_effect": False,
+                }
+            if source_hash != payload.get("source_preimage_sha256"):
+                return {"status": "retry", "reason": "source_changed_before_apply"}
+            if target_hash != payload.get("target_preimage_sha256"):
+                return {"status": "retry", "reason": "target_changed_before_apply"}
+            atomic_write(source_path, postimage)
+            source_after = source_path.read_bytes()
+            target_after = target_path.read_bytes()
+            if _sha256_bytes(source_after) != payload.get(
+                "source_postimage_sha256"
+            ) or _sha256_bytes(target_after) != payload.get("target_preimage_sha256"):
+                if _sha256_bytes(source_after) == payload.get(
+                    "source_postimage_sha256"
+                ):
+                    atomic_write(source_path, source_before.decode("utf-8"))
+                return {"status": "error", "reason": "post_write_verification_failed"}
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"status": "error", "reason": f"write_error:{exc}"}
+    return {
+        "status": "applied",
+        "source": source_id,
+        "target": target_id,
+        "recovery_only": False,
+        "semantic_effect": True,
+    }
+
+
+def _recover_pending_effects(state: Any, *, dry_run: bool) -> list[dict[str, Any]]:
+    """Finalize only a byte-exact postimage left by a crashed worker.
+
+    Recovery intentionally does not re-run the semantic effect.  A pending
+    artifact whose source is anything other than its exact recorded postimage
+    is left pending (and may later be retired), never replayed here.
+    """
+    results: list[dict[str, Any]] = []
+    for item in state.list_items(lane=DECISION_LANE):
+        if item.get("status") in {
+            "applied",
+            "rejected",
+            "quarantined",
+            "human_required",
+        }:
+            continue
+        key = str(item.get("key") or "")
+        payload, artifact_error = _load_effect_artifact(
+            item.get("metadata"),
+            expected_key=key,
+        )
+        if payload is None:
+            if isinstance(item.get("metadata"), Mapping) and item["metadata"].get(
+                "effect_artifact_path"
+            ):
+                results.append(
+                    {
+                        "key": key,
+                        "orphan": str(item.get("source_id") or "").removeprefix(
+                            "orphan:"
+                        ),
+                        "status": "recovery_artifact_invalid",
+                        "reason": artifact_error,
+                    }
+                )
+            continue
+        source_path = find_page(str(payload.get("source_page_id") or ""))
+        target_path = find_page(str(payload.get("target_page_id") or ""))
+        try:
+            source_hash = (
+                _sha256_bytes(source_path.read_bytes())
+                if source_path is not None
+                else None
+            )
+            target_hash = (
+                _sha256_bytes(target_path.read_bytes())
+                if target_path is not None
+                else None
+            )
+        except OSError:
+            continue
+        if source_hash != payload.get(
+            "source_postimage_sha256"
+        ) or target_hash != payload.get("target_preimage_sha256"):
+            continue
+        orphan_id = str(payload.get("target_page_id") or "")
+        if dry_run:
+            results.append(
+                {
+                    "key": key,
+                    "orphan": orphan_id,
+                    "status": "would_recover_exact_postimage",
+                    "recovery_only": True,
+                    "semantic_effect": False,
+                }
+            )
+            continue
+        recovery = {
+            "status": "already_applied",
+            "source": str(payload.get("source_page_id") or ""),
+            "target": orphan_id,
+            "recovery_only": True,
+            "semantic_effect": False,
+        }
+        semantic = payload["semantic_artifact"]
+        completed = state.complete(
+            key,
+            "applied",
+            result={
+                **semantic,
+                "apply": recovery,
+                "recovery_only": True,
+                "semantic_effect": False,
+            },
+            owner=str(payload.get("claim_owner") or "") or None,
+        )
+        results.append(
+            {
+                "key": key,
+                "orphan": orphan_id,
+                "status": completed["item"]["status"],
+                "recovery_only": True,
+                "semantic_effect": False,
+            }
+        )
+    return results
+
+
 def apply_suggestion(
     orphan_id: str,
     suggestion: Suggestion,
@@ -514,41 +881,14 @@ def apply_suggestion(
         target_preimage = target_path.read_bytes()
     except OSError as exc:
         return {"status": "error", "reason": f"read_error:{exc}"}
-    link = f"[[{orphan_id}]]"
     if re.search(r"\[\[" + re.escape(orphan_id) + r"(?:[#|\]])", original):
-        return {"status": "already_applied", "source": suggestion.source_page_id, "target": orphan_id}
+        return {
+            "status": "already_applied",
+            "source": suggestion.source_page_id,
+            "target": orphan_id,
+        }
 
-    updated = original
-    anchor = suggestion.suggested_anchor.strip()
-    if (
-        "\n" in anchor
-        or "\r" in anchor
-        or "[[" in anchor
-        or "]]" in anchor
-        or len(anchor) > 200
-    ):
-        anchor = ""
-    if anchor:
-        spans = sorted([*protected_spans(original), *_wiki_link_spans(original)])
-        positions = [match.start() for match in re.finditer(re.escape(anchor), original)]
-        position = next(
-            (
-                pos
-                for pos in positions
-                if not any(
-                    pos < protected_end and pos + len(anchor) > protected_start
-                    for protected_start, protected_end in spans
-                )
-            ),
-            None,
-        )
-        if position is not None:
-            replacement = f"[[{orphan_id}|{anchor}]]"
-            updated = original[:position] + replacement + original[position + len(anchor):]
-    if updated == original:
-        section = _sanitize_section_heading(suggestion.suggested_section)
-        suffix = "" if original.endswith("\n") else "\n"
-        updated = f"{original}{suffix}\n## {section}\n\n- {link}\n"
+    updated = _render_suggestion_postimage(original, orphan_id, suggestion)
     if dry_run:
         return {
             "status": "dry_run",
@@ -587,7 +927,11 @@ def apply_suggestion(
                 return {"status": "error", "reason": "post_write_verification_failed"}
     except OSError as exc:
         return {"status": "error", "reason": f"write_error:{exc}"}
-    return {"status": "applied", "source": suggestion.source_page_id, "target": orphan_id}
+    return {
+        "status": "applied",
+        "source": suggestion.source_page_id,
+        "target": orphan_id,
+    }
 
 
 def _frontier_failure_class(review: dict[str, Any]) -> str | None:
@@ -658,28 +1002,15 @@ def _review_orphan_proposal(
                 "reason": suggestion.reason,
                 "suggested_anchor": suggestion.suggested_anchor,
                 "suggested_section": suggestion.suggested_section,
-                "source_excerpt": _page_head(
-                    suggestion.source_page_id, max_chars=1200
-                ),
+                "source_excerpt": _page_head(suggestion.source_page_id, max_chars=1200),
             }
         )
     if reviewer is not None:
         return reviewer(candidate)
+    from llm_wiki_mcp.decision_lane_prompts import build_orphan_link_review_prompt
     from llm_wiki_mcp.frontier_review import run_structured_review
 
-    prompt = f"""\
-You are the final autonomous reviewer for an LLM Wiki orphan-link disposition.
-For proposal_kind=link, approve only if SOURCE naturally benefits from linking
-to TARGET. For proposal_kind=no_link, approve only if the supplied candidates
-support the conclusion that no safe link should be created. For
-proposal_kind=retry, approve only if evidence is genuinely unavailable or
-transiently broken and another autonomous attempt is required. Reject an
-unsupported disposition. Do not edit files or ask a human. Return JSON matching
-the schema.
-
-Candidate:
-{json.dumps(candidate, ensure_ascii=False, indent=2)}
-"""
+    prompt = build_orphan_link_review_prompt(candidate)
     return run_structured_review(
         prompt,
         ORPHAN_FRONTIER_SCHEMA,
@@ -710,13 +1041,19 @@ def run_autonomous(
         stable_item_key,
     )
 
+    state = convergence_store or ConvergenceStore()
+    recovered = _recover_pending_effects(state, dry_run=dry_run)
+    recovered_keys = {str(row.get("key") or "") for row in recovered}
     if store is None:
         from llm_wiki_mcp.index_store import get_store
 
         store = get_store()
         store.refresh()
-    state = convergence_store or ConvergenceStore()
-    cycle_budget = budget or CycleBudget(max_local_calls=max(1, orphan_limit * max_candidates), max_frontier_calls=2, max_mutations=2)
+    cycle_budget = budget or CycleBudget(
+        max_local_calls=max(1, orphan_limit * max_candidates),
+        max_frontier_calls=2,
+        max_mutations=2,
+    )
     orphans = store.orphans(include_system=False)
     retired_absent = state.retire_absent_sources(
         lane="orphan_link",
@@ -732,7 +1069,7 @@ def run_autonomous(
     work_limit = max(0, int(orphan_limit))
     # Deprecated compatibility input. Consensus confidence is diagnostic only.
     del frontier_confidence_threshold
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = list(recovered)
     work_items = 0
     scanned = 0
 
@@ -756,9 +1093,27 @@ def run_autonomous(
         if not candidates and semantic_search_fn is None and discovery_error is None:
             discovery_error = "production semantic search returned no candidates"
         source_id = candidates[0] if candidates else ""
+        decision_authority, authority_error = current_semantic_authority(
+            DECISION_LANE,
+            injected_reviewer=reviewer is not None,
+        )
+        if decision_authority is None or authority_error is not None:
+            results.append(
+                {
+                    "orphan": orphan_id,
+                    "source": source_id,
+                    "status": "decision_authority_unavailable",
+                    "reason": authority_error or "decision authority is unavailable",
+                }
+            )
+            continue
         input_data = {
             "orphan": orphan_id,
             "orphan_hash": _content_hash(orphan_id),
+            # Make pending and terminal convergence keys authority-epoch
+            # specific.  A new contract, adoption artifact/model triplet, or
+            # lane-mode change can never reuse an old semantic disposition.
+            "decision_authority": decision_authority,
             "candidates": [
                 {"source": candidate_id, "source_hash": _content_hash(candidate_id)}
                 for candidate_id in candidates
@@ -772,6 +1127,8 @@ def run_autonomous(
         )
         existing = state.get(key)
         if existing is not None and existing.get("status") in TERMINAL_STATUSES:
+            if key in recovered_keys:
+                continue
             results.append(
                 {
                     "orphan": orphan_id,
@@ -831,12 +1188,16 @@ def run_autonomous(
                 if not candidates
                 else "would_process"
             )
-            results.append({"orphan": orphan_id, "source": source_id, "status": status, "key": key})
+            results.append(
+                {"orphan": orphan_id, "source": source_id, "status": status, "key": key}
+            )
             continue
         if not candidates and item.get("status") in {"pending_local", "local_retry"}:
             claim = state.claim_attempt(key, "local")
             if not claim["claimed"]:
-                results.append({"orphan": orphan_id, "status": claim["reason"], "key": key})
+                results.append(
+                    {"orphan": orphan_id, "status": claim["reason"], "key": key}
+                )
                 continue
             frontier_proposal = {
                 "kind": "retry" if discovery_error else "no_link",
@@ -869,7 +1230,9 @@ def run_autonomous(
         if item["status"] == "pending_local" or item["status"] == "local_retry":
             claim = state.claim_attempt(key, "local", budget=cycle_budget)
             if not claim["claimed"]:
-                results.append({"orphan": orphan_id, "status": claim["reason"], "key": key})
+                results.append(
+                    {"orphan": orphan_id, "status": claim["reason"], "key": key}
+                )
                 continue
             work_items += 1
             item_counted = True
@@ -880,15 +1243,23 @@ def run_autonomous(
                 if index:
                     allowed, budget_reason = cycle_budget.consume("local")
                     if not allowed:
-                        local_errors.append({"status": "budget_deferred", "error": budget_reason})
+                        local_errors.append(
+                            {"status": "budget_deferred", "error": budget_reason}
+                        )
                         break
-                outcome = _score_candidate_outcome(candidate_id, orphan_id, store, generate_fn)
+                outcome = _score_candidate_outcome(
+                    candidate_id, orphan_id, store, generate_fn
+                )
                 scored = outcome.get("score")
                 if isinstance(scored, dict):
                     valid_scores.append(scored)
                 else:
                     local_errors.append(
-                        {"source": candidate_id, "status": outcome.get("status"), "error": outcome.get("error")}
+                        {
+                            "source": candidate_id,
+                            "status": outcome.get("status"),
+                            "error": outcome.get("error"),
+                        }
                     )
                     continue
                 if scored["confidence"] >= confidence_threshold:
@@ -938,11 +1309,17 @@ def run_autonomous(
                     "frontier_proposal": frontier_proposal,
                 },
             )
-            state.escalate(key, reason="local suggestion requires frontier final review", owner=claim["owner"])
+            state.escalate(
+                key,
+                reason="local suggestion requires frontier final review",
+                owner=claim["owner"],
+            )
             item = state.get(key) or item
 
         if item.get("status") not in {"pending_frontier", "frontier_retry"}:
-            results.append({"orphan": orphan_id, "status": item.get("status"), "key": key})
+            results.append(
+                {"orphan": orphan_id, "status": item.get("status"), "key": key}
+            )
             continue
         claim = state.claim_attempt(key, "frontier", budget=cycle_budget)
         if not claim["claimed"]:
@@ -952,10 +1329,14 @@ def run_autonomous(
         frontier_proposal = (
             metadata.get("frontier_proposal") if isinstance(metadata, dict) else None
         )
-        raw_suggestion = metadata.get("suggestion") if isinstance(metadata, dict) else None
+        raw_suggestion = (
+            metadata.get("suggestion") if isinstance(metadata, dict) else None
+        )
         if not isinstance(frontier_proposal, dict) and isinstance(raw_suggestion, dict):
             frontier_proposal = {"kind": "link", "suggestion": raw_suggestion}
-        if not isinstance(frontier_proposal, dict) or frontier_proposal.get("kind") not in {
+        if not isinstance(frontier_proposal, dict) or frontier_proposal.get(
+            "kind"
+        ) not in {
             "link",
             "no_link",
             "retry",
@@ -966,12 +1347,12 @@ def run_autonomous(
                 error="durable frontier proposal missing",
                 owner=claim["owner"],
             )
-            results.append({"orphan": orphan_id, "status": "frontier_retry", "key": key})
+            results.append(
+                {"orphan": orphan_id, "status": "frontier_retry", "key": key}
+            )
             continue
         proposal_kind = str(frontier_proposal["kind"])
-        if not item_counted and not (
-            proposal_kind == "no_link" and not candidates
-        ):
+        if not item_counted and not (proposal_kind == "no_link" and not candidates):
             work_items += 1
         suggestion: Suggestion | None = None
         if proposal_kind == "link":
@@ -988,9 +1369,35 @@ def run_autonomous(
                     owner=claim["owner"],
                 )
                 results.append(
-                    {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
+                    {
+                        "orphan": orphan_id,
+                        "status": failed["item"]["status"],
+                        "key": key,
+                    }
                 )
                 continue
+        review_authority, review_authority_error = current_semantic_authority(
+            DECISION_LANE,
+            injected_reviewer=reviewer is not None,
+        )
+        authority_changed = review_authority_error
+        if review_authority is not None and authority_changed is None:
+            authority_changed = compare_semantic_authority(
+                decision_authority,
+                review_authority,
+                lane=DECISION_LANE,
+            )
+        if review_authority is None or authority_changed is not None:
+            failed = state.fail_attempt(
+                key,
+                "frontier",
+                error=authority_changed or "decision authority is unavailable",
+                owner=claim["owner"],
+            )
+            results.append(
+                {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
+            )
+            continue
         try:
             raw_review = _review_orphan_proposal(
                 orphan_id,
@@ -1004,72 +1411,265 @@ def run_autonomous(
                 "summary": f"{exc.__class__.__name__}: {exc}",
             }
         review = _normalize_frontier_review(raw_review)
-        decision = review.get("decision")
-        if decision == "rejected":
-            if proposal_kind in {"link", "retry"}:
-                state.complete(
-                    key,
-                    "rejected",
-                    result={"frontier": review, "proposal": frontier_proposal},
-                    owner=claim["owner"],
-                )
-                results.append({"orphan": orphan_id, "status": "rejected", "key": key})
-            else:
-                failed = state.fail_attempt(
-                    key,
-                    "frontier",
-                    error=str(review.get("summary") or "frontier rejected no-link disposition"),
-                    owner=claim["owner"],
-                )
-                results.append(
-                    {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
-                )
-            continue
-        if decision != "approved":
+        verdict_error = semantic_verdict_authority_error(
+            review,
+            review_authority,
+            lane=DECISION_LANE,
+        )
+        if verdict_error is not None:
             failed = state.fail_attempt(
                 key,
                 "frontier",
-                error=str(review.get("summary") or "frontier needs retry"),
-                failure_class=_frontier_failure_class(review),
-                owner=claim["owner"],
-            )
-            results.append({"orphan": orphan_id, "status": failed["item"]["status"], "key": key})
-            continue
-        if proposal_kind == "no_link":
-            completed = state.complete(
-                key,
-                "rejected",
-                result={"frontier": review, "proposal": frontier_proposal},
-                owner=claim["owner"],
-            )
-            results.append(
-                {"orphan": orphan_id, "status": completed["item"]["status"], "key": key}
-            )
-            continue
-        if proposal_kind == "retry":
-            failed = state.fail_attempt(
-                key,
-                "frontier",
-                error=str(frontier_proposal.get("reason") or "autonomous retry required"),
-                failure_class=str(frontier_proposal.get("failure_class") or "") or None,
+                error=verdict_error,
                 owner=claim["owner"],
             )
             results.append(
                 {"orphan": orphan_id, "status": failed["item"]["status"], "key": key}
             )
             continue
-        assert suggestion is not None
-        allowed, reason = cycle_budget.consume("mutation")
-        if not allowed:
-            state.fail_attempt(key, "frontier", error=reason, owner=claim["owner"])
-            results.append({"orphan": orphan_id, "status": reason, "key": key})
-            continue
-        applied = apply_suggestion(orphan_id, suggestion)
-        if applied["status"] in {"applied", "already_applied"}:
-            state.complete(key, "applied", result={"frontier": review, "apply": applied}, owner=claim["owner"])
-        else:
-            state.fail_attempt(key, "frontier", error=str(applied.get("reason") or applied["status"]), owner=claim["owner"])
-        results.append({"orphan": orphan_id, "status": (state.get(key) or {}).get("status"), "key": key})
+        semantic_result = seal_semantic_artifact(
+            {
+                "schema_version": 2,
+                "frontier": review,
+                "proposal": frontier_proposal,
+            },
+            authority=review_authority,
+            lane=DECISION_LANE,
+        )
+
+        # Every durable semantic disposition and page effect is committed in
+        # the same authority epoch that produced the review.  This prevents a
+        # concurrent lane disable, contract update, or model re-adoption from
+        # installing a now-stale verdict.
+        with decision_authority_lock():
+            current_authority, current_authority_error = current_semantic_authority(
+                DECISION_LANE,
+                injected_reviewer=reviewer is not None,
+            )
+            effect_authority_error = current_authority_error
+            if current_authority is not None and effect_authority_error is None:
+                effect_authority_error = compare_semantic_authority(
+                    review_authority,
+                    current_authority,
+                    lane=DECISION_LANE,
+                )
+            if effect_authority_error is None:
+                effect_authority_error = semantic_verdict_authority_error(
+                    review,
+                    review_authority,
+                    lane=DECISION_LANE,
+                )
+            if current_authority is None or effect_authority_error is not None:
+                failed = state.fail_attempt(
+                    key,
+                    "frontier",
+                    error=(
+                        effect_authority_error
+                        or "decision authority is unavailable before effect"
+                    ),
+                    owner=claim["owner"],
+                )
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "status": failed["item"]["status"],
+                        "key": key,
+                    }
+                )
+                continue
+
+            decision = review.get("decision")
+            if decision == "rejected":
+                if proposal_kind in {"link", "retry"}:
+                    state.complete(
+                        key,
+                        "rejected",
+                        result=semantic_result,
+                        owner=claim["owner"],
+                    )
+                    results.append(
+                        {"orphan": orphan_id, "status": "rejected", "key": key}
+                    )
+                else:
+                    failed = state.fail_attempt(
+                        key,
+                        "frontier",
+                        error=str(
+                            review.get("summary")
+                            or "frontier rejected no-link disposition"
+                        ),
+                        owner=claim["owner"],
+                    )
+                    results.append(
+                        {
+                            "orphan": orphan_id,
+                            "status": failed["item"]["status"],
+                            "key": key,
+                        }
+                    )
+                continue
+            if decision != "approved":
+                failed = state.fail_attempt(
+                    key,
+                    "frontier",
+                    error=str(review.get("summary") or "frontier needs retry"),
+                    failure_class=_frontier_failure_class(review),
+                    owner=claim["owner"],
+                )
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "status": failed["item"]["status"],
+                        "key": key,
+                    }
+                )
+                continue
+            if proposal_kind == "no_link":
+                completed = state.complete(
+                    key,
+                    "rejected",
+                    result=semantic_result,
+                    owner=claim["owner"],
+                )
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "status": completed["item"]["status"],
+                        "key": key,
+                    }
+                )
+                continue
+            if proposal_kind == "retry":
+                failed = state.fail_attempt(
+                    key,
+                    "frontier",
+                    error=str(
+                        frontier_proposal.get("reason") or "autonomous retry required"
+                    ),
+                    failure_class=(
+                        str(frontier_proposal.get("failure_class") or "") or None
+                    ),
+                    owner=claim["owner"],
+                )
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "status": failed["item"]["status"],
+                        "key": key,
+                    }
+                )
+                continue
+            assert suggestion is not None
+            allowed, reason = cycle_budget.consume("mutation")
+            if not allowed:
+                state.fail_attempt(key, "frontier", error=reason, owner=claim["owner"])
+                results.append({"orphan": orphan_id, "status": reason, "key": key})
+                continue
+            proposal_fingerprint = _canonical_payload_sha256(frontier_proposal)
+            effect_payload, preparation_error = _prepare_suggestion_effect(
+                orphan_id,
+                suggestion,
+                convergence_key=key,
+                proposal_fingerprint=proposal_fingerprint,
+                semantic_artifact=semantic_result,
+                claim_owner=str(claim["owner"]),
+            )
+            if preparation_error is not None:
+                if preparation_error.get("status") == "already_applied":
+                    state.complete(
+                        key,
+                        "applied",
+                        result={
+                            **semantic_result,
+                            "apply": preparation_error,
+                            "recovery_only": bool(
+                                preparation_error.get("recovery_only")
+                            ),
+                            "semantic_effect": False,
+                        },
+                        owner=claim["owner"],
+                    )
+                else:
+                    state.fail_attempt(
+                        key,
+                        "frontier",
+                        error=str(
+                            preparation_error.get("reason")
+                            or preparation_error.get("status")
+                        ),
+                        owner=claim["owner"],
+                    )
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "status": (state.get(key) or {}).get("status"),
+                        "key": key,
+                    }
+                )
+                continue
+            assert effect_payload is not None
+            artifact_path = _effect_artifact_path(state, key)
+            artifact_hash = _persist_effect_artifact(artifact_path, effect_payload)
+            durable_metadata = {
+                **metadata,
+                "effect_artifact_path": str(artifact_path),
+                "effect_artifact_sha256": artifact_hash,
+                "effect_proposal_fingerprint": proposal_fingerprint,
+            }
+            state.merge_item(
+                lane=DECISION_LANE,
+                source_id=f"orphan:{orphan_id}",
+                input_data=input_data,
+                resolver_version=RESOLVER_VERSION,
+                metadata=durable_metadata,
+            )
+            persisted = state.get(key) or {}
+            effect_payload, artifact_error = _load_effect_artifact(
+                persisted.get("metadata"),
+                expected_key=key,
+            )
+            if effect_payload is None:
+                state.fail_attempt(
+                    key,
+                    "frontier",
+                    error=artifact_error or "durable orphan effect artifact is invalid",
+                    owner=claim["owner"],
+                )
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "status": (state.get(key) or {}).get("status"),
+                        "key": key,
+                    }
+                )
+                continue
+            applied = _apply_prepared_effect(effect_payload)
+            if applied["status"] in {"applied", "already_applied"}:
+                state.complete(
+                    key,
+                    "applied",
+                    result={
+                        **semantic_result,
+                        "apply": applied,
+                        "recovery_only": bool(applied.get("recovery_only")),
+                        "semantic_effect": bool(applied.get("semantic_effect")),
+                    },
+                    owner=claim["owner"],
+                )
+            else:
+                state.fail_attempt(
+                    key,
+                    "frontier",
+                    error=str(applied.get("reason") or applied["status"]),
+                    owner=claim["owner"],
+                )
+        results.append(
+            {
+                "orphan": orphan_id,
+                "status": (state.get(key) or {}).get("status"),
+                "key": key,
+            }
+        )
 
     return {
         "status": "ok",
@@ -1094,7 +1694,9 @@ def format_report(
 ) -> str:
     """Render the dry-run report as Markdown."""
     today = date.today().isoformat()
-    total_pages = "?" if store is None else str(len(store.all_page_ids(include_system=False)))
+    total_pages = (
+        "?" if store is None else str(len(store.all_page_ids(include_system=False)))
+    )
     with_sug = sum(1 for r in reports if r.suggestions)
     total_sug = sum(len(r.suggestions) for r in reports)
 
@@ -1115,7 +1717,9 @@ def format_report(
     lines.append("# Orphan Link Suggestions (dry-run)")
     lines.append("")
     lines.append("Direction: each suggestion proposes `source_page → orphan_page`.")
-    lines.append("Pages are not modified by this diagnostic report; nightly convergence reviews and applies bounded proposals.")
+    lines.append(
+        "Pages are not modified by this diagnostic report; nightly convergence reviews and applies bounded proposals."
+    )
     lines.append("")
     lines.append("## Run statistics")
     lines.append(f"- generated_at: {datetime.now().isoformat(timespec='seconds')}")
@@ -1145,8 +1749,8 @@ def format_report(
             lines.append(
                 f"  - [ ] **`{s.source_page_id}`** "
                 f"confidence={s.confidence:.2f}, "
-                f"anchor=\"{s.suggested_anchor}\", "
-                f"section=\"{s.suggested_section}\""
+                f'anchor="{s.suggested_anchor}", '
+                f'section="{s.suggested_section}"'
             )
             lines.append(f"        reason: {s.reason}")
         lines.append("")

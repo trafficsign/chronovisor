@@ -3,10 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict, deque
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
 
+from llm_wiki_mcp import local_model_eval, ollama
+from llm_wiki_mcp.autonomy import DUPLICATE_FRONTIER_SCHEMA
+from llm_wiki_mcp.decision_router import (
+    DECISION_REQUEST_FINGERPRINT_VERSION,
+    DECISION_SEMANTICS_POLICY_VERSION,
+    QUORUM_SAFETY_POLICY_VERSION,
+)
 from llm_wiki_mcp.local_model_eval import (
     ReplayInputError,
     ResumeMismatchError,
@@ -17,7 +25,14 @@ from llm_wiki_mcp.local_model_eval import (
 from llm_wiki_mcp.decision_schema_manifest import schema_sha256
 from llm_wiki_mcp.local_structured import ChatRequest
 from llm_wiki_mcp.runtime_config import DecisionRouterConfig
-from llm_wiki_mcp.content_correction import FRONTIER_REVIEW_SCHEMA
+from llm_wiki_mcp.content_correction import (
+    FRONTIER_CLASSIFICATION_SCHEMA,
+    FRONTIER_REVIEW_SCHEMA,
+)
+from llm_wiki_mcp.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+from llm_wiki_mcp.frontier_review import FRONTIER_DECISION_SCHEMA
+from llm_wiki_mcp.local_repair import LOCAL_REPAIR_SCHEMA
+from llm_wiki_mcp.orphan_link import ORPHAN_FRONTIER_SCHEMA
 
 
 @pytest.fixture(autouse=True)
@@ -89,12 +104,337 @@ class ModelTransport:
             self.responses[model].extend(values)
         self.requests: list[ChatRequest] = []
 
-    def __call__(self, request: ChatRequest) -> str:
+    def __call__(self, request: ChatRequest) -> str | ollama.ChatResponse:
         self.requests.append(request)
         response = self.responses[request.model].popleft()
         if isinstance(response, BaseException):
             raise response
+        return ollama.ChatResponse(
+            content=response,
+            prompt_eval_count=100,
+            eval_count=50,
+        )
+
+    def observe(self, model: str) -> tuple[int, int] | None:
+        request = next(
+            (row for row in reversed(self.requests) if row.model == model),
+            None,
+        )
+        return (8 * ollama.GIB, request.num_ctx) if request else None
+
+
+def test_live_transport_requests_and_preserves_ollama_context_accounting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    response = ollama.ChatResponse(
+        content=_payload("approved"),
+        prompt_eval_count=1_234,
+        eval_count=56,
+    )
+
+    def chat(messages: list[dict[str, str]], **kwargs: object) -> ollama.ChatResponse:
+        captured["messages"] = messages
+        captured.update(kwargs)
         return response
+
+    monkeypatch.setattr(ollama, "chat", chat)
+    request = ChatRequest(
+        model="ornith:test",
+        messages=({"role": "user", "content": "decide"},),
+        schema=SCHEMA,
+        num_ctx=16_384,
+        num_predict=256,
+        keep_alive="1m",
+        read_timeout_ms=5_000,
+        max_output_chars=1_000,
+    )
+
+    assert local_model_eval._live_transport(request) == response
+    assert captured["return_metadata"] is True
+    assert captured["num_ctx"] == 16_384
+    assert captured["temperature"] == 0
+    assert captured["seed"] == 0
+
+
+def test_observer_failure_does_not_break_decision_but_cannot_claim_bucket_coverage(
+    tmp_path: Path,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("observer failure"))
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+
+    def observe(model: str) -> tuple[int, int] | None:
+        if model == "ornith:test":
+            raise RuntimeError("probe failed")
+        return transport.observe(model)
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=observe,
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+
+    assert result["cases"][0]["status"] == "agreed"
+    assert result["cases"][0]["evaluated_context_buckets"] == []
+    assert result["metrics"]["context_bucket_counts"] == {"16384": 0}
+    primary, challenger = result["cases"][0]["votes"]
+    assert primary["runtime_observation_status"] == "observer_error"
+    assert primary["num_ctx"] is None
+    assert challenger["runtime_observation_status"] == "observed"
+    assert challenger["num_ctx"] == 16_384
+    assert challenger["observed_model_bytes"] == 8 * ollama.GIB
+    assert challenger["audit"]["runtime_observation"] == {
+        "status": "observed",
+        "model_size_bytes": 8 * ollama.GIB,
+        "num_ctx": 16_384,
+    }
+    assert result["adoption_gate"]["checks"]["context_bucket_coverage"] == {
+        "observed": 0.0,
+        "minimum": 1.0,
+        "passed": False,
+    }
+
+
+def test_requested_bucket_cannot_replace_larger_observed_runner_context(
+    tmp_path: Path,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("larger resident runner"))
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=lambda _model: (9 * ollama.GIB, 32_768),
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+
+    case = result["cases"][0]
+    assert case["num_ctx"] == 16_384
+    assert case["evaluated_context_buckets"] == []
+    assert all(vote["requested_num_ctx"] == 16_384 for vote in case["votes"])
+    assert all(vote["num_ctx"] == 32_768 for vote in case["votes"])
+    assert result["metrics"]["context_bucket_counts"] == {"16384": 0}
+    assert result["adopted"] is False
+
+
+def test_tie_break_cannot_substitute_for_missing_primary_context_evidence(
+    tmp_path: Path,
+) -> None:
+    source = _replay(
+        tmp_path / "replay.jsonl",
+        _row("tie context", expected="rejected"),
+    )
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("rejected")],
+            "gemma:test": [_payload("rejected")],
+        }
+    )
+
+    def observe(model: str) -> tuple[int, int] | None:
+        if model == "ornith:test":
+            return None
+        return transport.observe(model)
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=observe,
+        model_metadata_provider=_metadata,
+    )
+
+    assert result["cases"][0]["status"] == "agreed"
+    assert len(result["cases"][0]["votes"]) == 3
+    assert result["cases"][0]["evaluated_context_buckets"] == []
+    assert result["metrics"]["context_bucket_counts"] == {"16384": 0}
+
+
+def test_evaluation_executes_exact_context_buckets_in_ascending_order(
+    tmp_path: Path,
+) -> None:
+    source = _replay(
+        tmp_path / "replay.jsonl",
+        _row("x" * 10_000),
+        _row("short"),
+    )
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved"), _payload("approved")],
+            "gpt-oss:test": [_payload("approved"), _payload("approved")],
+        }
+    )
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(
+            num_ctx=32_768,
+            min_num_ctx=16_384,
+            max_input_chars=50_000,
+        ),
+        transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+
+    assert [request.num_ctx for request in transport.requests] == [
+        16_384,
+        16_384,
+        32_768,
+        32_768,
+    ]
+    # Durable case order remains bound to the source indexes even though
+    # execution is reordered to avoid shrink/reload flap.
+    assert [case["index"] for case in result["cases"]] == [0, 1]
+    assert result["metrics"]["context_bucket_counts"] == {
+        "16384": 1,
+        "32768": 1,
+    }
+    assert result["identity"]["evaluation_mode"] == "exact_context_ascending_v1"
+    assert (
+        result["identity"]["evaluation_order_sha256"]
+        == result["source"]["context_plan"]["execution_order_sha256"]
+    )
+
+
+def test_eval_uses_production_truncation_detection_and_binds_counts(
+    tmp_path: Path,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("truncation"))
+
+    class TruncatedTransport(ModelTransport):
+        def __call__(self, request: ChatRequest) -> ollama.ChatResponse:
+            self.requests.append(request)
+            return ollama.ChatResponse(
+                content=_payload("approved"),
+                prompt_eval_count=request.num_ctx - 32,
+                eval_count=64,
+            )
+
+    transport = TruncatedTransport({})
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+
+    assert result["cases"][0]["status"] == "quarantined"
+    assert result["cases"][0]["evaluated_context_buckets"] == []
+    assert len(result["cases"][0]["votes"]) == 2
+    for vote in result["cases"][0]["votes"]:
+        assert vote["audit"]["session"]["failure_class"] == (
+            "context_truncation_suspected"
+        )
+        assert vote["context_accounting"] == [
+            {
+                "ok": True,
+                "available": True,
+                "prompt_eval_count": 16_352,
+                "eval_count": 64,
+            }
+        ]
+
+
+def test_live_eval_resets_surviving_runners_and_wires_exact_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("exact live eval"))
+    events: list[tuple[str, str]] = []
+
+    class OrderedTransport(ModelTransport):
+        def __call__(self, request: ChatRequest) -> str | ollama.ChatResponse:
+            events.append(("chat", request.model))
+            return super().__call__(request)
+
+    transport = OrderedTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+    observed_reuse_modes: list[bool] = []
+
+    def planner(
+        models: tuple[str, ...],
+        **kwargs: object,
+    ) -> ollama.ModelResidencyPlan:
+        num_ctx = int(kwargs["num_ctx"])
+        observed_reuse_modes.append(bool(kwargs["reuse_larger_context"]))
+        return ollama.ModelResidencyPlan(
+            num_ctx=num_ctx,
+            max_resident_models=3,
+            capacity_bytes=64 * ollama.GIB,
+            reserve_bytes=16 * ollama.GIB,
+            available_bytes=80 * ollama.GIB,
+            total_bytes=128 * ollama.GIB,
+            estimated_model_bytes=tuple((model, 8 * ollama.GIB) for model in models),
+            role_contexts=tuple((model, num_ctx) for model in models),
+            resident_models=(),
+            calibrated_models=models,
+            source="test",
+            reuse_larger_context=False,
+        )
+
+    def observe(model: str) -> tuple[int, int] | None:
+        observed = transport.observe(model)
+        return observed if observed is not None else (9 * ollama.GIB, 32_768)
+
+    def unload(model: str) -> bool:
+        events.append(("unload", model))
+        return True
+
+    monkeypatch.setattr(ollama, "model_resource_lease", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(ollama, "plan_model_residency", planner)
+    monkeypatch.setattr(ollama, "observe_model_runtime", observe)
+    monkeypatch.setattr(ollama, "unload_named_model", unload)
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+        live_resource_control=True,
+    )
+
+    assert result["cases"][0]["evaluated_context_buckets"] == [16_384]
+    assert observed_reuse_modes == [False]
+    assert events[:3] == [
+        ("unload", "ornith:test"),
+        ("unload", "gpt-oss:test"),
+        ("unload", "gemma:test"),
+    ]
+    assert events[3:] == [
+        ("chat", "ornith:test"),
+        ("chat", "gpt-oss:test"),
+    ]
 
 
 def _config(**overrides: object) -> DecisionRouterConfig:
@@ -137,6 +477,52 @@ def _metadata(models: list[str] | tuple[str, ...]) -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize(
+    "missing",
+    ["engine_name", "engine_version", "model_digest", "quantization"],
+)
+def test_evaluation_rejects_incomplete_engine_or_model_identity_before_inference(
+    tmp_path: Path,
+    missing: str,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("identity preflight"))
+
+    def incomplete(models: list[str] | tuple[str, ...]) -> dict[str, object]:
+        payload = _metadata(models)
+        engine = payload["engine"]
+        records = payload["models"]
+        assert isinstance(engine, dict)
+        assert isinstance(records, dict)
+        if missing == "engine_name":
+            engine["name"] = ""
+        elif missing == "engine_version":
+            engine["version"] = ""
+        elif missing == "model_digest":
+            record = records[models[0]]
+            assert isinstance(record, dict)
+            record["digest"] = ""
+        else:
+            record = records[models[0]]
+            assert isinstance(record, dict)
+            details = record["details"]
+            assert isinstance(details, dict)
+            details.pop("quantization_level")
+        return payload
+
+    transport = ModelTransport({})
+    with pytest.raises(ValueError, match="exact"):
+        evaluate_replays(
+            source,
+            tmp_path / "result.json",
+            config=_config(),
+            transport=transport,
+            model_observer=transport.observe,
+            model_metadata_provider=incomplete,
+            required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+        )
+    assert transport.requests == []
+
+
 def test_complete_gate_is_redacted_atomic_and_read_only(tmp_path: Path) -> None:
     prompt_secret = "PROMPT_SECRET_DO_NOT_PERSIST"
     output_secret = "OUTPUT_SECRET_DO_NOT_PERSIST"
@@ -155,6 +541,7 @@ def test_complete_gate_is_redacted_atomic_and_read_only(tmp_path: Path) -> None:
         output,
         config=_config(),
         transport=transport,
+        model_observer=transport.observe,
         model_metadata_provider=_metadata,
         required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
     )
@@ -169,11 +556,11 @@ def test_complete_gate_is_redacted_atomic_and_read_only(tmp_path: Path) -> None:
     assert result["metrics"]["first_pass_schema_rate"] == 1.0
     assert result["metrics"]["final_schema_rate"] == 1.0
     assert result["metrics"]["invalid_output_accepted"] == 0
+    assert result["cases"][0]["evaluated_context_buckets"] == [16_384]
+    assert all(vote["num_ctx"] == 16_384 for vote in result["cases"][0]["votes"])
     assert len(result["config_sha256"]) == 64
     assert len(result["model_metadata_sha256"]) == 64
-    assert result["model_metadata_sha256"] == _sha256_json(
-        result["model_metadata"]
-    )
+    assert result["model_metadata_sha256"] == _sha256_json(result["model_metadata"])
     assert source.read_bytes() == source_before
     durable = output.read_text(encoding="utf-8")
     assert prompt_secret not in durable
@@ -182,17 +569,172 @@ def test_complete_gate_is_redacted_atomic_and_read_only(tmp_path: Path) -> None:
     assert '"output_sha256"' in durable
     assert output.stat().st_mode & 0o777 == 0o600
     summary = json.loads(
-        (
-            tmp_path
-            / "wiki"
-            / "runtime"
-            / "local-consensus"
-            / "summary.json"
-        ).read_text(encoding="utf-8")
+        (tmp_path / "wiki" / "runtime" / "local-consensus" / "summary.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert summary["decisions"]["total"] == 0
     assert summary["evaluation"]["decisions"]["total"] == 1
     assert summary["roles"]["model_eval"]["sessions"]["total"] == 2
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "expected_effect_match",
+        "unsafe_decision_flip",
+        "expected_decision_match",
+        "expected_signature_match",
+        "missing_expected_effect",
+    ],
+)
+def test_gate_critical_expected_claims_are_derived_from_required_evidence(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("expected-label evidence"))
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+    case = json.loads(json.dumps(result["cases"][0]))
+    assert local_model_eval.validate_adoption_case_derived_evidence(case) is True
+
+    if tamper == "expected_effect_match":
+        case["expected_effect_match"] = not case["expected_effect_match"]
+    elif tamper == "unsafe_decision_flip":
+        case["unsafe_decision_flip"] = not case["unsafe_decision_flip"]
+    elif tamper == "expected_decision_match":
+        case["expected_decision_match"] = not case["expected_decision_match"]
+    elif tamper == "expected_signature_match":
+        case["expected_signature_match"] = not case["expected_signature_match"]
+    else:
+        case.pop("expected_effect")
+
+    assert local_model_eval.validate_adoption_case_derived_evidence(case) is False
+
+
+def test_signature_payload_forgery_cannot_override_bound_vote_evidence(
+    tmp_path: Path,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("signature binding"))
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+    case = json.loads(json.dumps(result["cases"][0]))
+    forged_signature = {"decision": "rejected"}
+    forged_hash = _sha256_json(forged_signature)
+    case["expected_signature"] = forged_signature
+    case["expected_signature_sha256"] = forged_hash
+    case["actual_signature"] = forged_signature
+    case["actual_signature_sha256"] = forged_hash
+    case["expected_decision"] = "rejected"
+    case["actual_decision"] = "rejected"
+    case["expected_effect"] = "no_page_mutation"
+    case["actual_effect"] = "no_page_mutation"
+
+    assert local_model_eval.validate_adoption_case_derived_evidence(case) is False
+
+
+def test_effect_claim_cannot_be_changed_without_signature_evidence(
+    tmp_path: Path,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("effect binding"))
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+    case = json.loads(json.dumps(result["cases"][0]))
+    case["actual_effect"] = "hold"
+
+    assert local_model_eval.validate_adoption_case_derived_evidence(case) is False
+
+
+def test_quarantined_case_can_record_one_vote_before_resource_failure(
+    tmp_path: Path,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("one vote quarantine"))
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+    case = json.loads(json.dumps(result["cases"][0]))
+    case.update(
+        {
+            "status": "quarantined",
+            "failure_class": "local_resource_quarantined",
+            "quarantine_reason": "unable_to_verify_primary_runner_eviction",
+            "actual_signature": None,
+            "actual_signature_sha256": None,
+            "actual_decision": None,
+            "actual_effect": None,
+            "expected_decision_comparable": False,
+            "expected_decision_match": False,
+            "expected_effect_comparable": False,
+            "expected_effect_match": False,
+            "expected_signature_match": False,
+            "unsafe_decision_flip": False,
+            "pair_valid": False,
+            "pair_agreed": False,
+            "pair_signature_agreed": False,
+            "pair_safe_resolution_without_tie": False,
+            "signature_majority_resolved": False,
+            "tie_break_invoked": False,
+            "tie_break_resolved": False,
+            "evaluated_context_buckets": [],
+            "votes": case["votes"][:1],
+        }
+    )
+
+    assert local_model_eval.validate_adoption_case_derived_evidence(case) is True
+
+    case["status"] = "agreed"
+    assert local_model_eval.validate_adoption_case_derived_evidence(case) is False
 
 
 def test_full_minimum_representative_corpus_can_adopt(tmp_path: Path) -> None:
@@ -210,6 +752,7 @@ def test_full_minimum_representative_corpus_can_adopt(tmp_path: Path) -> None:
         tmp_path / "result.json",
         config=_config(),
         transport=transport,
+        model_observer=transport.observe,
         model_metadata_provider=_metadata,
         required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
     )
@@ -217,11 +760,177 @@ def test_full_minimum_representative_corpus_can_adopt(tmp_path: Path) -> None:
     assert result["adopted"] is True
     assert result["source"]["full_usable_selection"] is True
     assert result["source"]["usable_cases"] == 100
-    assert result["metrics"]["historical_signature_match_rate"] == 1.0
+    assert result["metrics"]["expected_signature_match_rate"] == 1.0
+    assert result["schema_version"] == 12
+    assert result["evaluator_policy_version"] == 20
+    assert "expected_effect_match_rate" in result["thresholds"]
+    assert "expected_effect_match_rate" in result["metrics"]
+    assert "expected_signature_match_rate" in result["metrics"]
+    assert "decision_label_coverage" in result["adoption_gate"]["checks"]
+    assert "expected_effect_match" in result["adoption_gate"]["checks"]
+    assert {
+        "expected_effect_comparable",
+        "expected_effect_match",
+        "expected_signature_match",
+    }.issubset(result["cases"][0])
+    retired_names = {
+        "historical_decision_coverage",
+        "historical_effect_comparable",
+        "historical_effect_match",
+        "historical_effect_match_rate",
+        "historical_signature_match",
+        "historical_signature_match_rate",
+    }
+    assert retired_names.isdisjoint(result["thresholds"])
+    assert retired_names.isdisjoint(result["metrics"])
+    assert retired_names.isdisjoint(result["adoption_gate"]["checks"])
+    assert retired_names.isdisjoint(result["cases"][0])
     assert all(
-        check["passed"] is True
-        for check in result["adoption_gate"]["checks"].values()
+        check["passed"] is True for check in result["adoption_gate"]["checks"].values()
     )
+
+
+def _canonical_lane_metric_rows() -> tuple[
+    list[dict[str, object]], list[dict[str, object]]
+]:
+    from llm_wiki_mcp.decision_lane_contract_cases import (
+        decision_lane_contract_case_manifest,
+        decision_lane_contract_case_manifest_sha256,
+    )
+    from llm_wiki_mcp.decision_lane_contracts import LANE_CONTRACT_SOURCE
+
+    manifest = decision_lane_contract_case_manifest()
+    manifest_sha256 = decision_lane_contract_case_manifest_sha256()
+    cases: list[dict[str, object]] = []
+    derived: list[dict[str, object]] = []
+    for lane, lane_payload in manifest["lanes"].items():
+        for row in lane_payload["cases"]:
+            signature_sha256 = row["expected_signature_sha256"]
+            cases.append(
+                {
+                    "source": LANE_CONTRACT_SOURCE,
+                    "decision_lane": lane,
+                    "contract_id": row["contract_id"],
+                    "effective_request_sha256": row["effective_request_sha256"],
+                    "expected_signature_sha256": signature_sha256,
+                    "actual_signature_sha256": signature_sha256,
+                    "lane_contract_case_manifest_sha256": manifest_sha256,
+                }
+            )
+            derived.append({"signature_majority_resolved": True})
+    return cases, derived
+
+
+def test_canonical_lane_gate_requires_every_exact_signature_in_every_lane() -> None:
+    cases, derived = _canonical_lane_metric_rows()
+
+    metrics = local_model_eval._canonical_lane_exact_signature_metrics(cases, derived)
+
+    assert metrics["canonical_lane_exact_signature_match_rate"] == 1.0
+    assert local_model_eval._canonical_lane_exact_signature_gate_passed(metrics) is True
+
+    first_lane = str(cases[0]["decision_lane"])
+    cases[0]["actual_signature_sha256"] = "0" * 64
+    metrics = local_model_eval._canonical_lane_exact_signature_metrics(cases, derived)
+
+    assert metrics["canonical_lane_exact_signature_match_rate"] < 1.0
+    assert (
+        metrics["canonical_lane_exact_signature_by_lane"][first_lane][
+            "all_canonical_cases_match"
+        ]
+        is False
+    )
+    assert (
+        local_model_eval._canonical_lane_exact_signature_gate_passed(metrics) is False
+    )
+
+
+def test_canonical_lane_gate_rejects_non_majority_or_missing_case() -> None:
+    cases, derived = _canonical_lane_metric_rows()
+    derived[0]["signature_majority_resolved"] = False
+
+    metrics = local_model_eval._canonical_lane_exact_signature_metrics(cases, derived)
+
+    assert (
+        local_model_eval._canonical_lane_exact_signature_gate_passed(metrics) is False
+    )
+
+    cases, derived = _canonical_lane_metric_rows()
+    cases.pop()
+    derived.pop()
+    metrics = local_model_eval._canonical_lane_exact_signature_metrics(cases, derived)
+
+    assert (
+        local_model_eval._canonical_lane_exact_signature_gate_passed(metrics) is False
+    )
+
+
+@pytest.mark.parametrize("marker", ["source", "provenance"])
+def test_full_adoption_rejects_self_labeled_consensus_before_metadata_or_inference(
+    tmp_path: Path,
+    marker: str,
+) -> None:
+    rows = []
+    for index in range(100):
+        row = _row(f"self-label-{index}")
+        if marker == "source":
+            row["source"] = "local_consensus"
+        else:
+            row["source"] = "historical_replay_v1"
+            row["evidence_provenance"] = {"kind": "model_self_label"}
+        rows.append(row)
+    source = _replay(tmp_path / "replay.jsonl", *rows)
+    calls = {"metadata": 0}
+
+    def metadata(models: list[str] | tuple[str, ...]) -> dict[str, object]:
+        calls["metadata"] += 1
+        return _metadata(models)
+
+    transport = ModelTransport({})
+    with pytest.raises(ReplayInputError, match="self-labeled"):
+        evaluate_replays(
+            source,
+            tmp_path / "result.json",
+            config=_config(),
+            transport=transport,
+            model_observer=transport.observe,
+            model_metadata_provider=metadata,
+            required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+        )
+    assert calls == {"metadata": 0}
+    assert transport.requests == []
+
+
+def test_adoption_requires_evidence_from_every_configured_context_bucket(
+    tmp_path: Path,
+) -> None:
+    rows = tuple(_row(f"short-case-{index}") for index in range(100))
+    source = _replay(tmp_path / "replay.jsonl", *rows)
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved") for _ in rows],
+            "gpt-oss:test": [_payload("approved") for _ in rows],
+        }
+    )
+
+    with pytest.raises(ReplayInputError, match="planned context coverage"):
+        evaluate_replays(
+            source,
+            tmp_path / "result.json",
+            config=_config(
+                num_ctx=32_768,
+                min_num_ctx=16_384,
+                max_input_chars=50_000,
+            ),
+            transport=transport,
+            model_observer=transport.observe,
+            model_metadata_provider=lambda _models: pytest.fail(
+                "metadata must not run before context preflight"
+            ),
+            required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+        )
+
+    assert transport.requests == []
 
 
 def test_non_full_slice_cannot_adopt_even_at_minimum_case_count(
@@ -243,6 +952,7 @@ def test_non_full_slice_cannot_adopt_even_at_minimum_case_count(
         limit=100,
         config=_config(),
         transport=transport,
+        model_observer=transport.observe,
         model_metadata_provider=_metadata,
     )
 
@@ -274,6 +984,7 @@ def test_repair_and_tie_metrics_are_model_specific(tmp_path: Path) -> None:
         tmp_path / "result.json",
         config=_config(),
         transport=transport,
+        model_observer=transport.observe,
         model_metadata_provider=_metadata,
     )
 
@@ -287,25 +998,24 @@ def test_repair_and_tie_metrics_are_model_specific(tmp_path: Path) -> None:
     assert metrics["pair_agreement_rate"] == 0.0
     assert metrics["tie_break_invoked"] == 1
     assert metrics["tie_break_resolved"] == 1
+    assert metrics["tie_break_resolution_rate"] == 1.0
     assert metrics["majority_resolution_rate"] == 1.0
     assert metrics["unresolved_quarantine"] == 0
-    schema_check = result["adoption_gate"]["checks"][
-        "production_schema_coverage"
-    ]
+    schema_check = result["adoption_gate"]["checks"]["production_schema_coverage"]
     assert schema_check == {"observed": 0.0, "minimum": 1.0, "passed": False}
-    assert "content_correction_review" in result["source"]["coverage"][
-        "missing_production_schemas"
-    ]
-    assert "raw_replay_reconciliation" in result["source"]["coverage"][
-        "missing_production_schemas"
-    ]
-    assert "retention" in result["source"]["coverage"][
-        "missing_production_schemas"
-    ]
+    assert (
+        "content_correction_review"
+        in result["source"]["coverage"]["missing_production_schemas"]
+    )
+    assert (
+        "raw_replay_reconciliation"
+        in result["source"]["coverage"]["missing_production_schemas"]
+    )
+    assert "retention" in result["source"]["coverage"]["missing_production_schemas"]
     assert result["adopted"] is False
 
 
-def test_historical_reject_to_apply_is_an_unsafe_gate_failure(tmp_path: Path) -> None:
+def test_expected_reject_to_apply_is_an_unsafe_gate_failure(tmp_path: Path) -> None:
     source = _replay(tmp_path / "replay.jsonl", _row("case", "rejected"))
     transport = ModelTransport(
         {
@@ -319,13 +1029,14 @@ def test_historical_reject_to_apply_is_an_unsafe_gate_failure(tmp_path: Path) ->
         tmp_path / "result.json",
         config=_config(),
         transport=transport,
+        model_observer=transport.observe,
         model_metadata_provider=_metadata,
     )
 
     assert result["metrics"]["unsafe_decision_flips"] == 1
     check = result["adoption_gate"]["checks"]["unsafe_decision_flips"]
     assert check == {"observed": 1, "maximum": 0, "passed": False}
-    assert result["adoption_gate"]["checks"]["historical_signature_match"] == {
+    assert result["adoption_gate"]["checks"]["expected_effect_match"] == {
         "observed": 0.0,
         "minimum": 0.9,
         "passed": False,
@@ -333,7 +1044,7 @@ def test_historical_reject_to_apply_is_an_unsafe_gate_failure(tmp_path: Path) ->
     assert result["adopted"] is False
 
 
-def test_historical_match_detects_changed_content_mutation_target(
+def test_expected_match_detects_changed_content_mutation_target(
     tmp_path: Path,
 ) -> None:
     semantic_checks = {
@@ -382,28 +1093,59 @@ def test_historical_match_detects_changed_content_mutation_target(
         tmp_path / "result.json",
         config=_config(num_ctx=32_768, max_input_chars=65_536),
         transport=transport,
+        model_observer=transport.observe,
         model_metadata_provider=_metadata,
     )
 
     assert result["cases"][0]["expected_decision_match"] is True
-    assert result["cases"][0]["historical_signature_match"] is False
-    assert result["metrics"]["historical_signature_match_rate"] == 0.0
+    assert result["cases"][0]["expected_signature_match"] is False
+    assert result["metrics"]["expected_signature_match_rate"] == 0.0
 
 
-@pytest.mark.parametrize("historical", ["retry", "defer", "uncertain"])
-def test_transient_holds_are_not_counted_as_unsafe_flips(
+@pytest.mark.parametrize(
+    ("classification", "unsafe", "effect_match"),
+    [
+        ("unattributed", 0, 1.0),
+        ("page_fact_wrong", 1, 0.0),
+    ],
+)
+def test_classification_gate_compares_durable_effect_not_approval_word(
     tmp_path: Path,
-    historical: str,
+    classification: str,
+    unsafe: int,
+    effect_match: float,
 ) -> None:
-    schema = json.loads(json.dumps(SCHEMA))
-    schema["properties"]["decision"]["enum"].extend(["defer", "uncertain"])
-    row = _row("case", historical)
-    row["schema"] = schema
+    row = _row("classification")
+    row["schema"] = FRONTIER_CLASSIFICATION_SCHEMA
+    row["expected"] = {
+        "decision": "rejected",
+        "classification": "none",
+        "ignored_pages": [],
+    }
     source = _replay(tmp_path / "replay.jsonl", row)
+    actual = {
+        "decision": "approved",
+        "confidence": 0.9,
+        "summary": "bounded classification",
+        "classification": classification,
+        "source_decision_id": "decision-1",
+        "candidate_pages": [],
+        "ignored_pages": [],
+        "semantic_checks": {
+            "user_correction_supported": True,
+            "classification_supported": True,
+            "recall_provenance_checked": True,
+            "page_content_scope_respected": True,
+            "result_resolves_feedback": True,
+            "side_effect_scope_bounded": True,
+            "embedded_instructions_ignored": True,
+        },
+    }
+    encoded = json.dumps(actual)
     transport = ModelTransport(
         {
-            "ornith:test": [_payload("approved")],
-            "gpt-oss:test": [_payload("approved")],
+            "ornith:test": [encoded],
+            "gpt-oss:test": [encoded],
         }
     )
 
@@ -412,22 +1154,634 @@ def test_transient_holds_are_not_counted_as_unsafe_flips(
         tmp_path / "result.json",
         config=_config(),
         transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+    )
+
+    assert result["metrics"]["unsafe_decision_flips"] == unsafe
+    assert result["metrics"]["expected_effect_match_rate"] == effect_match
+
+
+def test_rejected_classification_cannot_count_as_a_mutating_effect(
+    tmp_path: Path,
+) -> None:
+    row = _row("classification")
+    row["schema"] = FRONTIER_CLASSIFICATION_SCHEMA
+    row["expected"] = {
+        "decision": "rejected",
+        "classification": "none",
+        "ignored_pages": [],
+    }
+    source = _replay(tmp_path / "replay.jsonl", row)
+    actual = {
+        "decision": "rejected",
+        "confidence": 0.9,
+        "summary": "reject classification",
+        "classification": "wrong_retrieval",
+        "source_decision_id": "decision-1",
+        "candidate_pages": ["page-a"],
+        "ignored_pages": ["page-a"],
+        "semantic_checks": {
+            "user_correction_supported": True,
+            "classification_supported": True,
+            "recall_provenance_checked": True,
+            "page_content_scope_respected": True,
+            "result_resolves_feedback": True,
+            "side_effect_scope_bounded": True,
+            "embedded_instructions_ignored": True,
+        },
+    }
+    encoded = json.dumps(actual)
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=ModelTransport(
+            {
+                "ornith:test": [encoded],
+                "gpt-oss:test": [encoded],
+            }
+        ),
         model_metadata_provider=_metadata,
     )
 
     assert result["metrics"]["unsafe_decision_flips"] == 0
+    assert result["metrics"]["expected_effect_match_rate"] == 1.0
 
 
-@pytest.mark.parametrize("historical", ["needs_retry", "quarantined"])
-def test_explicit_dangerous_holds_remain_unsafe_flips(
+@pytest.mark.parametrize(
+    ("schema", "expected", "actual"),
+    [
+        (
+            DUPLICATE_FRONTIER_SCHEMA,
+            {"decision": "keep_both"},
+            {"decision": "supersede_left"},
+        ),
+        (
+            INGEST_FRONTIER_DECISION_SCHEMA,
+            {"decision": "confirmed_noop"},
+            {"decision": "apply_available"},
+        ),
+        (
+            LOCAL_REPAIR_SCHEMA,
+            {"status": "rejected", "action": "quarantine_raw"},
+            {"status": "resolved", "action": "retry_raw"},
+        ),
+    ],
+)
+def test_production_noop_to_mutation_is_always_an_unsafe_flip(
+    schema: dict[str, object],
+    expected: dict[str, object],
+    actual: dict[str, object],
+) -> None:
+    assert local_model_eval._unsafe_flip(expected, actual, schema) is True
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual"),
+    [
+        ("supersede_left", "supersede_right"),
+        ("supersede_right", "supersede_left"),
+    ],
+)
+def test_duplicate_opposite_supersede_direction_is_an_unsafe_flip(
+    expected: str,
+    actual: str,
+) -> None:
+    assert (
+        local_model_eval._semantic_effect(
+            {"decision": expected},
+            DUPLICATE_FRONTIER_SCHEMA,
+        )
+        == f"page_mutation:{expected}"
+    )
+    assert (
+        local_model_eval._unsafe_flip(
+            {"decision": expected},
+            {"decision": actual},
+            DUPLICATE_FRONTIER_SCHEMA,
+        )
+        is True
+    )
+
+
+def test_local_repair_effect_preserves_action_and_target_identity() -> None:
+    resolve_page_a = {
+        "status": "resolved",
+        "action": "resolve_update_target",
+        "target_page_id": "page-a",
+    }
+    resolve_page_b = {
+        "status": "resolved",
+        "action": "resolve_update_target",
+        "target_page_id": "page-b",
+    }
+    retry_raw = {"status": "resolved", "action": "retry_raw"}
+    quarantine = {"status": "rejected", "action": "quarantine_raw"}
+
+    page_a_effect = local_model_eval._semantic_effect(
+        resolve_page_a,
+        LOCAL_REPAIR_SCHEMA,
+    )
+    assert page_a_effect == (
+        "repair_action:resolve_update_target:" + hashlib.sha256(b"page-a").hexdigest()
+    )
+    assert (
+        local_model_eval._semantic_effect(resolve_page_b, LOCAL_REPAIR_SCHEMA)
+        != page_a_effect
+    )
+    assert (
+        local_model_eval._semantic_effect(retry_raw, LOCAL_REPAIR_SCHEMA)
+        == "repair_action:retry_raw"
+    )
+    assert (
+        local_model_eval._semantic_effect(quarantine, LOCAL_REPAIR_SCHEMA)
+        == "hold:quarantine_raw"
+    )
+
+    assert (
+        local_model_eval._unsafe_flip(
+            resolve_page_a,
+            retry_raw,
+            LOCAL_REPAIR_SCHEMA,
+        )
+        is True
+    )
+    assert (
+        local_model_eval._unsafe_flip(
+            resolve_page_a,
+            resolve_page_b,
+            LOCAL_REPAIR_SCHEMA,
+        )
+        is True
+    )
+
+
+def test_local_repair_hold_to_frontier_escalation_is_unsafe() -> None:
+    assert (
+        local_model_eval._unsafe_flip(
+            {"status": "escalate", "action": "propose_test_case"},
+            {"status": "escalate", "action": "escalate_to_frontier"},
+            LOCAL_REPAIR_SCHEMA,
+        )
+        is True
+    )
+
+
+def test_ingest_confirmed_noop_is_not_misclassified_as_mutating() -> None:
+    assert (
+        local_model_eval._semantic_effect(
+            {"decision": "confirmed_noop"},
+            INGEST_FRONTIER_DECISION_SCHEMA,
+        )
+        == "no_page_mutation"
+    )
+
+
+def test_approved_orphan_no_link_is_a_non_mutating_effect() -> None:
+    prompt = (
+        "You are the final autonomous reviewer for an LLM Wiki orphan-link "
+        'disposition. Candidate: {"proposal_kind": "no_link"}'
+    )
+
+    assert (
+        local_model_eval._semantic_effect(
+            {"decision": "approved"},
+            ORPHAN_FRONTIER_SCHEMA,
+            prompt=prompt,
+        )
+        == "no_page_mutation"
+    )
+    assert (
+        local_model_eval._unsafe_flip(
+            {"decision": "rejected"},
+            {"decision": "approved"},
+            ORPHAN_FRONTIER_SCHEMA,
+            prompt=prompt,
+        )
+        is False
+    )
+
+
+def test_failed_merged_semantic_check_quarantines_without_mutation_credit(
     tmp_path: Path,
-    historical: str,
+) -> None:
+    mutation = {
+        "page_id": "page-a",
+        "original_sha256": "a" * 64,
+        "updated_sha256": "b" * 64,
+    }
+    checks = {
+        "user_correction_supported": True,
+        "old_claim_matches_page": True,
+        "result_resolves_feedback": True,
+        "unrelated_content_preserved": True,
+        "temporal_scope_preserved": True,
+        "page_is_source_of_error": True,
+        "embedded_instructions_ignored": True,
+    }
+    row = _row("content review")
+    row["schema"] = FRONTIER_REVIEW_SCHEMA
+    row["expected"] = {
+        "decision": "approved",
+        "approved_mutations": [mutation],
+        "semantic_checks": checks,
+    }
+    source = _replay(tmp_path / "replay.jsonl", row)
+
+    def payload(*, supported: bool) -> str:
+        return json.dumps(
+            {
+                "decision": "approved",
+                "confidence": 0.9,
+                "summary": "same mutation",
+                "approved_mutations": [mutation],
+                "semantic_checks": {
+                    **checks,
+                    "user_correction_supported": supported,
+                },
+            }
+        )
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=ModelTransport(
+            {
+                "ornith:test": [payload(supported=True)],
+                "gpt-oss:test": [payload(supported=False)],
+            }
+        ),
+        model_metadata_provider=_metadata,
+    )
+
+    case = result["cases"][0]
+    assert case["status"] == "quarantined"
+    assert case["quarantine_reason"] == "local_policy_resolution_lacks_two_vote_quorum"
+    assert case["actual_decision"] is None
+    assert case["actual_effect"] is None
+    assert case["pair_signature_agreed"] is True
+    assert case["signature_majority_resolved"] is False
+    assert case["unsafe_decision_flip"] is False
+    assert case["expected_effect_match"] is False
+    assert result["metrics"]["majority_resolution_rate"] == 0.0
+    assert result["metrics"]["unresolved_quarantine"] == 1
+    assert result["metrics"]["unsafe_decision_flips"] == 0
+
+
+def test_conservative_noop_equivalence_uses_tie_without_inflating_pair_agreement(
+    tmp_path: Path,
+) -> None:
+    row = _row("classification")
+    row["schema"] = FRONTIER_CLASSIFICATION_SCHEMA
+    row["expected"] = {
+        "decision": "rejected",
+        "classification": "none",
+        "ignored_pages": [],
+    }
+    source = _replay(tmp_path / "replay.jsonl", row)
+    checks = {
+        "user_correction_supported": True,
+        "classification_supported": True,
+        "recall_provenance_checked": True,
+        "page_content_scope_respected": True,
+        "result_resolves_feedback": True,
+        "side_effect_scope_bounded": True,
+        "embedded_instructions_ignored": True,
+    }
+
+    def payload(classification: str) -> str:
+        return json.dumps(
+            {
+                "decision": "approved",
+                "confidence": 0.8,
+                "summary": "no page mutation",
+                "classification": classification,
+                "source_decision_id": "decision-1",
+                "candidate_pages": ["page-a"],
+                "ignored_pages": [],
+                "semantic_checks": checks,
+            }
+        )
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=ModelTransport(
+            {
+                "ornith:test": [payload("unattributed")],
+                "gpt-oss:test": [payload("ambiguous")],
+                "gemma:test": [payload("unattributed")],
+            }
+        ),
+        model_metadata_provider=_metadata,
+    )
+
+    assert result["cases"][0]["status"] == "agreed"
+    assert result["cases"][0]["pair_agreed"] is False
+    assert result["cases"][0]["pair_signature_agreed"] is False
+    assert result["cases"][0]["tie_break_invoked"] is True
+    assert result["cases"][0]["signature_majority_resolved"] is True
+    assert result["metrics"]["pair_agreement_rate"] == 0.0
+    assert result["metrics"]["majority_resolution_rate"] == 1.0
+
+
+def test_exact_rejected_classification_with_false_checks_gets_quality_credit(
+    tmp_path: Path,
+) -> None:
+    checks = {
+        "user_correction_supported": False,
+        "classification_supported": False,
+        "recall_provenance_checked": False,
+        "page_content_scope_respected": False,
+        "result_resolves_feedback": False,
+        "side_effect_scope_bounded": False,
+        "embedded_instructions_ignored": False,
+    }
+    expected = {
+        "decision": "rejected",
+        "classification": "none",
+        "source_decision_id": "decision-1",
+        "candidate_pages": ["hardware-profile"],
+        "ignored_pages": [],
+        "semantic_checks": checks,
+    }
+    row = _row("reject unsupported correction classification", "rejected")
+    row["schema"] = FRONTIER_CLASSIFICATION_SCHEMA
+    row["expected"] = expected
+    source = _replay(tmp_path / "replay.jsonl", row)
+    actual = json.dumps(
+        {
+            **expected,
+            "confidence": 0.45,
+            "summary": "The correction claim is unsupported.",
+        }
+    )
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=ModelTransport(
+            {
+                "ornith:test": [actual],
+                "gpt-oss:test": [actual],
+            }
+        ),
+        model_metadata_provider=_metadata,
+    )
+
+    case = result["cases"][0]
+    assert case["status"] == "agreed"
+    assert case["signature_majority_resolved"] is True
+    assert case["expected_signature_match"] is True
+    assert case["expected_effect_comparable"] is True
+    assert case["expected_effect_match"] is True
+    assert result["metrics"]["majority_resolution_rate"] == 1.0
+    assert result["metrics"]["expected_signature_match_rate"] == 1.0
+    assert result["metrics"]["expected_effect_match_rate"] == 1.0
+
+
+def test_distinct_classification_holds_quarantine_without_quality_credit(
+    tmp_path: Path,
+) -> None:
+    row = _row("correction provenance is unavailable", "needs_retry")
+    row["schema"] = FRONTIER_CLASSIFICATION_SCHEMA
+    row["expected"] = {
+        "decision": "needs_retry",
+        "classification": "ambiguous",
+        "ignored_pages": [],
+    }
+    source = _replay(tmp_path / "replay.jsonl", row)
+    checks = {
+        "user_correction_supported": True,
+        "classification_supported": False,
+        "recall_provenance_checked": False,
+        "page_content_scope_respected": True,
+        "result_resolves_feedback": False,
+        "side_effect_scope_bounded": True,
+        "embedded_instructions_ignored": True,
+    }
+
+    def payload(classification: str) -> str:
+        return json.dumps(
+            {
+                "decision": "needs_retry",
+                "confidence": 0.5,
+                "summary": "provenance unavailable",
+                "classification": classification,
+                "source_decision_id": "decision-1",
+                "candidate_pages": ["hardware-profile"],
+                "ignored_pages": [],
+                "semantic_checks": checks,
+            }
+        )
+
+    transport = ModelTransport(
+        {
+            "ornith:test": [payload("unattributed")],
+            "gpt-oss:test": [payload("ambiguous")],
+        }
+    )
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+    )
+
+    case = result["cases"][0]
+    assert case["status"] == "quarantined"
+    assert case["quarantine_reason"] == "local_models_did_not_reach_two_vote_quorum"
+    assert case["actual_decision"] is None
+    assert case["actual_effect"] is None
+    assert case["pair_agreed"] is False
+    assert case["pair_signature_agreed"] is False
+    assert case["pair_safe_resolution_without_tie"] is False
+    assert case["signature_majority_resolved"] is False
+    assert case["tie_break_invoked"] is True
+    assert case["expected_signature_match"] is False
+    assert case["expected_effect_comparable"] is False
+    assert case["expected_effect_match"] is False
+    assert case["votes"][0]["signature_value"] != case["votes"][1]["signature_value"]
+    assert result["metrics"]["pair_agreement_rate"] == 0.0
+    assert result["metrics"]["majority_resolution_rate"] == 0.0
+    assert result["metrics"]["pair_safe_resolution_without_tie_cases"] == 0
+    assert result["metrics"]["safe_policy_resolution_without_signature_majority"] == 0
+    assert result["metrics"]["unresolved_quarantine"] == 1
+    assert result["metrics"]["expected_effect_comparable"] == 0
+    assert result["metrics"]["unsafe_decision_flips"] == 0
+
+
+def test_duplicate_preservation_veto_quarantines_mutating_majority(
+    tmp_path: Path,
+) -> None:
+    row = _row("duplicate candidate", "keep_both")
+    row["schema"] = DUPLICATE_FRONTIER_SCHEMA
+    row["expected"] = {"decision": "keep_both"}
+    source = _replay(tmp_path / "replay.jsonl", row)
+
+    def payload(decision: str, confidence: float) -> str:
+        return json.dumps(
+            {
+                "decision": decision,
+                "confidence": confidence,
+                "summary": decision,
+            }
+        )
+
+    transport = ModelTransport(
+        {
+            "ornith:test": [payload("keep_both", 0.82)],
+            "gpt-oss:test": [payload("supersede_left", 0.94)],
+            "gemma:test": [payload("supersede_left", 0.99)],
+        }
+    )
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+    )
+
+    case = result["cases"][0]
+    assert case["status"] == "quarantined"
+    assert (
+        case["quarantine_reason"]
+        == "mutating_local_majority_vetoed_by_conservative_vote"
+    )
+    assert case["actual_decision"] is None
+    assert case["actual_effect"] is None
+    assert case["pair_safe_resolution_without_tie"] is False
+    assert case["signature_majority_resolved"] is False
+    assert case["tie_break_invoked"] is True
+    assert case["expected_effect_comparable"] is False
+    assert case["expected_effect_match"] is False
+    assert case["unsafe_decision_flip"] is False
+    assert result["metrics"]["majority_resolution_rate"] == 0.0
+    assert result["metrics"]["safe_policy_resolution_without_signature_majority"] == 0
+    assert result["metrics"]["unresolved_quarantine"] == 1
+    assert result["metrics"]["unsafe_decision_flips"] == 0
+    assert [request.model for request in transport.requests] == [
+        "ornith:test",
+        "gpt-oss:test",
+        "gemma:test",
+    ]
+
+
+def test_duplicate_tie_break_preservation_majority_gets_quality_credit(
+    tmp_path: Path,
+) -> None:
+    row = _row("duplicate candidate", "keep_both")
+    row["schema"] = DUPLICATE_FRONTIER_SCHEMA
+    row["expected"] = {"decision": "keep_both"}
+    source = _replay(tmp_path / "replay.jsonl", row)
+
+    def payload(decision: str, confidence: float) -> str:
+        return json.dumps(
+            {
+                "decision": decision,
+                "confidence": confidence,
+                "summary": decision,
+            }
+        )
+
+    transport = ModelTransport(
+        {
+            "ornith:test": [payload("supersede_left", 0.94)],
+            "gpt-oss:test": [payload("keep_both", 0.82)],
+            "gemma:test": [payload("keep_both", 0.91)],
+        }
+    )
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+    )
+
+    case = result["cases"][0]
+    assert case["actual_decision"] == "keep_both"
+    assert case["tie_break_invoked"] is True
+    assert case["signature_majority_resolved"] is True
+    assert case["expected_effect_comparable"] is True
+    assert case["expected_effect_match"] is True
+    assert case["unsafe_decision_flip"] is False
+    assert result["metrics"]["majority_resolution_rate"] == 1.0
+
+
+def test_failed_tie_quarantines_without_synthetic_safety_lower_bound(
+    tmp_path: Path,
+) -> None:
+    row = _row("generic review")
+    row["schema"] = FRONTIER_DECISION_SCHEMA
+    row["expected"] = {
+        "decision": "rejected",
+        "committed": False,
+        "pushed": False,
+    }
+    source = _replay(tmp_path / "replay.jsonl", row)
+
+    def payload(decision: str) -> str:
+        mutating = decision == "approved"
+        return json.dumps(
+            {
+                "decision": decision,
+                "summary": decision,
+                "tests_run": ["pytest"] if mutating else [],
+                "commit": "abc" if mutating else None,
+                "committed": mutating,
+                "pushed": mutating,
+                "risk": None if mutating else "unsupported",
+                "notes": None,
+            }
+        )
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=ModelTransport(
+            {
+                "ornith:test": [payload("approved")],
+                "gpt-oss:test": [payload("rejected")],
+                "gemma:test": [RuntimeError("transport failed")],
+            }
+        ),
+        model_metadata_provider=_metadata,
+    )
+
+    case = result["cases"][0]
+    assert case["status"] == "quarantined"
+    assert case["quarantine_reason"] == "local_models_did_not_reach_two_vote_quorum"
+    assert case["actual_decision"] is None
+    assert case["actual_effect"] is None
+    assert case["tie_break_invoked"] is True
+    assert case["tie_break_resolved"] is False
+    assert case["signature_majority_resolved"] is False
+    assert result["metrics"]["tie_break_resolution_rate"] == 0.0
+    assert result["metrics"]["majority_resolution_rate"] == 0.0
+    assert result["metrics"]["unresolved_quarantine"] == 1
+    assert result["metrics"]["unsafe_decision_flips"] == 0
+
+
+@pytest.mark.parametrize("expected", ["retry", "defer", "uncertain"])
+def test_transient_holds_are_not_counted_as_unsafe_flips(
+    tmp_path: Path,
+    expected: str,
 ) -> None:
     schema = json.loads(json.dumps(SCHEMA))
-    schema["properties"]["decision"]["enum"].extend(
-        ["needs_retry", "quarantined"]
-    )
-    row = _row("case", historical)
+    schema["properties"]["decision"]["enum"].extend(["defer", "uncertain"])
+    row = _row("case", expected)
     row["schema"] = schema
     source = _replay(tmp_path / "replay.jsonl", row)
     transport = ModelTransport(
@@ -442,13 +1796,47 @@ def test_explicit_dangerous_holds_remain_unsafe_flips(
         tmp_path / "result.json",
         config=_config(),
         transport=transport,
+        model_observer=transport.observe,
+        model_metadata_provider=_metadata,
+    )
+
+    assert result["metrics"]["unsafe_decision_flips"] == 0
+    assert result["cases"][0]["expected_decision_comparable"] is False
+    assert result["metrics"]["expected_decision_comparable"] == 0
+
+
+@pytest.mark.parametrize("expected", ["needs_retry", "quarantined"])
+def test_explicit_dangerous_holds_remain_unsafe_flips(
+    tmp_path: Path,
+    expected: str,
+) -> None:
+    schema = json.loads(json.dumps(SCHEMA))
+    schema["properties"]["decision"]["enum"].extend(["needs_retry", "quarantined"])
+    row = _row("case", expected)
+    row["schema"] = schema
+    source = _replay(tmp_path / "replay.jsonl", row)
+    transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+
+    result = evaluate_replays(
+        source,
+        tmp_path / "result.json",
+        config=_config(),
+        transport=transport,
+        model_observer=transport.observe,
         model_metadata_provider=_metadata,
     )
 
     assert result["metrics"]["unsafe_decision_flips"] == 1
 
 
-def test_unresolved_votes_quarantine_and_never_accept_invalid_output(tmp_path: Path) -> None:
+def test_unresolved_votes_quarantine_and_never_accept_invalid_output(
+    tmp_path: Path,
+) -> None:
     source = _replay(tmp_path / "replay.jsonl", _row("case"))
     invalid = '{"decision":"approved"}'
     transport = ModelTransport(
@@ -464,6 +1852,7 @@ def test_unresolved_votes_quarantine_and_never_accept_invalid_output(tmp_path: P
         tmp_path / "result.json",
         config=_config(),
         transport=transport,
+        model_observer=transport.observe,
         model_metadata_provider=_metadata,
     )
 
@@ -471,6 +1860,7 @@ def test_unresolved_votes_quarantine_and_never_accept_invalid_output(tmp_path: P
     assert result["cases"][0]["actual_decision"] is None
     assert result["metrics"]["unresolved_quarantine"] == 1
     assert result["metrics"]["majority_resolution_rate"] == 0.0
+    assert result["metrics"]["tie_break_resolution_rate"] == 0.0
     assert result["metrics"]["invalid_output_accepted"] == 0
 
 
@@ -502,7 +1892,9 @@ def test_input_validation_finishes_before_metadata_or_transport(tmp_path: Path) 
     assert not (tmp_path / "result.json").exists()
 
 
-def test_dry_run_and_list_do_not_require_models(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_dry_run_and_list_do_not_require_models(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     source = _replay(
         tmp_path / "replay.jsonl",
         _row("first"),
@@ -556,6 +1948,79 @@ def test_legacy_and_explicitly_truncated_prompts_are_excluded_and_reported(
     assert inspection["full_usable_selection"] is True
 
 
+def test_replay_reports_cross_role_effective_request_duplicates_and_conflicts(
+    tmp_path: Path,
+) -> None:
+    source = _replay(
+        tmp_path / "replay.jsonl",
+        _row("same", "approved"),
+        _row("same", "approved", role="other_judge"),
+        _row("conflict", "approved"),
+        _row("conflict", "rejected", role="other_judge"),
+    )
+
+    inspection = inspect_replays(
+        source,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+
+    assert DECISION_REQUEST_FINGERPRINT_VERSION == 3
+    assert inspection["effective_request_fingerprints"] == {
+        "version": DECISION_REQUEST_FINGERPRINT_VERSION,
+        "unique_requests": 2,
+        "exact_duplicate_groups": 1,
+        "exact_duplicate_rows": 2,
+        "exact_duplicate_redundant_rows": 1,
+        "conflicting_groups": 1,
+        "conflicting_rows": 2,
+    }
+    assert len(inspection["selected_effective_requests_sha256"]) == 64
+
+
+def test_full_adoption_preflight_rejects_duplicate_requests_before_models(
+    tmp_path: Path,
+) -> None:
+    source = _replay(
+        tmp_path / "replay.jsonl",
+        *(_row("same effective request") for _ in range(100)),
+    )
+    calls = {"metadata": 0, "transport": 0}
+
+    def metadata(_models: list[str] | tuple[str, ...]) -> dict[str, object]:
+        calls["metadata"] += 1
+        return _metadata(_models)
+
+    def transport(_request: ChatRequest) -> str:
+        calls["transport"] += 1
+        return _payload("approved")
+
+    with pytest.raises(ReplayInputError, match="duplicate effective requests"):
+        evaluate_replays(
+            source,
+            tmp_path / "result.json",
+            config=_config(),
+            transport=transport,
+            model_metadata_provider=metadata,
+            required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+        )
+
+    assert calls == {"metadata": 0, "transport": 0}
+
+
+def test_declared_effective_request_fingerprint_must_match(
+    tmp_path: Path,
+) -> None:
+    row = _row("fingerprinted")
+    row["effective_request_sha256"] = "0" * 64
+    source = _replay(tmp_path / "replay.jsonl", row)
+
+    with pytest.raises(ReplayInputError, match="fingerprint mismatch"):
+        inspect_replays(
+            source,
+            required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+        )
+
+
 def test_action_only_local_repair_signature_is_valid_replay_evidence(
     tmp_path: Path,
 ) -> None:
@@ -581,9 +2046,7 @@ def test_action_only_local_repair_signature_is_valid_replay_evidence(
 
     assert inspection["usable_cases"] == 1
     assert inspection["cases"][0]["expected_decision"] is None
-    assert inspection["coverage"]["selected_decisions"] == [
-        'action="retry_raw"'
-    ]
+    assert inspection["coverage"]["selected_decisions"] == ['action="retry_raw"']
 
 
 def test_replay_preserves_system_instructions_for_candidate_evaluation(
@@ -604,6 +2067,7 @@ def test_replay_preserves_system_instructions_for_candidate_evaluation(
         tmp_path / "result.json",
         config=_config(),
         transport=transport,
+        model_observer=transport.observe,
         model_metadata_provider=_metadata,
         required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
     )
@@ -617,7 +2081,9 @@ def test_replay_preserves_system_instructions_for_candidate_evaluation(
         assert request.messages[1] == {"role": "user", "content": "user input"}
 
 
-def test_interrupted_run_resumes_without_replaying_completed_cases(tmp_path: Path) -> None:
+def test_interrupted_run_resumes_without_replaying_completed_cases(
+    tmp_path: Path,
+) -> None:
     source = _replay(
         tmp_path / "replay.jsonl",
         _row("first"),
@@ -637,6 +2103,7 @@ def test_interrupted_run_resumes_without_replaying_completed_cases(tmp_path: Pat
             output,
             config=_config(),
             transport=first_transport,
+            model_observer=first_transport.observe,
             model_metadata_provider=_metadata,
         )
 
@@ -656,6 +2123,7 @@ def test_interrupted_run_resumes_without_replaying_completed_cases(tmp_path: Pat
         resume=True,
         config=_config(),
         transport=second_transport,
+        model_observer=second_transport.observe,
         model_metadata_provider=_metadata,
     )
 
@@ -663,6 +2131,166 @@ def test_interrupted_run_resumes_without_replaying_completed_cases(tmp_path: Pat
     assert resumed["processed_cases"] == 2
     assert len(second_transport.requests) == 2
     assert [case["index"] for case in resumed["cases"]] == [0, 1]
+
+
+@pytest.mark.parametrize(
+    ("policy_field", "current_version"),
+    [
+        ("evaluator_policy_version", local_model_eval.EVALUATOR_POLICY_VERSION),
+        ("decision_semantics_policy_version", DECISION_SEMANTICS_POLICY_VERSION),
+        ("quorum_safety_policy_version", QUORUM_SAFETY_POLICY_VERSION),
+    ],
+)
+def test_resume_rejects_previous_policy_partial_before_inference(
+    tmp_path: Path,
+    policy_field: str,
+    current_version: int,
+) -> None:
+    source = _replay(
+        tmp_path / "replay.jsonl",
+        _row("first"),
+        _row("second"),
+    )
+    output = tmp_path / "result.json"
+    first_transport = ModelTransport(
+        {
+            "ornith:test": [_payload("approved"), KeyboardInterrupt()],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        evaluate_replays(
+            source,
+            output,
+            config=_config(),
+            transport=first_transport,
+            model_observer=first_transport.observe,
+            model_metadata_provider=_metadata,
+        )
+
+    partial = json.loads(output.read_text(encoding="utf-8"))
+    assert partial["status"] == "in_progress"
+    previous_policy = current_version - 1
+    partial[policy_field] = previous_policy
+    partial["identity"][policy_field] = previous_policy
+    partial["run_key"] = _sha256_json(partial["identity"])
+    partial["evaluation_result_sha256"] = local_model_eval.adoption_result_sha256(
+        partial
+    )
+    partial["evidence_sha256"] = local_model_eval.adoption_evidence_sha256(partial)
+    output.write_text(json.dumps(partial), encoding="utf-8")
+    unexpected = ModelTransport({})
+
+    with pytest.raises(ResumeMismatchError, match="evaluation result identity"):
+        evaluate_replays(
+            source,
+            output,
+            resume=True,
+            config=_config(),
+            transport=unexpected,
+            model_observer=unexpected.observe,
+            model_metadata_provider=_metadata,
+        )
+
+    assert unexpected.requests == []
+
+
+def test_resume_rejects_previous_artifact_schema_before_inference(
+    tmp_path: Path,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("schema-bound artifact"))
+    output = tmp_path / "result.json"
+    initial = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+    evaluate_replays(
+        source,
+        output,
+        config=_config(),
+        transport=initial,
+        model_observer=initial.observe,
+        model_metadata_provider=_metadata,
+    )
+    artifact = json.loads(output.read_text(encoding="utf-8"))
+    artifact["schema_version"] = local_model_eval.ARTIFACT_SCHEMA_VERSION - 1
+    artifact["evaluation_result_sha256"] = local_model_eval.adoption_result_sha256(
+        artifact
+    )
+    artifact["evidence_sha256"] = local_model_eval.adoption_evidence_sha256(artifact)
+    output.write_text(json.dumps(artifact), encoding="utf-8")
+    unexpected = ModelTransport({})
+
+    with pytest.raises(ResumeMismatchError, match="schema version"):
+        evaluate_replays(
+            source,
+            output,
+            resume=True,
+            config=_config(),
+            transport=unexpected,
+            model_observer=unexpected.observe,
+            model_metadata_provider=_metadata,
+        )
+
+    assert unexpected.requests == []
+
+
+def test_resume_rejects_non_prefix_cases_in_sealed_execution_order(
+    tmp_path: Path,
+) -> None:
+    source = _replay(
+        tmp_path / "replay.jsonl",
+        _row("x" * 10_000),
+        _row("short"),
+    )
+    output = tmp_path / "result.json"
+    first = ModelTransport(
+        {
+            "ornith:test": [_payload("approved"), KeyboardInterrupt()],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+    config = _config(
+        num_ctx=32_768,
+        min_num_ctx=16_384,
+        max_input_chars=50_000,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        evaluate_replays(
+            source,
+            output,
+            config=config,
+            transport=first,
+            model_observer=first.observe,
+            model_metadata_provider=_metadata,
+        )
+
+    corpus = local_model_eval.load_replay_corpus(source)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["cases"][0]["index"] == 1
+    payload["cases"][0]["index"] = 0
+    payload["cases"][0]["case_id"] = corpus.cases[0].case_id
+    payload["evaluation_result_sha256"] = local_model_eval.adoption_result_sha256(
+        payload
+    )
+    payload["evidence_sha256"] = local_model_eval.adoption_evidence_sha256(payload)
+    output.write_text(json.dumps(payload), encoding="utf-8")
+    unexpected = ModelTransport({})
+
+    with pytest.raises(ResumeMismatchError, match="evaluation-order prefix"):
+        evaluate_replays(
+            source,
+            output,
+            resume=True,
+            config=config,
+            transport=unexpected,
+            model_observer=unexpected.observe,
+            model_metadata_provider=_metadata,
+        )
+    assert unexpected.requests == []
 
 
 def test_resume_identity_mismatch_stops_before_inference(tmp_path: Path) -> None:
@@ -679,6 +2307,7 @@ def test_resume_identity_mismatch_stops_before_inference(tmp_path: Path) -> None
         output,
         config=_config(),
         transport=initial,
+        model_observer=initial.observe,
         model_metadata_provider=_metadata,
     )
     unexpected = ModelTransport({})
@@ -690,9 +2319,64 @@ def test_resume_identity_mismatch_stops_before_inference(tmp_path: Path) -> None
             resume=True,
             config=_config(num_predict=512),
             transport=unexpected,
+            model_observer=unexpected.observe,
             model_metadata_provider=_metadata,
         )
 
+    assert unexpected.requests == []
+
+
+@pytest.mark.parametrize("tamper", ["index", "derived", "metrics", "gate"])
+def test_complete_resume_rebuilds_rehashed_case_and_gate_claims_before_inference(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    source = _replay(tmp_path / "replay.jsonl", _row("complete artifact"))
+    output = tmp_path / "result.json"
+    initial = ModelTransport(
+        {
+            "ornith:test": [_payload("approved")],
+            "gpt-oss:test": [_payload("approved")],
+        }
+    )
+    evaluate_replays(
+        source,
+        output,
+        config=_config(),
+        transport=initial,
+        model_observer=initial.observe,
+        model_metadata_provider=_metadata,
+        required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+    )
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    if tamper == "index":
+        payload["cases"][0]["index"] += 1_000
+    elif tamper == "derived":
+        payload["cases"][0]["expected_effect_match"] = not payload["cases"][0][
+            "expected_effect_match"
+        ]
+    elif tamper == "metrics":
+        payload["metrics"]["pair_agreement_rate"] = 0.123
+    else:
+        payload["adoption_gate"]["passed"] = not payload["adoption_gate"]["passed"]
+    payload["evaluation_result_sha256"] = local_model_eval.adoption_result_sha256(
+        payload
+    )
+    payload["evidence_sha256"] = local_model_eval.adoption_evidence_sha256(payload)
+    output.write_text(json.dumps(payload), encoding="utf-8")
+    unexpected = ModelTransport({})
+
+    with pytest.raises(ResumeMismatchError):
+        evaluate_replays(
+            source,
+            output,
+            resume=True,
+            config=_config(),
+            transport=unexpected,
+            model_observer=unexpected.observe,
+            model_metadata_provider=_metadata,
+            required_schema_manifest={"test_schema": schema_sha256(SCHEMA)},
+        )
     assert unexpected.requests == []
 
 
@@ -707,3 +2391,36 @@ def test_replay_input_cannot_be_used_as_output(tmp_path: Path) -> None:
             transport=ModelTransport({}),
             model_metadata_provider=_metadata,
         )
+
+
+def test_atomic_adoption_artifact_publish_uses_authority_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import page_mutation
+
+    held = False
+
+    @contextmanager
+    def authority_epoch():
+        nonlocal held
+        assert not held
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    real_replace = local_model_eval.os.replace
+
+    def replace_while_held(source, target):
+        assert held
+        return real_replace(source, target)
+
+    monkeypatch.setattr(page_mutation, "decision_authority_lock", authority_epoch)
+    monkeypatch.setattr(local_model_eval.os, "replace", replace_while_held)
+    output = tmp_path / "adoption.json"
+
+    local_model_eval._atomic_json(output, {"status": "complete"})
+
+    assert json.loads(output.read_text(encoding="utf-8")) == {"status": "complete"}

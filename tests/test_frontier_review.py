@@ -46,6 +46,7 @@ def _local_router_config() -> DecisionRouterConfig:
         max_input_chars=20_000,
         max_output_chars=1_000,
         max_feedback_chars=2_000,
+        adaptive_residency=False,
     )
 
 
@@ -70,7 +71,9 @@ def test_frontier_timeout_is_capped_by_sleep_cycle_deadline(monkeypatch) -> None
     assert frontier_review._bounded_timeout(3600) == 12
 
 
-def test_frontier_invocation_disables_hooks_and_uses_selected_model(tmp_path: Path) -> None:
+def test_frontier_invocation_disables_hooks_and_uses_selected_model(
+    tmp_path: Path,
+) -> None:
     invocation = frontier_review._build_codex_exec_invocation(
         "/bin/codex",
         repo_root=tmp_path,
@@ -83,12 +86,20 @@ def test_frontier_invocation_disables_hooks_and_uses_selected_model(tmp_path: Pa
     )
 
     cmd = invocation["cmd"]
-    assert cmd[cmd.index("--disable") : cmd.index("--disable") + 2] == ["--disable", "hooks"]
-    assert cmd[cmd.index("--model") : cmd.index("--model") + 2] == ["--model", "gpt-5.6-luna"]
+    assert cmd[cmd.index("--disable") : cmd.index("--disable") + 2] == [
+        "--disable",
+        "hooks",
+    ]
+    assert cmd[cmd.index("--model") : cmd.index("--model") + 2] == [
+        "--model",
+        "gpt-5.6-luna",
+    ]
     assert 'model_reasoning_effort="low"' in cmd
 
 
-def test_frontier_env_marks_internal_children_and_disables_stop_work(monkeypatch) -> None:
+def test_frontier_env_marks_internal_children_and_disables_stop_work(
+    monkeypatch,
+) -> None:
     monkeypatch.delenv("LLM_WIKI_INTERNAL_FRONTIER", raising=False)
     env = frontier_review._frontier_env()
 
@@ -146,9 +157,9 @@ def test_run_codex_uses_isolated_codex_home_with_shared_auth(
         seen["cmd"] = cmd
         isolated_home = Path(kwargs["env"]["CODEX_HOME"])
         seen["isolated_home_differs"] = isolated_home != config_home
-        seen["auth_resolves_to_source"] = (
-            isolated_home / "auth.json"
-        ).resolve() == (config_home / "auth.json").resolve()
+        seen["auth_resolves_to_source"] = (isolated_home / "auth.json").resolve() == (
+            config_home / "auth.json"
+        ).resolve()
         seen["config"] = (isolated_home / "config.toml").read_text()
         seen["has_hooks"] = (isolated_home / "hooks.json").exists()
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -326,13 +337,17 @@ def test_redacts_secrets_and_allows_only_official_urls() -> None:
 
     assert "sk-this-secret" not in redacted
     assert (
-        frontier_review.redact_sensitive_text("sandbox_permissions=[\"disk-full-read-access\"]")
-        == "sandbox_permissions=[\"disk-full-read-access\"]"
+        frontier_review.redact_sensitive_text(
+            'sandbox_permissions=["disk-full-read-access"]'
+        )
+        == 'sandbox_permissions=["disk-full-read-access"]'
     )
     assert frontier_review.is_allowed_official_url("https://platform.openai.com/docs")
     assert frontier_review.is_allowed_official_url("https://docs.anthropic.com/en/docs")
     assert frontier_review.is_allowed_official_url("https://github.com/openai/codex")
-    assert not frontier_review.is_allowed_official_url("https://openai.example.com/docs")
+    assert not frontier_review.is_allowed_official_url(
+        "https://openai.example.com/docs"
+    )
     assert not frontier_review.is_allowed_official_url("https://github.com/random/repo")
 
 
@@ -348,7 +363,9 @@ def test_preflight_reports_adaptive_codex_exec_options(
         if cmd[-1:] == ["--version"]:
             return SimpleNamespace(returncode=0, stdout="codex 1.2.3", stderr="")
         if cmd[-2:] == ["exec", "--help"]:
-            return SimpleNamespace(returncode=0, stdout="--cd\n--ephemeral\n", stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout="--cd\n--ephemeral\n", stderr=""
+            )
         raise AssertionError(f"unexpected command: {cmd}")
 
     monkeypatch.delenv("CODEX_HOME", raising=False)
@@ -364,9 +381,7 @@ def test_preflight_reports_adaptive_codex_exec_options(
     assert "--output-schema" in result["codex"]["missing_exec_options"]
 
 
-def test_run_codex_adapts_to_missing_cli_options(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_run_codex_adapts_to_missing_cli_options(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "home"
     config_home = home / ".config" / "codex"
     config_home.mkdir(parents=True)
@@ -427,7 +442,9 @@ def test_collect_official_frontier_docs_uses_allowlist(monkeypatch) -> None:
     class FakeResponse:
         status_code = 200
         url = "https://platform.openai.com/docs"
-        text = "<html><body><h1>Codex exec</h1><p>Use official commands.</p></body></html>"
+        text = (
+            "<html><body><h1>Codex exec</h1><p>Use official commands.</p></body></html>"
+        )
 
         def raise_for_status(self) -> None:
             return None
@@ -448,7 +465,9 @@ def test_collect_official_frontier_docs_uses_allowlist(monkeypatch) -> None:
 
     assert result["attempted"] is True
     assert result["documents"]
-    assert all(frontier_review.is_allowed_official_url(url) for url in result["allowlist"])
+    assert all(
+        frontier_review.is_allowed_official_url(url) for url in result["allowlist"]
+    )
 
 
 def test_frontier_without_validated_evidence_starts_no_process(
@@ -469,7 +488,9 @@ def test_frontier_without_validated_evidence_starts_no_process(
     )
 
     assert result.decision == "needs_retry"
-    assert result.frontier_failure["failure_class"] == "frontier_guard_evidence_required"
+    assert (
+        result.frontier_failure["failure_class"] == "frontier_guard_evidence_required"
+    )
     assert not hasattr(frontier_review, "_run_codex_rescue")
     assert not hasattr(frontier_review, "_run_claude_code_rescue")
     assert not hasattr(frontier_review, "_run_frontier_rescue")
@@ -779,7 +800,9 @@ def test_failed_parent_suite_never_publishes_candidate(
 
     def fake_git(repo, args, **_kwargs):
         if args[:2] == ["rev-parse", "HEAD"]:
-            return SimpleNamespace(returncode=0, stdout=candidate_head + "\n", stderr="")
+            return SimpleNamespace(
+                returncode=0, stdout=candidate_head + "\n", stderr=""
+            )
         if args == ["remote"] and repo == candidate_root:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -789,10 +812,16 @@ def test_failed_parent_suite_never_publishes_candidate(
     def fake_verify(_command, **_kwargs):
         nonlocal verification_calls
         verification_calls += 1
-        return {"ok": verification_calls == 1, "returncode": 0 if verification_calls == 1 else 1, "stdout": ""}
+        return {
+            "ok": verification_calls == 1,
+            "returncode": 0 if verification_calls == 1 else 1,
+            "stdout": "",
+        }
 
     monkeypatch.setattr(frontier_review, "_git_probe", fake_git)
-    monkeypatch.setattr(frontier_review, "_remote_main_sha", lambda _repo: baseline_head)
+    monkeypatch.setattr(
+        frontier_review, "_remote_main_sha", lambda _repo: baseline_head
+    )
     monkeypatch.setattr(frontier_review, "_verification_command", fake_verify)
     monkeypatch.setattr(
         frontier_review,
@@ -834,7 +863,9 @@ def test_publish_stops_before_push_on_untracked_path_collision(
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(frontier_review, "_git_probe", fake_git)
-    monkeypatch.setattr(frontier_review, "_remote_main_sha", lambda _repo: baseline_head)
+    monkeypatch.setattr(
+        frontier_review, "_remote_main_sha", lambda _repo: baseline_head
+    )
 
     published = frontier_review._publish_verified_candidate(
         repo_root=tmp_path,
@@ -871,8 +902,16 @@ def test_runtime_restart_verifies_new_pid_and_archive(
         return values.pop(0) if len(values) > 1 else values[0]
 
     monkeypatch.setattr(frontier_review, "_launchd_pid", fake_pid)
-    monkeypatch.setattr(frontier_review, "_pid_tree_uses_archive", lambda pid, path: pid == 202 and path == "/archive")
-    monkeypatch.setattr(frontier_review.shutil, "which", lambda name: "/bin/launchctl" if name == "launchctl" else None)
+    monkeypatch.setattr(
+        frontier_review,
+        "_pid_tree_uses_archive",
+        lambda pid, path: pid == 202 and path == "/archive",
+    )
+    monkeypatch.setattr(
+        frontier_review.shutil,
+        "which",
+        lambda name: "/bin/launchctl" if name == "launchctl" else None,
+    )
     monkeypatch.setattr(
         frontier_review.subprocess,
         "run",
@@ -886,6 +925,55 @@ def test_runtime_restart_verifies_new_pid_and_archive(
     assert result["services"][0]["new_pid"] == 202
     assert result["services"][0]["archive_loaded"] is True
     assert result["services"][1]["status"] == "not_running"
+
+
+def test_pid_tree_matches_runtime_identity_lib_path_to_exact_uv_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_base = tmp_path / "archive-v0"
+    expected = archive_base / "expected-id"
+    sibling = archive_base / "expected-id-other"
+    identity_path = expected / "lib" / "python3.13"
+    ps_output = "\n".join(
+        (
+            "100 1 /usr/bin/launch-wrapper dashboard",
+            (
+                f"101 100 {expected}/bin/python "
+                f"{expected}/bin/llm-wiki-dashboard --port 8765"
+            ),
+            f"102 100 {expected}/bin/python -c pass",
+            (
+                f"201 200 {sibling}/bin/python "
+                f"{sibling}/bin/llm-wiki-ingest-drain --watch"
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        frontier_review.subprocess,
+        "run",
+        lambda command, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=ps_output,
+            stderr="",
+        ),
+    )
+
+    assert frontier_review._pid_tree_uses_archive(100, str(identity_path)) is True
+    assert frontier_review._pid_tree_uses_archive(102, str(identity_path)) is False
+    assert frontier_review._pid_tree_uses_archive(200, str(identity_path)) is False
+
+
+def test_pid_tree_rejects_non_uv_archive_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        frontier_review.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("ps must not run for invalid identity"),
+    )
+
+    assert frontier_review._pid_tree_uses_archive(100, "/tmp/not-an-archive") is False
 
 
 def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
@@ -910,7 +998,9 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
         )
 
     def forbidden_subprocess(*_args, **_kwargs):
-        raise AssertionError("routine structured review must never start subprocess/Codex")
+        raise AssertionError(
+            "routine structured review must never start subprocess/Codex"
+        )
 
     monkeypatch.setattr(
         decision_router,
@@ -950,15 +1040,73 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
     assert calls == ["ornith:test", "gpt-oss:test"]
     audit_rows = [
         json.loads(line)
-        for line in (
-            tmp_path / "local-consensus-audit" / "audit.jsonl"
-        ).read_text(encoding="utf-8").splitlines()
+        for line in (tmp_path / "local-consensus-audit" / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     assert [row["role"] for row in audit_rows] == [
         "recall_auto_apply:primary",
         "recall_auto_apply:challenger",
         "recall_auto_apply",
     ]
+
+
+def test_structured_review_quarantines_mutating_majority_with_conservative_vote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_chat(_messages, *, model: str, **_kwargs) -> str:
+        calls.append(model)
+        decision = "rejected" if model == "gpt-oss:test" else "approved"
+        return json.dumps(
+            {
+                "decision": decision,
+                "summary": f"{decision} vote from {model}",
+                "tests_run": [],
+                "commit": None,
+                "committed": False,
+                "pushed": False,
+                "risk": "hold" if decision == "rejected" else None,
+                "notes": None,
+            }
+        )
+
+    monkeypatch.setattr(
+        decision_router,
+        "load_decision_router_config",
+        _local_router_config,
+    )
+    monkeypatch.setattr(ollama, "chat", fake_chat)
+    monkeypatch.setattr(
+        decision_router,
+        "resolve_router_policy",
+        lambda config, **_kwargs: decision_router.RouterPolicyResolution(
+            config=config,
+            source="adopted_artifact",
+        ),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "review this",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        audit_root=tmp_path / "local-consensus-audit",
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["reviewer"] == "local_consensus"
+    assert result["frontier_failure"]["failure_class"] == "local_consensus_failed"
+    assert result["frontier_failure"]["rescue_status"] == "local_quarantined"
+    assert (
+        result["local_consensus"]["quarantine_reason"]
+        == "mutating_local_majority_vetoed_by_conservative_vote"
+    )
+    assert result["human_required"] is False
+    assert calls == ["ornith:test", "gpt-oss:test", "gemma:test"]
 
 
 def test_structured_review_local_model_failures_quarantine_without_tie_or_frontier(
@@ -1041,3 +1189,53 @@ def test_structured_review_rejects_incomplete_approved_json(
     assert result["decision"] == "needs_retry"
     assert result["frontier_failure"]["failure_class"] == "schema_invalid"
     assert result["human_required"] is False
+
+
+def test_structured_review_forwards_optional_system_to_local_router(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class SystemCapturingLocalRouter:
+        def __init__(self, **_kwargs) -> None:
+            self.policy = SimpleNamespace(
+                source="adopted_artifact",
+                audit_record=lambda: {"source": "adopted_artifact"},
+            )
+
+        def decide(self, prompt, schema, *, system=None):
+            captured.update(prompt=prompt, schema=schema, system=system)
+            return DecisionRouterResult(
+                status="agreed",
+                value={
+                    "decision": "approved",
+                    "summary": "local vote",
+                    "tests_run": [],
+                    "commit": None,
+                    "committed": False,
+                    "pushed": False,
+                    "risk": None,
+                    "notes": None,
+                },
+                agreement_sha256="a" * 64,
+            )
+
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        SystemCapturingLocalRouter,
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    marker = "LLM_WIKI_READ_BACK_EVIDENCE_POLICY=1"
+
+    result = frontier_review.run_structured_review(
+        "review this",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+        system=marker,
+    )
+
+    assert result["decision"] == "approved"
+    assert captured["system"] == marker

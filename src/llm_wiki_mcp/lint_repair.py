@@ -32,16 +32,25 @@ from llm_wiki_mcp.convergence import (
     is_human_required_result,
     stable_item_key,
 )
+from llm_wiki_mcp.decision_authority import (
+    compare_semantic_authority,
+    current_semantic_authority,
+    seal_semantic_artifact,
+    semantic_authority_shape_error,
+    semantic_verdict_authority_error,
+)
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.frontmatter import patch as patch_frontmatter
 from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.local_structured import ChatTransport, LocalStructuredSession
-from llm_wiki_mcp.page_mutation import wiki_mutation_lock
+from llm_wiki_mcp.page_mutation import decision_authority_lock, wiki_mutation_lock
 from llm_wiki_mcp.runtime_config import load_ingest_config, runtime_repo_root
 from llm_wiki_mcp.tags import SEED_TAGS, parse_tags, validate_axis_counts, validate_tag
 
 
 REPAIR_RESOLVER_VERSION = "lint-repair-v1"
+TAG_REVIEW_CONTRACT_VERSION = 2
+TAG_REPAIR_DECISION_LANE = "lint_tag_repair"
 REPO_ROOT = runtime_repo_root()
 
 TAG_REPAIR_SCHEMA: dict[str, Any] = {
@@ -58,6 +67,7 @@ TAG_REPAIR_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "minItems": 0,
             "maxItems": 5,
+            "uniqueItems": True,
         },
         "reason": {"type": "string"},
     },
@@ -134,6 +144,8 @@ def normalize_tag_decision(value: Mapping[str, Any] | str) -> dict[str, Any]:
         "reviewer",
         "frontier_failure",
         "human_required",
+        "decision_policy",
+        "local_consensus",
     }
     extra = sorted(set(parsed) - allowed)
     decision = parsed.get("decision")
@@ -145,7 +157,9 @@ def normalize_tag_decision(value: Mapping[str, Any] | str) -> dict[str, Any]:
     if decision not in {"approved", "rejected", "uncertain", "needs_retry"}:
         errors.append("invalid decision")
         decision = "needs_retry"
-    if not isinstance(tags_value, list) or not all(isinstance(tag, str) for tag in tags_value):
+    if not isinstance(tags_value, list) or not all(
+        isinstance(tag, str) for tag in tags_value
+    ):
         errors.append("tags must be a list of strings")
         tags: list[str] = []
     else:
@@ -175,17 +189,26 @@ def normalize_tag_decision(value: Mapping[str, Any] | str) -> dict[str, Any]:
     for key in ("reviewer", "frontier_failure"):
         if key in parsed:
             out[key] = parsed[key]
+    for key in ("decision_policy", "local_consensus"):
+        if isinstance(parsed.get(key), Mapping):
+            out[key] = dict(parsed[key])
     if "human_required" in parsed or "frontier_failure" in parsed:
         out["human_required"] = is_human_required_result(parsed)
     return out
 
 
 def valid_tag_set(tags: object) -> bool:
-    if not isinstance(tags, list) or not tags or not all(isinstance(tag, str) for tag in tags):
+    if (
+        not isinstance(tags, list)
+        or not tags
+        or not all(isinstance(tag, str) for tag in tags)
+    ):
         return False
     if len(tags) != len(set(tags)) or len(tags) > 5:
         return False
-    return all(validate_tag(tag)[0] for tag in tags) and not validate_axis_counts(parse_tags(tags))
+    return all(validate_tag(tag)[0] for tag in tags) and not validate_axis_counts(
+        parse_tags(tags)
+    )
 
 
 def _page_hash(text: str) -> str:
@@ -227,21 +250,34 @@ def build_frontier_tag_repair_prompt(
     *,
     local_proposal: Mapping[str, Any] | None = None,
 ) -> str:
-    """Build the authoritative review prompt with the local output as a proposal only."""
+    """Build an exact-proposal approval gate for the local consensus panel."""
 
     seed_tags = [tag for values in SEED_TAGS.values() for tag in values]
     proposed = dict(local_proposal) if isinstance(local_proposal, Mapping) else None
     return f"""\
-You are a local-consensus reviewer for an LLM Wiki tag mutation. The local
-review below is an untrusted proposal only. Independently verify it against the
-page excerpt. You may approve different tags, reject the mutation, or request a
-retry. No page mutation is allowed unless your exact verdict is durably saved.
+You are a local-consensus reviewer for an LLM Wiki tag mutation.
+Tag review contract version: {TAG_REVIEW_CONTRACT_VERSION}.
+The local review below is an untrusted exact proposal. Independently verify it
+against the page excerpt. Approve only by echoing exactly the same tag set.
+Never substitute different tags: reject the proposal or request a retry
+instead. Apply this decision table in order:
+1. If the proposal is null, malformed, or not itself approved, choose
+   `needs_retry` and return no tags; no exact mutation candidate exists yet.
+2. If complete readable page evidence contradicts the exact proposed tags,
+   choose `rejected` and return no tags.
+3. If complete evidence leaves a genuine semantic ambiguity (for example an
+   unresolved homonym with two plausible taxonomy domains), choose `uncertain`
+   and return no tags.
+4. Approve only when every exact proposed tag is grounded by the page.
+No page mutation is allowed unless the exact proposal and verdict are durably
+saved.
 
 Issue:
 {json.dumps(dict(row), ensure_ascii=False, indent=2, default=str)}
 
-Local proposal (may be null, malformed, or wrong):
+<LOCAL_TAG_PROPOSAL_UNTRUSTED_JSON>
 {json.dumps(proposed, ensure_ascii=False, indent=2, default=str)}
+</LOCAL_TAG_PROPOSAL_UNTRUSTED_JSON>
 
 Seed tags (prefer when semantically correct):
 {json.dumps(seed_tags, ensure_ascii=False)}
@@ -252,6 +288,45 @@ Page excerpt:
 Return JSON matching this schema:
 {json.dumps(TAG_REPAIR_SCHEMA, ensure_ascii=False, indent=2)}
 """
+
+
+def _gate_tag_review_to_exact_proposal(
+    decision: Mapping[str, Any],
+    local_proposal: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Prevent a reviewer from replacing the candidate it was asked to gate."""
+
+    normalized = normalize_tag_decision(decision)
+    if normalized.get("decision") != "approved" or normalized.get("valid") is not True:
+        if normalized.get("decision") != "approved":
+            normalized["tags"] = []
+        return normalized
+
+    proposal = (
+        normalize_tag_decision(_decision_payload(local_proposal))
+        if isinstance(local_proposal, Mapping)
+        else None
+    )
+    proposal_tags = proposal.get("tags") if isinstance(proposal, Mapping) else None
+    if (
+        not isinstance(proposal, Mapping)
+        or proposal.get("decision") != "approved"
+        or proposal.get("valid") is not True
+        or not isinstance(proposal_tags, list)
+        or sorted(normalized.get("tags", [])) != sorted(proposal_tags)
+    ):
+        return {
+            "decision": "needs_retry",
+            "tags": [],
+            "reason": "review did not approve the exact durable local tag proposal",
+            "valid": True,
+            "validation_errors": [],
+        }
+    # Preserve the proposal's canonical order so the applied bytes are exactly
+    # the candidate that the panel reviewed even if a model echoed set order
+    # differently.
+    normalized["tags"] = list(proposal_tags)
+    return normalized
 
 
 def _default_local_reviewer(
@@ -286,7 +361,9 @@ def _default_local_reviewer(
     return dict(result.value)
 
 
-def _default_frontier_reviewer(prompt: str, schema: dict[str, Any]) -> Mapping[str, Any] | str:
+def _default_frontier_reviewer(
+    prompt: str, schema: dict[str, Any]
+) -> Mapping[str, Any] | str:
     return frontier_review.run_structured_review(
         prompt,
         schema,
@@ -331,13 +408,26 @@ def _load_json_artifact(path: Path) -> dict[str, Any] | None:
 
 
 def _decision_payload(decision: Mapping[str, Any]) -> dict[str, Any]:
-    """Persist only schema fields; derived validation fields are recomputed on read."""
+    """Persist schema fields and the production local-consensus audit."""
 
-    return {
+    payload = {
         "decision": decision.get("decision"),
         "tags": list(decision.get("tags") or []),
         "reason": decision.get("reason"),
     }
+    for key in ("decision_policy", "local_consensus"):
+        if isinstance(decision.get(key), Mapping):
+            payload[key] = dict(decision[key])
+    return payload
+
+
+def _tag_postimage(
+    page_text: str,
+    tags: list[str],
+    *,
+    updated_date: str,
+) -> str:
+    return patch_frontmatter(page_text, {"tags": tags, "updated": updated_date})
 
 
 def _write_local_proposal_artifact(
@@ -390,18 +480,36 @@ def _write_frontier_review_artifact(
     page_text: str,
     prompt: str,
     decision: Mapping[str, Any],
-) -> None:
-    _write_json_artifact(
-        _review_artifact_path(store, key),
+    authority: Mapping[str, Any],
+    page_id: str,
+    updated_date: str,
+) -> dict[str, Any]:
+    tags = list(decision.get("tags") or [])
+    postimage_sha256 = (
+        _page_hash(_tag_postimage(page_text, tags, updated_date=updated_date))
+        if decision.get("decision") == "approved" and valid_tag_set(tags)
+        else None
+    )
+    envelope = seal_semantic_artifact(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "lint_tag_frontier_verdict",
             "key": key,
+            "page_id": page_id,
             "page_sha256": _page_hash(page_text),
+            "postimage_sha256": postimage_sha256,
+            "updated_date": updated_date,
             "prompt_sha256": _page_hash(prompt),
             "verdict": _decision_payload(decision),
         },
+        authority=authority,
+        lane=TAG_REPAIR_DECISION_LANE,
     )
+    _write_json_artifact(
+        _review_artifact_path(store, key),
+        envelope,
+    )
+    return envelope
 
 
 def _load_frontier_review_artifact(
@@ -410,15 +518,19 @@ def _load_frontier_review_artifact(
     *,
     page_text: str,
     prompt: str,
+    authority: Mapping[str, Any],
+    page_id: str,
 ) -> dict[str, Any] | None:
     artifact = _load_json_artifact(_review_artifact_path(store, key))
     if (
         not isinstance(artifact, dict)
-        or artifact.get("schema_version") != 1
+        or artifact.get("schema_version") != 2
         or artifact.get("kind") != "lint_tag_frontier_verdict"
         or artifact.get("key") != key
+        or artifact.get("page_id") != page_id
         or artifact.get("page_sha256") != _page_hash(page_text)
         or artifact.get("prompt_sha256") != _page_hash(prompt)
+        or artifact.get("authority") != authority
     ):
         return None
     verdict = artifact.get("verdict")
@@ -429,7 +541,118 @@ def _load_frontier_review_artifact(
         return None
     if normalized.get("valid") is not True:
         return None
+    updated_date = artifact.get("updated_date")
+    postimage_sha256 = artifact.get("postimage_sha256")
+    if not isinstance(updated_date, str):
+        return None
+    if normalized.get("decision") == "approved":
+        expected_postimage_sha256 = _page_hash(
+            _tag_postimage(
+                page_text,
+                list(normalized.get("tags") or []),
+                updated_date=updated_date,
+            )
+        )
+        if postimage_sha256 != expected_postimage_sha256:
+            return None
+    elif postimage_sha256 is not None:
+        return None
+    if (
+        semantic_verdict_authority_error(
+            normalized,
+            authority,
+            lane=TAG_REPAIR_DECISION_LANE,
+        )
+        is not None
+    ):
+        return None
+    normalized["authority"] = dict(authority)
+    normalized["updated_date"] = updated_date
+    normalized["postimage_sha256"] = postimage_sha256
+    normalized["reused"] = True
     return normalized
+
+
+def _find_exact_applied_recovery(
+    store: ConvergenceStore,
+    *,
+    page_id: str,
+    page_text: str,
+    tags: list[str],
+) -> dict[str, Any] | None:
+    """Find a prior approved artifact whose exact postimage is already present.
+
+    This is bookkeeping recovery only: it never reinstalls an old semantic
+    verdict after its authority epoch has changed.
+    """
+
+    artifact_dir = store.state_file.parent / "lint-repair-frontier-reviews"
+    for path in sorted(artifact_dir.glob("*.json")):
+        artifact = _load_json_artifact(path)
+        if (
+            not isinstance(artifact, Mapping)
+            or artifact.get("schema_version") != 2
+            or artifact.get("kind") != "lint_tag_frontier_verdict"
+            or artifact.get("page_id") != page_id
+            or artifact.get("postimage_sha256") != _page_hash(page_text)
+        ):
+            continue
+        authority = artifact.get("authority")
+        if (
+            semantic_authority_shape_error(
+                authority,
+                lane=TAG_REPAIR_DECISION_LANE,
+            )
+            is not None
+        ):
+            continue
+        verdict = artifact.get("verdict")
+        if not isinstance(verdict, Mapping):
+            continue
+        normalized = normalize_tag_decision(verdict)
+        if (
+            normalized.get("decision") != "approved"
+            or normalized.get("valid") is not True
+            or normalized.get("tags") != tags
+            or semantic_verdict_authority_error(
+                normalized,
+                authority,
+                lane=TAG_REPAIR_DECISION_LANE,
+            )
+            is not None
+        ):
+            continue
+        return {
+            "artifact": str(path),
+            "review_key": artifact.get("key"),
+            "postimage_sha256": artifact.get("postimage_sha256"),
+        }
+    return None
+
+
+def _current_review_authority_error(
+    decision: Mapping[str, Any],
+    expected_authority: object,
+    *,
+    injected_reviewer: bool,
+) -> str | None:
+    current_authority, authority_error = current_semantic_authority(
+        TAG_REPAIR_DECISION_LANE,
+        injected_reviewer=injected_reviewer,
+    )
+    return (
+        authority_error
+        or compare_semantic_authority(
+            expected_authority,
+            current_authority,
+            lane=TAG_REPAIR_DECISION_LANE,
+        )
+        or semantic_verdict_authority_error(
+            decision,
+            expected_authority,
+            lane=TAG_REPAIR_DECISION_LANE,
+        )
+    )
 
 
 def apply_tags_cas(
@@ -437,12 +660,17 @@ def apply_tags_cas(
     *,
     expected_text: str,
     tags: list[str],
+    updated_date: str | None = None,
+    expected_postimage_sha256: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Patch tags only if the page still matches the reviewed preimage."""
 
     if not valid_tag_set(tags):
-        return {"status": "invalid", "reason": "candidate tags failed taxonomy validation"}
+        return {
+            "status": "invalid",
+            "reason": "candidate tags failed taxonomy validation",
+        }
     try:
         current = path.read_text(encoding="utf-8")
     except Exception as exc:
@@ -455,12 +683,21 @@ def apply_tags_cas(
             "actual_hash": _page_hash(current),
         }
     try:
-        patched = patch_frontmatter(
+        patched = _tag_postimage(
             current,
-            {"tags": tags, "updated": date.today().isoformat()},
+            tags,
+            updated_date=updated_date or date.today().isoformat(),
         )
     except Exception as exc:
         return {"status": "error", "reason": f"frontmatter_error: {exc}"}
+    if (
+        expected_postimage_sha256 is not None
+        and _page_hash(patched) != expected_postimage_sha256
+    ):
+        return {
+            "status": "invalid",
+            "reason": "reviewed postimage hash does not match candidate patch",
+        }
     if patched == current:
         return {"status": "unchanged", "path": str(path), "tags": tags}
     if dry_run:
@@ -471,7 +708,10 @@ def apply_tags_cas(
         # review therefore wins instead of being overwritten by stale tags.
         with wiki_mutation_lock():
             if path.read_text(encoding="utf-8") != expected_text:
-                return {"status": "cas_conflict", "reason": "page changed before atomic write"}
+                return {
+                    "status": "cas_conflict",
+                    "reason": "page changed before atomic write",
+                }
             atomic_write(path, patched)
             written = path.read_text(encoding="utf-8")
     except Exception as exc:
@@ -525,7 +765,9 @@ def _terminal_result(
     result: Mapping[str, Any],
     now: datetime | None,
 ) -> dict[str, Any]:
-    transition = store.complete(key, "applied", result={"action": action, **dict(result)}, now=now)
+    transition = store.complete(
+        key, "applied", result={"action": action, **dict(result)}, now=now
+    )
     return transition["item"]
 
 
@@ -539,6 +781,8 @@ def _apply_reviewed_tags(
     path: Path,
     expected_text: str,
     decision: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    injected_reviewer: bool,
     now: datetime | None,
 ) -> dict[str, Any]:
     allowed, budget_reason = budget.consume("mutation")
@@ -551,39 +795,85 @@ def _apply_reviewed_tags(
             failure_class="cycle_budget_exhausted",
             now=now,
         )
-        return {"status": "budget_exhausted", "state": failed["item"], "reason": budget_reason}
-    applied = apply_tags_cas(path, expected_text=expected_text, tags=list(decision["tags"]))
-    if applied["status"] in {"applied", "unchanged"}:
-        completed = store.complete(
-            key,
-            "applied",
-            owner=owner,
-            result={
-                "action": "tag_repair",
-                "review_stage": stage,
-                "decision": dict(decision),
+        return {
+            "status": "budget_exhausted",
+            "state": failed["item"],
+            "reason": budget_reason,
+        }
+    with decision_authority_lock():
+        authority_error = _current_review_authority_error(
+            decision,
+            authority,
+            injected_reviewer=injected_reviewer,
+        )
+        if authority_error is not None:
+            failed = store.fail_attempt(
+                key,
+                stage,
+                owner=owner,
+                error=authority_error,
+                failure_class="decision_authority_changed",
+                now=now,
+            )
+            return {
+                "status": "frontier_retry",
+                "state": failed["item"],
+                "reason": authority_error,
+            }
+        applied = apply_tags_cas(
+            path,
+            expected_text=expected_text,
+            tags=list(decision["tags"]),
+            updated_date=(
+                str(decision["updated_date"])
+                if isinstance(decision.get("updated_date"), str)
+                else None
+            ),
+            expected_postimage_sha256=(
+                str(decision["postimage_sha256"])
+                if isinstance(decision.get("postimage_sha256"), str)
+                else None
+            ),
+        )
+        if applied["status"] in {"applied", "unchanged"}:
+            completed = store.complete(
+                key,
+                "applied",
+                owner=owner,
+                result={
+                    "action": "tag_repair",
+                    "review_stage": stage,
+                    "decision": dict(decision),
+                    "apply": applied,
+                },
+                now=now,
+            )
+            return {
+                "status": applied["status"],
+                "state": completed["item"],
                 "apply": applied,
-            },
-            now=now,
-        )
-        return {"status": applied["status"], "state": completed["item"], "apply": applied}
-    if applied["status"] == "cas_conflict":
-        quarantined = store.quarantine(
+            }
+        if applied["status"] == "cas_conflict":
+            quarantined = store.quarantine(
+                key,
+                owner=owner,
+                reason="tag_repair_cas_conflict",
+                now=now,
+            )
+            return {
+                "status": "quarantined",
+                "state": quarantined["item"],
+                "apply": applied,
+            }
+        failed = store.fail_attempt(
             key,
+            stage,
             owner=owner,
-            reason="tag_repair_cas_conflict",
+            error=str(applied.get("reason") or applied.get("status")),
+            failure_class="tag_apply_error",
             now=now,
         )
-        return {"status": "quarantined", "state": quarantined["item"], "apply": applied}
-    failed = store.fail_attempt(
-        key,
-        stage,
-        owner=owner,
-        error=str(applied.get("reason") or applied.get("status")),
-        failure_class="tag_apply_error",
-        now=now,
-    )
-    return {"status": "apply_error", "state": failed["item"], "apply": applied}
+        return {"status": "apply_error", "state": failed["item"], "apply": applied}
 
 
 def _run_frontier_tag_review(
@@ -597,24 +887,40 @@ def _run_frontier_tag_review(
     reviewer: StructuredReviewer,
     now: datetime | None,
     local_proposal: Mapping[str, Any] | None = None,
+    injected_reviewer: bool = False,
 ) -> dict[str, Any]:
     prompt = build_frontier_tag_repair_prompt(
         row,
         page_text,
         local_proposal=local_proposal,
     )
-    artifact_decision = _load_frontier_review_artifact(
-        store,
-        key,
-        page_text=page_text,
-        prompt=prompt,
-    )
+    with decision_authority_lock():
+        authority, authority_error = current_semantic_authority(
+            TAG_REPAIR_DECISION_LANE,
+            injected_reviewer=injected_reviewer,
+        )
+        artifact_decision = (
+            _load_frontier_review_artifact(
+                store,
+                key,
+                page_text=page_text,
+                prompt=prompt,
+                authority=authority,
+                page_id=str(row.get("page") or ""),
+            )
+            if authority_error is None and isinstance(authority, Mapping)
+            else None
+        )
     # Replaying a durable verdict does not spend another model-call budget.
     # It still acquires the convergence lease before applying or terminalizing.
     claim = store.claim_attempt(
         key,
         "frontier",
-        budget=None if artifact_decision is not None else budget,
+        budget=(
+            None
+            if artifact_decision is not None or authority_error is not None
+            else budget
+        ),
         now=now,
     )
     if not claim["claimed"]:
@@ -625,12 +931,26 @@ def _run_frontier_tag_review(
             "frontier_lane": True,
         }
     owner = str(claim["owner"])
+    if authority_error is not None or not isinstance(authority, Mapping):
+        failed = store.fail_attempt(
+            key,
+            "frontier",
+            owner=owner,
+            error=authority_error or "decision authority unavailable",
+            failure_class="decision_authority_unavailable",
+            now=now,
+        )
+        return {
+            "status": "frontier_error",
+            "state": failed["item"],
+            "frontier_lane": True,
+        }
     if artifact_decision is not None:
         decision = artifact_decision
     else:
         try:
             raw = reviewer(prompt, TAG_REPAIR_SCHEMA)
-            decision = normalize_tag_decision(raw)
+            decision = _gate_tag_review_to_exact_proposal(raw, local_proposal)
         except Exception as exc:
             failed = store.fail_attempt(
                 key,
@@ -647,28 +967,49 @@ def _run_frontier_tag_review(
             }
 
         if decision["decision"] in {"approved", "rejected"} and decision["valid"]:
-            try:
-                _write_frontier_review_artifact(
-                    store,
-                    key,
-                    page_text=page_text,
-                    prompt=prompt,
-                    decision=decision,
+            with decision_authority_lock():
+                authority_error = _current_review_authority_error(
+                    decision,
+                    authority,
+                    injected_reviewer=injected_reviewer,
                 )
-            except Exception as exc:
-                failed = store.fail_attempt(
-                    key,
-                    "frontier",
-                    owner=owner,
-                    error=f"{exc.__class__.__name__}: {exc}",
-                    failure_class="review_artifact_write_error",
-                    now=now,
-                )
-                return {
-                    "status": "frontier_error",
-                    "state": failed["item"],
-                    "frontier_lane": True,
-                }
+                try:
+                    if authority_error is not None:
+                        raise RuntimeError(authority_error)
+                    updated_date = date.today().isoformat()
+                    artifact = _write_frontier_review_artifact(
+                        store,
+                        key,
+                        page_text=page_text,
+                        prompt=prompt,
+                        decision=decision,
+                        authority=authority,
+                        page_id=str(row.get("page") or ""),
+                        updated_date=updated_date,
+                    )
+                except Exception as exc:
+                    failure_class = (
+                        "decision_authority_changed"
+                        if authority_error is not None
+                        else "review_artifact_write_error"
+                    )
+                    failed = store.fail_attempt(
+                        key,
+                        "frontier",
+                        owner=owner,
+                        error=f"{exc.__class__.__name__}: {exc}",
+                        failure_class=failure_class,
+                        now=now,
+                    )
+                    return {
+                        "status": "frontier_error",
+                        "state": failed["item"],
+                        "frontier_lane": True,
+                    }
+            decision = dict(decision)
+            decision["authority"] = dict(authority)
+            decision["updated_date"] = artifact.get("updated_date")
+            decision["postimage_sha256"] = artifact.get("postimage_sha256")
 
     if decision["decision"] == "approved" and decision["valid"]:
         applied = _apply_reviewed_tags(
@@ -680,18 +1021,41 @@ def _run_frontier_tag_review(
             path=path,
             expected_text=page_text,
             decision=decision,
+            authority=authority,
+            injected_reviewer=injected_reviewer,
             now=now,
         )
         applied["frontier_lane"] = True
         return applied
     if decision["decision"] == "rejected" and decision["valid"]:
-        completed = store.complete(
-            key,
-            "rejected",
-            owner=owner,
-            result={"action": "tag_repair_rejected", "decision": decision},
-            now=now,
-        )
+        with decision_authority_lock():
+            authority_error = _current_review_authority_error(
+                decision,
+                authority,
+                injected_reviewer=injected_reviewer,
+            )
+            if authority_error is not None:
+                failed = store.fail_attempt(
+                    key,
+                    "frontier",
+                    owner=owner,
+                    error=authority_error,
+                    failure_class="decision_authority_changed",
+                    now=now,
+                )
+                return {
+                    "status": "frontier_retry",
+                    "state": failed["item"],
+                    "reason": authority_error,
+                    "frontier_lane": True,
+                }
+            completed = store.complete(
+                key,
+                "rejected",
+                owner=owner,
+                result={"action": "tag_repair_rejected", "decision": decision},
+                now=now,
+            )
         return {
             "status": "rejected",
             "state": completed["item"],
@@ -731,19 +1095,44 @@ def _process_tag_candidate(
     key: str,
     local_reviewer: StructuredReviewer,
     frontier_reviewer: StructuredReviewer,
+    injected_reviewer: bool,
     now: datetime | None,
 ) -> dict[str, Any]:
     meta, _body = parse_frontmatter(page_text)
     existing_tags = meta.get("tags")
     if valid_tag_set(existing_tags):
-        item = _terminal_result(
+        tags = list(existing_tags)
+        recovery = _find_exact_applied_recovery(
             store,
-            key,
-            action="already_resolved",
-            result={"tags": existing_tags},
-            now=now,
+            page_id=str(row.get("page") or ""),
+            page_text=page_text,
+            tags=tags,
         )
-        return {"status": "already_resolved", "state": item}
+        with decision_authority_lock():
+            item = _terminal_result(
+                store,
+                key,
+                action=(
+                    "exact_already_applied_recovery"
+                    if recovery is not None
+                    else "already_resolved_observed"
+                ),
+                result={
+                    "tags": tags,
+                    "semantic_effect": False,
+                    "recovery_only": recovery is not None,
+                    **({"review_recovery": recovery} if recovery is not None else {}),
+                },
+                now=now,
+            )
+        return {
+            "status": (
+                "exact_already_applied_recovery"
+                if recovery is not None
+                else "already_resolved"
+            ),
+            "state": item,
+        }
 
     current = store.get(key) or {}
     status = str(current.get("status") or "")
@@ -763,6 +1152,7 @@ def _process_tag_candidate(
             reviewer=frontier_reviewer,
             now=now,
             local_proposal=local_proposal,
+            injected_reviewer=injected_reviewer,
         )
 
     claim = store.claim_attempt(key, "local", budget=budget, now=now)
@@ -784,6 +1174,7 @@ def _process_tag_candidate(
                 reviewer=frontier_reviewer,
                 now=now,
                 local_proposal=local_proposal,
+                injected_reviewer=injected_reviewer,
             )
         return {"status": "deferred", "reason": claim["reason"], "state": next_item}
     owner = str(claim["owner"])
@@ -810,6 +1201,7 @@ def _process_tag_candidate(
                 key=key,
                 reviewer=frontier_reviewer,
                 now=now,
+                injected_reviewer=injected_reviewer,
             )
         return {"status": "local_error", "state": failed["item"]}
 
@@ -839,7 +1231,11 @@ def _process_tag_candidate(
         now=now,
     )
     if escalated["item"].get("status") == "quarantined":
-        return {"status": "quarantined", "state": escalated["item"], "decision": decision}
+        return {
+            "status": "quarantined",
+            "state": escalated["item"],
+            "decision": decision,
+        }
     return _run_frontier_tag_review(
         row=row,
         path=path,
@@ -854,6 +1250,7 @@ def _process_tag_candidate(
             if decision["decision"] == "approved" and decision["valid"]
             else None
         ),
+        injected_reviewer=injected_reviewer,
     )
 
 
@@ -879,6 +1276,7 @@ def run_lint_repair(
     cycle_budget = budget or CycleBudget()
     local = local_reviewer or _default_local_reviewer
     frontier = frontier_reviewer or _default_frontier_reviewer
+    injected_frontier_reviewer = frontier_reviewer is not None
     rows, invalid_rows = _read_jsonl(path)
     work_limit = max(0, max_items)
     work_items = 0
@@ -903,7 +1301,9 @@ def run_lint_repair(
         page_id = str(row.get("page") or "")
         page_path = wiki.find_page(page_id) if page_id else None
         try:
-            page_text = page_path.read_text(encoding="utf-8") if page_path is not None else None
+            page_text = (
+                page_path.read_text(encoding="utf-8") if page_path is not None else None
+            )
         except OSError:
             page_text = None
         source_id, input_data = _candidate_identity(row, page_text)
@@ -971,7 +1371,12 @@ def run_lint_repair(
             else:
                 action = "would_quarantine"
             results.append(
-                {"key": key, "page": page_id, "issue_type": issue_type, "status": action}
+                {
+                    "key": key,
+                    "page": page_id,
+                    "issue_type": issue_type,
+                    "status": action,
+                }
             )
             continue
 
@@ -991,12 +1396,19 @@ def run_lint_repair(
                 convergence,
                 key,
                 action="routed",
-                result={"target_lane": target, "issue_type": issue_type, "page": page_id},
+                result={
+                    "target_lane": target,
+                    "issue_type": issue_type,
+                    "page": page_id,
+                },
                 now=now,
             )
             counts["routed"] += 1
             result = {"status": "routed", "target_lane": target, "state": terminal}
-        elif lane == "heavy_model_batch" and issue_type in {"tag_missing", "tag_count_violation"}:
+        elif lane == "heavy_model_batch" and issue_type in {
+            "tag_missing",
+            "tag_count_violation",
+        }:
             if page_path is None or page_text is None:
                 transition = convergence.complete(
                     key,
@@ -1019,6 +1431,7 @@ def run_lint_repair(
                     key=key,
                     local_reviewer=local,
                     frontier_reviewer=frontier,
+                    injected_reviewer=injected_frontier_reviewer,
                     now=now,
                 )
         else:
@@ -1037,7 +1450,12 @@ def run_lint_repair(
             # monopolize the head of the append-only queue.
             work_items -= 1
             counts["processed"] -= 1
-        if status in {"applied", "unchanged", "already_resolved"}:
+        if status in {
+            "applied",
+            "unchanged",
+            "already_resolved",
+            "exact_already_applied_recovery",
+        }:
             counts["applied"] += 1
         if status == "rejected":
             counts["rejected"] += 1
@@ -1056,7 +1474,9 @@ def run_lint_repair(
             counts["quarantined"] += 1
         if state.get("status") == "human_required":
             counts["human_required"] += 1
-        results.append({"key": key, "page": page_id, "issue_type": issue_type, **result})
+        results.append(
+            {"key": key, "page": page_id, "issue_type": issue_type, **result}
+        )
 
     return {
         "status": "dry_run" if dry_run else "ok",

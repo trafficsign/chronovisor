@@ -81,7 +81,22 @@ Exceptional system repair
 - **Decision router**: asks `maxwell1500/ornith-35b:Q5_K_M` and `gpt-oss:20b`
   for independent routine votes. Matching votes finish immediately. Otherwise
   `gemma4:26b` is used as a tie-breaker and any two matching votes form the
-  quorum. No local failure or disagreement has a frontier fallback.
+  quorum. The complete structured-session token budget selects the smallest
+  executable configured context bucket; buckets below the lightest production
+  lane envelope are omitted. The current 2KB feedback policy uses 32K, 64K,
+  96K, and 112K. Measured footprints at that bucket then determine whether one,
+  two, or three runners may remain resident. For ingest repairs, each model
+  selects only one host-hashed `repair_option_id`; the router materializes its
+  trusted exact arrays and revalidates them before action signatures and quorum.
+  The host supplies no regex-derived semantic verdict: every structurally valid
+  tag option remains available and both local models judge the exact raw and
+  proposed page independently.
+  Every structured vote uses the sealed sampler policy (`temperature=0`,
+  `seed=0`, no thinking, JSON Schema output). Its policy hash is part of both
+  the effective-request fingerprint and adoption identity, so an unseeded or
+  differently seeded artifact cannot authorize production.
+  No local failure or disagreement has a frontier fallback. Frontier execution
+  exists only in the separately guarded system-code-repair plane.
 - **Content correction**: binds explicit user corrections to the preceding
   complete turn by exact prompt hash, host, session, and timestamped recall
   provenance. Stop only schedules its capture-only worker; the sleep/local

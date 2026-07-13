@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 from llm_wiki_mcp import search_eval
 from llm_wiki_mcp.convergence import CycleBudget
+from llm_wiki_mcp.decision_router import canonical_agreement_signature
+from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
 from llm_wiki_mcp.feedback_ledger import feedback_row_sha256
 from llm_wiki_mcp.reranker import RerankOutcome
 from llm_wiki_mcp.runtime_config import RerankerConfig
@@ -28,12 +31,139 @@ def write_jsonl(path, rows) -> None:
     )
 
 
+def authority(lane: str, marker: str = "a") -> dict:
+    schema_name = (
+        "search_label" if lane == search_eval.SEARCH_LABEL_LANE else "generic_decision"
+    )
+    router = {
+        "source": "adopted_artifact",
+        "artifact_sha256": marker * 64,
+        "error": None,
+        "models": ["primary", "challenger", "tie"],
+    }
+    return {
+        "source": "adopted_local_consensus",
+        "authority_version": 1,
+        "lane": lane,
+        "lane_contract_sha256": marker * 64,
+        "lane_contract_manifest_sha256": marker * 64,
+        "lane_contract_case_manifest_sha256": marker * 64,
+        "policy": {
+            "kind": "local_batch",
+            "schema_name": schema_name,
+            "mode": "enabled",
+            "error": None,
+        },
+        "router": router,
+    }
+
+
+def authority_review(lane: str, marker: str = "a", **values) -> dict:
+    expected = authority(lane, marker)
+    review = {
+        **values,
+        "decision_policy": {
+            **expected["policy"],
+            "router_policy": expected["router"],
+        },
+        "local_consensus": {
+            "status": "agreed",
+            "ok": True,
+            "agreement_sha256": marker * 64,
+            "failure_class": None,
+            "quarantine_reason": None,
+            "votes": [
+                {
+                    "model": "primary",
+                    "role": "primary",
+                    "valid": True,
+                    "signature_sha256": marker * 64,
+                    "invalid_reason": None,
+                },
+                {
+                    "model": "challenger",
+                    "role": "challenger",
+                    "valid": True,
+                    "signature_sha256": marker * 64,
+                    "invalid_reason": None,
+                },
+            ],
+        },
+    }
+    schema_name = expected["policy"]["schema_name"]
+    signature = canonical_agreement_signature(
+        review,
+        schema=production_decision_schemas()[schema_name],
+    )
+    agreement_sha256 = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    review["local_consensus"]["agreement_sha256"] = agreement_sha256
+    for vote in review["local_consensus"]["votes"]:
+        vote["signature_sha256"] = agreement_sha256
+    return review
+
+
+def label_artifact(row: dict, review: dict) -> dict:
+    injected, error = search_eval.decision_authority.current_semantic_authority(
+        search_eval.SEARCH_LABEL_LANE,
+        injected_reviewer=True,
+    )
+    assert error is None and injected is not None
+    return search_eval._seal_search_review(
+        kind="search_label_verdict",
+        lane=search_eval.SEARCH_LABEL_LANE,
+        evidence=search_eval._label_candidate_payload(row),
+        review=review,
+        authority=injected,
+    )
+
+
+def self_tune_policy(marker: str = "a", *, previous: dict | None = None) -> dict:
+    lane = search_eval.SEARCH_SELF_TUNE_LANE
+    previous_policy = {} if previous is None else previous
+    weights = dict(search_eval.DEFAULT_FUSION_WEIGHTS)
+    holdout: dict = {}
+    review = authority_review(
+        lane,
+        marker,
+        decision="approved",
+        summary="safe",
+    )
+    evidence = {
+        "baseline": {},
+        "best": {"weights": weights, "locked-test": holdout},
+        "guardrails": {},
+        "previous_sha256": search_eval._canonical_json_sha256(previous_policy),
+        "previous_summary": search_eval._self_tune_previous_summary(previous_policy),
+    }
+    artifact = search_eval._seal_search_review(
+        kind="search_self_tune_verdict",
+        lane=lane,
+        evidence=evidence,
+        review=review,
+        authority=authority(lane, marker),
+    )
+    policy = {
+        "version": 1,
+        "created_at": "2026-07-13T00:00:00",
+        "source": "search_eval.self_tune",
+        "weights": weights,
+        "holdout": holdout,
+        "previous": previous_policy,
+        "decision_artifact": artifact,
+    }
+    policy["policy_id"] = search_eval._self_tune_policy_id(policy)
+    return policy
+
+
 def test_language_and_kind_buckets() -> None:
     assert search_eval.language_bucket("LLM Wiki 検索") == "mixed"
     assert search_eval.language_bucket("検索エンジン") == "ja"
     assert search_eval.language_bucket("search engine") == "en"
     assert search_eval.query_kind("短い質問?") == "short"
-    assert search_eval.query_kind("この検索結果はどうして外れているのかを確認したい？") == "question"
+    assert (
+        search_eval.query_kind("この検索結果はどうして外れているのかを確認したい？")
+        == "question"
+    )
     assert search_eval.query_kind("uv run pytest -q") == "short"
 
 
@@ -87,7 +217,9 @@ def test_build_candidates_uses_feedback_labels(tmp_path) -> None:
     assert examples[2].kind == "page_ignored"
 
 
-def test_build_candidates_excludes_only_exactly_retracted_page_feedback(tmp_path) -> None:
+def test_build_candidates_excludes_only_exactly_retracted_page_feedback(
+    tmp_path,
+) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     log_file = tmp_path / "recall-log.jsonl"
     legacy = {
@@ -157,7 +289,12 @@ def test_evaluate_examples_reports_ranking_metrics(monkeypatch) -> None:
             "variant": variant,
             "results": results,
             "latency_ms": 7,
-            "channels": {"bm25": [p.page_id for p in results], "semantic": [], "graph": [], "usage_prior": []},
+            "channels": {
+                "bm25": [p.page_id for p in results],
+                "semantic": [],
+                "graph": [],
+                "usage_prior": [],
+            },
         }
 
     monkeypatch.setattr(search_eval, "run_variant", fake_run_variant)
@@ -207,11 +344,18 @@ def test_run_report_respects_limit(tmp_path, monkeypatch) -> None:
 
     def fake_evaluate(examples, variants, top_n):
         seen["count"] = len(examples)
-        return {"variants": {"bm25": {"metrics": {"examples": len(examples)}, "by_bucket": {}}}, "debug_rows": []}
+        return {
+            "variants": {
+                "bm25": {"metrics": {"examples": len(examples)}, "by_bucket": {}}
+            },
+            "debug_rows": [],
+        }
 
     monkeypatch.setattr(search_eval, "evaluate_examples", fake_evaluate)
 
-    payload = search_eval.run_report(golden_file=golden_file, variants=("bm25",), limit=2)
+    payload = search_eval.run_report(
+        golden_file=golden_file, variants=("bm25",), limit=2
+    )
 
     assert seen["count"] == 2
     assert payload["dataset"]["examples"] == 2
@@ -222,19 +366,36 @@ def test_run_report_can_filter_auto_golden_sources(tmp_path, monkeypatch) -> Non
     write_jsonl(
         golden_file,
         [
-            {"query": "manual", "expected_pages": ["a"], "source": "manual-curated-from-feedback", "reviewed": True},
-            {"query": "auto", "expected_pages": ["b"], "source": "recall_questions", "reviewed": True},
+            {
+                "query": "manual",
+                "expected_pages": ["a"],
+                "source": "manual-curated-from-feedback",
+                "reviewed": True,
+            },
+            {
+                "query": "auto",
+                "expected_pages": ["b"],
+                "source": "recall_questions",
+                "reviewed": True,
+            },
         ],
     )
     seen = {}
 
     def fake_evaluate(examples, variants, top_n):
         seen["queries"] = [example.query for example in examples]
-        return {"variants": {"bm25": {"metrics": {"examples": len(examples)}, "by_bucket": {}}}, "debug_rows": []}
+        return {
+            "variants": {
+                "bm25": {"metrics": {"examples": len(examples)}, "by_bucket": {}}
+            },
+            "debug_rows": [],
+        }
 
     monkeypatch.setattr(search_eval, "evaluate_examples", fake_evaluate)
 
-    payload = search_eval.run_report(golden_file=golden_file, variants=("bm25",), source_filter="manual")
+    payload = search_eval.run_report(
+        golden_file=golden_file, variants=("bm25",), source_filter="manual"
+    )
 
     assert seen["queries"] == ["manual"]
     assert payload["dataset"]["sources"] == {"manual-curated-from-feedback": 1}
@@ -276,7 +437,9 @@ def test_run_variant_can_apply_hybrid_reranker(monkeypatch) -> None:
 
     monkeypatch.setattr(search_eval, "get_bm25", lambda: FakeBM25())
     monkeypatch.setattr(search_eval, "semantic_search", lambda query, top_n=20: [])
-    monkeypatch.setattr(search_eval, "load_reranker_config", lambda: RerankerConfig(enabled=True))
+    monkeypatch.setattr(
+        search_eval, "load_reranker_config", lambda: RerankerConfig(enabled=True)
+    )
     monkeypatch.setattr(search_eval, "rerank_results", fake_rerank)
 
     payload = search_eval.run_variant("anything", "hybrid-rerank", top_n=2)
@@ -331,8 +494,16 @@ def test_unreviewed_rows_are_never_loaded_as_active_golden(tmp_path) -> None:
     write_jsonl(
         golden_file,
         [
-            {"query": "local proposal", "expected_pages": ["unsafe"], "reviewed": False},
-            {"query": "frontier approved", "expected_pages": ["safe"], "reviewed": True},
+            {
+                "query": "local proposal",
+                "expected_pages": ["unsafe"],
+                "reviewed": False,
+            },
+            {
+                "query": "frontier approved",
+                "expected_pages": ["safe"],
+                "reviewed": True,
+            },
         ],
     )
 
@@ -401,7 +572,10 @@ def test_build_label_queue_does_not_touch_golden(tmp_path) -> None:
         output_file=output_file,
     )
 
-    rows = [json.loads(line) for line in output_file.read_text(encoding="utf-8").splitlines()]
+    rows = [
+        json.loads(line)
+        for line in output_file.read_text(encoding="utf-8").splitlines()
+    ]
     assert payload["examples"] == 1
     assert rows[0]["queue_status"] == "pending_frontier_review"
     assert rows[0]["promoted_to_golden"] is False
@@ -452,8 +626,13 @@ def test_frontier_review_promotes_trusted_label_queue_rows(tmp_path) -> None:
         reviewer=reviewer,
     )
 
-    queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
-    golden_rows = [json.loads(line) for line in golden_file.read_text(encoding="utf-8").splitlines()]
+    queue_rows = [
+        json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()
+    ]
+    golden_rows = [
+        json.loads(line)
+        for line in golden_file.read_text(encoding="utf-8").splitlines()
+    ]
     assert payload["promoted"] == 1
     assert queue_rows[0]["queue_status"] == "frontier_approved"
     assert queue_rows[0]["promoted_to_golden"] is True
@@ -462,6 +641,8 @@ def test_frontier_review_promotes_trusted_label_queue_rows(tmp_path) -> None:
     assert golden_rows[0]["reviewer"] == "frontier:test"
     assert golden_rows[0]["review_confidence"] == 0.93
     assert golden_rows[0]["expected_pages"] == ["target"]
+    assert queue_rows[0]["decision_artifact"]["schema_version"] == 2
+    assert golden_rows[0]["decision_artifact"] == queue_rows[0]["decision_artifact"]
 
 
 def test_frontier_review_commits_golden_before_queue_ack(tmp_path, monkeypatch) -> None:
@@ -519,25 +700,28 @@ def test_frontier_review_recovers_either_cross_file_crash_window(tmp_path) -> No
         "reviewer": "frontier:test",
     }
 
-    # Legacy queue-first crash: acknowledgement exists but golden is absent.
+    queue_row = {
+        "query": "legacy",
+        "expected_pages": ["target"],
+        "negative_pages": [],
+        "stale_pages": [],
+        "queue_status": "frontier_approved",
+        "promoted_to_golden": True,
+        "frontier_review": trusted_review,
+    }
+    queue_row["decision_artifact"] = label_artifact(queue_row, trusted_review)
+
+    # Queue-first crash: a sealed acknowledgement exists but golden is absent.
     write_jsonl(
         queue_file,
-        [
-            {
-                "query": "legacy",
-                "expected_pages": ["target"],
-                "negative_pages": [],
-                "stale_pages": [],
-                "queue_status": "frontier_approved",
-                "promoted_to_golden": True,
-                "frontier_review": trusted_review,
-            }
-        ],
+        [queue_row],
     )
     result = search_eval.review_label_queue_with_frontier(
         queue_file=queue_file,
         golden_file=golden_file,
-        reviewer=lambda _row: (_ for _ in ()).throw(AssertionError("must not review again")),
+        reviewer=lambda _row: (_ for _ in ()).throw(
+            AssertionError("must not review again")
+        ),
     )
     assert result["recovered"] == 1
     assert json.loads(golden_file.read_text().splitlines()[0])["query"] == "legacy"
@@ -560,16 +744,143 @@ def test_frontier_review_recovers_either_cross_file_crash_window(tmp_path) -> No
     golden_row = json.loads(golden_file.read_text().splitlines()[0])
     golden_row["ref"] = "r1"
     write_jsonl(golden_file, [golden_row])
+    review_calls = 0
+
+    def reject_false_recovery(_row):
+        nonlocal review_calls
+        review_calls += 1
+        raise AssertionError("different candidate must be reviewed")
+
     result = search_eval.review_label_queue_with_frontier(
         queue_file=queue_file,
         golden_file=golden_file,
-        reviewer=lambda _row: (_ for _ in ()).throw(AssertionError("must not review again")),
+        reviewer=reject_false_recovery,
     )
     queue_row = json.loads(queue_file.read_text().splitlines()[0])
-    assert result["recovered"] == 1
-    assert result["attempted"] == 0
-    assert queue_row["queue_status"] == "frontier_approved"
-    assert queue_row["promoted_to_golden"] is True
+    assert result["recovered"] == 0
+    assert result["attempted"] == 1
+    assert review_calls == 1
+    assert queue_row["queue_status"] == "frontier_retry"
+    assert queue_row["promoted_to_golden"] is False
+    assert "authority_recovery" not in queue_row
+
+
+def test_frontier_review_denies_stale_sealed_queue_verdict(
+    tmp_path, monkeypatch
+) -> None:
+    queue_file = tmp_path / "queue.jsonl"
+    golden_file = tmp_path / "golden.jsonl"
+    lane = search_eval.SEARCH_LABEL_LANE
+    row = {
+        "query": "stale",
+        "expected_pages": ["target"],
+        "negative_pages": [],
+        "stale_pages": [],
+        "queue_status": "frontier_approved",
+        "promoted_to_golden": True,
+    }
+    review = authority_review(
+        lane,
+        "a",
+        decision="approved",
+        confidence=0.9,
+        expected_pages=["target"],
+        negative_pages=[],
+        stale_pages=[],
+        summary="old",
+        notes=None,
+    )
+    row["frontier_review"] = review
+    row["decision_artifact"] = search_eval._seal_search_review(
+        kind="search_label_verdict",
+        lane=lane,
+        evidence=search_eval._label_candidate_payload(row),
+        review=review,
+        authority=authority(lane, "a"),
+    )
+    write_jsonl(queue_file, [row])
+    monkeypatch.setattr(
+        search_eval.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority(lane, "b"), None),
+    )
+    calls = 0
+
+    def reviewer(_row):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("do not reuse stale verdict")
+
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=reviewer,
+    )
+
+    stored = search_eval.read_jsonl(queue_file)[0]
+    assert result["promoted"] == 0
+    assert calls == 1
+    assert not search_eval.read_jsonl(golden_file)
+    assert stored["queue_status"] == "frontier_retry"
+    assert "decision_artifact" not in stored
+
+
+def test_frontier_review_revalidates_authority_inside_final_effect_lock(
+    tmp_path, monkeypatch
+) -> None:
+    queue_file = tmp_path / "queue.jsonl"
+    golden_file = tmp_path / "golden.jsonl"
+    lane = search_eval.SEARCH_LABEL_LANE
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "race",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+    calls = 0
+
+    def current(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return (authority(lane, "a" if calls <= 2 else "b"), None)
+
+    monkeypatch.setattr(
+        search_eval.decision_authority,
+        "current_semantic_authority",
+        current,
+    )
+    review = authority_review(
+        lane,
+        "a",
+        decision="approved",
+        confidence=0.99,
+        expected_pages=["target"],
+        negative_pages=[],
+        stale_pages=[],
+        summary="safe",
+        notes=None,
+    )
+
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: review,
+    )
+
+    stored = search_eval.read_jsonl(queue_file)[0]
+    assert calls == 3
+    assert result["promoted"] == 0
+    assert result["status_counts"] == {"frontier_retry": 1}
+    assert not search_eval.read_jsonl(golden_file)
+    assert stored["queue_status"] == "frontier_retry"
+    assert "decision_artifact" not in stored
 
 
 def test_frontier_review_does_not_use_confidence_as_promotion_gate(tmp_path) -> None:
@@ -604,11 +915,90 @@ def test_frontier_review_does_not_use_confidence_as_promotion_gate(tmp_path) -> 
         },
     )
 
-    queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
+    queue_rows = [
+        json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()
+    ]
     assert payload["promoted"] == 1
     assert payload["status_counts"] == {"frontier_approved": 1}
     assert queue_rows[0]["queue_status"] == "frontier_approved"
     assert search_eval.read_jsonl(golden_file)[0]["expected_pages"] == ["target"]
+
+
+def test_frontier_review_cannot_approve_invented_label_ids(tmp_path) -> None:
+    queue_file = tmp_path / "queue.jsonl"
+    golden_file = tmp_path / "golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "query",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: {
+            "decision": "approved",
+            "confidence": 1.0,
+            "expected_pages": ["invented"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "invented replacement",
+            "notes": None,
+        },
+    )
+
+    stored = search_eval.read_jsonl(queue_file)[0]
+    assert result["promoted"] == 0
+    assert result["status_counts"] == {"frontier_retry": 1}
+    assert not search_eval.read_jsonl(golden_file)
+    assert stored["queue_status"] == "frontier_retry"
+    assert "decision_artifact" not in stored
+
+
+def test_frontier_review_requires_exact_unmodified_label_arrays(tmp_path) -> None:
+    queue_file = tmp_path / "queue.jsonl"
+    golden_file = tmp_path / "golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "query",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: {
+            "decision": "approved",
+            "confidence": 1.0,
+            "expected_pages": ["target", "target"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "duplicated candidate",
+            "notes": None,
+        },
+    )
+
+    stored = search_eval.read_jsonl(queue_file)[0]
+    assert result["promoted"] == 0
+    assert not search_eval.read_jsonl(golden_file)
+    assert stored["queue_status"] == "frontier_retry"
+    assert stored["decision_artifact"]["review"]["decision"] == "needs_retry"
 
 
 def test_same_label_action_is_order_independent_across_confidence_metadata() -> None:
@@ -692,7 +1082,9 @@ def test_frontier_review_votes_require_same_label_set(tmp_path) -> None:
         reviewer=lambda _row: next(responses),
     )
 
-    queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
+    queue_rows = [
+        json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()
+    ]
     assert payload["promoted"] == 0
     assert queue_rows[0]["queue_status"] == "frontier_uncertain"
     assert queue_rows[0]["frontier_review"]["reviewer"] == "frontier_consensus"
@@ -735,13 +1127,15 @@ def test_frontier_tool_unavailable_retries_without_human_queue(tmp_path) -> None
         },
     )
 
-    queue_rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
+    queue_rows = [
+        json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()
+    ]
     assert payload["promoted"] == 0
     assert queue_rows[0]["queue_status"] == "frontier_retry"
     assert queue_rows[0]["frontier_review"]["human_required"] is False
 
 
-def test_legacy_tool_unavailable_human_label_is_quarantined_without_human_wait(
+def test_legacy_unsealed_human_label_is_rereviewed_before_quarantine(
     tmp_path,
 ) -> None:
     queue_file = tmp_path / "label-queue.jsonl"
@@ -776,9 +1170,10 @@ def test_legacy_tool_unavailable_human_label_is_quarantined_without_human_wait(
     )
 
     queue_row = json.loads(queue_file.read_text(encoding="utf-8"))
-    assert payload["attempted"] == 0
+    assert payload["attempted"] == 1
     assert queue_row["queue_status"] == "frontier_quarantined"
     assert "human_boundary_reclassified_at" in queue_row
+    assert queue_row["decision_artifact"]["schema_version"] == 2
 
 
 def test_cli_frontier_review_labels_json(tmp_path, capsys, monkeypatch) -> None:
@@ -845,7 +1240,10 @@ def test_failure_index_records_missed_expected_pages(tmp_path) -> None:
 
     payload = search_eval.write_failure_index(debug_rows, output_file)
 
-    rows = [json.loads(line) for line in output_file.read_text(encoding="utf-8").splitlines()]
+    rows = [
+        json.loads(line)
+        for line in output_file.read_text(encoding="utf-8").splitlines()
+    ]
     assert payload["failures"] == 1
     assert rows[0]["failed_stage"] == "fusion"
     assert rows[0]["reason_code"] == "fusion_missed"
@@ -901,13 +1299,20 @@ def test_self_tune_shadow_blocks_when_locked_regresses(tmp_path, monkeypatch) ->
     assert history_file.exists()
 
 
-def test_self_tune_runtime_budget_defers_without_history_mutation(tmp_path, monkeypatch) -> None:
+def test_self_tune_runtime_budget_defers_without_history_mutation(
+    tmp_path, monkeypatch
+) -> None:
     golden_file = tmp_path / "golden.jsonl"
     history_file = tmp_path / "self-tune.jsonl"
     write_jsonl(
         golden_file,
         [
-            {"query": "dev", "expected_pages": ["target"], "split": "dev", "reviewed": True},
+            {
+                "query": "dev",
+                "expected_pages": ["target"],
+                "split": "dev",
+                "reviewed": True,
+            },
             {
                 "query": "locked",
                 "expected_pages": ["target"],
@@ -919,7 +1324,9 @@ def test_self_tune_runtime_budget_defers_without_history_mutation(tmp_path, monk
     monkeypatch.setattr(
         search_eval,
         "_rows_for_weight_eval",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("budget must stop evaluation")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("budget must stop evaluation")
+        ),
     )
 
     result = search_eval.self_tune(
@@ -932,26 +1339,45 @@ def test_self_tune_runtime_budget_defers_without_history_mutation(tmp_path, monk
     assert not history_file.exists()
 
 
-def test_build_label_queue_preserves_terminal_decisions(tmp_path) -> None:
+def test_build_label_queue_reopens_unsealed_terminal_decisions(tmp_path) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     log_file = tmp_path / "log.jsonl"
     queue_file = tmp_path / "queue.jsonl"
     write_jsonl(
         feedback_file,
-        [{"kind": "missed_candidate", "prompt": "query", "expected_pages": ["target"], "ref": "r1"}],
+        [
+            {
+                "kind": "missed_candidate",
+                "prompt": "query",
+                "expected_pages": ["target"],
+                "ref": "r1",
+            }
+        ],
     )
     write_jsonl(log_file, [])
-    search_eval.build_label_queue(feedback_file=feedback_file, log_file=log_file, output_file=queue_file)
+    search_eval.build_label_queue(
+        feedback_file=feedback_file, log_file=log_file, output_file=queue_file
+    )
     row = json.loads(queue_file.read_text().splitlines()[0])
-    row.update({"queue_status": "frontier_rejected", "frontier_attempts": 1, "review_note": "wrong"})
+    row.update(
+        {
+            "queue_status": "frontier_rejected",
+            "frontier_attempts": 1,
+            "review_note": "wrong",
+        }
+    )
     write_jsonl(queue_file, [row])
 
-    search_eval.build_label_queue(feedback_file=feedback_file, log_file=log_file, output_file=queue_file)
+    search_eval.build_label_queue(
+        feedback_file=feedback_file, log_file=log_file, output_file=queue_file
+    )
 
     refreshed = json.loads(queue_file.read_text().splitlines()[0])
-    assert refreshed["queue_status"] == "frontier_rejected"
+    assert refreshed["queue_status"] == "frontier_retry"
     assert refreshed["frontier_attempts"] == 1
     assert refreshed["review_note"] == "wrong"
+    assert "decision_artifact" not in refreshed
+    assert "decision_authority_error" in refreshed
 
 
 def test_frontier_label_retry_quarantines_after_bound(tmp_path) -> None:
@@ -959,7 +1385,14 @@ def test_frontier_label_retry_quarantines_after_bound(tmp_path) -> None:
     golden_file = tmp_path / "golden.jsonl"
     write_jsonl(
         queue_file,
-        [{"query": "q", "expected_pages": ["p"], "queue_status": "frontier_retry", "frontier_attempts": 2}],
+        [
+            {
+                "query": "q",
+                "expected_pages": ["p"],
+                "queue_status": "frontier_retry",
+                "frontier_attempts": 2,
+            }
+        ],
     )
 
     result = search_eval.review_label_queue_with_frontier(
@@ -983,7 +1416,9 @@ def test_frontier_label_retry_quarantines_after_bound(tmp_path) -> None:
     assert row["queue_status"] == "frontier_quarantined"
 
 
-def test_frontier_label_quarantine_reopens_after_cooldown(tmp_path, monkeypatch) -> None:
+def test_frontier_label_quarantine_reopens_after_cooldown(
+    tmp_path, monkeypatch
+) -> None:
     queue_file = tmp_path / "queue.jsonl"
     golden_file = tmp_path / "golden.jsonl"
     write_jsonl(
@@ -1028,8 +1463,18 @@ def test_self_tune_applies_frontier_approved_policy(tmp_path, monkeypatch) -> No
     write_jsonl(
         golden_file,
         [
-            {"query": "dev", "expected_pages": ["target"], "split": "dev", "reviewed": True},
-            {"query": "locked", "expected_pages": ["target"], "split": "locked-test", "reviewed": True},
+            {
+                "query": "dev",
+                "expected_pages": ["target"],
+                "split": "dev",
+                "reviewed": True,
+            },
+            {
+                "query": "locked",
+                "expected_pages": ["target"],
+                "split": "locked-test",
+                "reviewed": True,
+            },
         ],
     )
 
@@ -1062,7 +1507,13 @@ def test_self_tune_applies_frontier_approved_policy(tmp_path, monkeypatch) -> No
 
     assert result["status"] == "applied"
     assert result["applied"] is True
-    assert json.loads(policy_file.read_text())["weights"]["semantic"] == 0.7
+    active_policy = json.loads(policy_file.read_text())
+    assert active_policy["weights"]["semantic"] == 0.7
+    assert active_policy["decision_artifact"]["schema_version"] == 2
+    assert (
+        active_policy["decision_artifact"]["authority"]["source"]
+        == "injected_reviewer_boundary"
+    )
     assert apply_budget.snapshot()["used"]["mutation"] == 1
 
     deferred_policy = tmp_path / "deferred-policy.json"
@@ -1102,3 +1553,248 @@ def test_self_tune_applies_frontier_approved_policy(tmp_path, monkeypatch) -> No
     assert rejected["status"] == "frontier_rejected"
     assert rejected_policy.read_bytes() == before
     assert rejected_budget.snapshot()["used"]["mutation"] == 0
+
+
+def test_self_tune_revalidates_authority_before_policy_and_terminal_history(
+    tmp_path, monkeypatch
+) -> None:
+    golden_file = tmp_path / "golden.jsonl"
+    history_file = tmp_path / "history.jsonl"
+    policy_file = tmp_path / "policy.json"
+    write_jsonl(
+        golden_file,
+        [
+            {
+                "query": "dev",
+                "expected_pages": ["target"],
+                "split": "dev",
+                "reviewed": True,
+            },
+            {
+                "query": "locked",
+                "expected_pages": ["target"],
+                "split": "locked-test",
+                "reviewed": True,
+            },
+        ],
+    )
+
+    def fake_rows(examples, weights):
+        return [
+            {
+                "expected_pages": list(example.expected_pages),
+                "negative_pages": [],
+                "stale_pages": [],
+                "result_pages": ["target"]
+                if example.query == "locked" or float(weights["semantic"]) >= 0.7
+                else ["other"],
+                "latency_ms": 1,
+            }
+            for example in examples
+        ]
+
+    monkeypatch.setattr(search_eval, "_rows_for_weight_eval", fake_rows)
+    lane = search_eval.SEARCH_SELF_TUNE_LANE
+    calls = 0
+
+    def current(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return (authority(lane, "a" if calls <= 2 else "b"), None)
+
+    monkeypatch.setattr(
+        search_eval.decision_authority,
+        "current_semantic_authority",
+        current,
+    )
+    review = authority_review(lane, "a", decision="approved", summary="safe")
+
+    result = search_eval.self_tune(
+        golden_file=golden_file,
+        history_file=history_file,
+        policy_file=policy_file,
+        apply=True,
+        frontier_mode="auto",
+        frontier_reviewer=lambda _record: review,
+    )
+
+    assert calls == 3
+    assert result["status"] == "frontier_retry"
+    assert result["applied"] is False
+    assert not policy_file.exists()
+    assert not history_file.exists()
+
+
+def test_self_tune_exact_postimage_recovery_is_audit_only(tmp_path) -> None:
+    policy_file = tmp_path / "policy.json"
+    history_file = tmp_path / "history.jsonl"
+    golden_file = tmp_path / "golden.jsonl"
+    policy = self_tune_policy()
+    policy_file.write_text(json.dumps(policy), encoding="utf-8")
+    before = policy_file.read_bytes()
+
+    result = search_eval.self_tune(
+        golden_file=golden_file,
+        history_file=history_file,
+        policy_file=policy_file,
+    )
+
+    assert result["status"] == "applied_recovered"
+    assert result["authority_recovery"]["kind"] == "already_applied_exact_postimage"
+    assert policy_file.read_bytes() == before
+    assert search_eval.read_jsonl(history_file)[0]["status"] == "applied_recovered"
+    assert (
+        search_eval._recover_applied_self_tune_receipt(
+            policy_file=policy_file,
+            history_file=history_file,
+        )
+        is None
+    )
+    assert len(search_eval.read_jsonl(history_file)) == 1
+
+
+def test_self_tune_recovery_rejects_spliced_policy_and_stale_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    policy_file = tmp_path / "policy.json"
+    history_file = tmp_path / "history.jsonl"
+    policy = self_tune_policy()
+    policy["weights"] = {**policy["weights"], "semantic": 0.99}
+    # Recomputing the public content id cannot make mismatched reviewed
+    # evidence authorize a different policy body.
+    policy["policy_id"] = search_eval._self_tune_policy_id(policy)
+    policy_file.write_text(json.dumps(policy), encoding="utf-8")
+
+    assert (
+        search_eval._recover_applied_self_tune_receipt(
+            policy_file=policy_file,
+            history_file=history_file,
+        )
+        is None
+    )
+    assert not history_file.exists()
+    lane = search_eval.SEARCH_SELF_TUNE_LANE
+    monkeypatch.setattr(
+        search_eval.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority(lane, "a"), None),
+    )
+    blocked = search_eval.rollback_search_policy(
+        policy_file=policy_file,
+        history_file=history_file,
+        expected_policy_id=policy["policy_id"],
+        injected_reviewer=True,
+    )
+    assert blocked["status"] == "rollback_blocked"
+
+    current = self_tune_policy()
+    policy_file.write_text(json.dumps(current), encoding="utf-8")
+    write_jsonl(
+        history_file,
+        [
+            {
+                "ts": "2026-07-14T00:00:00",
+                "status": "applied",
+                "policy_id": "newer-different-policy",
+            }
+        ],
+    )
+    assert (
+        search_eval._recover_applied_self_tune_receipt(
+            policy_file=policy_file,
+            history_file=history_file,
+        )
+        is None
+    )
+    assert len(search_eval.read_jsonl(history_file)) == 1
+
+
+def test_self_tune_recovery_receipt_uses_policy_and_history_cas(
+    tmp_path, monkeypatch
+) -> None:
+    policy_file = tmp_path / "policy.json"
+    history_file = tmp_path / "history.jsonl"
+    policy = self_tune_policy()
+    policy_file.write_text(json.dumps(policy), encoding="utf-8")
+    original_read_jsonl = search_eval.read_jsonl
+
+    def concurrent_history_update(path):
+        rows = original_read_jsonl(path)
+        if path == history_file and not rows:
+            write_jsonl(
+                history_file,
+                [
+                    {
+                        "ts": "2026-07-14T00:00:00",
+                        "status": "applied",
+                        "policy_id": "concurrent-policy",
+                    }
+                ],
+            )
+        return rows
+
+    monkeypatch.setattr(search_eval, "read_jsonl", concurrent_history_update)
+
+    assert (
+        search_eval._recover_applied_self_tune_receipt(
+            policy_file=policy_file,
+            history_file=history_file,
+        )
+        is None
+    )
+    assert original_read_jsonl(history_file) == [
+        {
+            "ts": "2026-07-14T00:00:00",
+            "status": "applied",
+            "policy_id": "concurrent-policy",
+        }
+    ]
+
+
+def test_search_policy_rollback_requires_current_sealed_authority(
+    tmp_path, monkeypatch
+) -> None:
+    policy_file = tmp_path / "policy.json"
+    history_file = tmp_path / "history.jsonl"
+    previous = {
+        "version": 1,
+        "source": "search_eval.self_tune",
+        "holdout": {},
+        "weights": {**search_eval.DEFAULT_FUSION_WEIGHTS, "semantic": 0.5},
+    }
+    policy = self_tune_policy(previous=previous)
+    policy_file.write_text(json.dumps(policy), encoding="utf-8")
+    lane = search_eval.SEARCH_SELF_TUNE_LANE
+    monkeypatch.setattr(
+        search_eval.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority(lane, "b"), None),
+    )
+    before = policy_file.read_bytes()
+
+    blocked = search_eval.rollback_search_policy(
+        policy_file=policy_file,
+        history_file=history_file,
+        expected_policy_id=policy["policy_id"],
+        injected_reviewer=True,
+    )
+
+    assert blocked["status"] == "rollback_blocked"
+    assert policy_file.read_bytes() == before
+    assert not history_file.exists()
+
+    monkeypatch.setattr(
+        search_eval.decision_authority,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority(lane, "a"), None),
+    )
+    applied = search_eval.rollback_search_policy(
+        policy_file=policy_file,
+        history_file=history_file,
+        expected_policy_id=policy["policy_id"],
+        injected_reviewer=True,
+    )
+
+    assert applied["status"] == "rolled_back"
+    assert json.loads(policy_file.read_text()) == previous
+    assert search_eval.read_jsonl(history_file)[0]["status"] == "rolled_back"

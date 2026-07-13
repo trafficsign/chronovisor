@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 from pathlib import Path
 
 from llm_wiki_mcp import entities
 from llm_wiki_mcp.entities import extract_entities, patch_entities_frontmatter
 
 
-def _frontier_decision(decision: str, summary: str = "reviewed exact entity proposal") -> dict:
+def _frontier_decision(
+    decision: str, summary: str = "reviewed exact entity proposal"
+) -> dict:
     return {
         "decision": decision,
         "summary": summary,
@@ -40,6 +43,99 @@ def test_patch_entities_frontmatter_merges_existing() -> None:
     out = patch_entities_frontmatter(text, registry=registry)
 
     assert "entities: [qwen, ollama]" in out
+
+
+def test_entity_proposal_validator_proves_alias_backed_frontmatter_only_edit() -> None:
+    registry = {"qwen": ["Qwen"]}
+    original = _entity_page()
+    updated = entities.patch_entities_frontmatter(original, registry=registry)
+    proposal = entities.build_semantic_mutation_proposal(
+        page_id="memory",
+        operation="backfill_entities_frontmatter",
+        expected_text=original,
+        updated_text=updated,
+        details=entities._review_evidence(original, updated, registry=registry),
+    )
+
+    assert (
+        entities.validate_entity_backfill_proposal(
+            proposal,
+            expected_text=original,
+            updated_text=updated,
+            registry=registry,
+        )
+        is True
+    )
+
+    corrupted = json.loads(json.dumps(proposal))
+    corrupted["details"]["alias_evidence"][0]["matched_aliases"] = []
+    assert entities.validate_entity_backfill_proposal(corrupted) is False
+
+
+def test_entity_proposal_validator_rejects_replacement_disguised_as_backfill() -> None:
+    registry = {
+        "qwen": ["Qwen"],
+        "ollama": ["Ollama"],
+        "codex": ["Codex"],
+    }
+    original = (
+        "---\n"
+        "title: Qwen and Codex Notes\n"
+        "entities: [qwen, ollama]\n"
+        "---\n"
+        "Ollama and Codex notes.\n"
+    )
+    tampered = original.replace(
+        "entities: [qwen, ollama]",
+        "entities: [qwen, codex]",
+    )
+    proposal = entities.build_semantic_mutation_proposal(
+        page_id="memory",
+        operation="backfill_entities_frontmatter",
+        expected_text=original,
+        updated_text=tampered,
+        details=entities._review_evidence(original, tampered, registry=registry),
+    )
+
+    assert (
+        entities.validate_entity_backfill_proposal(
+            proposal,
+            expected_text=original,
+            updated_text=tampered,
+            registry=registry,
+        )
+        is False
+    )
+
+
+def test_invalid_entity_proposal_never_reaches_reviewer_or_page(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page = tmp_path / "memory.md"
+    original = _entity_page()
+    page.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(entities, "all_pages", lambda: [page])
+    monkeypatch.setattr(entities, "load_registry", lambda: {"qwen": ["Qwen"]})
+    real_builder = entities.build_semantic_mutation_proposal
+
+    def corrupt(**kwargs):
+        proposal = real_builder(**kwargs)
+        proposal["details"]["alias_evidence"][0]["matched_aliases"] = []
+        return proposal
+
+    monkeypatch.setattr(entities, "build_semantic_mutation_proposal", corrupt)
+    result = entities.backfill_entities(
+        reviewer=lambda _prompt, _schema: (_ for _ in ()).throw(
+            AssertionError("invalid deterministic proposal must not reach a model")
+        ),
+        artifact_dir=tmp_path / "reviews",
+    )
+
+    assert result["invalid_proposals"] == 1
+    assert result["frontier_calls"] == 0
+    assert result["updated"] == 0
+    assert page.read_text(encoding="utf-8") == original
 
 
 def test_backfill_preserves_correction_that_lands_before_cas(
@@ -89,6 +185,40 @@ def test_backfill_applies_only_after_frontier_approval(
 
     assert result["updated"] == 1
     assert result["frontier_calls"] == 1
+    assert "entities: [qwen]" in page.read_text(encoding="utf-8")
+
+
+def test_large_entity_backfill_uses_exact_changed_spans_packet(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page = tmp_path / "memory.md"
+    original = _entity_page(
+        title="Qwen Notes",
+        body="".join(f"context line {index:05d}\n" for index in range(6_000)),
+    )
+    page.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(entities, "all_pages", lambda: [page])
+    monkeypatch.setattr(entities, "load_registry", lambda: {"qwen": ["Qwen"]})
+    reviews = tmp_path / "reviews"
+    prompts: list[str] = []
+
+    result = entities.backfill_entities(
+        reviewer=lambda prompt, _schema: (
+            prompts.append(prompt) or _frontier_decision("approved")
+        ),
+        artifact_dir=reviews,
+    )
+
+    proposal = json.loads(
+        next((reviews / "proposals").glob("*.json")).read_text(encoding="utf-8")
+    )["proposal"]
+    assert proposal["review_packet"]["mode"] == "changed_spans"
+    assert proposal["review_packet"]["coverage"]["all_changed_spans_rendered"] is True
+    assert proposal["unified_diff"] is None
+    assert '"kind": "entity_alias_semantic_evidence"' in prompts[0]
+    assert result["invalid_proposals"] == 0
+    assert result["updated"] == 1
     assert "entities: [qwen]" in page.read_text(encoding="utf-8")
 
 
@@ -154,7 +284,9 @@ def test_durable_approval_is_reused_after_pre_apply_failure(
     monkeypatch.setattr(entities, "all_pages", lambda: [page])
     monkeypatch.setattr(entities, "load_registry", lambda: {"qwen": ["Qwen"]})
     real_apply = entities._apply_entities_cas
-    monkeypatch.setattr(entities, "_apply_entities_cas", lambda *_args, **_kwargs: "write_error")
+    monkeypatch.setattr(
+        entities, "_apply_entities_cas", lambda *_args, **_kwargs: "write_error"
+    )
 
     first = entities.backfill_entities(
         reviewer=lambda _prompt, _schema: _frontier_decision("approved"),
@@ -247,6 +379,8 @@ def test_both_cli_entrypoints_forward_frontier_budget(monkeypatch, capsys) -> No
     monkeypatch.setattr(entities, "backfill_entities", fake_backfill)
 
     assert entities.main(["backfill", "--max-frontier-calls", "2", "--json"]) == 0
-    assert cli.main(["entities", "backfill", "--max-frontier-calls", "3", "--json"]) == 0
+    assert (
+        cli.main(["entities", "backfill", "--max-frontier-calls", "3", "--json"]) == 0
+    )
     assert seen == [2, 3]
     capsys.readouterr()

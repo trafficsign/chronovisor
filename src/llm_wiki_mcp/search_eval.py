@@ -15,17 +15,19 @@ import os
 import statistics
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
 from llm_wiki_mcp.convergence import is_human_required_result
+from llm_wiki_mcp import decision_authority
 from llm_wiki_mcp.feedback_ledger import active_feedback_rows
+from llm_wiki_mcp.page_mutation import decision_authority_lock
 from llm_wiki_mcp.search import (
     ACTIVE_SEARCH_POLICY_FILE,
     DEFAULT_FUSION_WEIGHTS,
-    ScoredPage,
     apply_filters,
     fuse_results,
     get_bm25,
@@ -111,6 +113,11 @@ FRONTIER_TERMINAL_STATUSES = {
     "human_required",
 }
 DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
+SEARCH_LABEL_LANE = "search_label"
+SEARCH_LABEL_PROMPT_POLICY_VERSION = 2
+SEARCH_SELF_TUNE_LANE = "search_self_tune"
+SEARCH_REVIEW_ARTIFACT_SCHEMA_VERSION = 2
+ALREADY_APPLIED_RECOVERY = "already_applied_exact_postimage"
 
 FrontierLabelReviewer = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -188,7 +195,9 @@ def _atomic_write_text(path: Path, payload: str) -> None:
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    payload = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+    payload = "".join(
+        json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows
+    )
     _atomic_write_text(path, payload)
 
 
@@ -201,11 +210,154 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
 def _str_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
-    return tuple(dict.fromkeys(item for item in value if isinstance(item, str) and item))
+    return tuple(
+        dict.fromkeys(item for item in value if isinstance(item, str) and item)
+    )
 
 
 def _str_list(value: Any) -> list[str]:
     return list(_str_tuple(value))
+
+
+def _canonical_json_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _label_candidate_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the stable label claim authorized by one semantic verdict."""
+
+    return {
+        "query": str(row.get("query") or ""),
+        "expected_pages": _str_list(row.get("expected_pages")),
+        "negative_pages": _str_list(row.get("negative_pages")),
+        "stale_pages": _str_list(row.get("stale_pages")),
+        "split": str(row.get("split") or ""),
+        "language": str(row.get("language") or ""),
+        "kind": str(row.get("kind") or ""),
+        "source": str(row.get("source") or ""),
+        "ref": str(row.get("ref") or ""),
+        "ts": str(row.get("ts") or ""),
+    }
+
+
+def _label_review_claim_error(
+    review: object,
+    evidence: object,
+) -> str | None:
+    """Bind an approved label action to the exact candidate buckets."""
+
+    if not isinstance(review, Mapping) or not isinstance(evidence, Mapping):
+        return "search label verdict evidence is missing"
+    if review.get("decision") != "approved":
+        return None
+    fields = ("expected_pages", "negative_pages", "stale_pages")
+    reviewed = tuple(review.get(field) for field in fields)
+    candidate = tuple(evidence.get(field) for field in fields)
+    if any(
+        not isinstance(value, list)
+        or any(not isinstance(item, str) or not item for item in value)
+        or len(value) != len(set(value))
+        for value in (*reviewed, *candidate)
+    ):
+        return "approved search label verdict arrays are invalid"
+    if reviewed != candidate:
+        return "approved search label verdict changed candidate buckets"
+    if not any(bool(value) for value in candidate):
+        return "approved search label verdict has no candidate page"
+    return None
+
+
+def _seal_search_review(
+    *,
+    kind: str,
+    lane: str,
+    evidence: Mapping[str, Any],
+    review: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence_payload = dict(evidence)
+    return decision_authority.seal_semantic_artifact(
+        {
+            "schema_version": SEARCH_REVIEW_ARTIFACT_SCHEMA_VERSION,
+            "kind": kind,
+            "evidence": evidence_payload,
+            "evidence_sha256": _canonical_json_sha256(evidence_payload),
+            "review": dict(review),
+        },
+        authority=authority,
+        lane=lane,
+    )
+
+
+def _search_review_artifact_error(
+    artifact: object,
+    *,
+    kind: str,
+    lane: str,
+    evidence: Mapping[str, Any] | None = None,
+    current_authority: object | None = None,
+) -> str | None:
+    if not isinstance(artifact, Mapping):
+        return "semantic review artifact is missing"
+    if (
+        artifact.get("schema_version") != SEARCH_REVIEW_ARTIFACT_SCHEMA_VERSION
+        or artifact.get("kind") != kind
+    ):
+        return "semantic review artifact identity is invalid"
+    stored_evidence = artifact.get("evidence")
+    if (
+        not isinstance(stored_evidence, Mapping)
+        or artifact.get("evidence_sha256")
+        != _canonical_json_sha256(dict(stored_evidence))
+        or (evidence is not None and dict(stored_evidence) != dict(evidence))
+    ):
+        return "semantic review artifact evidence is invalid"
+    review = artifact.get("review")
+    authority = artifact.get("authority")
+    error = decision_authority.semantic_verdict_authority_error(
+        review,
+        authority,
+        lane=lane,
+    )
+    if error is not None:
+        return error
+    if current_authority is not None:
+        return decision_authority.compare_semantic_authority(
+            authority,
+            current_authority,
+            lane=lane,
+        )
+    return None
+
+
+def _label_review_artifact_error(
+    artifact: object,
+    *,
+    evidence: Mapping[str, Any] | None = None,
+    current_authority: object | None = None,
+) -> str | None:
+    error = _search_review_artifact_error(
+        artifact,
+        kind="search_label_verdict",
+        lane=SEARCH_LABEL_LANE,
+        evidence=evidence,
+        current_authority=current_authority,
+    )
+    if error is not None:
+        return error
+    assert isinstance(artifact, Mapping)
+    return _label_review_claim_error(
+        artifact.get("review"),
+        artifact.get("evidence"),
+    )
 
 
 def _top_page_ids(value: Any) -> tuple[str, ...]:
@@ -244,7 +396,10 @@ def query_kind(text: str) -> str:
         return "short"
     if "?" in compact or "？" in compact:
         return "question"
-    if any(token in compact for token in ("```", "def ", "class ", "import ", "pytest", "uv run")):
+    if any(
+        token in compact
+        for token in ("```", "def ", "class ", "import ", "pytest", "uv run")
+    ):
         return "code"
     return "statement"
 
@@ -286,9 +441,15 @@ def build_candidates(
             continue
 
         ref = str(feedback.get("ref", ""))
-        snapshot = feedback.get("snapshot") if isinstance(feedback.get("snapshot"), dict) else {}
+        snapshot = (
+            feedback.get("snapshot")
+            if isinstance(feedback.get("snapshot"), dict)
+            else {}
+        )
         record = logs_by_id.get(ref) or snapshot or {}
-        query = str(feedback.get("prompt") or record.get("prompt_preview") or "").strip()
+        query = str(
+            feedback.get("prompt") or record.get("prompt_preview") or ""
+        ).strip()
         if not query:
             continue
 
@@ -327,7 +488,9 @@ def build_candidates(
             continue
         seen.add(key)
 
-        seed = json.dumps([query, expected, negative], ensure_ascii=False, sort_keys=True)
+        seed = json.dumps(
+            [query, expected, negative], ensure_ascii=False, sort_keys=True
+        )
         example = SearchExample(
             query=query,
             expected_pages=expected,
@@ -437,7 +600,9 @@ def _pipeline_dependencies() -> PipelineDependencies:
     )
 
 
-def _variant_pipeline_config(variant: str, *, top_n: int) -> tuple[PipelineConfig, bool]:
+def _variant_pipeline_config(
+    variant: str, *, top_n: int
+) -> tuple[PipelineConfig, bool]:
     weights = dict(DEFAULT_FUSION_WEIGHTS)
     if variant == "bm25":
         return (
@@ -538,7 +703,9 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
         )
         results = rerank_stage.results
         reranker_meta = rerank_stage.metadata
-        results, negative_meta = apply_negative_feedback_stage(query, results, deps=deps)
+        results, negative_meta = apply_negative_feedback_stage(
+            query, results, deps=deps
+        )
 
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
     out = apply_filters(results)[:top_n]
@@ -548,9 +715,13 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
         "latency_ms": elapsed_ms,
         "channels": {
             "bm25": [page.page_id for page in pipeline_result.bm25_results[:top_n]],
-            "semantic": [page.page_id for page in pipeline_result.semantic_results[:top_n]],
+            "semantic": [
+                page.page_id for page in pipeline_result.semantic_results[:top_n]
+            ],
             "graph": [page.page_id for page in pipeline_result.graph_results[:top_n]],
-            "usage_prior": [page.page_id for page in pipeline_result.usage_results[:top_n]],
+            "usage_prior": [
+                page.page_id for page in pipeline_result.usage_results[:top_n]
+            ],
             "reranker": reranker_meta,
             "negative_feedback": negative_meta,
         },
@@ -562,7 +733,9 @@ def _dcg(ranks: list[int], *, k: int) -> float:
 
 
 def _ideal_dcg(relevant_count: int, *, k: int) -> float:
-    return sum(1.0 / math.log2(rank + 1) for rank in range(1, min(relevant_count, k) + 1))
+    return sum(
+        1.0 / math.log2(rank + 1) for rank in range(1, min(relevant_count, k) + 1)
+    )
 
 
 def percentile(values: list[int], pct: float) -> float:
@@ -582,7 +755,10 @@ def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     def recall_at(k: int) -> float:
         if not positives:
             return 0.0
-        return sum(bool(set(row["expected_pages"]) & set(row["result_pages"][:k])) for row in positives) / len(positives)
+        return sum(
+            bool(set(row["expected_pages"]) & set(row["result_pages"][:k]))
+            for row in positives
+        ) / len(positives)
 
     reciprocal_ranks: list[float] = []
     ndcgs: list[float] = []
@@ -616,10 +792,12 @@ def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "recall_at_20": recall_at(20),
         "mrr_at_10": statistics.mean(reciprocal_ranks) if reciprocal_ranks else 0.0,
         "ndcg_at_10": statistics.mean(ndcgs) if ndcgs else 0.0,
-        "negative_hit_rate_at_20": (
-            negative_hits / len(negative_labeled)
-        ) if negative_labeled else 0.0,
-        "stale_hit_rate_at_20": (stale_hits / len(stale_labeled)) if stale_labeled else 0.0,
+        "negative_hit_rate_at_20": (negative_hits / len(negative_labeled))
+        if negative_labeled
+        else 0.0,
+        "stale_hit_rate_at_20": (stale_hits / len(stale_labeled))
+        if stale_labeled
+        else 0.0,
         "latency_ms": {
             "p50": float(statistics.median(latencies)) if latencies else 0.0,
             "p95": percentile(latencies, 0.95),
@@ -668,7 +846,9 @@ def evaluate_examples(
                 "latency_ms": result["latency_ms"],
             }
             rows.append(row)
-            debug_rows.append({**row, "variant": variant, "channels": result["channels"]})
+            debug_rows.append(
+                {**row, "variant": variant, "channels": result["channels"]}
+            )
         by_variant[variant] = {
             "metrics": _metrics(rows),
             "by_bucket": _bucket_metrics(rows),
@@ -676,11 +856,16 @@ def evaluate_examples(
     return {"variants": by_variant, "debug_rows": debug_rows}
 
 
-def save_baseline(payload: dict[str, Any], *, baseline_dir: Path = BASELINE_DIR) -> Path:
+def save_baseline(
+    payload: dict[str, Any], *, baseline_dir: Path = BASELINE_DIR
+) -> Path:
     baseline_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = baseline_dir / f"search-baseline-{stamp}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -721,7 +906,13 @@ def build_label_queue(
     dry_run: bool = False,
     budget: Any | None = None,
 ) -> dict[str, Any]:
-    examples = build_candidates(feedback_file=feedback_file, log_file=log_file, limit=limit)
+    try:
+        output_preimage = output_file.read_bytes()
+    except FileNotFoundError:
+        output_preimage = None
+    examples = build_candidates(
+        feedback_file=feedback_file, log_file=log_file, limit=limit
+    )
     existing_rows = read_jsonl(output_file)
     existing_by_key = {_golden_key(row): row for row in existing_rows}
     rows = []
@@ -745,6 +936,10 @@ def build_label_queue(
                     in {
                         "frontier_attempts",
                         "frontier_review",
+                        "decision_artifact",
+                        "authority_recovery",
+                        "decision_authority_error",
+                        "last_authority_error_at",
                         "last_attempt_at",
                         "next_attempt_at",
                         "reviewed",
@@ -753,10 +948,40 @@ def build_label_queue(
                 },
             }
         )
-    # A refresh must never resurrect or erase a prior decision. Keep rows that
-    # fell outside the latest candidate window so terminal state remains an
-    # exact-once ledger and retryable work can continue draining.
+    # A refresh must never erase a row that fell outside the latest candidate
+    # window. It is still subject to the same authority check below.
     rows.extend(row for row in existing_rows if _golden_key(row) not in seen)
+    terminal_rows = [
+        row
+        for row in rows
+        if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+        and not (
+            isinstance(row.get("authority_recovery"), Mapping)
+            and row["authority_recovery"].get("kind") == ALREADY_APPLIED_RECOVERY
+        )
+    ]
+    if terminal_rows:
+        with decision_authority_lock():
+            current_authority, current_error = (
+                decision_authority.current_semantic_authority(SEARCH_LABEL_LANE)
+            )
+        for row in terminal_rows:
+            artifact = row.get("decision_artifact")
+            authority_error = current_error or _label_review_artifact_error(
+                artifact,
+                evidence=_label_candidate_payload(row),
+                current_authority=current_authority,
+            )
+            if authority_error is None:
+                continue
+            row["queue_status"] = "frontier_retry"
+            row["promoted_to_golden"] = False
+            row["decision_authority_error"] = authority_error
+            row["last_authority_error_at"] = datetime.now().isoformat(
+                timespec="seconds"
+            )
+            row.pop("decision_artifact", None)
+            row.pop("next_attempt_at", None)
     changed = rows != existing_rows
     if not dry_run and changed:
         if budget is not None:
@@ -770,17 +995,72 @@ def build_label_queue(
                     "reviewed": sum(
                         1
                         for row in existing_rows
-                        if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+                        if str(row.get("queue_status") or "")
+                        in FRONTIER_TERMINAL_STATUSES
                     ),
                     "preserved": len(existing_rows),
                     "dry_run": False,
                 }
-        write_jsonl(output_file, rows)
+        with decision_authority_lock():
+            try:
+                current_output_preimage = output_file.read_bytes()
+            except FileNotFoundError:
+                current_output_preimage = None
+            if current_output_preimage != output_preimage:
+                return {
+                    "status": "concurrent_update_deferred",
+                    "reason": "search label queue changed before refresh",
+                    "output_file": str(output_file),
+                    "examples": len(existing_rows),
+                    "reviewed": sum(
+                        1
+                        for row in existing_rows
+                        if str(row.get("queue_status") or "")
+                        in FRONTIER_TERMINAL_STATUSES
+                    ),
+                    "preserved": len(existing_rows),
+                    "dry_run": False,
+                }
+            final_terminal = [
+                row
+                for row in rows
+                if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+                and not (
+                    isinstance(row.get("authority_recovery"), Mapping)
+                    and row["authority_recovery"].get("kind")
+                    == ALREADY_APPLIED_RECOVERY
+                )
+            ]
+            if final_terminal:
+                current_authority, current_error = (
+                    decision_authority.current_semantic_authority(SEARCH_LABEL_LANE)
+                )
+                for row in final_terminal:
+                    authority_error = current_error or _label_review_artifact_error(
+                        row.get("decision_artifact"),
+                        evidence=_label_candidate_payload(row),
+                        current_authority=current_authority,
+                    )
+                    if authority_error is None:
+                        continue
+                    row["queue_status"] = "frontier_retry"
+                    row["promoted_to_golden"] = False
+                    row["decision_authority_error"] = authority_error
+                    row["last_authority_error_at"] = datetime.now().isoformat(
+                        timespec="seconds"
+                    )
+                    row.pop("decision_artifact", None)
+                    row.pop("next_attempt_at", None)
+            write_jsonl(output_file, rows)
     return {
         "status": "ok",
         "output_file": str(output_file),
         "examples": len(rows),
-        "reviewed": sum(1 for row in rows if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES),
+        "reviewed": sum(
+            1
+            for row in rows
+            if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+        ),
         "preserved": len(existing_rows),
         "dry_run": dry_run,
         "changed": changed,
@@ -803,7 +1083,13 @@ def _page_excerpt(page_id: str, *, limit: int = 1800) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        return {"page_id": page_id, "exists": False, "path": str(path), "error": str(exc), "excerpt": ""}
+        return {
+            "page_id": page_id,
+            "exists": False,
+            "path": str(path),
+            "error": str(exc),
+            "excerpt": "",
+        }
     return {
         "page_id": page_id,
         "exists": True,
@@ -819,7 +1105,47 @@ def _candidate_label_pages(row: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(pages))
 
 
-def build_frontier_label_prompt(row: dict[str, Any]) -> str:
+def build_frontier_label_prompt(
+    row: dict[str, Any],
+    *,
+    page_excerpts: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build the production label-review request from bound page evidence.
+
+    Normal callers leave ``page_excerpts`` unset and the builder reads the
+    current Wiki pages itself.  Deterministic adoption contracts may provide
+    sealed, production-shaped page snapshots so their request hashes do not
+    depend on mutable live Wiki content.  Supplied evidence must cover the
+    exact candidate ids once each and may not invent an extra page.
+    """
+
+    candidate_pages = _candidate_label_pages(row)
+    if page_excerpts is None:
+        bound_excerpts = [_page_excerpt(page_id) for page_id in candidate_pages]
+    else:
+        by_page: dict[str, dict[str, Any]] = {}
+        for item in page_excerpts:
+            if not isinstance(item, dict):
+                raise ValueError("label page evidence must contain objects")
+            page_id = item.get("page_id")
+            exists = item.get("exists")
+            path = item.get("path")
+            excerpt = item.get("excerpt")
+            if (
+                not isinstance(page_id, str)
+                or not page_id
+                or page_id in by_page
+                or not isinstance(exists, bool)
+                or not isinstance(path, str)
+                or not isinstance(excerpt, str)
+                or (exists and (not path or not excerpt))
+            ):
+                raise ValueError("label page evidence is malformed")
+            by_page[page_id] = dict(item)
+        if set(by_page) != set(candidate_pages):
+            raise ValueError("label page evidence must match exact candidate pages")
+        bound_excerpts = [by_page[page_id] for page_id in candidate_pages]
+
     payload = {
         "query": str(row.get("query") or ""),
         "candidate_labels": {
@@ -835,11 +1161,12 @@ def build_frontier_label_prompt(row: dict[str, Any]) -> str:
             "ref": row.get("ref"),
             "ts": row.get("ts"),
         },
-        "page_excerpts": [_page_excerpt(page_id) for page_id in _candidate_label_pages(row)],
+        "page_excerpts": bound_excerpts,
     }
     schema = FRONTIER_LABEL_SCHEMA
     return f"""\
-You are the trusted frontier label reviewer for LLM Wiki search evaluation.
+You are the final autonomous label reviewer for LLM Wiki search evaluation.
+Search label policy version: {SEARCH_LABEL_PROMPT_POLICY_VERSION}.
 
 Goal:
 - Decide whether the candidate labels are trustworthy for the user's search query.
@@ -848,11 +1175,24 @@ Goal:
 - Do not edit files, run commands, ask a human, or invent unrelated page ids.
 
 Decision policy:
-- approved: the label set is trustworthy. You may move page ids between expected_pages,
-  negative_pages, and stale_pages if the candidate type is wrong but the evidence is clear.
-- rejected: the candidate labels are clearly wrong and should not be promoted.
-- uncertain: evidence is insufficient or ambiguous; leave it for another frontier pass.
-- needs_retry: the review cannot be completed because context is malformed or unavailable.
+- Treat each candidate bucket as a claim. expected_pages must answer the query,
+  negative_pages must not answer it, and stale_pages must be relevant but outdated.
+- Require a direct topical, factual, or causal connection between the query and
+  each page excerpt. Shared broad words, emotional tone, analogy, or a merely
+  possible thematic connection are not enough for expected_pages.
+- An expected page must materially help answer the actual query as written. A
+  page that only matches background context or one isolated term is a false positive.
+- Do not repair a wrong label by moving page ids between buckets.
+- approved: at least one candidate page was supplied and every candidate bucket
+  assignment is supported. Return the three candidate arrays exactly as supplied.
+- rejected: at least one available excerpt clearly contradicts its assigned bucket.
+  Return all three arrays empty so the candidate set cannot be promoted.
+- uncertain: evidence is insufficient or ambiguous. A meaningful ambiguous query with
+  no candidate labels is uncertain, not approved or needs_retry. Return all three
+  arrays empty.
+- needs_retry: context is malformed or any candidate page has exists=false or a
+  missing excerpt. Missing candidate evidence is needs_retry, not rejected or
+  uncertain. Return all three arrays empty.
 
 Return JSON only matching this schema:
 {json.dumps(schema, ensure_ascii=False, indent=2)}
@@ -862,7 +1202,9 @@ Candidate:
 """
 
 
-def _frontier_label_failure(summary: str, *, output: str = "", failure: dict[str, Any] | None = None) -> dict[str, Any]:
+def _frontier_label_failure(
+    summary: str, *, output: str = "", failure: dict[str, Any] | None = None
+) -> dict[str, Any]:
     return {
         "decision": "needs_retry",
         "confidence": 0.0,
@@ -893,10 +1235,14 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _normalize_frontier_label_result(raw: dict[str, Any], *, raw_output: str = "") -> dict[str, Any]:
+def _normalize_frontier_label_result(
+    raw: dict[str, Any], *, raw_output: str = ""
+) -> dict[str, Any]:
     decision = raw.get("decision")
     if decision not in {"approved", "rejected", "uncertain", "needs_retry"}:
-        return _frontier_label_failure("frontier label JSON failed schema validation", output=raw_output)
+        return _frontier_label_failure(
+            "frontier label JSON failed schema validation", output=raw_output
+        )
     confidence = raw.get("confidence")
     if (
         isinstance(confidence, bool)
@@ -910,13 +1256,22 @@ def _normalize_frontier_label_result(raw: dict[str, Any], *, raw_output: str = "
         )
     confidence_value = float(confidence)
     summary = raw.get("summary")
+    label_fields = ("expected_pages", "negative_pages", "stale_pages")
+    normalized_labels = {field: _str_list(raw.get(field)) for field in label_fields}
+    if decision == "approved" and any(
+        raw.get(field) != normalized_labels[field] for field in label_fields
+    ):
+        return _frontier_label_failure(
+            "approved frontier label arrays failed exact schema validation",
+            output=raw_output,
+        )
     normalized = {
         "decision": decision,
         "confidence": confidence_value,
-        "expected_pages": _str_list(raw.get("expected_pages")),
-        "negative_pages": _str_list(raw.get("negative_pages")),
-        "stale_pages": _str_list(raw.get("stale_pages")),
-        "summary": summary if isinstance(summary, str) and summary.strip() else decision,
+        **normalized_labels,
+        "summary": summary
+        if isinstance(summary, str) and summary.strip()
+        else decision,
         "notes": raw.get("notes") if isinstance(raw.get("notes"), str) else None,
         "reviewer": str(raw.get("reviewer") or "frontier"),
     }
@@ -927,6 +1282,10 @@ def _normalize_frontier_label_result(raw: dict[str, Any], *, raw_output: str = "
         "frontier_failure",
         "access_repair",
         "votes",
+        "decision_policy",
+        "local_consensus",
+        "schema_valid",
+        "validation_errors",
     ):
         if key in raw:
             normalized[key] = raw[key]
@@ -940,7 +1299,9 @@ def _normalize_frontier_label_result(raw: dict[str, Any], *, raw_output: str = "
 def _parse_frontier_label_output(output: str) -> dict[str, Any]:
     parsed = _extract_json_object(output)
     if parsed is None:
-        return _frontier_label_failure("frontier label output did not contain JSON", output=output)
+        return _frontier_label_failure(
+            "frontier label output did not contain JSON", output=output
+        )
     return _normalize_frontier_label_result(parsed, raw_output=output)
 
 
@@ -953,7 +1314,9 @@ def run_frontier_label_review(
     from llm_wiki_mcp import frontier_review
 
     prompt = build_frontier_label_prompt(row)
-    timeout_seconds = timeout or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600"))
+    timeout_seconds = timeout or int(
+        os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600")
+    )
     raw = frontier_review.run_structured_review(
         prompt,
         FRONTIER_LABEL_SCHEMA,
@@ -966,7 +1329,9 @@ def run_frontier_label_review(
     return _normalize_frontier_label_result(raw)
 
 
-def _label_tuple_from_review(review: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+def _label_tuple_from_review(
+    review: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     return (
         tuple(_str_list(review.get("expected_pages"))),
         tuple(_str_list(review.get("negative_pages"))),
@@ -989,7 +1354,10 @@ def _combine_frontier_label_reviews(
 
     if any(is_human_required_result(review) for review in reviews):
         first = next(review for review in reviews if is_human_required_result(review))
-        return {**first, "summary": f"frontier label review needs human action: {first.get('summary', '')}"}
+        return {
+            **first,
+            "summary": f"frontier label review needs human action: {first.get('summary', '')}",
+        }
 
     retry = [review for review in reviews if review.get("decision") == "needs_retry"]
     if retry:
@@ -999,11 +1367,7 @@ def _combine_frontier_label_reviews(
             "votes": reviews,
         }
 
-    approvals = [
-        review
-        for review in reviews
-        if review.get("decision") == "approved"
-    ]
+    approvals = [review for review in reviews if review.get("decision") == "approved"]
     label_sets = {_label_tuple_from_review(review) for review in approvals}
     if len(approvals) == len(reviews) and len(label_sets) == 1:
         agreed = approvals[0]
@@ -1016,7 +1380,9 @@ def _combine_frontier_label_reviews(
 
     if any(review.get("decision") == "rejected" for review in reviews):
         return {
-            **next(review for review in reviews if review.get("decision") == "rejected"),
+            **next(
+                review for review in reviews if review.get("decision") == "rejected"
+            ),
             "reviewer": "frontier_consensus",
             "summary": "frontier consensus rejected or disagreed on labels",
             "votes": reviews,
@@ -1032,10 +1398,22 @@ def _combine_frontier_label_reviews(
         "notes": None,
         "reviewer": "frontier_consensus",
         "votes": reviews,
+        **(
+            {"decision_policy": reviews[0]["decision_policy"]}
+            if isinstance(reviews[0].get("decision_policy"), Mapping)
+            else {}
+        ),
+        **(
+            {"local_consensus": reviews[0]["local_consensus"]}
+            if isinstance(reviews[0].get("local_consensus"), Mapping)
+            else {}
+        ),
     }
 
 
-def _golden_key(row: dict[str, Any]) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+def _golden_key(
+    row: dict[str, Any],
+) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     return (
         str(row.get("query") or ""),
         tuple(_str_list(row.get("expected_pages"))),
@@ -1044,7 +1422,13 @@ def _golden_key(row: dict[str, Any]) -> tuple[str, tuple[str, ...], tuple[str, .
     )
 
 
-def _golden_row_from_review(row: dict[str, Any], review: dict[str, Any], *, reviewed_at: str) -> dict[str, Any]:
+def _golden_row_from_review(
+    row: dict[str, Any],
+    review: dict[str, Any],
+    *,
+    reviewed_at: str,
+    decision_artifact: Mapping[str, Any],
+) -> dict[str, Any]:
     expected = _str_list(review.get("expected_pages"))
     negative = _str_list(review.get("negative_pages"))
     stale = _str_list(review.get("stale_pages"))
@@ -1054,7 +1438,9 @@ def _golden_row_from_review(row: dict[str, Any], review: dict[str, Any], *, revi
         "negative_pages": negative,
         "stale_pages": stale,
         "split": str(row.get("split") or assign_split(str(row.get("query") or ""))),
-        "language": str(row.get("language") or language_bucket(str(row.get("query") or ""))),
+        "language": str(
+            row.get("language") or language_bucket(str(row.get("query") or ""))
+        ),
         "kind": str(row.get("kind") or query_kind(str(row.get("query") or ""))),
         "source": str(row.get("source") or "frontier_label_review"),
         "ref": str(row.get("ref") or ""),
@@ -1064,6 +1450,7 @@ def _golden_row_from_review(row: dict[str, Any], review: dict[str, Any], *, revi
         "review_confidence": float(review.get("confidence") or 0.0),
         "reviewed_at": reviewed_at,
         "review_note": str(review.get("summary") or ""),
+        "decision_artifact": dict(decision_artifact),
     }
     return out
 
@@ -1102,6 +1489,14 @@ def review_label_queue_with_frontier(
     now: datetime | None = None,
     budget: Any | None = None,
 ) -> dict[str, Any]:
+    def optional_bytes(path: Path) -> bytes | None:
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    queue_preimage = optional_bytes(queue_file)
+    golden_preimage = optional_bytes(golden_file)
     rows = read_jsonl(queue_file)
     original_rows = json.loads(json.dumps(rows, ensure_ascii=False, default=str))
     golden_rows = read_jsonl(golden_file)
@@ -1115,7 +1510,43 @@ def review_label_queue_with_frontier(
     max_votes = max(1, votes)
     attempts_cap = max(1, max_attempts)
     budget_exhausted = False
+    commit_error: str | None = None
     mutation_reserved = False
+    injected_reviewer = reviewer is not None or (
+        getattr(run_frontier_label_review, "__module__", None) != __name__
+    )
+    effect_rows: dict[int, dict[str, Any]] = {}
+    staged_golden: list[tuple[int, dict[str, Any], bool]] = []
+
+    def authority_retry(
+        row: dict[str, Any], error: str, *, preserve_attempts: bool = True
+    ) -> dict[str, Any]:
+        updated = dict(row)
+        updated["queue_status"] = "frontier_retry"
+        updated["promoted_to_golden"] = False
+        updated["decision_authority_error"] = error
+        updated["last_authority_error_at"] = reviewed_at
+        updated.pop("decision_artifact", None)
+        updated.pop("next_attempt_at", None)
+        if not preserve_attempts:
+            updated["frontier_attempts"] = 0
+        return updated
+
+    def label_artifact_error(
+        artifact: object,
+        *,
+        current_authority: object | None = None,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> str | None:
+        return _label_review_artifact_error(
+            artifact,
+            evidence=evidence,
+            current_authority=current_authority,
+        )
+
+    def artifact_review(artifact: object) -> dict[str, Any] | None:
+        review_value = artifact.get("review") if isinstance(artifact, Mapping) else None
+        return dict(review_value) if isinstance(review_value, Mapping) else None
 
     for row in rows:
         review = row.get("frontier_review")
@@ -1165,20 +1596,74 @@ def review_label_queue_with_frontier(
                 quarantined_at = quarantined_at.replace(tzinfo=None)
         if (
             quarantined_at is not None
-            and (compare_now - quarantined_at).total_seconds() < quarantine_retry_seconds
+            and (compare_now - quarantined_at).total_seconds()
+            < quarantine_retry_seconds
         ):
             continue
         row["queue_status"] = "frontier_retry"
         row["frontier_attempts"] = 0
         row["quarantine_reopened_at"] = reviewed_at
-        row["quarantine_reopen_count"] = int(row.get("quarantine_reopen_count") or 0) + 1
+        row["quarantine_reopen_count"] = (
+            int(row.get("quarantine_reopen_count") or 0) + 1
+        )
         row.pop("next_attempt_at", None)
 
-    # Recover both cross-file crash windows. The current golden-first commit can
-    # exit before acknowledging the queue; older builds could acknowledge the
-    # queue first. In either direction the durable side contains enough trusted
-    # evidence to reconcile without paying for another frontier call.
-    reviewed_golden = [row for row in golden_rows if row.get("reviewed") is True]
+    stale_terminal_indices = [
+        index
+        for index, row in enumerate(rows)
+        if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+        and row.get("queue_status") != "frontier_approved"
+        and not (
+            isinstance(row.get("authority_recovery"), Mapping)
+            and row["authority_recovery"].get("kind") == ALREADY_APPLIED_RECOVERY
+        )
+    ]
+    if stale_terminal_indices:
+        with decision_authority_lock():
+            terminal_authority, terminal_authority_error = (
+                decision_authority.current_semantic_authority(
+                    SEARCH_LABEL_LANE,
+                    injected_reviewer=injected_reviewer,
+                )
+            )
+        for row_index in stale_terminal_indices:
+            row = rows[row_index]
+            artifact = row.get("decision_artifact")
+            authority_error = terminal_authority_error or label_artifact_error(
+                artifact,
+                current_authority=terminal_authority,
+                evidence=_label_candidate_payload(row),
+            )
+            if authority_error is not None:
+                rows[row_index] = authority_retry(row, authority_error)
+
+    # Golden-first recovery is bookkeeping only: the exact semantic postimage
+    # is already durable. It may therefore acknowledge a queue row even after
+    # the authority epoch changes, but it is explicitly marked and can never
+    # install another label. Queue-first recovery still performs a semantic
+    # effect and must revalidate current authority below.
+    reviewed_golden: list[dict[str, Any]] = []
+    for golden_row in golden_rows:
+        if golden_row.get("reviewed") is not True:
+            continue
+        artifact = golden_row.get("decision_artifact")
+        review_value = artifact_review(artifact)
+        evidence = artifact.get("evidence") if isinstance(artifact, Mapping) else None
+        if (
+            review_value is None
+            or review_value.get("decision") != "approved"
+            or label_artifact_error(artifact) is not None
+            or not isinstance(evidence, Mapping)
+            or str(evidence.get("query") or "") != str(golden_row.get("query") or "")
+            or _label_tuple_from_review(review_value)
+            != (
+                tuple(_str_list(golden_row.get("expected_pages"))),
+                tuple(_str_list(golden_row.get("negative_pages"))),
+                tuple(_str_list(golden_row.get("stale_pages"))),
+            )
+        ):
+            continue
+        reviewed_golden.append(golden_row)
     golden_by_key = {_golden_key(row): row for row in reviewed_golden}
     golden_by_ref = {
         (str(row.get("query") or ""), str(row.get("ref") or "")): row
@@ -1187,7 +1672,10 @@ def review_label_queue_with_frontier(
     }
     recovered_queue = 0
     for row in rows:
-        if bool(row.get("promoted_to_golden")) or row.get("queue_status") == "frontier_approved":
+        if (
+            bool(row.get("promoted_to_golden"))
+            or row.get("queue_status") == "frontier_approved"
+        ):
             continue
         golden_match = golden_by_key.get(_golden_key(row))
         ref = str(row.get("ref") or "")
@@ -1195,16 +1683,15 @@ def review_label_queue_with_frontier(
             golden_match = golden_by_ref.get((str(row.get("query") or ""), ref))
         if golden_match is None:
             continue
-        review = {
-            "decision": "approved",
-            "confidence": float(golden_match.get("review_confidence") or 1.0),
-            "expected_pages": _str_list(golden_match.get("expected_pages")),
-            "negative_pages": _str_list(golden_match.get("negative_pages")),
-            "stale_pages": _str_list(golden_match.get("stale_pages")),
-            "summary": str(golden_match.get("review_note") or "recovered from trusted golden label"),
-            "notes": None,
-            "reviewer": str(golden_match.get("reviewer") or "frontier"),
-        }
+        artifact = golden_match.get("decision_artifact")
+        review = artifact_review(artifact)
+        evidence = artifact.get("evidence") if isinstance(artifact, Mapping) else None
+        if (
+            review is None
+            or not isinstance(evidence, Mapping)
+            or dict(evidence) != _label_candidate_payload(row)
+        ):
+            continue
         row.update(
             {
                 "queue_status": "frontier_approved",
@@ -1215,32 +1702,79 @@ def review_label_queue_with_frontier(
                 "review_confidence": review["confidence"],
                 "review_note": review["summary"],
                 "frontier_review": review,
+                "decision_artifact": artifact,
+                "authority_recovery": {
+                    "kind": ALREADY_APPLIED_RECOVERY,
+                    "source": "golden_label",
+                    "recovered_at": reviewed_at,
+                },
             }
         )
         recovered_queue += 1
 
     recovered_golden = 0
-    for row in rows:
-        if not bool(row.get("promoted_to_golden")) and row.get("queue_status") != "frontier_approved":
+    for row_index, row in enumerate(rows):
+        recovery = row.get("authority_recovery")
+        if (
+            isinstance(recovery, Mapping)
+            and recovery.get("kind") == ALREADY_APPLIED_RECOVERY
+        ):
             continue
-        review = row.get("frontier_review")
+        if (
+            not bool(row.get("promoted_to_golden"))
+            and row.get("queue_status") != "frontier_approved"
+        ):
+            continue
+        artifact = row.get("decision_artifact")
+        review = artifact_review(artifact) or row.get("frontier_review")
         if not isinstance(review, dict):
+            rows[row_index] = authority_retry(
+                row, "approved queue row has no sealed semantic verdict"
+            )
             continue
-        if _queue_status_for_review(review, min_confidence=min_confidence) != "frontier_approved":
+        if (
+            _queue_status_for_review(review, min_confidence=min_confidence)
+            != "frontier_approved"
+        ):
+            rows[row_index] = authority_retry(
+                row, "approved queue row has no approved semantic verdict"
+            )
+            continue
+        with decision_authority_lock():
+            current_authority, current_error = (
+                decision_authority.current_semantic_authority(
+                    SEARCH_LABEL_LANE,
+                    injected_reviewer=injected_reviewer,
+                )
+            )
+        authority_error = current_error or label_artifact_error(
+            artifact,
+            current_authority=current_authority,
+            evidence=_label_candidate_payload(row),
+        )
+        if authority_error is not None:
+            rows[row_index] = authority_retry(row, authority_error)
             continue
         golden_row = _golden_row_from_review(
             row,
             review,
             reviewed_at=str(row.get("reviewed_at") or reviewed_at),
+            decision_artifact=artifact,
         )
         key = _golden_key(golden_row)
         if key not in golden_keys:
-            golden_rows.append(golden_row)
             golden_keys.add(key)
+            staged_golden.append((row_index, golden_row, False))
             recovered_golden += 1
         row["promoted_to_golden"] = True
         row["reviewed"] = True
         row["reviewed_at"] = str(row.get("reviewed_at") or reviewed_at)
+        effect_rows[row_index] = {
+            "artifact": artifact,
+            "evidence": _label_candidate_payload(row),
+            "status": "frontier_approved",
+            "promoted": False,
+        }
 
     if (recovered_queue or recovered_golden) and not dry_run and budget is not None:
         allowed, reason = budget.consume("mutation")
@@ -1264,12 +1798,6 @@ def review_label_queue_with_frontier(
             }
         mutation_reserved = True
 
-    # Golden is the source of truth for a successful promotion. Persist any
-    # recovered rows before reviewing new work; queue reconciliation is safe to
-    # repeat if the process exits immediately afterwards.
-    if recovered_golden and not dry_run:
-        write_jsonl(golden_file, golden_rows)
-
     def retry_due(row: dict[str, Any]) -> bool:
         raw = row.get("next_attempt_at")
         if not isinstance(raw, str) or not raw:
@@ -1279,7 +1807,7 @@ def review_label_queue_with_frontier(
         except ValueError:
             return True
 
-    for row in rows:
+    for row_index, row in enumerate(rows):
         status = str(row.get("queue_status") or "")
         if (
             attempted >= limit
@@ -1296,7 +1824,9 @@ def review_label_queue_with_frontier(
             continue
 
         if budget is not None:
-            frontier_allowed, _frontier_reason = budget.can_consume("frontier", max_votes)
+            frontier_allowed, _frontier_reason = budget.can_consume(
+                "frontier", max_votes
+            )
             mutation_allowed, _mutation_reason = (
                 budget.can_consume("mutation")
                 if not mutation_reserved
@@ -1311,25 +1841,99 @@ def review_label_queue_with_frontier(
                 budget.consume("mutation")
                 mutation_reserved = True
 
+        with decision_authority_lock():
+            authority, authority_error = decision_authority.current_semantic_authority(
+                SEARCH_LABEL_LANE,
+                injected_reviewer=injected_reviewer,
+            )
+        if authority_error is not None or authority is None:
+            updated_rows.append(
+                authority_retry(
+                    row, authority_error or "search label authority unavailable"
+                )
+            )
+            continue
+
         reviews: list[dict[str, Any]] = []
         try:
             for _idx in range(max_votes):
                 review = (
                     reviewer(row)
                     if reviewer is not None
-                    else run_frontier_label_review(row, repo_root=repo_root, timeout=timeout)
+                    else run_frontier_label_review(
+                        row, repo_root=repo_root, timeout=timeout
+                    )
                 )
-                reviews.append(_normalize_frontier_label_result(review) if "decision" in review else review)
+                reviews.append(
+                    _normalize_frontier_label_result(review)
+                    if "decision" in review
+                    else review
+                )
         except Exception as exc:
             reviews = [
                 _frontier_label_failure(
                     f"frontier label reviewer raised {exc.__class__.__name__}: {exc}"
                 )
             ]
-        combined = _combine_frontier_label_reviews(reviews, min_confidence=min_confidence)
+        combined = _combine_frontier_label_reviews(
+            reviews, min_confidence=min_confidence
+        )
+        with decision_authority_lock():
+            current_authority, current_error = (
+                decision_authority.current_semantic_authority(
+                    SEARCH_LABEL_LANE,
+                    injected_reviewer=injected_reviewer,
+                )
+            )
+            authority_error = current_error or (
+                decision_authority.compare_semantic_authority(
+                    authority,
+                    current_authority,
+                    lane=SEARCH_LABEL_LANE,
+                )
+            )
+            if authority_error is None:
+                for review_value in [*reviews, combined]:
+                    authority_error = (
+                        decision_authority.semantic_verdict_authority_error(
+                            review_value,
+                            authority,
+                            lane=SEARCH_LABEL_LANE,
+                        )
+                    )
+                    if authority_error is not None:
+                        break
+            label_evidence = _label_candidate_payload(row)
+            authority_error = authority_error or _label_review_claim_error(
+                combined,
+                label_evidence,
+            )
+            decision_artifact = (
+                _seal_search_review(
+                    kind="search_label_verdict",
+                    lane=SEARCH_LABEL_LANE,
+                    evidence=label_evidence,
+                    review=combined,
+                    authority=authority,
+                )
+                if authority_error is None
+                else None
+            )
+        if authority_error is not None or decision_artifact is None:
+            attempted += 1
+            updated_rows.append(
+                authority_retry(
+                    row, authority_error or "search label verdict authority invalid"
+                )
+            )
+            status_counts["frontier_retry"] = status_counts.get("frontier_retry", 0) + 1
+            continue
         next_status = _queue_status_for_review(combined, min_confidence=min_confidence)
         frontier_attempts = int(row.get("frontier_attempts") or 0) + 1
-        if next_status in {"frontier_retry", "frontier_uncertain"} and frontier_attempts >= attempts_cap:
+        if (
+            next_status in {"frontier_retry", "frontier_uncertain"}
+            and frontier_attempts >= attempts_cap
+        ):
             next_status = "frontier_quarantined"
         attempted += 1
         status_counts[next_status] = status_counts.get(next_status, 0) + 1
@@ -1341,24 +1945,32 @@ def review_label_queue_with_frontier(
             "review_confidence": float(combined.get("confidence") or 0.0),
             "review_note": combined.get("summary") or "",
             "frontier_review": combined,
+            "decision_artifact": decision_artifact,
             "frontier_attempts": frontier_attempts,
             "last_attempt_at": reviewed_at,
         }
 
         if next_status in {"frontier_retry", "frontier_uncertain"}:
             delay = max(0, backoff_base_seconds) * (2 ** max(0, frontier_attempts - 1))
-            updated["next_attempt_at"] = (current_time + timedelta(seconds=delay)).isoformat(timespec="seconds")
+            updated["next_attempt_at"] = (
+                current_time + timedelta(seconds=delay)
+            ).isoformat(timespec="seconds")
         else:
             updated.pop("next_attempt_at", None)
         if next_status == "frontier_quarantined":
             updated["quarantined_at"] = reviewed_at
 
         if next_status == "frontier_approved":
-            golden_row = _golden_row_from_review(row, combined, reviewed_at=reviewed_at)
+            golden_row = _golden_row_from_review(
+                row,
+                combined,
+                reviewed_at=reviewed_at,
+                decision_artifact=decision_artifact,
+            )
             key = _golden_key(golden_row)
             if key not in golden_keys:
-                golden_rows.append(golden_row)
                 golden_keys.add(key)
+                staged_golden.append((row_index, golden_row, True))
                 promoted += 1
             updated["promoted_to_golden"] = True
             updated["reviewed"] = True
@@ -1366,16 +1978,78 @@ def review_label_queue_with_frontier(
         else:
             updated["promoted_to_golden"] = False
         updated_rows.append(updated)
+        effect_rows[row_index] = {
+            "artifact": decision_artifact,
+            "evidence": _label_candidate_payload(row),
+            "status": next_status,
+            "promoted": next_status == "frontier_approved",
+        }
 
-    # Commit the durable effect before its queue acknowledgement. A crash after
-    # the golden replace merely causes an idempotent queue reconciliation; the
-    # reverse ordering could permanently lose an approved label.
-    if promoted and not dry_run:
-        write_jsonl(golden_file, golden_rows)
-    if not dry_run and updated_rows != original_rows:
-        write_jsonl(queue_file, updated_rows)
+    if not dry_run:
+        # Keep the final authority stable through the semantic postimage and
+        # its queue acknowledgement. A review whose epoch changed after the
+        # model returned is reopened and cannot mutate either durable file.
+        with decision_authority_lock():
+            if (
+                optional_bytes(queue_file) != queue_preimage
+                or optional_bytes(golden_file) != golden_preimage
+            ):
+                commit_error = "search label files changed before effect"
+            current_authority: dict[str, Any] | None = None
+            current_error: str | None = None
+            if effect_rows and commit_error is None:
+                current_authority, current_error = (
+                    decision_authority.current_semantic_authority(
+                        SEARCH_LABEL_LANE,
+                        injected_reviewer=injected_reviewer,
+                    )
+                )
+            invalid_effects: dict[int, str] = {}
+            for row_index, effect in effect_rows.items():
+                error = (
+                    commit_error
+                    or current_error
+                    or label_artifact_error(
+                        effect["artifact"],
+                        current_authority=current_authority,
+                        evidence=effect["evidence"],
+                    )
+                )
+                if error is not None:
+                    invalid_effects[row_index] = error
+            for row_index, error in invalid_effects.items():
+                prior_status = str(effect_rows[row_index].get("status") or "")
+                if prior_status in status_counts:
+                    status_counts[prior_status] -= 1
+                    if status_counts[prior_status] <= 0:
+                        status_counts.pop(prior_status, None)
+                if effect_rows[row_index].get("promoted"):
+                    promoted = max(0, promoted - 1)
+                recovered_golden -= sum(
+                    1
+                    for staged_index, _golden_row, new_promotion in staged_golden
+                    if staged_index == row_index and not new_promotion
+                )
+                updated_rows[row_index] = authority_retry(
+                    original_rows[row_index], error
+                )
+                status_counts["frontier_retry"] = (
+                    status_counts.get("frontier_retry", 0) + 1
+                )
+            valid_staged = [
+                golden_row
+                for row_index, golden_row, _new_promotion in staged_golden
+                if row_index not in invalid_effects
+            ]
+            if valid_staged and commit_error is None:
+                # Golden is the semantic postimage and is committed first. A
+                # crash after this point is reconciled only by the explicitly
+                # marked exact-postimage recovery path above.
+                write_jsonl(golden_file, [*golden_rows, *valid_staged])
+            if commit_error is None and updated_rows != original_rows:
+                write_jsonl(queue_file, updated_rows)
     return {
-        "status": "ok",
+        "status": "concurrent_update_deferred" if commit_error else "ok",
         "queue_file": str(queue_file),
         "golden_file": str(golden_file),
         "attempted": attempted,
@@ -1392,7 +2066,8 @@ def review_label_queue_with_frontier(
         "dry_run": dry_run,
         "max_attempts": attempts_cap,
         "budget_exhausted": budget_exhausted,
-        "recovered": recovered_queue + recovered_golden,
+        "recovered": 0 if commit_error else recovered_queue + recovered_golden,
+        "reason": commit_error or "",
     }
 
 
@@ -1407,10 +2082,14 @@ def _count_by(examples: list[SearchExample], field: str) -> dict[str, int]:
 def _failure_index_rows(debug_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for row in debug_rows:
-        expected = [page for page in row.get("expected_pages", []) if isinstance(page, str)]
+        expected = [
+            page for page in row.get("expected_pages", []) if isinstance(page, str)
+        ]
         if not expected:
             continue
-        result_pages = [page for page in row.get("result_pages", []) if isinstance(page, str)]
+        result_pages = [
+            page for page in row.get("result_pages", []) if isinstance(page, str)
+        ]
         if set(expected) & set(result_pages[:20]):
             continue
         channels = row.get("channels") if isinstance(row.get("channels"), dict) else {}
@@ -1444,13 +2123,17 @@ def _failure_index_rows(debug_rows: list[dict[str, Any]]) -> list[dict[str, Any]
     return rows
 
 
-def write_failure_index(debug_rows: list[dict[str, Any]], path: Path = FAILURE_INDEX_FILE) -> dict[str, Any]:
+def write_failure_index(
+    debug_rows: list[dict[str, Any]], path: Path = FAILURE_INDEX_FILE
+) -> dict[str, Any]:
     rows = _failure_index_rows(debug_rows)
     write_jsonl(path, rows)
     return {"path": str(path), "failures": len(rows)}
 
 
-def run_weighted_hybrid(query: str, weights: dict[str, float], *, top_n: int = 20) -> dict[str, Any]:
+def run_weighted_hybrid(
+    query: str, weights: dict[str, float], *, top_n: int = 20
+) -> dict[str, Any]:
     started = time.perf_counter()
     pipeline_result = run_search_pipeline(
         query,
@@ -1465,7 +2148,9 @@ def run_weighted_hybrid(query: str, weights: dict[str, float], *, top_n: int = 2
     return {"results": pipeline_result.results, "latency_ms": elapsed_ms}
 
 
-def _rows_for_weight_eval(examples: list[SearchExample], weights: dict[str, float]) -> list[dict[str, Any]]:
+def _rows_for_weight_eval(
+    examples: list[SearchExample], weights: dict[str, float]
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for example in examples:
         result = run_weighted_hybrid(example.query, weights, top_n=20)
@@ -1488,6 +2173,191 @@ def _rows_for_weight_eval(examples: list[SearchExample], weights: dict[str, floa
     return rows
 
 
+def _self_tune_review_evidence(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "baseline": record.get("baseline", {}),
+        "best": record.get("best", {}),
+        "guardrails": record.get("guardrails", {}),
+        "previous_sha256": record.get("previous_policy_sha256"),
+        "previous_summary": record.get("previous_policy_summary", {}),
+    }
+
+
+def _self_tune_artifact_error(
+    artifact: object,
+    *,
+    evidence: Mapping[str, Any] | None = None,
+    current_authority: object | None = None,
+) -> str | None:
+    return _search_review_artifact_error(
+        artifact,
+        kind="search_self_tune_verdict",
+        lane=SEARCH_SELF_TUNE_LANE,
+        evidence=evidence,
+        current_authority=current_authority,
+    )
+
+
+def _self_tune_policy_id(policy: Mapping[str, Any]) -> str:
+    canonical = dict(policy)
+    canonical.pop("policy_id", None)
+    return _canonical_json_sha256(canonical)
+
+
+def _self_tune_previous_summary(previous: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "version": previous.get("version"),
+        "source": previous.get("source"),
+        "policy_id": previous.get("policy_id"),
+        "weights": previous.get("weights"),
+        "holdout": previous.get("holdout"),
+    }
+
+
+def _self_tune_policy_error(
+    policy: object,
+    *,
+    current_authority: object | None = None,
+) -> str | None:
+    if not isinstance(policy, Mapping):
+        return "search self-tune policy is missing"
+    artifact = policy.get("decision_artifact")
+    evidence = artifact.get("evidence") if isinstance(artifact, Mapping) else None
+    review = artifact.get("review") if isinstance(artifact, Mapping) else None
+    previous = policy.get("previous")
+    weights = policy.get("weights")
+    holdout = policy.get("holdout")
+    if (
+        set(policy)
+        != {
+            "version",
+            "created_at",
+            "source",
+            "weights",
+            "holdout",
+            "previous",
+            "decision_artifact",
+            "policy_id",
+        }
+        or policy.get("version") != 1
+        or policy.get("source") != "search_eval.self_tune"
+        or not isinstance(policy.get("created_at"), str)
+        or not isinstance(previous, Mapping)
+        or not isinstance(weights, Mapping)
+        or not isinstance(holdout, Mapping)
+        or not isinstance(evidence, Mapping)
+        or not isinstance(review, Mapping)
+        or review.get("decision") != "approved"
+    ):
+        return "search self-tune policy shape is invalid"
+    artifact_error = _self_tune_artifact_error(
+        artifact,
+        evidence=evidence,
+        current_authority=current_authority,
+    )
+    if artifact_error is not None:
+        return artifact_error
+    best = evidence.get("best")
+    if (
+        not isinstance(best, Mapping)
+        or best.get("weights") != weights
+        or best.get("locked-test") != holdout
+        or evidence.get("previous_sha256") != _canonical_json_sha256(previous)
+        or evidence.get("previous_summary") != _self_tune_previous_summary(previous)
+    ):
+        return "search self-tune policy is not linked to reviewed evidence"
+    policy_id = policy.get("policy_id")
+    if not isinstance(policy_id, str) or policy_id != _self_tune_policy_id(policy):
+        return "search self-tune policy id is invalid"
+    return None
+
+
+def _recover_applied_self_tune_receipt(
+    *,
+    policy_file: Path,
+    history_file: Path,
+) -> dict[str, Any] | None:
+    """Acknowledge only an exact policy postimage left by a prior crash."""
+
+    with decision_authority_lock():
+        # Read both sides only after acquiring the same lease used by policy
+        # mutation and rollback. This prevents a stale pre-lock snapshot from
+        # creating a duplicate or misattributed receipt.
+        try:
+            policy_preimage = policy_file.read_bytes()
+            policy = json.loads(policy_preimage)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if _self_tune_policy_error(policy) is not None:
+            return None
+        assert isinstance(policy, dict)
+        artifact = policy["decision_artifact"]
+        policy_id = policy["policy_id"]
+        try:
+            history_preimage = history_file.read_bytes()
+        except FileNotFoundError:
+            history_preimage = None
+        except OSError:
+            return None
+        prior = read_jsonl(history_file)
+        lifecycle = [
+            row
+            for row in prior
+            if row.get("status") in {"applied", "applied_recovered", "rolled_back"}
+        ]
+        if any(
+            row.get("policy_id") == policy_id
+            and row.get("status") in {"applied", "applied_recovered"}
+            for row in lifecycle
+        ):
+            return None
+        latest = lifecycle[-1] if lifecycle else None
+        if isinstance(latest, Mapping):
+            if (
+                latest.get("status") == "rolled_back"
+                and latest.get("restored_policy_id") == policy_id
+            ):
+                return None
+            latest_ts = str(latest.get("ts") or "")
+            created_at = str(policy.get("created_at") or "")
+            if (
+                latest.get("policy_id") != policy_id
+                and latest_ts
+                and created_at
+                and latest_ts >= created_at
+            ):
+                return None
+        recovered = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "status": "applied_recovered",
+            "applied": True,
+            "policy_id": policy_id,
+            "policy": policy,
+            "decision_artifact": artifact,
+            "authority_recovery": {
+                "kind": ALREADY_APPLIED_RECOVERY,
+                "source": "active_search_policy",
+            },
+        }
+        # This is audit reconciliation only; the exact policy bytes are already
+        # installed and are never rewritten on this path.
+        try:
+            if policy_file.read_bytes() != policy_preimage:
+                return None
+        except OSError:
+            return None
+        try:
+            current_history_preimage = history_file.read_bytes()
+        except FileNotFoundError:
+            current_history_preimage = None
+        except OSError:
+            return None
+        if current_history_preimage != history_preimage:
+            return None
+        append_jsonl(history_file, recovered)
+        return recovered
+
+
 def self_tune(
     *,
     golden_file: Path = GOLDEN_FILE,
@@ -1501,6 +2371,13 @@ def self_tune(
     max_examples: int = 200,
     max_elapsed_seconds: float = 10 * 60,
 ) -> dict[str, Any]:
+    if not dry_run:
+        recovered = _recover_applied_self_tune_receipt(
+            policy_file=policy_file,
+            history_file=history_file,
+        )
+        if recovered is not None:
+            return recovered
     examples = load_examples(golden_file)
     dev = [example for example in examples if example.split == "dev"]
     locked = [example for example in examples if example.split == "locked-test"]
@@ -1525,12 +2402,14 @@ def self_tune(
         return record
     deadline = time.monotonic() + max(0.0, float(max_elapsed_seconds))
 
-    def evaluate_bounded(items: list[SearchExample], weights: dict[str, float]) -> list[dict[str, Any]]:
+    def evaluate_bounded(
+        items: list[SearchExample], weights: dict[str, float]
+    ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for offset in range(0, len(items), 10):
             if time.monotonic() >= deadline:
                 raise TimeoutError("search self-tune runtime budget exhausted")
-            rows.extend(_rows_for_weight_eval(items[offset:offset + 10], weights))
+            rows.extend(_rows_for_weight_eval(items[offset : offset + 10], weights))
         return rows
 
     baseline_weights = load_active_fusion_weights(policy_file)
@@ -1549,7 +2428,11 @@ def self_tune(
             "status": "budget_deferred",
             "applied": False,
             "reason": str(exc),
-            "dataset": {"dev": len(dev), "locked-test": len(locked), "max_examples": example_cap},
+            "dataset": {
+                "dev": len(dev),
+                "locked-test": len(locked),
+                "max_examples": example_cap,
+            },
         }
     best = max(
         candidates,
@@ -1567,13 +2450,19 @@ def self_tune(
             "status": "budget_deferred",
             "applied": False,
             "reason": str(exc),
-            "dataset": {"dev": len(dev), "locked-test": len(locked), "max_examples": example_cap},
+            "dataset": {
+                "dev": len(dev),
+                "locked-test": len(locked),
+                "max_examples": example_cap,
+            },
         }
     locked_ok = (
         locked_metrics["recall_at_5"] >= baseline_locked["recall_at_5"]
         and locked_metrics["mrr_at_10"] >= baseline_locked["mrr_at_10"]
-        and locked_metrics["stale_hit_rate_at_20"] <= baseline_locked["stale_hit_rate_at_20"]
-        and locked_metrics["negative_hit_rate_at_20"] <= baseline_locked["negative_hit_rate_at_20"]
+        and locked_metrics["stale_hit_rate_at_20"]
+        <= baseline_locked["stale_hit_rate_at_20"]
+        and locked_metrics["negative_hit_rate_at_20"]
+        <= baseline_locked["negative_hit_rate_at_20"]
     )
     dev_improved = best["dev"]["mrr_at_10"] > baseline_dev["mrr_at_10"]
     status = "shadow_pass" if dev_improved and locked_ok else "blocked"
@@ -1581,18 +2470,52 @@ def self_tune(
         "ts": datetime.now().isoformat(timespec="seconds"),
         "status": status,
         "applied": False,
-        "reason": "" if status == "shadow_pass" else "dev improvement or locked-test guard failed",
+        "reason": ""
+        if status == "shadow_pass"
+        else "dev improvement or locked-test guard failed",
         "baseline": {"dev": baseline_dev, "locked-test": baseline_locked},
-        "best": {"weights": best["weights"], "dev": best["dev"], "locked-test": locked_metrics},
+        "best": {
+            "weights": best["weights"],
+            "dev": best["dev"],
+            "locked-test": locked_metrics,
+        },
         "guardrails": {
             "dev_improved": dev_improved,
             "locked_non_degrading": locked_ok,
             "apply_policy": "validated_auto" if apply else "shadow_only",
         },
     }
-    if status == "shadow_pass" and apply:
-        frontier: dict[str, Any] | None = None
-        if frontier_mode == "auto" and not dry_run:
+    semantic_artifact: dict[str, Any] | None = None
+    pending_policy: dict[str, Any] | None = None
+    pending_policy_preimage: bytes | None = None
+    previous_policy: dict[str, Any] = {}
+    semantic_evidence: dict[str, Any] | None = None
+    injected_reviewer = frontier_reviewer is not None or (
+        getattr(review_search_policy_with_frontier, "__module__", None) != __name__
+    )
+    if status == "shadow_pass" and apply and not dry_run:
+        try:
+            pending_policy_preimage = policy_file.read_bytes()
+            parsed_previous = json.loads(pending_policy_preimage)
+            if not isinstance(parsed_previous, dict):
+                raise ValueError("active search policy must be an object")
+            previous_policy = parsed_previous
+        except FileNotFoundError:
+            pending_policy_preimage = None
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            record["status"] = "frontier_retry"
+            record["reason"] = f"active search policy preimage is invalid: {exc}"
+        record["previous_policy_sha256"] = _canonical_json_sha256(previous_policy)
+        record["previous_policy_summary"] = _self_tune_previous_summary(previous_policy)
+    if record["status"] == "shadow_pass" and apply:
+        if dry_run:
+            record["status"] = "dry_run"
+        elif frontier_mode != "auto":
+            record["status"] = "frontier_retry"
+            record["reason"] = (
+                "search policy mutation requires local semantic authority"
+            )
+        else:
             allowed = True
             if budget is not None:
                 allowed, _reason = budget.consume("frontier")
@@ -1600,41 +2523,107 @@ def self_tune(
                 record["status"] = "budget_deferred"
                 record["reason"] = "frontier cycle budget exhausted"
             else:
-                frontier = (
-                    frontier_reviewer(record)
-                    if frontier_reviewer is not None
-                    else review_search_policy_with_frontier(record)
-                )
-        if frontier is not None:
-            record["frontier_review"] = frontier
-            if is_human_required_result(frontier):
-                record["status"] = "human_required"
-                record["reason"] = str(frontier.get("summary") or "frontier access requires external authority")
-            elif frontier.get("decision") != "approved":
-                record["status"] = (
-                    "frontier_rejected" if frontier.get("decision") in {"rejected", "quarantined"}
-                    else "frontier_retry"
-                )
-                record["reason"] = str(frontier.get("summary") or "frontier did not approve search policy")
-        if record["status"] == "shadow_pass":
-            old = {}
-            try:
-                parsed = json.loads(policy_file.read_text(encoding="utf-8"))
-                old = parsed if isinstance(parsed, dict) else {}
-            except (OSError, json.JSONDecodeError):
-                pass
+                with decision_authority_lock():
+                    authority, authority_error = (
+                        decision_authority.current_semantic_authority(
+                            SEARCH_SELF_TUNE_LANE,
+                            injected_reviewer=injected_reviewer,
+                        )
+                    )
+                if authority_error is not None or authority is None:
+                    record["status"] = "frontier_retry"
+                    record["reason"] = (
+                        authority_error or "search self-tune authority unavailable"
+                    )
+                else:
+                    try:
+                        frontier = (
+                            frontier_reviewer(record)
+                            if frontier_reviewer is not None
+                            else review_search_policy_with_frontier(record)
+                        )
+                    except Exception as exc:
+                        frontier = {
+                            "decision": "needs_retry",
+                            "summary": (
+                                "search policy reviewer failed: "
+                                f"{exc.__class__.__name__}: {exc}"
+                            ),
+                        }
+                    record["frontier_review"] = frontier
+                    semantic_evidence = _self_tune_review_evidence(record)
+                    with decision_authority_lock():
+                        current_authority, current_error = (
+                            decision_authority.current_semantic_authority(
+                                SEARCH_SELF_TUNE_LANE,
+                                injected_reviewer=injected_reviewer,
+                            )
+                        )
+                        authority_error = current_error or (
+                            decision_authority.compare_semantic_authority(
+                                authority,
+                                current_authority,
+                                lane=SEARCH_SELF_TUNE_LANE,
+                            )
+                        )
+                        authority_error = authority_error or (
+                            decision_authority.semantic_verdict_authority_error(
+                                frontier,
+                                authority,
+                                lane=SEARCH_SELF_TUNE_LANE,
+                            )
+                        )
+                        if authority_error is None:
+                            semantic_artifact = _seal_search_review(
+                                kind="search_self_tune_verdict",
+                                lane=SEARCH_SELF_TUNE_LANE,
+                                evidence=semantic_evidence,
+                                review=frontier,
+                                authority=authority,
+                            )
+                    if authority_error is not None or semantic_artifact is None:
+                        record["status"] = "frontier_retry"
+                        record["reason"] = (
+                            authority_error
+                            or "search self-tune verdict authority invalid"
+                        )
+                    else:
+                        record["decision_artifact"] = semantic_artifact
+                        if is_human_required_result(frontier):
+                            record["status"] = "human_required"
+                            record["reason"] = str(
+                                frontier.get("summary")
+                                or "frontier access requires external authority"
+                            )
+                        elif frontier.get("decision") != "approved":
+                            record["status"] = (
+                                "frontier_rejected"
+                                if frontier.get("decision")
+                                in {"rejected", "quarantined"}
+                                else "frontier_retry"
+                            )
+                            record["reason"] = str(
+                                frontier.get("summary")
+                                or "frontier did not approve search policy"
+                            )
+        if record["status"] == "shadow_pass" and semantic_artifact is not None:
             artifact = {
                 "version": 1,
                 "created_at": record["ts"],
                 "source": "search_eval.self_tune",
                 "weights": best["weights"],
                 "holdout": locked_metrics,
-                "previous": old,
+                "previous": previous_policy,
+                "decision_artifact": semantic_artifact,
             }
-            record["policy"] = artifact
-            if dry_run:
-                record["status"] = "dry_run"
-            else:
+            artifact["policy_id"] = _self_tune_policy_id(artifact)
+            policy_error = _self_tune_policy_error(artifact)
+            if policy_error is not None:
+                record["status"] = "frontier_retry"
+                record["reason"] = policy_error
+            if record["status"] == "shadow_pass":
+                record["policy"] = artifact
+                record["policy_id"] = artifact["policy_id"]
                 mutation_allowed = True
                 mutation_reason = "ok"
                 if budget is not None:
@@ -1643,12 +2632,7 @@ def self_tune(
                     record["status"] = "budget_deferred"
                     record["reason"] = mutation_reason
                 else:
-                    _atomic_write_text(
-                        policy_file,
-                        json.dumps(artifact, ensure_ascii=False, indent=2) + "\n",
-                    )
-                    record["status"] = "applied"
-                    record["applied"] = True
+                    pending_policy = artifact
     if record.get("status") == "frontier_retry":
         candidate_payload = {
             "weights": (record.get("best") or {}).get("weights", {}),
@@ -1656,7 +2640,9 @@ def self_tune(
             "locked-test": (record.get("best") or {}).get("locked-test", {}),
         }
         candidate_hash = hashlib.sha256(
-            json.dumps(candidate_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+            json.dumps(
+                candidate_payload, ensure_ascii=False, sort_keys=True, default=str
+            ).encode("utf-8")
         ).hexdigest()
         prior_history = read_jsonl(history_file)
         prior = prior_history[-1] if prior_history else {}
@@ -1669,13 +2655,158 @@ def self_tune(
         record["frontier_attempts"] = attempts
         if attempts >= 3:
             record["status"] = "frontier_quarantined"
-            record["reason"] = f"{record.get('reason', '')}; frontier retry limit exhausted"
+            record["reason"] = (
+                f"{record.get('reason', '')}; frontier retry limit exhausted"
+            )
             record["next_attempt_at"] = None
         else:
             record["next_attempt_at"] = (
                 datetime.now() + timedelta(minutes=15 * (2 ** max(0, attempts - 1)))
             ).isoformat(timespec="seconds")
     if not dry_run and record.get("status") != "budget_deferred":
+        if semantic_artifact is not None and semantic_evidence is not None:
+            with decision_authority_lock():
+                current_authority, current_error = (
+                    decision_authority.current_semantic_authority(
+                        SEARCH_SELF_TUNE_LANE,
+                        injected_reviewer=injected_reviewer,
+                    )
+                )
+                authority_error = current_error or (
+                    _self_tune_policy_error(
+                        pending_policy,
+                        current_authority=current_authority,
+                    )
+                    if pending_policy is not None
+                    else _self_tune_artifact_error(
+                        semantic_artifact,
+                        evidence=semantic_evidence,
+                        current_authority=current_authority,
+                    )
+                )
+                if authority_error is None and pending_policy is not None:
+                    try:
+                        current_policy_preimage = policy_file.read_bytes()
+                    except FileNotFoundError:
+                        current_policy_preimage = None
+                    except OSError as exc:
+                        authority_error = (
+                            f"active search policy preimage check failed: {exc}"
+                        )
+                        current_policy_preimage = None
+                    if (
+                        authority_error is None
+                        and current_policy_preimage != pending_policy_preimage
+                    ):
+                        authority_error = "active search policy changed before effect"
+                if authority_error is None:
+                    if pending_policy is not None:
+                        _atomic_write_text(
+                            policy_file,
+                            json.dumps(
+                                pending_policy,
+                                ensure_ascii=False,
+                                indent=2,
+                                sort_keys=True,
+                            )
+                            + "\n",
+                        )
+                        record["status"] = "applied"
+                        record["applied"] = True
+                    append_jsonl(history_file, record)
+                else:
+                    # A stale verdict is returned for observability but is not
+                    # installed and does not become durable terminal history.
+                    record["status"] = "frontier_retry"
+                    record["applied"] = False
+                    record["reason"] = authority_error
+                    record["decision_authority_error"] = authority_error
+        else:
+            append_jsonl(history_file, record)
+    return record
+
+
+def rollback_search_policy(
+    *,
+    policy_file: Path = ACTIVE_SEARCH_POLICY_FILE,
+    history_file: Path = SELF_TUNE_HISTORY_FILE,
+    expected_policy_id: str | None = None,
+    injected_reviewer: bool = False,
+) -> dict[str, Any]:
+    """Restore one approved policy's exact preimage under its authority lease."""
+
+    try:
+        expected_bytes = policy_file.read_bytes()
+        policy = json.loads(expected_bytes)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "status": "rollback_blocked",
+            "rolled_back": False,
+            "reason": f"active search policy is unreadable: {exc}",
+        }
+    policy_id = policy.get("policy_id") if isinstance(policy, dict) else None
+    previous = policy.get("previous") if isinstance(policy, dict) else None
+    if (
+        not isinstance(policy_id, str)
+        or not policy_id
+        or (expected_policy_id is not None and policy_id != expected_policy_id)
+        or not isinstance(previous, Mapping)
+        or _self_tune_policy_error(policy) is not None
+    ):
+        return {
+            "status": "rollback_blocked",
+            "rolled_back": False,
+            "reason": "active search policy has no matching sealed approval",
+        }
+
+    with decision_authority_lock():
+        try:
+            if policy_file.read_bytes() != expected_bytes:
+                return {
+                    "status": "rollback_blocked",
+                    "rolled_back": False,
+                    "reason": "active search policy changed before rollback",
+                }
+        except OSError as exc:
+            return {
+                "status": "rollback_blocked",
+                "rolled_back": False,
+                "reason": f"active search policy disappeared before rollback: {exc}",
+            }
+        current_authority, current_error = (
+            decision_authority.current_semantic_authority(
+                SEARCH_SELF_TUNE_LANE,
+                injected_reviewer=injected_reviewer,
+            )
+        )
+        authority_error = current_error or _self_tune_policy_error(
+            policy,
+            current_authority=current_authority,
+        )
+        if authority_error is not None:
+            return {
+                "status": "rollback_blocked",
+                "rolled_back": False,
+                "reason": authority_error,
+            }
+        restored = dict(previous)
+        _atomic_write_text(
+            policy_file,
+            json.dumps(restored, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+        record = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "status": "rolled_back",
+            "rolled_back": True,
+            "policy_id": policy_id,
+            "restored_policy_id": (
+                restored.get("policy_id")
+                if isinstance(restored.get("policy_id"), str)
+                else None
+            ),
+            "restored_sha256": _canonical_json_sha256(restored),
+            "decision_artifact": policy["decision_artifact"],
+        }
         append_jsonl(history_file, record)
     return record
 
@@ -1688,22 +2819,15 @@ def review_search_policy_with_frontier(
 ) -> dict[str, Any]:
     """Ask the frontier model for the final veto on a validated policy."""
     from llm_wiki_mcp import frontier_review
+    from llm_wiki_mcp.decision_lane_prompts import build_search_self_tune_prompt
 
-    prompt = f"""\
-You are the final autonomous reviewer for an LLM Wiki search ranking policy.
-The candidate already passed an independent locked-test non-regression gate.
-Approve only when the evidence supports the change and no metric or safety
-guard regresses. Do not edit files, commit, push, or ask a human. Return JSON
-matching the supplied frontier decision schema.
-
-Candidate evidence:
-{json.dumps(record, ensure_ascii=False, indent=2)}
-"""
+    prompt = build_search_self_tune_prompt(record)
     return frontier_review.run_structured_review(
         prompt,
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=repo_root,
-        timeout=timeout or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600")),
+        timeout=timeout
+        or int(os.environ.get("LLM_WIKI_FRONTIER_TIMEOUT_SECONDS", "3600")),
         execute_patch=False,
         decision_lane="search_self_tune",
     )
@@ -1735,11 +2859,17 @@ def run_self_tune_due(
             due = True
     elif last_ts:
         try:
-            due = datetime.now() - datetime.fromisoformat(last_ts) >= timedelta(hours=max(0.0, min_interval_hours))
+            due = datetime.now() - datetime.fromisoformat(last_ts) >= timedelta(
+                hours=max(0.0, min_interval_hours)
+            )
         except ValueError:
             due = True
     if not due:
-        return {"status": "skipped", "reason": "interval_not_due", "last_run_at": last_ts}
+        return {
+            "status": "skipped",
+            "reason": "interval_not_due",
+            "last_run_at": last_ts,
+        }
     return self_tune(
         golden_file=golden_file,
         history_file=history_file,
@@ -1764,7 +2894,9 @@ def run_report(
     debug_dump: Path | None = None,
     failure_index: Path | None = None,
 ) -> dict[str, Any]:
-    examples = load_examples(golden_file, limit=max(0, limit), source_filter=source_filter)
+    examples = load_examples(
+        golden_file, limit=max(0, limit), source_filter=source_filter
+    )
     result = evaluate_examples(examples, variants=variants, top_n=top_n)
     payload = {
         "status": "ok",
@@ -1786,7 +2918,9 @@ def run_report(
         write_jsonl(debug_dump, result["debug_rows"])
         payload["debug_dump"] = str(debug_dump)
     if failure_index is not None:
-        payload["failure_index"] = write_failure_index(result["debug_rows"], failure_index)
+        payload["failure_index"] = write_failure_index(
+            result["debug_rows"], failure_index
+        )
     if save:
         payload["baseline_file"] = str(save_baseline(payload))
     return payload
@@ -1833,7 +2967,9 @@ def ci_gate(
     min_mrr_at_10: float = 0.0,
     max_negative_hit_rate_at_20: float = 1.0,
 ) -> dict[str, Any]:
-    variants = payload.get("variants") if isinstance(payload.get("variants"), dict) else {}
+    variants = (
+        payload.get("variants") if isinstance(payload.get("variants"), dict) else {}
+    )
     selected = variants.get(variant) if isinstance(variants, dict) else None
     if selected is None and variants:
         variant, selected = next(iter(variants.items()))
@@ -1842,11 +2978,13 @@ def ci_gate(
     metrics = selected.get("metrics")
     if not isinstance(metrics, dict):
         return {"status": "failed", "reason": "missing metrics", "variant": variant}
+
     def metric(name: str, default: float) -> float:
         try:
             return float(metrics.get(name, default))
         except (TypeError, ValueError):
             return default
+
     failures = []
     if metric("recall_at_5", 0.0) < min_recall_at_5:
         failures.append("recall_at_5")
@@ -1868,34 +3006,60 @@ def ci_gate(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Evaluate LLM Wiki search ranking quality.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate LLM Wiki search ranking quality."
+    )
     parser.add_argument("--golden-file", default=str(GOLDEN_FILE))
     parser.add_argument("--label-queue-file", default=str(LABEL_QUEUE_FILE))
     parser.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))
     parser.add_argument("--log-file", default=str(RECALL_LOG_FILE))
     parser.add_argument("--output-file", default=str(GOLDEN_FILE))
     parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--source-filter", choices=("all", "manual", "auto"), default="all")
+    parser.add_argument(
+        "--source-filter", choices=("all", "manual", "auto"), default="all"
+    )
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--variants", help="Comma-separated variants to evaluate.")
-    parser.add_argument("--debug-dump", help="Write per-query channel/result rows as JSONL.")
-    parser.add_argument("--failure-index", nargs="?", const=str(FAILURE_INDEX_FILE), help="Write failed query index JSONL.")
+    parser.add_argument(
+        "--debug-dump", help="Write per-query channel/result rows as JSONL."
+    )
+    parser.add_argument(
+        "--failure-index",
+        nargs="?",
+        const=str(FAILURE_INDEX_FILE),
+        help="Write failed query index JSONL.",
+    )
     parser.add_argument("--build-golden", action="store_true")
     parser.add_argument("--build-label-queue", action="store_true")
-    parser.add_argument("--frontier-review-labels", action="store_true", help="Use a frontier model to promote trusted label-queue rows into the golden set.")
+    parser.add_argument(
+        "--frontier-review-labels",
+        action="store_true",
+        help="Use a frontier model to promote trusted label-queue rows into the golden set.",
+    )
     parser.add_argument(
         "--frontier-min-confidence",
         type=float,
         default=0.8,
         help="Deprecated no-op; confidence is retained only as review metadata.",
     )
-    parser.add_argument("--frontier-votes", type=int, default=1, help="Number of frontier votes required to agree before promotion.")
+    parser.add_argument(
+        "--frontier-votes",
+        type=int,
+        default=1,
+        help="Number of frontier votes required to agree before promotion.",
+    )
     parser.add_argument("--frontier-timeout", type=int, default=None)
-    parser.add_argument("--self-tune", action="store_true", help="Run dev-only shadow self-tune with locked-test guard.")
+    parser.add_argument(
+        "--self-tune",
+        action="store_true",
+        help="Run dev-only shadow self-tune with locked-test guard.",
+    )
     parser.add_argument("--self-tune-history", default=str(SELF_TUNE_HISTORY_FILE))
     parser.add_argument("--report", action="store_true")
     parser.add_argument("--save-baseline", action="store_true")
-    parser.add_argument("--ci", action="store_true", help="Fail non-zero when metrics miss thresholds.")
+    parser.add_argument(
+        "--ci", action="store_true", help="Fail non-zero when metrics miss thresholds."
+    )
     parser.add_argument("--ci-variant", default="hybrid-current")
     parser.add_argument("--min-recall-at-5", type=float, default=0.0)
     parser.add_argument("--min-mrr-at-10", type=float, default=0.0)
@@ -1979,10 +3143,14 @@ def main(argv: list[str] | None = None) -> int:
         variants=_parse_variants(args.variants),
         top_n=args.top_n,
         limit=args.limit,
-        source_filter="manual" if args.ci and args.source_filter == "all" else args.source_filter,
+        source_filter="manual"
+        if args.ci and args.source_filter == "all"
+        else args.source_filter,
         save=args.save_baseline,
         debug_dump=Path(args.debug_dump).expanduser() if args.debug_dump else None,
-        failure_index=Path(args.failure_index).expanduser() if args.failure_index else None,
+        failure_index=Path(args.failure_index).expanduser()
+        if args.failure_index
+        else None,
     )
     if args.ci:
         payload["ci_gate"] = ci_gate(

@@ -15,14 +15,23 @@ import hashlib
 import json
 import os
 import re
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
 from llm_wiki_mcp.convergence import is_human_required_result
+from llm_wiki_mcp.decision_authority import (
+    compare_semantic_authority,
+    current_semantic_authority,
+    seal_semantic_artifact,
+    semantic_authority_shape_error,
+    semantic_verdict_authority_error,
+)
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.jobs import JobStatus, job_store
+from llm_wiki_mcp.page_mutation import decision_authority_lock
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT
 
 RAW_DATE_RE = re.compile(r"(20\d{6})")
@@ -58,6 +67,8 @@ COMPLETED_HISTORY_STATUSES = frozenset(
     {"completed", "completed_partial", "success", "already_completed"}
 )
 MAX_FRONTIER_ATTEMPTS = 3
+RAW_REPLAY_DECISION_LANE = "raw_replay_reconciliation"
+RAW_REPLAY_APPROVAL_SCHEMA_VERSION = 2
 LIFECYCLE_FIELDS = (
     "status",
     "attempts",
@@ -77,7 +88,11 @@ LIFECYCLE_FIELDS = (
     "frontier_attempts",
     "next_frontier_retry_at",
     "frontier_decision",
+    "frontier_review_artifact",
+    "frontier_authorization_consumed_at",
+    "frontier_authority_error",
     "human_required_at",
+    "recovery_kind",
 )
 NONTERMINAL_FAILURE_PACKET_STATUSES = frozenset(
     {
@@ -186,9 +201,9 @@ def _resume_due_autonomous_terminal(row: dict[str, Any], *, now: datetime) -> bo
     row["human_required_at"] = None
     row["quarantine_resumed_at"] = row.get("quarantine_resumed_at") or _iso(now)
     if not already_resumed:
-        row["quarantine_reopen_count"] = _nonnegative_int(
-            row.get("quarantine_reopen_count")
-        ) + 1
+        row["quarantine_reopen_count"] = (
+            _nonnegative_int(row.get("quarantine_reopen_count")) + 1
+        )
     row["updated_at"] = _iso(now)
     return True
 
@@ -212,7 +227,11 @@ def is_raw_retracted(path: Path) -> bool:
 
 def raw_date(path: Path) -> str:
     match = RAW_DATE_RE.search(path.name)
-    return match.group(1) if match else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%d")
+    return (
+        match.group(1)
+        if match
+        else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%d")
+    )
 
 
 def select_raws(*, since: str = "", limit: int = 0) -> list[Path]:
@@ -261,7 +280,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _atomic_write_queue(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n" for row in rows)
+    payload = "".join(
+        json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n"
+        for row in rows
+    )
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         with tmp.open("w", encoding="utf-8") as handle:
@@ -291,7 +313,9 @@ def _append_history(row: dict[str, Any], path: Path | None = None) -> None:
     with target.open("a", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:
-            f.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+            f.write(
+                json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n"
+            )
             f.flush()
             os.fsync(f.fileno())
         finally:
@@ -311,7 +335,9 @@ def _append_completion(row: dict[str, Any], path: Path | None = None) -> None:
     with target.open("a", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+            handle.write(
+                json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n"
+            )
             handle.flush()
             os.fsync(handle.fileno())
         finally:
@@ -386,7 +412,9 @@ def _candidate(
     }
 
 
-def _normalize_queue_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any] | None:
+def _normalize_queue_row(
+    row: dict[str, Any], *, now: datetime
+) -> dict[str, Any] | None:
     raw = _raw_name(row)
     if not raw:
         return None
@@ -412,7 +440,9 @@ def _normalize_queue_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any
     sources = row.get("sources")
     if not isinstance(sources, list):
         source = row.get("source")
-        sources = [source] if isinstance(source, str) and source else ["explicit_migration"]
+        sources = (
+            [source] if isinstance(source, str) and source else ["explicit_migration"]
+        )
     normalized["sources"] = sorted(
         {str(item) for item in sources if isinstance(item, str) and item},
         key=lambda item: (-SOURCE_PRIORITY.get(item, 0), item),
@@ -421,7 +451,9 @@ def _normalize_queue_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any
     if not isinstance(reasons, list):
         reason = row.get("reason")
         reasons = [reason] if isinstance(reason, str) and reason else []
-    normalized["reasons"] = list(dict.fromkeys(str(item) for item in reasons if isinstance(item, str) and item))
+    normalized["reasons"] = list(
+        dict.fromkeys(str(item) for item in reasons if isinstance(item, str) and item)
+    )
     source_priorities = [
         SOURCE_PRIORITY[source]
         for source in normalized["sources"]
@@ -447,13 +479,17 @@ def _row_is_retracted(row: dict[str, Any]) -> bool:
     return path is not None and is_raw_retracted(path)
 
 
-def _merge_rows(current: dict[str, Any], incoming: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+def _merge_rows(
+    current: dict[str, Any], incoming: dict[str, Any], *, now: datetime
+) -> dict[str, Any]:
     merged = dict(current)
     merged["sources"] = sorted(
         set(current.get("sources", [])) | set(incoming.get("sources", [])),
         key=lambda item: (-SOURCE_PRIORITY.get(str(item), 0), str(item)),
     )
-    merged["reasons"] = list(dict.fromkeys([*current.get("reasons", []), *incoming.get("reasons", [])]))
+    merged["reasons"] = list(
+        dict.fromkeys([*current.get("reasons", []), *incoming.get("reasons", [])])
+    )
     merged["priority"] = max(
         _nonnegative_int(current.get("priority")),
         _nonnegative_int(incoming.get("priority")),
@@ -502,7 +538,11 @@ def _merge_durable_rows(
     for field in LIFECYCLE_FIELDS:
         if field in winner:
             merged[field] = winner.get(field)
-    created = [str(row.get("created_at")) for row in (current, incoming) if row.get("created_at")]
+    created = [
+        str(row.get("created_at"))
+        for row in (current, incoming)
+        if row.get("created_at")
+    ]
     if created:
         merged["created_at"] = min(created)
     return merged
@@ -521,7 +561,9 @@ def _memory_integrity_candidates(*, now: datetime) -> list[dict[str, Any]]:
         path = _resolve_raw_path(raw, row.get("path")) if raw else None
         if path is None:
             continue
-        reason = str(row.get("reason") or row.get("query") or "memory integrity search miss")
+        reason = str(
+            row.get("reason") or row.get("query") or "memory integrity search miss"
+        )
         candidate = _candidate(
             path,
             source="memory_integrity_miss",
@@ -533,7 +575,9 @@ def _memory_integrity_candidates(*, now: datetime) -> list[dict[str, Any]]:
     return out
 
 
-def _explicit_migration_candidates(*, since: str, now: datetime) -> list[dict[str, Any]]:
+def _explicit_migration_candidates(
+    *, since: str, now: datetime
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for path in select_raws(since=since, limit=0):
         candidate = _candidate(
@@ -579,7 +623,10 @@ def _read_back_raws(
     for failure in failed:
         if not isinstance(failure, dict):
             continue
-        if str(failure.get("reason") or "").strip().casefold() in READ_BACK_REPAIR_ONLY_REASONS:
+        if (
+            str(failure.get("reason") or "").strip().casefold()
+            in READ_BACK_REPAIR_ONLY_REASONS
+        ):
             continue
         page_id = failure.get("page_id")
         if not isinstance(page_id, str) or not page_id:
@@ -610,11 +657,24 @@ def _read_back_raws(
 
 def _ingest_failure_candidates(*, now: datetime) -> list[dict[str, Any]]:
     records: list[tuple[dict[str, Any], str]] = []
-    for path in sorted(FAILURE_PACKETS_DIR.glob("*.json")) if FAILURE_PACKETS_DIR.exists() else []:
+    for path in (
+        sorted(FAILURE_PACKETS_DIR.glob("*.json"))
+        if FAILURE_PACKETS_DIR.exists()
+        else []
+    ):
         packet = _read_json(path)
         status = str(packet.get("status") or "")
         if status in NONTERMINAL_FAILURE_PACKET_STATUSES:
-            records.append((packet, str(packet.get("failure_class") or packet.get("error") or "ingest failure packet")))
+            records.append(
+                (
+                    packet,
+                    str(
+                        packet.get("failure_class")
+                        or packet.get("error")
+                        or "ingest failure packet"
+                    ),
+                )
+            )
     read_back_rows = _read_jsonl(INGEST_FAILURE_LOG_FILE)
     for row in read_back_rows:
         failed = row.get("failed")
@@ -630,18 +690,19 @@ def _ingest_failure_candidates(*, now: datetime) -> list[dict[str, Any]]:
     if isinstance(last_success, dict):
         failed_ops = last_success.get("failed_ops")
         read_back = last_success.get("read_back")
-        read_back_failed = read_back.get("failed") if isinstance(read_back, dict) else None
-        actionable_read_back = (
-            isinstance(read_back_failed, list)
-            and any(
-                not isinstance(item, dict)
-                or str(item.get("reason") or "").strip().casefold()
-                not in READ_BACK_REPAIR_ONLY_REASONS
-                for item in read_back_failed
-            )
+        read_back_failed = (
+            read_back.get("failed") if isinstance(read_back, dict) else None
+        )
+        actionable_read_back = isinstance(read_back_failed, list) and any(
+            not isinstance(item, dict)
+            or str(item.get("reason") or "").strip().casefold()
+            not in READ_BACK_REPAIR_ONLY_REASONS
+            for item in read_back_failed
         )
         if (isinstance(failed_ops, list) and failed_ops) or actionable_read_back:
-            records.append((last_success, "latest ingest had failed ops or read-back failures"))
+            records.append(
+                (last_success, "latest ingest had failed ops or read-back failures")
+            )
 
     out_by_key: dict[str, dict[str, Any]] = {}
     for record, reason in records:
@@ -663,34 +724,52 @@ def _ingest_failure_candidates(*, now: datetime) -> list[dict[str, Any]]:
             path = _resolve_raw_path(raw)
             if path is None:
                 continue
-            candidate = _candidate(path, source="ingest_failure", reason=reason, now=now)
+            candidate = _candidate(
+                path, source="ingest_failure", reason=reason, now=now
+            )
             if candidate is None:
                 continue
             current = out_by_key.get(candidate["key"])
             out_by_key[candidate["key"]] = (
-                candidate if current is None else _merge_rows(current, candidate, now=now)
+                candidate
+                if current is None
+                else _merge_rows(current, candidate, now=now)
             )
 
     # Quarantined sources are durable failure evidence even if an old packet
     # has already reached a code-fix terminal state.
     if QUARANTINED_RAW_DIR.exists():
         for path in sorted(QUARANTINED_RAW_DIR.glob("*.md")):
-            candidate = _candidate(path, source="ingest_failure", reason="raw remains in ingest quarantine", now=now)
+            candidate = _candidate(
+                path,
+                source="ingest_failure",
+                reason="raw remains in ingest quarantine",
+                now=now,
+            )
             if candidate is None:
                 continue
             current = out_by_key.get(candidate["key"])
             out_by_key[candidate["key"]] = (
-                candidate if current is None else _merge_rows(current, candidate, now=now)
+                candidate
+                if current is None
+                else _merge_rows(current, candidate, now=now)
             )
     dead_letter = RAW_DIR / ".dead-letter"
     if dead_letter.exists():
         for path in sorted(dead_letter.glob("*.md")):
-            candidate = _candidate(path, source="ingest_failure", reason="raw remains in ingest dead-letter", now=now)
+            candidate = _candidate(
+                path,
+                source="ingest_failure",
+                reason="raw remains in ingest dead-letter",
+                now=now,
+            )
             if candidate is None:
                 continue
             current = out_by_key.get(candidate["key"])
             out_by_key[candidate["key"]] = (
-                candidate if current is None else _merge_rows(current, candidate, now=now)
+                candidate
+                if current is None
+                else _merge_rows(current, candidate, now=now)
             )
     return list(out_by_key.values())
 
@@ -706,7 +785,9 @@ def _history_lifecycle_states(
         key = stable_key(raw)
         status = str(record.get("status") or "").lower()
         if status in COMPLETED_HISTORY_STATUSES:
-            status = "completed_partial" if status == "completed_partial" else "completed"
+            status = (
+                "completed_partial" if status == "completed_partial" else "completed"
+            )
         elif status in {"error", "missing"}:
             status = "failed"
         if status not in TERMINAL_STATUSES | RETRYABLE_STATUSES:
@@ -722,7 +803,9 @@ def _history_lifecycle_states(
             "status": status,
             "attempts": attempts,
             "next_retry_at": record.get("next_retry_at"),
-            "last_attempt_at": record.get("last_attempt_at") or record.get("ts") or record.get("timestamp"),
+            "last_attempt_at": record.get("last_attempt_at")
+            or record.get("ts")
+            or record.get("timestamp"),
             "completed_at": (
                 (record.get("completed_at") or record.get("ts"))
                 if status in {"completed", "completed_partial"}
@@ -741,8 +824,25 @@ def _history_lifecycle_states(
                 else None
             ),
             "terminal_reason": record.get("terminal_reason"),
+            "frontier_decision": record.get("frontier_decision"),
+            "next_frontier_retry_at": record.get("next_frontier_retry_at"),
+            "frontier_review_artifact": record.get("frontier_review_artifact"),
+            "frontier_authorization_consumed_at": record.get(
+                "frontier_authorization_consumed_at"
+            ),
+            "frontier_authority_error": record.get("frontier_authority_error"),
+            "human_required_at": (
+                (record.get("human_required_at") or record.get("ts"))
+                if status == "human_required"
+                else None
+            ),
+            "recovery_kind": record.get("recovery_kind"),
         }
-        states[key] = state if previous is None else max((previous, state), key=_lifecycle_sort_key)
+        states[key] = (
+            state
+            if previous is None
+            else max((previous, state), key=_lifecycle_sort_key)
+        )
     return states
 
 
@@ -750,7 +850,9 @@ def _merge_history_lifecycle(
     row: dict[str, Any],
     history_state: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    if history_state is None or _lifecycle_sort_key(row) >= _lifecycle_sort_key(history_state):
+    if history_state is None or _lifecycle_sort_key(row) >= _lifecycle_sort_key(
+        history_state
+    ):
         return row
     merged = dict(row)
     for field in LIFECYCLE_FIELDS:
@@ -803,13 +905,19 @@ def _completion_states(path: Path | None = None) -> dict[str, dict[str, Any]]:
             continue
         key = stable_key(raw)
         previous = states.get(key)
-        if previous is None or str(record.get("ts") or "") >= str(previous.get("ts") or ""):
+        if previous is None or str(record.get("ts") or "") >= str(
+            previous.get("ts") or ""
+        ):
             states[key] = record
     return states
 
 
 def _queue_sort_key(row: dict[str, Any]) -> tuple[int, str, str]:
-    return (-_nonnegative_int(row.get("priority")), str(row.get("date") or ""), str(row.get("key") or ""))
+    return (
+        -_nonnegative_int(row.get("priority")),
+        str(row.get("date") or ""),
+        str(row.get("key") or ""),
+    )
 
 
 @contextmanager
@@ -948,13 +1056,22 @@ def _reconcile_running_rows(
                     "blind replay is disabled"
                 )
                 row["terminal_reason"] = "awaiting autonomous frontier reconciliation"
-                row["frontier_attempts"] = _nonnegative_int(row.get("frontier_attempts"))
-                row["next_frontier_retry_at"] = row.get("next_frontier_retry_at") or _iso(now)
+                row["frontier_attempts"] = _nonnegative_int(
+                    row.get("frontier_attempts")
+                )
+                row["next_frontier_retry_at"] = row.get(
+                    "next_frontier_retry_at"
+                ) or _iso(now)
                 row["updated_at"] = _iso(now)
         if status in {"completed", "completed_partial"}:
             _mark_completed(row, evidence=evidence, now=now, status=status)
+            # This is evidence-based bookkeeping recovery, not reuse of a
+            # semantic replay authorization. No new page mutation is launched.
+            row["recovery_kind"] = "exact_already_applied"
             if status == "completed_partial":
-                row["terminal_reason"] = "partial operations delegated to autonomous repair"
+                row["terminal_reason"] = (
+                    "partial operations delegated to autonomous repair"
+                )
         elif status == "failed":
             _mark_failed_attempt(
                 row,
@@ -972,6 +1089,7 @@ def _reconcile_running_rows(
             "job_id": row.get("job_id"),
             "attempt_id": row.get("attempt_id"),
             "completion_evidence": row.get("completion_evidence"),
+            "recovery_kind": row.get("recovery_kind"),
             "error": row.get("last_error"),
             "reconciled": True,
         }
@@ -1009,11 +1127,184 @@ def _frontier_due(row: dict[str, Any], *, now: datetime) -> bool:
 
 def _raw_claim_evidence(row: dict[str, Any], claims_file: Path) -> list[dict[str, Any]]:
     raw = str(row.get("raw") or "")
-    return [
-        claim
-        for claim in _read_jsonl(claims_file)
-        if _raw_name(claim) == raw
-    ][-20:]
+    return [claim for claim in _read_jsonl(claims_file) if _raw_name(claim) == raw][
+        -20:
+    ]
+
+
+_REVIEW_MUTABLE_ROW_FIELDS = frozenset(
+    {
+        "status",
+        "updated_at",
+        "last_error",
+        "terminal_reason",
+        "next_retry_at",
+        "quarantined_at",
+        "human_required_at",
+        "frontier_attempts",
+        "frontier_decision",
+        "frontier_failure",
+        "frontier_review_artifact",
+        "frontier_authorization_consumed_at",
+        "frontier_authority_error",
+        "next_frontier_retry_at",
+    }
+)
+
+
+def _review_queue_subject(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the crash attempt identity unaffected by review lifecycle writes."""
+
+    return {
+        str(key): value
+        for key, value in row.items()
+        if key not in _REVIEW_MUTABLE_ROW_FIELDS
+    }
+
+
+def _raw_replay_review_evidence(
+    row: dict[str, Any],
+    *,
+    claims_file: Path,
+) -> dict[str, Any]:
+    raw_path = _resolve_raw_path(str(row.get("raw") or ""), row.get("path"))
+    try:
+        raw_payload = raw_path.read_bytes() if raw_path else b""
+        raw_excerpt = raw_payload.decode("utf-8")[:4000] if raw_path else ""
+        current_raw_sha256 = (
+            hashlib.sha256(raw_payload).hexdigest() if raw_path else None
+        )
+    except (OSError, UnicodeDecodeError):
+        raw_excerpt = ""
+        current_raw_sha256 = None
+    return {
+        "queue_row": _review_queue_subject(row),
+        "claims": _raw_claim_evidence(row, claims_file),
+        "runtime_status": _read_json(RUNTIME_STATUS_FILE),
+        "raw_excerpt": raw_excerpt,
+        "current_raw_sha256": current_raw_sha256,
+    }
+
+
+def _canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _current_raw_replay_authority(
+    *,
+    injected_reviewer: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    return current_semantic_authority(
+        RAW_REPLAY_DECISION_LANE,
+        injected_reviewer=injected_reviewer,
+    )
+
+
+def _raw_replay_approval(
+    row: dict[str, Any],
+    *,
+    evidence: dict[str, Any],
+    review: dict[str, Any],
+    authority: dict[str, Any],
+) -> dict[str, Any]:
+    return seal_semantic_artifact(
+        {
+            "schema_version": RAW_REPLAY_APPROVAL_SCHEMA_VERSION,
+            "lane": RAW_REPLAY_DECISION_LANE,
+            "key": row.get("key"),
+            "raw": row.get("raw"),
+            "attempt_id": row.get("attempt_id"),
+            "job_id": row.get("job_id"),
+            "raw_sha256": row.get("raw_sha256"),
+            "observed_raw_sha256": evidence.get("current_raw_sha256"),
+            "review_input_sha256": _canonical_sha256(evidence),
+            "review": dict(review),
+        },
+        authority=authority,
+        lane=RAW_REPLAY_DECISION_LANE,
+    )
+
+
+def _raw_replay_approval_error(
+    row: dict[str, Any],
+    *,
+    approval: object,
+    claims_file: Path,
+    injected_reviewer: bool,
+) -> str | None:
+    if not isinstance(approval, Mapping):
+        return "raw replay semantic approval is missing"
+    review = approval.get("review")
+    authority = approval.get("authority")
+    current_evidence = _raw_replay_review_evidence(row, claims_file=claims_file)
+    if (
+        approval.get("schema_version") != RAW_REPLAY_APPROVAL_SCHEMA_VERSION
+        or approval.get("lane") != RAW_REPLAY_DECISION_LANE
+        or approval.get("key") != row.get("key")
+        or approval.get("raw") != row.get("raw")
+        or approval.get("attempt_id") != row.get("attempt_id")
+        or approval.get("job_id") != row.get("job_id")
+        or approval.get("raw_sha256") != row.get("raw_sha256")
+        or approval.get("observed_raw_sha256")
+        != current_evidence.get("current_raw_sha256")
+        or not isinstance(review, Mapping)
+    ):
+        return "raw replay semantic approval identity is invalid"
+    if (
+        semantic_authority_shape_error(
+            authority,
+            lane=RAW_REPLAY_DECISION_LANE,
+        )
+        is not None
+    ):
+        return "raw replay semantic approval authority is invalid"
+    if review.get("decision") != "safe_replay":
+        return "raw replay semantic approval does not authorize replay"
+    input_sha256 = approval.get("review_input_sha256")
+    if not isinstance(input_sha256, str) or input_sha256 != _canonical_sha256(
+        current_evidence
+    ):
+        return "raw replay semantic approval evidence changed"
+    current, current_error = _current_raw_replay_authority(
+        injected_reviewer=injected_reviewer
+    )
+    return (
+        current_error
+        or compare_semantic_authority(
+            authority,
+            current,
+            lane=RAW_REPLAY_DECISION_LANE,
+        )
+        or semantic_verdict_authority_error(
+            review,
+            authority,
+            lane=RAW_REPLAY_DECISION_LANE,
+        )
+    )
+
+
+def _invalidate_safe_replay_authorization(
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    reason: str,
+) -> dict[str, Any]:
+    updated = dict(row)
+    updated["status"] = "indeterminate"
+    updated["next_retry_at"] = None
+    updated["next_frontier_retry_at"] = _iso(now)
+    updated["last_error"] = reason
+    updated["terminal_reason"] = "semantic replay authorization rejected"
+    updated["frontier_authority_error"] = reason
+    updated["updated_at"] = _iso(now)
+    return updated
 
 
 def _review_indeterminate_rows(
@@ -1024,6 +1315,7 @@ def _review_indeterminate_rows(
     now: datetime,
     budget: Any | None,
     retry_delay_seconds: int,
+    reviewer: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     candidates = [
         row
@@ -1041,37 +1333,34 @@ def _review_indeterminate_rows(
                 "budget_deferred": [{"key": row.get("key"), "reason": reason}],
             }
 
-    from llm_wiki_mcp.frontier_review import run_structured_review
+    from llm_wiki_mcp.decision_lane_prompts import (
+        build_raw_replay_reconciliation_prompt,
+    )
 
-    raw_path = _resolve_raw_path(str(row.get("raw") or ""), row.get("path"))
-    try:
-        raw_excerpt = raw_path.read_text(encoding="utf-8")[:4000] if raw_path else ""
-    except OSError:
-        raw_excerpt = ""
-    evidence = {
-        "queue_row": row,
-        "claims": _raw_claim_evidence(row, claims_file),
-        "runtime_status": _read_json(RUNTIME_STATUS_FILE),
-        "raw_excerpt": raw_excerpt,
-    }
-    prompt = (
-        "You are the final autonomous judge for an indeterminate LLM Wiki raw replay.\n"
-        "A process ended after a durable launch marker but before whole-raw completion was proved.\n"
-        "Never request ordinary human judgment. Choose accept_processed when evidence shows the raw "
-        "was at least partially applied and duplicate replay is riskier; choose safe_replay only when "
-        "there is strong evidence no page mutation occurred; otherwise quarantine. needs_retry is only "
-        "for transient inability to judge. Return strict JSON.\n\n"
-        + json.dumps(evidence, ensure_ascii=False, indent=2, default=str)
+    evidence = _raw_replay_review_evidence(row, claims_file=claims_file)
+    prompt = build_raw_replay_reconciliation_prompt(evidence)
+    injected_reviewer = reviewer is not None
+    authority, authority_error = _current_raw_replay_authority(
+        injected_reviewer=injected_reviewer
     )
-    review = run_structured_review(
-        prompt,
-        RAW_REPLAY_RECONCILIATION_SCHEMA,
-        repo_root=Path(__file__).resolve().parents[2],
-        timeout=300,
-        execute_patch=False,
-        command_env="LLM_WIKI_RAW_REPLAY_REVIEW_CMD",
-        decision_lane="raw_replay_reconciliation",
-    )
+    if authority_error is None:
+        if reviewer is not None:
+            raw_review = reviewer(prompt, RAW_REPLAY_RECONCILIATION_SCHEMA)
+        else:
+            from llm_wiki_mcp.frontier_review import run_structured_review
+
+            raw_review = run_structured_review(
+                prompt,
+                RAW_REPLAY_RECONCILIATION_SCHEMA,
+                repo_root=Path(__file__).resolve().parents[2],
+                timeout=300,
+                execute_patch=False,
+                command_env="LLM_WIKI_RAW_REPLAY_REVIEW_CMD",
+                decision_lane=RAW_REPLAY_DECISION_LANE,
+            )
+        review = dict(raw_review) if isinstance(raw_review, Mapping) else {}
+    else:
+        review = {}
     attempts = _nonnegative_int(row.get("frontier_attempts")) + 1
     decision = str(review.get("decision") or "needs_retry")
     confidence_raw = review.get("confidence")
@@ -1081,61 +1370,154 @@ def _review_indeterminate_rows(
         and 0.0 <= float(confidence_raw) <= 1.0
     )
     confidence = float(confidence_raw) if confidence_valid else 0.0
-    reason = str(review.get("reason") or review.get("summary") or "invalid frontier result")
-    if not confidence_valid:
+    reason = str(
+        review.get("reason") or review.get("summary") or "invalid frontier result"
+    )
+    if authority_error is not None:
         decision = "needs_retry"
-        reason = "local consensus returned invalid confidence metadata"
-    row["frontier_attempts"] = attempts
-    row["frontier_decision"] = decision
-    row["frontier_failure"] = review.get("frontier_failure")
-    row["updated_at"] = _iso(now)
-    human_required = is_human_required_result(review)
-    if human_required:
-        row["status"] = "human_required"
-        row["human_required_at"] = _iso(now)
-        row["terminal_reason"] = reason
-        row["next_frontier_retry_at"] = None
-    elif decision == "accept_processed":
-        _mark_completed(
-            row,
-            evidence="frontier_indeterminate_review",
-            now=now,
-            status="completed_partial",
-        )
-        row["terminal_reason"] = reason
-    elif decision == "safe_replay":
-        row["status"] = "pending"
-        row["next_retry_at"] = None
-        row["next_frontier_retry_at"] = None
-        row["last_error"] = None
-        row["terminal_reason"] = reason
-    elif decision == "quarantine" or attempts >= MAX_FRONTIER_ATTEMPTS:
-        row["status"] = "quarantined"
-        row["quarantined_at"] = _iso(now)
-        row["next_frontier_retry_at"] = None
-        row["terminal_reason"] = reason
-    else:
-        row["status"] = "indeterminate"
-        delay = max(0, retry_delay_seconds) * (2 ** max(0, attempts - 1))
-        row["next_frontier_retry_at"] = _iso(now + timedelta(seconds=delay))
-        row["last_error"] = reason
+        reason = authority_error
+    elif decision not in {
+        "accept_processed",
+        "safe_replay",
+        "quarantine",
+        "needs_retry",
+    }:
+        authority_error = "local consensus returned an invalid replay decision"
+        decision = "needs_retry"
+        reason = authority_error
+    elif not confidence_valid:
+        authority_error = "local consensus returned invalid confidence metadata"
+        decision = "needs_retry"
+        reason = authority_error
 
-    record = {
-        "ts": _iso(now),
-        "schema_version": SCHEMA_VERSION,
-        "key": row.get("key"),
-        "raw": row.get("raw"),
-        "status": row.get("status"),
-        "attempts": row.get("attempts"),
-        "frontier_attempts": attempts,
-        "frontier_decision": decision,
-        "frontier_confidence": confidence,
-        "human_required": human_required,
-        "frontier_failure": review.get("frontier_failure"),
-        "error": row.get("last_error"),
-        "terminal_reason": row.get("terminal_reason"),
-    }
-    _append_history(record, history_file)
+    if authority_error is None:
+        assert authority is not None
+        current, current_error = _current_raw_replay_authority(
+            injected_reviewer=injected_reviewer
+        )
+        authority_error = (
+            semantic_verdict_authority_error(
+                review,
+                authority,
+                lane=RAW_REPLAY_DECISION_LANE,
+            )
+            or current_error
+            or compare_semantic_authority(
+                authority,
+                current,
+                lane=RAW_REPLAY_DECISION_LANE,
+            )
+        )
+        if authority_error is not None:
+            decision = "needs_retry"
+            reason = authority_error
+
+    human_required = is_human_required_result(review)
+    approval: dict[str, Any] | None = None
+    if authority_error is None:
+        assert authority is not None
+        approval = _raw_replay_approval(
+            row,
+            evidence=evidence,
+            review=review,
+            authority=authority,
+        )
+
+    # Every transition caused by a semantic verdict is serialized with an
+    # adopted-authority update.  The comparison is intentionally repeated
+    # here after the immediate post-review check above.
+    with decision_authority_lock():
+        if authority_error is None:
+            assert authority is not None
+            current, current_error = _current_raw_replay_authority(
+                injected_reviewer=injected_reviewer
+            )
+            authority_error = (
+                current_error
+                or compare_semantic_authority(
+                    authority,
+                    current,
+                    lane=RAW_REPLAY_DECISION_LANE,
+                )
+                or semantic_verdict_authority_error(
+                    review,
+                    authority,
+                    lane=RAW_REPLAY_DECISION_LANE,
+                )
+            )
+            if authority_error is None and _canonical_sha256(
+                _raw_replay_review_evidence(row, claims_file=claims_file)
+            ) != approval.get("review_input_sha256"):
+                authority_error = "raw replay review evidence changed before effect"
+        if authority_error is not None:
+            decision = "needs_retry"
+            human_required = False
+            reason = authority_error
+            row["status"] = "indeterminate"
+            row["next_retry_at"] = None
+            delay = max(0, retry_delay_seconds) * (2 ** max(0, attempts - 1))
+            row["next_frontier_retry_at"] = _iso(now + timedelta(seconds=delay))
+            row["last_error"] = reason
+            row["frontier_authority_error"] = reason
+            row.pop("frontier_review_artifact", None)
+        else:
+            assert approval is not None
+            row["frontier_review_artifact"] = approval
+            row["frontier_authority_error"] = None
+            if human_required:
+                row["status"] = "human_required"
+                row["human_required_at"] = _iso(now)
+                row["terminal_reason"] = reason
+                row["next_frontier_retry_at"] = None
+            elif decision == "accept_processed":
+                _mark_completed(
+                    row,
+                    evidence="local_consensus_indeterminate_review",
+                    now=now,
+                    status="completed_partial",
+                )
+                row["terminal_reason"] = reason
+            elif decision == "safe_replay":
+                row["status"] = "pending"
+                row["next_retry_at"] = None
+                row["next_frontier_retry_at"] = None
+                row["last_error"] = None
+                row["terminal_reason"] = reason
+            elif decision == "quarantine" or attempts >= MAX_FRONTIER_ATTEMPTS:
+                row["status"] = "quarantined"
+                row["quarantined_at"] = _iso(now)
+                row["next_frontier_retry_at"] = None
+                row["terminal_reason"] = reason
+            else:
+                row["status"] = "indeterminate"
+                delay = max(0, retry_delay_seconds) * (2 ** max(0, attempts - 1))
+                row["next_frontier_retry_at"] = _iso(now + timedelta(seconds=delay))
+                row["last_error"] = reason
+
+        row["frontier_attempts"] = attempts
+        row["frontier_decision"] = decision
+        row["frontier_failure"] = review.get("frontier_failure")
+        row["updated_at"] = _iso(now)
+        record = {
+            "ts": _iso(now),
+            "schema_version": SCHEMA_VERSION,
+            "key": row.get("key"),
+            "raw": row.get("raw"),
+            "status": row.get("status"),
+            "attempts": row.get("attempts"),
+            "frontier_attempts": attempts,
+            "frontier_decision": decision,
+            "frontier_confidence": confidence,
+            "human_required": human_required,
+            "frontier_failure": review.get("frontier_failure"),
+            "frontier_review_artifact": row.get("frontier_review_artifact"),
+            "frontier_authority_error": row.get("frontier_authority_error"),
+            "next_frontier_retry_at": row.get("next_frontier_retry_at"),
+            "human_required_at": row.get("human_required_at"),
+            "error": row.get("last_error"),
+            "terminal_reason": row.get("terminal_reason"),
+        }
+        _append_history(record, history_file)
     return {"reviewed": 1, "record": record, "budget_deferred": []}
 
 
@@ -1177,7 +1559,10 @@ def _reactivate_not_needed(row: dict[str, Any], *, now: datetime) -> dict[str, A
 
 
 def _coerce_exhausted(row: dict[str, Any], *, now: datetime) -> None:
-    if row.get("status") not in RETRYABLE_STATUSES or _nonnegative_int(row.get("attempts")) < MAX_ATTEMPTS:
+    if (
+        row.get("status") not in RETRYABLE_STATUSES
+        or _nonnegative_int(row.get("attempts")) < MAX_ATTEMPTS
+    ):
         return
     row["status"] = "quarantined"
     row["next_retry_at"] = None
@@ -1203,7 +1588,9 @@ def _build_queue_unlocked(
             _retire_retracted_row(row, now=now)
             key = str(row["key"])
             current = existing_by_key.get(key)
-            existing_by_key[key] = row if current is None else _merge_durable_rows(current, row, now=now)
+            existing_by_key[key] = (
+                row if current is None else _merge_durable_rows(current, row, now=now)
+            )
     for key, row in existing_by_key.items():
         existing_by_key[key] = _merge_history_lifecycle(row, history_states.get(key))
         _coerce_exhausted(existing_by_key[key], now=now)
@@ -1224,7 +1611,9 @@ def _build_queue_unlocked(
         _coerce_exhausted(row, now=now)
         _resume_due_autonomous_terminal(row, now=now)
         current = incoming_by_key.get(key)
-        incoming_by_key[key] = row if current is None else _merge_durable_rows(current, row, now=now)
+        incoming_by_key[key] = (
+            row if current is None else _merge_durable_rows(current, row, now=now)
+        )
 
     auto_signal_keys = {
         key
@@ -1259,7 +1648,9 @@ def _build_queue_unlocked(
     completed = _completed_replays()
     for key, row in existing_by_key.items():
         if row.get("status") == "completed":
-            completed.setdefault(key, str(row.get("completion_evidence") or "replay_queue"))
+            completed.setdefault(
+                key, str(row.get("completion_evidence") or "replay_queue")
+            )
     for key, evidence in completed.items():
         row = existing_by_key.get(key)
         if row is None:
@@ -1278,14 +1669,24 @@ def _build_queue_unlocked(
         )
         if incoming_row.get("status") == "not_needed" and reactivation_signal:
             incoming_row = _reactivate_not_needed(incoming_row, now=now)
-        if current is not None and current.get("status") == "not_needed" and reactivation_signal:
+        if (
+            current is not None
+            and current.get("status") == "not_needed"
+            and reactivation_signal
+        ):
             current = _reactivate_not_needed(current, now=now)
-        combined = incoming_row if current is None else _merge_durable_rows(current, incoming_row, now=now)
+        combined = (
+            incoming_row
+            if current is None
+            else _merge_durable_rows(current, incoming_row, now=now)
+        )
         _resume_due_autonomous_terminal(combined, now=now)
         if key in completed or combined.get("status") == "completed":
             skipped_completed += 1
             if current is not None:
-                _mark_completed(combined, evidence=completed.get(key, "replay_queue"), now=now)
+                _mark_completed(
+                    combined, evidence=completed.get(key, "replay_queue"), now=now
+                )
                 existing_by_key[key] = combined
             continue
         if combined.get("status") in TERMINAL_STATUSES:
@@ -1391,7 +1792,9 @@ def _select_bounded(
         if eligible_keys is not None:
             eligibility_checks.append(row.get("key") in eligible_keys)
         if eligible_sources is not None:
-            eligibility_checks.append(bool(set(row.get("sources", [])) & eligible_sources))
+            eligibility_checks.append(
+                bool(set(row.get("sources", [])) & eligible_sources)
+            )
         # Multiple selectors are a union: current signal keys plus every
         # previously queued row in the same autonomous lane.
         if eligibility_checks and not any(eligibility_checks):
@@ -1466,8 +1869,14 @@ def _run_candidate(
             def record_processed() -> None:
                 nonlocal completion_written
                 finished_job = job_store.get(active_job_id)
-                result = getattr(finished_job, "result", None) if finished_job is not None else None
-                callback_failed_ops = result.get("failed_ops") if isinstance(result, dict) else None
+                result = (
+                    getattr(finished_job, "result", None)
+                    if finished_job is not None
+                    else None
+                )
+                callback_failed_ops = (
+                    result.get("failed_ops") if isinstance(result, dict) else None
+                )
                 completion_status = (
                     "completed_partial"
                     if isinstance(callback_failed_ops, list) and callback_failed_ops
@@ -1504,8 +1913,12 @@ def _run_candidate(
                 pages_created = list(getattr(finished, "pages_created", []) or [])
                 pages_updated = list(getattr(finished, "pages_updated", []) or [])
             result = getattr(finished, "result", None) if finished is not None else None
-            result_failed_ops = result.get("failed_ops") if isinstance(result, dict) else None
-            failed_ops = result_failed_ops if isinstance(result_failed_ops, list) else []
+            result_failed_ops = (
+                result.get("failed_ops") if isinstance(result, dict) else None
+            )
+            failed_ops = (
+                result_failed_ops if isinstance(result_failed_ops, list) else []
+            )
             if job_status != JobStatus.COMPLETED.value:
                 error = _failure_text(finished, job_status)
             elif not completion_written:
@@ -1516,9 +1929,15 @@ def _run_candidate(
             observed_status = _job_status(finished)
             if observed_status == JobStatus.COMPLETED.value:
                 job_status = observed_status
-                result = getattr(finished, "result", None) if finished is not None else None
-                result_failed_ops = result.get("failed_ops") if isinstance(result, dict) else None
-                failed_ops = result_failed_ops if isinstance(result_failed_ops, list) else []
+                result = (
+                    getattr(finished, "result", None) if finished is not None else None
+                )
+                result_failed_ops = (
+                    result.get("failed_ops") if isinstance(result, dict) else None
+                )
+                failed_ops = (
+                    result_failed_ops if isinstance(result_failed_ops, list) else []
+                )
                 completion_uncertain = True
             else:
                 job_status = "error"
@@ -1536,7 +1955,9 @@ def _run_candidate(
             "ingest completed but durable replay completion marker failed: " + error
         )
         updated["terminal_reason"] = "awaiting autonomous frontier reconciliation"
-        updated["frontier_attempts"] = _nonnegative_int(updated.get("frontier_attempts"))
+        updated["frontier_attempts"] = _nonnegative_int(
+            updated.get("frontier_attempts")
+        )
         updated["next_frontier_retry_at"] = _iso(now)
     elif not error:
         updated["status"] = "completed_partial" if failed_ops else "completed"
@@ -1545,7 +1966,9 @@ def _run_candidate(
         updated["last_error"] = None
         updated["completion_evidence"] = "replay_completion_journal"
         if failed_ops:
-            updated["terminal_reason"] = "partial operations delegated to autonomous repair"
+            updated["terminal_reason"] = (
+                "partial operations delegated to autonomous repair"
+            )
     elif attempts >= MAX_ATTEMPTS:
         updated["status"] = "quarantined"
         updated["next_retry_at"] = None
@@ -1593,6 +2016,7 @@ def run_pending_queue(
     eligible_keys: set[str] | None = None,
     eligible_sources: set[str] | frozenset[str] | None = None,
     budget: Any | None = None,
+    frontier_reviewer: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run due queue rows within strict count and byte budgets.
 
@@ -1605,7 +2029,9 @@ def run_pending_queue(
     target = path if path is not None else QUEUE_FILE
     history_target = history_file if history_file is not None else HISTORY_FILE
     claims_target = claims_file if claims_file is not None else CLAIMS_FILE
-    completions_target = completions_file if completions_file is not None else COMPLETIONS_FILE
+    completions_target = (
+        completions_file if completions_file is not None else COMPLETIONS_FILE
+    )
     current_time = now or _now()
     run_limit = _nonnegative_int(max_runs)
     byte_limit = _nonnegative_int(max_bytes)
@@ -1620,7 +2046,11 @@ def run_pending_queue(
             _retire_retracted_row(row, now=current_time)
             key = str(row["key"])
             current = by_key.get(key)
-            by_key[key] = row if current is None else _merge_durable_rows(current, row, now=current_time)
+            by_key[key] = (
+                row
+                if current is None
+                else _merge_durable_rows(current, row, now=current_time)
+            )
         for key, row in by_key.items():
             by_key[key] = _merge_history_lifecycle(row, history_states.get(key))
             _coerce_exhausted(by_key[key], now=current_time)
@@ -1655,7 +2085,9 @@ def run_pending_queue(
                     "raw": row["raw"],
                     "bytes": row["bytes"],
                     "charged_bytes": (
-                        0 if _nonnegative_int(row.get("bytes")) > byte_limit else row["bytes"]
+                        0
+                        if _nonnegative_int(row.get("bytes")) > byte_limit
+                        else row["bytes"]
                     ),
                     "action": (
                         "retry_oversized"
@@ -1672,9 +2104,7 @@ def run_pending_queue(
                 if _nonnegative_int(row.get("bytes")) <= byte_limit
             ),
             "oversized": sum(
-                1
-                for row in selected
-                if _nonnegative_int(row.get("bytes")) > byte_limit
+                1 for row in selected if _nonnegative_int(row.get("bytes")) > byte_limit
             ),
             "max_runs": run_limit,
             "max_bytes": byte_limit,
@@ -1698,12 +2128,15 @@ def run_pending_queue(
         )
         for row in rows:
             evidence = completed.get(str(row.get("key")))
-            if (
-                not evidence
-                or row.get("status") in {"completed", "completed_partial", "indeterminate", "running"}
-            ):
+            if not evidence or row.get("status") in {
+                "completed",
+                "completed_partial",
+                "indeterminate",
+                "running",
+            }:
                 continue
             _mark_completed(row, evidence=evidence, now=current_time)
+            row["recovery_kind"] = "exact_already_applied"
         for row in rows:
             _coerce_exhausted(row, now=current_time)
         frontier_reconciliation = _review_indeterminate_rows(
@@ -1713,6 +2146,7 @@ def run_pending_queue(
             now=current_time,
             budget=budget,
             retry_delay_seconds=retry_delay_seconds,
+            reviewer=frontier_reviewer,
         )
         selected = _select_bounded(
             rows,
@@ -1729,6 +2163,7 @@ def run_pending_queue(
         by_key = {str(row["key"]): row for row in rows}
         runs: list[dict[str, Any]] = []
         budget_deferred: list[dict[str, Any]] = []
+        authorization_rejected: list[dict[str, Any]] = []
         for selected_row in selected:
             raw_bytes = _nonnegative_int(selected_row.get("bytes"))
             charge_bytes = raw_bytes if raw_bytes <= byte_limit else 0
@@ -1744,7 +2179,9 @@ def run_pending_queue(
                         {
                             "key": selected_row.get("key"),
                             "raw": selected_row.get("raw"),
-                            "reason": bytes_reason if not bytes_allowed else mutation_reason,
+                            "reason": bytes_reason
+                            if not bytes_allowed
+                            else mutation_reason,
                         }
                     )
                     continue
@@ -1752,53 +2189,121 @@ def run_pending_queue(
                     budget.consume("raw_bytes", charge_bytes)
                 budget.consume("mutation")
 
-            candidate = selected_row
-            candidate_path = _resolve_raw_path(
-                str(selected_row.get("raw") or ""), selected_row.get("path")
+            requires_semantic_authorization = (
+                selected_row.get("frontier_decision") == "safe_replay"
             )
-            active_job_id: str | None = None
-            attempt_started = False
-            if candidate_path is not None and raw_bytes <= byte_limit:
-                raw_hash = _sha256_path(candidate_path)
-                job = job_store.create(processor="ollama")
-                active_job_id = job.job_id
-                candidate = dict(selected_row)
-                candidate.pop("quarantine_resumed_at", None)
-                attempts = _nonnegative_int(candidate.get("attempts")) + 1
-                candidate.update(
-                    {
-                        "status": "running",
-                        "attempts": attempts,
-                        "last_attempt_at": _iso(current_time),
-                        "started_at": _iso(current_time),
-                        "updated_at": _iso(current_time),
-                        "job_id": active_job_id,
-                        "raw_sha256": raw_hash,
-                        "attempt_id": f"{active_job_id}:{attempts}:{raw_hash[:16]}",
-                        "next_retry_at": None,
-                        "last_error": None,
-                    }
+            effect_lock = (
+                decision_authority_lock()
+                if requires_semantic_authorization
+                else nullcontext()
+            )
+            with effect_lock:
+                if requires_semantic_authorization:
+                    approval_error = _raw_replay_approval_error(
+                        selected_row,
+                        approval=selected_row.get("frontier_review_artifact"),
+                        claims_file=claims_target,
+                        injected_reviewer=frontier_reviewer is not None,
+                    )
+                    if approval_error is not None:
+                        updated = _invalidate_safe_replay_authorization(
+                            selected_row,
+                            now=current_time,
+                            reason=approval_error,
+                        )
+                        by_key[str(updated["key"])] = updated
+                        record = {
+                            "ts": _iso(current_time),
+                            "schema_version": SCHEMA_VERSION,
+                            "key": updated.get("key"),
+                            "raw": updated.get("raw"),
+                            "status": updated.get("status"),
+                            "attempts": updated.get("attempts"),
+                            "frontier_attempts": updated.get("frontier_attempts"),
+                            "frontier_decision": updated.get("frontier_decision"),
+                            "frontier_review_artifact": updated.get(
+                                "frontier_review_artifact"
+                            ),
+                            "frontier_authority_error": approval_error,
+                            "error": approval_error,
+                            "terminal_reason": updated.get("terminal_reason"),
+                            "authorization_rejected": True,
+                        }
+                        _append_history(record, history_target)
+                        _atomic_write_queue(
+                            target, sorted(by_key.values(), key=_queue_sort_key)
+                        )
+                        authorization_rejected.append(
+                            {
+                                "key": updated.get("key"),
+                                "raw": updated.get("raw"),
+                                "reason": approval_error,
+                            }
+                        )
+                        continue
+
+                candidate = selected_row
+                candidate_path = _resolve_raw_path(
+                    str(selected_row.get("raw") or ""), selected_row.get("path")
                 )
-                by_key[str(candidate["key"])] = candidate
-                # This write is the at-most-once launch boundary. Ingest is
-                # never called unless the running marker is durable first.
-                _atomic_write_queue(target, sorted(by_key.values(), key=_queue_sort_key))
-                attempt_started = True
-            updated, record = _run_candidate(
-                candidate,
-                now=current_time,
-                retry_delay_seconds=retry_delay_seconds,
-                max_bytes=byte_limit,
-                completions_file=completions_target,
-                job_id=active_job_id,
-                attempt_started=attempt_started,
-            )
-            by_key[str(updated["key"])] = updated
-            runs.append(record)
-            _append_history(record, history_target)
-            # Persist every terminal/retry transition so a later candidate is
-            # never replayed twice merely because a subsequent row crashed.
-            _atomic_write_queue(target, sorted(by_key.values(), key=_queue_sort_key))
+                active_job_id: str | None = None
+                attempt_started = False
+                if candidate_path is not None and raw_bytes <= byte_limit:
+                    raw_hash = _sha256_path(candidate_path)
+                    job = job_store.create(processor="ollama")
+                    active_job_id = job.job_id
+                    candidate = dict(selected_row)
+                    candidate.pop("quarantine_resumed_at", None)
+                    attempts = _nonnegative_int(candidate.get("attempts")) + 1
+                    candidate.update(
+                        {
+                            "status": "running",
+                            "attempts": attempts,
+                            "last_attempt_at": _iso(current_time),
+                            "started_at": _iso(current_time),
+                            "updated_at": _iso(current_time),
+                            "job_id": active_job_id,
+                            "raw_sha256": raw_hash,
+                            "attempt_id": f"{active_job_id}:{attempts}:{raw_hash[:16]}",
+                            "next_retry_at": None,
+                            "last_error": None,
+                        }
+                    )
+                    if requires_semantic_authorization:
+                        candidate["frontier_authorization_consumed_at"] = _iso(
+                            current_time
+                        )
+                    by_key[str(candidate["key"])] = candidate
+                    # This write is the at-most-once launch boundary. Ingest is
+                    # never called unless the running marker is durable first.
+                    _atomic_write_queue(
+                        target, sorted(by_key.values(), key=_queue_sort_key)
+                    )
+                    attempt_started = True
+                updated, record = _run_candidate(
+                    candidate,
+                    now=current_time,
+                    retry_delay_seconds=retry_delay_seconds,
+                    max_bytes=byte_limit,
+                    completions_file=completions_target,
+                    job_id=active_job_id,
+                    attempt_started=attempt_started,
+                )
+                if requires_semantic_authorization:
+                    record["frontier_authorization_consumed_at"] = updated.get(
+                        "frontier_authorization_consumed_at"
+                    )
+                    record["frontier_review_artifact"] = updated.get(
+                        "frontier_review_artifact"
+                    )
+                by_key[str(updated["key"])] = updated
+                runs.append(record)
+                _append_history(record, history_target)
+                # Persist every terminal/retry transition so a later candidate is
+                # never replayed twice merely because a subsequent row crashed.
+                _atomic_write_queue(
+                    target, sorted(by_key.values(), key=_queue_sort_key)
+                )
 
         final_rows = list(by_key.values())
         status_counts: dict[str, int] = {}
@@ -1812,6 +2317,7 @@ def run_pending_queue(
             "runs": runs,
             "count": len(runs),
             "budget_deferred": budget_deferred,
+            "authorization_rejected": authorization_rejected,
             "reconciled": reconciled,
             "frontier_reconciliation": frontier_reconciliation,
             "bytes": sum(
@@ -1820,9 +2326,7 @@ def run_pending_queue(
                 if _nonnegative_int(row.get("bytes")) <= byte_limit
             ),
             "oversized": sum(
-                1
-                for row in selected
-                if _nonnegative_int(row.get("bytes")) > byte_limit
+                1 for row in selected if _nonnegative_int(row.get("bytes")) > byte_limit
             ),
             "max_runs": run_limit,
             "max_bytes": byte_limit,
@@ -1855,11 +2359,21 @@ def run_replay(*, since: str = "", limit: int = 1) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Plan or run retroactive raw re-ingestion.")
-    parser.add_argument("--since", default="", help="YYYYMMDD or YYYY-MM-DD lower bound.")
+    parser = argparse.ArgumentParser(
+        description="Plan or run retroactive raw re-ingestion."
+    )
+    parser.add_argument(
+        "--since", default="", help="YYYYMMDD or YYYY-MM-DD lower bound."
+    )
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--run", action="store_true", help="Actually re-ingest selected raws.")
-    parser.add_argument("--dry-run", action="store_true", help="Inspect without queue/history/ingest writes.")
+    parser.add_argument(
+        "--run", action="store_true", help="Actually re-ingest selected raws."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect without queue/history/ingest writes.",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if args.run:
@@ -1874,11 +2388,19 @@ def main(argv: list[str] | None = None) -> int:
         else:
             payload = run_replay(since=args.since, limit=max(1, args.limit or 1))
     else:
-        payload = build_queue(since=args.since, limit=max(0, args.limit), dry_run=args.dry_run)
+        payload = build_queue(
+            since=args.since, limit=max(0, args.limit), dry_run=args.dry_run
+        )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:
-        print("\t".join(f"{key}={value}" for key, value in payload.items() if key not in {"runs", "candidate_keys"}))
+        print(
+            "\t".join(
+                f"{key}={value}"
+                for key, value in payload.items()
+                if key not in {"runs", "candidate_keys"}
+            )
+        )
     return 0
 
 

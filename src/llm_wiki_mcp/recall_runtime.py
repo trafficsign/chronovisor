@@ -33,7 +33,7 @@ from llm_wiki_mcp.runtime_config import (
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 from llm_wiki_mcp.search import search as run_search
 from llm_wiki_mcp.state_register import format_state_context, should_inject_state
-from llm_wiki_mcp.wiki import WIKI_ROOT, SYSTEM_DIR, find_page, init_wiki
+from llm_wiki_mcp.wiki import SYSTEM_DIR, find_page, init_wiki
 
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
@@ -56,7 +56,9 @@ SYSTEM_BLOCK_RE = re.compile(
 SYSTEM_BLOCK_TO_END_RE = re.compile(
     r"(?ims)(^|\n)\s*<(task-notification|system-reminder|system-notification)\b.*\Z"
 )
-RECALL_CONTEXT_BLOCK_RE = re.compile(r"(?ms)(^|\n)\s*\[RECALL_CONTEXT\].*?\[/RECALL_CONTEXT\]\s*")
+RECALL_CONTEXT_BLOCK_RE = re.compile(
+    r"(?ms)(^|\n)\s*\[RECALL_CONTEXT\].*?\[/RECALL_CONTEXT\]\s*"
+)
 RECALL_CONTEXT_TO_END_RE = re.compile(r"(?ms)(^|\n)\s*\[RECALL_CONTEXT\].*\Z")
 CODEX_INTERNAL_SUGGESTION_RE = re.compile(
     r"^\s*#\s*Overview\s+Generate\s+0\s+to\s+3\s+hyperpersonalized\s+suggestions\b",
@@ -181,7 +183,7 @@ class RecallPolicy:
     use_feedback_suppressions: bool = True
     fail_silent_on_judge_unavailable: bool = True
     judge_mode: str = "auto"  # off | auto | always
-    judge_model: str = "qwen3.5:4b-mlx"
+    judge_model: str = "ornith:9b-q4_K_M"
     judge_think: bool = False
     judge_timeout_ms: int = 2000
     judge_num_ctx: int = 4096
@@ -190,7 +192,7 @@ class RecallPolicy:
     warmup_timeout_ms: int = 15000
     judge_include_queries: bool = False
     rewrite_enabled: bool = True
-    rewrite_model: str = "qwen3.5:4b-mlx"
+    rewrite_model: str = "ornith:9b-q4_K_M"
     rewrite_timeout_ms: int = 3000
     fusion_bm25: float = 1.0
     fusion_semantic: float = 0.6
@@ -383,9 +385,13 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
         if isinstance(calibration.get("min_samples"), int):
             policy.calibration_min_samples = max(1, calibration["min_samples"])
         if isinstance(calibration.get("holdout_ratio"), int | float):
-            policy.calibration_holdout_ratio = max(0.05, min(0.8, float(calibration["holdout_ratio"])))
+            policy.calibration_holdout_ratio = max(
+                0.05, min(0.8, float(calibration["holdout_ratio"]))
+            )
         if isinstance(calibration.get("min_improvement"), int | float):
-            policy.calibration_min_improvement = max(0.0, float(calibration["min_improvement"]))
+            policy.calibration_min_improvement = max(
+                0.0, float(calibration["min_improvement"])
+            )
 
     behavior = data.get("policy", {})
     if isinstance(behavior, dict):
@@ -398,10 +404,14 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
         if isinstance(behavior.get("use_feedback_suppressions"), bool):
             policy.use_feedback_suppressions = behavior["use_feedback_suppressions"]
         if isinstance(behavior.get("fail_silent_on_judge_unavailable"), bool):
-            policy.fail_silent_on_judge_unavailable = behavior["fail_silent_on_judge_unavailable"]
+            policy.fail_silent_on_judge_unavailable = behavior[
+                "fail_silent_on_judge_unavailable"
+            ]
 
 
-def request_from_hook_payload(payload: dict[str, Any], *, host: str, event: str) -> RecallRequest:
+def request_from_hook_payload(
+    payload: dict[str, Any], *, host: str, event: str
+) -> RecallRequest:
     prompt = ""
     for key in ("user_prompt", "prompt", "message", "input"):
         value = payload.get(key)
@@ -439,7 +449,9 @@ def request_from_hook_payload(payload: dict[str, Any], *, host: str, event: str)
     )
 
 
-def evaluate_heuristic(request: RecallRequest, policy: RecallPolicy) -> tuple[float, list[str], dict[str, list[str]]]:
+def evaluate_heuristic(
+    request: RecallRequest, policy: RecallPolicy
+) -> tuple[float, list[str], dict[str, list[str]]]:
     prompt = request.prompt.strip()
     prompt_lower = prompt.lower()
     cwd_lower = request.cwd.lower()
@@ -476,7 +488,9 @@ def evaluate_heuristic(request: RecallRequest, policy: RecallPolicy) -> tuple[fl
         score += 0.14
         reasons.append("ambiguous reference")
 
-    if any(key in cwd_lower for key in ("llm-wiki", "codex", "claude", "jttok", "jttk")):
+    if any(
+        key in cwd_lower for key in ("llm-wiki", "codex", "claude", "jttok", "jttk")
+    ):
         score += 0.10
         matched["cwd"].append(Path(request.cwd).name or request.cwd)
         reasons.append("cwd matches recurring work")
@@ -504,7 +518,9 @@ def classify_non_user_prompt(prompt: str, policy: RecallPolicy | None = None) ->
         return "system notification prompt"
     if CODEX_INTERNAL_SUGGESTION_RE.match(stripped):
         return "codex internal suggestion prompt"
-    if stripped.startswith("[RECALL_CONTEXT]") or stripped.startswith("[/RECALL_CONTEXT]"):
+    if stripped.startswith("[RECALL_CONTEXT]") or stripped.startswith(
+        "[/RECALL_CONTEXT]"
+    ):
         return "recall context injection"
     if policy is None or policy.use_feedback_suppressions:
         feedback_reason = classify_feedback_suppressed_prompt(stripped)
@@ -599,7 +615,9 @@ def _matched_terms(prompt_lower: str, terms: list[str]) -> list[str]:
     return matched
 
 
-def should_run_judge(score: float, policy: RecallPolicy, features: dict[str, Any] | None = None) -> bool:
+def should_run_judge(
+    score: float, policy: RecallPolicy, features: dict[str, Any] | None = None
+) -> bool:
     if policy.judge_mode == "off":
         return False
     if policy.judge_mode == "always":
@@ -610,13 +628,18 @@ def should_run_judge(score: float, policy: RecallPolicy, features: dict[str, Any
         evidence = float(features.get("evidence_score", score) or score)
         if hit_count == 0:
             return False
-        return policy.search_threshold <= evidence < policy.read_threshold and margin < 0.12
+        return (
+            policy.search_threshold <= evidence < policy.read_threshold
+            and margin < 0.12
+        )
     # Auto judge is for the ambiguous search zone. Obvious read decisions should
     # not depend on a synchronous local model being available.
     return (policy.search_threshold - 0.10) <= score < policy.read_threshold
 
 
-def run_local_judge(request: RecallRequest, heuristic_score: float, policy: RecallPolicy) -> tuple[float | None, list[str], str]:
+def run_local_judge(
+    request: RecallRequest, heuristic_score: float, policy: RecallPolicy
+) -> tuple[float | None, list[str], str]:
     system = "You are a fast LLM Wiki recall classifier. Return compact JSON only."
     prompt = {
         "user_prompt": request.prompt,
@@ -645,7 +668,7 @@ def run_local_judge(request: RecallRequest, heuristic_score: float, policy: Reca
         schema["properties"]["queries"] = {"type": "array", "items": {"type": "string"}}
 
     try:
-        from llm_wiki_mcp.ollama import OLLAMA_URL
+        from llm_wiki_mcp.ollama import OLLAMA_URL, model_resource_lease
 
         timeout_seconds = max(0.2, policy.judge_timeout_ms / 1000)
         timeout = httpx.Timeout(
@@ -654,25 +677,26 @@ def run_local_judge(request: RecallRequest, heuristic_score: float, policy: Reca
             write=1.0,
             pool=0.5,
         )
-        with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
-            resp = client.post(
-                "/api/generate",
-                json={
-                    "model": policy.judge_model,
-                    "system": system,
-                    "prompt": json.dumps(prompt, ensure_ascii=False),
-                    "stream": False,
-                    "think": policy.judge_think,
-                    "keep_alive": policy.judge_keep_alive,
-                    "format": schema,
-                    "options": {
-                        "temperature": 0,
-                        "num_ctx": policy.judge_num_ctx,
-                        "num_predict": policy.judge_num_predict,
+        with model_resource_lease(exclusive=False):
+            with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
+                resp = client.post(
+                    "/api/generate",
+                    json={
+                        "model": policy.judge_model,
+                        "system": system,
+                        "prompt": json.dumps(prompt, ensure_ascii=False),
+                        "stream": False,
+                        "think": policy.judge_think,
+                        "keep_alive": policy.judge_keep_alive,
+                        "format": schema,
+                        "options": {
+                            "temperature": 0,
+                            "num_ctx": policy.judge_num_ctx,
+                            "num_predict": policy.judge_num_predict,
+                        },
                     },
-                },
-            )
-            resp.raise_for_status()
+                )
+                resp.raise_for_status()
         raw = resp.json().get("response", "{}")
         parsed = json.loads(raw)
         decision = parsed.get("decision")
@@ -695,12 +719,16 @@ def run_local_judge(request: RecallRequest, heuristic_score: float, policy: Reca
         return None, [], f"judge unavailable: {exc.__class__.__name__}"
 
 
-def normalize_judge_confidence(confidence: float, decision: str, policy: RecallPolicy) -> float:
+def normalize_judge_confidence(
+    confidence: float, decision: str, policy: RecallPolicy
+) -> float:
     confidence = max(0.0, min(1.0, confidence))
     if decision == "none":
         return min(confidence, policy.search_threshold - 0.01)
     if decision == "search":
-        return min(max(confidence, policy.search_threshold), policy.read_threshold - 0.01)
+        return min(
+            max(confidence, policy.search_threshold), policy.read_threshold - 0.01
+        )
     return max(confidence, policy.read_threshold)
 
 
@@ -720,7 +748,9 @@ def build_queries(
         candidates.extend(getattr(session_state, "recent_queries", [])[-3:])
         recent_topics = getattr(session_state, "recent_topics", [])[-8:]
         if recent_topics and matched.get("ambiguity"):
-            candidates.append(" ".join(recent_topics + [_compact_query(request.prompt, limit=80)]))
+            candidates.append(
+                " ".join(recent_topics + [_compact_query(request.prompt, limit=80)])
+            )
 
     topic_terms = []
     for key in ("project", "past_reference", "ownership"):
@@ -779,7 +809,7 @@ def run_query_rewriter(
         "required": ["queries", "confidence"],
     }
     try:
-        from llm_wiki_mcp.ollama import OLLAMA_URL
+        from llm_wiki_mcp.ollama import OLLAMA_URL, model_resource_lease
 
         timeout_seconds = max(0.2, policy.rewrite_timeout_ms / 1000)
         timeout = httpx.Timeout(
@@ -788,37 +818,50 @@ def run_query_rewriter(
             write=1.0,
             pool=0.5,
         )
-        with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
-            resp = client.post(
-                "/api/generate",
-                json={
-                    "model": policy.rewrite_model or policy.judge_model,
-                    "prompt": json.dumps(prompt, ensure_ascii=False),
-                    "stream": False,
-                    "think": False,
-                    "keep_alive": policy.judge_keep_alive,
-                    "format": schema,
-                    "options": {
-                        "temperature": 0,
-                        "num_ctx": policy.judge_num_ctx,
-                        "num_predict": 96,
+        with model_resource_lease(exclusive=False):
+            with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
+                resp = client.post(
+                    "/api/generate",
+                    json={
+                        "model": policy.rewrite_model or policy.judge_model,
+                        "prompt": json.dumps(prompt, ensure_ascii=False),
+                        "stream": False,
+                        "think": False,
+                        "keep_alive": policy.judge_keep_alive,
+                        "format": schema,
+                        "options": {
+                            "temperature": 0,
+                            "num_ctx": policy.judge_num_ctx,
+                            "num_predict": 96,
+                        },
                     },
-                },
-            )
-            resp.raise_for_status()
+                )
+                resp.raise_for_status()
         parsed = json.loads(resp.json().get("response", "{}"))
         raw_queries = parsed.get("queries")
-        queries = [q for q in raw_queries if isinstance(q, str) and q.strip()] if isinstance(raw_queries, list) else []
+        queries = (
+            [q for q in raw_queries if isinstance(q, str) and q.strip()]
+            if isinstance(raw_queries, list)
+            else []
+        )
         confidence = parsed.get("confidence", 0.0)
-        confidence_f = max(0.0, min(1.0, float(confidence))) if isinstance(confidence, int | float) else 0.0
-        return _dedupe_queries(queries, limit=policy.max_queries), confidence_f, "rewrite ok"
+        confidence_f = (
+            max(0.0, min(1.0, float(confidence)))
+            if isinstance(confidence, int | float)
+            else 0.0
+        )
+        return (
+            _dedupe_queries(queries, limit=policy.max_queries),
+            confidence_f,
+            "rewrite ok",
+        )
     except Exception as exc:
         return [], 0.0, f"rewrite fallback: {exc.__class__.__name__}"
 
 
 def warm_recall_model(policy: RecallPolicy) -> dict[str, Any]:
     """Warm the gate/rewrite Ollama model so sync recall avoids cold starts."""
-    from llm_wiki_mcp.ollama import OLLAMA_URL
+    from llm_wiki_mcp.ollama import OLLAMA_URL, model_resource_lease
 
     started = time.monotonic()
     models = _dedupe_queries(
@@ -836,23 +879,24 @@ def warm_recall_model(policy: RecallPolicy) -> dict[str, Any]:
     errors: dict[str, str] = {}
     for model in models:
         try:
-            with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
-                resp = client.post(
-                    "/api/generate",
-                    json={
-                        "model": model,
-                        "prompt": "warmup",
-                        "stream": False,
-                        "think": False,
-                        "keep_alive": policy.judge_keep_alive,
-                        "options": {
-                            "temperature": 0,
-                            "num_ctx": 128,
-                            "num_predict": 1,
+            with model_resource_lease(exclusive=False):
+                with httpx.Client(base_url=OLLAMA_URL, timeout=timeout) as client:
+                    resp = client.post(
+                        "/api/generate",
+                        json={
+                            "model": model,
+                            "prompt": "warmup",
+                            "stream": False,
+                            "think": False,
+                            "keep_alive": policy.judge_keep_alive,
+                            "options": {
+                                "temperature": 0,
+                                "num_ctx": 128,
+                                "num_predict": 1,
+                            },
                         },
-                    },
-                )
-                resp.raise_for_status()
+                    )
+                    resp.raise_for_status()
             warmed.append(model)
         except Exception as exc:
             errors[model] = exc.__class__.__name__
@@ -1087,7 +1131,12 @@ def search_candidates(
         for result in results:
             if should_filter_sensitive_result(result, request):
                 continue
-            adjusted = replace(result, score=float(result.score) * query_weight * context_boost(result, request))
+            adjusted = replace(
+                result,
+                score=float(result.score)
+                * query_weight
+                * context_boost(result, request),
+            )
             existing = merged.get(result.page_id)
             if existing is None or adjusted.score > existing.score:
                 merged[result.page_id] = adjusted
@@ -1126,7 +1175,9 @@ def collect_context(
         if len(items) >= policy.max_pages:
             return items
 
-    for page_id in prefetch_page_ids_for_request(request, queries, limit=policy.max_pages):
+    for page_id in prefetch_page_ids_for_request(
+        request, queries, limit=policy.max_pages
+    ):
         if page_id in seen:
             continue
         prefetched = context_item_from_page_id(page_id, queries, decision, score=0.95)
@@ -1185,7 +1236,9 @@ def query_hint_page_ids(queries: list[str], *, limit: int) -> list[str]:
         return []
 
 
-def prefetch_page_ids_for_request(request: RecallRequest | None, queries: list[str], *, limit: int) -> list[str]:
+def prefetch_page_ids_for_request(
+    request: RecallRequest | None, queries: list[str], *, limit: int
+) -> list[str]:
     if request is None:
         return []
     try:
@@ -1202,7 +1255,9 @@ def prefetch_page_ids_for_request(request: RecallRequest | None, queries: list[s
         return []
 
 
-def context_item_from_page_id(page_id: str, queries: list[str], decision: str, *, score: float) -> ContextItem | None:
+def context_item_from_page_id(
+    page_id: str, queries: list[str], decision: str, *, score: float
+) -> ContextItem | None:
     path = find_readable_page(page_id)
     if not path or not path.exists():
         return None
@@ -1240,7 +1295,9 @@ def context_item_from_page_id(page_id: str, queries: list[str], decision: str, *
     )
 
 
-def should_skip_session_page(session_state: Any | None, page_id: str, updated: str) -> bool:
+def should_skip_session_page(
+    session_state: Any | None, page_id: str, updated: str
+) -> bool:
     if session_state is None:
         return False
     try:
@@ -1306,7 +1363,9 @@ def excerpt_terms(queries: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for query in queries:
-        for token in re.findall(r"[a-z0-9_+.-]{2,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", query.lower()):
+        for token in re.findall(
+            r"[a-z0-9_+.-]{2,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", query.lower()
+        ):
             token = token.strip("。、.?!！？」』")
             if len(token) < 2 or token in generic or token in seen:
                 continue
@@ -1394,7 +1453,9 @@ def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
         for item in result.context_items:
             summary = item.snippets[0] if item.snippets else page_summary(item.page_id)
             suffix = f" — {_one_line(summary, limit=160)}" if summary else ""
-            lines.append(f"- {item.page_id}: {item.title}{context_item_annotations(item)}{suffix}")
+            lines.append(
+                f"- {item.page_id}: {item.title}{context_item_annotations(item)}{suffix}"
+            )
         lines.append("詳細が必要なページは wiki.read(page_id) で取得。")
         lines.append("[/RECALL_CONTEXT]")
         context = "\n".join(lines)
@@ -1416,7 +1477,9 @@ def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
     lines.append("pages:")
     for item in result.context_items:
         annotations = context_item_annotations(item)
-        score_note = f", score: {item.score}" if annotations else f" (score: {item.score})"
+        score_note = (
+            f", score: {item.score}" if annotations else f" (score: {item.score})"
+        )
         if annotations:
             annotations = annotations[:-1] + score_note + ")"
         lines.append(f"- {item.page_id}: {item.title}{annotations or score_note}")
@@ -1538,8 +1601,12 @@ def run_recall(
 
             cleanup_sessions(policy.session_ttl_seconds)
             session_state = load_session_state(active_request.session_id)
-            initial_queries = build_queries(active_request, matched, [], policy, session_state=session_state)
-            pre_results, search_mode = search_candidates(initial_queries, policy, request=active_request)
+            initial_queries = build_queries(
+                active_request, matched, [], policy, session_state=session_state
+            )
+            pre_results, search_mode = search_candidates(
+                initial_queries, policy, request=active_request
+            )
             evidence_features = build_evidence_features(
                 request=active_request,
                 matched=matched,
@@ -1556,11 +1623,13 @@ def run_recall(
                 preliminary_features=evidence_features,
             ):
                 rewrite_started = time.monotonic()
-                rewrite_queries, rewrite_confidence, rewrite_reason = run_query_rewriter(
-                    active_request,
-                    matched,
-                    policy,
-                    session_summary(session_state),
+                rewrite_queries, rewrite_confidence, rewrite_reason = (
+                    run_query_rewriter(
+                        active_request,
+                        matched,
+                        policy,
+                        session_summary(session_state),
+                    )
                 )
                 rewrite_metrics = {
                     "rewrite_attempted": True,
@@ -1585,7 +1654,9 @@ def run_recall(
                         session_state=session_state,
                         rewrite_queries=rewrite_queries,
                     )
-                    pre_results, search_mode = search_candidates(queries_for_search, policy, request=active_request)
+                    pre_results, search_mode = search_candidates(
+                        queries_for_search, policy, request=active_request
+                    )
                     evidence_features = build_evidence_features(
                         request=active_request,
                         matched=matched,
@@ -1604,7 +1675,9 @@ def run_recall(
             search_mode = "error"
 
     if should_run_judge(score, policy, evidence_features):
-        judge_score, judge_queries, judge_reason = run_local_judge(active_request, score, policy)
+        judge_score, judge_queries, judge_reason = run_local_judge(
+            active_request, score, policy
+        )
         used_judge = judge_score is not None
         if judge_score is not None:
             score = judge_score
@@ -1665,7 +1738,9 @@ def run_recall(
 
     result = RecallResult(
         status="ok" if not error else "error",
-        decision=decision if context_items or decision == "none" or not perform_search else "search",
+        decision=decision
+        if context_items or decision == "none" or not perform_search
+        else "search",
         confidence=round(score, 3),
         queries=queries,
         reasons=reasons,
@@ -1697,7 +1772,9 @@ def run_recall(
                 session_state,
                 queries=queries,
                 page_ids=[item.page_id for item in result.context_items],
-                page_updated={item.page_id: item.updated for item in result.context_items},
+                page_updated={
+                    item.page_id: item.updated for item in result.context_items
+                },
             )
         except Exception:
             pass
@@ -1740,7 +1817,12 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
     try:
         from llm_wiki_mcp.recall_policy_store import append_live_episode
 
-        live_path = RECALL_LOG_FILE.parent.parent / "runtime" / "recall-improvement" / "live-episodes.jsonl"
+        live_path = (
+            RECALL_LOG_FILE.parent.parent
+            / "runtime"
+            / "recall-improvement"
+            / "live-episodes.jsonl"
+        )
         append_live_episode(record, path=live_path)
     except Exception:
         pass
@@ -1836,7 +1918,9 @@ def append_feedback(
     ref: str = "",
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    snapshot = recall_log_snapshot(found) if ref and (found := find_recall_log(ref)) else None
+    snapshot = (
+        recall_log_snapshot(found) if ref and (found := find_recall_log(ref)) else None
+    )
     record = {
         "ts": datetime.now().isoformat(timespec="seconds"),
         "kind": kind,
@@ -1890,15 +1974,30 @@ def render_output(result: RecallResult, output_format: str) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the LLM Wiki recall gate.")
-    parser.add_argument("--host", default="generic", help="Host adapter name: claude-code, codex, generic.")
+    parser.add_argument(
+        "--host",
+        default="generic",
+        help="Host adapter name: claude-code, codex, generic.",
+    )
     parser.add_argument("--event", default="UserPromptSubmit")
-    parser.add_argument("--prompt", help="User prompt. If omitted with --hook, read from hook JSON stdin.")
+    parser.add_argument(
+        "--prompt",
+        help="User prompt. If omitted with --hook, read from hook JSON stdin.",
+    )
     parser.add_argument("--cwd", default=os.environ.get("PWD", ""))
     parser.add_argument("--session-id", default="")
     parser.add_argument("--config", default=str(RECALL_CONFIG_FILE))
-    parser.add_argument("--hook", action="store_true", help="Read hook JSON from stdin.")
-    parser.add_argument("--no-search", action="store_true", help="Only evaluate the gate; do not search pages.")
-    parser.add_argument("--warmup", action="store_true", help="Warm the gate/rewrite model and exit.")
+    parser.add_argument(
+        "--hook", action="store_true", help="Read hook JSON from stdin."
+    )
+    parser.add_argument(
+        "--no-search",
+        action="store_true",
+        help="Only evaluate the gate; do not search pages.",
+    )
+    parser.add_argument(
+        "--warmup", action="store_true", help="Warm the gate/rewrite model and exit."
+    )
     parser.add_argument(
         "--recent",
         nargs="?",
@@ -1913,19 +2012,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--feedback",
-        choices=["missed", "missed_candidate", "false-positive", "page_ignored", "useful"],
+        choices=[
+            "missed",
+            "missed_candidate",
+            "false-positive",
+            "page_ignored",
+            "useful",
+        ],
         help="Record human feedback instead of running recall.",
     )
     parser.add_argument("--note", default="", help="Feedback note.")
-    parser.add_argument("--expected-page", action="append", default=[], help="Expected page id for missed recall.")
+    parser.add_argument(
+        "--expected-page",
+        action="append",
+        default=[],
+        help="Expected page id for missed recall.",
+    )
     parser.add_argument(
         "--negative-page",
         action="append",
         default=[],
         help="Specific irrelevant page id for page-scoped feedback.",
     )
-    parser.add_argument("--expected-query", action="append", default=[], help="Expected query for missed recall.")
-    parser.add_argument("--ref", default="", help="Decision id to attach as a feedback snapshot.")
+    parser.add_argument(
+        "--expected-query",
+        action="append",
+        default=[],
+        help="Expected query for missed recall.",
+    )
+    parser.add_argument(
+        "--ref", default="", help="Decision id to attach as a feedback snapshot."
+    )
     return parser
 
 
@@ -1934,7 +2051,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.recent is not None:
-        print(json.dumps({"status": "ok", "items": recent_recall_logs(args.recent)}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"status": "ok", "items": recent_recall_logs(args.recent)},
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     if args.feedback:
@@ -1948,13 +2070,20 @@ def main(argv: list[str] | None = None) -> int:
             expected_queries=args.expected_query,
             ref=args.ref,
         )
-        print(json.dumps({"status": "recorded", "feedback": record}, ensure_ascii=False))
+        print(
+            json.dumps({"status": "recorded", "feedback": record}, ensure_ascii=False)
+        )
         return 0
 
     policy = load_policy(Path(args.config).expanduser())
     if args.warmup:
         result = warm_recall_model(policy)
-        print(json.dumps({"status": "ok" if result["ok"] else "error", **result}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"status": "ok" if result["ok"] else "error", **result},
+                ensure_ascii=False,
+            )
+        )
         return 0 if result["ok"] else 1
 
     payload: dict[str, Any] = {}
@@ -1966,12 +2095,16 @@ def main(argv: list[str] | None = None) -> int:
             except json.JSONDecodeError:
                 payload = {}
 
-    request = request_from_hook_payload(payload, host=args.host, event=args.event) if args.hook else RecallRequest(
-        host=args.host,
-        event=args.event,
-        prompt=args.prompt or "",
-        cwd=args.cwd,
-        session_id=args.session_id,
+    request = (
+        request_from_hook_payload(payload, host=args.host, event=args.event)
+        if args.hook
+        else RecallRequest(
+            host=args.host,
+            event=args.event,
+            prompt=args.prompt or "",
+            cwd=args.cwd,
+            session_id=args.session_id,
+        )
     )
     if args.prompt:
         request.prompt = args.prompt

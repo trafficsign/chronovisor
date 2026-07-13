@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from llm_wiki_mcp import runtime_config
 
 
@@ -127,7 +129,9 @@ query_prefix = "検索クエリ: "
     assert cfg.query_prefix == "検索クエリ: "
 
 
-def test_ingest_config_reads_ollama_generation_knobs(tmp_path: Path, monkeypatch) -> None:
+def test_ingest_config_reads_ollama_generation_knobs(
+    tmp_path: Path, monkeypatch
+) -> None:
     config = tmp_path / "config.toml"
     legacy = tmp_path / "recall.toml"
     config.write_text(
@@ -198,8 +202,17 @@ def test_decision_router_config_defaults_to_local_three_model_quorum() -> None:
     assert cfg.primary_model == "maxwell1500/ornith-35b:Q5_K_M"
     assert cfg.challenger_model == "gpt-oss:20b"
     assert cfg.tie_break_model == "gemma4:26b"
-    assert cfg.num_ctx == 32768
+    assert cfg.num_ctx == 114688
+    assert cfg.min_num_ctx == 16384
+    assert cfg.num_predict == 3072
+    assert cfg.max_input_chars == 93000
+    assert cfg.max_output_chars == 4000
+    assert cfg.max_feedback_chars == 2000
     assert cfg.quorum == 2
+    assert cfg.adaptive_residency is True
+    assert cfg.residency_policy_version == 2
+    assert cfg.memory_reserve_gib == 16
+    assert cfg.max_resident_models == 3
 
 
 def test_decision_router_config_allows_exact_installed_tag_overrides(
@@ -216,12 +229,17 @@ primary_keep_alive = "21m"
 challenger_keep_alive = "19m"
 tie_break_keep_alive = "90s"
 num_ctx = 16384
+min_num_ctx = 8192
 num_predict = 2048
 read_timeout_ms = 180000
 max_input_chars = 80000
 max_output_chars = 12000
 max_feedback_chars = 6000
 quorum = 2
+adaptive_residency = false
+residency_policy_version = 2
+memory_reserve_gib = 20
+max_resident_models = 2
 adoption_artifact = "~/.wiki/runtime/model-lab/candidate.json"
 """,
         encoding="utf-8",
@@ -236,12 +254,17 @@ adoption_artifact = "~/.wiki/runtime/model-lab/candidate.json"
     assert cfg.challenger_keep_alive == "19m"
     assert cfg.tie_break_keep_alive == "90s"
     assert cfg.num_ctx == 16384
+    assert cfg.min_num_ctx == 8192
     assert cfg.num_predict == 2048
     assert cfg.read_timeout_ms == 180000
     assert cfg.max_input_chars == 80000
     assert cfg.max_output_chars == 12000
     assert cfg.max_feedback_chars == 6000
     assert cfg.quorum == 2
+    assert cfg.adaptive_residency is False
+    assert cfg.residency_policy_version == 2
+    assert cfg.memory_reserve_gib == 20
+    assert cfg.max_resident_models == 2
     assert cfg.adoption_artifact == "~/.wiki/runtime/model-lab/candidate.json"
 
 
@@ -262,7 +285,37 @@ tie_keep_alive = "3m"
     assert cfg.tie_break_keep_alive == "3m"
 
 
-def test_reranker_config_reads_nested_search_section(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("not = [valid", "malformed TOML"),
+        ("[recall]\nenabled = true\n", "requires a non-empty"),
+        ("[decision_router]\nnum_ctx = 'large'\n", "num_ctx must be an integer"),
+        ("[decision_router]\nprimry_model = 'typo'\n", "unknown"),
+        (
+            "[decision_router]\nadoption_artifact = 'old.json'\n",
+            "adoption_artifact must be empty",
+        ),
+    ],
+)
+def test_candidate_decision_router_config_fails_closed(
+    tmp_path: Path, body: str, message: str
+) -> None:
+    config = tmp_path / "candidate.toml"
+    config.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        runtime_config.load_candidate_decision_router_config(config)
+
+
+def test_candidate_decision_router_config_rejects_missing_file() -> None:
+    with pytest.raises(ValueError, match="unreadable"):
+        runtime_config.load_candidate_decision_router_config("/does/not/exist.toml")
+
+
+def test_reranker_config_reads_nested_search_section(
+    tmp_path: Path, monkeypatch
+) -> None:
     config = tmp_path / "config.toml"
     legacy = tmp_path / "recall.toml"
     config.write_text(

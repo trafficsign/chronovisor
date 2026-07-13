@@ -35,40 +35,86 @@ num_predict = 8192
 read_timeout_ms = 660000
 
 [decision_router]
-# Routine structured decisions require a two-vote local quorum. The tie-break
-# model is loaded only when the first pair does not agree.
+# Routine structured decisions require a two-vote local quorum. The complete
+# request-token budget, including both possible JSON-repair turns, selects the
+# smallest executable configured context bucket. Buckets below the lightest
+# full production-lane envelope are omitted; with the 2000-byte feedback budget
+# the active set is 32K, 64K, 96K, and 112K. Measured /api/ps
+# footprints at that exact size determine whether one, two, or three decision
+# runners may remain resident. A larger measured runner is reused within the
+# cap to avoid shrink/reload flap, but its actual context is recorded and never
+# counted as smaller-bucket adoption evidence. The offline adoption evaluator
+# uses a separate exact-bucket mode.
 primary_model = "maxwell1500/ornith-35b:Q5_K_M"
 challenger_model = "gpt-oss:20b"
 tie_break_model = "gemma4:26b"
 primary_keep_alive = "20m"
 challenger_keep_alive = "20m"
 tie_break_keep_alive = "2m"
-num_ctx = 32768
-num_predict = 2048
+num_ctx = 114688
+min_num_ctx = 16384
+num_predict = 3072
 read_timeout_ms = 660000
-max_input_chars = 65536
-max_output_chars = 8000
+max_input_chars = 93000
+max_output_chars = 4000
 max_feedback_chars = 2000
 quorum = 2
-# Empty keeps the exact model triplet above as the bootstrap/current policy.
-# Set this only after a full local-model-eval run has produced an adopted v2
-# artifact. Invalid, partial, or stale artifacts are ignored as candidates and
-# the current triplet continues running.
-adoption_artifact = ""
+adaptive_residency = true
+residency_policy_version = 2
+memory_reserve_gib = 16
+max_resident_models = 3
+# This is the post-adoption production shape. The v53 artifact is sealed by
+# artifact schema 12, evaluator policy 20, decision-semantics policy 11,
+# quorum-safety policy 1, action-signature policy 5, effective-request-
+# fingerprint policy 3, structured-generation policy 1, lane-contract registry
+# policy 9 (artifact identity
+# only), lane prompt policy 7 for 17 lanes, 8 for raw replay, 11 for ingest, and
+# lane-contract case policy 20 (source deterministic_lane_contract_v20).
+# Evaluator policy 20 seals deterministic seed 0 as well as hash-bound ingest
+# repair option selection and host-only byte materialization into the artifact
+# identity. Repair option
+# policy 2 exposes no heuristic semantic receipts; both models judge the exact
+# raw and page bytes independently.
+# Invalid, partial, stale, or
+# engine/model-drifted artifacts make enabled semantic lanes quarantine before
+# inference. Set this to "" and keep the 19 model-backed lanes in shadow only
+# while compiling and evaluating a replacement candidate.
+adoption_artifact = "~/.wiki/runtime/model-lab/local-eval/adoption-v53-evaluator20.json"
 
 [decision_policies]
-# Deterministic/non-model lanes are live immediately. Structured semantic
-# lanes stay in shadow until the full replay artifact above is adopted.
+# Deterministic/non-model lanes and the guarded repair-only lane are live
+# immediately. The repair lane still requires trusted incident evidence,
+# explicit repair enablement, and the durable FrontierRepairGuard permit.
 raw_capture = "enabled"
 exact_user_correction = "enabled"
 derived_index_rebuild = "enabled"
 claims_conflict = "enabled"
 system_code_repair = "enabled"
-ingest_reconciliation = "shadow"
-content_correction_classification = "shadow"
-content_correction_review = "shadow"
-recall_auto_apply = "shadow"
-recall_improvement = "shadow"
+
+# Post-adoption production has all 24 policy lanes enabled and zero in shadow:
+# the five deterministic/guarded lanes above plus these 19 model-backed
+# semantic lanes. Each semantic lane still fails closed unless the nominated
+# artifact validates as adopted for the exact models, engine, corpus, config,
+# context buckets, and policy versions.
+autonomy_duplicate_resolution = "enabled"
+autonomy_retention = "enabled"
+content_correction_classification = "enabled"
+content_correction_review = "enabled"
+entity_backfill = "enabled"
+ingest_reconciliation = "enabled"
+lint_safe_semantic_mutation = "enabled"
+lint_tag_repair = "enabled"
+local_repair = "enabled"
+metadata_backfill = "enabled"
+orphan_link = "enabled"
+page_normalize = "enabled"
+raw_replay_reconciliation = "enabled"
+read_back_repair = "enabled"
+recall_auto_apply = "enabled"
+recall_calibration = "enabled"
+recall_improvement = "enabled"
+search_label = "enabled"
+search_self_tune = "enabled"
 
 [ingest.audit]
 # Routine quality sampling stays cheap. Mandatory correction, incomplete

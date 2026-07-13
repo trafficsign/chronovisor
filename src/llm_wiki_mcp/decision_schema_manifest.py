@@ -7,17 +7,22 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-SIGNATURE_POLICY_VERSION = 1
+SIGNATURE_POLICY_VERSION = 5
 NON_DECISION_FIELDS = frozenset(
     {
         "comment",
         "comments",
+        "commit",
+        "committed",
         "confidence",
         "explanation",
         "notes",
         "rationale",
         "reason",
         "reviewer",
+        "risk",
+        "pushed",
+        "semantic_checks",
         "summary",
         "tests_run",
     }
@@ -51,24 +56,107 @@ def default_decision_value(value: Any) -> Any:
     return value
 
 
+def _is_local_repair_schema(schema: Mapping[str, Any]) -> bool:
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, Mapping) or not isinstance(required, list):
+        return False
+    action = properties.get("action")
+    return bool(
+        set(required) == {"status", "action", "confidence", "reason"}
+        and isinstance(action, Mapping)
+        and {
+            "resolve_update_target",
+            "retry_raw",
+            "quarantine_raw",
+            "escalate_to_frontier",
+            "propose_prompt_fix",
+            "propose_test_case",
+        }
+        == set(action.get("enum", ()))
+    )
+
+
+def _is_ingest_reconciliation_schema(schema: Mapping[str, Any]) -> bool:
+    """Identify the ingest schema whose two repair arrays default to empty."""
+
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, Mapping) or not isinstance(required, list):
+        return False
+    decision = properties.get("decision")
+    return bool(
+        set(required)
+        == {
+            "decision",
+            "summary",
+            "failed_operations_disposition",
+            "tests_run",
+            "risk",
+            "notes",
+        }
+        and isinstance(decision, Mapping)
+        and set(decision.get("enum", ()))
+        == {"apply_available", "confirmed_noop", "retry", "quarantined"}
+        and {"invalid_tags", "replacement_operations"}.issubset(properties)
+    )
+
+
+def canonical_ingest_repair_arrays(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Canonicalize ingest repair instructions to their application semantics.
+
+    Invalid tags are a set and replacement operations are an unordered set of
+    filename/content records.  Model ordering and exact duplicates therefore
+    must not manufacture a different quorum signature or a different repair.
+    Conflicting replacements for the same filename remain distinct so the
+    ingest validator can reject the ambiguity instead of choosing one body.
+    """
+
+    normalized = dict(value)
+    for field in ("invalid_tags", "replacement_operations"):
+        items = normalized.get(field)
+        if not isinstance(items, list):
+            continue
+        canonical: dict[str, Any] = {}
+        for item in items:
+            stable_item = dict(item) if isinstance(item, Mapping) else item
+            if field == "replacement_operations" and isinstance(stable_item, dict):
+                content = stable_item.get("content")
+                if isinstance(content, str):
+                    # The repair application path strips surrounding
+                    # whitespace before creating or appending the replacement.
+                    # Match that exact side-effect identity so a trailing
+                    # newline cannot manufacture a tie.
+                    stable_item["content"] = content.strip()
+            key = json.dumps(
+                stable_item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            canonical.setdefault(key, stable_item)
+        normalized[field] = [canonical[key] for key in sorted(canonical)]
+    return normalized
+
+
 def signature_policy(schema: Mapping[str, Any]) -> dict[str, Any]:
     """Return the schema-specific root fields that determine an action."""
 
     properties = schema.get("properties")
     fields = (
-        sorted(
-            str(name)
-            for name in properties
-            if str(name) not in NON_DECISION_FIELDS
-        )
+        sorted(str(name) for name in properties if str(name) not in NON_DECISION_FIELDS)
         if isinstance(properties, Mapping)
         else []
     )
-    return {
+    policy = {
         "policy_version": SIGNATURE_POLICY_VERSION,
         "schema_sha256": schema_sha256(schema),
-        "fields": fields,
+        "fields": ["action", "status"] if _is_local_repair_schema(schema) else fields,
     }
+    if _is_local_repair_schema(schema):
+        policy["conditional_fields"] = {"resolve_update_target": ["target_page_id"]}
+    return policy
 
 
 def decision_signature_value(
@@ -80,10 +168,55 @@ def decision_signature_value(
     normalized = default_decision_value(value)
     if not isinstance(normalized, Mapping):
         return normalized
+    if _is_ingest_reconciliation_schema(schema):
+        # These optional arrays are imperative repair instructions.  Missing
+        # and explicitly empty both mean "perform no repair"; treating them
+        # as distinct needlessly invokes the tie model without changing the
+        # action or its side effects.
+        normalized = canonical_ingest_repair_arrays(normalized)
+        normalized.setdefault("invalid_tags", [])
+        normalized.setdefault("replacement_operations", [])
+    if _is_local_repair_schema(schema):
+        selected = {
+            field: normalized[field]
+            for field in ("action", "status")
+            if field in normalized
+        }
+        if (
+            normalized.get("action") == "resolve_update_target"
+            and "target_page_id" in normalized
+        ):
+            selected["target_page_id"] = normalized["target_page_id"]
+        return selected
     fields = signature_policy(schema)["fields"]
     if not fields:
         return normalized
-    return {field: normalized[field] for field in fields if field in normalized}
+    selected = {field: normalized[field] for field in fields if field in normalized}
+    properties = schema.get("properties")
+    if isinstance(properties, Mapping):
+        for field, value in list(selected.items()):
+            field_schema = properties.get(field)
+            if (
+                isinstance(field_schema, Mapping)
+                and field_schema.get("uniqueItems") is True
+                and isinstance(value, list)
+            ):
+                # JSON arrays normally carry order, but ``uniqueItems`` fields
+                # in our decision schemas are semantic sets.  Sorting only
+                # those declared fields prevents harmless model ordering from
+                # manufacturing a disagreement while leaving ordered action
+                # sequences untouched.
+                selected[field] = sorted(
+                    value,
+                    key=lambda item: json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ),
+                )
+    return selected
 
 
 def production_decision_schemas() -> dict[str, Mapping[str, Any]]:
@@ -155,6 +288,7 @@ __all__ = [
     "default_decision_value",
     "NON_DECISION_FIELDS",
     "SIGNATURE_POLICY_VERSION",
+    "canonical_ingest_repair_arrays",
     "schema_sha256",
     "signature_policy",
 ]

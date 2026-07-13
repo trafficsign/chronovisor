@@ -14,7 +14,11 @@ from llm_wiki_mcp.local_structured import (
     ChatRequest,
     LocalConsensusAuditStore,
     LocalStructuredSession,
+    STRUCTURED_GENERATION_POLICY_VERSION,
+    ValidationIssue,
     normalize_json_output,
+    structured_generation_policy,
+    structured_generation_policy_sha256,
     validate_json,
 )
 
@@ -43,8 +47,23 @@ class QueueTransport:
         return response
 
 
+def test_structured_generation_policy_seals_the_fixed_sampler() -> None:
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 1
+    assert structured_generation_policy() == {
+        "version": 1,
+        "temperature": 0,
+        "seed": 0,
+        "think": False,
+        "stream": False,
+        "format": "json_schema",
+    }
+    assert len(structured_generation_policy_sha256()) == 64
+
+
 @pytest.fixture(autouse=True)
-def _isolate_default_audit_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_default_audit_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from llm_wiki_mcp import wiki
 
     monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
@@ -65,7 +84,9 @@ def _session(transport: QueueTransport, **overrides: Any) -> LocalStructuredSess
 def test_first_pass_valid_uses_fixed_non_thinking_request() -> None:
     transport = QueueTransport('{"decision":"apply","summary":"ok"}')
 
-    result = _session(transport).run("decide", SCHEMA, system="Follow the decision rule.")
+    result = _session(transport).run(
+        "decide", SCHEMA, system="Follow the decision rule."
+    )
 
     assert result.ok is True
     assert result.value == {"decision": "apply", "summary": "ok"}
@@ -76,11 +97,44 @@ def test_first_pass_valid_uses_fixed_non_thinking_request() -> None:
     assert request.num_ctx == 16_384
     assert request.num_predict == 256
     assert request.temperature == 0
+    assert request.seed == 0
     assert request.think is False
     assert request.schema == SCHEMA
     assert request.messages[0]["role"] == "system"
     assert "untrusted data" in request.messages[0]["content"]
     assert '"decision"' in request.messages[0]["content"]
+
+
+def test_schema_valid_semantic_error_repairs_in_the_same_session() -> None:
+    transport = QueueTransport(
+        '{"decision":"apply","summary":"wrong"}',
+        '{"decision":"apply","summary":"exact"}',
+    )
+
+    def validate(value: Any) -> list[ValidationIssue]:
+        if value.get("summary") == "exact":
+            return []
+        return [
+            ValidationIssue(
+                pointer="/summary",
+                keyword="const",
+                expected="exact",
+                received="wrong",
+                message="copy the exact bound value",
+            )
+        ]
+
+    result = _session(transport).run(
+        "decide",
+        SCHEMA,
+        value_validator=validate,
+    )
+
+    assert result.ok is True
+    assert result.value["summary"] == "exact"
+    assert result.first_pass_valid is False
+    assert result.repair_turns == 1
+    assert "copy the exact bound value" in transport.requests[1].messages[-1]["content"]
 
 
 def test_active_marker_is_atomic_redacted_and_removed_after_session(
@@ -143,7 +197,9 @@ def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -
     assert summary["sessions"]["failures"] == {"transport_error": 1}
 
 
-def test_observability_write_failure_does_not_change_valid_result(tmp_path: Path) -> None:
+def test_observability_write_failure_does_not_change_valid_result(
+    tmp_path: Path,
+) -> None:
     blocked_root = tmp_path / "not-a-directory"
     blocked_root.write_text("file", encoding="utf-8")
     transport = QueueTransport('{"decision":"apply","summary":"ok"}')
@@ -244,7 +300,7 @@ def test_parse_error_is_repaired_in_same_client_side_session() -> None:
     assert '"line":1' in feedback
     assert '"column":21' in feedback
     assert '"byte_offset":20' in feedback
-    assert "preserve every field that was already valid" in feedback
+    assert "preserve unrelated fields only when they remain" in feedback
 
 
 def test_schema_errors_use_escaped_rfc6901_pointers() -> None:
@@ -278,6 +334,8 @@ def test_schema_repair_prompt_contains_exact_pointer_expected_and_received() -> 
     assert '"keyword":"type"' in feedback
     assert '"expected":["string"]' in feedback
     assert '"received":{"type":"integer","value":7}' in feedback
+    assert "Never change a truthful failed factual" in feedback
+    assert "re-evaluate that root action or decision" in feedback
 
 
 def test_validator_handles_existing_schema_subset_strictly() -> None:
@@ -315,7 +373,9 @@ def test_validator_handles_existing_schema_subset_strictly() -> None:
 
 def test_same_invalid_output_stops_before_second_repair() -> None:
     invalid = '{"summary":"missing decision"}'
-    transport = QueueTransport(invalid, invalid, '{"decision":"apply","summary":"unused"}')
+    transport = QueueTransport(
+        invalid, invalid, '{"decision":"apply","summary":"unused"}'
+    )
 
     result = _session(transport).run("decide", SCHEMA)
 
@@ -325,20 +385,38 @@ def test_same_invalid_output_stops_before_second_repair() -> None:
     assert len(transport.requests) == 2
 
 
-def test_same_validation_fingerprint_stops_even_when_output_changes() -> None:
+def test_same_validation_fingerprint_allows_second_repair_when_output_changes() -> None:
     transport = QueueTransport(
         '{"summary":"first"}',
         '{"summary":"second"}',
-        '{"decision":"apply","summary":"unused"}',
+        '{"decision":"apply","summary":"fixed"}',
+    )
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.value == {"decision": "apply", "summary": "fixed"}
+    assert result.repair_turns == 2
+    assert result.attempts[0].output_sha256 != result.attempts[1].output_sha256
+    assert result.attempts[0].error_fingerprint == result.attempts[1].error_fingerprint
+    assert len(transport.requests) == 3
+
+
+def test_same_validation_fingerprint_still_obeys_fixed_repair_limit() -> None:
+    transport = QueueTransport(
+        '{"summary":"first"}',
+        '{"summary":"second"}',
+        '{"summary":"third"}',
     )
 
     result = _session(transport).run("decide", SCHEMA)
 
     assert result.ok is False
-    assert result.failure_class == "repeated_validation_error"
-    assert result.attempts[0].output_sha256 != result.attempts[1].output_sha256
-    assert result.attempts[0].error_fingerprint == result.attempts[1].error_fingerprint
-    assert len(transport.requests) == 2
+    assert result.failure_class == "repair_exhausted"
+    assert result.repair_turns == 2
+    assert len({attempt.output_sha256 for attempt in result.attempts}) == 3
+    assert len({attempt.error_fingerprint for attempt in result.attempts}) == 1
+    assert len(transport.requests) == 3
 
 
 def test_session_stops_after_initial_plus_two_repairs() -> None:
@@ -356,15 +434,37 @@ def test_session_stops_after_initial_plus_two_repairs() -> None:
     assert len(transport.requests) == 3
 
 
-def test_output_cap_fails_closed_without_putting_oversize_text_in_history() -> None:
-    transport = QueueTransport("x" * 101)
+def test_output_cap_repairs_without_putting_oversize_text_in_history() -> None:
+    oversized = "x" * 101
+    transport = QueueTransport(
+        oversized,
+        '{"decision":"apply","summary":"compact"}',
+    )
+
+    result = _session(transport, max_output_chars=100).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.first_pass_valid is False
+    assert result.repair_turns == 1
+    assert result.attempts[0].issues[0].keyword == "maxOutputBytes"
+    assert len(transport.requests) == 2
+    repair_messages = transport.requests[1].messages
+    assert oversized not in json.dumps(repair_messages)
+    assert "exceeded the fixed output limit" in repair_messages[-1]["content"]
+
+
+def test_output_cap_fails_closed_after_two_oversize_repairs() -> None:
+    transport = QueueTransport("x" * 101, "y" * 101, "z" * 101)
 
     result = _session(transport, max_output_chars=100).run("decide", SCHEMA)
 
     assert result.ok is False
-    assert result.failure_class == "output_too_large"
-    assert result.attempts == ()
-    assert len(transport.requests) == 1
+    assert result.failure_class == "repair_exhausted"
+    assert result.repair_turns == 2
+    assert len(result.attempts) == 3
+    assert all(
+        attempt.issues[0].keyword == "maxOutputBytes" for attempt in result.attempts
+    )
 
 
 def test_initial_input_byte_cap_fails_before_call() -> None:
@@ -398,6 +498,24 @@ def test_context_preflight_reserves_two_maximum_repair_histories() -> None:
     assert result.failure_class == "context_window_exceeded"
     assert "two fixed UTF-8 byte-bounded repair histories" in result.failure_reason
     assert transport.requests == []
+
+
+def test_production_112k_policy_retains_largest_bounded_prompt_and_two_repairs() -> (
+    None
+):
+    transport = QueueTransport('{"decision":"apply","summary":"ok"}')
+
+    result = _session(
+        transport,
+        num_ctx=114_688,
+        num_predict=3_072,
+        max_input_chars=93_000,
+        max_output_chars=4_000,
+        max_feedback_chars=2_000,
+    ).run("x" * 92_000, SCHEMA)
+
+    assert result.ok is True
+    assert len(transport.requests) == 1
 
 
 def test_context_window_guard_fails_before_ollama_can_truncate() -> None:
@@ -450,9 +568,7 @@ def test_ollama_context_accounting_fails_closed_after_unexpected_shift() -> None
         num_predict=256,
         max_output_chars=200,
         max_feedback_chars=200,
-    ).run(
-        "decide", SCHEMA
-    )
+    ).run("decide", SCHEMA)
 
     assert result.ok is False
     assert result.failure_class == "context_truncation_suspected"
@@ -503,7 +619,7 @@ def test_duplicate_json_object_keys_are_rejected_not_silently_overwritten() -> N
 
 
 def test_only_whole_document_known_wrappers_are_normalized() -> None:
-    fenced, fenced_changed = normalize_json_output("```json\n{\"ok\":true}\n```")
+    fenced, fenced_changed = normalize_json_output('```json\n{"ok":true}\n```')
     prose, prose_changed = normalize_json_output('answer: {"ok":true}')
     channel, channel_changed = normalize_json_output(
         '<|channel|>final<|message|>{"ok":true}<|return|>'
@@ -516,9 +632,7 @@ def test_only_whole_document_known_wrappers_are_normalized() -> None:
 
 def test_audit_record_never_contains_raw_model_output_or_payload() -> None:
     secret = "secret-user-payload"
-    transport = QueueTransport(
-        json.dumps({"decision": "apply", "summary": secret})
-    )
+    transport = QueueTransport(json.dumps({"decision": "apply", "summary": secret}))
 
     result = _session(transport).run(secret, SCHEMA)
     serialized = json.dumps(result.audit_record(), ensure_ascii=False)

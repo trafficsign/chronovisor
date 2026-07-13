@@ -1,10 +1,18 @@
 """Deterministic and local-consensus repair decisions for failure packets."""
+
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable
+
+from llm_wiki_mcp.decision_authority import (
+    compare_semantic_authority,
+    current_semantic_authority,
+    seal_semantic_artifact,
+    semantic_verdict_authority_error,
+)
 
 
 ALLOWED_ACTIONS = {
@@ -45,6 +53,21 @@ If a code change appears necessary, propose_test_case.  Routine packets never
 invoke a frontier model; only the separate trusted system-incident lane may do so.
 If ingest.frontier_nonconvergent was caused by frontier call budget exhaustion,
 retry_raw is allowed; do not escalate the packet back to frontier.
+Apply these status/action pairs exactly:
+- exactly one authorized similar_existing_pages candidate for
+  apply.update_target_not_found -> resolved + resolve_update_target, echo the
+  packet requested_page_id unchanged, and set target_page_id to that sole
+  candidate exactly;
+- no candidate and a safe ASCII kebab-case requested page id -> resolved +
+  retry_raw;
+- an unsafe or path-like requested page id -> rejected + quarantine_raw;
+- a repeated local contract/schema implementation failure that needs a code
+  regression guard -> escalate + propose_test_case;
+- a structured-output failure whose validator feedback identifies a narrow
+  instruction defect -> escalate + propose_prompt_fix.
+Never combine an action with a different status. Do not use retry_raw for an
+unsafe page id, and do not quarantine a packet merely because a test or prompt
+repair is needed.
 """
 
 
@@ -62,9 +85,13 @@ class LocalRepairDecision:
     target_page_id: str | None = None
     notes: str | None = None
     source: str = "qwen"
+    authority: dict[str, Any] | None = None
+    decision_policy: dict[str, Any] | None = None
+    local_consensus: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": 2 if self.authority is not None else 1,
             "status": self.status,
             "action": self.action,
             "confidence": self.confidence,
@@ -73,6 +100,9 @@ class LocalRepairDecision:
             "reason": self.reason,
             "notes": self.notes,
             "source": self.source,
+            "authority": self.authority,
+            "decision_policy": self.decision_policy,
+            "local_consensus": self.local_consensus,
         }
 
 
@@ -96,7 +126,34 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _validate_decision(data: dict[str, Any], packet: dict[str, Any]) -> LocalRepairDecision | None:
+def _deterministic_update_target(
+    packet: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Return the only packet-authorized update target, if it is exact.
+
+    A model may echo packet identities, but it cannot create either identity.
+    Keeping this check shared by the deterministic and consensus paths avoids
+    accepting a plausible target for the wrong failure or requested page.
+    """
+
+    requested = packet.get("requested_page_id")
+    candidates = packet.get("similar_existing_pages")
+    if (
+        packet.get("failure_class") != "apply.update_target_not_found"
+        or not isinstance(requested, str)
+        or not requested
+        or not isinstance(candidates, list)
+        or len(candidates) != 1
+        or not isinstance(candidates[0], str)
+        or not candidates[0]
+    ):
+        return None
+    return requested, candidates[0]
+
+
+def _validate_decision(
+    data: dict[str, Any], packet: dict[str, Any]
+) -> LocalRepairDecision | None:
     status = data.get("status")
     action = data.get("action")
     confidence = data.get("confidence")
@@ -110,9 +167,10 @@ def _validate_decision(data: dict[str, Any], packet: dict[str, Any]) -> LocalRep
     if not isinstance(reason, str) or not reason.strip():
         return None
 
+    packet_requested = packet.get("requested_page_id")
     requested = data.get("requested_page_id")
     if requested is None:
-        requested = packet.get("requested_page_id")
+        requested = packet_requested
     if requested is not None and not isinstance(requested, str):
         return None
 
@@ -121,10 +179,11 @@ def _validate_decision(data: dict[str, Any], packet: dict[str, Any]) -> LocalRep
         return None
 
     if action == "resolve_update_target":
-        candidates = packet.get("similar_existing_pages")
-        if not isinstance(candidates, list) or not all(isinstance(c, str) for c in candidates):
+        authorized = _deterministic_update_target(packet)
+        if authorized is None:
             return None
-        if target not in candidates:
+        authorized_requested, authorized_target = authorized
+        if requested != authorized_requested or target != authorized_target:
             return None
         if status != "resolved":
             return None
@@ -175,18 +234,15 @@ def deterministic_repair(packet: dict[str, Any]) -> LocalRepairDecision:
             ),
             source="deterministic",
         )
-    if (
-        failure_class == "apply.update_target_not_found"
-        and isinstance(candidates, list)
-        and len(candidates) == 1
-        and isinstance(candidates[0], str)
-    ):
+    authorized_target = _deterministic_update_target(packet)
+    if authorized_target is not None:
+        requested_page_id, target_page_id = authorized_target
         return LocalRepairDecision(
             status="resolved",
             action="resolve_update_target",
             confidence=0.92,
-            requested_page_id=packet.get("requested_page_id"),
-            target_page_id=candidates[0],
+            requested_page_id=requested_page_id,
+            target_page_id=target_page_id,
             reason="single existing page candidate for missing update target",
             source="deterministic",
         )
@@ -255,11 +311,11 @@ def propose_repair(
     """
 
     deterministic = deterministic_repair(packet)
-    if (
-        deterministic.status == "resolved"
-        and deterministic.action
-        in {"resolve_update_target", "retry_raw", "quarantine_raw"}
-    ):
+    if deterministic.status == "resolved" and deterministic.action in {
+        "resolve_update_target",
+        "retry_raw",
+        "quarantine_raw",
+    }:
         return deterministic
 
     if use_qwen:
@@ -268,10 +324,17 @@ def propose_repair(
                 from llm_wiki_mcp.decision_policy import resolve_decision_policy
                 from llm_wiki_mcp.decision_router import DecisionRouter
 
-                _policy, mode, policy_error = resolve_decision_policy("local_repair")
+                policy, mode, policy_error = resolve_decision_policy("local_repair")
                 if policy_error is not None or mode == "off":
                     return deterministic
-                router = DecisionRouter(audit_role="local_repair")
+                authority, authority_error = current_semantic_authority("local_repair")
+                if authority is None or authority_error is not None:
+                    return deterministic
+                router = DecisionRouter(
+                    audit_role="local_repair",
+                    require_adopted=mode == "enabled",
+                    decision_lane="local_repair",
+                )
                 routed = router.decide(
                     build_prompt(packet),
                     LOCAL_REPAIR_SCHEMA,
@@ -287,6 +350,14 @@ def propose_repair(
                     else None
                 )
                 source = "local_consensus"
+                decision_policy = {
+                    "kind": policy.kind if policy is not None else None,
+                    "schema_name": policy.schema_name if policy is not None else None,
+                    "mode": mode,
+                    "error": policy_error,
+                    "router_policy": router.policy.audit_record(),
+                }
+                local_consensus = routed.audit_record()
             else:
                 output = generator(
                     build_prompt(packet),
@@ -298,7 +369,47 @@ def propose_repair(
             if parsed is not None:
                 decision = _validate_decision(parsed, packet)
                 if decision is not None:
-                    return replace(decision, source=source)
+                    if source != "local_consensus":
+                        return replace(decision, source=source)
+                    # Canonical authority validation must see the exact
+                    # action-bearing payload that the quorum signed, not only
+                    # its audit envelope.
+                    review = decision.to_dict()
+                    review["decision_policy"] = decision_policy
+                    review["local_consensus"] = local_consensus
+                    if (
+                        semantic_verdict_authority_error(
+                            review,
+                            authority,
+                            lane="local_repair",
+                        )
+                        is not None
+                    ):
+                        return deterministic
+                    current, current_error = current_semantic_authority("local_repair")
+                    if current is None or current_error is not None:
+                        return deterministic
+                    if (
+                        compare_semantic_authority(
+                            authority,
+                            current,
+                            lane="local_repair",
+                        )
+                        is not None
+                    ):
+                        return deterministic
+                    sealed = seal_semantic_artifact(
+                        {"schema_version": 2},
+                        authority=authority,
+                        lane="local_repair",
+                    )
+                    return replace(
+                        decision,
+                        source=source,
+                        authority=sealed["authority"],
+                        decision_policy=decision_policy,
+                        local_consensus=local_consensus,
+                    )
         except Exception:
             pass
     return deterministic

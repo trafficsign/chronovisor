@@ -3,6 +3,7 @@
 Each test pins a bug we shipped at least once. Do not delete one without
 replacing it with something that catches the same class of mistake.
 """
+
 from __future__ import annotations
 
 import base64
@@ -36,9 +37,7 @@ class TestExtractJsonArray:
         assert _extract_json_array('[{"a":1}]') == [{"a": 1}]
 
     def test_preamble_stripped(self) -> None:
-        assert _extract_json_array('---\n[{"type":"create"}]') == [
-            {"type": "create"}
-        ]
+        assert _extract_json_array('---\n[{"type":"create"}]') == [{"type": "create"}]
         assert _extract_json_array('Here is the plan:\n[{"x":1}]') == [{"x": 1}]
 
     def test_postamble_with_brackets(self) -> None:
@@ -95,7 +94,7 @@ class TestExtractJsonArray:
         # either "nothing wiki-worthy" (empty `[]`) or "schema invalid"
         # (string list). Both are wrong — the LLM had more to say.
         truncated_string_inner = (
-            '[\n'
+            "[\n"
             '  {"type": "create", "filename": "a.md", "title": "A", '
             '"keywords": ["x", "y"], "summary": "..."},\n'
             '  {"type": "create", "filename": "b.md", "title": "B", '
@@ -104,7 +103,7 @@ class TestExtractJsonArray:
         assert _extract_json_array(truncated_string_inner) is None
 
         truncated_empty_inner = (
-            '[\n'
+            "[\n"
             '  {"type": "create", "filename": "a.md", '
             '"keywords": []},\n'
             '  {"type": "create", "filename": "b.md", '
@@ -115,9 +114,7 @@ class TestExtractJsonArray:
         # Edge case: the outer array is broken but a complete dict-array
         # appears later. This *does* fit the contract, so accept it.
         text = 'broken [stuff\nlater: [{"type": "create", "filename": "a.md"}]'
-        assert _extract_json_array(text) == [
-            {"type": "create", "filename": "a.md"}
-        ]
+        assert _extract_json_array(text) == [{"type": "create", "filename": "a.md"}]
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +133,7 @@ class TestFrontmatter:
         assert not _has_frontmatter("---\nupdated: 2026-04-28\n---\nbody")
 
     def test_strip_removes_all_blocks(self) -> None:
-        text = (
-            "---\ntitle: A\n---\n"
-            "body1\n"
-            "---\ntitle: B\n---\n"
-            "body2\n"
-        )
+        text = "---\ntitle: A\n---\nbody1\n---\ntitle: B\n---\nbody2\n"
         assert "title:" not in _strip_all_frontmatter(text)
 
 
@@ -259,8 +251,7 @@ class TestExtractPageBody:
         # Same truncation pattern for updates: no frontmatter expected,
         # so the contract check passes any non-empty body.
         out = _extract_page_body(
-            "=== UPDATE PAGE: foo.md ===\n"
-            "\n## new section\n\nnotes...",
+            "=== UPDATE PAGE: foo.md ===\n\n## new section\n\nnotes...",
             op_type="update",
         )
         assert out is not None
@@ -281,8 +272,7 @@ class TestExtractPageBody:
         # be recovered: we'd persist a page with no proper frontmatter
         # block. The op_type contract check must still reject.
         out = _extract_page_body(
-            "=== NEW PAGE: foo.md ===\n"
-            "---\ntitle: Foo\nupdated: 2026",
+            "=== NEW PAGE: foo.md ===\n---\ntitle: Foo\nupdated: 2026",
             op_type="create",
         )
         assert out is None
@@ -344,7 +334,9 @@ class TestReconcileLinks:
         self.allowed = {"foo", "bar", "switchbot-hub-3-purchase-logic"}
 
     def test_resolve_intact(self) -> None:
-        out, s = _reconcile_links("See [[foo]] and [[bar#section|alias]].", self.allowed)
+        out, s = _reconcile_links(
+            "See [[foo]] and [[bar#section|alias]].", self.allowed
+        )
         assert out == "See [[foo]] and [[bar#section|alias]]."
         assert s["resolved"] == 2
 
@@ -433,17 +425,30 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(ingest, "LOG_FILE", wiki_root / "log.md")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
     monkeypatch.setattr(orchestrator, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json")
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+    )
     monkeypatch.setattr(
         page_mutation,
         "WIKI_MUTATION_LOCK",
         wiki_root / "runtime" / "wiki-mutation.lock",
     )
+    monkeypatch.setattr(
+        page_mutation,
+        "DECISION_AUTHORITY_LOCK",
+        wiki_root / "runtime" / "decision-authority.lock",
+    )
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", wiki_root / "runtime")
-    monkeypatch.setattr(runtime_status, "STATUS_FILE", wiki_root / "runtime" / "status.json")
-    monkeypatch.setattr(runtime_status, "EVENTS_FILE", wiki_root / "runtime" / "events.jsonl")
-    monkeypatch.setattr(runtime_status, "METRICS_FILE", wiki_root / "runtime" / "metrics.jsonl")
+    monkeypatch.setattr(
+        runtime_status, "STATUS_FILE", wiki_root / "runtime" / "status.json"
+    )
+    monkeypatch.setattr(
+        runtime_status, "EVENTS_FILE", wiki_root / "runtime" / "events.jsonl"
+    )
+    monkeypatch.setattr(
+        runtime_status, "METRICS_FILE", wiki_root / "runtime" / "metrics.jsonl"
+    )
 
     # IndexStore reads its paths from module globals AND from wiki.PAGES_DIR
     # internally; patch both layers.
@@ -458,6 +463,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(index_store, "_store", None)
     monkeypatch.setattr(ollama, "is_available", lambda: False)
     monkeypatch.setattr(search, "update_embeddings", lambda page_ids=None: 0)
+
     def isolated_frontier_review(proposal, *, reviewer=None):
         if reviewer is not None:
             return ingest._normalize_ingest_frontier_review(
@@ -507,7 +513,9 @@ class TestApplyOperations:
 
     def test_create_collision_converts_to_update(self, isolated_wiki: Path) -> None:
         path = _seed_page(
-            isolated_wiki, "a/foo.md", "---\ntitle: existing\nupdated: 2026-01-01\n---\nold"
+            isolated_wiki,
+            "a/foo.md",
+            "---\ntitle: existing\nupdated: 2026-01-01\n---\nold",
         )
         ops = [
             {
@@ -537,9 +545,7 @@ class TestApplyOperations:
         with pytest.raises(IngestApplyError, match="update target not found"):
             _apply_operations(ops)
 
-    def test_update_resolves_single_loose_page_id(
-        self, isolated_wiki: Path
-    ) -> None:
+    def test_update_resolves_single_loose_page_id(self, isolated_wiki: Path) -> None:
         path = _seed_page(
             isolated_wiki,
             "ai/opus-4.7-evaluation-and-industry-geopolitics.md",
@@ -561,9 +567,7 @@ class TestApplyOperations:
         assert "old" in text
         assert "new" in text
 
-    def test_update_ambiguous_loose_page_id_fails(
-        self, isolated_wiki: Path
-    ) -> None:
+    def test_update_ambiguous_loose_page_id_fails(self, isolated_wiki: Path) -> None:
         _seed_page(
             isolated_wiki,
             "a/foo.bar.md",
@@ -757,9 +761,255 @@ class TestIngestFrontierGate:
             ),
         }
 
-    def test_local_prepare_alone_cannot_mutate_page(
-        self, isolated_wiki: Path
+    @staticmethod
+    def _production_authority(marker: str) -> dict:
+        return {
+            "source": "adopted_local_consensus",
+            "authority_version": 1,
+            "lane": "ingest_reconciliation",
+            "lane_contract_sha256": "1" * 64,
+            "lane_contract_manifest_sha256": "2" * 64,
+            "lane_contract_case_manifest_sha256": "3" * 64,
+            "policy": {
+                "kind": "consensus",
+                "schema_name": "ingest_reconciliation",
+                "mode": "enabled",
+                "error": None,
+            },
+            "router": {
+                "source": "adopted_artifact",
+                "artifact_sha256": marker * 64,
+                "error": None,
+                "models": ["primary:model", "challenger:model", "tie:model"],
+            },
+        }
+
+    @staticmethod
+    def _authority_review(
+        authority: dict,
+        *,
+        decision: str = "apply_available",
+        summary: str = "authority-bound review",
+    ) -> dict:
+        from llm_wiki_mcp.decision_router import canonical_agreement_signature
+        from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
+
+        review = {
+            "decision": decision,
+            "summary": summary,
+            "failed_operations_disposition": "none",
+            "tests_run": [],
+            "risk": None,
+            "notes": None,
+            "decision_policy": {
+                **authority["policy"],
+                "router_policy": authority["router"],
+            },
+        }
+        signature = canonical_agreement_signature(
+            review,
+            schema=production_decision_schemas()["ingest_reconciliation"],
+        )
+        agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+        review["local_consensus"] = {
+            "status": "agreed",
+            "ok": True,
+            "agreement_sha256": agreement,
+            "failure_class": None,
+            "quarantine_reason": None,
+            "votes": [
+                {
+                    "role": "primary",
+                    "model": "primary:model",
+                    "valid": True,
+                    "signature_sha256": agreement,
+                    "invalid_reason": None,
+                },
+                {
+                    "role": "challenger",
+                    "model": "challenger:model",
+                    "valid": True,
+                    "signature_sha256": agreement,
+                    "invalid_reason": None,
+                },
+            ],
+        }
+        return review
+
+    def test_production_authority_binds_lane_manifests_and_adopted_models(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        del isolated_wiki
+        from llm_wiki_mcp import (
+            decision_policy,
+            decision_router,
+            ingest,
+            runtime_config,
+        )
+        from llm_wiki_mcp.decision_lane_contract_cases import (
+            decision_lane_contract_case_manifest_sha256,
+        )
+        from llm_wiki_mcp.decision_lane_contracts import (
+            lane_contract_manifest_sha256,
+            lane_contract_sha256,
+        )
+
+        def production_review_stub(*_args, **_kwargs):
+            raise AssertionError("authority resolution must not invoke review")
+
+        production_review_stub.__module__ = ingest.__name__
+        monkeypatch.setattr(
+            ingest, "_run_ingest_frontier_review", production_review_stub
+        )
+
+        class Policy:
+            kind = "consensus"
+            schema_name = "ingest_reconciliation"
+
+        router_audit = {
+            "source": "adopted_artifact",
+            "artifact_sha256": "a" * 64,
+            "error": None,
+            "models": ["primary:model", "challenger:model", "tie:model"],
+        }
+
+        class Resolution:
+            source = "adopted_artifact"
+            error = None
+            artifact_sha256 = "a" * 64
+
+            @staticmethod
+            def audit_record() -> dict[str, object]:
+                return router_audit
+
+        monkeypatch.setattr(
+            decision_policy,
+            "resolve_decision_policy",
+            lambda _lane: (Policy(), "enabled", None),
+        )
+        monkeypatch.setattr(
+            runtime_config,
+            "load_decision_router_config",
+            lambda: object(),
+        )
+        monkeypatch.setattr(
+            decision_router,
+            "resolve_router_policy",
+            lambda _config: Resolution(),
+        )
+
+        authority, error = ingest._current_ingest_review_authority(reviewer=None)
+
+        assert error is None
+        assert authority is not None
+        assert authority["lane_contract_sha256"] == lane_contract_sha256(
+            "ingest_reconciliation"
+        )
+        assert (
+            authority["lane_contract_manifest_sha256"]
+            == lane_contract_manifest_sha256()
+        )
+        assert (
+            authority["lane_contract_case_manifest_sha256"]
+            == decision_lane_contract_case_manifest_sha256()
+        )
+        assert authority["policy"] == {
+            "kind": "consensus",
+            "schema_name": "ingest_reconciliation",
+            "mode": "enabled",
+            "error": None,
+        }
+        assert authority["router"] == router_audit
+        assert ingest._ingest_review_authority_shape_error(authority) is None
+
+    def test_production_review_requires_policy_and_exact_local_quorum(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        del isolated_wiki
+        from llm_wiki_mcp import ingest
+
+        authority = {
+            "source": "adopted_local_consensus",
+            "authority_version": 1,
+            "lane": "ingest_reconciliation",
+            "lane_contract_sha256": "b" * 64,
+            "lane_contract_manifest_sha256": "c" * 64,
+            "lane_contract_case_manifest_sha256": "d" * 64,
+            "policy": {
+                "kind": "consensus",
+                "schema_name": "ingest_reconciliation",
+                "mode": "enabled",
+                "error": None,
+            },
+            "router": {
+                "source": "adopted_artifact",
+                "artifact_sha256": "a" * 64,
+                "error": None,
+                "models": ["primary:model", "challenger:model", "tie:model"],
+            },
+        }
+        review = {
+            "decision": "apply_available",
+            "summary": "grounded",
+            "failed_operations_disposition": "none",
+            "decision_policy": {
+                **authority["policy"],
+                "router_policy": authority["router"],
+            },
+        }
+
+        assert ingest._ingest_review_authority_error(review, authority) == (
+            "decision verdict local consensus proof is missing"
+        )
+        from llm_wiki_mcp.decision_router import canonical_agreement_signature
+        from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
+
+        signature = canonical_agreement_signature(
+            review,
+            schema=production_decision_schemas()["ingest_reconciliation"],
+        )
+        agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+        review["local_consensus"] = {
+            "status": "agreed",
+            "ok": True,
+            "agreement_sha256": agreement,
+            "failure_class": None,
+            "quarantine_reason": None,
+            "votes": [
+                {
+                    "role": "primary",
+                    "model": "primary:model",
+                    "valid": True,
+                    "signature_sha256": agreement,
+                    "invalid_reason": None,
+                },
+                {
+                    "role": "challenger",
+                    "model": "challenger:model",
+                    "valid": True,
+                    "signature_sha256": agreement,
+                    "invalid_reason": None,
+                },
+            ],
+        }
+
+        normalized = ingest._normalize_ingest_frontier_review(
+            review,
+            proposal={"prepared_operations": [{}], "failed_operation_specs": []},
+        )
+        assert normalized["decision_policy"] == review["decision_policy"]
+        assert normalized["local_consensus"] == review["local_consensus"]
+        assert ingest._ingest_review_authority_error(normalized, authority) is None
+
+        normalized["failed_operations_disposition"] = "retry_required"
+        assert ingest._ingest_review_authority_error(normalized, authority) == (
+            "decision verdict action does not match local consensus agreement"
+        )
+
+    def test_local_prepare_alone_cannot_mutate_page(self, isolated_wiki: Path) -> None:
         from llm_wiki_mcp import ingest
 
         planned, _totals = ingest._prepare_operations([self._create_op()])
@@ -776,11 +1026,8 @@ class TestIngestFrontierGate:
         raw = next(
             candidate
             for index in range(1000)
-            if (
-                candidate := f"ordinary observation {index}"
-            )
-            and int(ingest._ingest_source_key(candidate, None)[:12], 16)
-            / float(16**12)
+            if (candidate := f"ordinary observation {index}")
+            and int(ingest._ingest_source_key(candidate, None)[:12], 16) / float(16**12)
             >= 0.10
         )
         captured: list[dict] = []
@@ -881,7 +1128,51 @@ class TestIngestFrontierGate:
         assert review_path.exists()
         review = json.loads(review_path.read_text(encoding="utf-8"))
         assert review["proposal_sha256"] == result["proposal_sha256"]
+        assert (
+            review["schema_version"]
+            == ingest.INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION
+        )
+        assert review["authority"] == {
+            "authority_version": 1,
+            "lane": "ingest_reconciliation",
+            "source": "injected_reviewer_boundary",
+        }
         assert review["review"]["decision"] == "confirmed_noop"
+
+    @pytest.mark.parametrize("terminal", ["apply_available", "confirmed_noop"])
+    def test_terminal_review_with_repairs_is_normalized_to_retry(
+        self,
+        terminal: str,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        proposal = {
+            "prepared_operations": [{"page_id": "frontier-only"}],
+            "failed_operation_specs": [],
+        }
+        normalized = ingest._normalize_ingest_frontier_review(
+            {
+                "decision": terminal,
+                "summary": "repair this before applying",
+                "failed_operations_disposition": "none",
+                "invalid_tags": ["t/zeta", "t/alpha", "t/zeta"],
+                "replacement_operations": [
+                    {"filename": "memory/z.md", "content": "z"},
+                    {"filename": "memory/a.md", "content": "a"},
+                    {"filename": "memory/a.md", "content": "a"},
+                ],
+            },
+            proposal=proposal,
+        )
+
+        assert normalized["decision"] == "retry"
+        assert normalized["failed_operations_disposition"] == "retry_required"
+        assert normalized["invalid_tags"] == ["t/alpha", "t/zeta"]
+        assert normalized["replacement_operations"] == [
+            {"filename": "memory/a.md", "content": "a"},
+            {"filename": "memory/z.md", "content": "z"},
+        ]
+        assert "fresh review" in normalized["summary"]
 
     def test_frontier_retry_keeps_proposal_but_writes_no_verdict_or_page(
         self, isolated_wiki: Path
@@ -940,9 +1231,39 @@ class TestIngestFrontierGate:
         exact = proposal["prepared_operations"][0]
         assert exact["previous_text"] == original
         assert exact["previous_sha256"] == hashlib.sha256(original.encode()).hexdigest()
-        assert exact["proposed_sha256"] == hashlib.sha256(
-            exact["proposed_text"].encode()
-        ).hexdigest()
+        assert (
+            exact["proposed_sha256"]
+            == hashlib.sha256(exact["proposed_text"].encode()).hexdigest()
+        )
+
+    def test_terminal_artifact_readback_failure_blocks_page_effect(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_load_ingest_review_artifact",
+            lambda *_args, **_kwargs: None,
+        )
+
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="readback must be proven",
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "injected approval",
+                "failed_operations_disposition": "none",
+            },
+        )
+
+        assert result["status"] == "needs_retry"
+        assert result["summary"] == (
+            "frontier review artifact readback verification failed"
+        )
+        assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
 
     def test_page_race_after_reviewed_prepare_fails_closed(
         self, isolated_wiki: Path
@@ -972,6 +1293,25 @@ class TestIngestFrontierGate:
             ingest._apply_prepared_operations(planned, link_totals=totals)
         assert "concurrent correction" in path.read_text(encoding="utf-8")
         assert "reviewed proposal" not in path.read_text(encoding="utf-8")
+
+    def test_recovery_only_never_reinstalls_a_reviewed_postimage(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        planned, totals = ingest._prepare_operations([self._create_op()])
+
+        with pytest.raises(
+            IngestApplyError,
+            match="reviewed postimage no longer present during recovery",
+        ):
+            ingest._apply_prepared_operations(
+                planned,
+                link_totals=totals,
+                recovery_only=True,
+            )
+
+        assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
 
     def test_approved_artifact_recovers_without_second_frontier_call(
         self,
@@ -1011,6 +1351,136 @@ class TestIngestFrontierGate:
         assert result["status"] == "apply_available"
         assert result["recovered_artifact"] is True
         assert result["reused_review"] is True
+        assert (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
+
+    def test_stale_unapplied_review_is_replaced_under_current_authority(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        authority_a = self._production_authority("a")
+        authority_b = self._production_authority("b")
+        active_authority = {"value": authority_a}
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (active_authority["value"], None),
+        )
+        real_apply = ingest._apply_prepared_operations
+        monkeypatch.setattr(
+            ingest,
+            "_apply_prepared_operations",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                IngestApplyError("simulated crash before first page replace")
+            ),
+        )
+        with pytest.raises(IngestApplyError, match="simulated crash"):
+            ingest._review_and_apply_ingest_operations(
+                [self._create_op()],
+                raw_content="stale authority raw",
+                reviewer=lambda _proposal: self._authority_review(
+                    authority_a,
+                    summary="authority a approval",
+                ),
+            )
+
+        active_authority["value"] = authority_b
+        monkeypatch.setattr(ingest, "_apply_prepared_operations", real_apply)
+        review_calls: list[str] = []
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="stale authority raw",
+            reviewer=lambda _proposal: (
+                review_calls.append("fresh")
+                or self._authority_review(
+                    authority_b,
+                    summary="authority b approval",
+                )
+            ),
+        )
+
+        assert result["status"] == "apply_available"
+        assert result["reused_review"] is False
+        assert result["stale_review_replaced"] == (
+            "ingest review authority changed before effect"
+        )
+        assert review_calls == ["fresh"]
+        _proposal_path, review_path = ingest._ingest_artifact_paths(
+            result["source_key"]
+        )
+        artifact = json.loads(review_path.read_text(encoding="utf-8"))
+        assert artifact["authority"] == authority_b
+        assert artifact["review"]["summary"] == "authority b approval"
+
+    def test_authority_change_at_final_apply_boundary_fails_closed(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        authority_a = self._production_authority("a")
+        authority_b = self._production_authority("b")
+        resolutions = iter([authority_a, authority_a, authority_b])
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (next(resolutions), None),
+        )
+
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="authority race raw",
+            reviewer=lambda _proposal: self._authority_review(
+                authority_a,
+                summary="approval before authority swap",
+            ),
+        )
+
+        assert result["status"] == "needs_retry"
+        assert result["summary"] == "decision authority changed before effect"
+        assert result["created"] == []
+        assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
+
+    def test_exact_postimage_recovery_does_not_reapply_under_stale_authority(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        authority_a = self._production_authority("a")
+        authority_b = self._production_authority("b")
+        active_authority = {"value": authority_a}
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (active_authority["value"], None),
+        )
+        first = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="already applied authority raw",
+            reviewer=lambda _proposal: self._authority_review(
+                authority_a,
+                summary="authority a approval",
+            ),
+        )
+        assert first["status"] == "apply_available"
+
+        active_authority["value"] = authority_b
+        second = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="already applied authority raw",
+            reviewer=lambda _proposal: (_ for _ in ()).throw(
+                AssertionError("exact postimage recovery must not call reviewer")
+            ),
+        )
+
+        assert second["status"] == "apply_available"
+        assert second["reused_review"] is True
+        assert second["recovery_basis"] == "exact_postimages_already_applied"
         assert (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
 
     def test_dry_run_is_completely_read_only(self, isolated_wiki: Path) -> None:
@@ -1268,9 +1738,6 @@ class TestApplyRawKeywordsPatch:
 
         # Make atomic_write fail on the SECOND op so the first op's write
         # is committed and then must be rolled back.
-        from llm_wiki_mcp import ingest as ingest_mod
-
-        real_atomic = ingest_mod.atomic_write if hasattr(ingest_mod, "atomic_write") else None
         from llm_wiki_mcp import link_fix
 
         original_atomic = link_fix.atomic_write
@@ -1347,9 +1814,7 @@ class TestSafeResolvePagePath:
         with pytest.raises(IngestApplyError):
             _safe_resolve_page_path("   ")
 
-    def test_apply_rejects_traversal_before_writing(
-        self, isolated_wiki: Path
-    ) -> None:
+    def test_apply_rejects_traversal_before_writing(self, isolated_wiki: Path) -> None:
         # Even a single traversal op poisons the whole batch — nothing writes.
         good = {
             "type": "create",
@@ -1411,10 +1876,7 @@ class TestUnclosedFence:
         # after the opener must be treated as code so we don't eat
         # `data[[1]]` -> `data1`.
         text = (
-            "intro [[foo]] mid\n"
-            "```python\n"
-            "x = data[[1]]\n"
-            "y = also[[2]]\n"
+            "intro [[foo]] mid\n```python\nx = data[[1]]\ny = also[[2]]\n"
             # NOTE: no closing fence
         )
         out, stats = _reconcile_links(text, {"foo"})
@@ -1431,6 +1893,92 @@ class TestUnclosedFence:
 
 
 class TestRunIngestPartialFailure:
+    def test_confirmed_noop_revalidates_authority_before_retiring_raw(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        monkeypatch.setattr(ingest, "_triage", lambda _content: [])
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest,
+            "_review_and_apply_ingest_operations",
+            lambda *_args, **_kwargs: {
+                "status": "confirmed_noop",
+                "source_key": "noop-source",
+                "proposal_sha256": "a" * 64,
+                "review": {"decision": "confirmed_noop"},
+                "authority": {"epoch": "before"},
+                "created": [],
+                "updated": [],
+                "audit": {},
+            },
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: ({"epoch": "after"}, None),
+        )
+        completed: list[bool] = []
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest(
+            "raw content",
+            job.job_id,
+            on_complete=lambda: completed.append(True),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert "authority changed before raw retirement" in str(finished.error)
+        assert completed == []
+
+    def test_confirmed_noop_recomputes_action_proof_before_retiring_raw(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        authority = TestIngestFrontierGate._production_authority("a")
+        review = TestIngestFrontierGate._authority_review(
+            authority,
+            decision="confirmed_noop",
+        )
+        review["failed_operations_disposition"] = "retry_required"
+        monkeypatch.setattr(ingest, "_triage", lambda _content: [])
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest,
+            "_review_and_apply_ingest_operations",
+            lambda *_args, **_kwargs: {
+                "status": "confirmed_noop",
+                "source_key": "noop-source",
+                "proposal_sha256": "a" * 64,
+                "review": review,
+                "authority": authority,
+                "created": [],
+                "updated": [],
+                "audit": {},
+            },
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (authority, None),
+        )
+        completed: list[bool] = []
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest(
+            "raw content",
+            job.job_id,
+            on_complete=lambda: completed.append(True),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert "proof invalid before raw retirement" in str(finished.error)
+        assert completed == []
+
     def test_partial_generate_applies_successful_ops(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1461,9 +2009,7 @@ class TestRunIngestPartialFailure:
             return {
                 "type": "create",
                 "filename": op["filename"],
-                "content": (
-                    "---\ntitle: X\nupdated: 2026-04-28\n---\nbody"
-                ),
+                "content": ("---\ntitle: X\nupdated: 2026-04-28\n---\nbody"),
             }
 
         monkeypatch.setattr(ingest, "_generate_one", fake_generate)
@@ -1566,9 +2112,7 @@ class TestRunIngestPartialFailure:
             for i in range(2)
         ]
         monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
-        monkeypatch.setattr(
-            ingest, "_generate_one", lambda _op, _raw, **_kw: None
-        )
+        monkeypatch.setattr(ingest, "_generate_one", lambda _op, _raw, **_kw: None)
         monkeypatch.setattr(ingest, "is_available", lambda: True)
 
         on_complete_called = []
@@ -1659,11 +2203,7 @@ class TestRunIngestPartialFailure:
         assert finished.pages_created == ["career-transition-strategy-2026"]
         assert finished.pages_updated == []
         assert on_complete_called == [True]
-        assert (
-            isolated_wiki
-            / "pages"
-            / "career-transition-strategy-2026.md"
-        ).exists()
+        assert (isolated_wiki / "pages" / "career-transition-strategy-2026.md").exists()
 
     def test_failure_packet_missing_update_target_becomes_create(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -1730,9 +2270,7 @@ class TestRunIngestPartialFailure:
             / "claude-code-vs-claude-code-structural-analysis.md"
         )
         assert page.exists()
-        assert (
-            "raw_keywords: [Claude Code, Cursor, Mac Studio]" in page.read_text()
-        )
+        assert "raw_keywords: [Claude Code, Cursor, Mac Studio]" in page.read_text()
 
 
 class TestRunIngestFrontierDisposition:
@@ -1741,12 +2279,14 @@ class TestRunIngestFrontierDisposition:
     ) -> None:
         from llm_wiki_mcp import ingest, jobs
 
-        plan = [{
-            "type": "create",
-            "filename": "memory/observed-tools.md",
-            "title": "Observed tools",
-            "summary": "visible and responsive tools",
-        }]
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/observed-tools.md",
+                "title": "Observed tools",
+                "summary": "visible and responsive tools",
+            }
+        ]
         triage_calls: list[str] = []
 
         def fake_triage(content: str, **_kwargs):
@@ -1781,10 +2321,12 @@ class TestRunIngestFrontierDisposition:
                     "decision": "retry",
                     "summary": "Replace the unsupported recommendation.",
                     "failed_operations_disposition": "none",
-                    "replacement_operations": [{
-                        "filename": "memory/observed-tools.md",
-                        "content": replacement,
-                    }],
+                    "replacement_operations": [
+                        {
+                            "filename": "memory/observed-tools.md",
+                            "content": replacement,
+                        }
+                    ],
                 }
             return {
                 "decision": "apply_available",
@@ -1813,12 +2355,14 @@ class TestRunIngestFrontierDisposition:
     ) -> None:
         from llm_wiki_mcp import ingest, jobs
 
-        plan = [{
-            "type": "create",
-            "filename": "memory/workflow-note.md",
-            "title": "Workflow note",
-            "summary": "grounded workflow",
-        }]
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/workflow-note.md",
+                "title": "Workflow note",
+                "summary": "grounded workflow",
+            }
+        ]
         triage_calls: list[str] = []
 
         def fake_triage(content: str, **_kwargs):
@@ -1834,7 +2378,7 @@ class TestRunIngestFrontierDisposition:
                 "filename": op["filename"],
                 "content": (
                     "---\ntitle: Workflow note\nupdated: 2026-07-11\n"
-                    "tags: [d/ai-tools, t/hardware, s/2026]\n---\n"
+                    "tags: [d/ai-tools, d/finance, t/howto, s/2026]\n---\n"
                     "Grounded workflow fact.\n"
                 ),
             },
@@ -1845,12 +2389,20 @@ class TestRunIngestFrontierDisposition:
         def reviewer(proposal: dict) -> dict:
             reviews.append(proposal)
             proposed = proposal["prepared_operations"][0]["proposed_text"]
-            if "t/hardware" in proposed:
+            if "d/finance" in proposed:
                 return {
                     "decision": "retry",
-                    "summary": "The incorrect tag `t/hardware` must be removed.",
+                    "summary": "The semantic option requires one exact postimage.",
                     "failed_operations_disposition": "none",
-                    "invalid_tags": ["t/hardware"],
+                    "invalid_tags": ["d/finance"],
+                    "replacement_operations": [
+                        {
+                            "filename": "memory/workflow-note.md",
+                            "content": proposed.replace(
+                                "d/ai-tools, d/finance", "d/ai-tools"
+                            ),
+                        }
+                    ],
                 }
             return {
                 "decision": "apply_available",
@@ -1871,19 +2423,114 @@ class TestRunIngestFrontierDisposition:
         assert len(triage_calls) == 1
         page = isolated_wiki / "pages" / "memory" / "workflow-note.md"
         written = page.read_text(encoding="utf-8")
-        assert "t/hardware" not in written
+        assert "d/finance" not in written
         assert "d/ai-tools" in written
+
+    def test_tag_repair_requires_structured_filename_scoped_full_postimage(
+        self,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        first = (
+            "---\ntitle: First\ntags: [d/alpha, d/shared, t/reference, "
+            "s/evergreen]\n---\nFirst fact.\n"
+        )
+        second = (
+            "---\ntitle: Second\ntags: [d/beta, d/shared, t/reference, "
+            "s/evergreen]\n---\nSecond fact.\n"
+        )
+        operations = [
+            {
+                "type": "create",
+                "filename": "memory/first.md",
+                "content": first,
+            },
+            {
+                "type": "create",
+                "filename": "memory/second.md",
+                "content": second,
+            },
+        ]
+        first_without_shared = first.replace("d/alpha, d/shared", "d/alpha")
+        second_without_shared = second.replace("d/beta, d/shared", "d/beta")
+
+        # Untrusted prose is excluded from the decision signature and cannot
+        # manufacture a hidden tag deletion even when it uses old backticks.
+        malicious_prose = {
+            "review": {
+                "decision": "retry",
+                "summary": "Incorrect tag `d/shared`; remove it everywhere.",
+                "risk": "Ungrounded `d/beta` too.",
+                "notes": "Delete `d/shared`.",
+                "replacement_operations": [
+                    {
+                        "filename": "memory/first.md",
+                        "content": first_without_shared,
+                    }
+                ],
+            }
+        }
+        repaired, replaced = ingest._apply_frontier_replacement_operations(
+            operations, malicious_prose
+        )
+        assert repaired == operations
+        assert replaced == []
+
+        scoped = {
+            "review": {
+                "decision": "retry",
+                "summary": "Prose still says `d/beta`, but it has no authority.",
+                "invalid_tags": ["d/shared"],
+                "replacement_operations": [
+                    {
+                        "filename": "memory/first.md",
+                        "content": first_without_shared,
+                    }
+                ],
+            }
+        }
+        repaired, replaced = ingest._apply_frontier_replacement_operations(
+            operations, scoped
+        )
+        assert replaced == ["memory/first.md"]
+        assert "d/shared" not in repaired[0]["content"]
+        assert "d/shared" in repaired[1]["content"]
+        assert "d/beta" in repaired[1]["content"]
+
+        global_deletion = {
+            "review": {
+                "decision": "retry",
+                "invalid_tags": ["d/shared"],
+                "replacement_operations": [
+                    {
+                        "filename": "memory/first.md",
+                        "content": first_without_shared,
+                    },
+                    {
+                        "filename": "memory/second.md",
+                        "content": second_without_shared,
+                    },
+                ],
+            }
+        }
+        repaired, replaced = ingest._apply_frontier_replacement_operations(
+            operations, global_deletion
+        )
+        assert repaired == operations
+        assert replaced == []
 
     def test_frontier_content_replacement_preserves_unrejected_taxonomy(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from llm_wiki_mcp import ingest, jobs
 
-        plan = [{
-            "type": "create",
-            "filename": "ai/socialization-scenario.md",
-            "title": "Socialization scenario",
-        }]
+        plan = [
+            {
+                "type": "create",
+                "filename": "ai/socialization-scenario.md",
+                "title": "Socialization scenario",
+            }
+        ]
         monkeypatch.setattr(ingest, "_triage", lambda *_args, **_kwargs: plan)
         monkeypatch.setattr(
             ingest,
@@ -1909,14 +2556,16 @@ class TestRunIngestFrontierDisposition:
                     "decision": "retry",
                     "summary": "Remove only the unsupported claim.",
                     "failed_operations_disposition": "none",
-                    "replacement_operations": [{
-                        "filename": "ai/socialization-scenario.md",
-                        "content": (
-                            "---\ntitle: Socialization scenario\nupdated: 2026-07-11\n"
-                            "tags: [d/event, t/ai-socialization]\n---\n"
-                            "Grounded fact.\n"
-                        ),
-                    }],
+                    "replacement_operations": [
+                        {
+                            "filename": "ai/socialization-scenario.md",
+                            "content": (
+                                "---\ntitle: Socialization scenario\nupdated: 2026-07-11\n"
+                                "tags: [d/scenario, t/ai-socialization]\n---\n"
+                                "Grounded fact.\n"
+                            ),
+                        }
+                    ],
                 }
             assert "d/scenario" in proposed
             assert "d/event" not in proposed
@@ -1974,9 +2623,7 @@ class TestRunIngestFrontierDisposition:
             return {
                 "type": op["type"],
                 "filename": op["filename"],
-                "content": (
-                    "---\ntitle: Converged\nupdated: 2026-07-11\n---\n" + fact
-                ),
+                "content": ("---\ntitle: Converged\nupdated: 2026-07-11\n---\n" + fact),
             }
 
         reviews: list[dict] = []
@@ -2294,9 +2941,7 @@ class TestRawKeywordsMetadataPropagation:
         monkeypatch.setattr(
             ingest,
             "generate",
-            lambda *_a, **_kw: (
-                "---\ntitle: P\nupdated: 2026-04-28\n---\nbody"
-            ),
+            lambda *_a, **_kw: "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
         )
 
         result = ingest._generate_one(op, "raw content", raw_keywords=None)
@@ -2315,9 +2960,7 @@ class TestRawKeywordsMetadataPropagation:
         monkeypatch.setattr(
             ingest,
             "generate",
-            lambda *_a, **_kw: (
-                "---\ntitle: P\nupdated: 2026-04-28\n---\nbody"
-            ),
+            lambda *_a, **_kw: "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
         )
 
         result = ingest._generate_one(op, "raw content", raw_keywords=[])
@@ -2642,9 +3285,7 @@ class TestOrchestrator:
         orchestrator.reset_stale_lock()
         assert orchestrator._load_state()["current_job_id"] is None
 
-    def test_reset_stale_lock_clears_unknown_job(
-        self, isolated_wiki: Path
-    ) -> None:
+    def test_reset_stale_lock_clears_unknown_job(self, isolated_wiki: Path) -> None:
         from llm_wiki_mcp import orchestrator
 
         state = orchestrator._load_state()
@@ -2655,9 +3296,7 @@ class TestOrchestrator:
         # job_store is in-memory → after restart, the id is unknown → cleared.
         assert orchestrator._load_state()["current_job_id"] is None
 
-    def test_reset_stale_lock_keeps_known_job(
-        self, isolated_wiki: Path
-    ) -> None:
+    def test_reset_stale_lock_keeps_known_job(self, isolated_wiki: Path) -> None:
         from llm_wiki_mcp import orchestrator
         from llm_wiki_mcp import jobs
 
@@ -2733,9 +3372,7 @@ class TestOrchestrator:
             metadata=None,
         ):
             captured["calls"] += 1
-            captured["metadata_keys"].append(
-                sorted((metadata or {}).keys())
-            )
+            captured["metadata_keys"].append(sorted((metadata or {}).keys()))
             if on_complete:
                 on_complete()
             if on_finally:
@@ -2758,7 +3395,10 @@ class TestOrchestrator:
 
         # Second call: every raw is now marked processed → below threshold.
         assert second["triggered"] is False
-        assert "threshold" in second["reason"].lower() or "pending" in second["reason"].lower()
+        assert (
+            "threshold" in second["reason"].lower()
+            or "pending" in second["reason"].lower()
+        )
 
     def test_release_lock_only_counts_triage_failures(
         self, isolated_wiki: Path
@@ -2821,13 +3461,7 @@ class TestPerRawOrchestrator:
             kw = (metadata or {}).get("raw_keywords")
             # Identify which raw this call belongs to by the leading body
             # line (we wrote distinct bodies above).
-            tag = (
-                "a"
-                if "A body" in content
-                else "b"
-                if "B body" in content
-                else "f"
-            )
+            tag = "a" if "A body" in content else "b" if "B body" in content else "f"
             seen.append((tag, kw))
             if on_complete:
                 on_complete()
@@ -3070,9 +3704,7 @@ class TestPerRawOrchestrator:
         assert result.tracked is False
         assert result.transient is True
         assert raw_path.exists()
-        assert not (
-            isolated_wiki / "runtime" / "failures" / "state.json"
-        ).exists()
+        assert not (isolated_wiki / "runtime" / "failures" / "state.json").exists()
 
     def test_serial_execution_no_concurrent_threads(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -3443,28 +4075,19 @@ class TestTriagePlanSchema:
     def test_unknown_type_rejected(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
-        assert (
-            _validate_triage_plan(
-                [{"type": "delete", "filename": "x.md"}]
-            )
-            is None
-        )
+        assert _validate_triage_plan([{"type": "delete", "filename": "x.md"}]) is None
 
     def test_missing_filename_rejected(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
         assert _validate_triage_plan([{"type": "create"}]) is None
         assert _validate_triage_plan([{"type": "create", "filename": ""}]) is None
-        assert (
-            _validate_triage_plan([{"type": "create", "filename": "   "}]) is None
-        )
+        assert _validate_triage_plan([{"type": "create", "filename": "   "}]) is None
 
     def test_non_string_filename_rejected(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
-        assert (
-            _validate_triage_plan([{"type": "create", "filename": 123}]) is None
-        )
+        assert _validate_triage_plan([{"type": "create", "filename": 123}]) is None
 
 
 class TestRecallMetadataStructuredSession:
@@ -3572,9 +4195,7 @@ class TestApplyPreparePhase:
         assert "\nx\n" in text
         assert "title: Dup" not in text
 
-    def test_duplicate_page_id_within_batch_rejected(
-        self, isolated_wiki: Path
-    ) -> None:
+    def test_duplicate_page_id_within_batch_rejected(self, isolated_wiki: Path) -> None:
         ops = [
             {
                 "type": "create",
@@ -3611,7 +4232,9 @@ class TestApplyPreparePhase:
             _apply_operations([op])
 
         assert system_page.read_text().endswith("canonical\n")
-        assert not (isolated_wiki / "pages" / "generated" / "lessons-learned.md").exists()
+        assert not (
+            isolated_wiki / "pages" / "generated" / "lessons-learned.md"
+        ).exists()
 
     def test_rollback_on_write_failure_restores_previous_state(
         self,
@@ -3620,20 +4243,17 @@ class TestApplyPreparePhase:
     ) -> None:
         """Force atomic_write to fail on the second op and verify the first
         op's effect is rolled back."""
-        from llm_wiki_mcp import ingest as ingest_mod
-
         # Seed a page so op[0] is a real update we can roll back.
         target = isolated_wiki / "pages" / "x" / "page.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            "---\ntitle: X\nupdated: 2026-01-01\n---\noriginal body\n"
-        )
+        target.write_text("---\ntitle: X\nupdated: 2026-01-01\n---\noriginal body\n")
         original = target.read_text()
 
         # First call: real write (the update succeeds). Second call: explode
         # (the create's write fails). Subsequent calls succeed so the
         # rollback path can actually run.
         from llm_wiki_mcp import link_fix
+
         real_write = link_fix.atomic_write
         call_count = {"n": 0}
 
@@ -3671,9 +4291,7 @@ class TestApplyPreparePhase:
         existing page rather than writing a second logical duplicate."""
         existing = isolated_wiki / "pages" / "a" / "Foo.md"
         existing.parent.mkdir(parents=True, exist_ok=True)
-        existing.write_text(
-            "---\ntitle: cased\nupdated: 2026-01-01\n---\nbody\n"
-        )
+        existing.write_text("---\ntitle: cased\nupdated: 2026-01-01\n---\nbody\n")
         ops = [
             {
                 "type": "create",
@@ -3701,8 +4319,13 @@ class TestWikiIngestRouting:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from llm_wiki_mcp import server, orchestrator
+
         # The MCP tool object wraps the function; call .fn.
-        tool_fn = server.wiki_ingest.fn if hasattr(server.wiki_ingest, "fn") else server.wiki_ingest
+        tool_fn = (
+            server.wiki_ingest.fn
+            if hasattr(server.wiki_ingest, "fn")
+            else server.wiki_ingest
+        )
 
         # Patch RAW_DIR in server (it grabbed the path at import time).
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
@@ -3734,9 +4357,15 @@ class TestWikiSaveRawRouting:
     ) -> None:
         from llm_wiki_mcp import orchestrator, server
 
-        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        tool_fn = (
+            server.wiki_save_raw.fn
+            if hasattr(server.wiki_save_raw, "fn")
+            else server.wiki_save_raw
+        )
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
-        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        monkeypatch.setattr(
+            orchestrator, "should_ingest", lambda: (False, "below threshold")
+        )
         key = "codex-0123456789abcdef01234567-from0-to5"
 
         first = json.loads(
@@ -3750,7 +4379,9 @@ class TestWikiSaveRawRouting:
         assert second["saved"] == first["saved"]
         assert first["deduplicated"] is False
         assert second["deduplicated"] is True
-        assert (isolated_wiki / "raw" / first["saved"]).read_text() == "first complete payload"
+        assert (
+            isolated_wiki / "raw" / first["saved"]
+        ).read_text() == "first complete payload"
         assert len(list((isolated_wiki / "raw").glob("*.md"))) == 1
 
     def test_idempotency_key_rejects_different_unverified_payload(
@@ -3758,9 +4389,15 @@ class TestWikiSaveRawRouting:
     ) -> None:
         from llm_wiki_mcp import orchestrator, server
 
-        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        tool_fn = (
+            server.wiki_save_raw.fn
+            if hasattr(server.wiki_save_raw, "fn")
+            else server.wiki_save_raw
+        )
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
-        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        monkeypatch.setattr(
+            orchestrator, "should_ingest", lambda: (False, "below threshold")
+        )
         key = "codex-0123456789abcdef01234567-from0-to5"
 
         tool_fn("first complete payload", trigger_ingest=False, idempotency_key=key)
@@ -3779,9 +4416,15 @@ class TestWikiSaveRawRouting:
             make_save_transaction,
         )
 
-        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        tool_fn = (
+            server.wiki_save_raw.fn
+            if hasattr(server.wiki_save_raw, "fn")
+            else server.wiki_save_raw
+        )
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
-        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        monkeypatch.setattr(
+            orchestrator, "should_ingest", lambda: (False, "below threshold")
+        )
         transaction = make_save_transaction(
             host="codex",
             session_file=isolated_wiki / "session.jsonl",
@@ -3789,8 +4432,12 @@ class TestWikiSaveRawRouting:
             after_line=0,
             until_line=5,
         )
-        first_content = attach_save_transaction_marker(transaction, "first writer output")
-        retry_content = attach_save_transaction_marker(transaction, "different retry output")
+        first_content = attach_save_transaction_marker(
+            transaction, "first writer output"
+        )
+        retry_content = attach_save_transaction_marker(
+            transaction, "different retry output"
+        )
 
         first = json.loads(
             tool_fn(
@@ -3820,9 +4467,15 @@ class TestWikiSaveRawRouting:
             make_save_transaction,
         )
 
-        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        tool_fn = (
+            server.wiki_save_raw.fn
+            if hasattr(server.wiki_save_raw, "fn")
+            else server.wiki_save_raw
+        )
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
-        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        monkeypatch.setattr(
+            orchestrator, "should_ingest", lambda: (False, "below threshold")
+        )
         transaction = make_save_transaction(
             host="codex",
             session_file=isolated_wiki / "session.jsonl",
@@ -3853,9 +4506,15 @@ class TestWikiSaveRawRouting:
     ) -> None:
         from llm_wiki_mcp import server, orchestrator
 
-        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        tool_fn = (
+            server.wiki_save_raw.fn
+            if hasattr(server.wiki_save_raw, "fn")
+            else server.wiki_save_raw
+        )
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
-        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (True, "threshold met"))
+        monkeypatch.setattr(
+            orchestrator, "should_ingest", lambda: (True, "threshold met")
+        )
 
         captured = {"called": False}
 
@@ -3877,9 +4536,15 @@ class TestWikiSaveRawRouting:
     ) -> None:
         from llm_wiki_mcp import server, orchestrator
 
-        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        tool_fn = (
+            server.wiki_save_raw.fn
+            if hasattr(server.wiki_save_raw, "fn")
+            else server.wiki_save_raw
+        )
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
-        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        monkeypatch.setattr(
+            orchestrator, "should_ingest", lambda: (False, "below threshold")
+        )
 
         result = json.loads(
             tool_fn(
@@ -3900,9 +4565,15 @@ class TestWikiSaveRawRouting:
     ) -> None:
         from llm_wiki_mcp import server, orchestrator
 
-        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        tool_fn = (
+            server.wiki_save_raw.fn
+            if hasattr(server.wiki_save_raw, "fn")
+            else server.wiki_save_raw
+        )
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
-        monkeypatch.setattr(orchestrator, "should_ingest", lambda: (False, "below threshold"))
+        monkeypatch.setattr(
+            orchestrator, "should_ingest", lambda: (False, "below threshold")
+        )
 
         result = json.loads(
             tool_fn(
@@ -3931,12 +4602,8 @@ class TestLogFailuresDontBreakRollback:
 
         target = isolated_wiki / "pages" / "x" / "page.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            "---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n"
-        )
-        correction = (
-            "---\ntitle: X\nupdated: 2026-07-11\n---\nfrontier correction\n"
-        )
+        target.write_text("---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n")
+        correction = "---\ntitle: X\nupdated: 2026-07-11\n---\nfrontier correction\n"
 
         @contextmanager
         def correction_wins_before_ingest_commit():
@@ -3968,9 +4635,7 @@ class TestLogFailuresDontBreakRollback:
         # Seed an existing page so op[0] becomes a real update we can roll back.
         target = isolated_wiki / "pages" / "x" / "page.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            "---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n"
-        )
+        target.write_text("---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n")
         original = target.read_text()
 
         # Make _append_log raise on every call: that used to mask the
@@ -3982,6 +4647,7 @@ class TestLogFailuresDontBreakRollback:
 
         # Make the second write fail to trigger rollback.
         from llm_wiki_mcp import link_fix
+
         real_write = link_fix.atomic_write
         n = {"calls": 0}
 
@@ -4017,12 +4683,11 @@ class TestLogFailuresDontBreakRollback:
 
         target = isolated_wiki / "pages" / "x" / "page.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            "---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n"
-        )
+        target.write_text("---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n")
 
         real_write = link_fix.atomic_write
         n = {"calls": 0}
+
         # After the first successful write, a "rogue" writer overwrites the
         # file with their own content. Then op 2 fails and rollback runs.
         def rogue_then_fail(path, content):
@@ -4030,7 +4695,9 @@ class TestLogFailuresDontBreakRollback:
             if n["calls"] == 1:
                 real_write(path, content)
                 # Simulate a concurrent writer changing the file.
-                path.write_text("---\ntitle: rogue\nupdated: 2026-04-28\n---\nrogue body\n")
+                path.write_text(
+                    "---\ntitle: rogue\nupdated: 2026-04-28\n---\nrogue body\n"
+                )
                 return
             if n["calls"] == 2:
                 raise OSError("disk full")
@@ -4134,9 +4801,7 @@ class TestFilenameSchemaStrict:
 
         for c in ("\x00", "\n", "\t", "\x07", "\x7f"):
             assert (
-                _validate_triage_plan(
-                    [{"type": "create", "filename": f"foo{c}bar.md"}]
-                )
+                _validate_triage_plan([{"type": "create", "filename": f"foo{c}bar.md"}])
                 is None
             ), c
 
@@ -4145,24 +4810,22 @@ class TestFilenameSchemaStrict:
 
         long_name = "a" * 250 + ".md"
         assert (
-            _validate_triage_plan([{"type": "create", "filename": long_name}])
-            is None
+            _validate_triage_plan([{"type": "create", "filename": long_name}]) is None
         )
 
     def test_non_kebab_case_rejected(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
         for bad in (
-            "Foo.md",         # uppercase
+            "Foo.md",  # uppercase
             "snake_case.md",  # underscore
-            "a/b/c.md",       # nested folders
-            "a..md",          # consecutive dots-ish
-            "-leading.md",    # leading dash
-            "trailing-.md",   # trailing dash before suffix
+            "a/b/c.md",  # nested folders
+            "a..md",  # consecutive dots-ish
+            "-leading.md",  # leading dash
+            "trailing-.md",  # trailing dash before suffix
         ):
             assert (
-                _validate_triage_plan([{"type": "create", "filename": bad}])
-                is None
+                _validate_triage_plan([{"type": "create", "filename": bad}]) is None
             ), bad
 
     def test_kebab_with_optional_folder_accepted(self) -> None:
@@ -4231,9 +4894,7 @@ class TestRebuildIndexNonFatal:
             lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "ai/foo.md",
-                "content": (
-                    "---\ntitle: Foo\nupdated: 2026-04-28\n---\nbody"
-                ),
+                "content": ("---\ntitle: Foo\nupdated: 2026-04-28\n---\nbody"),
             },
         )
 
@@ -4284,9 +4945,7 @@ class TestRebuildIndexNonFatal:
             lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "ai/bar.md",
-                "content": (
-                    "---\ntitle: Bar\nupdated: 2026-04-28\n---\nbody"
-                ),
+                "content": ("---\ntitle: Bar\nupdated: 2026-04-28\n---\nbody"),
             },
         )
 
@@ -4318,7 +4977,11 @@ class TestRawAllocationParallel:
         from llm_wiki_mcp import orchestrator, server
 
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
-        tool_fn = server.wiki_save_raw.fn if hasattr(server.wiki_save_raw, "fn") else server.wiki_save_raw
+        tool_fn = (
+            server.wiki_save_raw.fn
+            if hasattr(server.wiki_save_raw, "fn")
+            else server.wiki_save_raw
+        )
         real_link = server._link_raw_no_replace
         ready_to_publish = threading.Event()
         allow_publish = threading.Event()
@@ -4418,9 +5081,7 @@ class TestPostApplyLogSafety:
         from llm_wiki_mcp import ingest as ingest_mod
 
         captured: list[str] = []
-        monkeypatch.setattr(
-            ingest_mod, "_append_log", lambda msg: captured.append(msg)
-        )
+        monkeypatch.setattr(ingest_mod, "_append_log", lambda msg: captured.append(msg))
 
         ingest_mod._safe_log("hello via safe_log")
         assert captured == ["hello via safe_log"]
@@ -4451,9 +5112,7 @@ class TestPostApplyLogSafety:
             lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "ai/baz.md",
-                "content": (
-                    "---\ntitle: Baz\nupdated: 2026-04-28\n---\nbody"
-                ),
+                "content": ("---\ntitle: Baz\nupdated: 2026-04-28\n---\nbody"),
             },
         )
 
@@ -4509,9 +5168,7 @@ class TestFilenameSchemaUpdateLeniency:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
         assert (
-            _validate_triage_plan(
-                [{"type": "update", "filename": "foo\x00.md"}]
-            )
+            _validate_triage_plan([{"type": "update", "filename": "foo\x00.md"}])
             is None
         )
 
@@ -4561,7 +5218,10 @@ class TestWikiInit:
             "current-state",
             "lessons-learned",
         }
-        assert "body for [[user-profile]]" in payload["system_pages"]["user-profile"]["content"]
+        assert (
+            "body for [[user-profile]]"
+            in payload["system_pages"]["user-profile"]["content"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -4585,9 +5245,7 @@ class TestLinkFixProtectedRegions:
             "`[[ghost]]`\n"
             "```python\nx = data[[ghost]]\n```\n"
         )
-        new_content, count = _replace_link_in_content(
-            content, "ghost", "real-page"
-        )
+        new_content, count = _replace_link_in_content(content, "ghost", "real-page")
 
         assert count == 1
         assert "title: [[ghost]]" in new_content

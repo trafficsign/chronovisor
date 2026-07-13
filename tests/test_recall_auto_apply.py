@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
-from argparse import Namespace
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -10,6 +11,8 @@ import pytest
 
 from llm_wiki_mcp import page_mutation, recall_auto_apply, recall_hints, wiki
 from llm_wiki_mcp.convergence import CycleBudget
+from llm_wiki_mcp.decision_router import canonical_agreement_signature
+from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.recall_runtime import RecallPolicy, collect_context
@@ -18,6 +21,18 @@ from llm_wiki_mcp.recall_runtime import RecallPolicy, collect_context
 @pytest.fixture(autouse=True)
 def _frontier_approves_existing_auto_apply_tests(monkeypatch) -> None:
     monkeypatch.setattr(
+        recall_auto_apply.decision_authority,
+        "current_semantic_authority",
+        lambda lane, **_kwargs: (
+            {
+                "source": "injected_reviewer_boundary",
+                "authority_version": 1,
+                "lane": lane,
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
         recall_auto_apply,
         "review_auto_apply_with_frontier",
         lambda _proposal, **_kwargs: {
@@ -25,6 +40,80 @@ def _frontier_approves_existing_auto_apply_tests(monkeypatch) -> None:
             "summary": "test frontier approval",
         },
     )
+
+
+def _production_authority(epoch: str) -> dict[str, object]:
+    digest = (epoch[:1] or "a") * 64
+    return {
+        "source": "adopted_local_consensus",
+        "authority_version": 1,
+        "lane": "recall_auto_apply",
+        "lane_contract_sha256": "1" * 64,
+        "lane_contract_manifest_sha256": "2" * 64,
+        "lane_contract_case_manifest_sha256": "3" * 64,
+        "policy": {
+            "kind": "semantic",
+            "schema_name": "generic_decision",
+            "mode": "enabled",
+            "error": None,
+        },
+        "router": {
+            "source": "adopted_artifact",
+            "artifact_sha256": digest,
+            "error": None,
+            "models": ["primary", "challenger", "tie-break"],
+        },
+    }
+
+
+def _review(decision: str, authority: dict[str, object]) -> dict[str, object]:
+    policy = dict(authority["policy"])
+    policy["router_policy"] = authority["router"]
+    review: dict[str, object] = {
+        "decision": decision,
+        "summary": "authority-specific verdict",
+        "tests_run": [],
+        "commit": None,
+        "committed": False,
+        "pushed": False,
+        "risk": None,
+        "notes": None,
+        "decision_policy": policy,
+    }
+    schema_name = str(policy["schema_name"])
+    signature = canonical_agreement_signature(
+        review,
+        schema=production_decision_schemas()[schema_name],
+    )
+    agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    router = authority["router"]
+    assert isinstance(router, dict)
+    models = router["models"]
+    assert isinstance(models, list)
+    review["local_consensus"] = {
+        "status": "agreed",
+        "ok": True,
+        "agreement_sha256": agreement,
+        "failure_class": None,
+        "quarantine_reason": None,
+        "votes": [
+            {
+                "valid": True,
+                "signature_sha256": agreement,
+                "invalid_reason": None,
+                "model": models[0],
+                "role": "primary",
+            },
+            {
+                "valid": True,
+                "signature_sha256": agreement,
+                "invalid_reason": None,
+                "model": models[1],
+                "role": "challenger",
+            },
+        ],
+    }
+    return review
 
 
 def _page(root: Path, page_id: str, body: str = "Recall hook body") -> Path:
@@ -37,7 +126,9 @@ def _page(root: Path, page_id: str, body: str = "Recall hook body") -> Path:
     return path
 
 
-def _candidate(action_type: str, *, page_id: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+def _candidate(
+    action_type: str, *, page_id: str, payload: dict[str, object] | None = None
+) -> dict[str, object]:
     return {
         "kind": "missed_candidate",
         "source": "auditor",
@@ -79,7 +170,9 @@ def test_query_hint_auto_apply_feeds_runtime_context(tmp_path, monkeypatch) -> N
         RecallPolicy(max_pages=1, semantic=False),
     )
 
-    assert [item.page_id for item in context] == ["claude-code-recall-hook-implementation"]
+    assert [item.page_id for item in context] == [
+        "claude-code-recall-hook-implementation"
+    ]
 
 
 def test_query_hint_ignores_generic_context_tokens() -> None:
@@ -101,18 +194,26 @@ def test_auto_apply_min_count_groups_by_normalize_key(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", tmp_path / "query-hints.json")
 
     one = [_candidate("query_hint", page_id="claude-code-recall-hook-implementation")]
-    assert recall_auto_apply.apply_feedback_records(
-        one,
-        policy=recall_auto_apply.AutoApplyPolicy(min_count=2),
-        log_file=tmp_path / "auto-apply.jsonl",
-    )["actions"] == []
+    assert (
+        recall_auto_apply.apply_feedback_records(
+            one,
+            policy=recall_auto_apply.AutoApplyPolicy(min_count=2),
+            log_file=tmp_path / "auto-apply.jsonl",
+        )["actions"]
+        == []
+    )
 
-    two = one + [_candidate("query_hint", page_id="claude-code-recall-hook-implementation")]
-    assert recall_auto_apply.apply_feedback_records(
-        two,
-        policy=recall_auto_apply.AutoApplyPolicy(min_count=2),
-        log_file=tmp_path / "auto-apply.jsonl",
-    )["actions"][0]["status"] == "applied"
+    two = one + [
+        _candidate("query_hint", page_id="claude-code-recall-hook-implementation")
+    ]
+    assert (
+        recall_auto_apply.apply_feedback_records(
+            two,
+            policy=recall_auto_apply.AutoApplyPolicy(min_count=2),
+            log_file=tmp_path / "auto-apply.jsonl",
+        )["actions"][0]["status"]
+        == "applied"
+    )
 
 
 def test_page_tag_auto_apply_patches_frontmatter(tmp_path, monkeypatch) -> None:
@@ -242,7 +343,389 @@ def test_approved_frontier_artifact_survives_mutation_budget_deferral(
     assert hints_file.exists()
 
 
-def test_page_tag_does_not_overwrite_concurrent_content_correction(tmp_path, monkeypatch) -> None:
+def test_saved_approval_is_not_reused_after_authority_changes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target-page")
+    hints_file = tmp_path / "query-hints.json"
+    log_file = tmp_path / "auto-apply.jsonl"
+    review_dir = tmp_path / "reviews"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    authority = _production_authority("a")
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "_current_review_authority",
+        lambda **_kwargs: (dict(authority), None),
+    )
+    calls = 0
+
+    def review(_proposal):
+        nonlocal calls
+        calls += 1
+        return _review("approved" if calls == 1 else "rejected", authority)
+
+    record = _candidate(
+        "query_hint",
+        page_id="target-page",
+        payload={"query": "exact missing context"},
+    )
+    deferred = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=log_file,
+        review_dir=review_dir,
+        frontier_reviewer=review,
+        budget=CycleBudget(max_frontier_calls=1, max_mutations=0),
+    )
+    artifact = Path(deferred["actions"][0]["frontier_artifact"])
+    assert (
+        json.loads(artifact.read_text())["authority"]["router"]["artifact_sha256"]
+        == "a" * 64
+    )
+
+    authority = _production_authority("b")
+    rejected = recall_auto_apply.apply_feedback_records(
+        [record],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=log_file,
+        review_dir=review_dir,
+        frontier_reviewer=review,
+        budget=CycleBudget(max_frontier_calls=1, max_mutations=1),
+    )
+
+    assert calls == 2
+    assert rejected["actions"][0]["status"] == "frontier_rejected"
+    assert rejected["actions"][0]["frontier_artifact_reused"] is False
+    assert (
+        json.loads(artifact.read_text())["authority"]["router"]["artifact_sha256"]
+        == "b" * 64
+    )
+    assert not hints_file.exists()
+
+
+def test_production_verdict_without_router_audit_is_not_persisted(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target-page")
+    hints_file = tmp_path / "query-hints.json"
+    log_file = tmp_path / "auto-apply.jsonl"
+    review_dir = tmp_path / "reviews"
+    authority = _production_authority("a")
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "_current_review_authority",
+        lambda **_kwargs: (dict(authority), None),
+    )
+
+    result = recall_auto_apply.apply_feedback_records(
+        [
+            _candidate(
+                "query_hint",
+                page_id="target-page",
+                payload={"query": "exact missing context"},
+            )
+        ],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=log_file,
+        review_dir=review_dir,
+        frontier_reviewer=lambda _proposal: {
+            "decision": "approved",
+            "summary": "model-authored approval without trusted audit",
+        },
+    )
+
+    action = result["actions"][0]
+    assert action["status"] == "frontier_retry"
+    assert "authority audit is missing" in action["result"]["reason"]
+    assert not list(review_dir.glob("*.json"))
+    assert not hints_file.exists()
+
+
+def test_authority_change_after_review_blocks_artifact_persistence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target-page")
+    hints_file = tmp_path / "query-hints.json"
+    review_dir = tmp_path / "reviews"
+    authority_a = _production_authority("a")
+    authorities = iter(
+        [
+            (authority_a, None),
+            (_production_authority("b"), None),
+            (_production_authority("b"), None),
+        ]
+    )
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "_current_review_authority",
+        lambda **_kwargs: next(authorities),
+    )
+
+    result = recall_auto_apply.apply_feedback_records(
+        [
+            _candidate(
+                "query_hint",
+                page_id="target-page",
+                payload={"query": "exact missing context"},
+            )
+        ],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+        review_dir=review_dir,
+        frontier_reviewer=lambda _proposal: _review("approved", authority_a),
+    )
+
+    assert result["actions"][0]["status"] == "retry"
+    assert result["actions"][0]["authority_transition_blocked"] is True
+    assert not list(review_dir.glob("*.json"))
+    assert not hints_file.exists()
+
+
+def test_authority_is_rechecked_immediately_before_mutation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target-page")
+    hints_file = tmp_path / "query-hints.json"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    authorities = iter(
+        [
+            (_production_authority("a"), None),
+            (_production_authority("a"), None),
+            (_production_authority("b"), None),
+            (_production_authority("b"), None),
+        ]
+    )
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "_current_review_authority",
+        lambda **_kwargs: next(authorities),
+    )
+
+    result = recall_auto_apply.apply_feedback_records(
+        [
+            _candidate(
+                "query_hint",
+                page_id="target-page",
+                payload={"query": "exact missing context"},
+            )
+        ],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+        review_dir=tmp_path / "reviews",
+        frontier_reviewer=lambda _proposal: _review(
+            "approved", _production_authority("a")
+        ),
+    )
+
+    assert result["actions"][0]["status"] == "retry"
+    assert "authority changed" in result["actions"][0]["result"]["reason"]
+    assert not hints_file.exists()
+
+
+def test_authority_epoch_is_held_through_approved_mutation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target-page")
+    hints_file = tmp_path / "query-hints.json"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    epoch_held = False
+
+    @contextmanager
+    def authority_epoch():
+        nonlocal epoch_held
+        assert not epoch_held
+        epoch_held = True
+        try:
+            yield
+        finally:
+            epoch_held = False
+
+    real_apply = recall_auto_apply.apply_query_hint
+
+    def apply_while_epoch_held(record, *, dry_run):
+        if not dry_run:
+            assert epoch_held
+        return real_apply(record, dry_run=dry_run)
+
+    monkeypatch.setattr(recall_auto_apply, "decision_authority_lock", authority_epoch)
+    monkeypatch.setattr(recall_auto_apply, "apply_query_hint", apply_while_epoch_held)
+
+    result = recall_auto_apply.apply_feedback_records(
+        [
+            _candidate(
+                "query_hint",
+                page_id="target-page",
+                payload={"query": "exact missing context"},
+            )
+        ],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+        review_dir=tmp_path / "reviews",
+        frontier_reviewer=lambda _proposal: {
+            "decision": "approved",
+            "summary": "stable authority",
+        },
+    )
+
+    assert result["actions"][0]["status"] == "applied"
+    assert hints_file.exists()
+
+
+def test_existing_effect_uses_recovery_only_convergence_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target-page")
+    hints_file = tmp_path / "query-hints.json"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    recall_hints.add_query_hint(
+        page_id="target-page",
+        query="exact missing context",
+        path=hints_file,
+    )
+
+    result = recall_auto_apply.apply_feedback_records(
+        [
+            _candidate(
+                "query_hint",
+                page_id="target-page",
+                payload={
+                    "page_id": "target-page",
+                    "query": "exact missing context",
+                },
+            )
+        ],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=tmp_path / "auto-apply.jsonl",
+    )
+
+    action = result["actions"][0]
+    assert action["status"] == "already_applied"
+    assert action["recovery_only"] is True
+    assert len(action["recovery_proposal_sha256"]) == 64
+
+
+def test_rejected_transition_is_not_committed_after_authority_race(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target-page")
+    authority_a = _production_authority("a")
+    authorities = iter(
+        [
+            (authority_a, None),
+            (authority_a, None),
+            (_production_authority("b"), None),
+        ]
+    )
+    log_file = tmp_path / "auto-apply.jsonl"
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "_current_review_authority",
+        lambda **_kwargs: next(authorities),
+    )
+
+    result = recall_auto_apply.apply_feedback_records(
+        [_candidate("query_hint", page_id="target-page")],
+        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+        log_file=log_file,
+        review_dir=tmp_path / "reviews",
+        frontier_reviewer=lambda _proposal: _review("rejected", authority_a),
+    )
+
+    action = result["actions"][0]
+    assert action["status"] == "retry"
+    assert action["authority_transition_blocked"] is True
+    assert not log_file.exists()
+
+
+def test_review_migration_recovers_effect_when_authority_changes_before_log(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pages_root = tmp_path / "wiki"
+    _page(pages_root, "target-page")
+    hints_file = tmp_path / "query-hints.json"
+    log_file = tmp_path / "auto-apply.jsonl"
+    authority_a = _production_authority("a")
+    authority_b = _production_authority("b")
+    calls = 0
+
+    def authority(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return (authority_a if calls <= 4 else authority_b), None
+
+    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
+    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    monkeypatch.setattr(recall_auto_apply, "_current_review_authority", authority)
+    record = {
+        "kind": "missed_candidate",
+        "source": "auditor",
+        "lane": "review",
+        "action_type": "few_shot",
+        "normalize_key": "few-shot:authority-race",
+        "missing_signal": "specific recall",
+        "expected_pages": ["target-page"],
+        "ref": "d-authority",
+    }
+
+    def reviewer(_proposal):
+        return _review("approved", authority_a)
+
+    raced = recall_auto_apply.apply_review_feedback_records(
+        [record],
+        log_file=log_file,
+        review_dir=tmp_path / "reviews",
+        frontier_reviewer=reviewer,
+    )
+    recovered = recall_auto_apply.apply_review_feedback_records(
+        [record],
+        log_file=log_file,
+        review_dir=tmp_path / "reviews",
+        frontier_reviewer=reviewer,
+    )
+
+    assert raced["actions"][0]["status"] == "retry"
+    assert raced["actions"][0]["authority_transition_blocked"] is True
+    assert hints_file.exists()
+    assert recovered["actions"][0]["status"] == "already_applied"
+    assert recovered["actions"][0]["recovery_only"] is True
+    assert recall_auto_apply.read_applied_keys(log_file)
+
+
+def test_page_tag_does_not_overwrite_concurrent_content_correction(
+    tmp_path, monkeypatch
+) -> None:
     pages_root = tmp_path / "wiki"
     page = _page(
         pages_root,
@@ -371,7 +854,9 @@ def test_query_hint_without_target_is_skipped_not_error(tmp_path, monkeypatch) -
     monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
 
-    record = _candidate("query_hint", page_id="", payload={"query": "specific missing context"})
+    record = _candidate(
+        "query_hint", page_id="", payload={"query": "specific missing context"}
+    )
     result = recall_auto_apply.apply_feedback_records(
         [record],
         policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
@@ -383,11 +868,14 @@ def test_query_hint_without_target_is_skipped_not_error(tmp_path, monkeypatch) -
     assert action["result"]["reason"] == "query_hint missing page_id"
     assert "auto_apply_self_heal" not in result
     assert not hints_file.exists()
-    assert recall_auto_apply.apply_feedback_records(
-        [record],
-        policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
-        log_file=log_file,
-    )["actions"] == []
+    assert (
+        recall_auto_apply.apply_feedback_records(
+            [record],
+            policy=recall_auto_apply.AutoApplyPolicy(min_count=1),
+            log_file=log_file,
+        )["actions"]
+        == []
+    )
 
 
 def test_alias_auto_apply_uses_existing_alias_store(tmp_path, monkeypatch) -> None:
@@ -410,7 +898,9 @@ def test_alias_auto_apply_uses_existing_alias_store(tmp_path, monkeypatch) -> No
     )
 
     assert result["actions"][0]["status"] == "applied"
-    assert alias_store.load_aliases()["made-up-recall-page"] == "ai/canonical-recall-page"
+    assert (
+        alias_store.load_aliases()["made-up-recall-page"] == "ai/canonical-recall-page"
+    )
 
 
 def test_invalid_alias_falls_back_to_query_hint(tmp_path, monkeypatch) -> None:
@@ -436,7 +926,9 @@ def test_invalid_alias_falls_back_to_query_hint(tmp_path, monkeypatch) -> None:
     assert hints_file.exists()
 
 
-def test_invalid_alias_target_falls_back_to_expected_page_hint(tmp_path, monkeypatch) -> None:
+def test_invalid_alias_target_falls_back_to_expected_page_hint(
+    tmp_path, monkeypatch
+) -> None:
     pages_root = tmp_path / "wiki"
     _page(pages_root, "canonical-recall-page")
     hints_file = tmp_path / "query-hints.json"
@@ -487,13 +979,20 @@ def test_full_apply_history_does_not_resurrect_old_terminal_keys(tmp_path) -> No
         }
         for index in range(5_100)
     )
-    log_file.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    log_file.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
 
     assert "old" in recall_auto_apply.read_applied_keys(log_file)
-    assert recall_auto_apply.read_apply_states(log_file)["old"]["convergence_status"] == "applied"
+    assert (
+        recall_auto_apply.read_apply_states(log_file)["old"]["convergence_status"]
+        == "applied"
+    )
 
 
-def test_pull_log_candidate_is_consumed_by_validated_auto_lane(tmp_path, monkeypatch) -> None:
+def test_pull_log_candidate_is_consumed_by_validated_auto_lane(
+    tmp_path, monkeypatch
+) -> None:
     record = _candidate("query_hint", page_id="target")
     record["source"] = "pull-log"
     record["session_id"] = "session-1"
@@ -513,13 +1012,17 @@ def test_pull_log_candidate_is_consumed_by_validated_auto_lane(tmp_path, monkeyp
     assert result["actions"][0]["status"] == "applied"
 
 
-def test_apply_feedback_budget_defers_without_burning_attempt(tmp_path, monkeypatch) -> None:
+def test_apply_feedback_budget_defers_without_burning_attempt(
+    tmp_path, monkeypatch
+) -> None:
     pages_root = tmp_path / "wiki"
     _page(pages_root, "target")
     hints_file = tmp_path / "query-hints.json"
     feedback_file = tmp_path / "feedback.jsonl"
     log_file = tmp_path / "auto-apply.jsonl"
-    feedback_file.write_text(json.dumps(_candidate("query_hint", page_id="target")) + "\n")
+    feedback_file.write_text(
+        json.dumps(_candidate("query_hint", page_id="target")) + "\n"
+    )
     monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
     monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
@@ -544,7 +1047,9 @@ def test_apply_feedback_budget_defers_without_burning_attempt(tmp_path, monkeypa
     assert hints_file.exists()
 
 
-def test_existing_query_hint_is_terminal_without_incrementing_evidence_count(tmp_path, monkeypatch) -> None:
+def test_existing_query_hint_is_terminal_without_incrementing_evidence_count(
+    tmp_path, monkeypatch
+) -> None:
     pages_root = tmp_path / "wiki"
     _page(pages_root, "target")
     hints_file = tmp_path / "query-hints.json"
@@ -568,17 +1073,33 @@ def test_existing_query_hint_is_terminal_without_incrementing_evidence_count(tmp
     assert recall_hints.load_query_hints(hints_file)[0]["count"] == 1
 
 
-def test_skipped_auto_apply_is_bounded_not_permanently_consumed(tmp_path, monkeypatch) -> None:
+def test_skipped_auto_apply_is_bounded_not_permanently_consumed(
+    tmp_path, monkeypatch
+) -> None:
     log_file = tmp_path / "auto-apply.jsonl"
-    record = _candidate("query_hint", page_id="missing", payload={"query": "q", "page_id": "missing"})
-    monkeypatch.setattr(recall_auto_apply, "apply_record", lambda _record, dry_run=False: {"status": "skipped"})
+    record = _candidate(
+        "query_hint", page_id="missing", payload={"query": "q", "page_id": "missing"}
+    )
+    monkeypatch.setattr(
+        recall_auto_apply,
+        "apply_record",
+        lambda _record, dry_run=False: {"status": "skipped"},
+    )
     policy = recall_auto_apply.AutoApplyPolicy(min_count=1)
 
     first = recall_auto_apply.apply_feedback_records(
-        [record], policy=policy, log_file=log_file, max_attempts=2, backoff_base_seconds=0
+        [record],
+        policy=policy,
+        log_file=log_file,
+        max_attempts=2,
+        backoff_base_seconds=0,
     )
     second = recall_auto_apply.apply_feedback_records(
-        [record], policy=policy, log_file=log_file, max_attempts=2, backoff_base_seconds=0
+        [record],
+        policy=policy,
+        log_file=log_file,
+        max_attempts=2,
+        backoff_base_seconds=0,
     )
 
     assert first["actions"][0]["convergence_status"] == "retry_wait"
@@ -678,13 +1199,17 @@ def test_threshold_review_action_routes_to_recall_lab(tmp_path) -> None:
         "ref": "d1",
     }
 
-    result = recall_auto_apply.apply_review_feedback_records([record], log_file=log_file)
+    result = recall_auto_apply.apply_review_feedback_records(
+        [record], log_file=log_file
+    )
 
     assert result["actions"][0]["status"] == "routed_to_recall_lab"
     assert result["actions"][0]["convergence_status"] == "applied"
 
 
-def test_quarantined_review_action_resumes_after_cooldown(tmp_path, monkeypatch) -> None:
+def test_quarantined_review_action_resumes_after_cooldown(
+    tmp_path, monkeypatch
+) -> None:
     log_file = tmp_path / "auto-apply.jsonl"
     record = {
         "kind": "missed_candidate",
@@ -740,7 +1265,9 @@ def test_query_hint_accepts_system_pages(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(wiki, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
 
-    hint = recall_hints.add_query_hint(page_id="lessons-learned", query="反省ルール", path=hints_file)
+    hint = recall_hints.add_query_hint(
+        page_id="lessons-learned", query="反省ルール", path=hints_file
+    )
 
     assert hint["page_id"] == "lessons-learned"
     assert hints_file.exists()
@@ -780,8 +1307,12 @@ def test_auditor_recording_invokes_auto_apply(tmp_path, monkeypatch, capsys) -> 
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
     monkeypatch.setattr(recall_auditor, "RECALL_LOG_FILE", log_file)
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
-    monkeypatch.setattr(recall_auto_apply, "AUTO_APPLY_LOG_FILE", tmp_path / "auto-apply.jsonl")
-    monkeypatch.setattr(recall_auditor, "collect_top_pages", lambda _prompt, _policy: ([], "bm25"))
+    monkeypatch.setattr(
+        recall_auto_apply, "AUTO_APPLY_LOG_FILE", tmp_path / "auto-apply.jsonl"
+    )
+    monkeypatch.setattr(
+        recall_auditor, "collect_top_pages", lambda _prompt, _policy: ([], "bm25")
+    )
     auditor_json = json.dumps(
         {
             "missed": True,
@@ -796,24 +1327,27 @@ def test_auditor_recording_invokes_auto_apply(tmp_path, monkeypatch, capsys) -> 
         ensure_ascii=False,
     )
 
-    assert recall_auditor.main(
-        [
-            "--host",
-            "codex",
-            "--session-id",
-            "s1",
-            "--prompt",
-            prompt,
-            "--assistant-response",
-            "続きです。",
-            "--decision-id",
-            decision_id,
-            "--state-file",
-            str(tmp_path / "state.json"),
-            "--auditor-json",
-            auditor_json,
-        ]
-    ) == 0
+    assert (
+        recall_auditor.main(
+            [
+                "--host",
+                "codex",
+                "--session-id",
+                "s1",
+                "--prompt",
+                prompt,
+                "--assistant-response",
+                "続きです。",
+                "--decision-id",
+                decision_id,
+                "--state-file",
+                str(tmp_path / "state.json"),
+                "--auditor-json",
+                auditor_json,
+            ]
+        )
+        == 0
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert output["status"] == "recorded"

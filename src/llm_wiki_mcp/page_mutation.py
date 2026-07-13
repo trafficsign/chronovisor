@@ -21,6 +21,7 @@ from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR, WIKI_ROOT, find_page
 
 
 WIKI_MUTATION_LOCK = WIKI_ROOT / "runtime" / "wiki-mutation.lock"
+DECISION_AUTHORITY_LOCK = WIKI_ROOT / "runtime" / "decision-authority.lock"
 CORRECTION_CONSTRAINT_SCHEMA_VERSION = 1
 ACTIVE_CLAIM_FRONTMATTER_FIELDS = frozenset(
     {
@@ -110,6 +111,32 @@ def wiki_mutation_lock(path: Path | None = None) -> Iterator[None]:
     """Serialize cooperating Wiki writers around compare-and-replace operations."""
 
     lock_path = path or WIKI_MUTATION_LOCK
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    locked = False
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        try:
+            if locked:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+@contextmanager
+def decision_authority_lock(path: Path | None = None) -> Iterator[None]:
+    """Serialize adopted-authority updates with authority-bound mutations.
+
+    The local-evaluation artifact writer and recall auto-apply both use this
+    lease.  A completed adoption artifact therefore cannot be replaced after
+    its authority was revalidated but before the approved Wiki mutation is
+    durably committed.
+    """
+
+    lock_path = path or DECISION_AUTHORITY_LOCK
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+b")
     locked = False
@@ -317,7 +344,9 @@ def active_global_correction_constraints(
         for row in _read_jsonl(correction_constraints_file())
         if _constraint_row_is_valid(row)
     ]
-    audit_rows = [row for row in _audit_constraint_rows() if _constraint_row_is_valid(row)]
+    audit_rows = [
+        row for row in _audit_constraint_rows() if _constraint_row_is_valid(row)
+    ]
     active_ids = {str(row["correction_id"]) for row in audit_rows}
     if current_page_id and current_page_text:
         current_markers = _correction_markers(current_page_text)
@@ -418,14 +447,16 @@ def enforce_correction_constraints(
         meta, _body = parse_frontmatter(constrained)
         existing_markers = meta.get("applied_corrections")
         markers = (
-            [str(value) for value in existing_markers if isinstance(value, str) and value]
+            [
+                str(value)
+                for value in existing_markers
+                if isinstance(value, str) and value
+            ]
             if isinstance(existing_markers, list)
             else []
         )
         markers = list(
-            dict.fromkeys(
-                [*markers, *(str(row["correction_id"]) for row in applied)]
-            )
+            dict.fromkeys([*markers, *(str(row["correction_id"]) for row in applied)])
         )
         constrained = patch_frontmatter(constrained, {"applied_corrections": markers})
     return constrained, applied
@@ -438,7 +469,9 @@ def _bounded_text(text: str, limit: int) -> str:
     return text[:half] + "\n\n[... bounded preview ...]\n\n" + text[-half:]
 
 
-def _context_window(text: str, start: int, end: int, *, context_chars: int) -> dict[str, Any]:
+def _context_window(
+    text: str, start: int, end: int, *, context_chars: int
+) -> dict[str, Any]:
     left = max(0, start - context_chars)
     right = min(len(text), end + context_chars)
     return {
@@ -489,8 +522,12 @@ def _replacement_review_contexts(
         start = working.find(replacement.old_text)
         if start < 0:
             if not already_applied:
-                raise PageMutationError("prepared replacement is missing from review preimage")
-            new_start = working.find(replacement.new_text) if replacement.new_text else 0
+                raise PageMutationError(
+                    "prepared replacement is missing from review preimage"
+                )
+            new_start = (
+                working.find(replacement.new_text) if replacement.new_text else 0
+            )
             new_start = max(0, new_start)
             new_end = new_start + len(replacement.new_text)
             contexts.append(
@@ -558,7 +595,8 @@ def _validate_replacement_postconditions(
         active_fields = _active_frontmatter_occurrences(meta, replacement.old_text)
         if active_fields:
             raise PageMutationError(
-                "old claim remains active in frontmatter fields: " + ", ".join(active_fields)
+                "old claim remains active in frontmatter fields: "
+                + ", ".join(active_fields)
             )
         if replacement.new_text and replacement.new_text not in body:
             raise PageMutationError("new claim is missing from page body")
@@ -579,7 +617,9 @@ def _overlaps_protected_span(text: str, start: int, end: int) -> bool:
     )
 
 
-def _normalize_replacements(values: Iterable[ExactReplacement | dict[str, Any]]) -> tuple[ExactReplacement, ...]:
+def _normalize_replacements(
+    values: Iterable[ExactReplacement | dict[str, Any]],
+) -> tuple[ExactReplacement, ...]:
     normalized: list[ExactReplacement] = []
     for value in values:
         if isinstance(value, ExactReplacement):
@@ -681,7 +721,9 @@ def prepare_page_mutation(
         start = updated_body.index(item.old_text)
         end = start + len(item.old_text)
         if _overlaps_protected_span(updated_body, start, end):
-            raise PageMutationError("refusing to mutate text inside a protected code span")
+            raise PageMutationError(
+                "refusing to mutate text inside a protected code span"
+            )
         updated_body = updated_body[:start] + item.new_text + updated_body[end:]
 
     updated_text = _body_prefix(original_text, body) + updated_body
@@ -695,7 +737,9 @@ def prepare_page_mutation(
     if summary is not None:
         clean_summary = summary.strip()
         if not clean_summary or len(clean_summary) > 1_200 or "\n" in clean_summary:
-            raise PageMutationError("summary must be a non-empty single line up to 1,200 chars")
+            raise PageMutationError(
+                "summary must be a non-empty single line up to 1,200 chars"
+            )
         metadata_updates["summary"] = clean_summary
     if recall_questions is not None:
         if not recall_questions or len(recall_questions) > 8:

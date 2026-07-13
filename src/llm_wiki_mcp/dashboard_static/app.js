@@ -825,7 +825,7 @@ function drawBatchChart(canvas, rows, status) {
   els.batchOk.textContent = totalOk ? String(totalOk) : "--";
   els.batchFailed.textContent = totalFailed ? String(totalFailed) : "0";
   els.batchDuration.textContent = compactDuration(avgDuration);
-  els.batchCaption.textContent = data.length ? `${Math.max(0, data.length - (batch.total ? 1 : 0))} batches` : "waiting";
+  els.batchCaption.textContent = data.length ? `${Math.max(0, data.length - (batch.active === true ? 1 : 0))} batches` : "waiting";
 
   if (!data.length) {
     ctx.fillStyle = "rgba(169,164,148,0.85)";

@@ -73,25 +73,126 @@ weights, rewrite settings, or context style.
 ## Local Decision Replay Gate
 
 ```sh
-llm-wiki-local-model-eval --dry-run
-llm-wiki-local-model-eval --list --limit 20
+# Make one immutable candidate config first. Its [decision_router] section
+# must contain the intended production values and adoption_artifact = "".
+CANDIDATE_CONFIG="$HOME/.wiki/runtime/model-lab/decision-router-candidate.toml"
+CORPUS="$HOME/.wiki/runtime/model-lab/adoption-corpus-v53.jsonl"
+ARTIFACT="$HOME/.wiki/runtime/model-lab/local-eval/adoption-v53-evaluator20.json"
+chmod 600 "$CANDIDATE_CONFIG"
+
+# Preflight the deterministic selection without replacing the durable corpus.
+llm-wiki-adoption-corpus \
+  --config "$CANDIDATE_CONFIG" \
+  --output "$CORPUS" \
+  --dry-run
+
+# Freeze the production-representative corpus at an explicit durable path.
+llm-wiki-adoption-corpus \
+  --config "$CANDIDATE_CONFIG" \
+  --output "$CORPUS"
+chmod 600 "$CORPUS"
+
+# Read-only inspection performs no inference.
 llm-wiki-local-model-eval \
-  --output ~/.wiki/runtime/model-lab/local-consensus-eval.json
+  --input "$CORPUS" \
+  --config "$CANDIDATE_CONFIG" \
+  --dry-run
 llm-wiki-local-model-eval \
-  --output ~/.wiki/runtime/model-lab/local-consensus-eval.json \
+  --input "$CORPUS" \
+  --config "$CANDIDATE_CONFIG" \
+  --list \
+  --limit 20
+
+# A full run evaluates every exact context bucket in ascending order.
+llm-wiki-local-model-eval \
+  --input "$CORPUS" \
+  --config "$CANDIDATE_CONFIG" \
+  --output "$ARTIFACT"
+chmod 600 "$ARTIFACT"
+
+# Resume only with the exact same candidate config, corpus, and output path.
+llm-wiki-local-model-eval \
+  --input "$CORPUS" \
+  --config "$CANDIDATE_CONFIG" \
+  --output "$ARTIFACT" \
   --resume
 ```
 
-The evaluator reads `~/.wiki/runtime/model-lab/replay.jsonl` without modifying
-the corpus. `--dry-run` validates and counts cases, while `--list` prints
-redacted case metadata; neither performs inference. An evaluation uses the
-configured local decision router and atomically checkpoints a resumable,
-redacted artifact containing hashes, labels, validation diagnostics, latency,
-and aggregate metrics, never prompts or literal model responses. Adoption
-remains false unless all usable cases (at least 100), every historical role and
+The compiler reads the append-only
+`~/.wiki/runtime/model-lab/replay.jsonl` without modifying it, adds only
+deterministic production-contract cases needed for complete schema and context
+coverage, validates the exact output bytes, and atomically installs the frozen
+corpus with mode `0600`. Use a new versioned corpus path whenever replay source
+selection, the schema/signature manifest, decision-semantics policy, effective
+request-fingerprint policy, or candidate config changes; do not overwrite a
+corpus after an evaluation has started. The same immutable candidate config
+must be supplied to both the compiler and every fresh or resumed evaluator
+invocation. A config change is a new evaluation identity, never a resumable
+continuation. The current v53 identity uses artifact schema 12, evaluator
+policy 20, decision-semantics policy 11, quorum-safety policy 1, action-
+signature policy 5, effective-request-fingerprint policy 3, structured-
+generation policy 1, lane-contract registry policy 9, lane-contract case policy
+20 with source `deterministic_lane_contract_v20`, residency policy 2, and
+`num_predict = 3072`. Evaluator policy 20 seals explicit deterministic seed 0,
+hash-bound ingest repair option selection, host-only byte-exact materialization
+before action signatures/quorum, and repair-attempt accounting into the
+artifact identity.
+Registry policy 9 is aggregate artifact/run identity only and is not
+rendered into model requests. The model-visible prompt-contract version is
+lane-scoped: 17 lanes remain at version 7, `ingest_reconciliation` is at version
+11, and `raw_replay_reconciliation` is at version 8. This preserves the already-proven
+effective requests for unchanged lanes while resealing only the changed lanes.
+
+When one lane's prompt, system policy, effect semantics, or request envelope
+changes, increment only that lane's prompt-contract version, compile a new
+versioned corpus, and run a fresh evaluator artifact. The changed per-lane hash
+updates the aggregate manifest and artifact identity automatically; do not put
+the registry version into every model request, because that would invalidate
+all 19 lanes. Increment the registry policy itself only when the registry or
+artifact identity contract changes. The fixed v53 baseline contains 100
+canonical cases spanning all 19 model-backed lanes and all four executable
+context buckets. Legacy replay rows are included only when their independent
+provenance, contract identity, expected effect, and action signature all match
+the current policy; the v53 corpus admits none of the 36 stale historical rows.
+
+Canonical fixtures must be reachable through the same deterministic preflight
+as production. Entity-backfill missing, malformed, truncated, or alias-
+incomplete proposals are therefore tested before inference; its model corpus
+covers only semantic approval and rejection. Other page-mutation retry cases
+use actual bounded/truncated request payloads rather than availability claims
+embedded in untrusted page prose.
+
+Ingest repair choices are host-bound selectors, not model-authored page bytes.
+The preflight hashes each exact deterministic or semantic repair into one
+`repair_option_id`; a model may return only that ID with `retry` and
+`retry_required`. After schema and lane validation, the router resolves the ID
+against the same preflight, removes it, materializes the exact trusted
+`invalid_tags` and `replacement_operations`, and validates the result again
+before its action signature enters quorum. Unknown IDs, mixed selector/arrays,
+ambiguous options, terminal decisions with an ID, or any post-materialization
+drift fail closed.
+Repair-option policy 2 deliberately exposes no regex-derived or host-authored
+semantic contradiction receipt. Every structurally valid one-tag option stays
+visible, and the two local models must independently choose from the exact raw
+and page bytes. Extra legacy receipt fields fail closed before inference.
+
+`llm-wiki-local-model-eval --dry-run` validates and counts the compiled cases,
+while `--list` prints redacted case metadata; neither performs inference. A
+full evaluation uses the candidate local decision router and atomically
+checkpoints a resumable, redacted artifact containing hashes, labels,
+validation diagnostics, latency, and aggregate metrics, never prompts or
+literal model responses. It starts from cold candidate runners and processes
+the required 32K, 64K, 96K, and 112K context buckets in
+ascending order with larger-context reuse disabled. A resume revalidates the
+candidate config and corpus identities and preserves this exact-bucket mode;
+identity drift fails closed. Adoption
+remains false unless all usable cases (at least 100), every usable role and
 decision class, every current production schema (at least five cases per schema
 hash), schema-validity, pair-validity, agreement, majority resolution,
-historical-signature match, and unsafe-flip thresholds all pass. The production
+historical-effect match, and unsafe-flip thresholds all pass. Pair agreement
+means the first two models produced the same decision signature; a
+deterministic safety lower-bound is reported separately and never inflates
+pair or three-model majority quality. The production
 schema manifest is code-defined, so adding a new local decision schema blocks
 future model adoption until replay evidence exists for it. `--offset` or
 `--limit` is therefore a smoke-test facility only and cannot produce an adopted
@@ -105,17 +206,70 @@ the already-completed local votes; this collection step performs no additional
 inference. Prompts within the fixed 50,000-character evidence cap are retained
 losslessly. Longer prompts are explicitly marked `prompt_truncated=true` and
 are excluded from adoption evaluation. Production quorum, replay recording,
-and evaluation all use the same schema-derived action signature. Consequently,
-fields such as exact approved mutation targets and semantic checks cannot be
-dropped merely because two models returned the same top-level `decision`.
+and evaluation all use the same schema-derived action signature. Exact approved
+mutation targets remain action-bearing fields. `semantic_checks`, however, are
+diagnostic authorization evidence and are intentionally excluded from that
+signature: after action agreement, the agreeing votes are conservatively
+AND-merged per check. Any false check changes an otherwise approved result to
+`needs_retry` and clears approved mutations, so matching action signatures can
+never hide a failed semantic precondition.
 
 The model triplet in `[decision_router]` remains the explicit
 bootstrap/current policy. To nominate a replacement after a full passing run,
 set `decision_router.adoption_artifact` to that artifact. Runtime revalidates
-the artifact schema, hashes, full-corpus coverage, fixed minimum thresholds,
+the artifact schema, evaluator policy, sealed per-case evidence, recomputed
+metrics/gate, full-corpus coverage, fixed minimum thresholds,
 all gate checks, and evaluated model digests before switching all three roles
-atomically. A missing or invalid artifact never partially switches roles and
-does not stop the current policy.
+atomically. It also reopens the immutable source corpus and compares the exact
+Ollama engine version, model digests, and quantization identities. A missing,
+modified, or drifted nominated artifact never partially switches roles:
+enabled semantic lanes quarantine before inference, while explicit shadow
+evaluation may continue on the bootstrap triplet without creating trusted
+adoption labels.
+
+Decision inference also uses memory-aware residency. The router computes the
+full structured-session token requirement (system prompt, user prompt, schema,
+two possible JSON-repair turns, output reservation, and safety margin), rounds
+it to the smallest executable configured context bucket, and uses
+calibrated Ollama `/api/ps` footprints measured at that bucket plus host
+reclaimable memory to choose whether one, two, or three runners fit.
+Production applies monotonic context hysteresis: a larger runner already in
+memory is reused when its measured footprint still fits reserved capacity and
+its context is within the configured ceiling. It grows when necessary but is
+not shrunk merely because the next request is smaller, avoiding runner flap.
+After every vote, the router records the actual runner size and context reported
+by `/api/ps`; admission therefore counts the larger measured allocation rather
+than the smaller requested bucket. Missing observations do not overturn an
+otherwise safe decision, but they fail closed as adoption evidence. Likewise,
+an observed larger context cannot manufacture coverage for a requested smaller
+bucket. The evaluator starts cold and executes cases in ascending bucket order,
+then explicitly disables larger-context reuse so it measures every exact bucket
+once. Production remains grow-only; evaluation's exact mode is isolated and
+resets surviving candidate runners on both fresh and resumed runs. The corpus
+compiler and evaluator both reject a full gate before inference when any bucket
+lacks a planned case. The evaluator also preserves Ollama's per-turn
+prompt/output token counts, so production truncation checks and replay-gate
+checks use the same transport contract.
+Measurements persist by exact model digest, context bucket, Ollama version,
+platform, and daemon process epoch; a daemon restart invalidates stale
+measurements, while caller-shell environment differences do not. An
+uncalibrated model/context pair bootstraps exactly one runner only when its
+conservative 2x estimate fits currently reclaimable capacity after reserve.
+Unrelated resident models are never counted as reclaimable; a failed resource
+probe or a role that cannot fit alone quarantines before inference. Runner eviction is
+verified under a thread/process-shared lease; a failed eviction quarantines the
+decision rather than skipping a vote. Adoption artifacts must contain passing
+evidence from every context bucket before this policy can become active.
+Increasing the resident count also requires spare capacity of at least 2 GiB or
+10% of the proposed resident set, whichever is larger, so small memory changes
+do not flap repeatedly between two and three runners.
+
+After the v53/evaluator-policy-20 artifact reports `adopted=true`, nominate it in
+`decision_router.adoption_artifact`, revalidate it through a fresh runtime, and
+promote all 19 model-backed semantic lanes from `shadow` to `enabled`. Together
+with the five deterministic/guarded lanes, the post-adoption production state
+is 24 enabled and 0 shadow. If artifact validation later fails, enabled semantic
+lanes quarantine before inference rather than falling back to bootstrap models.
 
 ## Ingest Model
 
@@ -123,7 +277,8 @@ The page-generation path reads `[ingest]` from `~/.wiki/config.toml`. The
 production profile keeps `num_ctx` and `max_num_ctx` at the same fixed value so
 Ollama can reuse one loaded Ornith 35B runner instead of replacing it when call
 context changes. Oversized inputs fail closed or are chunked by their producing
-lane. Changing the ingest model does not require a semantic reindex unless
+lane. Decision routing uses the measured grow-only policy above instead.
+Changing the ingest model does not require a semantic reindex unless
 `[embedding].model` also changes.
 
 Before generation, ingest now runs a conservative search-before-create gate.

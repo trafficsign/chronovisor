@@ -32,6 +32,9 @@ MAX_RESPONSES = 1 + MAX_REPAIR_TURNS
 MAX_AUDIT_RECORDS = 512
 CONTEXT_SAFETY_TOKENS = 256
 SAFE_ACTIVITY_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+STRUCTURED_GENERATION_POLICY_VERSION = 1
+STRUCTURED_GENERATION_TEMPERATURE = 0
+STRUCTURED_GENERATION_SEED = 0
 
 _JSON_TYPES = {"object", "array", "string", "number", "integer", "boolean", "null"}
 _ANNOTATION_KEYWORDS = {
@@ -66,6 +69,30 @@ _VALIDATION_KEYWORDS = {
     "uniqueItems",
 }
 _KNOWN_SCHEMA_KEYWORDS = _ANNOTATION_KEYWORDS | _VALIDATION_KEYWORDS
+
+
+def structured_generation_policy() -> dict[str, Any]:
+    """Return the fixed sampler contract shared by production and replay."""
+
+    return {
+        "version": STRUCTURED_GENERATION_POLICY_VERSION,
+        "temperature": STRUCTURED_GENERATION_TEMPERATURE,
+        "seed": STRUCTURED_GENERATION_SEED,
+        "think": False,
+        "stream": False,
+        "format": "json_schema",
+    }
+
+
+def structured_generation_policy_sha256() -> str:
+    encoded = json.dumps(
+        structured_generation_policy(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -125,9 +152,7 @@ class ValidationIssue:
                 expected_encoded.encode("utf-8")
             ).hexdigest(),
             "received": safe_received,
-            "message_sha256": hashlib.sha256(
-                self.message.encode("utf-8")
-            ).hexdigest(),
+            "message_sha256": hashlib.sha256(self.message.encode("utf-8")).hexdigest(),
         }
         if self.line is not None:
             payload["line"] = self.line
@@ -163,7 +188,8 @@ class ChatRequest:
     keep_alive: str
     read_timeout_ms: int
     max_output_chars: int
-    temperature: int = 0
+    temperature: int = STRUCTURED_GENERATION_TEMPERATURE
+    seed: int = STRUCTURED_GENERATION_SEED
     think: bool = False
 
 
@@ -224,8 +250,10 @@ class LocalStructuredResult:
 
 
 def _utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -237,7 +265,17 @@ def structured_request_sha256(
     """Return an opaque request identity without persisting request content."""
 
     encoded = json.dumps(
-        {"prompt": prompt, "schema": schema, "system": system},
+        {
+            "structured_generation_policy_version": (
+                STRUCTURED_GENERATION_POLICY_VERSION
+            ),
+            "structured_generation_policy_sha256": (
+                structured_generation_policy_sha256()
+            ),
+            "prompt": prompt,
+            "schema": schema,
+            "system": system,
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -258,6 +296,35 @@ def _estimated_message_tokens(messages: Sequence[Mapping[str, str]]) -> int:
         content_tokens = len(content.encode("utf-8"))
         total += 32 + content_tokens
     return total
+
+
+def required_structured_context_tokens(
+    prompt: str,
+    schema: Mapping[str, Any],
+    *,
+    system: str | None,
+    num_predict: int,
+    max_output_chars: int,
+    max_feedback_chars: int,
+) -> int:
+    """Return the fail-closed context requirement used by a full repair session."""
+
+    schema_copy = json.loads(_canonical_json(schema))
+    structured_system = _STRUCTURED_SYSTEM.format(
+        schema=json.dumps(schema_copy, ensure_ascii=False, sort_keys=True, indent=2)
+    )
+    if system and system.strip():
+        structured_system = f"{system.strip()}\n\n{structured_system}"
+    messages = [
+        {"role": "system", "content": structured_system},
+        {"role": "user", "content": prompt},
+    ]
+    return (
+        _estimated_message_tokens(messages)
+        + MAX_REPAIR_TURNS * (64 + max_output_chars + max_feedback_chars)
+        + num_predict
+        + CONTEXT_SAFETY_TOKENS
+    )
 
 
 def _audit_role(row: Mapping[str, Any]) -> str:
@@ -285,9 +352,7 @@ def _session_summary(sessions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "total": len(sessions),
         "ok": sum(bool(row.get("ok")) for row in sessions),
-        "first_pass_valid": sum(
-            bool(row.get("first_pass_valid")) for row in sessions
-        ),
+        "first_pass_valid": sum(bool(row.get("first_pass_valid")) for row in sessions),
         "repaired": sum(bool(row.get("repaired")) for row in sessions),
         "repair_turns": sum(int(row.get("repair_turns") or 0) for row in sessions),
         "failures": failures,
@@ -476,11 +541,7 @@ class LocalConsensusAuditStore:
             if not hmac.compare_digest(actual_sha256, expected_sha256):
                 raise RuntimeError("local consensus audit changed before quarantine")
             timestamp = _utc_timestamp().replace(":", "").replace(".", "-")
-            archive = (
-                self.root
-                / "quarantine"
-                / f"{timestamp}-{reason_slug}.jsonl"
-            )
+            archive = self.root / "quarantine" / f"{timestamp}-{reason_slug}.jsonl"
             self._atomic_write(archive, raw.decode("utf-8"))
             self._atomic_write(self.audit_file, "")
             self._atomic_write(
@@ -634,7 +695,9 @@ def _require_nonnegative_int(schema: Mapping[str, Any], key: str, pointer: str) 
         return
     value = schema[key]
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise SchemaDefinitionError(_pointer_join(pointer, key), "must be an integer >= 0")
+        raise SchemaDefinitionError(
+            _pointer_join(pointer, key), "must be an integer >= 0"
+        )
 
 
 def _require_finite_number(schema: Mapping[str, Any], key: str, pointer: str) -> None:
@@ -646,7 +709,9 @@ def _require_finite_number(schema: Mapping[str, Any], key: str, pointer: str) ->
         or not isinstance(value, (int, float))
         or not math.isfinite(float(value))
     ):
-        raise SchemaDefinitionError(_pointer_join(pointer, key), "must be a finite number")
+        raise SchemaDefinitionError(
+            _pointer_join(pointer, key), "must be a finite number"
+        )
 
 
 def validate_schema_definition(schema: Mapping[str, Any], *, pointer: str = "") -> None:
@@ -663,26 +728,40 @@ def validate_schema_definition(schema: Mapping[str, Any], *, pointer: str = "") 
     declared_type = schema.get("type")
     if declared_type is not None:
         types = declared_type if isinstance(declared_type, list) else [declared_type]
-        if not types or any(not isinstance(item, str) or item not in _JSON_TYPES for item in types):
-            raise SchemaDefinitionError(_pointer_join(pointer, "type"), "contains an unsupported JSON type")
+        if not types or any(
+            not isinstance(item, str) or item not in _JSON_TYPES for item in types
+        ):
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "type"), "contains an unsupported JSON type"
+            )
         if len(types) != len(set(types)):
-            raise SchemaDefinitionError(_pointer_join(pointer, "type"), "contains duplicate types")
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "type"), "contains duplicate types"
+            )
 
     if "enum" in schema:
         enum = schema["enum"]
         if not isinstance(enum, list) or not enum:
-            raise SchemaDefinitionError(_pointer_join(pointer, "enum"), "must be a non-empty array")
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "enum"), "must be a non-empty array"
+            )
         try:
             encoded = [_canonical_json(item) for item in enum]
         except (TypeError, ValueError) as exc:
-            raise SchemaDefinitionError(_pointer_join(pointer, "enum"), "must contain JSON values") from exc
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "enum"), "must contain JSON values"
+            ) from exc
         if len(encoded) != len(set(encoded)):
-            raise SchemaDefinitionError(_pointer_join(pointer, "enum"), "contains duplicate values")
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "enum"), "contains duplicate values"
+            )
     if "const" in schema:
         try:
             _canonical_json(schema["const"])
         except (TypeError, ValueError) as exc:
-            raise SchemaDefinitionError(_pointer_join(pointer, "const"), "must be a JSON value") from exc
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "const"), "must be a JSON value"
+            ) from exc
 
     for key in (
         "minItems",
@@ -701,31 +780,53 @@ def validate_schema_definition(schema: Mapping[str, Any], *, pointer: str = "") 
         if low in schema and high in schema and schema[low] > schema[high]:
             raise SchemaDefinitionError(pointer, f"{low} cannot exceed {high}")
 
-    for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"):
+    for key in (
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+    ):
         _require_finite_number(schema, key, pointer)
     if "multipleOf" in schema and float(schema["multipleOf"]) <= 0:
         raise SchemaDefinitionError(_pointer_join(pointer, "multipleOf"), "must be > 0")
-    if "minimum" in schema and "maximum" in schema and schema["minimum"] > schema["maximum"]:
+    if (
+        "minimum" in schema
+        and "maximum" in schema
+        and schema["minimum"] > schema["maximum"]
+    ):
         raise SchemaDefinitionError(pointer, "minimum cannot exceed maximum")
 
     if "pattern" in schema:
         pattern = schema["pattern"]
         if not isinstance(pattern, str):
-            raise SchemaDefinitionError(_pointer_join(pointer, "pattern"), "must be a string")
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "pattern"), "must be a string"
+            )
         try:
             re.compile(pattern)
         except re.error as exc:
-            raise SchemaDefinitionError(_pointer_join(pointer, "pattern"), f"invalid pattern: {exc}") from exc
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "pattern"), f"invalid pattern: {exc}"
+            ) from exc
 
     if "uniqueItems" in schema and not isinstance(schema["uniqueItems"], bool):
-        raise SchemaDefinitionError(_pointer_join(pointer, "uniqueItems"), "must be boolean")
+        raise SchemaDefinitionError(
+            _pointer_join(pointer, "uniqueItems"), "must be boolean"
+        )
 
     properties = schema.get("properties")
     if properties is not None:
-        if not isinstance(properties, Mapping) or any(not isinstance(key, str) for key in properties):
-            raise SchemaDefinitionError(_pointer_join(pointer, "properties"), "must be an object")
+        if not isinstance(properties, Mapping) or any(
+            not isinstance(key, str) for key in properties
+        ):
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "properties"), "must be an object"
+            )
         for name, child in properties.items():
-            validate_schema_definition(child, pointer=_pointer_join(_pointer_join(pointer, "properties"), name))
+            validate_schema_definition(
+                child, pointer=_pointer_join(_pointer_join(pointer, "properties"), name)
+            )
 
     required = schema.get("required")
     if required is not None:
@@ -734,12 +835,15 @@ def validate_schema_definition(schema: Mapping[str, Any], *, pointer: str = "") 
             or any(not isinstance(item, str) for item in required)
             or len(required) != len(set(required))
         ):
-            raise SchemaDefinitionError(_pointer_join(pointer, "required"), "must be an array of unique strings")
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "required"), "must be an array of unique strings"
+            )
 
     additional = schema.get("additionalProperties")
     if additional is not None and not isinstance(additional, (bool, Mapping)):
         raise SchemaDefinitionError(
-            _pointer_join(pointer, "additionalProperties"), "must be boolean or a schema object"
+            _pointer_join(pointer, "additionalProperties"),
+            "must be boolean or a schema object",
         )
     if isinstance(additional, Mapping):
         validate_schema_definition(
@@ -749,16 +853,22 @@ def validate_schema_definition(schema: Mapping[str, Any], *, pointer: str = "") 
     items = schema.get("items")
     if items is not None:
         if not isinstance(items, Mapping):
-            raise SchemaDefinitionError(_pointer_join(pointer, "items"), "must be a schema object")
+            raise SchemaDefinitionError(
+                _pointer_join(pointer, "items"), "must be a schema object"
+            )
         validate_schema_definition(items, pointer=_pointer_join(pointer, "items"))
 
 
-def validate_json(value: Any, schema: Mapping[str, Any], *, pointer: str = "") -> list[ValidationIssue]:
+def validate_json(
+    value: Any, schema: Mapping[str, Any], *, pointer: str = ""
+) -> list[ValidationIssue]:
     """Return every violation supported by the validated schema subset."""
 
     issues: list[ValidationIssue] = []
     expected_type = schema.get("type")
-    allowed_types = expected_type if isinstance(expected_type, list) else [expected_type]
+    allowed_types = (
+        expected_type if isinstance(expected_type, list) else [expected_type]
+    )
     allowed_types = [item for item in allowed_types if isinstance(item, str)]
     if allowed_types and not any(_matches_type(value, item) for item in allowed_types):
         issues.append(
@@ -772,61 +882,137 @@ def validate_json(value: Any, schema: Mapping[str, Any], *, pointer: str = "") -
         )
         return issues
 
-    if "enum" in schema and not any(_json_equal(value, item) for item in schema["enum"]):
+    if "enum" in schema and not any(
+        _json_equal(value, item) for item in schema["enum"]
+    ):
         issues.append(
-            ValidationIssue(pointer, "enum", schema["enum"], _received(value), "value is outside enum")
+            ValidationIssue(
+                pointer,
+                "enum",
+                schema["enum"],
+                _received(value),
+                "value is outside enum",
+            )
         )
     if "const" in schema and not _json_equal(value, schema["const"]):
         issues.append(
-            ValidationIssue(pointer, "const", schema["const"], _received(value), "value does not match const")
+            ValidationIssue(
+                pointer,
+                "const",
+                schema["const"],
+                _received(value),
+                "value does not match const",
+            )
         )
 
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if not math.isfinite(float(value)):
             issues.append(
-                ValidationIssue(pointer, "type", "finite number", _received(value), "number must be finite")
+                ValidationIssue(
+                    pointer,
+                    "type",
+                    "finite number",
+                    _received(value),
+                    "number must be finite",
+                )
             )
             return issues
         comparisons: tuple[tuple[str, Callable[[float, float], bool], str], ...] = (
-            ("minimum", lambda actual, bound: actual < bound, "number is below minimum"),
-            ("maximum", lambda actual, bound: actual > bound, "number is above maximum"),
-            ("exclusiveMinimum", lambda actual, bound: actual <= bound, "number is not above exclusiveMinimum"),
-            ("exclusiveMaximum", lambda actual, bound: actual >= bound, "number is not below exclusiveMaximum"),
+            (
+                "minimum",
+                lambda actual, bound: actual < bound,
+                "number is below minimum",
+            ),
+            (
+                "maximum",
+                lambda actual, bound: actual > bound,
+                "number is above maximum",
+            ),
+            (
+                "exclusiveMinimum",
+                lambda actual, bound: actual <= bound,
+                "number is not above exclusiveMinimum",
+            ),
+            (
+                "exclusiveMaximum",
+                lambda actual, bound: actual >= bound,
+                "number is not below exclusiveMaximum",
+            ),
         )
         for keyword, violates, message in comparisons:
             if keyword in schema and violates(float(value), float(schema[keyword])):
                 issues.append(
-                    ValidationIssue(pointer, keyword, schema[keyword], _received(value), message)
+                    ValidationIssue(
+                        pointer, keyword, schema[keyword], _received(value), message
+                    )
                 )
         if "multipleOf" in schema:
             quotient = float(value) / float(schema["multipleOf"])
-            if not math.isclose(quotient, round(quotient), rel_tol=1e-12, abs_tol=1e-12):
+            if not math.isclose(
+                quotient, round(quotient), rel_tol=1e-12, abs_tol=1e-12
+            ):
                 issues.append(
-                    ValidationIssue(pointer, "multipleOf", schema["multipleOf"], _received(value), "number is not a multiple")
+                    ValidationIssue(
+                        pointer,
+                        "multipleOf",
+                        schema["multipleOf"],
+                        _received(value),
+                        "number is not a multiple",
+                    )
                 )
 
     if isinstance(value, str):
         if "minLength" in schema and len(value) < schema["minLength"]:
             issues.append(
-                ValidationIssue(pointer, "minLength", schema["minLength"], _received(value), "string is too short")
+                ValidationIssue(
+                    pointer,
+                    "minLength",
+                    schema["minLength"],
+                    _received(value),
+                    "string is too short",
+                )
             )
         if "maxLength" in schema and len(value) > schema["maxLength"]:
             issues.append(
-                ValidationIssue(pointer, "maxLength", schema["maxLength"], _received(value), "string is too long")
+                ValidationIssue(
+                    pointer,
+                    "maxLength",
+                    schema["maxLength"],
+                    _received(value),
+                    "string is too long",
+                )
             )
         if "pattern" in schema and re.search(schema["pattern"], value) is None:
             issues.append(
-                ValidationIssue(pointer, "pattern", schema["pattern"], _received(value), "string does not match pattern")
+                ValidationIssue(
+                    pointer,
+                    "pattern",
+                    schema["pattern"],
+                    _received(value),
+                    "string does not match pattern",
+                )
             )
 
     if isinstance(value, list):
         if "minItems" in schema and len(value) < schema["minItems"]:
             issues.append(
-                ValidationIssue(pointer, "minItems", schema["minItems"], _received(value), "array has too few items")
+                ValidationIssue(
+                    pointer,
+                    "minItems",
+                    schema["minItems"],
+                    _received(value),
+                    "array has too few items",
+                )
             )
         if "maxItems" in schema and len(value) > schema["maxItems"]:
             issues.append(
-                ValidationIssue(pointer, "maxItems", schema["maxItems"], _received(value), "array has too many items")
+                ValidationIssue(
+                    pointer,
+                    "maxItems",
+                    schema["maxItems"],
+                    _received(value),
+                    "array has too many items",
+                )
             )
         if schema.get("uniqueItems") is True:
             seen: set[str] = set()
@@ -846,16 +1032,32 @@ def validate_json(value: Any, schema: Mapping[str, Any], *, pointer: str = "") -
         item_schema = schema.get("items")
         if isinstance(item_schema, Mapping):
             for index, item in enumerate(value):
-                issues.extend(validate_json(item, item_schema, pointer=_pointer_join(pointer, index)))
+                issues.extend(
+                    validate_json(
+                        item, item_schema, pointer=_pointer_join(pointer, index)
+                    )
+                )
 
     if isinstance(value, dict):
         if "minProperties" in schema and len(value) < schema["minProperties"]:
             issues.append(
-                ValidationIssue(pointer, "minProperties", schema["minProperties"], _received(value), "object has too few properties")
+                ValidationIssue(
+                    pointer,
+                    "minProperties",
+                    schema["minProperties"],
+                    _received(value),
+                    "object has too few properties",
+                )
             )
         if "maxProperties" in schema and len(value) > schema["maxProperties"]:
             issues.append(
-                ValidationIssue(pointer, "maxProperties", schema["maxProperties"], _received(value), "object has too many properties")
+                ValidationIssue(
+                    pointer,
+                    "maxProperties",
+                    schema["maxProperties"],
+                    _received(value),
+                    "object has too many properties",
+                )
             )
         properties = schema.get("properties")
         properties = properties if isinstance(properties, Mapping) else {}
@@ -875,7 +1077,9 @@ def validate_json(value: Any, schema: Mapping[str, Any], *, pointer: str = "") -
         for name, child_schema in properties.items():
             if name in value:
                 issues.extend(
-                    validate_json(value[name], child_schema, pointer=_pointer_join(pointer, name))
+                    validate_json(
+                        value[name], child_schema, pointer=_pointer_join(pointer, name)
+                    )
                 )
         extras = sorted(set(value) - set(properties))
         additional = schema.get("additionalProperties", True)
@@ -893,12 +1097,16 @@ def validate_json(value: Any, schema: Mapping[str, Any], *, pointer: str = "") -
         elif isinstance(additional, Mapping):
             for name in extras:
                 issues.extend(
-                    validate_json(value[name], additional, pointer=_pointer_join(pointer, name))
+                    validate_json(
+                        value[name], additional, pointer=_pointer_join(pointer, name)
+                    )
                 )
     return issues
 
 
-_FENCED_JSON = re.compile(r"\A\s*```(?:json)?\s*\n?(.*?)\n?```\s*\Z", re.IGNORECASE | re.DOTALL)
+_FENCED_JSON = re.compile(
+    r"\A\s*```(?:json)?\s*\n?(.*?)\n?```\s*\Z", re.IGNORECASE | re.DOTALL
+)
 _CHANNEL_PREFIXES = (
     "<|start|>assistant<|channel|>final<|message|>",
     "<|channel|>final<|message|>",
@@ -1011,6 +1219,8 @@ def _default_transport(request: ChatRequest) -> str | ollama.ChatResponse:
         keep_alive=request.keep_alive,
         read_timeout_ms=request.read_timeout_ms,
         max_output_chars=request.max_output_chars,
+        temperature=request.temperature,
+        seed=request.seed,
         return_metadata=True,
     )
 
@@ -1026,11 +1236,28 @@ JSON Schema:
 """
 
 _REPAIR_TEMPLATE = """\
-Your previous JSON response was invalid. Correct only the listed violations
-and preserve every field that was already valid. Return JSON only.
+Your previous JSON response was invalid. Correct the listed violations and
+preserve unrelated fields only when they remain semantically consistent.
+Never change a truthful failed factual, safety, provenance, or semantic check
+to true merely to satisfy the validator. If the selected action or decision
+requires such a check to be true, re-evaluate that root action or decision and
+all dependent fields from the original evidence, choosing the fail-closed
+non-mutating outcome required by the original instructions. Return JSON only.
 
 Validator errors (RFC 6901 pointers):
 {errors}
+"""
+
+_OVERSIZE_ASSISTANT_PLACEHOLDER = """\
+[Previous response omitted by the client because it exceeded the fixed UTF-8
+output byte limit. Re-evaluate the original request from the conversation.]
+"""
+
+_OVERSIZE_REPAIR_TEMPLATE = """\
+Your previous response exceeded the fixed output limit of {maximum} UTF-8
+bytes ({observed} bytes). Return a compact JSON value matching the schema.
+Re-evaluate the original request, keep the semantic decision faithful, retain
+all required fields, shorten free-text fields, and add no prose or markdown.
 """
 
 
@@ -1064,7 +1291,10 @@ class LocalStructuredSession:
             "max_output_chars": max_output_chars,
             "max_feedback_chars": max_feedback_chars,
         }
-        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in numeric_limits.values()):
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in numeric_limits.values()
+        ):
             raise ValueError("structured session limits must be positive integers")
         self.model = model.strip()
         self.role = role.strip()
@@ -1098,6 +1328,7 @@ class LocalStructuredSession:
         schema: Mapping[str, Any],
         *,
         system: str | None = None,
+        value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
     ) -> LocalStructuredResult:
         if not isinstance(prompt, str):
             return self._failure("input_invalid", "prompt must be a string")
@@ -1130,9 +1361,7 @@ class LocalStructuredSession:
             64 + self.max_output_chars + self.max_feedback_chars
         )
         if (
-            worst_case_history_tokens
-            + self.num_predict
-            + CONTEXT_SAFETY_TOKENS
+            worst_case_history_tokens + self.num_predict + CONTEXT_SAFETY_TOKENS
             > self.num_ctx
         ):
             return self._failure(
@@ -1145,14 +1374,11 @@ class LocalStructuredSession:
 
         attempts: list[StructuredAttempt] = []
         seen_outputs: set[str] = set()
-        seen_errors: set[str] = set()
 
         for index in range(MAX_RESPONSES):
             estimated_input_tokens = _estimated_message_tokens(messages)
             if (
-                estimated_input_tokens
-                + self.num_predict
-                + CONTEXT_SAFETY_TOKENS
+                estimated_input_tokens + self.num_predict + CONTEXT_SAFETY_TOKENS
                 > self.num_ctx
             ):
                 return self._failure(
@@ -1171,6 +1397,8 @@ class LocalStructuredSession:
                 keep_alive=self.keep_alive,
                 read_timeout_ms=self.read_timeout_ms,
                 max_output_chars=self.max_output_chars,
+                temperature=STRUCTURED_GENERATION_TEMPERATURE,
+                seed=STRUCTURED_GENERATION_SEED,
             )
             try:
                 transport_output = self.transport(request)
@@ -1178,11 +1406,15 @@ class LocalStructuredSession:
                 return self._failure("output_too_large", str(exc), attempts)
             except (TimeoutError, httpx.TimeoutException) as exc:
                 return self._failure(
-                    "transport_timeout", f"{type(exc).__name__}: {str(exc)[:500]}", attempts
+                    "transport_timeout",
+                    f"{type(exc).__name__}: {str(exc)[:500]}",
+                    attempts,
                 )
             except Exception as exc:
                 return self._failure(
-                    "transport_error", f"{type(exc).__name__}: {str(exc)[:500]}", attempts
+                    "transport_error",
+                    f"{type(exc).__name__}: {str(exc)[:500]}",
+                    attempts,
                 )
             if isinstance(transport_output, ollama.ChatResponse):
                 raw_output = transport_output.content
@@ -1204,21 +1436,83 @@ class LocalStructuredSession:
             else:
                 raw_output = transport_output
             if not isinstance(raw_output, str):
-                return self._failure("transport_error", "transport returned non-string content", attempts)
+                return self._failure(
+                    "transport_error", "transport returned non-string content", attempts
+                )
             output_bytes = len(raw_output.encode("utf-8"))
             if output_bytes > self.max_output_chars:
-                return self._failure(
-                    "output_too_large",
-                    "response exceeded the fixed output UTF-8 byte cap "
-                    f"({output_bytes}>{self.max_output_chars})",
-                    attempts,
+                output_sha256 = hashlib.sha256(raw_output.encode("utf-8")).hexdigest()
+                issue = ValidationIssue(
+                    pointer="",
+                    keyword="maxOutputBytes",
+                    expected={"maximum": self.max_output_chars},
+                    received={
+                        "type": "oversize_output",
+                        "chars": len(raw_output),
+                        "length": output_bytes,
+                        "sha256": output_sha256,
+                    },
+                    message="response exceeded the fixed output UTF-8 byte cap",
                 )
+                attempts.append(
+                    StructuredAttempt(
+                        index=index,
+                        valid=False,
+                        output_sha256=output_sha256,
+                        output_chars=len(raw_output),
+                        normalized=False,
+                        error_fingerprint=_fingerprint_issues([issue]),
+                        issues=(issue,),
+                    )
+                )
+                if output_sha256 in seen_outputs:
+                    return self._failure(
+                        "repeated_output",
+                        "model repeated the same oversized output",
+                        attempts,
+                    )
+                seen_outputs.add(output_sha256)
+                if index == MAX_RESPONSES - 1:
+                    return self._failure(
+                        "repair_exhausted",
+                        "initial response and two compact-output repairs exceeded "
+                        "the fixed output limit",
+                        attempts,
+                    )
+                repair_prompt = _OVERSIZE_REPAIR_TEMPLATE.format(
+                    maximum=self.max_output_chars,
+                    observed=output_bytes,
+                )
+                feedback_bytes = len(repair_prompt.encode("utf-8"))
+                if feedback_bytes > self.max_feedback_chars:
+                    return self._failure(
+                        "feedback_too_large",
+                        "compact-output feedback exceeded the fixed UTF-8 byte cap "
+                        f"({feedback_bytes}>{self.max_feedback_chars})",
+                        attempts,
+                    )
+                messages.append(
+                    {"role": "assistant", "content": _OVERSIZE_ASSISTANT_PLACEHOLDER}
+                )
+                messages.append({"role": "user", "content": repair_prompt})
+                continue
 
             normalized_output, normalized = normalize_json_output(raw_output)
-            output_sha256 = hashlib.sha256(normalized_output.encode("utf-8")).hexdigest()
+            output_sha256 = hashlib.sha256(
+                normalized_output.encode("utf-8")
+            ).hexdigest()
             parsed, issues = _parse_json(normalized_output)
             if not issues:
                 issues = validate_json(parsed, schema_copy)
+            if not issues and value_validator is not None:
+                try:
+                    issues = list(value_validator(parsed))
+                except Exception as exc:
+                    return self._failure(
+                        "value_validator_error",
+                        f"{type(exc).__name__}: {str(exc)[:500]}",
+                        attempts,
+                    )
             error_fingerprint = _fingerprint_issues(issues) if issues else None
             attempt = StructuredAttempt(
                 index=index,
@@ -1240,21 +1534,17 @@ class LocalStructuredSession:
 
             if output_sha256 in seen_outputs:
                 return self._failure(
-                    "repeated_output", "model repeated the same invalid output", attempts
-                )
-            if error_fingerprint in seen_errors:
-                return self._failure(
-                    "repeated_validation_error",
-                    "model repeated the same validation fingerprint",
+                    "repeated_output",
+                    "model repeated the same invalid output",
                     attempts,
                 )
             seen_outputs.add(output_sha256)
-            if error_fingerprint is not None:
-                seen_errors.add(error_fingerprint)
 
             if index == MAX_RESPONSES - 1:
                 return self._failure(
-                    "repair_exhausted", "initial response and two repair turns were invalid", attempts
+                    "repair_exhausted",
+                    "initial response and two repair turns were invalid",
+                    attempts,
                 )
 
             errors_json = json.dumps(
@@ -1275,7 +1565,9 @@ class LocalStructuredSession:
             messages.append({"role": "assistant", "content": raw_output})
             messages.append({"role": "user", "content": repair_prompt})
 
-        return self._failure("repair_exhausted", "structured session exhausted", attempts)
+        return self._failure(
+            "repair_exhausted", "structured session exhausted", attempts
+        )
 
     def run(
         self,
@@ -1283,6 +1575,7 @@ class LocalStructuredSession:
         schema: Mapping[str, Any],
         *,
         system: str | None = None,
+        value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
     ) -> LocalStructuredResult:
         request_sha256 = structured_request_sha256(prompt, schema, system)
         with self.audit_store.activity(
@@ -1290,7 +1583,12 @@ class LocalStructuredSession:
             role=self.role,
             model=self.model,
         ):
-            result = self._run_impl(prompt, schema, system=system)
+            result = self._run_impl(
+                prompt,
+                schema,
+                system=system,
+                value_validator=value_validator,
+            )
         try:
             self.audit_store.record_session(
                 request_sha256=request_sha256,
@@ -1312,10 +1610,16 @@ __all__ = [
     "LocalStructuredSession",
     "MAX_REPAIR_TURNS",
     "MAX_RESPONSES",
+    "STRUCTURED_GENERATION_POLICY_VERSION",
+    "STRUCTURED_GENERATION_SEED",
+    "STRUCTURED_GENERATION_TEMPERATURE",
     "SchemaDefinitionError",
     "StructuredAttempt",
     "ValidationIssue",
     "normalize_json_output",
+    "required_structured_context_tokens",
+    "structured_generation_policy",
+    "structured_generation_policy_sha256",
     "structured_request_sha256",
     "validate_json",
     "validate_schema_definition",

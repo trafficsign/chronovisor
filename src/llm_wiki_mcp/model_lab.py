@@ -1,4 +1,5 @@
 """Autonomous frontier-model discovery, replay evaluation, and rollback."""
+
 from __future__ import annotations
 
 import argparse
@@ -28,7 +29,12 @@ LOCK_FILE = LAB_DIR / "model-lab.lock"
 REPLAY_PROMPT_LIMIT = 50_000
 
 ROLE_SPECS: dict[str, dict[str, str]] = {
-    "code_repair": {"tier": "sol", "effort": "high", "fallback_model": "gpt-5.5", "fallback_effort": "high"},
+    "code_repair": {
+        "tier": "sol",
+        "effort": "high",
+        "fallback_model": "gpt-5.5",
+        "fallback_effort": "high",
+    },
 }
 
 MODEL_RE = re.compile(r"^gpt-(\d+)\.(\d+)(?:-(sol|terra|luna|mini))?$")
@@ -88,10 +94,12 @@ def cache_paths() -> list[Path]:
     paths: list[Path] = []
     if os.environ.get("CODEX_HOME"):
         paths.append(Path(os.environ["CODEX_HOME"]).expanduser() / "models_cache.json")
-    paths.extend([
-        Path.home() / ".config" / "codex" / "models_cache.json",
-        Path.home() / ".codex" / "models_cache.json",
-    ])
+    paths.extend(
+        [
+            Path.home() / ".config" / "codex" / "models_cache.json",
+            Path.home() / ".codex" / "models_cache.json",
+        ]
+    )
     unique: list[Path] = []
     for path in paths:
         if path not in unique:
@@ -121,13 +129,15 @@ def discover_models(paths: list[Path] | None = None) -> dict[str, Any]:
             for item in row.get("supported_reasoning_levels", [])
             if isinstance(item, dict) and item.get("effort")
         ]
-        models.append({
-            "slug": slug,
-            "tier": match.group(3) or "flagship",
-            "version": [int(match.group(1)), int(match.group(2))],
-            "efforts": efforts,
-            "priority": int(row.get("priority") or 0),
-        })
+        models.append(
+            {
+                "slug": slug,
+                "tier": match.group(3) or "flagship",
+                "version": [int(match.group(1)), int(match.group(2))],
+                "efforts": efforts,
+                "priority": int(row.get("priority") or 0),
+            }
+        )
     models.sort(key=lambda row: (row["version"], row["priority"]), reverse=True)
     latest: dict[str, dict[str, Any]] = {}
     for row in models:
@@ -147,19 +157,34 @@ def _selection(role: str, discovery: dict[str, Any]) -> dict[str, Any]:
         "code_repair": ("sol", "flagship", "terra", "luna", "mini"),
     }
     latest = discovery.get("latest", {})
-    candidate = next((latest.get(tier) for tier in preferences[role] if latest.get(tier)), None)
+    candidate = next(
+        (latest.get(tier) for tier in preferences[role] if latest.get(tier)), None
+    )
     model = spec["fallback_model"]
     effort = spec["fallback_effort"]
     source = "fallback"
     if isinstance(candidate, dict):
         model = str(candidate["slug"])
         efforts = candidate.get("efforts", [])
-        effort = spec["effort"] if spec["effort"] in efforts or not efforts else str(efforts[0])
+        effort = (
+            spec["effort"]
+            if spec["effort"] in efforts or not efforts
+            else str(efforts[0])
+        )
         source = "codex-model-cache"
-    return {"model": model, "effort": effort, "tier": str(candidate.get("tier")) if isinstance(candidate, dict) else spec["tier"], "source": source}
+    return {
+        "model": model,
+        "effort": effort,
+        "tier": str(candidate.get("tier"))
+        if isinstance(candidate, dict)
+        else spec["tier"],
+        "source": source,
+    }
 
 
-def bootstrap_policy(*, write: bool = False, discovery: dict[str, Any] | None = None) -> dict[str, Any]:
+def bootstrap_policy(
+    *, write: bool = False, discovery: dict[str, Any] | None = None
+) -> dict[str, Any]:
     discovery = discovery or discover_models()
     policy = {
         "schema_version": 1,
@@ -175,7 +200,10 @@ def bootstrap_policy(*, write: bool = False, discovery: dict[str, Any] | None = 
             if isinstance(existing, dict) and isinstance(existing.get("roles"), dict):
                 return existing
             _atomic_json(POLICY_FILE, policy)
-            _append_jsonl(HISTORY_FILE, {"event": "bootstrap", "timestamp": _now(), "roles": policy["roles"]})
+            _append_jsonl(
+                HISTORY_FILE,
+                {"event": "bootstrap", "timestamp": _now(), "roles": policy["roles"]},
+            )
     return policy
 
 
@@ -192,8 +220,12 @@ def resolve_role(role: str) -> tuple[str, str]:
     env_key = re.sub(r"[^A-Z0-9]", "_", role.upper())
     policy = load_policy()
     selected = policy.get("roles", {}).get(role, _selection(role, discover_models()))
-    model = os.environ.get(f"LLM_WIKI_MODEL_{env_key}", str(selected.get("model") or "")).strip()
-    effort = os.environ.get(f"LLM_WIKI_EFFORT_{env_key}", str(selected.get("effort") or "")).strip()
+    model = os.environ.get(
+        f"LLM_WIKI_MODEL_{env_key}", str(selected.get("model") or "")
+    ).strip()
+    effort = os.environ.get(
+        f"LLM_WIKI_EFFORT_{env_key}", str(selected.get("effort") or "")
+    ).strip()
     return model, effort
 
 
@@ -215,22 +247,34 @@ def _model_version(model: Any) -> tuple[int, int]:
 
 
 def record_replay_case(
-    *, role: str, prompt: str, schema: dict[str, Any], result: dict[str, Any], model: str,
-    effort: str, latency_seconds: float,
+    *,
+    role: str,
+    prompt: str,
+    schema: dict[str, Any],
+    result: dict[str, Any],
+    model: str,
+    effort: str,
+    latency_seconds: float,
 ) -> None:
     if role not in ROLE_SPECS or os.environ.get("LLM_WIKI_MODEL_LAB_REPLAY") == "1":
         return
     if result.get("frontier_failure"):
         return
     prompt_truncated = len(prompt) > REPLAY_PROMPT_LIMIT
-    _append_jsonl(REPLAY_FILE, {
-        "timestamp": _now(), "role": role, "model": model, "effort": effort,
-        "prompt": prompt[-REPLAY_PROMPT_LIMIT:],
-        "prompt_truncated": prompt_truncated,
-        "prompt_original_chars": len(prompt),
-        "expected": decision_signature(result, schema),
-        "latency_seconds": round(latency_seconds, 3),
-    })
+    _append_jsonl(
+        REPLAY_FILE,
+        {
+            "timestamp": _now(),
+            "role": role,
+            "model": model,
+            "effort": effort,
+            "prompt": prompt[-REPLAY_PROMPT_LIMIT:],
+            "prompt_truncated": prompt_truncated,
+            "prompt_original_chars": len(prompt),
+            "expected": decision_signature(result, schema),
+            "latency_seconds": round(latency_seconds, 3),
+        },
+    )
 
 
 def record_local_replay_case(
@@ -242,6 +286,10 @@ def record_local_replay_case(
     models: Sequence[str],
     latency_seconds: float,
     system: str | None = None,
+    policy_source: str | None = None,
+    policy_artifact_sha256: str | None = None,
+    decision_lane: str | None = None,
+    lane_contract_sha256: str | None = None,
     replay_file: Path | None = None,
 ) -> bool:
     """Append one successful local-consensus decision without another LLM call.
@@ -276,15 +324,20 @@ def record_local_replay_case(
         {
             "timestamp": _now(),
             "source": "local_consensus",
+            "evidence_provenance": {
+                "kind": "model_self_label",
+                "policy_source": policy_source,
+                "policy_artifact_sha256": policy_artifact_sha256,
+            },
             "role": role,
+            "decision_lane": decision_lane,
+            "lane_contract_sha256": lane_contract_sha256,
             "model": "local_consensus",
             "models": model_tags,
             "effort": "local",
             "prompt": prompt[-REPLAY_PROMPT_LIMIT:],
             "system": (
-                system[-REPLAY_PROMPT_LIMIT:]
-                if isinstance(system, str)
-                else None
+                system[-REPLAY_PROMPT_LIMIT:] if isinstance(system, str) else None
             ),
             "prompt_truncated": prompt_truncated,
             "prompt_original_chars": len(prompt),
@@ -318,13 +371,20 @@ def _load_replays(role: str, limit: int = 40) -> list[dict[str, Any]]:
 def _is_unsafe(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
     expected_decision = str(expected.get("decision") or "")
     actual_decision = str(actual.get("decision") or "")
-    return expected_decision in {"rejected", "needs_retry", "quarantined"} and actual_decision == "approved"
+    return (
+        expected_decision in {"rejected", "needs_retry", "quarantined"}
+        and actual_decision == "approved"
+    )
 
 
-def record_live_result(*, role: str, model: str, ok: bool, failure_class: str | None = None) -> dict[str, Any] | None:
+def record_live_result(
+    *, role: str, model: str, ok: bool, failure_class: str | None = None
+) -> dict[str, Any] | None:
     with _lock():
         policy = _read_json(POLICY_FILE, {})
-        canary = policy.get("canaries", {}).get(role) if isinstance(policy, dict) else None
+        canary = (
+            policy.get("canaries", {}).get(role) if isinstance(policy, dict) else None
+        )
         if not isinstance(canary, dict) or model != canary.get("model"):
             return None
         canary["calls"] = int(canary.get("calls") or 0) + 1
@@ -339,10 +399,30 @@ def record_live_result(*, role: str, model: str, ok: bool, failure_class: str | 
                 policy["roles"][role] = previous
             policy["canaries"].pop(role, None)
             policy["updated_at"] = _now()
-            _append_jsonl(HISTORY_FILE, {"event": "rollback", "timestamp": _now(), "role": role, "model": model, "failure_class": failure_class, "calls": calls, "failures": failures})
+            _append_jsonl(
+                HISTORY_FILE,
+                {
+                    "event": "rollback",
+                    "timestamp": _now(),
+                    "role": role,
+                    "model": model,
+                    "failure_class": failure_class,
+                    "calls": calls,
+                    "failures": failures,
+                },
+            )
         elif calls >= int(canary.get("target_calls") or 20):
             policy["canaries"].pop(role, None)
-            _append_jsonl(HISTORY_FILE, {"event": "canary_complete", "timestamp": _now(), "role": role, "model": model, "calls": calls})
+            _append_jsonl(
+                HISTORY_FILE,
+                {
+                    "event": "canary_complete",
+                    "timestamp": _now(),
+                    "role": role,
+                    "model": model,
+                    "calls": calls,
+                },
+            )
         _atomic_json(POLICY_FILE, policy)
         return {"rollback": rollback, "calls": calls, "failures": failures}
 
@@ -359,7 +439,12 @@ def run_due(*, dry_run: bool = False, max_evaluations: int = 0) -> dict[str, Any
     discovery = discover_models()
     if not POLICY_FILE.exists():
         policy = bootstrap_policy(write=not dry_run, discovery=discovery)
-        return {"status": "bootstrapped", "dry_run": dry_run, "roles": policy["roles"], "evaluated": 0}
+        return {
+            "status": "bootstrapped",
+            "dry_run": dry_run,
+            "roles": policy["roles"],
+            "evaluated": 0,
+        }
     policy = load_policy()
     active = policy.get("roles", {}).get("code_repair", {})
     desired = _selection("code_repair", discovery)
@@ -426,7 +511,16 @@ def snapshot() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         pass
     discovery = discover_models()
-    return {"status": "ok", "policy": policy, "discovery": discovery, "candidates": list(state.get("candidates", {}).values()), "history": history, "replay_cases": sum(1 for _ in REPLAY_FILE.open(encoding="utf-8")) if REPLAY_FILE.exists() else 0}
+    return {
+        "status": "ok",
+        "policy": policy,
+        "discovery": discovery,
+        "candidates": list(state.get("candidates", {}).values()),
+        "history": history,
+        "replay_cases": sum(1 for _ in REPLAY_FILE.open(encoding="utf-8"))
+        if REPLAY_FILE.exists()
+        else 0,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -441,7 +535,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "discover":
         result = discover_models()
     elif args.command == "run-due":
-        result = run_due(dry_run=args.dry_run, max_evaluations=max(0, args.max_evaluations))
+        result = run_due(
+            dry_run=args.dry_run, max_evaluations=max(0, args.max_evaluations)
+        )
     else:
         result = snapshot()
     print(json.dumps(result, ensure_ascii=False, indent=2))

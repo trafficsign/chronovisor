@@ -6,6 +6,8 @@ import argparse
 import json
 import math
 import re
+import subprocess
+import threading
 import time
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
@@ -18,11 +20,15 @@ import httpx
 
 from llm_wiki_mcp import orchestrator, recall_runtime, runtime_status
 from llm_wiki_mcp.convergence import is_human_required_result
+from llm_wiki_mcp.decision_router import resolve_router_policy
 from llm_wiki_mcp.health import health_snapshot
 from llm_wiki_mcp.ollama import OLLAMA_URL, embedding_model, ingest_model
 from llm_wiki_mcp.recall_auditor import load_audit_policy
 from llm_wiki_mcp.recall_improvement import configured_models
-from llm_wiki_mcp.runtime_config import load_reranker_config
+from llm_wiki_mcp.runtime_config import (
+    load_decision_router_config,
+    load_reranker_config,
+)
 from llm_wiki_mcp.wiki import LOG_FILE, WIKI_ROOT, init_wiki
 
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
@@ -39,6 +45,7 @@ SELF_HEAL_PENDING_STATUSES = {
     "frontier_retry",
     "frontier_preflight_failed",
     "pending_frontier_review",
+    "repair_deferred",
 }
 SELF_HEAL_FAILED_STATUSES = {
     "local_repair_failed",
@@ -58,9 +65,18 @@ ACTIVE_BATCH_STAGES = {
     "frontier-regenerate",
     "apply",
 }
+DECISION_ROUTER_DASHBOARD_CACHE_SECONDS = 15.0
+_DECISION_ROUTER_CACHE_LOCK = threading.Lock()
+_DECISION_ROUTER_CACHE: dict[str, Any] = {
+    "key": None,
+    "expires_at": 0.0,
+    "config": None,
+}
 
 
-def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
+def _json_response(
+    handler: BaseHTTPRequestHandler, data: Any, status: int = 200
+) -> None:
     body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -142,6 +158,44 @@ def _add_model_role(roles: dict[str, set[str]], model: str | None, role: str) ->
     roles.setdefault(model, set()).add(role)
 
 
+def _decision_router_cache_key(config: Any) -> tuple[Any, ...]:
+    nominated = str(getattr(config, "adoption_artifact", "") or "").strip()
+    artifact_identity: tuple[Any, ...] = ()
+    if nominated:
+        path = Path(nominated).expanduser()
+        try:
+            stat = path.stat()
+            artifact_identity = (str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            artifact_identity = (str(path), "missing")
+    return (repr(config), *artifact_identity)
+
+
+def _resolved_decision_router_config() -> Any:
+    """Resolve adopted model roles without revalidating the corpus every poll."""
+
+    configured = load_decision_router_config()
+    key = _decision_router_cache_key(configured)
+    now = time.monotonic()
+    with _DECISION_ROUTER_CACHE_LOCK:
+        if (
+            _DECISION_ROUTER_CACHE.get("key") == key
+            and float(_DECISION_ROUTER_CACHE.get("expires_at") or 0.0) > now
+            and _DECISION_ROUTER_CACHE.get("config") is not None
+        ):
+            return _DECISION_ROUTER_CACHE["config"]
+        resolved = resolve_router_policy(configured).config
+        resolved_at = time.monotonic()
+        _DECISION_ROUTER_CACHE.update(
+            {
+                "key": key,
+                "expires_at": (resolved_at + DECISION_ROUTER_DASHBOARD_CACHE_SECONDS),
+                "config": resolved,
+            }
+        )
+        return resolved
+
+
 def _configured_model_roles() -> dict[str, set[str]]:
     roles: dict[str, set[str]] = {}
     _add_model_role(roles, ingest_model(), "ingest")
@@ -158,13 +212,31 @@ def _configured_model_roles() -> dict[str, set[str]]:
         if getattr(recall_policy, "judge_mode", "auto") != "off":
             _add_model_role(roles, getattr(recall_policy, "judge_model", ""), "gate")
         if getattr(recall_policy, "rewrite_enabled", False):
-            _add_model_role(roles, getattr(recall_policy, "rewrite_model", ""), "rewrite")
+            _add_model_role(
+                roles, getattr(recall_policy, "rewrite_model", ""), "rewrite"
+            )
     except Exception:
         pass
 
     try:
         for model in configured_models(None):
             _add_model_role(roles, model, "improve")
+    except Exception:
+        pass
+
+    try:
+        decision_router = _resolved_decision_router_config()
+        _add_model_role(roles, decision_router.primary_model, "decision-primary")
+        _add_model_role(
+            roles,
+            decision_router.challenger_model,
+            "decision-challenger",
+        )
+        _add_model_role(
+            roles,
+            decision_router.tie_break_model,
+            "decision-tie-break",
+        )
     except Exception:
         pass
 
@@ -190,8 +262,11 @@ def _role_sort_key(role: str) -> int:
         "improve": 2,
         "gate": 3,
         "rewrite": 4,
-        "embed": 5,
-        "rerank": 6,
+        "decision-primary": 5,
+        "decision-challenger": 6,
+        "decision-tie-break": 7,
+        "embed": 8,
+        "rerank": 9,
     }
     return order.get(role, 99)
 
@@ -228,8 +303,12 @@ def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, An
     if not isinstance(installed_models, list):
         installed_models = []
 
-    running_by_name = {_model_name(row): row for row in running_models if _model_name(row)}
-    installed_by_name = {_model_name(row): row for row in installed_models if _model_name(row)}
+    running_by_name = {
+        _model_name(row): row for row in running_models if _model_name(row)
+    }
+    installed_by_name = {
+        _model_name(row): row for row in installed_models if _model_name(row)
+    }
     roles_by_name: dict[str, set[str]] = {}
     for name, roles in _configured_model_roles().items():
         resolved = _resolve_model_name(name, installed_by_name, running_by_name)
@@ -252,7 +331,12 @@ def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, An
             (running.get("size_vram") if isinstance(running, dict) else 0)
             or (running.get("size") if isinstance(running, dict) else 0)
         )
-        is_external = configured and not installed and not running and _external_configured_model(name, roles)
+        is_external = (
+            configured
+            and not installed
+            and not running
+            and _external_configured_model(name, roles)
+        )
         if running:
             status = "loaded"
         elif installed:
@@ -281,19 +365,29 @@ def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, An
                 "running": running is not None,
                 "configured": configured,
                 "roles": sorted(roles, key=_role_sort_key),
-                "size_bytes": _numeric_bytes(installed.get("size") if installed else None),
+                "size_bytes": _numeric_bytes(
+                    installed.get("size") if installed else None
+                ),
                 "loaded_size_bytes": _numeric_bytes(
                     (running.get("size_vram") if isinstance(running, dict) else None)
                     or (running.get("size") if isinstance(running, dict) else None)
                 ),
-                "context_length": running.get("context_length") if isinstance(running, dict) else details.get("context_length"),
-                "expires_at": running.get("expires_at") if isinstance(running, dict) else None,
-                "modified_at": installed.get("modified_at") if isinstance(installed, dict) else None,
+                "context_length": running.get("context_length")
+                if isinstance(running, dict)
+                else details.get("context_length"),
+                "expires_at": running.get("expires_at")
+                if isinstance(running, dict)
+                else None,
+                "modified_at": installed.get("modified_at")
+                if isinstance(installed, dict)
+                else None,
                 "digest": (
                     (installed.get("digest") if isinstance(installed, dict) else None)
                     or (running.get("digest") if isinstance(running, dict) else None)
                 ),
-                "processor": running.get("processor") if isinstance(running, dict) else None,
+                "processor": running.get("processor")
+                if isinstance(running, dict)
+                else None,
                 "details": details,
                 "capabilities": capabilities,
             }
@@ -308,7 +402,9 @@ def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, An
         )
     )
     return {
-        "available": bool(running_snapshot.get("available") or installed_snapshot.get("available")),
+        "available": bool(
+            running_snapshot.get("available") or installed_snapshot.get("available")
+        ),
         "running_available": bool(running_snapshot.get("available")),
         "installed_available": bool(installed_snapshot.get("available")),
         "error": running_snapshot.get("error") or installed_snapshot.get("error"),
@@ -504,7 +600,9 @@ def _knowledge_mix_snapshot() -> dict[str, Any]:
 
     total_pages = sum(int(row["pages"]) for row in categories.values())
     total_bytes = sum(int(row["bytes"]) for row in categories.values())
-    rows = sorted(categories.values(), key=lambda row: (-int(row["bytes"]), str(row["label"])))
+    rows = sorted(
+        categories.values(), key=lambda row: (-int(row["bytes"]), str(row["label"]))
+    )
     for row in rows:
         row["share"] = (int(row["bytes"]) / total_bytes) if total_bytes else 0.0
 
@@ -546,11 +644,15 @@ def _add_sample(row: dict[str, Any], key: str, value: str, limit: int = 6) -> No
         samples.append(value)
 
 
-def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[str, Any]:
+def _save_history_snapshot(
+    days: int = 371, today: date | None = None
+) -> dict[str, Any]:
     end = today or datetime.now().date()
     start = end - timedelta(days=max(1, days) - 1)
     rows = {
-        (start + timedelta(days=offset)).isoformat(): _new_save_day(start + timedelta(days=offset))
+        (start + timedelta(days=offset)).isoformat(): _new_save_day(
+            start + timedelta(days=offset)
+        )
         for offset in range((end - start).days + 1)
     }
 
@@ -564,7 +666,11 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
                 continue
             raw_bytes = path.stat().st_size
             source = _raw_source_label(path.name)
-            raw_files[path.name] = {"date": raw_date.isoformat(), "bytes": raw_bytes, "source": source}
+            raw_files[path.name] = {
+                "date": raw_date.isoformat(),
+                "bytes": raw_bytes,
+                "source": source,
+            }
             row = rows[raw_date.isoformat()]
             row["raw_saved"] += 1
             row["raw_bytes"] += raw_bytes
@@ -579,19 +685,41 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
                 if record_date is None or record_date < start or record_date > end:
                     continue
                 row = rows[record_date.isoformat()]
-                result = record.get("result") if isinstance(record.get("result"), dict) else {}
-                attempted_files = result.get("files_attempted") if isinstance(result.get("files_attempted"), list) else []
-                processed_files = result.get("files_processed") if isinstance(result.get("files_processed"), list) else []
-                per_raw = result.get("per_raw") if isinstance(result.get("per_raw"), list) else []
+                result = (
+                    record.get("result")
+                    if isinstance(record.get("result"), dict)
+                    else {}
+                )
+                attempted_files = (
+                    result.get("files_attempted")
+                    if isinstance(result.get("files_attempted"), list)
+                    else []
+                )
+                processed_files = (
+                    result.get("files_processed")
+                    if isinstance(result.get("files_processed"), list)
+                    else []
+                )
+                per_raw = (
+                    result.get("per_raw")
+                    if isinstance(result.get("per_raw"), list)
+                    else []
+                )
 
-                processed = _int_value(record.get("files_processed")) or len(processed_files)
+                processed = _int_value(record.get("files_processed")) or len(
+                    processed_files
+                )
                 if per_raw:
                     succeeded = sum(
-                        1 for item in per_raw if isinstance(item, dict) and item.get("succeeded") is True
+                        1
+                        for item in per_raw
+                        if isinstance(item, dict) and item.get("succeeded") is True
                     )
                     attempted = len(per_raw)
                     failed = sum(
-                        1 for item in per_raw if isinstance(item, dict) and item.get("succeeded") is False
+                        1
+                        for item in per_raw
+                        if isinstance(item, dict) and item.get("succeeded") is False
                     )
                 else:
                     attempted = len(attempted_files) or processed
@@ -617,7 +745,9 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
                         elif raw_status.get(filename) != "processed":
                             raw_status[filename] = "failed"
                 else:
-                    processed_names = {name for name in processed_files if isinstance(name, str)}
+                    processed_names = {
+                        name for name in processed_files if isinstance(name, str)
+                    }
                     for filename in attempted_files:
                         if (
                             isinstance(filename, str)
@@ -691,24 +821,33 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
             status = "pending"
         segments = row.setdefault("raw_segments", [])
         if isinstance(segments, list):
-            segments.append({
-                "name": filename,
-                "bytes": raw_bytes,
-                "status": status,
-                "source": meta.get("source") or _raw_source_label(filename),
-            })
+            segments.append(
+                {
+                    "name": filename,
+                    "bytes": raw_bytes,
+                    "status": status,
+                    "source": meta.get("source") or _raw_source_label(filename),
+                }
+            )
     for row in rows.values():
         sources = row.get("sources") if isinstance(row.get("sources"), dict) else {}
         for source, count in sources.items():
             source_totals[source] = source_totals.get(source, 0) + int(count)
         row["sources"] = [
             {"name": source, "count": count}
-            for source, count in sorted(sources.items(), key=lambda item: (-item[1], item[0]))
+            for source, count in sorted(
+                sources.items(), key=lambda item: (-item[1], item[0])
+            )
         ]
         raw_segments = row.get("raw_segments")
         if isinstance(raw_segments, list):
             raw_segments.sort(key=lambda item: str(item.get("name") or ""))
-        if row["raw_saved"] or row["processed"] or row["pages_created"] or row["pages_updated"]:
+        if (
+            row["raw_saved"]
+            or row["processed"]
+            or row["pages_created"]
+            or row["pages_updated"]
+        ):
             totals["days_with_saves"] += 1
         for key in (
             "raw_saved",
@@ -727,17 +866,27 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
         days_list.append(row)
 
     recent = [
-        row for row in days_list
-        if row["raw_saved"] or row["processed"] or row["pages_created"] or row["pages_updated"]
+        row
+        for row in days_list
+        if row["raw_saved"]
+        or row["processed"]
+        or row["pages_created"]
+        or row["pages_updated"]
     ][-14:]
     return {
-        "range": {"start": start.isoformat(), "end": end.isoformat(), "days": len(days_list)},
+        "range": {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "days": len(days_list),
+        },
         "days": days_list,
         "recent": recent,
         "totals": totals,
         "sources": [
             {"name": source, "count": count}
-            for source, count in sorted(source_totals.items(), key=lambda item: (-item[1], item[0]))
+            for source, count in sorted(
+                source_totals.items(), key=lambda item: (-item[1], item[0])
+            )
         ],
         "paths": {
             "raw_dir": str(raw_dir),
@@ -747,7 +896,9 @@ def _save_history_snapshot(days: int = 371, today: date | None = None) -> dict[s
     }
 
 
-def _failure_detail(packet: dict[str, Any] | None, record: dict[str, Any] | None = None) -> dict[str, Any]:
+def _failure_detail(
+    packet: dict[str, Any] | None, record: dict[str, Any] | None = None
+) -> dict[str, Any]:
     packet = packet or {}
     record = record or {}
     return {
@@ -799,9 +950,9 @@ def _frontier_preflight_snapshot() -> dict[str, Any]:
     try:
         from llm_wiki_mcp.frontier_guard import FrontierGuard
 
-        inspection = FrontierGuard(
-            WIKI_ROOT / "runtime" / "frontier-repair"
-        ).inspect(dry_run=True)
+        inspection = FrontierGuard(WIKI_ROOT / "runtime" / "frontier-repair").inspect(
+            dry_run=True
+        )
         state = inspection.state
         incidents = state.get("incidents") if isinstance(state, dict) else {}
         incidents = incidents if isinstance(incidents, dict) else {}
@@ -863,12 +1014,9 @@ def _frontier_activity_snapshot() -> dict[str, Any]:
                 else None
             )
             pid = record.get("pid")
-            stale = (
-                (isinstance(pid, int) and not runtime_status._pid_is_alive(pid))
-                or (
-                    age_seconds is not None
-                    and age_seconds > FRONTIER_ACTIVITY_STALE_SECONDS
-                )
+            stale = not _job_process_identity_matches(pid, started_raw) or (
+                age_seconds is not None
+                and age_seconds > FRONTIER_ACTIVITY_STALE_SECONDS
             )
             if stale:
                 try:
@@ -941,7 +1089,7 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
             age_seconds = _activity_age_seconds(row.get("started_at")) if row else None
             stale = (
                 not row
-                or not runtime_status._pid_is_alive(pid)
+                or not _job_process_identity_matches(pid, row.get("started_at"))
                 or age_seconds is None
                 or age_seconds > LOCAL_CONSENSUS_ACTIVITY_STALE_SECONDS
             )
@@ -1070,7 +1218,10 @@ def _frontier_repair_snapshot(limit: int = 40) -> dict[str, Any]:
         )
     recent.sort(
         key=lambda row: str(
-            row.get("started_at") or row.get("reserved_at") or row.get("finished_at") or ""
+            row.get("started_at")
+            or row.get("reserved_at")
+            or row.get("finished_at")
+            or ""
         )
     )
     recent = recent[-max(1, limit) :]
@@ -1181,8 +1332,12 @@ def _self_heal_watch_snapshot(packets: dict[str, dict[str, Any]]) -> dict[str, A
     }
 
 
-def _local_repair_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> dict[str, Any]:
-    decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+def _local_repair_summary(
+    record: dict[str, Any], packet: dict[str, Any] | None
+) -> dict[str, Any]:
+    decision = (
+        record.get("decision") if isinstance(record.get("decision"), dict) else {}
+    )
     action = record.get("action") if isinstance(record.get("action"), dict) else {}
     retry = action.get("retry") if isinstance(action.get("retry"), dict) else {}
     restore = action.get("restore") if isinstance(action.get("restore"), dict) else {}
@@ -1207,14 +1362,19 @@ def _local_repair_summary(record: dict[str, Any], packet: dict[str, Any] | None)
         or _basename(restore.get("source"))
     )
     return {
-        "timestamp": record.get("timestamp") or (packet or {}).get("updated_at") or (packet or {}).get("created_at"),
+        "timestamp": record.get("timestamp")
+        or (packet or {}).get("updated_at")
+        or (packet or {}).get("created_at"),
         "failure_id": record.get("failure_id"),
         "state": "resolved",
         "level": "success",
         "title": "Local repair applied",
-        "detail": _shorten("; ".join(details) or decision.get("reason") or "local repair applied"),
+        "detail": _shorten(
+            "; ".join(details) or decision.get("reason") or "local repair applied"
+        ),
         "raw_file": raw_file,
-        "failure_class": record.get("failure_class") or (packet or {}).get("failure_class"),
+        "failure_class": record.get("failure_class")
+        or (packet or {}).get("failure_class"),
         "resolution": "local",
         "action": decision.get("action"),
         "source": decision.get("source"),
@@ -1239,9 +1399,15 @@ def _local_repair_summary(record: dict[str, Any], packet: dict[str, Any] | None)
     }
 
 
-def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> dict[str, Any]:
-    frontier = record.get("frontier") if isinstance(record.get("frontier"), dict) else {}
-    local_decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+def _frontier_summary(
+    record: dict[str, Any], packet: dict[str, Any] | None
+) -> dict[str, Any]:
+    frontier = (
+        record.get("frontier") if isinstance(record.get("frontier"), dict) else {}
+    )
+    local_decision = (
+        record.get("decision") if isinstance(record.get("decision"), dict) else {}
+    )
     decision = frontier.get("decision") or "unknown"
     rescue_status = frontier.get("rescue_status")
     human_required = is_human_required_result(frontier)
@@ -1271,14 +1437,17 @@ def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> 
     if commit:
         detail = f"{detail}; commit {str(commit)[:8]}"
     return {
-        "timestamp": record.get("timestamp") or (packet or {}).get("updated_at") or (packet or {}).get("created_at"),
+        "timestamp": record.get("timestamp")
+        or (packet or {}).get("updated_at")
+        or (packet or {}).get("created_at"),
         "failure_id": record.get("failure_id"),
         "state": state,
         "level": level,
         "title": title,
         "detail": _shorten(detail),
         "raw_file": raw_file,
-        "failure_class": record.get("failure_class") or (packet or {}).get("failure_class"),
+        "failure_class": record.get("failure_class")
+        or (packet or {}).get("failure_class"),
         "resolution": "frontier",
         "action": decision,
         "source": "frontier",
@@ -1301,7 +1470,8 @@ def _frontier_summary(record: dict[str, Any], packet: dict[str, Any] | None) -> 
                 "rescue_attempt": frontier.get("rescue_attempt"),
                 "access_repair": frontier.get("access_repair"),
             },
-            "human_notification": record.get("human_notification") or (packet or {}).get("human_notification"),
+            "human_notification": record.get("human_notification")
+            or (packet or {}).get("human_notification"),
             "pending_frontier_review_path": (
                 record.get("pending_frontier_review_path")
                 or (packet or {}).get("pending_frontier_review_path")
@@ -1319,7 +1489,15 @@ def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
         if status in SELF_HEAL_FAILED_STATUSES
         else "resolved"
     )
-    level = "info" if state == "pending" else "error" if state == "failed" else "success"
+    level = (
+        "warn"
+        if status == "repair_deferred"
+        else "info"
+        if state == "pending"
+        else "error"
+        if state == "failed"
+        else "success"
+    )
     title = {
         "pending_local_repair": "Repair queued",
         "local_repairing": "Local repair running",
@@ -1328,6 +1506,7 @@ def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
         "frontier_retry": "Frontier retry needed",
         "frontier_preflight_failed": "Frontier preflight failed",
         "pending_frontier_review": "Frontier review pending",
+        "repair_deferred": "Frontier repair deferred",
         "human_required": "Human required",
         "local_repair_failed": "Local repair failed",
         "frontier_rejected": "Frontier rejected",
@@ -1386,8 +1565,12 @@ def _self_heal_snapshot(limit: int = 12) -> dict[str, Any]:
         "pending": sum(1 for item in history if item.get("state") == "pending"),
         "failed": sum(1 for item in history if item.get("state") == "failed"),
         "frontier": sum(1 for item in history if item.get("resolution") == "frontier"),
-        "human_required": sum(1 for item in history if item.get("title") == "Human required"),
-        "pending_frontier_review": sum(1 for item in history if item.get("title") == "Frontier review pending"),
+        "human_required": sum(
+            1 for item in history if item.get("title") == "Human required"
+        ),
+        "pending_frontier_review": sum(
+            1 for item in history if item.get("title") == "Frontier review pending"
+        ),
     }
     latest = history[-1] if history else None
     status = "quiet"
@@ -1473,7 +1656,9 @@ def _recall_snapshot(limit: int = 400) -> dict[str, Any]:
         pull_counts[kind] = pull_counts.get(kind, 0) + 1
 
     calibration = _read_json_file(recall_dir / "calibration.json")
-    calibration_history = _read_jsonl_file(recall_dir / "calibration-history.jsonl", limit=8)
+    calibration_history = _read_jsonl_file(
+        recall_dir / "calibration-history.jsonl", limit=8
+    )
 
     recent: list[dict[str, Any]] = []
     for row in rows[-12:]:
@@ -1542,7 +1727,13 @@ def _model_lab_snapshot() -> dict[str, Any]:
 
         return snapshot()
     except Exception as exc:
-        return {"status": "error", "error": exc.__class__.__name__, "policy": {"roles": {}}, "candidates": [], "history": []}
+        return {
+            "status": "error",
+            "error": exc.__class__.__name__,
+            "policy": {"roles": {}},
+            "candidates": [],
+            "history": [],
+        }
 
 
 def _mark_batch_activity(status: dict[str, Any]) -> None:
@@ -1561,6 +1752,49 @@ def _mark_batch_activity(status: dict[str, Any]) -> None:
     status["batch"] = annotated
 
 
+def _process_started_at(pid: object) -> datetime | None:
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        value = result.stdout.strip()
+        if not value:
+            return None
+        return datetime.strptime(value, "%a %b %d %H:%M:%S %Y")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _job_process_identity_matches(
+    pid: object,
+    job_started_at: object,
+) -> bool:
+    """Reject a live-but-reused PID left in durable orchestrator state."""
+
+    if not runtime_status._pid_is_alive(pid):
+        return False
+    if not isinstance(job_started_at, str):
+        return False
+    try:
+        job_start = datetime.fromisoformat(job_started_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if job_start.tzinfo is not None:
+        job_start = job_start.astimezone().replace(tzinfo=None)
+    process_start = _process_started_at(pid)
+    if process_start is None:
+        return False
+    # The orchestrator records current_job_started_at after this process was
+    # launched. A process that started later is necessarily a reused PID.
+    return process_start <= job_start
+
+
 def _canonicalize_runtime_status(
     status: dict[str, Any],
     orch_state: dict[str, Any],
@@ -1571,7 +1805,13 @@ def _canonicalize_runtime_status(
     canonical = dict(status)
     job_id = orch_state.get("current_job_id")
     job_pid = orch_state.get("current_job_pid")
-    job_active = bool(job_id and runtime_status._pid_is_alive(job_pid))
+    job_active = bool(
+        job_id
+        and _job_process_identity_matches(
+            job_pid,
+            orch_state.get("current_job_started_at"),
+        )
+    )
     canonical["pending"] = pending
 
     if job_active:
@@ -1579,7 +1819,9 @@ def _canonicalize_runtime_status(
         canonical["current_job_id"] = job_id
         canonical["current_job_pid"] = job_pid
         canonical["state"] = "running"
-        if not same_job or canonical.get("stage") not in ACTIVE_BATCH_STAGES | {"locked"}:
+        if not same_job or canonical.get("stage") not in ACTIVE_BATCH_STAGES | {
+            "locked"
+        }:
             canonical["stage"] = "batch"
         canonical["updated_at"] = (
             canonical.get("updated_at")
@@ -1611,7 +1853,9 @@ def _safe_snapshot_component(
         value = builder()
         if isinstance(value, dict):
             return value
-        raise TypeError(f"snapshot component returned {type(value).__name__}, expected dict")
+        raise TypeError(
+            f"snapshot component returned {type(value).__name__}, expected dict"
+        )
     except Exception as exc:
         return {
             **(fallback or {}),
@@ -1658,7 +1902,9 @@ def build_snapshot() -> dict[str, Any]:
     )
     frontier_repair = {
         **frontier_repair,
-        "active": bool(frontier_repair.get("active") or frontier_activity.get("active")),
+        "active": bool(
+            frontier_repair.get("active") or frontier_activity.get("active")
+        ),
         "process_activity": frontier_activity,
     }
     status["local_consensus"] = local_consensus
@@ -1692,7 +1938,9 @@ def build_snapshot() -> dict[str, Any]:
             )
         else:
             status["review_kind"] = "frontier_repair"
-        status["updated_at"] = latest_review.get("started_at") or status.get("updated_at")
+        status["updated_at"] = latest_review.get("started_at") or status.get(
+            "updated_at"
+        )
     _mark_batch_activity(status)
 
     runtime_metrics = runtime_status.read_metrics(limit=240)
@@ -1710,7 +1958,9 @@ def build_snapshot() -> dict[str, Any]:
             "files_failed": 0,
         }
     )
-    events = (runtime_status.read_events(limit=120) + _recent_log_events(limit=80))[-160:]
+    events = (runtime_status.read_events(limit=120) + _recent_log_events(limit=80))[
+        -160:
+    ]
     ollama = _ollama_snapshot()
     model_status = _safe_snapshot_component(
         "model_status",
@@ -1817,18 +2067,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/recall":
                 _json_response(self, {"recall": build_snapshot()["recall"]})
             elif path == "/api/recall-improvement":
-                _json_response(self, {"recall_improvement": build_snapshot()["recall_improvement"]})
+                _json_response(
+                    self, {"recall_improvement": build_snapshot()["recall_improvement"]}
+                )
             elif path == "/api/model-lab":
                 _json_response(self, {"model_lab": build_snapshot()["model_lab"]})
             elif path == "/api/save-history":
                 _json_response(self, {"save_history": build_snapshot()["save_history"]})
             elif path == "/api/knowledge-mix":
-                _json_response(self, {"knowledge_mix": build_snapshot()["knowledge_mix"]})
+                _json_response(
+                    self, {"knowledge_mix": build_snapshot()["knowledge_mix"]}
+                )
             elif path == "/api/health":
                 _json_response(self, {"health": build_snapshot()["health"]})
             elif path == "/api/model-status":
                 snapshot = build_snapshot()
-                _json_response(self, {"model_status": snapshot["model_status"], "ollama": snapshot["ollama"]})
+                _json_response(
+                    self,
+                    {
+                        "model_status": snapshot["model_status"],
+                        "ollama": snapshot["ollama"],
+                    },
+                )
             elif path.startswith("/static/"):
                 rel = path.removeprefix("/static/").lstrip("/")
                 target = (STATIC_DIR / rel).resolve()

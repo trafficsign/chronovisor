@@ -1,4 +1,5 @@
 """Autonomous self-healing loop for LLM Wiki failure packets."""
+
 from __future__ import annotations
 
 import argparse
@@ -21,11 +22,17 @@ from llm_wiki_mcp.convergence import (
     is_human_required_failure,
     is_human_required_result,
 )
+from llm_wiki_mcp.decision_authority import (
+    compare_semantic_authority,
+    current_semantic_authority,
+    semantic_verdict_authority_error,
+)
 from llm_wiki_mcp.frontier_guard import (
     EvidenceValidationError,
     RepairIncidentEvidence,
 )
 from llm_wiki_mcp.local_repair import LocalRepairDecision, propose_repair
+from llm_wiki_mcp.page_mutation import decision_authority_lock
 
 
 SELF_HEAL_STATUSES = {
@@ -61,6 +68,7 @@ FRONTIER_ONLY_STATUSES = {
     "frontier_retry",
     "frontier_preflight_failed",
     "pending_frontier_review",
+    "repair_deferred",
     "frontier_running",
 }
 
@@ -213,10 +221,13 @@ def _is_empty_query_read_back_packet(packet: dict[str, Any]) -> bool:
         return True
     if reason != "unknown":
         return False
-    return "empty-query" in _read_back_packet_diagnostic_text(
-        packet,
-        failure,
-    ).casefold()
+    return (
+        "empty-query"
+        in _read_back_packet_diagnostic_text(
+            packet,
+            failure,
+        ).casefold()
+    )
 
 
 def _read_back_packet_diagnostic_text(
@@ -521,7 +532,9 @@ def _terminal_resume_kind(
     if status == "human_required":
         if not is_human_required_result(packet.get("frontier_result")):
             return "legacy_nonhuman"
-        started = _parse_iso(packet.get("human_required_at") or packet.get("updated_at"))
+        started = _parse_iso(
+            packet.get("human_required_at") or packet.get("updated_at")
+        )
         cooldown = _env_seconds(
             "LLM_WIKI_HUMAN_REQUIRED_RECHECK_SECONDS",
             DEFAULT_HUMAN_RECHECK_SECONDS,
@@ -622,13 +635,17 @@ def _notification_key(packet: dict[str, Any], frontier_result: dict[str, Any]) -
     return ":".join(
         str(part or "unknown")
         for part in (
-            packet.get("fingerprint") or packet.get("failure_id") or packet.get("raw_file"),
+            packet.get("fingerprint")
+            or packet.get("failure_id")
+            or packet.get("raw_file"),
             failure.get("failure_class") or frontier_result.get("rescue_status"),
         )
     )
 
 
-def _human_notification_body(packet: dict[str, Any], frontier_result: dict[str, Any]) -> str:
+def _human_notification_body(
+    packet: dict[str, Any], frontier_result: dict[str, Any]
+) -> str:
     failure = (
         frontier_result.get("frontier_failure")
         if isinstance(frontier_result.get("frontier_failure"), dict)
@@ -743,14 +760,11 @@ def pending_packets(*, now: datetime | None = None) -> list[Path]:
         status = packet.get("status")
         if status in SELF_HEAL_STATUSES and due:
             out.append(path)
-        elif (
-            packet.get("incident_kind") == "system_code_repair"
-            and (
-                int(packet.get("frontier_attempts") or 0) > 0
-                or (
-                    isinstance(packet.get("frontier_result"), dict)
-                    and packet["frontier_result"].get("execution_started") is True
-                )
+        elif packet.get("incident_kind") == "system_code_repair" and (
+            int(packet.get("frontier_attempts") or 0) > 0
+            or (
+                isinstance(packet.get("frontier_result"), dict)
+                and packet["frontier_result"].get("execution_started") is True
             )
         ):
             # A started repair incident owns exactly one subscription session
@@ -776,13 +790,19 @@ def _raw_candidate_paths(packet: dict[str, Any]) -> list[Path]:
     ]
 
 
-def _restore_quarantined_raw(packet: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+def _restore_quarantined_raw(
+    packet: dict[str, Any], *, dry_run: bool
+) -> dict[str, Any]:
     candidates = _raw_candidate_paths(packet)
     if not candidates:
         return {"restored": False, "reason": "packet has no raw_file"}
     quarantine_path, raw_path = candidates[0], candidates[1]
     if raw_path.exists():
-        return {"restored": False, "reason": "raw already pending", "path": str(raw_path)}
+        return {
+            "restored": False,
+            "reason": "raw already pending",
+            "path": str(raw_path),
+        }
     if not quarantine_path.exists():
         return {"restored": False, "reason": "quarantined raw not found"}
     if dry_run:
@@ -849,7 +869,9 @@ def apply_local_decision(
     )
 
 
-def _local_decision_from_payload(payload: dict[str, Any] | None) -> LocalRepairDecision | None:
+def _local_decision_from_payload(
+    payload: dict[str, Any] | None,
+) -> LocalRepairDecision | None:
     if not isinstance(payload, dict):
         return None
     try:
@@ -870,9 +892,66 @@ def _local_decision_from_payload(payload: dict[str, Any] | None) -> LocalRepairD
             ),
             notes=str(payload["notes"]) if payload.get("notes") is not None else None,
             source=str(payload.get("source") or "persisted"),
+            authority=(
+                dict(payload["authority"])
+                if isinstance(payload.get("authority"), dict)
+                else None
+            ),
+            decision_policy=(
+                dict(payload["decision_policy"])
+                if isinstance(payload.get("decision_policy"), dict)
+                else None
+            ),
+            local_consensus=(
+                dict(payload["local_consensus"])
+                if isinstance(payload.get("local_consensus"), dict)
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _local_decision_authority_error(decision: LocalRepairDecision) -> str | None:
+    """Validate a local-consensus decision against the current effect epoch."""
+
+    if decision.source != "local_consensus":
+        return None
+    if not isinstance(decision.authority, dict):
+        return "local repair decision authority is missing"
+    # Include the full LOCAL_REPAIR_SCHEMA action.  Passing only the audit
+    # envelope would make canonical action/hash verification fail closed for
+    # every real local-consensus repair.
+    review = decision.to_dict()
+    verdict_error = semantic_verdict_authority_error(
+        review,
+        decision.authority,
+        lane="local_repair",
+    )
+    if verdict_error is not None:
+        return verdict_error
+    current, current_error = current_semantic_authority("local_repair")
+    if current is None or current_error is not None:
+        return current_error or "local repair decision authority is unavailable"
+    return compare_semantic_authority(
+        decision.authority,
+        current,
+        lane="local_repair",
+    )
+
+
+@contextmanager
+def _local_decision_effect(decision: LocalRepairDecision | None):
+    """Hold the shared authority epoch across one semantic state transition."""
+
+    if decision is None or decision.source != "local_consensus":
+        yield
+        return
+    with decision_authority_lock():
+        error = _local_decision_authority_error(decision)
+        if error is not None:
+            raise RuntimeError(error)
+        yield
 
 
 def _save_local_decision(packet_path: Path, decision: LocalRepairDecision) -> Path:
@@ -888,7 +967,9 @@ def _save_action(packet_path: Path, action: dict[str, Any], *, applied: bool) ->
     return path
 
 
-def _queue_frontier(packet_path: Path, packet: dict[str, Any], decision: dict[str, Any] | None) -> Path:
+def _queue_frontier(
+    packet_path: Path, packet: dict[str, Any], decision: dict[str, Any] | None
+) -> Path:
     target = _frontier_queue_dir() / packet_path.name
     payload = {
         "queued_at": datetime.now().isoformat(),
@@ -1000,9 +1081,7 @@ def _repair_incident_evidence(packet: dict[str, Any]) -> RepairIncidentEvidence:
             "all_local_models_unavailable",
             False,
         ),
-        local_unavailability_artifact=payload.get(
-            "local_unavailability_artifact"
-        ),
+        local_unavailability_artifact=payload.get("local_unavailability_artifact"),
         role=payload.get("role", "code_repair"),
         incident_kind=payload.get("incident_kind", "system_code_repair"),
         notes=payload.get("notes") or {},
@@ -1221,9 +1300,8 @@ def _handle_packet_unlocked(
         )
         if not dry_run:
             _write_json(packet_path, packet)
-    if (
-        packet.get("status") == "human_required"
-        and not is_human_required_result(packet.get("frontier_result"))
+    if packet.get("status") == "human_required" and not is_human_required_result(
+        packet.get("frontier_result")
     ):
         if dry_run:
             return {
@@ -1240,18 +1318,20 @@ def _handle_packet_unlocked(
             human_boundary_reclassified_at=datetime.now().isoformat(timespec="seconds"),
             next_attempt_at=None,
         )
-    frontier_only = (
-        packet.get("status") in FRONTIER_ONLY_STATUSES
-        and not _frontier_nonconvergence_should_reenter_local(packet)
+    frontier_only = packet.get(
+        "status"
+    ) in FRONTIER_ONLY_STATUSES and not _frontier_nonconvergence_should_reenter_local(
+        packet
     )
     decision: LocalRepairDecision | None = None
     persisted_decision = packet.get("local_decision")
-    local_decision = dict(persisted_decision) if isinstance(persisted_decision, dict) else None
+    local_decision = (
+        dict(persisted_decision) if isinstance(persisted_decision, dict) else None
+    )
     prior_frontier_attempts = int(
         packet.get("frontier_attempts")
         if packet.get("frontier_attempts") is not None
-        else packet.get("self_heal_attempts")
-        or 0
+        else packet.get("self_heal_attempts") or 0
     )
     max_frontier_attempts = max(1, max_attempts)
     will_apply_local = False
@@ -1296,10 +1376,11 @@ def _handle_packet_unlocked(
             in {"resolve_update_target", "retry_raw", "quarantine_raw"}
             and decision.source in {"deterministic", "local_consensus"}
         )
-        requires_frontier_action = (
-            decision.status == "escalate"
-            or decision.action in {"escalate_to_frontier", "propose_prompt_fix", "propose_test_case"}
-        )
+        requires_frontier_action = decision.status == "escalate" or decision.action in {
+            "escalate_to_frontier",
+            "propose_prompt_fix",
+            "propose_test_case",
+        }
         if will_apply_local and frontier_budget is not None:
             allowed, reason = frontier_budget.consume("mutation")
             if not allowed:
@@ -1357,40 +1438,43 @@ def _handle_packet_unlocked(
     if not frontier_only:
         assert decision is not None
         local_attempt = int(packet.get("local_repair_attempts") or 0) + 1
-        _update_packet(
-            packet_path,
-            packet,
-            status="local_repairing",
-            local_repair_attempts=local_attempt,
-            local_decision=local_decision,
-            last_attempt_at=datetime.now().isoformat(timespec="seconds"),
-            next_attempt_at=None,
-            **_lease_updates(lease_owner),
-        )
-        decision_path = _save_local_decision(packet_path, decision)
-        result["local_decision_path"] = str(decision_path)
-
         try:
-            if will_apply_local:
-                action = apply_local_decision(packet, decision, dry_run=False)
-                action_path = _save_action(packet_path, action, applied=True)
+            with _local_decision_effect(decision):
                 _update_packet(
                     packet_path,
                     packet,
-                    status="local_repair_applied",
+                    status="local_repairing",
+                    local_repair_attempts=local_attempt,
                     local_decision=local_decision,
-                    applied_action_path=str(action_path),
+                    last_attempt_at=datetime.now().isoformat(timespec="seconds"),
+                    next_attempt_at=None,
+                    **_lease_updates(lease_owner),
                 )
-                _append_registry({
-                    "timestamp": datetime.now().isoformat(),
-                    "failure_id": packet.get("failure_id"),
-                    "raw_file": packet.get("raw_file"),
-                    "failure_class": packet.get("failure_class"),
-                    "fingerprint": packet.get("fingerprint"),
-                    "resolution": "local",
-                    "decision": local_decision,
-                    "action": action,
-                })
+                decision_path = _save_local_decision(packet_path, decision)
+                result["local_decision_path"] = str(decision_path)
+            if will_apply_local:
+                with _local_decision_effect(decision):
+                    action = apply_local_decision(packet, decision, dry_run=False)
+                    action_path = _save_action(packet_path, action, applied=True)
+                    _update_packet(
+                        packet_path,
+                        packet,
+                        status="local_repair_applied",
+                        local_decision=local_decision,
+                        applied_action_path=str(action_path),
+                    )
+                    _append_registry(
+                        {
+                            "timestamp": datetime.now().isoformat(),
+                            "failure_id": packet.get("failure_id"),
+                            "raw_file": packet.get("raw_file"),
+                            "failure_class": packet.get("failure_class"),
+                            "fingerprint": packet.get("fingerprint"),
+                            "resolution": "local",
+                            "decision": local_decision,
+                            "action": action,
+                        }
+                    )
                 runtime_status.safe_append_event(
                     "success",
                     f"self-heal | local repair applied for {packet.get('raw_file')}",
@@ -1417,6 +1501,8 @@ def _handle_packet_unlocked(
             )
             result["local_error"] = str(exc)
 
+    effect_decision = decision or _local_decision_from_payload(local_decision)
+
     if not enable_frontier or repair_evidence is None:
         local_attempts = int(packet.get("local_repair_attempts") or 0)
         terminal = local_attempts >= max(1, max_attempts)
@@ -1427,47 +1513,81 @@ def _handle_packet_unlocked(
             if not enable_frontier
             else "frontier_repair_not_eligible"
         )
-        _update_packet(
-            packet_path,
-            packet,
-            status=status,
-            local_decision=local_decision,
-            frontier_queue_path=None,
-            next_attempt_at=(
-                None
-                if terminal
-                else (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds")
-            ),
-            quarantined_at=(
-                datetime.now().isoformat(timespec="seconds")
-                if terminal
-                else packet.get("quarantined_at")
-            ),
-            local_failure_reason=local_failure_reason,
-            frontier_eligibility_error=(
-                frontier_ineligible_reason if repair_evidence is None else None
-            ),
-        )
+        try:
+            with _local_decision_effect(effect_decision):
+                _update_packet(
+                    packet_path,
+                    packet,
+                    status=status,
+                    local_decision=local_decision,
+                    frontier_queue_path=None,
+                    next_attempt_at=(
+                        None
+                        if terminal
+                        else (datetime.now() + timedelta(seconds=delay)).isoformat(
+                            timespec="seconds"
+                        )
+                    ),
+                    quarantined_at=(
+                        datetime.now().isoformat(timespec="seconds")
+                        if terminal
+                        else packet.get("quarantined_at")
+                    ),
+                    local_failure_reason=local_failure_reason,
+                    frontier_eligibility_error=(
+                        frontier_ineligible_reason if repair_evidence is None else None
+                    ),
+                )
+        except RuntimeError as exc:
+            _update_packet(
+                packet_path,
+                packet,
+                status="local_repair_failed",
+                local_decision=local_decision,
+                local_error=str(exc),
+            )
+            result["status"] = "local_repair_failed"
+            result["local_error"] = str(exc)
+            return result
         result["status"] = status
         result["reason"] = local_failure_reason
         if repair_evidence is None:
             result["frontier_eligibility_error"] = frontier_ineligible_reason
         return result
 
-    queue_path = _queue_frontier(packet_path, packet, local_decision)
-    result["frontier_queue_path"] = str(queue_path)
-
-    if prior_frontier_attempts >= max_frontier_attempts:
+    try:
+        with _local_decision_effect(effect_decision):
+            queue_path = _queue_frontier(packet_path, packet, local_decision)
+    except RuntimeError as exc:
         _update_packet(
             packet_path,
             packet,
-            status="frontier_quarantined",
+            status="local_repair_failed",
             local_decision=local_decision,
-            frontier_queue_path=str(queue_path),
-            next_attempt_at=None,
-            frontier_error="frontier attempt limit reached before execution",
-            quarantined_at=datetime.now().isoformat(timespec="seconds"),
+            local_error=str(exc),
         )
+        result["status"] = "local_repair_failed"
+        result["local_error"] = str(exc)
+        return result
+    result["frontier_queue_path"] = str(queue_path)
+
+    if prior_frontier_attempts >= max_frontier_attempts:
+        try:
+            with _local_decision_effect(effect_decision):
+                _update_packet(
+                    packet_path,
+                    packet,
+                    status="frontier_quarantined",
+                    local_decision=local_decision,
+                    frontier_queue_path=str(queue_path),
+                    next_attempt_at=None,
+                    frontier_error="frontier attempt limit reached before execution",
+                    quarantined_at=datetime.now().isoformat(timespec="seconds"),
+                )
+        except RuntimeError as exc:
+            result["status"] = "local_repair_failed"
+            result["local_error"] = str(exc)
+            return result
         result["status"] = "frontier_quarantined"
         result["reason"] = "frontier_attempt_limit_reached"
         return result
@@ -1479,9 +1599,7 @@ def _handle_packet_unlocked(
             and not mutation_reserved
         )
         mutation_allowed, mutation_reason = (
-            frontier_budget.can_consume("mutation")
-            if needs_mutation
-            else (True, "ok")
+            frontier_budget.can_consume("mutation") if needs_mutation else (True, "ok")
         )
         if not mutation_allowed:
             return _budget_deferred_result(
@@ -1496,18 +1614,31 @@ def _handle_packet_unlocked(
             mutation_reserved = True
 
     attempt = prior_frontier_attempts + 1
-    _update_packet(
-        packet_path,
-        packet,
-        status="frontier_running",
-        frontier_attempts=attempt,
-        # Keep the legacy aggregate field in sync for old dashboards and
-        # packets, but never increment it before a real frontier execution.
-        self_heal_attempts=attempt,
-        local_decision=local_decision,
-        frontier_queue_path=str(queue_path),
-        **_lease_updates(lease_owner),
-    )
+    try:
+        with _local_decision_effect(effect_decision):
+            _update_packet(
+                packet_path,
+                packet,
+                status="frontier_running",
+                frontier_attempts=attempt,
+                # Keep the legacy aggregate field in sync for old dashboards and
+                # packets, but never increment it before a real frontier execution.
+                self_heal_attempts=attempt,
+                local_decision=local_decision,
+                frontier_queue_path=str(queue_path),
+                **_lease_updates(lease_owner),
+            )
+    except RuntimeError as exc:
+        _update_packet(
+            packet_path,
+            packet,
+            status="local_repair_failed",
+            local_decision=local_decision,
+            local_error=str(exc),
+        )
+        result["status"] = "local_repair_failed"
+        result["local_error"] = str(exc)
+        return result
     try:
         frontier_result = _run_frontier(
             packet_path,
@@ -1515,9 +1646,7 @@ def _handle_packet_unlocked(
             local_decision,
             evidence=repair_evidence,
             execute_patch=(
-                execute_frontier_patch
-                and not requires_frontier_action
-                and not dry_run
+                execute_frontier_patch and not requires_frontier_action and not dry_run
             ),
         )
     except Exception as exc:
@@ -1587,9 +1716,9 @@ def _handle_packet_unlocked(
             deferred_next_attempt = (
                 retry_at.isoformat(timespec="seconds")
                 if retry_at is not None
-                else (datetime.now() + timedelta(seconds=max(60, backoff_base_seconds))).isoformat(
-                    timespec="seconds"
-                )
+                else (
+                    datetime.now() + timedelta(seconds=max(60, backoff_base_seconds))
+                ).isoformat(timespec="seconds")
             )
         _update_packet(
             packet_path,
@@ -1617,7 +1746,9 @@ def _handle_packet_unlocked(
             final_status = "frontier_quarantined"
         else:
             delay = max(0, backoff_base_seconds) * (2 ** max(0, attempt - 1))
-            next_attempt_at = (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds")
+            next_attempt_at = (datetime.now() + timedelta(seconds=delay)).isoformat(
+                timespec="seconds"
+            )
     approved_action: dict[str, Any] | None = None
     action_error: str | None = None
     if final_status == "frontier_approved" and requires_frontier_action:
@@ -1626,27 +1757,30 @@ def _handle_packet_unlocked(
             action_error = "frontier-approved local action artifact is invalid"
         else:
             try:
-                approved_action = apply_local_decision(
-                    packet,
-                    approved_decision,
-                    dry_run=False,
-                )
-                action_path = _save_action(packet_path, approved_action, applied=True)
-                result["action"] = approved_action
-                result["applied_action_path"] = str(action_path)
-                _append_registry(
-                    {
-                        "timestamp": datetime.now().isoformat(),
-                        "failure_id": packet.get("failure_id"),
-                        "raw_file": packet.get("raw_file"),
-                        "failure_class": packet.get("failure_class"),
-                        "fingerprint": packet.get("fingerprint"),
-                        "resolution": "frontier_approved_local_action",
-                        "decision": local_decision,
-                        "frontier": frontier_result,
-                        "action": approved_action,
-                    }
-                )
+                with _local_decision_effect(approved_decision):
+                    approved_action = apply_local_decision(
+                        packet,
+                        approved_decision,
+                        dry_run=False,
+                    )
+                    action_path = _save_action(
+                        packet_path, approved_action, applied=True
+                    )
+                    result["action"] = approved_action
+                    result["applied_action_path"] = str(action_path)
+                    _append_registry(
+                        {
+                            "timestamp": datetime.now().isoformat(),
+                            "failure_id": packet.get("failure_id"),
+                            "raw_file": packet.get("raw_file"),
+                            "failure_class": packet.get("failure_class"),
+                            "fingerprint": packet.get("fingerprint"),
+                            "resolution": "frontier_approved_local_action",
+                            "decision": local_decision,
+                            "frontier": frontier_result,
+                            "action": approved_action,
+                        }
+                    )
             except Exception as exc:
                 action_error = f"frontier-approved local action failed: {exc}"
                 _save_action(
@@ -1681,7 +1815,9 @@ def _handle_packet_unlocked(
         status=final_status,
         frontier_result=frontier_result,
         human_notification=human_notification,
-        pending_frontier_review_path=str(pending_review_path) if pending_review_path else None,
+        pending_frontier_review_path=str(pending_review_path)
+        if pending_review_path
+        else None,
         next_attempt_at=next_attempt_at,
         approved_action=approved_action,
         action_error=action_error,
@@ -1696,18 +1832,22 @@ def _handle_packet_unlocked(
             else packet.get("quarantined_at")
         ),
     )
-    _append_registry({
-        "timestamp": datetime.now().isoformat(),
-        "failure_id": packet.get("failure_id"),
-        "raw_file": packet.get("raw_file"),
-        "failure_class": packet.get("failure_class"),
-        "fingerprint": packet.get("fingerprint"),
-        "resolution": "frontier",
-        "decision": local_decision,
-        "frontier": frontier_result,
-        "human_notification": human_notification,
-        "pending_frontier_review_path": str(pending_review_path) if pending_review_path else None,
-    })
+    _append_registry(
+        {
+            "timestamp": datetime.now().isoformat(),
+            "failure_id": packet.get("failure_id"),
+            "raw_file": packet.get("raw_file"),
+            "failure_class": packet.get("failure_class"),
+            "fingerprint": packet.get("fingerprint"),
+            "resolution": "frontier",
+            "decision": local_decision,
+            "frontier": frontier_result,
+            "human_notification": human_notification,
+            "pending_frontier_review_path": str(pending_review_path)
+            if pending_review_path
+            else None,
+        }
+    )
     event_level = (
         "success"
         if final_status == "frontier_approved"
@@ -1731,7 +1871,9 @@ def _handle_packet_unlocked(
     result["status"] = final_status
     result["frontier_result"] = frontier_result
     result["human_notification"] = human_notification
-    result["pending_frontier_review_path"] = str(pending_review_path) if pending_review_path else None
+    result["pending_frontier_review_path"] = (
+        str(pending_review_path) if pending_review_path else None
+    )
     return result
 
 
@@ -1865,7 +2007,11 @@ def run_auto_apply_error_self_heal(
         start_background=False,
         dry_run=dry_run,
     )
-    created = [Path(path) for path in supervision.get("packets_created", []) if isinstance(path, str)]
+    created = [
+        Path(path)
+        for path in supervision.get("packets_created", [])
+        if isinstance(path, str)
+    ]
     packets = created or pending_auto_apply_error_packets()
     packets = packets[:max_packets]
     results: list[dict[str, Any]] = []
@@ -1963,7 +2109,7 @@ def enqueue_due_system_repairs(*, limit: int = 2) -> dict[str, Any]:
             break
     for path in due_paths:
         try:
-            packet = _read_json(path)
+            _read_json(path)
             job = enqueue_system_code_repair(path)
             queued.append(
                 {
@@ -1995,8 +2141,7 @@ def drill_packet() -> dict[str, Any]:
         "job_id": "drill",
         "failure_class": "apply.update_target_not_found",
         "fingerprint": (
-            "apply.update_target_not_found:"
-            "opus-4-7-evaluation-and-industry-geopolitics"
+            "apply.update_target_not_found:opus-4-7-evaluation-and-industry-geopolitics"
         ),
         "attempts": 3,
         "error": (
@@ -2004,9 +2149,7 @@ def drill_packet() -> dict[str, Any]:
             "'opus-4-7-evaluation-and-industry-geopolitics'"
         ),
         "requested_page_id": "opus-4-7-evaluation-and-industry-geopolitics",
-        "similar_existing_pages": [
-            "ai/opus-4.7-evaluation-and-industry-geopolitics"
-        ],
+        "similar_existing_pages": ["ai/opus-4.7-evaluation-and-industry-geopolitics"],
         "status": "pending_local_repair",
     }
 
@@ -2100,9 +2243,16 @@ def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
     sandbox_root = Path(tempfile.mkdtemp(prefix="llm-wiki-self-heal-drill-"))
     path_snapshot = _patch_wiki_paths(sandbox_root)
 
-    page = sandbox_root / "pages" / "ai" / "opus-4.7-evaluation-and-industry-geopolitics.md"
+    page = (
+        sandbox_root
+        / "pages"
+        / "ai"
+        / "opus-4.7-evaluation-and-industry-geopolitics.md"
+    )
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text("---\ntitle: Opus\nupdated: 2026-01-01\n---\nold\n", encoding="utf-8")
+    page.write_text(
+        "---\ntitle: Opus\nupdated: 2026-01-01\n---\nold\n", encoding="utf-8"
+    )
     raw_path = sandbox_root / "raw" / "broken.md"
     raw_path.write_text("sandbox drill raw\n", encoding="utf-8")
 
@@ -2195,9 +2345,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow an eligible system-code incident to request the guarded repair plane.",
     )
     parser.add_argument("--no-frontier", action="store_true")
-    parser.add_argument("--review-only", action="store_true", help="Frontier may review but not patch.")
+    parser.add_argument(
+        "--review-only", action="store_true", help="Frontier may review but not patch."
+    )
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--drill", action="store_true", help="Run a synthetic local repair drill.")
+    parser.add_argument(
+        "--drill", action="store_true", help="Run a synthetic local repair drill."
+    )
     parser.add_argument(
         "--sandbox-drill",
         action="store_true",
@@ -2264,7 +2418,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.drill:
-        print(json.dumps(run_drill(use_qwen=not args.no_qwen), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                run_drill(use_qwen=not args.no_qwen), ensure_ascii=False, indent=2
+            )
+        )
         return 0
     if args.auto_apply_errors:
         result = run_auto_apply_error_self_heal(

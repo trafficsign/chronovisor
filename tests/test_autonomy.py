@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,8 @@ import pytest
 
 from llm_wiki_mcp import autonomy
 from llm_wiki_mcp.convergence import ConvergenceStore, CycleBudget, RetryPolicy
+from llm_wiki_mcp.decision_router import canonical_agreement_signature
+from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 
 
@@ -55,6 +58,87 @@ def _frontier_budget(*, calls: int = 3, mutations: int = 3) -> CycleBudget:
     )
 
 
+def _authority(lane: str, *, artifact_sha256: str = "a" * 64) -> dict:
+    schema_name = (
+        "duplicate_resolution"
+        if lane == autonomy.DUPLICATE_FRONTIER_LANE
+        else "retention"
+    )
+    return {
+        "source": "adopted_local_consensus",
+        "authority_version": 1,
+        "lane": lane,
+        "lane_contract_sha256": "b" * 64,
+        "lane_contract_manifest_sha256": "c" * 64,
+        "lane_contract_case_manifest_sha256": "d" * 64,
+        "policy": {
+            "kind": "consensus",
+            "schema_name": schema_name,
+            "mode": "enabled",
+            "error": None,
+        },
+        "router": {
+            "source": "adopted_artifact",
+            "artifact_sha256": artifact_sha256,
+            "error": None,
+            "models": ["primary", "challenger", "tie-break"],
+        },
+    }
+
+
+def _decision_policy(authority: dict) -> dict:
+    return {
+        **authority["policy"],
+        "router_policy": authority["router"],
+    }
+
+
+def _local_consensus_proof(review: dict, authority: dict) -> dict:
+    schema = production_decision_schemas()[authority["policy"]["schema_name"]]
+    signature = canonical_agreement_signature(review, schema=schema)
+    agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    models = authority["router"]["models"]
+    return {
+        "status": "agreed",
+        "ok": True,
+        "agreement_sha256": agreement,
+        "failure_class": None,
+        "quarantine_reason": None,
+        "votes": [
+            {
+                "role": "primary",
+                "model": models[0],
+                "valid": True,
+                "signature_sha256": agreement,
+                "invalid_reason": None,
+            },
+            {
+                "role": "challenger",
+                "model": models[1],
+                "valid": True,
+                "signature_sha256": agreement,
+                "invalid_reason": None,
+            },
+        ],
+    }
+
+
+def _authority_bound_review(
+    decision: str,
+    confidence: float,
+    summary: str,
+    authority: dict,
+) -> dict:
+    review = {
+        "decision": decision,
+        "confidence": confidence,
+        "summary": summary,
+        "decision_policy": _decision_policy(authority),
+    }
+    review["local_consensus"] = _local_consensus_proof(review, authority)
+    return review
+
+
 def _deferred_record(left: str = "a", right: str = "b") -> dict:
     return {
         "left": left,
@@ -94,7 +178,9 @@ def test_duplicate_decision_defers_uncertain_pair(monkeypatch) -> None:
     assert decision["reason"] == "title_mismatch"
 
 
-def test_duplicate_resolution_routes_exact_high_confidence_pair_without_mutation(monkeypatch, tmp_path: Path) -> None:
+def test_duplicate_resolution_routes_exact_high_confidence_pair_without_mutation(
+    monkeypatch, tmp_path: Path
+) -> None:
     pages = {
         "rich": {
             "page_id": "rich",
@@ -111,12 +197,22 @@ def test_duplicate_resolution_routes_exact_high_confidence_pair_without_mutation
             "path": str(tmp_path / "thin.md"),
         },
     }
-    (tmp_path / "rich.md").write_text("---\ntitle: Same\nupdated: 2026-07-06\n---\nRich\n", encoding="utf-8")
-    (tmp_path / "thin.md").write_text("---\ntitle: Same\nupdated: 2026-07-06\n---\nThin\n", encoding="utf-8")
+    (tmp_path / "rich.md").write_text(
+        "---\ntitle: Same\nupdated: 2026-07-06\n---\nRich\n", encoding="utf-8"
+    )
+    (tmp_path / "thin.md").write_text(
+        "---\ntitle: Same\nupdated: 2026-07-06\n---\nThin\n", encoding="utf-8"
+    )
     monkeypatch.setattr(autonomy, "_page_meta", lambda page_id: pages.get(page_id, {}))
-    monkeypatch.setattr(autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md")
+    monkeypatch.setattr(
+        autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
+    )
     monkeypatch.setattr("llm_wiki_mcp.index_store.get_store", lambda: None)
-    monkeypatch.setattr(autonomy, "_page_quality", lambda page_id, meta=None: 5.0 if page_id == "rich" else 1.0)
+    monkeypatch.setattr(
+        autonomy,
+        "_page_quality",
+        lambda page_id, meta=None: 5.0 if page_id == "rich" else 1.0,
+    )
     writes: list[dict] = []
     monkeypatch.setattr(autonomy, "_append_jsonl", lambda path, row: writes.append(row))
 
@@ -151,7 +247,9 @@ def test_deterministic_duplicate_proposal_never_calls_lifecycle_writer(
 ) -> None:
     _write_page(tmp_path / "a.md", "Same", "Winner")
     _write_page(tmp_path / "b.md", "Same", "Loser")
-    monkeypatch.setattr(autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md")
+    monkeypatch.setattr(
+        autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
+    )
     monkeypatch.setattr(autonomy, "_page_meta", lambda page_id: {"page_id": page_id})
     monkeypatch.setattr(
         autonomy,
@@ -162,14 +260,19 @@ def test_deterministic_duplicate_proposal_never_calls_lifecycle_writer(
     monkeypatch.setattr(
         autonomy,
         "_soft_supersede_page",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("lifecycle writer called")),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("lifecycle writer called")
+        ),
     )
 
     result = autonomy.resolve_duplicate_candidates([_exact_record()], write=False)
 
     assert result["applied"] == 0
     assert result["deferred"] == 1
-    assert result["decisions"][0]["result"]["reason"] == "deterministic_heuristic_is_proposal_only"
+    assert (
+        result["decisions"][0]["result"]["reason"]
+        == "deterministic_heuristic_is_proposal_only"
+    )
     meta, body = parse_frontmatter((tmp_path / "b.md").read_text(encoding="utf-8"))
     assert meta["status"] == "active"
     assert "superseded_by" not in meta
@@ -183,7 +286,9 @@ def test_soft_supersede_preserves_correction_that_lands_before_locked_cas(
 ) -> None:
     _write_page(tmp_path / "a.md", "Same", "Winner")
     _write_page(tmp_path / "b.md", "Same", "Loser")
-    monkeypatch.setattr(autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md")
+    monkeypatch.setattr(
+        autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
+    )
     loser_snapshot = autonomy._duplicate_page_snapshot("b")
     winner_snapshot = autonomy._duplicate_page_snapshot("a")
     loser = tmp_path / "b.md"
@@ -215,7 +320,9 @@ def test_lifecycle_writers_defer_pages_with_pending_content_correction(
     _write_page(tmp_path / "winner.md", "Same", "Winner")
     _write_page(tmp_path / "loser.md", "Same", "Loser")
     _write_page(tmp_path / "old.md", "Old", "Archive candidate")
-    monkeypatch.setattr(autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md")
+    monkeypatch.setattr(
+        autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
+    )
     store = _convergence_store(tmp_path)
     store.merge_item(
         lane="content_correction",
@@ -251,7 +358,9 @@ def test_lifecycle_writers_defer_pages_with_pending_content_correction(
 
     assert supersede["status"] == "retry"
     assert supersede["reason"] == "pending_content_correction"
-    loser_meta, _ = parse_frontmatter((tmp_path / "loser.md").read_text(encoding="utf-8"))
+    loser_meta, _ = parse_frontmatter(
+        (tmp_path / "loser.md").read_text(encoding="utf-8")
+    )
     old_meta, _ = parse_frontmatter((tmp_path / "old.md").read_text(encoding="utf-8"))
     assert loser_meta["status"] == "active"
     assert old_meta["status"] == "active"
@@ -324,7 +433,9 @@ def test_lifecycle_guard_avoids_inverse_lock_order(
     assert order == ["state-enter", "wiki-enter", "wiki-exit", "state-exit"]
 
 
-def test_autonomy_temp_names_are_unique_for_same_page_and_preimage(tmp_path: Path) -> None:
+def test_autonomy_temp_names_are_unique_for_same_page_and_preimage(
+    tmp_path: Path,
+) -> None:
     page = tmp_path / "old.md"
     _write_page(page, "Old", "Body")
     first = autonomy._write_unique_temp(page, b"one", token="same")
@@ -345,7 +456,9 @@ def test_deterministic_duplicate_proposal_does_not_spend_mutation_budget(
     _write_page(tmp_path / "a.md", "Same", "Winner")
     _write_page(tmp_path / "b.md", "Same", "Loser")
     before = (tmp_path / "b.md").read_bytes()
-    monkeypatch.setattr(autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md")
+    monkeypatch.setattr(
+        autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
+    )
     monkeypatch.setattr(autonomy, "_page_meta", lambda page_id: {"page_id": page_id})
     monkeypatch.setattr(
         autonomy,
@@ -374,7 +487,9 @@ def test_soft_supersede_rolls_back_only_its_owned_write_on_postverify_failure(
     _write_page(tmp_path / "a.md", "Alpha", "Winner")
     _write_page(tmp_path / "b.md", "Beta", "Loser")
     original_loser = (tmp_path / "b.md").read_bytes()
-    monkeypatch.setattr(autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md")
+    monkeypatch.setattr(
+        autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
+    )
     loser_snapshot = autonomy._duplicate_page_snapshot("b")
     winner_snapshot = autonomy._duplicate_page_snapshot("a")
     real_replace = autonomy.os.replace
@@ -407,8 +522,10 @@ def test_soft_supersede_rolls_back_only_its_owned_write_on_postverify_failure(
         "rolled_back": True,
     }
     assert (tmp_path / "b.md").read_bytes() == original_loser
-    assert (tmp_path / "a.md").read_text(encoding="utf-8").endswith(
-        "concurrent winner update\n"
+    assert (
+        (tmp_path / "a.md")
+        .read_text(encoding="utf-8")
+        .endswith("concurrent winner update\n")
     )
 
 
@@ -418,7 +535,9 @@ def test_soft_supersede_does_not_rollback_over_a_foreign_postwrite_change(
 ) -> None:
     _write_page(tmp_path / "a.md", "Alpha", "Winner")
     _write_page(tmp_path / "b.md", "Beta", "Loser")
-    monkeypatch.setattr(autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md")
+    monkeypatch.setattr(
+        autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
+    )
     loser_snapshot = autonomy._duplicate_page_snapshot("b")
     winner_snapshot = autonomy._duplicate_page_snapshot("a")
     real_replace = autonomy.os.replace
@@ -455,8 +574,10 @@ def test_soft_supersede_does_not_rollback_over_a_foreign_postwrite_change(
         "reason": "post_write_verification_failed",
         "rolled_back": False,
     }
-    assert (tmp_path / "b.md").read_text(encoding="utf-8").endswith(
-        "foreign loser update\n"
+    assert (
+        (tmp_path / "b.md")
+        .read_text(encoding="utf-8")
+        .endswith("foreign loser update\n")
     )
 
 
@@ -560,8 +681,130 @@ def test_duplicate_reuses_durable_frontier_approval_for_mutation_retry(
     meta, body = parse_frontmatter((pages / "b.md").read_text(encoding="utf-8"))
     assert meta["status"] == "deprecated"
     assert meta["superseded_by"] == "a"
-    assert meta["frontier_approval_key"].startswith("duplicate_frontier:")
+    assert meta["frontier_approval_key"].startswith("autonomy_duplicate_resolution:")
     assert body == "Loser\n"
+
+
+def test_duplicate_stale_approval_cannot_cross_adoption_epoch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    _write_page(pages / "a.md", "Same", "Winner")
+    _write_page(pages / "b.md", "Same", "Loser")
+    before = (pages / "b.md").read_bytes()
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: pages / f"{page_id}.md")
+    monkeypatch.setattr(autonomy, "_page_meta", lambda page_id: {"page_id": page_id})
+    monkeypatch.setattr(
+        autonomy,
+        "_page_quality",
+        lambda page_id, meta=None: 5.0 if page_id == "a" else 1.0,
+    )
+    store = _convergence_store(tmp_path)
+    first = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_exact_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1, mutations=0),
+        reviewer=lambda _candidate: {
+            "decision": "supersede_right",
+            "confidence": 0.99,
+            "summary": "A subsumes B",
+        },
+        now=NOW,
+        write=False,
+    )
+    assert first["status_counts"] == {"frontier_retry": 1}
+
+    approval_path = next((store.state_file.parent / "approvals").rglob("*.json"))
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    old_authority = _authority(autonomy.DUPLICATE_FRONTIER_LANE)
+    approval["authority"] = old_authority
+    approval["review"]["decision_policy"] = _decision_policy(old_authority)
+    approval_path.write_text(json.dumps(approval), encoding="utf-8")
+    current_authority = _authority(
+        autonomy.DUPLICATE_FRONTIER_LANE,
+        artifact_sha256="e" * 64,
+    )
+    monkeypatch.setattr(
+        autonomy,
+        "_current_autonomy_authority",
+        lambda *_args, **_kwargs: (current_authority, None),
+    )
+
+    second = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_exact_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1, mutations=1),
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("stale approval must not be resampled")
+        ),
+        now=NOW + timedelta(seconds=61),
+        write=False,
+    )
+
+    assert second["status_counts"] == {"frontier_retry": 1}
+    assert "authority changed" in second["results"][0]["reason"]
+    assert second["frontier_calls"] == 0
+    assert (pages / "b.md").read_bytes() == before
+
+
+def test_duplicate_effect_revalidates_authority_inside_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    _write_page(pages / "a.md", "Alpha", "Winner")
+    _write_page(pages / "b.md", "Beta", "Loser")
+    before = (pages / "b.md").read_bytes()
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: pages / f"{page_id}.md")
+    store = _convergence_store(tmp_path)
+    initial_authority = _authority(autonomy.DUPLICATE_FRONTIER_LANE)
+    changed_authority = _authority(
+        autonomy.DUPLICATE_FRONTIER_LANE,
+        artifact_sha256="e" * 64,
+    )
+    effect_lock = False
+    lock_entries = 0
+
+    @contextmanager
+    def authority_lock():
+        nonlocal effect_lock, lock_entries
+        lock_entries += 1
+        effect_lock = lock_entries >= 2
+        try:
+            yield
+        finally:
+            effect_lock = False
+
+    monkeypatch.setattr(autonomy, "decision_authority_lock", authority_lock)
+    monkeypatch.setattr(
+        autonomy,
+        "_current_autonomy_authority",
+        lambda *_args, **_kwargs: (
+            changed_authority if effect_lock else initial_authority,
+            None,
+        ),
+    )
+    result = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_deferred_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1, mutations=1),
+        reviewer=lambda _candidate: _authority_bound_review(
+            "supersede_right",
+            0.99,
+            "A subsumes B",
+            initial_authority,
+        ),
+        now=NOW,
+        write=False,
+    )
+
+    assert lock_entries == 2
+    assert result["status_counts"] == {"frontier_retry": 1}
+    assert "authority changed" in result["results"][0]["apply"]["reason"]
+    assert (pages / "b.md").read_bytes() == before
 
 
 def test_duplicate_recovers_convergence_after_crash_following_approved_write(
@@ -615,8 +858,93 @@ def test_duplicate_recovers_convergence_after_crash_following_approved_write(
 
     assert recovered["status_counts"] == {"already_applied": 1}
     assert recovered["results"][0]["convergence_status"] == "applied"
+    assert recovered["results"][0]["recovery_only"] is True
+    assert recovered["results"][0]["semantic_effect"] is False
     item = store.list_items(lane=autonomy.DUPLICATE_FRONTIER_LANE)[0]
     assert item["status"] == "applied"
+
+
+def test_duplicate_does_not_recover_from_frontmatter_only_postimage_match(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    _write_page(pages / "a.md", "Same", "Winner")
+    _write_page(pages / "b.md", "Same", "Loser")
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: pages / f"{page_id}.md")
+    store = _convergence_store(tmp_path)
+    real_complete = store.complete
+
+    def crash_after_write(key, status, **kwargs):
+        if status == "applied":
+            raise RuntimeError("simulated process crash")
+        return real_complete(key, status, **kwargs)
+
+    monkeypatch.setattr(store, "complete", crash_after_write)
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        autonomy.resolve_deferred_duplicates_with_frontier(
+            [_deferred_record()],
+            convergence_store=store,
+            budget=_frontier_budget(calls=1, mutations=1),
+            reviewer=lambda _candidate: {
+                "decision": "supersede_right",
+                "confidence": 0.99,
+                "summary": "A subsumes B",
+            },
+            now=NOW,
+            write=False,
+        )
+
+    approval_path = next((store.state_file.parent / "approvals").rglob("*.json"))
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    exact = (pages / "b.md").read_bytes()
+    assert approval["effect_receipt"]["postimages"]["b"] == {
+        "sha256": hashlib.sha256(exact).hexdigest(),
+        "size_bytes": len(exact),
+    }
+    # Preserve the approved lifecycle frontmatter while concurrently changing
+    # the body. A field-only recovery check would incorrectly terminalize it.
+    (pages / "b.md").write_bytes(exact + b"concurrent body change\n")
+
+    monkeypatch.setattr(store, "complete", real_complete)
+    result = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_deferred_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=0, mutations=0),
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("reviewer called during non-exact recovery")
+        ),
+        now=NOW + timedelta(seconds=31),
+        write=False,
+    )
+
+    assert result["status_counts"] == {"already_applied": 1}
+    assert "convergence_status" not in result["results"][0]
+    item = store.list_items(lane=autonomy.DUPLICATE_FRONTIER_LANE)[0]
+    assert item["status"] != "applied"
+
+
+def test_postimage_recovery_requires_every_mutated_page(
+    monkeypatch, tmp_path: Path
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_bytes(b"first exact\n")
+    second.write_bytes(b"second changed\n")
+    monkeypatch.setattr(
+        autonomy,
+        "find_page",
+        lambda page_id: {"first": first, "second": second}.get(page_id),
+    )
+    receipt = {
+        "postimages": {
+            "first": autonomy._bytes_receipt(first.read_bytes()),
+            "second": autonomy._bytes_receipt(b"second reviewed\n"),
+        }
+    }
+
+    assert autonomy._current_pages_match_postimages(receipt) is False
 
 
 def test_frontier_consumer_routes_exact_title_heuristic_directly_to_frontier(
@@ -679,7 +1007,9 @@ def test_frontier_consumer_deterministic_dry_run_is_byte_for_byte_read_only(
         [_exact_record()],
         convergence_store=store,
         budget=budget,
-        reviewer=lambda _candidate: (_ for _ in ()).throw(AssertionError("reviewer called")),
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("reviewer called")
+        ),
         now=NOW,
         dry_run=True,
     )
@@ -715,7 +1045,11 @@ def test_frontier_duplicate_soft_supersede_preserves_bodies_and_is_exact_once(
         calls.append(candidate)
         assert candidate["left"] == "a"
         assert candidate["right"] == "b"
-        return {"decision": "supersede_right", "confidence": 0.97, "summary": "A subsumes B"}
+        return {
+            "decision": "supersede_right",
+            "confidence": 0.97,
+            "summary": "A subsumes B",
+        }
 
     first = autonomy.resolve_deferred_duplicates_with_frontier(
         [_deferred_record()],
@@ -741,7 +1075,10 @@ def test_frontier_duplicate_soft_supersede_preserves_bodies_and_is_exact_once(
     assert b_meta["superseded_by"] == "a"
     assert b_body == "Body B stays exactly here.\n"
     assert sorted(path.name for path in pages.iterdir()) == ["a.md", "b.md"]
-    assert len((tmp_path / "decisions.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+    assert (
+        len((tmp_path / "decisions.jsonl").read_text(encoding="utf-8").splitlines())
+        == 1
+    )
 
 
 def test_frontier_duplicate_key_is_pair_order_stable_and_content_sensitive(
@@ -759,7 +1096,11 @@ def test_frontier_duplicate_key_is_pair_order_stable_and_content_sensitive(
 
     def reviewer(candidate: dict) -> dict:
         calls.append(candidate)
-        return {"decision": "keep_both", "confidence": 0.91, "summary": "Distinct scope"}
+        return {
+            "decision": "keep_both",
+            "confidence": 0.91,
+            "summary": "Distinct scope",
+        }
 
     first = autonomy.resolve_deferred_duplicates_with_frontier(
         [_deferred_record("a", "b")],
@@ -813,7 +1154,11 @@ def test_frontier_duplicate_content_cas_refuses_concurrent_page_change(
             (pages / "b.md").read_text(encoding="utf-8") + "concurrent update\n",
             encoding="utf-8",
         )
-        return {"decision": "supersede_right", "confidence": 0.99, "summary": "A subsumes B"}
+        return {
+            "decision": "supersede_right",
+            "confidence": 0.99,
+            "summary": "A subsumes B",
+        }
 
     result = autonomy.resolve_deferred_duplicates_with_frontier(
         [_deferred_record()],
@@ -877,6 +1222,36 @@ def test_frontier_duplicate_accepts_structured_runner_reviewer_annotation() -> N
     assert normalized["decision"] == "keep_both"
 
 
+def test_autonomy_normalizers_preserve_production_authority_audits() -> None:
+    duplicate_authority = _authority(autonomy.DUPLICATE_FRONTIER_LANE)
+    retention_authority = _authority(autonomy.RETENTION_FRONTIER_LANE)
+    duplicate = autonomy._normalize_duplicate_frontier_review(
+        _authority_bound_review(
+            "keep_both",
+            0.95,
+            "Distinct pages",
+            duplicate_authority,
+        )
+    )
+    retention = autonomy._normalize_retention_frontier_review(
+        _authority_bound_review(
+            "keep_active",
+            0.95,
+            "Still current",
+            retention_authority,
+        )
+    )
+
+    assert duplicate["decision_policy"] == _decision_policy(duplicate_authority)
+    assert duplicate["local_consensus"] == _local_consensus_proof(
+        duplicate, duplicate_authority
+    )
+    assert retention["decision_policy"] == _decision_policy(retention_authority)
+    assert retention["local_consensus"] == _local_consensus_proof(
+        retention, retention_authority
+    )
+
+
 def test_frontier_duplicate_invalid_supersede_schema_retries_without_mutation(
     monkeypatch,
     tmp_path: Path,
@@ -926,7 +1301,11 @@ def test_frontier_duplicate_retries_with_backoff_then_quarantines(
     def reviewer(_candidate: dict) -> dict:
         nonlocal calls
         calls += 1
-        return {"decision": "needs_retry", "confidence": 0.0, "summary": "temporary ambiguity"}
+        return {
+            "decision": "needs_retry",
+            "confidence": 0.0,
+            "summary": "temporary ambiguity",
+        }
 
     first = autonomy.resolve_deferred_duplicates_with_frontier(
         [_deferred_record()],
@@ -976,18 +1355,28 @@ def test_frontier_duplicate_uses_narrow_human_boundary_and_cycle_budget(
                 "decision": "needs_retry",
                 "confidence": 0.0,
                 "summary": "login required",
-                "frontier_failure": {"failure_class": "auth_required", "human_required": True},
+                "frontier_failure": {
+                    "failure_class": "auth_required",
+                    "human_required": True,
+                },
             }
         return {
             "decision": "needs_retry",
             "confidence": 0.0,
             "summary": "model asks for a person",
             "human_required": True,
-            "frontier_failure": {"failure_class": "model_uncertain", "human_required": True},
+            "frontier_failure": {
+                "failure_class": "model_uncertain",
+                "human_required": True,
+            },
         }
 
     result = autonomy.resolve_deferred_duplicates_with_frontier(
-        [_deferred_record("a", "b"), _deferred_record("c", "d"), _deferred_record("e", "f")],
+        [
+            _deferred_record("a", "b"),
+            _deferred_record("c", "d"),
+            _deferred_record("e", "f"),
+        ],
         convergence_store=store,
         budget=_frontier_budget(calls=2),
         reviewer=reviewer,
@@ -1000,7 +1389,9 @@ def test_frontier_duplicate_uses_narrow_human_boundary_and_cycle_budget(
         "human_required": 1,
         "pending_frontier": 1,
     }
-    budget_deferred = next(row for row in result["results"] if row.get("pair") == ["e", "f"])
+    budget_deferred = next(
+        row for row in result["results"] if row.get("pair") == ["e", "f"]
+    )
     assert budget_deferred["reason"] == "frontier_budget_exhausted"
 
 
@@ -1023,13 +1414,20 @@ def test_frontier_duplicate_dry_run_creates_nothing_and_spends_no_budget(
         [_deferred_record()],
         convergence_store=store,
         budget=budget,
-        reviewer=lambda _candidate: (_ for _ in ()).throw(AssertionError("reviewer called")),
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("reviewer called")
+        ),
         now=NOW,
         dry_run=True,
     )
 
     assert result["status_counts"] == {"would_review": 1}
-    assert budget.snapshot()["used"] == {"local": 0, "frontier": 0, "mutation": 0, "raw_bytes": 0}
+    assert budget.snapshot()["used"] == {
+        "local": 0,
+        "frontier": 0,
+        "mutation": 0,
+        "raw_bytes": 0,
+    }
     assert {path.name: path.read_bytes() for path in pages.iterdir()} == before
     assert not store.state_file.exists()
     assert not store.events_file.exists()
@@ -1071,7 +1469,9 @@ def test_retention_skips_already_archived_without_starving_next_candidate(
     _write_page(archived, "Archived", "Old")
     _write_page(active, "Active", "Old")
     archived.write_text(
-        archived.read_text(encoding="utf-8").replace("status: active", "status: archived"),
+        archived.read_text(encoding="utf-8").replace(
+            "status: active", "status: archived"
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -1199,8 +1599,64 @@ def test_retention_reuses_durable_approval_after_mutation_budget_retry(
     meta, body = parse_frontmatter(page.read_text(encoding="utf-8"))
     assert meta["status"] == "archived"
     assert meta["autonomy_decision"] == "retention_frontier_archive"
-    assert meta["frontier_approval_key"].startswith("retention_frontier:")
+    assert meta["frontier_approval_key"].startswith("autonomy_retention:")
     assert body == "Redundant historical cache\n"
+
+
+def test_retention_effect_revalidates_authority_inside_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Redundant historical cache")
+    before = page.read_bytes()
+    monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
+    store = _convergence_store(tmp_path)
+    initial_authority = _authority(autonomy.RETENTION_FRONTIER_LANE)
+    changed_authority = _authority(
+        autonomy.RETENTION_FRONTIER_LANE,
+        artifact_sha256="e" * 64,
+    )
+    effect_lock = False
+    lock_entries = 0
+
+    @contextmanager
+    def authority_lock():
+        nonlocal effect_lock, lock_entries
+        lock_entries += 1
+        effect_lock = lock_entries >= 2
+        try:
+            yield
+        finally:
+            effect_lock = False
+
+    monkeypatch.setattr(autonomy, "decision_authority_lock", authority_lock)
+    monkeypatch.setattr(
+        autonomy,
+        "_current_autonomy_authority",
+        lambda *_args, **_kwargs: (
+            changed_authority if effect_lock else initial_authority,
+            None,
+        ),
+    )
+    result = autonomy.apply_retention_archives(
+        {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}},
+        write=False,
+        budget=_frontier_budget(calls=1, mutations=1),
+        convergence_store=store,
+        reviewer=lambda _candidate: _authority_bound_review(
+            "archive",
+            0.99,
+            "Redundant",
+            initial_authority,
+        ),
+        now=NOW,
+    )
+
+    assert lock_entries == 2
+    assert result["status_counts"] == {"frontier_retry": 1}
+    assert "authority changed" in result["decisions"][0]["result"]["reason"]
+    assert page.read_bytes() == before
 
 
 def test_retention_recovers_convergence_after_crash_following_archive(
@@ -1251,8 +1707,66 @@ def test_retention_recovers_convergence_after_crash_following_archive(
 
     assert recovered["decisions"][0]["action"] == "already_archived"
     assert recovered["decisions"][0]["convergence_status"] == "applied"
+    assert recovered["decisions"][0]["recovery_only"] is True
+    assert recovered["decisions"][0]["semantic_effect"] is False
     item = store.list_items(lane=autonomy.RETENTION_FRONTIER_LANE)[0]
     assert item["status"] == "applied"
+
+
+def test_retention_does_not_recover_from_frontmatter_only_postimage_match(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Redundant")
+    monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
+    store = _convergence_store(tmp_path)
+    real_complete = store.complete
+
+    def crash_after_write(key, status, **kwargs):
+        if status == "applied":
+            raise RuntimeError("simulated retention crash")
+        return real_complete(key, status, **kwargs)
+
+    monkeypatch.setattr(store, "complete", crash_after_write)
+    payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
+    with pytest.raises(RuntimeError, match="simulated retention crash"):
+        autonomy.apply_retention_archives(
+            payload,
+            write=False,
+            convergence_store=store,
+            reviewer=lambda _candidate: {
+                "decision": "archive",
+                "confidence": 0.99,
+                "summary": "Redundant",
+            },
+            now=NOW,
+        )
+
+    approval_path = next((store.state_file.parent / "approvals").rglob("*.json"))
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    exact = page.read_bytes()
+    assert approval["effect_receipt"]["postimages"]["old"] == {
+        "sha256": hashlib.sha256(exact).hexdigest(),
+        "size_bytes": len(exact),
+    }
+    page.write_bytes(exact + b"concurrent body change\n")
+
+    monkeypatch.setattr(store, "complete", real_complete)
+    result = autonomy.apply_retention_archives(
+        payload,
+        write=False,
+        convergence_store=store,
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("reviewer called during non-exact retention recovery")
+        ),
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert result["decisions"][0]["action"] == "already_archived"
+    assert "convergence_status" not in result["decisions"][0]
+    item = store.list_items(lane=autonomy.RETENTION_FRONTIER_LANE)[0]
+    assert item["status"] != "applied"
 
 
 def test_retention_dry_run_is_byte_for_byte_and_state_read_only(
@@ -1317,8 +1831,12 @@ def test_watchdog_alerts_when_sleep_never_ran(monkeypatch) -> None:
     monkeypatch.setattr(autonomy, "_latest_jsonl", lambda path: {})
     writes: list[tuple[Path, dict]] = []
     history: list[dict] = []
-    monkeypatch.setattr(autonomy, "_write_json", lambda path, payload: writes.append((path, payload)))
-    monkeypatch.setattr(autonomy, "_write_watchdog_history", lambda payload: history.append(payload))
+    monkeypatch.setattr(
+        autonomy, "_write_json", lambda path, payload: writes.append((path, payload))
+    )
+    monkeypatch.setattr(
+        autonomy, "_write_watchdog_history", lambda payload: history.append(payload)
+    )
 
     payload = autonomy.watchdog_snapshot(write=True)
 
@@ -1328,7 +1846,9 @@ def test_watchdog_alerts_when_sleep_never_ran(monkeypatch) -> None:
     assert history == [payload]
 
 
-def test_watchdog_history_is_compact_and_bounded_to_1000_lines(monkeypatch, tmp_path: Path) -> None:
+def test_watchdog_history_is_compact_and_bounded_to_1000_lines(
+    monkeypatch, tmp_path: Path
+) -> None:
     history_file = tmp_path / "watchdog-history.jsonl"
     old_rows = [
         {
@@ -1361,12 +1881,19 @@ def test_watchdog_history_is_compact_and_bounded_to_1000_lines(monkeypatch, tmp_
     monkeypatch.setattr(
         autonomy,
         "_latest_jsonl",
-        lambda path: {"status": "ok", "started_at": "2026-07-10T03:40:00", "payload": "q" * 5000},
+        lambda path: {
+            "status": "ok",
+            "started_at": "2026-07-10T03:40:00",
+            "payload": "q" * 5000,
+        },
     )
 
     payload = autonomy.watchdog_snapshot(write=True)
 
-    rows = [json.loads(line) for line in history_file.read_text(encoding="utf-8").splitlines()]
+    rows = [
+        json.loads(line)
+        for line in history_file.read_text(encoding="utf-8").splitlines()
+    ]
     assert len(rows) == 1000
     assert all("health" not in row and "alerts" not in row for row in rows)
     assert rows[-1]["capture_rate"] == 0.96
@@ -1379,11 +1906,15 @@ def test_watchdog_history_is_compact_and_bounded_to_1000_lines(monkeypatch, tmp_
     }
     assert payload["latest_sleep"] == rows[-1]["latest_sleep"]
     assert "payload" not in payload["latest_sleep"]
-    persisted = json.loads((tmp_path / "watchdog-latest.json").read_text(encoding="utf-8"))
+    persisted = json.loads(
+        (tmp_path / "watchdog-latest.json").read_text(encoding="utf-8")
+    )
     assert persisted["latest_sleep"] == rows[-1]["latest_sleep"]
 
 
-def test_regression_guard_quarantines_cycle_without_global_git_reset(monkeypatch, tmp_path: Path) -> None:
+def test_regression_guard_quarantines_cycle_without_global_git_reset(
+    monkeypatch, tmp_path: Path
+) -> None:
     quarantine_file = tmp_path / "quarantine.json"
     decisions_file = tmp_path / "decisions.jsonl"
     monkeypatch.setattr(autonomy, "QUARANTINE_FILE", quarantine_file)
@@ -1391,12 +1922,18 @@ def test_regression_guard_quarantines_cycle_without_global_git_reset(monkeypatch
     monkeypatch.setattr(
         autonomy,
         "_git",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("global git reset attempted")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("global git reset attempted")
+        ),
     )
 
     payload = autonomy.regression_guard(
         before_health={"memory_integrity": {"capture_rate": 0.95}},
-        after_watchdog={"alerts": [{"type": "capture_rate_regression", "before": 0.95, "after": 0.7}]},
+        after_watchdog={
+            "alerts": [
+                {"type": "capture_rate_regression", "before": 0.95, "after": 0.7}
+            ]
+        },
         wiki_snapshot={"head": "abc123"},
         auto_revert=True,
         write=True,
@@ -1445,7 +1982,9 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     assert "--refresh-package" in command
     assert "git+ssh://git@github.com/trafficsign/llm-wiki-mcp" in command
     assert "--json" not in payload["wrappers"][0]["command"]
-    converge = next(item for item in payload["plists"] if item["label"] == autonomy.CONVERGE_LABEL)
+    converge = next(
+        item for item in payload["plists"] if item["label"] == autonomy.CONVERGE_LABEL
+    )
     assert converge["program"][0].endswith("llm-wiki-converge")
     converge_wrapper = next(
         item
