@@ -64,7 +64,11 @@ ACTIVE_BATCH_STAGES = {
     "triage",
     "generate",
     "authorization",
+    "local-consensus-review",
+    "local-regenerate",
     "frontier-review",
+    # Compatibility with cached status written by releases before routine
+    # ingest convergence was relabeled as a local-consensus operation.
     "frontier-regenerate",
     "apply",
 }

@@ -1,4 +1,4 @@
-"""Risk-based frontier auditing policy for ingest proposals."""
+"""Risk-based semantic auditing policy for ingest proposals."""
 
 from __future__ import annotations
 
@@ -89,9 +89,9 @@ def decide_ingest_audit(
 
     reasons: list[str] = []
     if force:
-        reasons.append("frontier convergence already engaged")
+        reasons.append("local consensus convergence already engaged")
     if explicit_reviewer:
-        reasons.append("explicit frontier reviewer")
+        reasons.append("explicit review fixture")
     if failed_operation_specs:
         reasons.append("local generation incomplete")
     if len(operations) > cfg.max_operations_without_audit:
@@ -108,7 +108,7 @@ def decide_ingest_audit(
 
     mandatory = bool(reasons)
     if not cfg.enabled and not mandatory:
-        reasons.append("routine frontier sampling disabled")
+        reasons.append("routine semantic sampling disabled")
 
     has_update = any(operation.get("type") == "update" for operation in operations)
     if local_disposition == "triage_no_operations":
@@ -161,7 +161,11 @@ def record_frontier_audit_outcome(
     reasons: list[str],
     config: IngestAuditConfig | None = None,
 ) -> None:
-    """Record one unique raw audit; a caught issue remains sticky after repair."""
+    """Record one unique semantic audit; a caught issue stays sticky after repair.
+
+    The function name is retained for compatibility with older callers and
+    durable artifacts.  Current routine authorization is local consensus.
+    """
 
     cfg = config or load_ingest_audit_config()
     state = _load_state(state_path)
@@ -177,12 +181,14 @@ def record_frontier_audit_outcome(
         rows.append(existing)
     else:
         existing["caught_issue"] = bool(existing.get("caught_issue")) or not approved
-    existing.update({
-        "last_audited_at": now,
-        "approved": approved,
-        "mode": mode,
-        "reasons": list(reasons),
-    })
+    existing.update(
+        {
+            "last_audited_at": now,
+            "approved": approved,
+            "mode": mode,
+            "reasons": list(reasons),
+        }
+    )
     state = {
         "schema_version": 1,
         "updated_at": now,

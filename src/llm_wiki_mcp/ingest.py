@@ -34,6 +34,7 @@ from llm_wiki_mcp.local_structured import (
     ChatRequest,
     ChatTransport,
     LocalStructuredSession,
+    ValidationIssue,
     required_structured_context_tokens,
 )
 from llm_wiki_mcp.runtime_config import load_ingest_config
@@ -269,6 +270,7 @@ def _generate_one_with_progress(
     raw_keywords: list[str] | None,
     progress_callback: Callable[[dict[str, Any]], None] | None,
     frontier_feedback: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict | None:
     kwargs: dict[str, Any] = {"raw_keywords": raw_keywords}
     if progress_callback is not None and _supports_keyword(
@@ -277,6 +279,8 @@ def _generate_one_with_progress(
         kwargs["progress_callback"] = progress_callback
     if frontier_feedback and _supports_keyword(_generate_one, "frontier_feedback"):
         kwargs["frontier_feedback"] = frontier_feedback
+    if diagnostics is not None and _supports_keyword(_generate_one, "diagnostics"):
+        kwargs["diagnostics"] = diagnostics
     return _generate_one(op, raw_content, **kwargs)
 
 
@@ -345,20 +349,24 @@ TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
     "maxItems": 32,
     "items": {
         "type": "object",
-        # Historical triage operations carry a few optional diagnostic fields;
-        # keep accepting them while strictly validating mutation essentials.
-        "additionalProperties": True,
+        # Only these five fields cross the semantic-plan boundary.  Unknown
+        # model keys are not diagnostics: accepting them can hide a malformed
+        # known key (for example ``"keywords: ["``) while the real field is
+        # absent.  The structured session returns this exact schema violation
+        # to the model on the next bounded repair turn.
+        "additionalProperties": False,
         "required": ["type", "filename"],
         "properties": {
             "type": {"type": "string", "enum": ["create", "update"]},
             "filename": {"type": "string", "minLength": 1, "maxLength": 200},
-            "title": {"type": "string"},
+            "title": {"type": "string", "minLength": 1, "maxLength": 300},
             "keywords": {
                 "type": "array",
+                "minItems": 1,
                 "maxItems": 32,
-                "items": {"type": "string"},
+                "items": {"type": "string", "minLength": 1, "maxLength": 200},
             },
-            "summary": {"type": "string"},
+            "summary": {"type": "string", "minLength": 1, "maxLength": 2_000},
         },
     },
 }
@@ -546,7 +554,7 @@ def _triage(
         feedback_block = f"""
 
 ---
-Previous frontier review (authoritative correction instructions):
+Previous local consensus review (authoritative correction instructions):
 ---
 {frontier_feedback}
 ---
@@ -609,7 +617,12 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
                 max_input_chars=selected_num_ctx,
                 max_output_chars=4_000,
                 max_feedback_chars=2_400,
-            ).run(prompt, TRIAGE_PLAN_SCHEMA, system=TRIAGE_SYSTEM_PROMPT)
+            ).run(
+                prompt,
+                TRIAGE_PLAN_SCHEMA,
+                system=TRIAGE_SYSTEM_PROMPT,
+                value_validator=_triage_plan_validation_issues,
+            )
     except IngestContextCapacityError as exc:
         failure = IngestTriageFailure("context_window_exceeded", str(exc))
         _emit_triage_failure(progress_callback, failure)
@@ -654,6 +667,146 @@ _FILENAME_PATTERN = re.compile(
     r"(?:\.md)?$"  # optional .md
 )
 _MAX_FILENAME_LEN = 200
+_TRIAGE_PLAN_FIELDS = frozenset({"type", "filename", "title", "keywords", "summary"})
+
+
+def _triage_plan_validation_issues(value: Any) -> list[ValidationIssue]:
+    """Return exact semantic-plan violations for same-session repair.
+
+    JSON Schema owns the basic container and scalar types.  This host
+    validator adds operation-aware rules that the intentionally small schema
+    subset cannot express: create operations require a non-empty title,
+    summary, and keyword list, while legacy update targets retain their looser
+    filename contract.  Keeping the same checks here and in
+    :func:`_validate_triage_plan` prevents a schema-valid but unusable plan from
+    escaping the repair session and becoming an opaque outer retry.
+    """
+
+    issues: list[ValidationIssue] = []
+    if not isinstance(value, list):
+        return issues
+    for index, entry in enumerate(value):
+        pointer = f"/{index}"
+        if not isinstance(entry, dict):
+            continue
+
+        for key in sorted(set(entry) - _TRIAGE_PLAN_FIELDS):
+            issues.append(
+                ValidationIssue(
+                    pointer=f"{pointer}/{key}",
+                    keyword="additionalProperties",
+                    expected=False,
+                    received={"type": type(entry[key]).__name__, "value": entry[key]},
+                    message=(
+                        f"unknown triage field {key!r}; use only type, filename, "
+                        "title, keywords, and summary"
+                    ),
+                )
+            )
+
+        op_type = entry.get("type")
+        filename = entry.get("filename")
+        if isinstance(filename, str):
+            fn = filename.strip()
+            filename_error: tuple[str, Any, str] | None = None
+            if not fn or len(fn) > _MAX_FILENAME_LEN:
+                filename_error = (
+                    "minLength",
+                    {"minimum": 1, "maximum": _MAX_FILENAME_LEN},
+                    "filename must be non-empty and at most 200 characters",
+                )
+            elif any(ord(char) < 0x20 or char == "\x7f" for char in fn):
+                filename_error = (
+                    "pattern",
+                    "no ASCII control characters",
+                    "filename contains a control character",
+                )
+            elif ".." in fn.split("/"):
+                filename_error = (
+                    "pattern",
+                    "no parent traversal segment",
+                    "filename contains a parent-traversal segment",
+                )
+            elif op_type == "create" and not _FILENAME_PATTERN.fullmatch(fn):
+                filename_error = (
+                    "pattern",
+                    _FILENAME_PATTERN.pattern,
+                    "create filename must be ASCII kebab-case with at most one folder",
+                )
+            if filename_error is not None:
+                keyword, expected, message = filename_error
+                issues.append(
+                    ValidationIssue(
+                        pointer=f"{pointer}/filename",
+                        keyword=keyword,
+                        expected=expected,
+                        received={"type": "string", "value": filename},
+                        message=message,
+                    )
+                )
+
+        for field, maximum in (("title", 300), ("summary", 2_000)):
+            if field not in entry:
+                continue
+            field_value = entry[field]
+            if (
+                isinstance(field_value, str)
+                and bool(field_value.strip())
+                and len(field_value) <= maximum
+            ):
+                continue
+            issues.append(
+                ValidationIssue(
+                    pointer=f"{pointer}/{field}",
+                    keyword="type",
+                    expected=f"non-empty string with at most {maximum} characters",
+                    received={
+                        "type": type(field_value).__name__,
+                        "value": field_value,
+                    },
+                    message=f"{field} must be a bounded non-empty string",
+                )
+            )
+        if "keywords" in entry:
+            keywords = entry["keywords"]
+            if not (
+                isinstance(keywords, list)
+                and 1 <= len(keywords) <= 32
+                and all(
+                    isinstance(item, str) and bool(item.strip()) and len(item) <= 200
+                    for item in keywords
+                )
+            ):
+                issues.append(
+                    ValidationIssue(
+                        pointer=f"{pointer}/keywords",
+                        keyword="items",
+                        expected="1 to 32 non-empty strings of at most 200 characters",
+                        received={"type": type(keywords).__name__, "value": keywords},
+                        message="keywords must be a bounded non-empty string list",
+                    )
+                )
+
+        if op_type != "create":
+            continue
+        required_fields = (
+            ("title", "a non-empty page title string"),
+            ("summary", "a non-empty grounded summary string"),
+            ("keywords", "a non-empty list of non-empty keyword strings"),
+        )
+        for field, description in required_fields:
+            if field in entry:
+                continue
+            issues.append(
+                ValidationIssue(
+                    pointer=f"{pointer}/{field}",
+                    keyword="required",
+                    expected=description,
+                    received={"type": "missing"},
+                    message=f"create operation requires {description}",
+                )
+            )
+    return issues
 
 
 def _validate_triage_plan(
@@ -687,9 +840,13 @@ def _validate_triage_plan(
     """
     if not isinstance(plan, list):
         return None
+    if _triage_plan_validation_issues(plan):
+        return None
     cleaned: list[dict] = []
     for entry in plan:
         if not isinstance(entry, dict):
+            return None
+        if set(entry) - _TRIAGE_PLAN_FIELDS:
             return None
         op_type = entry.get("type")
         if op_type not in ("create", "update"):
@@ -774,6 +931,12 @@ def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
         create_op = dict(op)
         create_op["type"] = "create"
         create_op.setdefault("title", _title_from_page_id(page_id))
+        summary = create_op.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            # This is a topic label, not a generated factual claim.  It keeps
+            # update-to-create coercion inside the same strict plan contract
+            # without inventing a semantic summary that was absent upstream.
+            create_op["summary"] = str(create_op["title"])
         keywords = create_op.get("keywords")
         if not (
             isinstance(keywords, list)
@@ -1063,17 +1226,39 @@ def _build_focused_context(
     return "\n".join(lines)
 
 
+_MAX_PAGE_GENERATION_REPAIR_TURNS = 2
+_MAX_PAGE_GENERATION_RESPONSES = 1 + _MAX_PAGE_GENERATION_REPAIR_TURNS
+_MAX_PAGE_REPAIR_FEEDBACK_BYTES = 2_400
+_PAGE_GENERATION_CONTEXT_SAFETY_TOKENS = 256
+
+
 def _required_generate_context_tokens(
     prompt: str,
     system: str | None,
     *,
     num_predict: int,
 ) -> int:
-    """Return a tokenizer-independent upper bound for legacy generation."""
+    """Return a fail-closed bound for the complete page-repair session.
+
+    Initial input uses UTF-8 bytes as a tokenizer-independent upper bound.
+    Every prior model completion is bounded by ``num_predict`` model tokens;
+    reserve two such assistant turns plus bounded validator feedback and the
+    final completion.  This prevents Ollama from shifting/truncating the
+    original evidence when page validation needs a second or third turn.
+    """
 
     prompt_bytes = len(prompt.encode("utf-8"))
     system_bytes = len(system.encode("utf-8")) if system else 0
-    return prompt_bytes + system_bytes + num_predict + 256
+    repair_history = _MAX_PAGE_GENERATION_REPAIR_TURNS * (
+        num_predict + _MAX_PAGE_REPAIR_FEEDBACK_BYTES + 64
+    )
+    return (
+        prompt_bytes
+        + system_bytes
+        + repair_history
+        + num_predict
+        + _PAGE_GENERATION_CONTEXT_SAFETY_TOKENS
+    )
 
 
 def _generation_completion_failure(
@@ -1169,8 +1354,18 @@ def _strip_all_frontmatter(text: str) -> str:
     return _FRONTMATTER_BLOCK_RE.sub("", text)
 
 
-def _extract_page_body(output: str, op_type: str = "create") -> str | None:
-    """Pull a page body out of generate-stage LLM output.
+@dataclass(frozen=True)
+class _PageBodyValidation:
+    body: str | None
+    failure_class: str | None = None
+    reason: str | None = None
+
+
+def _validate_generated_page_output(
+    output: str,
+    op_type: str = "create",
+) -> _PageBodyValidation:
+    """Validate and extract one complete page block with an exact reason.
 
     Op-type rules:
     - ``create``: body MUST contain a frontmatter block with ``title:``. We accept
@@ -1182,20 +1377,51 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
       drift. The explicit close is required and an empty body after stripping
       is rejected.
     """
-    if not output:
-        return None
+    if not isinstance(output, str) or not output.strip():
+        return _PageBodyValidation(
+            None,
+            "empty_output",
+            "the response was empty; return one complete page block",
+        )
 
     op_type = (op_type or "create").lower()
-    text = output.strip()
+    text = output.replace("\r\n", "\n").replace("\r", "\n").strip()
     if text.startswith("```"):
+        if re.search(r"\n```\s*$", text) is None:
+            return _PageBodyValidation(
+                None,
+                "incomplete_markdown_fence",
+                "the outer markdown code fence was not closed",
+            )
         text = re.sub(r"^```\w*\n?", "", text)
         text = re.sub(r"\n?```$", "", text)
         text = text.strip()
 
+    end_markers = re.findall(
+        r"^===\s*END\s+PAGE\s*===\s*$",
+        text,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    if (
+        len(end_markers) != 1
+        or re.search(
+            r"\n===\s*END\s+PAGE\s*===\s*\Z",
+            text,
+            re.IGNORECASE,
+        )
+        is None
+    ):
+        return _PageBodyValidation(
+            None,
+            "missing_end_marker",
+            "the response must contain exactly one `=== END PAGE ===` marker "
+            "as its final non-whitespace line",
+        )
+
     body: str | None = None
 
     # 1. Strict: === NEW/UPDATE PAGE: filename === ... === END PAGE ===
-    m = re.search(
+    m = re.fullmatch(
         r"===\s*(?:NEW|UPDATE)\s+PAGE:\s*\S+\s*===\n(.*?)\n===\s*END\s+PAGE\s*===",
         text,
         re.DOTALL | re.IGNORECASE,
@@ -1205,7 +1431,7 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
 
     # 2. Lenient: === <anything> === ... === END PAGE === (NEW PAGE: keyword dropped)
     if body is None:
-        m = re.search(
+        m = re.fullmatch(
             r"===[^\n]*===\n(.*?)\n===\s*END\s+PAGE\s*===",
             text,
             re.DOTALL | re.IGNORECASE,
@@ -1214,25 +1440,86 @@ def _extract_page_body(output: str, op_type: str = "create") -> str | None:
             body = m.group(1).strip() or None
 
     if body is None:
-        return None
+        expected = "NEW" if op_type == "create" else "UPDATE"
+        return _PageBodyValidation(
+            None,
+            "missing_page_wrapper",
+            f"the response must start with `=== {expected} PAGE: <filename> ===`",
+        )
 
     # Op-type sanity: enforce frontmatter contract.
     if op_type == "create":
         if not _has_frontmatter(body):
-            return None
-        return body
+            return _PageBodyValidation(
+                None,
+                "missing_create_frontmatter",
+                "a CREATE body requires a closed frontmatter block with a non-empty title",
+            )
+        return _PageBodyValidation(body)
 
     # update: drop any stray FM blocks, reject if nothing meaningful is left.
     cleaned = _strip_all_frontmatter(body).strip()
     if not cleaned:
-        return None
+        return _PageBodyValidation(
+            None,
+            "empty_update_body",
+            "an UPDATE must contain new markdown after removing forbidden frontmatter",
+        )
     # A partial frontmatter (opening `---` with no closing) cannot be safely
     # stripped; refuse rather than appending it raw.
     has_open_fence = bool(re.match(r"^---\s*$", cleaned, re.MULTILINE))
     has_closed_block = bool(_FRONTMATTER_BLOCK_RE.search(cleaned))
     if has_open_fence and not has_closed_block:
-        return None
-    return cleaned
+        return _PageBodyValidation(
+            None,
+            "partial_update_frontmatter",
+            "the UPDATE contains an unclosed frontmatter delimiter",
+        )
+    return _PageBodyValidation(cleaned)
+
+
+def _extract_page_body(output: str, op_type: str = "create") -> str | None:
+    """Compatibility wrapper returning only a validated page body."""
+
+    return _validate_generated_page_output(output, op_type=op_type).body
+
+
+def _page_generation_transcript(messages: list[dict[str, str]]) -> str:
+    """Serialize client-side page history for Ollama's generate endpoint."""
+
+    return "\n\n".join(
+        f"<{message['role'].upper()}>\n{message['content']}" for message in messages
+    )
+
+
+def _page_generation_repair_prompt(
+    validation: _PageBodyValidation,
+    *,
+    op_type: str,
+    filename: str,
+) -> str:
+    """Build bounded, targeted feedback for the next logical turn."""
+
+    expected_wrapper = "NEW" if op_type == "create" else "UPDATE"
+    failure_class = validation.failure_class or "invalid_page_block"
+    reason = validation.reason or "the page block failed deterministic validation"
+    prompt = f"""Your previous response was rejected by the deterministic page validator.
+
+Validator errors:
+- code: {failure_class}
+  reason: {reason}
+
+Return a complete replacement response for `{filename}`. Do not describe the
+fix and do not return a patch. Start with exactly
+`=== {expected_wrapper} PAGE: {filename} ===` and finish with the exact final
+line `=== END PAGE ===`. Preserve only facts grounded in the original source.
+"""
+    if len(prompt.encode("utf-8")) > _MAX_PAGE_REPAIR_FEEDBACK_BYTES:
+        raise RuntimeError(
+            "ingest generation feedback_too_large: page validator feedback "
+            "exceeded the fixed repair cap"
+        )
+    return prompt
 
 
 def _generate_one(
@@ -1242,6 +1529,7 @@ def _generate_one(
     raw_keywords: list[str] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     frontier_feedback: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict | None:
     """Stage 2: generate one page; return an operation dict ready for apply.
 
@@ -1271,7 +1559,7 @@ def _generate_one(
         feedback_block = f"""
 
 ---
-Previous frontier review (authoritative correction instructions):
+Previous local consensus review (authoritative correction instructions):
 ---
 {frontier_feedback}
 ---
@@ -1308,6 +1596,7 @@ Generate the page content based on the raw data and context above."""
         system_prompt,
         num_predict=config.num_predict,
     )
+    attempts_made = 0
     try:
         selected_num_ctx = _select_ingest_context(
             required_num_ctx,
@@ -1315,6 +1604,14 @@ Generate the page content based on the raw data and context above."""
             max_num_ctx=config.max_num_ctx,
         )
     except IngestContextCapacityError as exc:
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "failure_class": "context_window_exceeded",
+                    "reason": str(exc),
+                    "attempts": 0,
+                }
+            )
         if progress_callback is not None:
             progress_callback(
                 {
@@ -1361,62 +1658,199 @@ Generate the page content based on the raw data and context above."""
                     generate_kwargs[name] = value
             if _supports_keyword(_generate_with_progress, "return_metadata"):
                 generate_kwargs["return_metadata"] = True
-            output = _generate_with_progress(prompt, **generate_kwargs)
-            if isinstance(output, ollama_runtime.GenerateResponse):
-                completion_failure = _generation_completion_failure(output)
-                if completion_failure is not None:
-                    failure_class, failure_reason = completion_failure
-                    if progress_callback is not None:
-                        progress_callback(
+            messages = [{"role": "user", "content": prompt}]
+            seen_output_hashes: set[str] = set()
+            for attempt_index in range(_MAX_PAGE_GENERATION_RESPONSES):
+                attempts_made = attempt_index + 1
+                output = _generate_with_progress(
+                    _page_generation_transcript(messages),
+                    **generate_kwargs,
+                )
+                if isinstance(output, ollama_runtime.GenerateResponse):
+                    completion_failure = _generation_completion_failure(output)
+                    if completion_failure is not None:
+                        failure_class, failure_reason = completion_failure
+                        if diagnostics is not None:
+                            diagnostics.update(
+                                {
+                                    "failure_class": failure_class,
+                                    "reason": failure_reason,
+                                    "attempts": attempt_index + 1,
+                                }
+                            )
+                        if progress_callback is not None:
+                            progress_callback(
+                                {
+                                    "event": "error",
+                                    "active": False,
+                                    "failure_class": failure_class,
+                                    "error": failure_reason,
+                                }
+                            )
+                        # A partial completion is not valid conversational
+                        # history.  Never ask the model to repair text whose
+                        # terminal boundary is unknown.
+                        raise RuntimeError(
+                            f"ingest generation {failure_class}: {failure_reason}"
+                        )
+                    if (
+                        output.prompt_eval_count is not None
+                        and output.prompt_eval_count
+                        >= selected_num_ctx - _PAGE_GENERATION_CONTEXT_SAFETY_TOKENS
+                    ) or (
+                        output.prompt_eval_count is not None
+                        and output.eval_count is not None
+                        and output.prompt_eval_count + output.eval_count
+                        > selected_num_ctx
+                    ):
+                        failure_reason = (
+                            "Ollama context accounting reached or crossed the "
+                            "admitted page-generation context"
+                        )
+                        if diagnostics is not None:
+                            diagnostics.update(
+                                {
+                                    "failure_class": "context_truncation_suspected",
+                                    "reason": failure_reason,
+                                    "attempts": attempt_index + 1,
+                                }
+                            )
+                        raise RuntimeError(
+                            "ingest generation context_truncation_suspected: "
+                            + failure_reason
+                        )
+                    output = output.content
+                if not isinstance(output, str):
+                    if diagnostics is not None:
+                        diagnostics.update(
                             {
-                                "event": "error",
-                                "active": False,
-                                "failure_class": failure_class,
-                                "error": failure_reason,
+                                "failure_class": "completion_incomplete",
+                                "reason": "transport returned non-string content",
+                                "attempts": attempt_index + 1,
                             }
                         )
                     raise RuntimeError(
-                        f"ingest generation {failure_class}: {failure_reason}"
+                        "ingest generation completion_incomplete: "
+                        "transport returned non-string content"
                     )
-                output = output.content
-            if not isinstance(output, str):
-                raise RuntimeError(
-                    "ingest generation completion_incomplete: "
-                    "transport returned non-string content"
+
+                output_sha256 = hashlib.sha256(output.encode("utf-8")).hexdigest()
+                validation = _validate_generated_page_output(output, op_type=op_type)
+                if validation.body is not None:
+                    if diagnostics is not None:
+                        diagnostics.update(
+                            {
+                                "failure_class": None,
+                                "reason": None,
+                                "attempts": attempt_index + 1,
+                                "repair_turns": attempt_index,
+                                "output_sha256": output_sha256,
+                            }
+                        )
+                    result: dict = {
+                        "type": op_type,
+                        "filename": filename,
+                        "content": validation.body,
+                    }
+                    if raw_keywords is not None:
+                        result["raw_keywords"] = list(raw_keywords)
+                    return result
+
+                _safe_log(
+                    "ingest | generate validation failed for "
+                    f"{filename} ({op_type}, {validation.failure_class}, "
+                    f"attempt {attempt_index + 1}/{_MAX_PAGE_GENERATION_RESPONSES})"
                 )
+                if output_sha256 in seen_output_hashes:
+                    if diagnostics is not None:
+                        diagnostics.update(
+                            {
+                                "failure_class": "repeated_output",
+                                "reason": (
+                                    "model repeated the same invalid page output "
+                                    f"({validation.failure_class})"
+                                ),
+                                "attempts": attempt_index + 1,
+                                "repair_turns": attempt_index,
+                                "output_sha256": output_sha256,
+                            }
+                        )
+                    _safe_log(
+                        f"ingest | generate repair stopped for {filename}: "
+                        "same invalid output hash repeated"
+                    )
+                    return None
+                seen_output_hashes.add(output_sha256)
+                if attempt_index == _MAX_PAGE_GENERATION_RESPONSES - 1:
+                    if diagnostics is not None:
+                        diagnostics.update(
+                            {
+                                "failure_class": "repair_exhausted",
+                                "reason": validation.reason,
+                                "attempts": attempt_index + 1,
+                                "repair_turns": attempt_index,
+                                "output_sha256": output_sha256,
+                            }
+                        )
+                    return None
+
+                repair_prompt = _page_generation_repair_prompt(
+                    validation,
+                    op_type=op_type,
+                    filename=filename,
+                )
+                messages.append({"role": "assistant", "content": output})
+                messages.append({"role": "user", "content": repair_prompt})
+                _safe_log(
+                    f"ingest | targeted generate repair {attempt_index + 1}/"
+                    f"{_MAX_PAGE_GENERATION_REPAIR_TURNS} for {filename}: "
+                    f"{validation.failure_class}"
+                )
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "event": "repair",
+                            "active": True,
+                            "repair_turn": attempt_index + 1,
+                            "failure_class": validation.failure_class,
+                        }
+                    )
     except RuntimeError as e:
         if str(e).startswith(
             (
                 "ingest generation capacity_unavailable:",
                 "ingest generation context_window_exceeded:",
+                "ingest generation context_truncation_suspected:",
                 "ingest generation completion_incomplete:",
                 "ingest generation stream_incomplete:",
                 "ingest generation output_truncated:",
+                "ingest generation feedback_too_large:",
             )
         ):
             _safe_log(f"ingest | generate preflight failed for {filename}: {e}")
             raise
         _safe_log(f"ingest | generate failed for {filename}: {e}")
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "failure_class": "transport_error",
+                    "reason": f"{type(e).__name__}: {str(e)[:500]}",
+                    "attempts": attempts_made,
+                }
+            )
         return None
     except Exception as e:
         _safe_log(f"ingest | generate failed for {filename}: {e}")
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "failure_class": "transport_error",
+                    "reason": f"{type(e).__name__}: {str(e)[:500]}",
+                    "attempts": attempts_made,
+                }
+            )
         return None
-
-    body = _extract_page_body(output, op_type=op_type)
-    if not body:
-        _safe_log(
-            f"ingest | generate parse failed for {filename} ({op_type}, preview: {output[:120]!r})"
-        )
-        return None
-
-    result: dict = {
-        "type": op_type,
-        "filename": filename,
-        "content": body,
-    }
-    if raw_keywords is not None:
-        result["raw_keywords"] = list(raw_keywords)
-    return result
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -3252,7 +3686,7 @@ def _normalize_ingest_frontier_review(
     if not isinstance(value, dict):
         return {
             "decision": "retry",
-            "summary": "frontier reviewer returned a non-object payload",
+            "summary": "local consensus reviewer returned a non-object payload",
             "failed_operations_disposition": "retry_required",
         }
     from llm_wiki_mcp.decision_schema_manifest import (
@@ -3279,14 +3713,14 @@ def _normalize_ingest_frontier_review(
         return {
             **value,
             "decision": "retry",
-            "summary": "frontier reviewer returned an invalid decision",
+            "summary": "local consensus reviewer returned an invalid decision",
             "failed_operations_disposition": "retry_required",
         }
     if not isinstance(summary, str) or not summary.strip():
         return {
             **value,
             "decision": "retry",
-            "summary": "frontier reviewer omitted its decision summary",
+            "summary": "local consensus reviewer omitted its decision summary",
             "failed_operations_disposition": "retry_required",
         }
     repair_requested = any(
@@ -3306,7 +3740,7 @@ def _normalize_ingest_frontier_review(
         return {
             **value,
             "decision": "retry",
-            "summary": "frontier approval carried a failure payload",
+            "summary": "local consensus verdict carried a failure payload",
             "failed_operations_disposition": "retry_required",
         }
 
@@ -3325,9 +3759,9 @@ def _normalize_ingest_frontier_review(
             **value,
             "decision": "retry",
             "summary": (
-                "frontier must explicitly disposition locally failed operations"
+                "local consensus must explicitly disposition locally failed operations"
                 if has_failed_operations
-                else "frontier returned an invalid failed-operation disposition"
+                else "local consensus returned an invalid failed-operation disposition"
             ),
             "failed_operations_disposition": "retry_required",
         }
@@ -3337,7 +3771,7 @@ def _normalize_ingest_frontier_review(
                 **value,
                 "decision": "retry",
                 "summary": (
-                    "partial local generation remains replayable until frontier "
+                    "partial local generation remains replayable until local consensus "
                     "explicitly confirms failed operations are unnecessary"
                 ),
                 "failed_operations_disposition": "retry_required",
@@ -3352,7 +3786,9 @@ def _normalize_ingest_frontier_review(
         return {
             **value,
             "decision": "retry",
-            "summary": "frontier requested apply_available with no prepared operation",
+            "summary": (
+                "local consensus requested apply_available with no prepared operation"
+            ),
             "failed_operations_disposition": (
                 "retry_required" if has_failed_operations else "none"
             ),
@@ -3512,7 +3948,7 @@ def _review_and_apply_ingest_operations(
                 "status": "needs_retry",
                 "source_key": source_key,
                 "proposal_sha256": proposal_sha256,
-                "summary": f"frontier proposal artifact write failed: {exc}",
+                "summary": f"review proposal artifact write failed: {exc}",
                 "created": [],
                 "updated": [],
                 "audit": audit_decision,
@@ -4214,6 +4650,7 @@ def _frontier_retry_is_actionable(result: dict[str, Any]) -> bool:
     infrastructure_markers = (
         "artifact write failed",
         "frontier reviewer failed",
+        "local consensus reviewer failed",
         "transport",
         "timeout",
         "timed out",
@@ -4335,7 +4772,7 @@ def _generate_local_operations(
     job_id: str,
     frontier_feedback: str | None,
 ) -> tuple[list[dict], list[dict]]:
-    """Generate every operation, retrying malformed local output once."""
+    """Generate every operation through one bounded logical model session."""
 
     job_store.update(job_id, stage="generate", total_ops=len(plan), completed_ops=0)
     runtime_status.safe_write_status(
@@ -4359,6 +4796,7 @@ def _generate_local_operations(
             op_progress={"index": i + 1, "total": len(plan)},
         )
         _safe_log(f"ingest | generating {i + 1}/{len(plan)}: {fname}")
+        generation_diagnostics: dict[str, Any] = {}
         generated = _generate_one_with_progress(
             op,
             content,
@@ -4371,22 +4809,8 @@ def _generate_local_operations(
                 op_progress={"index": i + 1, "total": len(plan)},
             ),
             frontier_feedback=frontier_feedback,
+            diagnostics=generation_diagnostics,
         )
-        if generated is None:
-            _safe_log(f"ingest | retry generate for {fname}")
-            generated = _generate_one_with_progress(
-                op,
-                content,
-                raw_keywords=raw_keywords,
-                progress_callback=_llm_progress_callback(
-                    phase="generate-retry",
-                    target=fname,
-                    job_id=job_id,
-                    source_raw=source_raw,
-                    op_progress={"index": i + 1, "total": len(plan)},
-                ),
-                frontier_feedback=frontier_feedback,
-            )
         if generated:
             operations.append(generated)
         else:
@@ -4396,8 +4820,14 @@ def _generate_local_operations(
                     "type": op.get("type", "?"),
                     "title": op.get("title", ""),
                     "summary": op.get("summary", ""),
-                    "error": "generation parse failed after retry",
-                    "attempts": 2,
+                    "error": str(
+                        generation_diagnostics.get("reason")
+                        or "generation validation failed"
+                    ),
+                    "failure_class": str(
+                        generation_diagnostics.get("failure_class") or "unknown"
+                    ),
+                    "attempts": int(generation_diagnostics.get("attempts") or 1),
                 }
             )
         job_store.update(job_id, completed_ops=i + 1)
@@ -4507,7 +4937,7 @@ def run_ingest(
         if processor == "unavailable":
             raise RuntimeError("ollama unavailable; no fallback processor configured")
 
-        # A frontier rejection is feedback, not a terminal batch failure.
+        # A local-consensus rejection is feedback, not a terminal batch failure.
         # Re-run triage and generation inside the same job with the exact
         # critique, capped so a bad raw cannot create an unbounded model loop.
         frontier_feedback: str | None = None
@@ -4520,7 +4950,7 @@ def run_ingest(
             job_store.update(job_id, stage="triage")
             runtime_status.safe_write_status(
                 state="running",
-                stage="triage" if convergence_attempt == 1 else "frontier-regenerate",
+                stage="triage" if convergence_attempt == 1 else "local-regenerate",
                 current_job_id=job_id,
                 current_raw=source_raw,
                 current_op=None,
@@ -4529,7 +4959,7 @@ def run_ingest(
                 "ingest | stage 1: triage started"
                 if convergence_attempt == 1
                 else (
-                    "ingest | frontier convergence "
+                    "ingest | local consensus convergence "
                     f"{convergence_attempt}/{_MAX_FRONTIER_CONVERGENCE_ATTEMPTS} started"
                 )
             )
@@ -4540,7 +4970,7 @@ def run_ingest(
                         phase=(
                             "triage"
                             if convergence_attempt == 1
-                            else "frontier-regenerate-triage"
+                            else "local-regenerate-triage"
                         ),
                         target="operation plan",
                         job_id=job_id,
@@ -4642,8 +5072,8 @@ def run_ingest(
                 break
             if frontier_status == "frontier_budget_exhausted":
                 raise IngestApplyError(
-                    "frontier ingest review did not converge after "
-                    f"{frontier_budget.used} frontier calls: "
+                    "local consensus ingest review did not converge after "
+                    f"{frontier_budget.used} local review calls: "
                     + _frontier_feedback_text(frontier_result)
                 )
             repaired_operations, replaced_files = (
@@ -4683,24 +5113,24 @@ def run_ingest(
                     break
                 if frontier_status == "frontier_budget_exhausted":
                     raise IngestApplyError(
-                        "frontier ingest review did not converge after "
-                        f"{frontier_budget.used} frontier calls: "
+                        "local consensus ingest review did not converge after "
+                        f"{frontier_budget.used} local review calls: "
                         + _frontier_feedback_text(frontier_result)
                     )
             frontier_feedback = _frontier_feedback_text(frontier_result)
             if not _frontier_retry_is_actionable(frontier_result):
                 raise IngestApplyError(
-                    "frontier ingest review deferred: " + frontier_feedback
+                    "local consensus ingest review deferred: " + frontier_feedback
                 )
             _safe_log(
-                "ingest | frontier requested regeneration: "
+                "ingest | local consensus requested regeneration: "
                 + frontier_feedback.replace("\n", " ")[:300]
             )
         else:
             raise IngestApplyError(
-                "frontier ingest review did not converge after "
+                "local consensus ingest review did not converge after "
                 f"{_MAX_FRONTIER_CONVERGENCE_ATTEMPTS} attempts: "
-                + (frontier_feedback or "unknown frontier rejection")
+                + (frontier_feedback or "unknown local consensus rejection")
             )
 
         assert frontier_result is not None
@@ -4720,17 +5150,20 @@ def run_ingest(
             source_raw=source_raw,
         )
 
-        # Build job result. Frontier metadata deliberately excludes the raw
-        # and page bodies; their exact durable bundle stays in the artifact.
+        # Build the user-facing local-consensus result.  The legacy
+        # ``frontier`` alias is retained for old job readers, but both views
+        # deliberately exclude raw/page bodies; exact bytes stay in artifacts.
+        consensus_result = {
+            "status": frontier_status,
+            "proposal_sha256": frontier_result.get("proposal_sha256"),
+            "source_key": frontier_result.get("source_key"),
+            "review": frontier_result.get("review"),
+            "recovered_artifact": bool(frontier_result.get("recovered_artifact")),
+            "reused_review": bool(frontier_result.get("reused_review")),
+        }
         job_result: dict | None = {
-            "frontier": {
-                "status": frontier_status,
-                "proposal_sha256": frontier_result.get("proposal_sha256"),
-                "source_key": frontier_result.get("source_key"),
-                "review": frontier_result.get("review"),
-                "recovered_artifact": bool(frontier_result.get("recovered_artifact")),
-                "reused_review": bool(frontier_result.get("reused_review")),
-            },
+            "local_consensus": consensus_result,
+            "frontier": dict(consensus_result),
             "audit": frontier_result.get("audit"),
         }
         if failed_op_specs:
@@ -4832,7 +5265,8 @@ def run_ingest(
         # That was the R5-Critical regression path.
         if failed_op_specs:
             _safe_log(
-                f"ingest | frontier-final: {len(created)} created, {len(updated)} updated, "
+                f"ingest | local-consensus-final: {len(created)} created, "
+                f"{len(updated)} updated, "
                 f"{len(failed_op_specs)} local generation failures confirmed unnecessary "
                 f"({', '.join(failed_ops[:3])}"
                 + ("..." if len(failed_ops) > 3 else "")
@@ -4855,6 +5289,7 @@ def run_ingest(
                 "created": created,
                 "updated": updated,
                 "failed_ops": failed_op_specs,
+                "local_consensus_status": frontier_status,
                 "frontier_status": frontier_status,
                 "audit": frontier_result.get("audit"),
                 "failed_operations_disposition": (

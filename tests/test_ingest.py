@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
@@ -247,6 +248,22 @@ class TestExtractPageBody:
         )
         assert out is None
 
+    @pytest.mark.parametrize(
+        "suffix",
+        (
+            "\ntrailing text after the terminal marker",
+            "\n=== UPDATE PAGE: second.md ===\nsecond block\n=== END PAGE ===",
+        ),
+    )
+    def test_terminal_marker_must_be_unique_and_final(self, suffix: str) -> None:
+        out = _extract_page_body(
+            "=== NEW PAGE: foo.md ===\n"
+            "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
+            "body\n=== END PAGE ===" + suffix,
+            op_type="create",
+        )
+        assert out is None
+
     def test_create_truncated_broken_frontmatter_still_rejected(self) -> None:
         # Truncation BEFORE the closing "---" of the frontmatter cannot
         # be recovered: we'd persist a page with no proper frontmatter
@@ -302,6 +319,363 @@ def test_generate_one_supplies_current_date_and_forbids_date_inference(
     assert f"Current date: {today}" in captured["prompt"]
     assert "Do not add or infer any other date" in captured["prompt"]
     assert "exact current date" in captured["system"]
+
+
+@pytest.mark.parametrize(
+    ("op_type", "filename", "invalid", "valid"),
+    [
+        (
+            "create",
+            "memory/repaired-create.md",
+            "=== NEW PAGE: memory/repaired-create.md ===\n"
+            "---\ntitle: Repaired create\nupdated: 2026-07-14\n"
+            "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文",
+            "=== NEW PAGE: memory/repaired-create.md ===\n"
+            "---\ntitle: Repaired create\nupdated: 2026-07-14\n"
+            "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文\n"
+            "=== END PAGE ===",
+        ),
+        (
+            "update",
+            "memory/repaired-update.md",
+            "=== UPDATE PAGE: memory/repaired-update.md ===\n## 追記\n\n本文",
+            "=== UPDATE PAGE: memory/repaired-update.md ===\n## 追記\n\n本文\n"
+            "=== END PAGE ===",
+        ),
+    ],
+)
+def test_generate_one_repairs_missing_end_marker_in_same_logical_session(
+    monkeypatch: pytest.MonkeyPatch,
+    op_type: str,
+    filename: str,
+    invalid: str,
+    valid: str,
+) -> None:
+    from llm_wiki_mcp import ingest
+
+    prompts: list[str] = []
+    responses = iter([invalid, valid])
+
+    def fake_generate(prompt: str, **kwargs):
+        prompts.append(prompt)
+        response = next(responses)
+        if op_type == "create":
+            assert kwargs["return_metadata"] is True
+            return ingest.ollama_runtime.GenerateResponse(
+                content=response,
+                done=True,
+                done_reason="stop",
+                prompt_eval_count=9_226,
+                eval_count=1_170,
+            )
+        return response
+
+    monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+    diagnostics: dict = {}
+
+    result = ingest._generate_one(
+        {
+            "type": op_type,
+            "filename": filename,
+            "title": "Repaired",
+            "summary": "repair the deterministic wrapper violation",
+        },
+        "grounded raw",
+        diagnostics=diagnostics,
+    )
+
+    assert result is not None
+    assert len(prompts) == 2
+    assert f"<ASSISTANT>\n{invalid}" in prompts[1]
+    assert "Validator errors:" in prompts[1]
+    assert "code: missing_end_marker" in prompts[1]
+    assert "must contain exactly one" in prompts[1]
+    assert "final non-whitespace line" in prompts[1]
+    assert diagnostics["attempts"] == 2
+    assert diagnostics["repair_turns"] == 1
+
+
+def test_generate_one_stops_when_repair_repeats_same_invalid_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import ingest
+
+    invalid = (
+        "=== NEW PAGE: memory/repeated.md ===\n"
+        "---\ntitle: Repeated\nupdated: 2026-07-14\n"
+        "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文"
+    )
+    prompts: list[str] = []
+
+    def fake_generate(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return invalid
+
+    monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+    diagnostics: dict = {}
+
+    result = ingest._generate_one(
+        {
+            "type": "create",
+            "filename": "memory/repeated.md",
+            "title": "Repeated",
+            "summary": "same output should terminate repair",
+        },
+        "raw",
+        diagnostics=diagnostics,
+    )
+
+    assert result is None
+    assert len(prompts) == 2
+    assert diagnostics["failure_class"] == "repeated_output"
+    assert diagnostics["attempts"] == 2
+
+
+def test_generate_one_records_runtime_transport_failure_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import ingest
+
+    def fake_generate(_prompt: str, **_kwargs) -> str:
+        raise RuntimeError("socket reset")
+
+    monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+    diagnostics: dict = {}
+
+    result = ingest._generate_one(
+        {
+            "type": "create",
+            "filename": "memory/transport-error.md",
+            "title": "Transport error",
+            "summary": "Record the failed model turn",
+        },
+        "raw",
+        diagnostics=diagnostics,
+    )
+
+    assert result is None
+    assert diagnostics["failure_class"] == "transport_error"
+    assert diagnostics["attempts"] == 1
+    assert "socket reset" in diagnostics["reason"]
+
+
+def test_generate_one_exhausts_after_two_distinct_targeted_repairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import ingest
+
+    responses = iter(
+        [
+            "bare response one",
+            "bare response two",
+            "bare response three",
+        ]
+    )
+    calls = 0
+
+    def fake_generate(_prompt: str, **_kwargs) -> str:
+        nonlocal calls
+        calls += 1
+        return next(responses)
+
+    monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+    diagnostics: dict = {}
+
+    result = ingest._generate_one(
+        {
+            "type": "create",
+            "filename": "memory/exhausted.md",
+            "title": "Exhausted",
+            "summary": "bounded repairs",
+        },
+        "raw",
+        diagnostics=diagnostics,
+    )
+
+    assert result is None
+    assert calls == 3
+    assert diagnostics["failure_class"] == "repair_exhausted"
+    assert diagnostics["attempts"] == 3
+
+
+def test_generate_one_holds_one_exclusive_lease_across_repair_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import ingest
+    from llm_wiki_mcp.runtime_config import IngestConfig
+
+    invalid = (
+        "=== NEW PAGE: memory/leased.md ===\n"
+        "---\ntitle: Leased\nupdated: 2026-07-14\n"
+        "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文"
+    )
+    valid = invalid + "\n=== END PAGE ==="
+    responses = iter([invalid, valid])
+    events: list[tuple[str, object]] = []
+
+    @contextmanager
+    def fake_lease(*, exclusive: bool = False):
+        events.append(("lease_enter", exclusive))
+        try:
+            yield
+        finally:
+            events.append(("lease_exit", exclusive))
+
+    def fake_admit(_config, requested_num_ctx: int) -> int:
+        events.append(("admit", requested_num_ctx))
+        return requested_num_ctx
+
+    def fake_generate(prompt: str, *, system: str | None = None, **_kwargs):
+        events.append(("generate", prompt))
+        return ingest.ollama_runtime.GenerateResponse(
+            content=next(responses),
+            done=True,
+            done_reason="stop",
+            prompt_eval_count=100,
+            eval_count=100,
+        )
+
+    monkeypatch.setattr(
+        ingest,
+        "load_ingest_config",
+        lambda: IngestConfig(
+            model="ornith:test",
+            num_ctx=32768,
+            max_num_ctx=65536,
+            num_predict=4096,
+        ),
+    )
+    monkeypatch.setattr(ingest, "_build_focused_context", lambda *_a, **_k: "ctx")
+    monkeypatch.setattr(ingest, "_admit_ingest_context", fake_admit)
+    monkeypatch.setattr(ingest.ollama_runtime, "model_resource_lease", fake_lease)
+    monkeypatch.setattr(ingest, "generate", fake_generate)
+
+    assert ingest._generate_with_progress is ingest._DEFAULT_GENERATE_WITH_PROGRESS
+    result = ingest._generate_one(
+        {
+            "type": "create",
+            "filename": "memory/leased.md",
+            "title": "Leased",
+            "summary": "one lease must span repair turns",
+        },
+        "grounded raw",
+    )
+
+    assert result is not None
+    assert [name for name, _value in events] == [
+        "lease_enter",
+        "admit",
+        "generate",
+        "generate",
+        "lease_exit",
+    ]
+    assert events[0] == ("lease_enter", True)
+    assert events[-1] == ("lease_exit", True)
+    second_prompt = [value for name, value in events if name == "generate"][1]
+    assert isinstance(second_prompt, str)
+    assert f"<ASSISTANT>\n{invalid}" in second_prompt
+
+
+def test_generate_one_rejects_context_accounting_at_admitted_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import ingest
+    from llm_wiki_mcp.runtime_config import IngestConfig
+
+    calls = 0
+
+    def fake_generate(_prompt: str, **kwargs):
+        nonlocal calls
+        calls += 1
+        num_ctx = int(kwargs["num_ctx"])
+        return ingest.ollama_runtime.GenerateResponse(
+            content=(
+                "=== NEW PAGE: memory/context-boundary.md ===\n"
+                "---\ntitle: Context boundary\nupdated: 2026-07-14\n"
+                "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文\n"
+                "=== END PAGE ==="
+            ),
+            done=True,
+            done_reason="stop",
+            prompt_eval_count=num_ctx - 128,
+            eval_count=64,
+        )
+
+    monkeypatch.setattr(
+        ingest,
+        "load_ingest_config",
+        lambda: IngestConfig(
+            model="ornith:test",
+            num_ctx=32768,
+            max_num_ctx=32768,
+            num_predict=4096,
+        ),
+    )
+    monkeypatch.setattr(ingest, "_build_focused_context", lambda *_a, **_k: "ctx")
+    monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+    diagnostics: dict = {}
+
+    with pytest.raises(
+        RuntimeError,
+        match="ingest generation context_truncation_suspected",
+    ):
+        ingest._generate_one(
+            {
+                "type": "create",
+                "filename": "memory/context-boundary.md",
+                "title": "Context boundary",
+                "summary": "valid bytes must still fail at the context boundary",
+            },
+            "grounded raw",
+            diagnostics=diagnostics,
+        )
+
+    assert calls == 1
+    assert diagnostics["failure_class"] == "context_truncation_suspected"
+    assert diagnostics["attempts"] == 1
+
+
+def test_generate_one_oversized_full_repair_envelope_fails_before_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import ingest
+    from llm_wiki_mcp.runtime_config import IngestConfig
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail(
+            "oversized generation must fail before lease, admission, or transport"
+        )
+
+    monkeypatch.setattr(
+        ingest,
+        "load_ingest_config",
+        lambda: IngestConfig(
+            model="ornith:test",
+            num_ctx=32768,
+            max_num_ctx=32768,
+            num_predict=4096,
+        ),
+    )
+    monkeypatch.setattr(ingest, "_build_focused_context", lambda *_a, **_k: "ctx")
+    monkeypatch.setattr(ingest.ollama_runtime, "model_resource_lease", forbidden)
+    monkeypatch.setattr(ingest, "_admit_ingest_context", forbidden)
+    monkeypatch.setattr(ingest, "generate", forbidden)
+    diagnostics: dict = {}
+
+    with pytest.raises(RuntimeError, match="ingest generation context_window_exceeded"):
+        ingest._generate_one(
+            {
+                "type": "create",
+                "filename": "memory/oversized-envelope.md",
+                "title": "Oversized envelope",
+                "summary": "the complete repair envelope must be admitted up front",
+            },
+            "x" * 400_000,
+            diagnostics=diagnostics,
+        )
+
+    assert diagnostics["failure_class"] == "context_window_exceeded"
+    assert diagnostics["attempts"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -2067,6 +2441,7 @@ class TestRunIngestPartialFailure:
         assert sorted(finished.pages_created) == ["p0", "p1"]
         assert finished.pages_updated == []
         assert finished.result is not None
+        assert finished.result["local_consensus"] == finished.result["frontier"]
         assert finished.result.get("partial") is True
         failed_ops = finished.result.get("failed_ops", [])
         assert len(failed_ops) == 1
@@ -2077,12 +2452,15 @@ class TestRunIngestPartialFailure:
         assert (pages / "misc" / "p1.md").exists()
         assert not (pages / "misc" / "p2.md").exists()
 
-    def test_partial_generate_retries_once_before_dead_lettering(
+    def test_partial_generate_does_not_blindly_restart_generation_session(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Per-op retry: a transient generate failure on the first attempt
-        is retried once. If the retry succeeds, the op is applied; the job
-        completes cleanly with no partial flag and no failed_ops."""
+        """The outer loop must not replay an operation without feedback.
+
+        Real page-format repair is owned by ``_generate_one`` so it can retain
+        the invalid assistant turn and validator reason.  A mocked terminal
+        failure therefore crosses this boundary exactly once.
+        """
 
         from llm_wiki_mcp import ingest, jobs
 
@@ -2097,8 +2475,7 @@ class TestRunIngestPartialFailure:
         def flaky_generate(op: dict, _raw: str, **_kw) -> dict | None:
             fname = op["filename"]
             attempts[fname] = attempts.get(fname, 0) + 1
-            # p1 fails on first attempt, succeeds on second.
-            if fname.endswith("p1.md") and attempts[fname] == 1:
+            if fname.endswith("p1.md"):
                 return None
             return {
                 "type": "create",
@@ -2117,14 +2494,13 @@ class TestRunIngestPartialFailure:
             on_complete=lambda: on_complete_called.append(True),
         )
 
-        # p1 was attempted twice; p0 only once.
-        assert attempts.get("misc/p1.md") == 2
+        assert attempts.get("misc/p1.md") == 1
         assert attempts.get("misc/p0.md") == 1
-        # Full success — no partial flag.
         finished = jobs.job_store.get(job.job_id)
         assert finished.status == jobs.JobStatus.COMPLETED
-        assert sorted(finished.pages_created) == ["p0", "p1"]
-        assert finished.result is None or not finished.result.get("partial")
+        assert finished.pages_created == ["p0"]
+        assert finished.result is not None and finished.result.get("partial") is True
+        assert finished.result["failed_ops"][0]["attempts"] == 1
         assert on_complete_called == [True]
 
     def test_all_ops_fail_marks_raw_processed(
@@ -2674,6 +3050,12 @@ class TestRunIngestFrontierDisposition:
         monkeypatch.setattr(ingest, "_triage", fake_triage)
         monkeypatch.setattr(ingest, "_generate_one", fake_generate)
         monkeypatch.setattr(ingest, "is_available", lambda: True)
+        status_updates: list[dict] = []
+        monkeypatch.setattr(
+            ingest.runtime_status,
+            "safe_write_status",
+            lambda **fields: status_updates.append(fields),
+        )
         completed: list[bool] = []
         job = jobs.job_store.create(processor="ollama")
 
@@ -2693,6 +3075,22 @@ class TestRunIngestFrontierDisposition:
             "Remove the unsupported inference; keep only the grounded fact.",
         ]
         assert generate_feedback == triage_feedback
+        assert any(
+            update.get("stage") == "local-regenerate" for update in status_updates
+        )
+        assert any(
+            isinstance(update.get("llm"), dict)
+            and update["llm"].get("phase") == "local-regenerate-triage"
+            for update in status_updates
+        )
+        assert not any(
+            update.get("stage") == "frontier-regenerate"
+            or (
+                isinstance(update.get("llm"), dict)
+                and update["llm"].get("phase") == "frontier-regenerate-triage"
+            )
+            for update in status_updates
+        )
         page = isolated_wiki / "pages" / "memory" / "converged.md"
         assert "grounded fact" in page.read_text(encoding="utf-8")
         assert "unsupported inference" not in page.read_text(encoding="utf-8")
@@ -2725,7 +3123,7 @@ class TestRunIngestFrontierDisposition:
         assert finished.status == jobs.JobStatus.FAILED
         assert completed == []
         assert len(captured) == 2
-        assert "did not converge after 2 frontier calls" in str(finished.error)
+        assert "did not converge after 2 local review calls" in str(finished.error)
         assert captured[0]["raw_content"] == "raw must not disappear"
         assert captured[0]["triage_plan"] == []
         assert captured[0]["local_disposition"] == "triage_no_operations"
@@ -2774,8 +3172,8 @@ class TestRunIngestFrontierDisposition:
         assert captured[0]["triage_plan"] == plan
         [failure] = captured[0]["failed_operation_specs"]
         assert failure["filename"] == "memory/missing.md"
-        assert failure["attempts"] == 2
-        assert "parse failed" in failure["error"]
+        assert failure["attempts"] == 1
+        assert failure["error"] == "generation validation failed"
         assert captured[0]["prepared_operations"] == []
 
     def test_partial_apply_without_explicit_failed_disposition_retries(
@@ -4734,6 +5132,34 @@ class TestPerRawOrchestrator:
         assert packet["fingerprint"] == "ingest.frontier_nonconvergent"
         assert not raw_path.exists()
 
+    def test_local_consensus_nonconvergence_immediately_queues_self_heal(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, self_heal
+
+        raw_path = isolated_wiki / "raw" / "local-consensus-loop.md"
+        raw_path.write_text("grounded source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(self_heal, "start_background", started.append)
+
+        result = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=(
+                "local consensus ingest review did not converge after "
+                "2 local review calls: structured review budget exhausted (2/2)"
+            ),
+            raw_text="grounded source",
+        )
+
+        assert result.failure_class == "ingest.local_consensus_nonconvergent"
+        assert result.attempts == 1
+        assert result.quarantined is True
+        assert result.packet_path is not None
+        assert started == [Path(result.packet_path)]
+        packet = json.loads(Path(result.packet_path).read_text(encoding="utf-8"))
+        assert packet["fingerprint"] == "ingest.local_consensus_nonconvergent"
+        assert not raw_path.exists()
+
     def test_ollama_unavailable_stays_pending_without_self_heal_packet(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4866,6 +5292,14 @@ class TestPerRawOrchestrator:
             (
                 "ingest generation context_window_exceeded: input too large",
                 "ingest.generation_context_window_exceeded",
+            ),
+            (
+                "ingest generation context_truncation_suspected: shifted",
+                "ingest.generation_context_truncation_suspected",
+            ),
+            (
+                "ingest generation feedback_too_large: repair feedback too large",
+                "ingest.generation_feedback_too_large",
             ),
             (
                 "ingest generation completion_incomplete: done missing",
@@ -5758,7 +6192,13 @@ class TestTriagePlanSchema:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
         plan = [
-            {"type": "create", "filename": "ai/foo.md", "title": "Foo"},
+            {
+                "type": "create",
+                "filename": "ai/foo.md",
+                "title": "Foo",
+                "keywords": ["foo"],
+                "summary": "Foo knowledge",
+            },
             {"type": "update", "filename": "bar.md"},
         ]
         assert _validate_triage_plan(plan) == plan
@@ -5813,6 +6253,26 @@ class TestTriagePlanSchema:
 
         assert _validate_triage_plan(plan, coerce_missing_updates=True) == plan
 
+    def test_missing_update_without_summary_gets_neutral_create_topic(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        out = _validate_triage_plan(
+            [{"type": "update", "filename": "missing-topic.md"}],
+            coerce_missing_updates=True,
+        )
+
+        assert out == [
+            {
+                "type": "create",
+                "filename": "missing-topic.md",
+                "title": "Missing Topic",
+                "summary": "Missing Topic",
+                "keywords": ["missing", "topic"],
+            }
+        ]
+
     def test_live_triage_repairs_malformed_json_in_same_session(
         self, isolated_wiki: Path
     ) -> None:
@@ -5826,6 +6286,7 @@ class TestTriagePlanSchema:
                         "type": "create",
                         "filename": "memory/repaired.md",
                         "title": "Repaired",
+                        "keywords": ["repaired"],
                         "summary": "Durable repaired plan",
                     }
                 ]
@@ -5839,6 +6300,7 @@ class TestTriagePlanSchema:
                 "type": "create",
                 "filename": "memory/repaired.md",
                 "title": "Repaired",
+                "keywords": ["repaired"],
                 "summary": "Durable repaired plan",
             }
         ]
@@ -5851,6 +6313,117 @@ class TestTriagePlanSchema:
             "user",
         ]
         assert '"keyword":"parse"' in second.messages[-1]["content"]
+
+    def test_live_triage_repairs_unknown_keys_and_missing_create_fields(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        invalid = [
+            {
+                "type": "create",
+                "filename": "memory/repaired-fields.md",
+                "title": "Repaired fields",
+                "keywords: [": ["bad-key"],
+                'summary": ': {"summary": "nested under a malformed key"},
+            }
+        ]
+        valid = [
+            {
+                "type": "create",
+                "filename": "memory/repaired-fields.md",
+                "title": "Repaired fields",
+                "keywords": ["repaired", "fields"],
+                "summary": "Known fields restored after exact validator feedback.",
+            }
+        ]
+        transport = _QueueStructuredTransport(
+            json.dumps(invalid),
+            json.dumps(valid),
+        )
+
+        out = ingest._triage("raw content", transport=transport)
+
+        assert out == valid
+        assert len(transport.requests) == 2
+        repair_request = transport.requests[1]
+        assert repair_request.messages[-2] == {
+            "role": "assistant",
+            "content": json.dumps(invalid),
+        }
+        assert "Validator errors" in repair_request.messages[-1]["content"]
+        assert "additionalProperties" in repair_request.messages[-1]["content"]
+        assert "keywords: [" in repair_request.messages[-1]["content"]
+
+    def test_live_triage_repairs_schema_valid_missing_create_fields(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        invalid = [
+            {
+                "type": "create",
+                "filename": "memory/semantic-repair.md",
+            }
+        ]
+        valid = [
+            {
+                "type": "create",
+                "filename": "memory/semantic-repair.md",
+                "title": "Semantic repair",
+                "keywords": ["semantic", "repair"],
+                "summary": "Host validation repaired schema-valid omissions.",
+            }
+        ]
+        transport = _QueueStructuredTransport(
+            json.dumps(invalid),
+            json.dumps(valid),
+        )
+
+        out = ingest._triage("raw content", transport=transport)
+
+        assert out == valid
+        assert len(transport.requests) == 2
+        feedback = transport.requests[1].messages[-1]["content"]
+        assert "Validator errors" in feedback
+        assert '"keyword":"required"' in feedback
+        assert '"pointer":"/0/title"' in feedback
+        assert '"pointer":"/0/summary"' in feedback
+        assert '"pointer":"/0/keywords"' in feedback
+
+    def test_create_requires_known_non_empty_semantic_fields(self) -> None:
+        from llm_wiki_mcp.ingest import _validate_triage_plan
+
+        base = {"type": "create", "filename": "memory/strict.md"}
+        assert _validate_triage_plan([base]) is None
+        assert _validate_triage_plan([{**base, "title": "T"}]) is None
+        assert (
+            _validate_triage_plan(
+                [
+                    {
+                        **base,
+                        "title": "T",
+                        "summary": "S",
+                        "keywords": [],
+                    }
+                ]
+            )
+            is None
+        )
+        assert (
+            _validate_triage_plan(
+                [
+                    {
+                        **base,
+                        "title": "T",
+                        "summary": "S",
+                        "keywords": ["strict"],
+                        "diagnostic": "not allowed",
+                    }
+                ]
+            )
+            is None
+        )
 
     def test_live_triage_three_invalid_responses_fail_closed(
         self, isolated_wiki: Path
@@ -6261,7 +6834,9 @@ class TestIngestContextAdmission:
         )
 
         assert result is not None
-        assert captured["num_ctx"] == 65536
+        # The admitted bucket includes the complete initial + two-repair
+        # history, not only the first page-generation turn.
+        assert captured["num_ctx"] == 131072
         assert "z" * 1000 not in captured["prompt"]
         assert "r" * 40000 in captured["prompt"]
 
@@ -7230,22 +7805,27 @@ class TestWikiIngestForce:
 
 
 class TestFilenameSchemaStrict:
+    @staticmethod
+    def _create(filename: str) -> dict:
+        return {
+            "type": "create",
+            "filename": filename,
+            "title": "Filename test",
+            "keywords": ["filename"],
+            "summary": "Validate the create filename contract.",
+        }
+
     def test_control_char_rejected(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
         for c in ("\x00", "\n", "\t", "\x07", "\x7f"):
-            assert (
-                _validate_triage_plan([{"type": "create", "filename": f"foo{c}bar.md"}])
-                is None
-            ), c
+            assert _validate_triage_plan([self._create(f"foo{c}bar.md")]) is None, c
 
     def test_long_filename_rejected(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
         long_name = "a" * 250 + ".md"
-        assert (
-            _validate_triage_plan([{"type": "create", "filename": long_name}]) is None
-        )
+        assert _validate_triage_plan([self._create(long_name)]) is None
 
     def test_non_kebab_case_rejected(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
@@ -7258,15 +7838,13 @@ class TestFilenameSchemaStrict:
             "-leading.md",  # leading dash
             "trailing-.md",  # trailing dash before suffix
         ):
-            assert (
-                _validate_triage_plan([{"type": "create", "filename": bad}]) is None
-            ), bad
+            assert _validate_triage_plan([self._create(bad)]) is None, bad
 
     def test_kebab_with_optional_folder_accepted(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
         for good in ("ai/foo.md", "foo.md", "foo", "ai/career-note"):
-            out = _validate_triage_plan([{"type": "create", "filename": good}])
+            out = _validate_triage_plan([self._create(good)])
             assert out is not None, good
 
 

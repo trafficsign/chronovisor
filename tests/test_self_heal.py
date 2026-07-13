@@ -616,6 +616,33 @@ def test_frontier_budget_nonconvergence_retries_raw_deterministically(
     assert decision.confidence >= 0.85
 
 
+def test_local_consensus_budget_nonconvergence_retries_raw_deterministically(
+    isolated_wiki: Path,
+) -> None:
+    from llm_wiki_mcp.local_repair import propose_repair
+
+    packet = {
+        "failure_class": "ingest.local_consensus_nonconvergent",
+        "fingerprint": "ingest.local_consensus_nonconvergent",
+        "attempts": 1,
+        "error": (
+            "local consensus ingest review did not converge after "
+            "2 local review calls: structured review budget exhausted (2/2)"
+        ),
+        "requested_page_id": None,
+        "similar_existing_pages": [],
+    }
+
+    def stale_qwen(*_args, **_kwargs) -> str:
+        raise AssertionError("local review budget exhaustion must not ask Qwen")
+
+    decision = propose_repair(packet, generator=stale_qwen, use_qwen=True)
+
+    assert decision.status == "resolved"
+    assert decision.action == "retry_raw"
+    assert decision.confidence >= 0.85
+
+
 def test_missing_update_with_unsafe_page_id_still_escalates(
     isolated_wiki: Path,
 ) -> None:
@@ -789,6 +816,82 @@ def test_frontier_nonconvergence_restores_raw_without_frontier(
     assert result["action"]["action"] == "retry_raw"
     assert not quarantined.exists()
     assert (isolated_wiki / "raw" / "frontier-loop.md").exists()
+    assert updated_packet["status"] == "local_repair_applied"
+    assert updated_packet["local_decision"]["source"] == "deterministic"
+
+
+def test_local_consensus_nonconvergence_restores_raw_without_frontier(
+    isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet = {
+        "failure_id": "local-consensus-loop",
+        "raw_file": "local-consensus-loop.md",
+        "failure_class": "ingest.local_consensus_nonconvergent",
+        "fingerprint": "ingest.local_consensus_nonconvergent",
+        "attempts": 1,
+        "error": (
+            "local consensus ingest review did not converge after "
+            "2 local review calls: structured review budget exhausted (2/2)"
+        ),
+        "requested_page_id": None,
+        "similar_existing_pages": [],
+        "status": "frontier_running",
+        "frontier_attempts": 1,
+        "self_heal_attempts": 1,
+        "lease_expires_at": "2000-01-01T00:00:00",
+        "local_decision": {
+            "status": "escalate",
+            "action": "escalate_to_frontier",
+            "confidence": 0.7,
+            "reason": "stale model decision",
+            "source": "qwen",
+        },
+    }
+    packet_path = (
+        isolated_wiki / "runtime" / "failures" / "packets" / "local-consensus-loop.json"
+    )
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    quarantined = (
+        isolated_wiki
+        / "runtime"
+        / "failures"
+        / "quarantined-raw"
+        / "local-consensus-loop.md"
+    )
+    quarantined.parent.mkdir(parents=True, exist_ok=True)
+    quarantined.write_text("raw body", encoding="utf-8")
+
+    monkeypatch.setattr(
+        self_heal,
+        "_retry_ingest",
+        lambda *, dry_run: {
+            "triggered": True,
+            "files_processed": ["local-consensus-loop.md"],
+        },
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local consensus nonconvergence must stay local")
+        ),
+    )
+
+    result = self_heal.handle_packet(
+        packet_path,
+        use_qwen=True,
+        enable_frontier=True,
+        dry_run=False,
+    )
+
+    updated_packet = json.loads(packet_path.read_text())
+    assert result["status"] == "local_repair_applied"
+    assert result["action"]["action"] == "retry_raw"
+    assert not quarantined.exists()
+    assert (isolated_wiki / "raw" / "local-consensus-loop.md").exists()
     assert updated_packet["status"] == "local_repair_applied"
     assert updated_packet["local_decision"]["source"] == "deterministic"
 

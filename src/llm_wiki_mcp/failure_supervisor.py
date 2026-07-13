@@ -89,6 +89,8 @@ OPERATIONAL_SELF_HEAL_FAILURE_CLASSES = {
     "ingest.runtime_completion_incomplete",
     "ingest.runtime_output_truncated",
     "ingest.generation_context_window_exceeded",
+    "ingest.generation_context_truncation_suspected",
+    "ingest.generation_feedback_too_large",
     "ingest.generation_stream_incomplete",
     "ingest.generation_completion_incomplete",
     "ingest.generation_output_truncated",
@@ -108,6 +110,7 @@ REPAIR_SUCCESS_PACKET_STATUSES = {
 # frontier tokens while reproducing the same control-path defect.
 IMMEDIATE_SELF_HEAL_FAILURE_CLASSES = {
     "ingest.frontier_nonconvergent",
+    "ingest.local_consensus_nonconvergent",
 }
 
 
@@ -265,7 +268,8 @@ def classify_failure(message: str | None) -> FailureRecord:
 
     generation_failure = re.search(
         r"ingest generation (capacity_unavailable|context_window_exceeded|"
-        r"stream_incomplete|completion_incomplete|output_truncated):",
+        r"context_truncation_suspected|feedback_too_large|stream_incomplete|"
+        r"completion_incomplete|output_truncated):",
         msg,
         flags=re.IGNORECASE,
     )
@@ -288,6 +292,20 @@ def classify_failure(message: str | None) -> FailureRecord:
         return FailureRecord(
             failure_class="ingest.frontier_deferred",
             fingerprint="ingest.frontier_deferred",
+            message=msg,
+        )
+
+    if "local consensus ingest review did not converge after" in msg.casefold():
+        return FailureRecord(
+            failure_class="ingest.local_consensus_nonconvergent",
+            fingerprint="ingest.local_consensus_nonconvergent",
+            message=msg,
+        )
+
+    if "local consensus ingest review deferred:" in msg.casefold():
+        return FailureRecord(
+            failure_class="ingest.local_consensus_deferred",
+            fingerprint="ingest.local_consensus_deferred",
             message=msg,
         )
 

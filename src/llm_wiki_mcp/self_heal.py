@@ -32,7 +32,11 @@ from llm_wiki_mcp.frontier_guard import (
     EvidenceValidationError,
     RepairIncidentEvidence,
 )
-from llm_wiki_mcp.local_repair import LocalRepairDecision, propose_repair
+from llm_wiki_mcp.local_repair import (
+    LocalRepairDecision,
+    is_review_budget_nonconvergence,
+    propose_repair,
+)
 from llm_wiki_mcp.page_mutation import decision_authority_lock
 
 
@@ -296,9 +300,9 @@ def _is_unverifiable_query_hint_read_back_packet(packet: dict[str, Any]) -> bool
 
 
 def _frontier_nonconvergence_should_reenter_local(packet: dict[str, Any]) -> bool:
-    if packet.get("failure_class") != "ingest.frontier_nonconvergent":
-        return False
-    return "frontier call budget exhausted" in str(packet.get("error") or "").casefold()
+    """Compatibility wrapper for new and legacy bounded-review packets."""
+
+    return is_review_budget_nonconvergence(packet)
 
 
 def _retire_non_actionable_read_back_packet(

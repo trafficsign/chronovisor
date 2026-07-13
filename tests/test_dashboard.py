@@ -41,6 +41,24 @@ def test_mark_batch_activity_requires_a_running_batch_job() -> None:
     assert waiting["batch"]["active"] is False
 
 
+def test_mark_batch_activity_accepts_local_consensus_stages_and_legacy_cache() -> None:
+    for stage in (
+        "local-consensus-review",
+        "local-regenerate",
+        "frontier-regenerate",
+    ):
+        status = {
+            "state": "running",
+            "stage": stage,
+            "current_job_id": "job-1",
+            "batch": {"index": 1, "total": 2, "succeeded": 0, "failed": 0},
+        }
+
+        dashboard._mark_batch_activity(status)
+
+        assert status["batch"]["active"] is True
+
+
 def test_dead_orchestrator_pid_clears_stale_live_status(monkeypatch) -> None:
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: False)
     cached = {

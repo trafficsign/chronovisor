@@ -1458,6 +1458,8 @@ Rules:
 - Skip ephemeral conversation, greetings, and filler
 - Include brief summary of what knowledge each page should contain
 - Include keywords for finding related existing pages
+- Use only these five object keys: type, filename, title, keywords, summary
+- Every create MUST include non-empty title, keywords, and summary fields
 
 Output format (JSON array only):
 [
@@ -1471,6 +1473,8 @@ Output format (JSON array only):
   {
     "type": "update",
     "filename": "existing-page.md",
+    "title": "Existing Page Title",
+    "keywords": ["keyword1", "keyword2"],
     "summary": "What new information to add"
   }
 ]
@@ -1534,6 +1538,9 @@ tags: [d/example-domain, t/analysis, s/evergreen]
 Page content here with [[wiki-links]] to related topics.
 
 === END PAGE ===
+
+The final non-whitespace line MUST be exactly `=== END PAGE ===`. Keep the
+page concise enough to emit that closing line before stopping.
 """
 
 UPDATE_SYSTEM_PROMPT = """\
@@ -1552,4 +1559,7 @@ Output exactly one block:
 New section(s) here. Markdown body only — NO frontmatter delimiters.
 
 === END PAGE ===
+
+The final non-whitespace line MUST be exactly `=== END PAGE ===`. Keep the
+update concise enough to emit that closing line before stopping.
 """
