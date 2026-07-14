@@ -3563,6 +3563,18 @@ class TestIngestProposalSchemaCompatibility:
             )
             is None
         )
+        legacy_bytes = proposal_path.read_bytes()
+        assert (
+            ingest._load_pretriage_ingest_shard_continuation(
+                raw_content,
+                raw_keywords,
+                reviewer=lambda _proposal: pytest.fail(
+                    "legacy classification must not review"
+                ),
+            )
+            is None
+        )
+        assert proposal_path.read_bytes() == legacy_bytes
 
         replaced = ingest._review_and_apply_ingest_operations(
             operations,
@@ -3589,6 +3601,100 @@ class TestIngestProposalSchemaCompatibility:
             <= row.keys()
             for row in artifact["proposal"]["prepared_operations"]
         )
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            "partial_json",
+            "proposal_digest",
+            "raw_binding",
+            "partial_continuation",
+            "partial_shard_manifest",
+            "legacy_review_partial_continuation",
+            "legacy_review_partial_shard_manifest",
+        ],
+    )
+    def test_v1_pretriage_regeneration_fails_closed_on_corrupt_or_partial_state(
+        self,
+        isolated_wiki: Path,
+        corruption: str,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        raw_content = "legacy proposal must remain exactly bound before regeneration"
+        proposal_path, _review_path, proposal = _write_legacy_v1_ingest_proposal(
+            raw_content=raw_content,
+            operations=[TestIngestFrontierGate._create_op()],
+        )
+        if corruption.startswith("legacy_review_"):
+            ingest._write_ingest_artifact(
+                _review_path,
+                {
+                    "schema_version": 1,
+                    "kind": "ingest_frontier_review_artifact",
+                    "source_key": proposal["source_key"],
+                    "proposal_sha256": ingest._canonical_json_sha256(proposal),
+                    "review": {"decision": "approved"},
+                },
+            )
+        if corruption == "partial_json":
+            proposal_path.write_text('{"schema_version":1', encoding="utf-8")
+        elif corruption in {
+            "partial_continuation",
+            "legacy_review_partial_continuation",
+        }:
+            marker_path = ingest._ingest_review_continuation_marker_path(
+                str(proposal["source_key"])
+            )
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            marker_path.write_text("{}", encoding="utf-8")
+        elif corruption in {
+            "partial_shard_manifest",
+            "legacy_review_partial_shard_manifest",
+        }:
+            manifest_path = proposal_path.parent / (
+                "review-shard-manifest-" + "f" * 24 + ".json"
+            )
+            manifest_path.write_text(
+                json.dumps({"source_key": proposal["source_key"]}),
+                encoding="utf-8",
+            )
+        else:
+            artifact = json.loads(proposal_path.read_text(encoding="utf-8"))
+            if corruption == "proposal_digest":
+                artifact["proposal_sha256"] = "0" * 64
+            else:
+                artifact["proposal"]["raw_sha256"] = "0" * 64
+                artifact["proposal_sha256"] = ingest._canonical_json_sha256(
+                    artifact["proposal"]
+                )
+            ingest._write_ingest_artifact(proposal_path, artifact)
+
+        with pytest.raises(
+            IngestApplyError,
+            match=(
+                "unreadable"
+                if corruption == "partial_json"
+                else (
+                    "partial continuation evidence"
+                    if corruption
+                    in {
+                        "partial_continuation",
+                        "partial_shard_manifest",
+                        "legacy_review_partial_continuation",
+                        "legacy_review_partial_shard_manifest",
+                    }
+                    else "binding is invalid"
+                )
+            ),
+        ):
+            ingest._load_pretriage_ingest_shard_continuation(
+                raw_content,
+                None,
+                reviewer=lambda _proposal: pytest.fail(
+                    "invalid legacy artifact must not review"
+                ),
+            )
 
     def test_v1_legacy_review_is_replaced_by_current_sealed_review(
         self, isolated_wiki: Path

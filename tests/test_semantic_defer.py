@@ -205,6 +205,67 @@ def test_related_raws_share_one_idempotent_terminal_packet_and_reset_together(
     assert failure_supervisor.operational_deferred_raw_files([first, second]) == {}
 
 
+def test_guarded_semantic_publish_keeps_newer_operational_hold_atomic(
+    semantic_defer_wiki: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor
+
+    wiki_root, artifact = semantic_defer_wiki
+    raw_path = wiki_root / "raw" / "operational-wins.md"
+    raw_path.write_text("immutable source\n", encoding="utf-8")
+    observed_paths: list[tuple[Path, ...]] = []
+
+    def active_operational(paths) -> dict[str, str]:
+        observed_paths.append(tuple(paths))
+        return {raw_path.name: "pending_local_repair"}
+
+    monkeypatch.setattr(
+        failure_supervisor,
+        "_operational_deferred_raw_files_unlocked",
+        active_operational,
+    )
+    monkeypatch.setattr(
+        failure_supervisor,
+        "_record_semantic_no_quorum_defer_unlocked",
+        lambda **_kwargs: pytest.fail(
+            "semantic packet must not supersede an active operational hold"
+        ),
+    )
+
+    result = failure_supervisor.record_semantic_no_quorum_defer_unless_operational_hold(
+        raw_path=raw_path,
+        error=_no_quorum_error(_sha256(artifact)),
+        raw_text=raw_path.read_text(),
+    )
+
+    assert result is None
+    assert observed_paths == [(raw_path,)]
+    assert not (wiki_root / "runtime" / "failures" / "packets").exists()
+
+    accepted = SimpleNamespace(terminal_deferred=True)
+    monkeypatch.setattr(
+        failure_supervisor,
+        "_operational_deferred_raw_files_unlocked",
+        lambda _paths: {"unrelated.md": "pending_local_repair"},
+    )
+    monkeypatch.setattr(
+        failure_supervisor,
+        "_record_semantic_no_quorum_defer_unlocked",
+        lambda **_kwargs: accepted,
+    )
+
+    unrelated = (
+        failure_supervisor.record_semantic_no_quorum_defer_unless_operational_hold(
+            raw_path=raw_path,
+            error=_no_quorum_error(_sha256(artifact)),
+            raw_text=raw_path.read_text(),
+        )
+    )
+
+    assert unrelated is accepted
+
+
 def test_authority_artifact_change_reopens_and_unreadable_artifact_fails_closed(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:

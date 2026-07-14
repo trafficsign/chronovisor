@@ -26,6 +26,8 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
+    from llm_wiki_mcp import failure_supervisor
+
     paths = {
         "raw": tmp_path / "raw",
         "queue": tmp_path / "review" / "raw-replay-queue.jsonl",
@@ -49,6 +51,7 @@ def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
     monkeypatch.setattr(raw_replay, "RUNTIME_STATUS_FILE", paths["runtime_status"])
     monkeypatch.setattr(raw_replay, "FAILURE_PACKETS_DIR", paths["packets"])
     monkeypatch.setattr(raw_replay, "QUARANTINED_RAW_DIR", paths["quarantine"])
+    monkeypatch.setattr(failure_supervisor, "reset_raw_failure", lambda _raw: None)
     return paths
 
 

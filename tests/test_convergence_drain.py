@@ -526,13 +526,16 @@ def test_policy_mode_only_drift_stops_before_claim(
 
 
 def test_adoption_fingerprint_binds_resolved_policy_mode(monkeypatch) -> None:
-    from llm_wiki_mcp import runtime_config
+    from llm_wiki_mcp import decision_policy, runtime_config
 
     monkeypatch.setattr(
         runtime_config,
         "load_decision_router_config",
         runtime_config.DecisionRouterConfig,
     )
+    # This test verifies the registered default versus an environment override.
+    # Do not let the operator's live ~/.wiki/config.toml decide the baseline.
+    monkeypatch.setattr(decision_policy, "load_toml_file", lambda *_args, **_kwargs: {})
     for name in convergence_drain.DECISION_POLICY_LANES:
         env_name = "LLM_WIKI_DECISION_POLICY_" + name.upper()
         monkeypatch.delenv(env_name, raising=False)

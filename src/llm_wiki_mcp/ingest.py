@@ -6296,7 +6296,7 @@ def _load_pretriage_ingest_shard_continuation(
 
     source_key = _ingest_source_key(raw_content, raw_keywords)
     proposal_path, review_path = _ingest_artifact_paths(source_key)
-    if not proposal_path.exists() or review_path.exists():
+    if not proposal_path.exists():
         return None
     proposal, planned = _load_strict_ingest_proposal_for_recovery(
         proposal_path,
@@ -6304,6 +6304,43 @@ def _load_pretriage_ingest_shard_continuation(
         raw_content=raw_content,
         raw_keywords=raw_keywords,
     )
+    if (
+        proposal.get("schema_version")
+        == _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION
+    ):
+        # Schema-v1 proposals predate source-operation provenance and therefore
+        # cannot be projected into a current review shard.  Once their complete
+        # envelope has passed the strict raw/source/digest checks above, an
+        # *unapproved* v1 proposal (including one with only a legacy unsealed
+        # review) has authorized no effect and may be replaced by the ordinary
+        # v2 generation path.  The stable source-key path makes this a one-way
+        # transition: after the v2 artifact is durably written, this legacy
+        # branch cannot be selected again.
+        #
+        # Do not use that migration escape hatch when any continuation-family
+        # evidence exists.  Such state would mean the artifact is not merely an
+        # old unreviewed proposal; overwriting it could discard a partial proof.
+        direct_continuation_paths = tuple(
+            path
+            for path in (
+                _ingest_review_continuation_marker_path(source_key),
+                _ingest_review_repair_transition_path(source_key),
+                _ingest_review_stall_path(source_key),
+            )
+            if path.exists()
+        )
+        if direct_continuation_paths or _has_sharded_ingest_review_artifact_family(
+            review_path,
+            proposal=proposal,
+            source_key=source_key,
+        ):
+            raise IngestApplyError(
+                "pre-triage legacy proposal has partial continuation evidence; "
+                "refusing regeneration"
+            )
+        return None
+    if review_path.exists():
+        return None
     if _prepared_plan_targets_reserved_system_page(planned):
         return None
     if proposal.get("failed_operation_specs"):

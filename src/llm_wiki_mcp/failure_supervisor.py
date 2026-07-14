@@ -1214,6 +1214,37 @@ def record_semantic_no_quorum_defer(
         )
 
 
+def record_semantic_no_quorum_defer_unless_operational_hold(
+    *,
+    raw_path: Path,
+    error: str | None,
+    job_id: str | None = None,
+    raw_text: str | None = None,
+    related_raw_paths: Sequence[Path] = (),
+) -> SupervisionResult | None:
+    """Publish a semantic defer only if no newer operational repair owns the raw."""
+
+    record = classify_failure(error)
+    if record.failure_class != SEMANTIC_NO_QUORUM_FAILURE_CLASS:
+        raise ValueError("error is not an authority-bound semantic no-quorum failure")
+    source_paths = _semantic_unit_paths(raw_path, related_raw_paths)
+    with _failure_state_lock():
+        active = _operational_deferred_raw_files_unlocked(source_paths)
+        source_names = {path.name for path in source_paths}
+        if any(
+            active.get(name) not in {None, SEMANTIC_NO_QUORUM_DEFER_REASON}
+            for name in source_names
+        ):
+            return None
+        return _record_semantic_no_quorum_defer_unlocked(
+            raw_path=raw_path,
+            record=record,
+            job_id=job_id,
+            raw_text=raw_text,
+            related_raw_paths=related_raw_paths,
+        )
+
+
 def _record_operational_raw_failure(
     *,
     raw_path: Path,
