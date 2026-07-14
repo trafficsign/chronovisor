@@ -7367,6 +7367,133 @@ class TestTriagePlanSchema:
 
         assert any(issue.pointer == pointer for issue in issues)
 
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            "lessons-learned.md",
+            "memory/LESSONS-LEARNED.md",
+            "current-state",
+            "system/user-profile.md",
+        ],
+    )
+    def test_host_validator_rejects_reserved_system_target(
+        self,
+        isolated_wiki: Path,
+        filename: str,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        issues = ingest._triage_plan_validation_issues(
+            [
+                {
+                    "type": "update",
+                    "filename": filename,
+                    "title": "Reserved",
+                    "keywords": ["reserved"],
+                    "summary": "This must be retargeted from normal ingest.",
+                }
+            ]
+        )
+
+        reserved = [
+            issue for issue in issues if issue.keyword == "reservedSystemTarget"
+        ]
+        assert len(reserved) == 1
+        assert reserved[0].pointer == "/0/filename"
+        assert "preserve every unrelated valid operation" in str(reserved[0].expected)
+
+    def test_host_validator_reserves_every_installed_system_page(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        (isolated_wiki / "system" / "claude-code.md").write_text(
+            "---\ntitle: Claude Code\n---\noperational system memory\n",
+            encoding="utf-8",
+        )
+
+        issues = ingest._triage_plan_validation_issues(
+            [
+                {
+                    "type": "update",
+                    "filename": "memory/CLAUDE-CODE.md",
+                    "title": "Claude Code",
+                    "keywords": ["claude-code"],
+                    "summary": "An installed operational system page stays reserved.",
+                }
+            ]
+        )
+
+        assert [issue.keyword for issue in issues] == ["reservedSystemTarget"]
+
+    def test_live_triage_repairs_reserved_only_plan_to_noop_in_same_session(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        invalid = [
+            {
+                "type": "update",
+                "filename": "lessons-learned.md",
+                "title": "Lessons learned",
+                "keywords": ["lessons-learned"],
+                "summary": "Reserved system memory is not a normal ingest target.",
+            }
+        ]
+        transport = _QueueStructuredTransport(json.dumps(invalid), "[]")
+
+        assert ingest._triage("raw content", transport=transport) == []
+        assert len(transport.requests) == 2
+        feedback = transport.requests[1].messages[-1]["content"]
+        assert '"keyword":"reservedSystemTarget"' in feedback
+        assert '"pointer":"/0/filename"' in feedback
+        assert "normal knowledge page" in feedback
+
+    def test_live_triage_regenerates_complete_mixed_reserved_plan(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        valid_unrelated = {
+            "type": "create",
+            "filename": "memory/valid-unrelated.md",
+            "title": "Valid unrelated",
+            "keywords": ["valid", "unrelated"],
+            "summary": "A grounded normal knowledge-page operation.",
+        }
+        invalid_reserved = {
+            "type": "update",
+            "filename": "lessons-learned.md",
+            "title": "Lessons learned",
+            "keywords": ["lessons-learned"],
+            "summary": "A grounded fact that needs a normal page target.",
+        }
+        repaired_reserved = {
+            **invalid_reserved,
+            "type": "create",
+            "filename": "memory/grounded-lesson.md",
+            "title": "Grounded lesson",
+        }
+        repaired = [valid_unrelated, repaired_reserved]
+        transport = _QueueStructuredTransport(
+            json.dumps([valid_unrelated, invalid_reserved]),
+            json.dumps(repaired),
+        )
+
+        assert ingest._triage("raw content", transport=transport) == repaired
+        assert len(transport.requests) == 2
+        repair_request = transport.requests[1]
+        assert repair_request.messages[-2] == {
+            "role": "assistant",
+            "content": json.dumps([valid_unrelated, invalid_reserved]),
+        }
+        feedback = repair_request.messages[-1]["content"]
+        assert '"keyword":"reservedSystemTarget"' in feedback
+        assert "do not drop or alter unrelated valid operations" in feedback
+
     def test_live_triage_repairs_host_bounded_oversized_plan(
         self, isolated_wiki: Path
     ) -> None:
@@ -9250,6 +9377,78 @@ class TestApplyPreparePhase:
         assert not (
             isolated_wiki / "pages" / "generated" / "lessons-learned.md"
         ).exists()
+
+    def test_legacy_reserved_proposal_is_neither_reused_nor_applied(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.decision_lane_prompts import (
+            validate_ingest_proposal_envelope,
+        )
+
+        system_page = isolated_wiki / "system" / "lessons-learned.md"
+        canonical = "---\ntitle: System Lessons\nupdated: 2026-07-11\n---\ncanonical\n"
+        system_page.write_text(canonical, encoding="utf-8")
+        target = (
+            isolated_wiki / "pages" / "generated" / "lessons-learned.md"
+        ).resolve()
+        planned = [
+            ingest.PreparedIngestOperation(
+                op_type="create",
+                path=target,
+                page_id="lessons-learned",
+                new_body=("---\ntitle: Generated\nupdated: 2026-07-11\n---\nunsafe\n"),
+                previous_text=None,
+                source_operation_index=0,
+                source_operation_type="create",
+                source_filename="generated/lessons-learned.md",
+            )
+        ]
+        operations = [
+            {
+                "type": "create",
+                "filename": "generated/lessons-learned.md",
+                "content": planned[0].new_body,
+            }
+        ]
+        raw_content = "legacy artifact with a reserved target"
+        source_key = ingest._ingest_source_key(raw_content, None)
+        proposal = ingest._build_ingest_frontier_proposal(
+            raw_content=raw_content,
+            raw_keywords=None,
+            source_raw="semantic-legacy-reserved.md",
+            operations=operations,
+            planned=planned,
+            link_totals={"resolved": 0, "rewritten": 0, "unwrapped": 0},
+        )
+        proposal_path, _review_path = ingest._ingest_artifact_paths(source_key)
+        proposal_sha256 = ingest._canonical_json_sha256(proposal)
+        assert validate_ingest_proposal_envelope(proposal)
+        ingest._write_ingest_artifact(
+            proposal_path,
+            {
+                "schema_version": ingest.INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+                "kind": "ingest_frontier_proposal_artifact",
+                "source_key": source_key,
+                "proposal_sha256": proposal_sha256,
+                "proposal": proposal,
+            },
+        )
+
+        assert (
+            ingest._load_ingest_proposal(
+                proposal_path,
+                source_key=source_key,
+                raw_content=raw_content,
+            )
+            is None
+        )
+        with pytest.raises(IngestApplyError, match="reserved system page_id"):
+            ingest._apply_prepared_operations(planned)
+
+        assert system_page.read_text(encoding="utf-8") == canonical
+        assert not target.exists()
 
     def test_rollback_on_write_failure_restores_previous_state(
         self,

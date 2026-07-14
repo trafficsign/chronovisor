@@ -909,6 +909,45 @@ def _triage_plan_validation_issues(
         return issues
 
     operations = [entry for entry in value if isinstance(entry, dict)]
+    reserved_system_keys = _reserved_system_page_collision_keys()
+    for index, operation in enumerate(operations):
+        filename = (
+            _effective_triage_target_filename(operation)
+            if resolve_effective_targets
+            else operation.get("filename")
+        )
+        target_key = _target_page_collision_key(filename)
+        if target_key is None or target_key not in reserved_system_keys:
+            continue
+        requested_filename = operation.get("filename")
+        issues.append(
+            ValidationIssue(
+                pointer=f"/{index}/filename",
+                keyword="reservedSystemTarget",
+                expected={
+                    "rule": (
+                        "normal ingest cannot create or update reserved system pages"
+                    ),
+                    "repair": (
+                        "return a complete corrected array; replace this operation "
+                        "with a grounded create/update for a normal knowledge page, "
+                        "or return [] only when the raw warrants no normal knowledge-"
+                        "page operation; preserve every unrelated valid operation"
+                    ),
+                },
+                received={"type": "string", "value": requested_filename},
+                message=(
+                    "this operation targets a reserved system page outside normal "
+                    "ingest authority. Re-evaluate the complete array from the raw: "
+                    "retarget the grounded fact to a normal knowledge page or use [] "
+                    "only if no such operation is warranted, and do not drop or alter "
+                    "unrelated valid operations."
+                ),
+            )
+        )
+    if issues:
+        return issues
+
     _collapsed, collisions = distinct_target_collisions(
         operations,
         effective_filename=(
@@ -2780,6 +2819,44 @@ def _normalize_for_collision(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
 
+def _reserved_system_page_collision_keys() -> frozenset[str]:
+    """Return every page_id normal ingest must never mutate.
+
+    The three correction-owned system pages stay reserved even if one is
+    temporarily absent on disk.  Any additional installed system page is also
+    protected so the triage validator and the final apply guard cannot drift.
+    Resolve ``wiki.SYSTEM_DIR`` dynamically because tests and isolated runtimes
+    replace it after this module is imported.
+    """
+
+    from llm_wiki_mcp import wiki as _wiki
+    from llm_wiki_mcp.page_mutation import CORRECTABLE_SYSTEM_PAGE_IDS
+
+    page_ids = set(CORRECTABLE_SYSTEM_PAGE_IDS)
+    try:
+        page_ids.update(
+            path.stem for path in _wiki.SYSTEM_DIR.rglob("*.md") if path.is_file()
+        )
+    except OSError:
+        # Core system ids remain fail-closed when an optional directory scan is
+        # unavailable.  The apply layer's index load still fails independently
+        # if it cannot prove the complete corpus state.
+        pass
+    return frozenset(_normalize_for_collision(page_id) for page_id in page_ids)
+
+
+def _target_page_collision_key(filename: object) -> str | None:
+    """Return the apply-equivalent page_id key for one safe target filename."""
+
+    if not isinstance(filename, str):
+        return None
+    try:
+        page_id = _safe_resolve_page_path(filename).stem
+    except IngestApplyError:
+        return None
+    return _normalize_for_collision(page_id)
+
+
 def _normalize_for_loose_page_id(name: str) -> str:
     """Canonical key for legacy slug drift.
 
@@ -3187,6 +3264,10 @@ def _prepare_operations(
     except Exception as e:
         raise IngestApplyError(f"index_store unavailable: {e}") from e
 
+    # Keep the final mutation boundary fail-closed even when an installed core
+    # system page is temporarily absent from the index snapshot.
+    reserved_system_ids.update(_reserved_system_page_collision_keys())
+
     # ---- Prepare phase -----------------------------------------------------
     # Resolve every filename, validate every op, build the final write plan.
     # Nothing here touches disk except for read-only stat/read calls.
@@ -3477,6 +3558,14 @@ def _apply_prepared_operations(
     with wiki_mutation_lock():
         try:
             for entry in planned:
+                if (
+                    _normalize_for_collision(entry.page_id)
+                    in _reserved_system_page_collision_keys()
+                ):
+                    raise IngestApplyError(
+                        "reserved system page_id cannot be mutated by ingest: "
+                        f"{entry.page_id!r}"
+                    )
                 # Re-evaluate global correction tombstones while holding the
                 # same mutation lock as the correction lane. Preparation may
                 # predate a correction on another page, and a stale replay may
@@ -4013,6 +4102,15 @@ def _prepared_plan_is_recoverable(planned: list[PreparedIngestOperation]) -> boo
     return True
 
 
+def _prepared_plan_targets_reserved_system_page(
+    planned: list[PreparedIngestOperation],
+) -> bool:
+    """Reject legacy artifacts that predate the reserved-target validator."""
+
+    reserved = _reserved_system_page_collision_keys()
+    return any(_normalize_for_collision(item.page_id) in reserved for item in planned)
+
+
 def _build_ingest_frontier_proposal(
     *,
     raw_content: str,
@@ -4077,7 +4175,11 @@ def _load_ingest_proposal(
     ):
         return None
     prepared = _prepared_from_review_payload(proposal.get("prepared_operations"))
-    if prepared is None or not _prepared_plan_is_recoverable(prepared):
+    if (
+        prepared is None
+        or _prepared_plan_targets_reserved_system_page(prepared)
+        or not _prepared_plan_is_recoverable(prepared)
+    ):
         return None
     return proposal, prepared
 
@@ -4451,6 +4553,12 @@ def _load_pretriage_terminal_recovery(
         raw_content=raw_content,
         raw_keywords=raw_keywords,
     )
+    if _prepared_plan_targets_reserved_system_page(planned):
+        # This proposal was created before normal ingest learned to repair
+        # reserved targets in-session.  It is never a valid terminal proof;
+        # leave its raw pending and let the ordinary path overwrite it after a
+        # fresh, bounded triage repair.
+        return None
     expected_review_fields = {
         "schema_version",
         "kind",
