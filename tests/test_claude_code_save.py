@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from llm_wiki_mcp import claude_code_save
+from llm_wiki_mcp.raw_semantic_projection import project_parent_raw
+from llm_wiki_mcp.save_transaction import make_save_transaction
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -112,7 +114,15 @@ def args_for(session_file: Path, state_file: Path, *, ignore_state: bool = False
     )
 
 
-def test_extract_filters_system_and_injected(tmp_path: Path) -> None:
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def test_extract_preserves_every_event_but_semantic_view_filters_transport(
+    tmp_path: Path,
+) -> None:
     session = tmp_path / "session.jsonl"
     sample_session(session)
 
@@ -120,13 +130,16 @@ def test_extract_filters_system_and_injected(tmp_path: Path) -> None:
 
     assert result.session_id == "abc-1234-def"
     assert result.cwd == "/tmp/project"
-    roles_lines = [(r.role, r.line) for r in result.records]
-    assert ("user", 3) not in roles_lines, "system-reminder should be filtered"
-    assert ("user", 4) in roles_lines
-    assert ("assistant", 5) in roles_lines
-    assert ("tool", 6) in roles_lines, "tool_result must remain in structured capture"
-    assert ("user", 7) in roles_lines
-    assert ("assistant", 8) in roles_lines
+    assert [(r.role, r.line) for r in result.records] == [
+        ("event", 1),
+        ("event", 2),
+        ("event", 3),
+        ("user", 4),
+        ("assistant", 5),
+        ("tool", 6),
+        ("user", 7),
+        ("assistant", 8),
+    ]
 
     transcript = claude_code_save.format_transcript(result.records)
     assert "system-reminder" not in transcript
@@ -135,10 +148,99 @@ def test_extract_filters_system_and_injected(tmp_path: Path) -> None:
     assert "Wiki の保存フローを自動化したい" in transcript
     assert "了解、実装します。" in transcript
     serialized = claude_code_save.serialize_transcript_records(result.records)
-    assert "internal reasoning" not in serialized
+    source_events = [json.loads(line) for line in session.read_text().splitlines()]
+    serialized_rows = json.loads(serialized)
+    assert [row["event"] for row in serialized_rows] == source_events
+    assert [_canonical_json_bytes(row["event"]) for row in serialized_rows] == [
+        _canonical_json_bytes(event) for event in source_events
+    ]
+    assert "system prompt here" in serialized
+    assert "system-reminder" in serialized
+    assert "internal reasoning" in serialized
     assert '"type": "tool_use"' in serialized
     assert '"type": "tool_result"' in serialized
     assert "file contents here" in serialized
+
+
+def test_projection_omits_reasoning_tools_and_system_from_complete_raw(
+    tmp_path: Path,
+) -> None:
+    session = tmp_path / "complete-session.jsonl"
+    rows = [
+        {
+            "type": "system",
+            "sessionId": "complete",
+            "message": {"content": "privileged system prompt"},
+        },
+        {
+            "type": "assistant",
+            "sessionId": "complete",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "private reasoning"},
+                    {"type": "redacted_thinking", "data": "opaque reasoning bytes"},
+                    {"type": "text", "text": "visible assistant body"},
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "sessionId": "complete",
+            "message": {"content": "<system-reminder>injected bytes</system-reminder>"},
+        },
+        {
+            "type": "user",
+            "sessionId": "complete",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tool-1",
+                    "content": "private tool output",
+                }]
+            },
+        },
+        {
+            "type": "user",
+            "sessionId": "complete",
+            "message": {"content": "visible user body"},
+        },
+    ]
+    write_jsonl(session, rows)
+
+    extracted = claude_code_save.extract_transcript_slice(session)
+    serialized = claude_code_save.serialize_transcript_records(extracted.records)
+    serialized_events = [row["event"] for row in json.loads(serialized)]
+    assert [_canonical_json_bytes(event) for event in serialized_events] == [
+        _canonical_json_bytes(event) for event in rows
+    ]
+
+    transaction = make_save_transaction(
+        host="claude-code",
+        session_file=session,
+        session_id=extracted.session_id,
+        after_line=0,
+        until_line=extracted.scanned_until_line,
+    )
+    raw_path = tmp_path / f"save-{transaction.idempotency_key}.md"
+    raw_path.write_text(claude_code_save.build_raw_content(extracted, transaction=transaction))
+    projection = project_parent_raw(
+        raw_path, output_dir=tmp_path / "projection", max_child_bytes=4_000
+    )
+    projected = "\n".join(path.read_text() for path in projection.child_paths)
+
+    assert projection.record_count == len(rows)
+    assert projection.selected_record_count == 2
+    assert "visible assistant body" in projected
+    assert "visible user body" in projected
+    for transport_only in (
+        "privileged system prompt",
+        "private reasoning",
+        "opaque reasoning bytes",
+        "injected bytes",
+        "private tool output",
+    ):
+        assert transport_only in serialized
+        assert transport_only not in projected
 
 
 def test_extract_preserves_image_file_and_tool_payloads(tmp_path: Path) -> None:

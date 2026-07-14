@@ -1,4 +1,9 @@
-"""Codex session saver for LLM Wiki raw entries."""
+"""Codex session saver for lossless LLM Wiki raw entries.
+
+Every unpublished JSONL event is captured unchanged. ``role`` and ``text`` are
+a deterministic semantic view for downstream projection only; privileged,
+injected, reasoning and tool events remain intact in the raw evidence.
+"""
 
 from __future__ import annotations
 
@@ -262,15 +267,11 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
             payload = item.get("payload")
             if isinstance(payload, dict):
                 meta = payload
-            continue
-        if line_no <= after_line or item_type != "response_item":
+        if line_no <= after_line:
             continue
 
         payload = item.get("payload")
-        if not isinstance(payload, dict):
-            continue
-
-        if not has_file_changes:
+        if item_type == "response_item" and isinstance(payload, dict) and not has_file_changes:
             payload_type = payload.get("type")
             fname = str(payload.get("name") or "")
             if payload_type == "function_call" and fname in FILE_CHANGE_TOOLS:
@@ -282,27 +283,8 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
                     re.search(r"\btools\.(?:apply_patch|write_file)\s*\(", serialized)
                 )
 
-        payload_type = payload.get("type")
-        event = dict(item)
-        event_payload = dict(payload)
-        event["payload"] = event_payload
-
-        if payload_type == "message":
-            role_value = payload.get("role")
-            if role_value not in {"user", "assistant"}:
-                # Do not persist privileged system/developer prompts.
-                continue
-            sanitized_content = sanitize_message_content(payload.get("content"))
-            if not _content_has_capture_payload(sanitized_content):
-                continue
-            event_payload["content"] = sanitized_content
-            role = role_value
-            text = message_content_text(sanitized_content)
-        else:
-            # Tool calls/results and future response-item variants are part of
-            # the source transcript even when they have no displayable text.
-            role = "tool" if _is_tool_payload_type(payload_type) else "event"
-            text = ""
+        payload_type = payload.get("type") if isinstance(payload, dict) else None
+        role, text = _codex_semantic_view(item_type, payload)
 
         if role == "user":
             user_turn_count += 1
@@ -313,9 +295,18 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
                 role=role,
                 text=text,
                 timestamp=item.get("timestamp") if isinstance(item.get("timestamp"), str) else None,
-                phase=payload.get("phase") if isinstance(payload.get("phase"), str) else None,
-                event_type=payload_type if isinstance(payload_type, str) else None,
-                event=event,
+                phase=(
+                    payload.get("phase")
+                    if isinstance(payload, dict) and isinstance(payload.get("phase"), str)
+                    else None
+                ),
+                event_type=(
+                    payload_type
+                    if isinstance(payload_type, str)
+                    else item_type if isinstance(item_type, str) else None
+                ),
+                # Never replace the original payload with its semantic view.
+                event=item,
             )
         )
 
@@ -337,8 +328,24 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
     )
 
 
+def _codex_semantic_view(item_type: Any, payload: Any) -> tuple[str, str]:
+    """Return the non-authoritative semantic view for one complete event."""
+    if item_type != "response_item" or not isinstance(payload, dict):
+        return "event", ""
+    payload_type = payload.get("type")
+    if payload_type != "message":
+        return "tool" if _is_tool_payload_type(payload_type) else "event", ""
+    role = payload.get("role")
+    if role not in {"user", "assistant"}:
+        return "event", ""
+    semantic_content = sanitize_message_content(payload.get("content"))
+    if not _content_has_capture_payload(semantic_content):
+        return "event", ""
+    return role, message_content_text(semantic_content)
+
+
 def sanitize_message_content(content: Any) -> Any:
-    """Remove injected prompts while retaining every user/tool/media block."""
+    """Build a semantic-only view; the raw ``event`` remains untouched."""
     if isinstance(content, str):
         return None if is_injected_context(content) else content
     if not isinstance(content, list):
@@ -420,7 +427,7 @@ def format_transcript(records: list[TranscriptRecord]) -> str:
 
 
 def serialize_transcript_records(records: list[TranscriptRecord]) -> str:
-    """Serialize the selected transcript records without semantic rewriting."""
+    """Serialize complete transcript events plus their semantic view."""
     payload: list[dict[str, Any]] = []
     for record in records:
         row: dict[str, Any] = {
@@ -1157,7 +1164,7 @@ def _run_save_transaction(
                 "status": "recovered",
                 "reason": "published raw recovered before state cursor commit",
             }
-        return {**base_result, "status": "skipped", "reason": "no new user/assistant messages"}
+        return {**base_result, "status": "skipped", "reason": "no new transcript records"}
 
     if not args.ignore_state:
         proceed, trigger_reason = should_process(transcript_slice, state)

@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from llm_wiki_mcp import codex_save
+from llm_wiki_mcp.raw_semantic_projection import project_parent_raw
+from llm_wiki_mcp.save_transaction import make_save_transaction
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -96,7 +98,13 @@ def args_for(session_file: Path, state_file: Path, *, ignore_state: bool = False
     )
 
 
-def test_extract_transcript_slice_filters_injected_context_and_preserves_tool_output(
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def test_extract_preserves_every_event_but_semantic_view_filters_transport(
     tmp_path: Path,
 ) -> None:
     session = tmp_path / "session.jsonl"
@@ -108,6 +116,8 @@ def test_extract_transcript_slice_filters_injected_context_and_preserves_tool_ou
     assert result.cwd == "/tmp/project"
     assert result.scanned_until_line == 5
     assert [(record.role, record.line) for record in result.records] == [
+        ("event", 1),
+        ("event", 2),
         ("tool", 3),
         ("user", 4),
         ("assistant", 5),
@@ -115,8 +125,113 @@ def test_extract_transcript_slice_filters_injected_context_and_preserves_tool_ou
     assert "AGENTS.md" not in codex_save.format_transcript(result.records)
     assert "large command output" not in codex_save.format_transcript(result.records)
     serialized = codex_save.serialize_transcript_records(result.records)
+    source_events = [json.loads(line) for line in session.read_text().splitlines()]
+    serialized_rows = json.loads(serialized)
+    assert [row["event"] for row in serialized_rows] == source_events
+    assert [_canonical_json_bytes(row["event"]) for row in serialized_rows] == [
+        _canonical_json_bytes(event) for event in source_events
+    ]
+    assert "AGENTS.md instructions" in serialized
     assert "large command output" in serialized
-    assert result.records[0].event_type == "function_call_output"
+    assert result.records[2].event_type == "function_call_output"
+
+
+def test_projection_omits_privileged_reasoning_and_tools_from_complete_raw(
+    tmp_path: Path,
+) -> None:
+    session = tmp_path / "complete-session.jsonl"
+    rows = [
+        {"type": "session_meta", "payload": {"id": "complete", "cwd": "/tmp/project"}},
+        {"type": "turn_context", "payload": {"private": "transport context"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "privileged developer prompt"}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "private reasoning"}],
+                "encrypted_content": "opaque reasoning bytes",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "# AGENTS.md instructions\ninjected bytes",
+                }],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "tool-1",
+                "output": "private tool output",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "visible user body"}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "visible assistant body"}],
+            },
+        },
+    ]
+    write_jsonl(session, rows)
+
+    extracted = codex_save.extract_transcript_slice(session)
+    serialized = codex_save.serialize_transcript_records(extracted.records)
+    serialized_events = [row["event"] for row in json.loads(serialized)]
+    assert [_canonical_json_bytes(event) for event in serialized_events] == [
+        _canonical_json_bytes(event) for event in rows
+    ]
+
+    transaction = make_save_transaction(
+        host="codex",
+        session_file=session,
+        session_id=extracted.session_id,
+        after_line=0,
+        until_line=extracted.scanned_until_line,
+    )
+    raw_path = tmp_path / f"save-{transaction.idempotency_key}.md"
+    raw_path.write_text(codex_save.build_raw_content(extracted, transaction=transaction))
+    projection = project_parent_raw(
+        raw_path, output_dir=tmp_path / "projection", max_child_bytes=4_000
+    )
+    projected = "\n".join(path.read_text() for path in projection.child_paths)
+
+    assert projection.record_count == len(rows)
+    assert projection.selected_record_count == 2
+    assert "visible user body" in projected
+    assert "visible assistant body" in projected
+    for transport_only in (
+        "transport context",
+        "privileged developer prompt",
+        "private reasoning",
+        "opaque reasoning bytes",
+        "injected bytes",
+        "private tool output",
+    ):
+        assert transport_only in serialized
+        assert transport_only not in projected
 
 
 def test_extract_preserves_image_file_and_tool_payloads(tmp_path: Path) -> None:
@@ -154,6 +269,7 @@ def test_extract_preserves_image_file_and_tool_payloads(tmp_path: Path) -> None:
     serialized = codex_save.serialize_transcript_records(result.records)
 
     assert [(record.role, record.line) for record in result.records] == [
+        ("event", 1),
         ("user", 2),
         ("tool", 3),
     ]
@@ -402,10 +518,6 @@ def test_oversized_first_record_is_reassemblable_and_commits_after_all_fragments
         session,
         [
             {
-                "type": "session_meta",
-                "payload": {"id": "oversized", "cwd": "/tmp/project"},
-            },
-            {
                 "type": "response_item",
                 "payload": {
                     "type": "message",
@@ -442,7 +554,7 @@ def test_oversized_first_record_is_reassemblable_and_commits_after_all_fragments
     assert all(row["fragment_bytes"] <= args.max_chars for row in payloads)
     assert reconstructed == expected
     assert len({call["idempotency_key"] for call in calls}) == len(calls)
-    assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 2
+    assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 1
 
 
 def test_oversized_fragment_failure_never_advances_cursor(

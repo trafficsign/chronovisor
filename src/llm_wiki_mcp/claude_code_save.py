@@ -1,7 +1,11 @@
 """Claude Code session saver for LLM Wiki raw entries.
 
 Reads Claude Code JSONL session transcripts and losslessly captures every
-unpublished message delta into ~/.wiki/raw/ without starting an LLM.
+unpublished transcript record into ~/.wiki/raw/ without starting an LLM.
+
+The complete source event is immutable evidence. ``role`` and ``text`` are a
+deterministic semantic view used only by the downstream projection; they never
+replace or sanitize the captured event.
 """
 
 from __future__ import annotations
@@ -179,26 +183,13 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
 
         if line_no <= after_line:
             continue
-        if item_type not in ("user", "assistant"):
-            continue
 
         message = item.get("message")
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-
+        content = message.get("content") if isinstance(message, dict) else None
         if item_type == "assistant" and not has_file_changes:
             has_file_changes = _content_has_file_changes(content)
 
-        sanitized_content = sanitize_message_content(content)
-        if not _content_has_capture_payload(sanitized_content):
-            continue
-        text = message_content_text(sanitized_content)
-        role = _claude_record_role(item_type, sanitized_content, text)
-        event = dict(item)
-        event_message = dict(message)
-        event_message["content"] = sanitized_content
-        event["message"] = event_message
+        role, text = _claude_semantic_view(item_type, content)
 
         if role == "user":
             user_turn_count += 1
@@ -209,8 +200,10 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
                 role=role,
                 text=text,
                 timestamp=item.get("timestamp") if isinstance(item.get("timestamp"), str) else None,
-                event_type=item_type,
-                event=event,
+                event_type=item_type if isinstance(item_type, str) else None,
+                # Canonical JSON serialization remains byte-equivalent to the
+                # parsed source object; semantic filtering never mutates it.
+                event=item,
             )
         )
 
@@ -226,8 +219,19 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
     )
 
 
+def _claude_semantic_view(item_type: Any, content: Any) -> tuple[str, str]:
+    """Return the non-authoritative semantic view for one complete event."""
+    if item_type not in {"user", "assistant"}:
+        return "event", ""
+    semantic_content = sanitize_message_content(content)
+    if not _content_has_capture_payload(semantic_content):
+        return "event", ""
+    text = message_content_text(semantic_content)
+    return _claude_record_role(item_type, semantic_content, text), text
+
+
 def sanitize_message_content(content: Any) -> Any:
-    """Remove injected/reasoning blocks while retaining tools, images and files."""
+    """Build a semantic-only view; the raw ``event`` remains untouched."""
     if isinstance(content, str):
         return None if is_injected_context(content) else content
     if not isinstance(content, list):
@@ -335,7 +339,7 @@ def format_transcript(records: list[TranscriptRecord]) -> str:
 
 
 def serialize_transcript_records(records: list[TranscriptRecord]) -> str:
-    """Serialize the selected transcript records without semantic rewriting."""
+    """Serialize complete transcript events plus their semantic view."""
     payload: list[dict[str, Any]] = []
     for record in records:
         row: dict[str, Any] = {
@@ -1096,7 +1100,7 @@ def _run_save_transaction(
                 "status": "recovered",
                 "reason": "published raw recovered before state cursor commit",
             }
-        return {**base_result, "status": "skipped", "reason": "no new user/assistant messages"}
+        return {**base_result, "status": "skipped", "reason": "no new transcript records"}
 
     if not args.ignore_state:
         proceed, trigger_reason = should_process(transcript_slice, state)
