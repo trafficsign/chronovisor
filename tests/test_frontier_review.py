@@ -55,6 +55,7 @@ def _quarantined_router_class(
     valid: tuple[bool, bool, bool],
     signatures: tuple[str | None, str | None, str | None],
     reason: str,
+    failure_class: str = "local_consensus_failed",
 ):
     votes = tuple(
         SimpleNamespace(valid=is_valid, signature_sha256=signature)
@@ -75,13 +76,13 @@ def _quarantined_router_class(
             return SimpleNamespace(
                 ok=False,
                 decision=None,
-                failure_class="local_consensus_failed",
+                failure_class=failure_class,
                 quarantine_reason=reason,
                 votes=votes,
                 audit_record=lambda: {
                     "status": "quarantined",
                     "ok": False,
-                    "failure_class": "local_consensus_failed",
+                    "failure_class": failure_class,
                     "quarantine_reason": reason,
                     "votes": [
                         {
@@ -1143,42 +1144,16 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
     ]
 
 
-def test_structured_review_quarantines_mutating_majority_with_conservative_vote(
+def test_structured_review_defers_mutating_majority_with_conservative_vote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
-
-    def fake_chat(_messages, *, model: str, **_kwargs) -> str:
-        calls.append(model)
-        decision = "rejected" if model == "gpt-oss:test" else "approved"
-        return json.dumps(
-            {
-                "decision": decision,
-                "summary": f"{decision} vote from {model}",
-                "tests_run": [],
-                "commit": None,
-                "committed": False,
-                "pushed": False,
-                "risk": "hold" if decision == "rejected" else None,
-                "notes": None,
-            }
-        )
-
-    monkeypatch.setattr(
-        decision_router,
-        "load_decision_router_config",
-        _local_router_config,
+    router = _quarantined_router_class(
+        valid=(True, True, True),
+        signatures=("a" * 64, "a" * 64, "b" * 64),
+        reason="mutating_local_majority_vetoed_by_conservative_vote",
     )
-    monkeypatch.setattr(ollama, "chat", fake_chat)
-    monkeypatch.setattr(
-        decision_router,
-        "resolve_router_policy",
-        lambda config, **_kwargs: decision_router.RouterPolicyResolution(
-            config=config,
-            source="adopted_artifact",
-        ),
-    )
+    monkeypatch.setattr(decision_router, "DecisionRouter", router)
     monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
@@ -1191,14 +1166,64 @@ def test_structured_review_quarantines_mutating_majority_with_conservative_vote(
 
     assert result["decision"] == "needs_retry"
     assert result["reviewer"] == "local_consensus"
-    assert result["frontier_failure"]["failure_class"] == "local_consensus_failed"
+    assert result["frontier_failure"]["failure_class"] == ("local_semantic_no_quorum")
     assert result["frontier_failure"]["rescue_status"] == "local_quarantined"
     assert (
         result["local_consensus"]["quarantine_reason"]
         == "mutating_local_majority_vetoed_by_conservative_vote"
     )
     assert result["human_required"] is False
-    assert calls == ["ornith:test", "gpt-oss:test", "gemma:test"]
+    assert result["decision_policy"]["router_policy"]["artifact_sha256"] == ("d" * 64)
+
+
+@pytest.mark.parametrize(
+    ("valid", "signatures", "failure_class"),
+    [
+        (
+            (True, True, True),
+            ("a" * 64, "a" * 64, "malformed"),
+            "local_consensus_failed",
+        ),
+        (
+            (True, True, True),
+            ("a" * 64, "a" * 64, "b" * 64),
+            "local_resource_quarantined",
+        ),
+        (
+            (True, True, False),
+            ("a" * 64, "a" * 64, "b" * 64),
+            "local_consensus_failed",
+        ),
+    ],
+    ids=("malformed-signature", "wrong-failure-class", "invalid-vote"),
+)
+def test_structured_review_keeps_invalid_veto_evidence_operational(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid: tuple[bool, bool, bool],
+    signatures: tuple[str | None, str | None, str | None],
+    failure_class: str,
+) -> None:
+    router = _quarantined_router_class(
+        valid=valid,
+        signatures=signatures,
+        reason="mutating_local_majority_vetoed_by_conservative_vote",
+        failure_class=failure_class,
+    )
+    monkeypatch.setattr(decision_router, "DecisionRouter", router)
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "review this",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["frontier_failure"]["failure_class"] == "local_consensus_failed"
+    assert result["frontier_failure"]["rescue_status"] == "local_quarantined"
+    assert result["human_required"] is False
 
 
 def test_structured_review_types_three_valid_distinct_semantic_no_quorum(

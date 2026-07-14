@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
 from html import unescape
@@ -1580,11 +1581,31 @@ def run_structured_review(
         for vote in routed.votes
         if vote.valid and vote.signature_sha256 is not None
     }
+    vote_signature_sha256s = [vote.signature_sha256 for vote in routed.votes]
+    three_valid_votes = bool(
+        len(routed.votes) == 3 and all(vote.valid for vote in routed.votes)
+    )
+    conservative_veto_semantic_no_quorum = bool(
+        routed.failure_class == "local_consensus_failed"
+        and routed.quarantine_reason
+        == "mutating_local_majority_vetoed_by_conservative_vote"
+        and len(vote_signature_sha256s) == 3
+        and all(
+            isinstance(signature, str)
+            and re.fullmatch(r"[0-9a-f]{64}", signature) is not None
+            for signature in vote_signature_sha256s
+        )
+        and sorted(Counter(vote_signature_sha256s).values()) == [1, 2]
+    )
     three_way_semantic_no_quorum = bool(
-        routed.quarantine_reason == "local_models_did_not_reach_two_vote_quorum"
-        and len(routed.votes) == 3
-        and all(vote.valid for vote in routed.votes)
-        and len(valid_signatures) == 3
+        three_valid_votes
+        and (
+            (
+                routed.quarantine_reason == "local_models_did_not_reach_two_vote_quorum"
+                and len(valid_signatures) == 3
+            )
+            or conservative_veto_semantic_no_quorum
+        )
     )
     failure = _frontier_failure(
         (
