@@ -501,6 +501,11 @@ def test_semantic_defer_supersedes_unshared_operational_packet(
         raw_path=raw_path,
         error="local consensus semantic no quorum: authority marker missing",
     )
+    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["failures"][raw_path.name].pop("self_heal_queued")
+    state["failures"][raw_path.name].pop("packet_path")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
     semantic = failure_supervisor.record_raw_failure(
         raw_path=raw_path,
         error=_no_quorum_error(_sha256(artifact)),
@@ -516,6 +521,46 @@ def test_semantic_defer_supersedes_unshared_operational_packet(
     state = json.loads((wiki_root / "runtime" / "failures" / "state.json").read_text())
     assert state["operational_failures"] == {}
     assert state["failures"][raw_path.name]["packet_path"] == semantic.packet_path
+
+
+def test_semantic_defer_preserves_replaced_terminal_packet(
+    semantic_defer_wiki: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor
+
+    wiki_root, artifact = semantic_defer_wiki
+    raw_path = wiki_root / "raw" / "terminal-upgrade.md"
+    raw_path.write_text("terminal source\n", encoding="utf-8")
+    monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
+    operational = failure_supervisor.record_raw_failure(
+        raw_path=raw_path,
+        error="local consensus semantic no quorum: authority marker missing",
+    )
+    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["failures"][raw_path.name].pop("self_heal_queued")
+    state["failures"][raw_path.name].pop("packet_path")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    packet_path = Path(str(operational.packet_path))
+    old_packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    old_packet["status"] = "local_quarantined"
+    old_packet["terminal_deferred"] = True
+    packet_path.write_text(json.dumps(old_packet), encoding="utf-8")
+    terminal_before = packet_path.read_bytes()
+
+    semantic = failure_supervisor.record_raw_failure(
+        raw_path=raw_path,
+        error=_no_quorum_error(_sha256(artifact)),
+    )
+
+    assert semantic.terminal_deferred is True
+    assert packet_path.read_bytes() == terminal_before
+    updated_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert updated_state["failures"][raw_path.name]["packet_path"] == (
+        semantic.packet_path
+    )
+    assert updated_state["operational_failures"] != {}
 
 
 def test_in_flight_operational_worker_observes_semantic_defer_cancellation(
@@ -715,6 +760,13 @@ def test_semantic_defer_keeps_operational_packet_shared_by_another_raw(
         error=missing_authority,
     )
     assert second_operational.packet_path == first_operational.packet_path
+    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["failures"][first.name].pop("self_heal_queued")
+    state["failures"][second.name].pop("self_heal_queued")
+    state["failures"][first.name].pop("packet_path")
+    state["failures"][second.name].pop("packet_path")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
 
     semantic = failure_supervisor.record_raw_failure(
         raw_path=first,
@@ -726,7 +778,129 @@ def test_semantic_defer_keeps_operational_packet_shared_by_another_raw(
     assert "superseded_by_packet" not in old_packet
     state = json.loads((wiki_root / "runtime" / "failures" / "state.json").read_text())
     assert state["failures"][first.name]["packet_path"] == semantic.packet_path
-    assert state["failures"][second.name]["packet_path"] == (
-        first_operational.packet_path
-    )
+    assert "packet_path" not in state["failures"][second.name]
+    [registry] = state["operational_failures"].values()
+    assert registry["packet_path"] == first_operational.packet_path
     assert len(state["operational_failures"]) == 1
+
+
+def test_semantic_defer_cancels_legacy_packet_when_every_shared_raw_is_replaced(
+    semantic_defer_wiki: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor
+
+    wiki_root, artifact = semantic_defer_wiki
+    first = wiki_root / "raw" / "legacy-bundle-first.md"
+    second = wiki_root / "raw" / "legacy-bundle-second.md"
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
+    missing_authority = "local consensus semantic no quorum: authority marker missing"
+    operational = failure_supervisor.record_raw_failure(
+        raw_path=first,
+        error=missing_authority,
+    )
+    shared = failure_supervisor.record_raw_failure(
+        raw_path=second,
+        error=missing_authority,
+    )
+    assert shared.packet_path == operational.packet_path
+
+    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["failures"][first.name].pop("packet_path")
+    state["failures"][second.name].pop("packet_path")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    semantic = failure_supervisor.record_semantic_no_quorum_defer(
+        raw_path=first,
+        error=_no_quorum_error(_sha256(artifact)),
+        related_raw_paths=(second,),
+    )
+
+    old_packet = json.loads(Path(str(operational.packet_path)).read_text())
+    assert old_packet["status"] == "superseded_semantic_defer"
+    assert old_packet["superseded_by_packet"] == semantic.packet_path
+    updated_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert updated_state["operational_failures"] == {}
+    assert {
+        updated_state["failures"][first.name]["packet_path"],
+        updated_state["failures"][second.name]["packet_path"],
+    } == {semantic.packet_path}
+
+
+def test_semantic_defer_does_not_trust_mismatched_legacy_registry_binding(
+    semantic_defer_wiki: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor
+
+    wiki_root, artifact = semantic_defer_wiki
+    raw_path = wiki_root / "raw" / "legacy-registry-mismatch.md"
+    raw_path.write_text("source\n", encoding="utf-8")
+    monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
+    operational = failure_supervisor.record_raw_failure(
+        raw_path=raw_path,
+        error="local consensus semantic no quorum: authority marker missing",
+    )
+    packet_path = Path(str(operational.packet_path))
+    packet_before = packet_path.read_bytes()
+    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    entry = state["failures"][raw_path.name]
+    fingerprint = entry["fingerprint"]
+    entry.pop("packet_path")
+    state["operational_failures"][fingerprint]["fingerprint"] = "different"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    semantic = failure_supervisor.record_semantic_no_quorum_defer(
+        raw_path=raw_path,
+        error=_no_quorum_error(_sha256(artifact)),
+    )
+
+    assert semantic.terminal_deferred is True
+    assert packet_path.read_bytes() == packet_before
+    updated_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert fingerprint in updated_state["operational_failures"]
+
+
+def test_semantic_defer_preserves_direct_packet_reference_with_mismatched_fingerprint(
+    semantic_defer_wiki: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor
+
+    wiki_root, artifact = semantic_defer_wiki
+    first = wiki_root / "raw" / "mismatch-shared-first.md"
+    second = wiki_root / "raw" / "mismatch-shared-second.md"
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
+    missing_authority = "local consensus semantic no quorum: authority marker missing"
+    operational = failure_supervisor.record_raw_failure(
+        raw_path=first,
+        error=missing_authority,
+    )
+    shared = failure_supervisor.record_raw_failure(
+        raw_path=second,
+        error=missing_authority,
+    )
+    assert shared.packet_path == operational.packet_path
+
+    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["failures"][second.name]["fingerprint"] = "inconsistent:fingerprint"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    packet_path = Path(str(operational.packet_path))
+    packet_before = packet_path.read_bytes()
+
+    semantic = failure_supervisor.record_raw_failure(
+        raw_path=first,
+        error=_no_quorum_error(_sha256(artifact)),
+    )
+
+    assert semantic.terminal_deferred is True
+    assert packet_path.read_bytes() == packet_before
+    updated_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert updated_state["failures"][second.name]["packet_path"] == str(packet_path)

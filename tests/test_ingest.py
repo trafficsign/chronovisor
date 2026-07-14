@@ -1511,6 +1511,257 @@ class TestIngestFrontierGate:
         assert authority["router"] == router_audit
         assert ingest._ingest_review_authority_shape_error(authority) is None
 
+    @pytest.mark.parametrize("authority_state", ["stable", "drifted", "missing"])
+    def test_production_bounded_nonconvergence_is_deferred_only_under_stable_authority(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        authority_state: str,
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, ingest, jobs
+
+        authority_a = self._production_authority("a")
+        authority_b = self._production_authority("b")
+        authority_checks = 0
+
+        def current_authority(**_kwargs):
+            nonlocal authority_checks
+            authority_checks += 1
+            if authority_state == "drifted" and authority_checks == 2:
+                return authority_b, None
+            if authority_state == "missing" and authority_checks == 2:
+                return None, "decision_adoption_not_valid:ingest_reconciliation"
+            return authority_a, None
+
+        def bounded_nonconvergence(*_args, **kwargs):
+            budget = kwargs["frontier_budget"]
+            assert budget.consume() is True
+            assert budget.consume() is True
+            return {
+                "status": "frontier_budget_exhausted",
+                "summary": "three valid local semantic votes remained different",
+                "created": [],
+                "updated": [],
+            }
+
+        # Mark this injected implementation as the production boundary.  The
+        # dependency-injected legacy seam intentionally keeps its old message.
+        bounded_nonconvergence.__module__ = ingest.__name__
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            current_authority,
+        )
+        monkeypatch.setattr(
+            failure_supervisor,
+            "_current_adopted_authority_sha256",
+            lambda: "a" * 64,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_triage",
+            lambda _content, **_kwargs: [
+                {
+                    "type": "create",
+                    "filename": "memory/bounded-nonconvergence.md",
+                    "title": "Bounded nonconvergence",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_generate_one",
+            lambda op, _raw, **_kwargs: {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Bounded nonconvergence\nupdated: 2026-07-15\n"
+                    "---\nbody\n"
+                ),
+            },
+        )
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest,
+            "_review_and_apply_ingest_operations",
+            bounded_nonconvergence,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_review_exact_ingest_repair_once",
+            lambda operations, result, **_kwargs: (operations, result),
+        )
+
+        raw_text = "byte-exact bounded nonconvergence source\n"
+        raw_path = isolated_wiki / "raw" / "bounded-nonconvergence.md"
+        raw_path.write_text(raw_text, encoding="utf-8")
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(raw_text, job.job_id)
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        starts: list[Path] = []
+        monkeypatch.setattr(failure_supervisor, "_launch_self_heal", starts.append)
+        supervision = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=finished.error,
+            job_id=job.job_id,
+            raw_text=raw_text,
+        )
+
+        assert authority_checks == 2
+        assert raw_path.read_text(encoding="utf-8") == raw_text
+        assert supervision.quarantined is False
+        if authority_state == "drifted":
+            assert str(finished.error).startswith(
+                "local consensus authority unavailable: decision_authority_changed:"
+            )
+            assert supervision.failure_class == (
+                "ingest.runtime_local_consensus_authority_unavailable"
+            )
+            assert supervision.terminal_deferred is False
+            assert starts == [Path(str(supervision.packet_path))]
+        elif authority_state == "missing":
+            assert str(finished.error) == (
+                "local consensus authority unavailable: "
+                "decision_adoption_not_valid:ingest_reconciliation"
+            )
+            assert supervision.failure_class == (
+                "ingest.runtime_local_consensus_authority_unavailable"
+            )
+            assert supervision.terminal_deferred is False
+            assert starts == [Path(str(supervision.packet_path))]
+        else:
+            assert str(finished.error) == (
+                "local consensus semantic no quorum "
+                f"[authority_sha256={'a' * 64}]: "
+                "three valid local semantic votes remained different"
+            )
+            assert supervision.failure_class == "ingest.semantic_no_quorum"
+            assert supervision.terminal_deferred is True
+            assert starts == []
+        assert not (isolated_wiki / "raw" / ".dead-letter" / raw_path.name).exists()
+
+    @pytest.mark.parametrize("publication_authority", ["b" * 64, None])
+    def test_semantic_defer_publication_rechecks_authority_after_ingest(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        publication_authority: str | None,
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, ingest, jobs
+
+        authority_a = self._production_authority("a")
+        authority_sha256: list[str | None] = ["a" * 64]
+
+        def bounded_nonconvergence(*_args, **kwargs):
+            budget = kwargs["frontier_budget"]
+            assert budget.consume() is True
+            assert budget.consume() is True
+            return {
+                "status": "frontier_budget_exhausted",
+                "summary": "three valid local semantic votes remained different",
+                "created": [],
+                "updated": [],
+            }
+
+        bounded_nonconvergence.__module__ = ingest.__name__
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (authority_a, None),
+        )
+        monkeypatch.setattr(
+            failure_supervisor,
+            "_current_adopted_authority_sha256",
+            lambda: authority_sha256[0],
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_triage",
+            lambda _content, **_kwargs: [
+                {
+                    "type": "create",
+                    "filename": "memory/publication-cas.md",
+                    "title": "Publication CAS",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_generate_one",
+            lambda op, _raw, **_kwargs: {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Publication CAS\nupdated: 2026-07-15\n---\nbody\n"
+                ),
+            },
+        )
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        monkeypatch.setattr(
+            ingest,
+            "_review_and_apply_ingest_operations",
+            bounded_nonconvergence,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_review_exact_ingest_repair_once",
+            lambda operations, result, **_kwargs: (operations, result),
+        )
+        starts: list[Path] = []
+        monkeypatch.setattr(failure_supervisor, "_launch_self_heal", starts.append)
+
+        raw_text = "authority may change after ingest returns\n"
+        raw_path = isolated_wiki / "raw" / "publication-cas.md"
+        raw_path.write_text(raw_text, encoding="utf-8")
+        operational = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error="local consensus semantic no quorum: authority marker missing",
+        )
+        operational_packet = Path(str(operational.packet_path))
+        packet_before = operational_packet.read_bytes()
+
+        job = jobs.job_store.create(processor="ollama")
+        ingest.run_ingest(raw_text, job.job_id)
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert str(finished.error).startswith(
+            "local consensus semantic no quorum [authority_sha256=" + "a" * 64
+        )
+
+        # Simulate a valid A -> B adoption after run_ingest's final check but
+        # before the orchestrator publishes the failure-supervisor outcome.
+        authority_sha256[0] = publication_authority
+        supervision = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=finished.error,
+            job_id=job.job_id,
+            raw_text=raw_text,
+        )
+
+        assert supervision.terminal_deferred is False
+        assert supervision.transient is True
+        assert supervision.tracked is False
+        assert supervision.failure_class == (
+            "ingest.runtime_local_consensus_authority_unavailable"
+        )
+        assert raw_path.read_text(encoding="utf-8") == raw_text
+        assert operational_packet.read_bytes() == packet_before
+        assert starts == [operational_packet]
+        packets = list(
+            (isolated_wiki / "runtime" / "failures" / "packets").glob("*.json")
+        )
+        assert packets == [operational_packet]
+        state = json.loads(
+            (isolated_wiki / "runtime" / "failures" / "state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert state["failures"][raw_path.name]["packet_path"] == str(
+            operational_packet
+        )
+
     def test_production_review_requires_policy_and_exact_local_quorum(
         self,
         isolated_wiki: Path,

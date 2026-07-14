@@ -132,6 +132,17 @@ SEMANTIC_DEFER_RELEASE_PACKET_STATUSES = {
     "semantic_defer_released",
     "superseded_semantic_defer",
 }
+_CANCELLABLE_OPERATIONAL_PACKET_STATUSES = {
+    "pending_local_repair",
+    "local_repair_failed",
+    "pending_frontier",
+    "frontier_retry",
+    "frontier_preflight_failed",
+    "pending_frontier_review",
+    "repair_deferred",
+    "local_repairing",
+    "frontier_running",
+}
 _SEMANTIC_AUTHORITY_MARKER_RE = re.compile(r"\[authority_sha256=([0-9a-f]{64})\]")
 
 
@@ -987,22 +998,46 @@ def _supersede_replaced_operational_packets(
     if not isinstance(failures, dict):
         return
     operational_failures = state.get("operational_failures")
+
+    def effective_packet_path(entry: dict[str, Any]) -> tuple[str, str] | None:
+        """Resolve a direct or exact legacy registry packet binding."""
+
+        fingerprint = entry.get("fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return None
+        packet_path = entry.get("packet_path")
+        if isinstance(packet_path, str) and packet_path:
+            return fingerprint, packet_path
+        if not isinstance(operational_failures, dict):
+            return None
+        registry_entry = operational_failures.get(fingerprint)
+        if (
+            not isinstance(registry_entry, dict)
+            or registry_entry.get("fingerprint") != fingerprint
+        ):
+            return None
+        registry_path = registry_entry.get("packet_path")
+        if not isinstance(registry_path, str) or not registry_path:
+            return None
+        return fingerprint, registry_path
+
     candidates: dict[str, tuple[str, str]] = {}
     for entry in replaced_entries:
-        fingerprint = entry.get("fingerprint")
-        packet_path = entry.get("packet_path")
-        if (
-            entry.get("self_heal_queued") is not True
-            or not isinstance(fingerprint, str)
-            or not isinstance(packet_path, str)
-            or not packet_path
-        ):
+        if entry.get("terminal_deferred") is True:
             continue
+        resolved = effective_packet_path(entry)
+        if resolved is None:
+            continue
+        fingerprint, packet_path = resolved
         candidates[packet_path] = (fingerprint, packet_path)
 
     for fingerprint, packet_value in candidates.values():
         if any(
-            isinstance(entry, dict) and entry.get("packet_path") == packet_value
+            isinstance(entry, dict)
+            and (
+                entry.get("packet_path") == packet_value
+                or effective_packet_path(entry) == (fingerprint, packet_value)
+            )
             for entry in failures.values()
         ):
             continue
@@ -1014,7 +1049,8 @@ def _supersede_replaced_operational_packets(
         if (
             not isinstance(packet, dict)
             or packet.get("fingerprint") != fingerprint
-            or packet.get("status") in REPAIR_SUCCESS_PACKET_STATUSES
+            or packet.get("terminal_deferred") is True
+            or packet.get("status") not in _CANCELLABLE_OPERATIONAL_PACKET_STATUSES
         ):
             continue
         from llm_wiki_mcp.self_heal import request_packet_cancellation
@@ -1212,6 +1248,46 @@ def record_semantic_no_quorum_defer(
             raw_text=raw_text,
             related_raw_paths=related_raw_paths,
         )
+
+
+def record_current_semantic_no_quorum_defer(
+    *,
+    raw_path: Path,
+    error: str | None,
+    job_id: str | None = None,
+    raw_text: str | None = None,
+    related_raw_paths: Sequence[Path] = (),
+) -> SupervisionResult | None:
+    """Publish a semantic defer only while its adopted artifact is current.
+
+    Adoption writers use the same authority lease.  The current-artifact CAS
+    and failure-state publication therefore form one transaction, with a
+    single lock order of authority then failure state.  A stale or invalid
+    marker leaves the immutable raw pending for the next authority epoch and
+    must not cancel an existing operational repair packet.
+    """
+
+    record = classify_failure(error)
+    if record.failure_class != SEMANTIC_NO_QUORUM_FAILURE_CLASS:
+        raise ValueError("error is not an authority-bound semantic no-quorum failure")
+    authority_sha256 = record.authority_artifact_sha256
+    if authority_sha256 is None:
+        raise ValueError("semantic no-quorum defer requires an authority artifact hash")
+
+    from llm_wiki_mcp.page_mutation import decision_authority_lock
+
+    authority_lock_path = wiki.WIKI_ROOT / "runtime" / "decision-authority.lock"
+    with decision_authority_lock(authority_lock_path):
+        if _current_adopted_authority_sha256() != authority_sha256:
+            return None
+        with _failure_state_lock():
+            return _record_semantic_no_quorum_defer_unlocked(
+                raw_path=raw_path,
+                record=record,
+                job_id=job_id,
+                raw_text=raw_text,
+                related_raw_paths=related_raw_paths,
+            )
 
 
 def record_semantic_no_quorum_defer_unless_operational_hold(
@@ -1680,14 +1756,39 @@ def record_raw_failure(
     record = classify_failure(error)
     raw_file = raw_path.name
     if record.failure_class == SEMANTIC_NO_QUORUM_FAILURE_CLASS:
-        with _failure_state_lock():
-            return _record_semantic_no_quorum_defer_unlocked(
-                raw_path=raw_path,
-                record=record,
-                job_id=job_id,
-                raw_text=raw_text,
-                related_raw_paths=related_raw_paths,
-            )
+        semantic_defer = record_current_semantic_no_quorum_defer(
+            raw_path=raw_path,
+            error=record.message,
+            job_id=job_id,
+            raw_text=raw_text,
+            related_raw_paths=related_raw_paths,
+        )
+        if semantic_defer is not None:
+            return semantic_defer
+        failure_class = "ingest.runtime_local_consensus_authority_unavailable"
+        fingerprint = (
+            f"{failure_class}:semantic_defer_authority_changed_before_publication"
+        )
+        runtime_status.safe_append_event(
+            "warn",
+            (
+                "failure-supervisor | semantic defer authority changed before "
+                f"publication for {raw_file}; raw left pending"
+            ),
+            source="failure-supervisor",
+            raw_file=raw_file,
+            failure_class=failure_class,
+            fingerprint=fingerprint,
+            outcome_kind="semantic_defer_authority_changed",
+        )
+        return SupervisionResult(
+            raw_file=raw_file,
+            failure_class=failure_class,
+            fingerprint=fingerprint,
+            attempts=0,
+            tracked=False,
+            transient=True,
+        )
     if record.failure_class in TRANSIENT_FAILURE_CLASSES:
         runtime_status.safe_append_event(
             "warn",

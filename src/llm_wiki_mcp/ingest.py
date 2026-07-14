@@ -7910,6 +7910,72 @@ def _structured_frontier_authority_sha256(result: dict[str, Any]) -> str | None:
     return None
 
 
+def _raise_bounded_local_consensus_nonconvergence(
+    *,
+    initial_authority: dict[str, Any] | None,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    semantic_detail: str,
+    legacy_error: str,
+) -> None:
+    """Turn production semantic exhaustion into one authority-bound hold.
+
+    Dependency-injected reviewer seams retain their historical error contract.
+    Production, however, must not route a bounded semantic disagreement through
+    the legacy nonconvergence failure class: that class immediately quarantines
+    the raw and can tear apart a multi-child projection bundle.  Re-resolve the
+    adopted ingest authority at the last possible boundary and emit a semantic
+    defer only while it is the exact epoch observed before triage.  Missing,
+    malformed, or replaced authority is operational evidence instead.
+    """
+
+    if (
+        not isinstance(initial_authority, dict)
+        or initial_authority.get("source") != decision_authority.ADOPTED_LOCAL_SOURCE
+    ):
+        raise IngestApplyError(legacy_error)
+
+    current_authority, current_error = _current_ingest_review_authority(
+        reviewer=reviewer
+    )
+    authority_problem = current_error
+    if current_authority is None and authority_problem is None:
+        authority_problem = "decision_authority_missing: current authority is missing"
+    if current_authority is not None and authority_problem is None:
+        shape_error = _ingest_review_authority_shape_error(current_authority)
+        if shape_error is not None:
+            authority_problem = f"decision_authority_invalid: {shape_error}"
+    if current_authority is not None and authority_problem is None:
+        compare_error = decision_authority.compare_semantic_authority(
+            initial_authority,
+            current_authority,
+            lane="ingest_reconciliation",
+        )
+        if compare_error is not None:
+            authority_problem = f"decision_authority_changed: {compare_error}"
+    if authority_problem is not None:
+        raise IngestApplyError(
+            "local consensus authority unavailable: " + authority_problem
+        )
+
+    assert current_authority is not None
+    router = current_authority.get("router")
+    authority_sha256 = (
+        router.get("artifact_sha256") if isinstance(router, dict) else None
+    )
+    if (
+        not isinstance(authority_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", authority_sha256) is None
+    ):
+        raise IngestApplyError(
+            "local consensus authority unavailable: "
+            "decision_authority_invalid: adopted artifact hash is invalid"
+        )
+    raise IngestApplyError(
+        "local consensus semantic no quorum "
+        f"[authority_sha256={authority_sha256}]: {semantic_detail}"
+    )
+
+
 def _frontier_retry_is_actionable(result: dict[str, Any]) -> bool:
     """False when regenerating local content cannot repair the frontier lane."""
 
@@ -8278,6 +8344,7 @@ def run_ingest(
     # as "no metadata" so we don't fabricate values.
     raw_keywords_for_ops: list[str] | None = None
     source_raw: str | None = None
+    initial_review_authority: dict[str, Any] | None = None
     if metadata is not None:
         candidate = metadata.get("raw_keywords")
         if isinstance(candidate, list) and all(isinstance(v, str) for v in candidate):
@@ -8359,6 +8426,7 @@ def run_ingest(
                 raise IngestApplyError(
                     "local consensus authority unavailable: " + review_authority_problem
                 )
+            initial_review_authority = review_authority
 
         shard_continuation = _load_pretriage_ingest_shard_continuation(
             content,
@@ -8650,10 +8718,15 @@ def run_ingest(
                 failed = False
                 return
             if frontier_status == "frontier_budget_exhausted":
-                raise IngestApplyError(
-                    "local consensus ingest review did not converge after "
-                    f"{frontier_budget.used} local review calls: "
-                    + _frontier_feedback_text(frontier_result)
+                feedback = _frontier_feedback_text(frontier_result)
+                _raise_bounded_local_consensus_nonconvergence(
+                    initial_authority=initial_review_authority,
+                    reviewer=frontier_reviewer,
+                    semantic_detail=feedback,
+                    legacy_error=(
+                        "local consensus ingest review did not converge after "
+                        f"{frontier_budget.used} local review calls: {feedback}"
+                    ),
                 )
             frontier_feedback = _frontier_feedback_text(frontier_result)
             if not _frontier_retry_is_actionable(frontier_result):
@@ -8685,21 +8758,34 @@ def run_ingest(
                     "local consensus authority unavailable: " + typed_feedback
                 )
             if frontier_budget.used >= frontier_budget.limit:
-                raise IngestApplyError(
-                    "local consensus ingest review did not converge after "
-                    f"{frontier_budget.used} local review calls: structured review "
-                    f"budget exhausted ({frontier_budget.used}/{frontier_budget.limit}); "
+                detail = (
+                    "structured review budget exhausted "
+                    f"({frontier_budget.used}/{frontier_budget.limit}); "
                     + frontier_feedback
+                )
+                _raise_bounded_local_consensus_nonconvergence(
+                    initial_authority=initial_review_authority,
+                    reviewer=frontier_reviewer,
+                    semantic_detail=detail,
+                    legacy_error=(
+                        "local consensus ingest review did not converge after "
+                        f"{frontier_budget.used} local review calls: {detail}"
+                    ),
                 )
             _safe_log(
                 "ingest | local consensus requested regeneration: "
                 + frontier_feedback.replace("\n", " ")[:300]
             )
         else:
-            raise IngestApplyError(
-                "local consensus ingest review did not converge after "
-                f"{_MAX_FRONTIER_CONVERGENCE_ATTEMPTS} attempts: "
-                + (frontier_feedback or "unknown local consensus rejection")
+            detail = frontier_feedback or "unknown local consensus rejection"
+            _raise_bounded_local_consensus_nonconvergence(
+                initial_authority=initial_review_authority,
+                reviewer=frontier_reviewer,
+                semantic_detail=detail,
+                legacy_error=(
+                    "local consensus ingest review did not converge after "
+                    f"{_MAX_FRONTIER_CONVERGENCE_ATTEMPTS} attempts: {detail}"
+                ),
             )
 
         assert frontier_result is not None
