@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import socket
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -44,6 +45,10 @@ TERMINAL_STATUSES = frozenset(
     }
 )
 FINISH_OUTCOMES = TERMINAL_STATUSES - {"abandoned", "released"}
+
+_PROCESS_IDENTITY_MATCH = "match"
+_PROCESS_IDENTITY_MISMATCH = "mismatch"
+_PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
 
 _FINGERPRINT_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,512}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -454,6 +459,43 @@ def _pid_alive(pid: object) -> bool:
     return True
 
 
+def _process_started_at(pid: object) -> str | None:
+    """Return a stable UTC process-start identity for one live PID."""
+
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        value = result.stdout.strip()
+        if not value:
+            return None
+        started = datetime.strptime(value, "%a %b %d %H:%M:%S %Y")
+        return _timestamp(started.astimezone(timezone.utc))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _process_identity_status(pid: object, expected_started_at: object) -> str:
+    """Classify an owner PID without treating a transient ``ps`` failure as reuse."""
+
+    if not _pid_alive(pid):
+        return _PROCESS_IDENTITY_MISMATCH
+    if not isinstance(expected_started_at, str):
+        return _PROCESS_IDENTITY_UNAVAILABLE
+    observed = _process_started_at(pid)
+    if observed is None:
+        return _PROCESS_IDENTITY_UNAVAILABLE
+    if hmac.compare_digest(observed, expected_started_at):
+        return _PROCESS_IDENTITY_MATCH
+    return _PROCESS_IDENTITY_MISMATCH
+
+
 def _default_state() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -690,6 +732,16 @@ class FrontierGuard:
             reason = "lease_expired"
         elif not _pid_alive(owner_pid):
             reason = "owner_process_exited"
+        elif not isinstance(incident.get("owner_process_started_at"), str):
+            reason = "owner_process_identity_missing"
+        elif (
+            _process_identity_status(
+                owner_pid,
+                incident.get("owner_process_started_at"),
+            )
+            == _PROCESS_IDENTITY_MISMATCH
+        ):
+            reason = "owner_process_reused"
         if reason is None:
             return events
         prior_status = str(incident["status"])
@@ -802,6 +854,9 @@ class FrontierGuard:
         ).strip()
         if not effective_owner:
             raise ValueError("owner is required")
+        owner_process_started_at = _process_started_at(effective_owner_pid)
+        if owner_process_started_at is None:
+            raise FrontierGuardError("cannot establish owner process identity")
         incident_id = uuid4().hex
         token = secrets.token_urlsafe(32)
         with self._state_lock():
@@ -834,6 +889,7 @@ class FrontierGuard:
                 "lease_expires_at": _timestamp(current + effective_lease),
                 "owner": effective_owner,
                 "owner_pid": effective_owner_pid,
+                "owner_process_started_at": owner_process_started_at,
                 "pid": None,
                 "permit_token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
                 "fingerprint": evidence.fingerprint,

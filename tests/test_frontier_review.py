@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import json
 import sys
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import decision_router, frontier_review, ollama
+from llm_wiki_mcp import (
+    decision_router,
+    frontier_review,
+    ollama,
+    semantic_hold,
+)
 from llm_wiki_mcp.decision_router import DecisionRouterResult
 from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
 CODEX_EXEC_HELP = """
@@ -57,6 +63,8 @@ def _quarantined_router_class(
     reason: str,
     failure_class: str = "local_consensus_failed",
 ):
+    router_audit = semantic_authority(artifact_sha256="d" * 64)["router"]
+    assert isinstance(router_audit, dict)
     votes = tuple(
         SimpleNamespace(valid=is_valid, signature_sha256=signature)
         for is_valid, signature in zip(valid, signatures, strict=True)
@@ -66,10 +74,7 @@ def _quarantined_router_class(
         def __init__(self, **_kwargs) -> None:
             self.policy = SimpleNamespace(
                 source="adopted_artifact",
-                audit_record=lambda: {
-                    "source": "adopted_artifact",
-                    "artifact_sha256": "d" * 64,
-                },
+                audit_record=lambda: dict(router_audit),
             )
 
         def decide(self, _prompt, _schema):
@@ -97,6 +102,85 @@ def _quarantined_router_class(
     return QuarantinedLocalRouter
 
 
+def _cache_test_router_class(
+    authority_box: dict[str, dict[str, object]],
+    calls: list[str],
+    *,
+    outcome: str = "semantic",
+):
+    class CacheTestRouter:
+        def __init__(self, **_kwargs) -> None:
+            authority = authority_box["value"]
+            router = authority["router"]
+            assert isinstance(router, dict)
+            self.policy = SimpleNamespace(
+                source="adopted_artifact",
+                audit_record=lambda: dict(router),
+            )
+
+        def decide(self, prompt, _schema, *, system=None):
+            calls.append(f"{prompt}|{system}")
+            authority = authority_box["value"]
+            review = semantic_review(authority)
+            consensus = review["local_consensus"]
+            assert isinstance(consensus, dict)
+            vote_rows = consensus["votes"]
+            assert isinstance(vote_rows, list)
+            votes = tuple(
+                SimpleNamespace(
+                    valid=bool(vote["valid"]),
+                    signature_sha256=vote["signature_sha256"],
+                )
+                for vote in vote_rows
+            )
+            if outcome == "success":
+                decision = {
+                    "decision": "approved",
+                    "summary": "approved locally",
+                    "tests_run": [],
+                    "commit": None,
+                    "committed": False,
+                    "pushed": False,
+                    "risk": None,
+                    "notes": None,
+                }
+                return SimpleNamespace(
+                    ok=True,
+                    decision=decision,
+                    failure_class=None,
+                    quarantine_reason=None,
+                    votes=votes[:2],
+                    audit_record=lambda: {
+                        "status": "agreed",
+                        "ok": True,
+                        "votes": vote_rows[:2],
+                    },
+                )
+            if outcome == "operational":
+                return SimpleNamespace(
+                    ok=False,
+                    decision=None,
+                    failure_class="local_consensus_failed",
+                    quarantine_reason="fewer_than_two_valid_local_votes",
+                    votes=votes[:2],
+                    audit_record=lambda: {
+                        **consensus,
+                        "quarantine_reason": "fewer_than_two_valid_local_votes",
+                        "votes": vote_rows[:2],
+                    },
+                )
+            return SimpleNamespace(
+                ok=False,
+                decision=None,
+                failure_class="local_consensus_failed",
+                quarantine_reason="local_models_did_not_reach_two_vote_quorum",
+                votes=votes,
+                audit_record=lambda: consensus,
+            )
+
+    return CacheTestRouter
+
+
 @pytest.fixture(autouse=True)
 def isolate_frontier_activity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -108,6 +192,24 @@ def isolate_frontier_activity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         frontier_review.runtime_status,
         "safe_append_event",
         lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "STRUCTURED_REVIEW_HOLD_CACHE_ROOT",
+        tmp_path / "structured-review-holds",
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: "0" * 64,
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: (
+            semantic_authority(lane, artifact_sha256="d" * 64),
+            None,
+        ),
     )
 
 
@@ -1105,6 +1207,7 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
         lambda config, **_kwargs: decision_router.RouterPolicyResolution(
             config=config,
             source="adopted_artifact",
+            artifact_sha256="d" * 64,
         ),
     )
     monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
@@ -1255,6 +1358,592 @@ def test_structured_review_types_three_valid_distinct_semantic_no_quorum(
     assert result["human_required"] is False
 
 
+def test_structured_review_reuses_exact_epoch_semantic_hold_without_model_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: (
+            authority_box["value"],
+            None,
+        ),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    prompt = "SENSITIVE_PROMPT_MUST_NOT_BE_PERSISTED"
+    system = "SENSITIVE_SYSTEM_MUST_NOT_BE_PERSISTED"
+
+    first = frontier_review.run_structured_review(
+        prompt,
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+        system=system,
+    )
+    second = frontier_review.run_structured_review(
+        prompt,
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+        system=system,
+    )
+
+    assert second == first
+    assert first["frontier_failure"]["failure_class"] == ("local_semantic_no_quorum")
+    assert calls == [f"{prompt}|{system}"]
+    cache_files = list(
+        (tmp_path / "structured-review-holds" / "entries").glob("*.json")
+    )
+    assert len(cache_files) == 1
+    raw = cache_files[0].read_text(encoding="utf-8")
+    assert prompt not in raw
+    assert system not in raw
+
+
+def test_structured_review_reuses_cached_hold_after_observation_generation_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    observation_box = {"value": "0" * 64}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda _lane: (authority_box["value"], None),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: observation_box["value"],
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    first = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+    observation_box["value"] = "1" * 64
+    restored = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert restored == first
+    assert calls == ["same request|None"]
+    entries = tmp_path / "structured-review-holds" / "entries"
+    assert len(list(entries.glob("*.json"))) == 1
+
+
+def test_structured_review_restores_cached_a_after_authority_a_b_a(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_a = semantic_authority()
+    authority_b = semantic_authority(artifact_sha256="9" * 64)
+    authority_box = {"value": authority_a}
+    observation_box = {"value": "0" * 64}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda _lane: (authority_box["value"], None),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: observation_box["value"],
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result_a = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+    authority_box["value"] = authority_b
+    observation_box["value"] = "1" * 64
+    result_b = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+    authority_box["value"] = authority_a
+    observation_box["value"] = "2" * 64
+    restored_a = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert restored_a == result_a
+    assert result_b != result_a
+    assert calls == ["same request|None", "same request|None"]
+    entries = tmp_path / "structured-review-holds" / "entries"
+    assert len(list(entries.glob("*.json"))) == 2
+
+
+def test_structured_review_discards_cached_result_if_observation_drifts_during_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda _lane: (authority_box["value"], None),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+    observations = iter(["1" * 64, "1" * 64, "2" * 64])
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: next(observations),
+    )
+
+    result = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["frontier_failure"]["failure_class"] == ("decision_authority_changed")
+    assert result["frontier_failure"]["rescue_status"] == "local_retry"
+    assert calls == ["same request|None"]
+
+
+def test_structured_review_discards_current_result_if_authority_drifts_during_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    observation_box = {"value": "0" * 64}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda _lane: (authority_box["value"], None),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: observation_box["value"],
+    )
+    original_store = semantic_hold.StructuredReviewHoldLease.store
+
+    def drifting_store(self, result):
+        hold = original_store(self, result)
+        observation_box["value"] = "1" * 64
+        return hold
+
+    monkeypatch.setattr(
+        semantic_hold.StructuredReviewHoldLease,
+        "store",
+        drifting_store,
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    drifted = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert drifted["frontier_failure"]["failure_class"] == (
+        "decision_authority_changed"
+    )
+    assert drifted["frontier_failure"]["rescue_status"] == "local_retry"
+    entries = tmp_path / "structured-review-holds" / "entries"
+    assert len(list(entries.glob("*.json"))) == 1
+    assert calls == ["same request|None"]
+
+    restored = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert restored["frontier_failure"]["failure_class"] == ("local_semantic_no_quorum")
+    assert calls == ["same request|None"]
+
+
+def test_structured_review_does_not_use_cache_when_initial_observation_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda _lane: (authority_box["value"], None),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: None,
+    )
+    result = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["frontier_failure"]["failure_class"] == (
+        "decision_authority_unavailable"
+    )
+    assert calls == ["same request|None"]
+
+
+def test_structured_review_does_not_return_cache_when_post_observation_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda _lane: (authority_box["value"], None),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+    observations = iter(["1" * 64, "1" * 64, None])
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: next(observations),
+    )
+    result = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["frontier_failure"]["failure_class"] == (
+        "decision_authority_unavailable"
+    )
+    assert calls == ["same request|None"]
+
+
+def test_structured_review_cache_lock_entry_failure_falls_back_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: (authority_box["value"], None),
+    )
+
+    @contextmanager
+    def broken_lock(_self, **_kwargs):
+        raise OSError("lock unavailable")
+        yield
+
+    monkeypatch.setattr(
+        semantic_hold.StructuredReviewSemanticHoldCache,
+        "locked",
+        broken_lock,
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["frontier_failure"]["failure_class"] == ("local_semantic_no_quorum")
+    assert calls == ["same request|None"]
+
+
+def test_structured_review_cache_misses_prompt_system_and_authority_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: (authority_box["value"], None),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    def run(prompt: str, system: str | None) -> dict[str, object]:
+        return frontier_review.run_structured_review(
+            prompt,
+            frontier_review.FRONTIER_DECISION_SCHEMA,
+            repo_root=tmp_path,
+            decision_lane="recall_auto_apply",
+            system=system,
+        )
+
+    run("prompt-a", "system-a")
+    run("prompt-a", "system-a")
+    run("prompt-b", "system-a")
+    run("prompt-b", "system-b")
+    authority_box["value"] = semantic_authority(artifact_sha256="9" * 64)
+    run("prompt-b", "system-b")
+    run("prompt-b", "system-b")
+
+    assert calls == [
+        "prompt-a|system-a",
+        "prompt-b|system-a",
+        "prompt-b|system-b",
+        "prompt-b|system-b",
+    ]
+
+
+def test_structured_review_does_not_store_after_authority_aba_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    observations = iter(["0" * 64, "0" * 64, "1" * 64, *("1" * 64 for _ in range(7))])
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: (authority_box["value"], None),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: next(observations),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    results = []
+    for _index in range(3):
+        results.append(
+            frontier_review.run_structured_review(
+                "same request",
+                frontier_review.FRONTIER_DECISION_SCHEMA,
+                repo_root=tmp_path,
+                decision_lane="recall_auto_apply",
+            )
+        )
+
+    assert results[0]["frontier_failure"]["failure_class"] == (
+        "decision_authority_changed"
+    )
+    assert results[0]["frontier_failure"]["rescue_status"] == "local_retry"
+    assert results[1]["frontier_failure"]["failure_class"] == (
+        "local_semantic_no_quorum"
+    )
+    assert results[2] == results[1]
+    # The first no-quorum result was discarded because the mutable authority
+    # generation changed during the model call. The second stored under the
+    # new stable generation and the third was a zero-call cache hit.
+    assert calls == ["same request|None", "same request|None"]
+
+
+@pytest.mark.parametrize("outcome", ["semantic", "success", "operational"])
+def test_structured_review_discards_any_model_result_after_authority_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    observations = iter(["0" * 64, "0" * 64, "1" * 64])
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls, outcome=outcome),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: (authority_box["value"], None),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: next(observations),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["frontier_failure"]["failure_class"] == ("decision_authority_changed")
+    assert result["frontier_failure"]["rescue_status"] == "local_retry"
+    assert calls == ["same request|None"]
+    entries = tmp_path / "structured-review-holds" / "entries"
+    assert not entries.exists() or not list(entries.glob("*.json"))
+
+
+def test_structured_review_authority_guard_survives_cache_lock_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    observations = iter(["0" * 64, "0" * 64, "1" * 64])
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: (authority_box["value"], None),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: next(observations),
+    )
+    monkeypatch.setattr(
+        frontier_review.semantic_hold.StructuredReviewSemanticHoldCache,
+        "locked",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("lock failed")),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "same request",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["frontier_failure"]["failure_class"] == ("decision_authority_changed")
+    assert calls == ["same request|None"]
+
+
+@pytest.mark.parametrize("outcome", ["success", "operational"])
+def test_structured_review_never_caches_non_semantic_outcomes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    authority_box = {"value": semantic_authority()}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        _cache_test_router_class(authority_box, calls, outcome=outcome),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: (authority_box["value"], None),
+    )
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    for _index in range(2):
+        frontier_review.run_structured_review(
+            "same request",
+            frontier_review.FRONTIER_DECISION_SCHEMA,
+            repo_root=tmp_path,
+            decision_lane="recall_auto_apply",
+        )
+
+    assert calls == ["same request|None", "same request|None"]
+    entries = tmp_path / "structured-review-holds" / "entries"
+    assert not entries.exists() or not list(entries.glob("*.json"))
+
+
 @pytest.mark.parametrize(
     ("valid", "signatures"),
     [
@@ -1345,9 +2034,11 @@ def test_structured_review_rejects_incomplete_approved_json(
 ) -> None:
     class IncompleteLocalRouter:
         def __init__(self, **_kwargs) -> None:
+            router_audit = semantic_authority(artifact_sha256="d" * 64)["router"]
+            assert isinstance(router_audit, dict)
             self.policy = SimpleNamespace(
                 source="adopted_artifact",
-                audit_record=lambda: {"source": "adopted_artifact"},
+                audit_record=lambda: dict(router_audit),
             )
 
         def decide(self, _prompt, _schema):
@@ -1436,9 +2127,11 @@ def test_structured_review_forwards_optional_system_to_local_router(
 
     class SystemCapturingLocalRouter:
         def __init__(self, **_kwargs) -> None:
+            router_audit = semantic_authority(artifact_sha256="d" * 64)["router"]
+            assert isinstance(router_audit, dict)
             self.policy = SimpleNamespace(
                 source="adopted_artifact",
-                audit_record=lambda: {"source": "adopted_artifact"},
+                audit_record=lambda: dict(router_audit),
             )
 
         def decide(self, prompt, schema, *, system=None):

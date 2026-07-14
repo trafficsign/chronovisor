@@ -17,16 +17,22 @@ from llm_wiki_mcp.convergence import (
     is_human_required_result,
     stable_item_key,
 )
+from llm_wiki_mcp.semantic_hold import persisted_semantic_no_quorum_hold
+from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 
 
 def _store(tmp_path: Path, *, policy: RetryPolicy | None = None) -> ConvergenceStore:
-    return ConvergenceStore(tmp_path / "runtime" / "convergence" / "state.json", policy=policy)
+    return ConvergenceStore(
+        tmp_path / "runtime" / "convergence" / "state.json", policy=policy
+    )
 
 
-def _merge(store: ConvergenceStore, *, source_id: str = "item-1", input_data=None) -> dict:
+def _merge(
+    store: ConvergenceStore, *, source_id: str = "item-1", input_data=None
+) -> dict:
     result = store.merge_item(
         lane="test",
         source_id=source_id,
@@ -66,7 +72,9 @@ def test_stable_key_is_order_independent_and_versioned() -> None:
     )
 
 
-def test_merge_preserves_terminal_state_and_changed_input_reopens(tmp_path: Path) -> None:
+def test_merge_preserves_terminal_state_and_changed_input_reopens(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     item = _merge(store)
     key = item["key"]
@@ -184,8 +192,12 @@ def test_local_attempts_back_off_then_escalate(tmp_path: Path) -> None:
         failure_class="local_transient",
         now=NOW,
     )
-    early = store.claim_attempt(key, "local", owner="worker-2", now=NOW + timedelta(seconds=9))
-    second = store.claim_attempt(key, "local", owner="worker-2", now=NOW + timedelta(seconds=10))
+    early = store.claim_attempt(
+        key, "local", owner="worker-2", now=NOW + timedelta(seconds=9)
+    )
+    second = store.claim_attempt(
+        key, "local", owner="worker-2", now=NOW + timedelta(seconds=10)
+    )
     escalated = store.fail_attempt(
         key,
         "local",
@@ -206,7 +218,9 @@ def test_local_attempts_back_off_then_escalate(tmp_path: Path) -> None:
     assert escalated["item"]["next_attempt_at"] is None
 
 
-def test_frontier_attempts_are_bounded_and_terminally_quarantined(tmp_path: Path) -> None:
+def test_frontier_attempts_are_bounded_and_terminally_quarantined(
+    tmp_path: Path,
+) -> None:
     store = _store(
         tmp_path,
         policy=RetryPolicy(
@@ -224,7 +238,9 @@ def test_frontier_attempts_are_bounded_and_terminally_quarantined(tmp_path: Path
     at = NOW
     expected_delays = [10, 20]
     for attempt, delay in enumerate(expected_delays, start=1):
-        claim = store.claim_attempt(key, "frontier", owner=f"frontier-{attempt}", now=at)
+        claim = store.claim_attempt(
+            key, "frontier", owner=f"frontier-{attempt}", now=at
+        )
         failed = store.fail_attempt(
             key,
             "frontier",
@@ -265,12 +281,15 @@ def test_only_external_access_failures_cross_human_boundary(tmp_path: Path) -> N
     assert is_human_required_failure("schema_invalid") is False
     assert is_human_required_failure("model_asked_for_human") is False
     assert is_human_required_result({"human_required": True}) is False
-    assert is_human_required_result(
-        {
-            "human_required": False,
-            "frontier_failure": {"failure_class": "keychain_permission_required"},
-        }
-    ) is True
+    assert (
+        is_human_required_result(
+            {
+                "human_required": False,
+                "frontier_failure": {"failure_class": "keychain_permission_required"},
+            }
+        )
+        is True
+    )
 
     store = _store(tmp_path)
     schema_key = _merge(store, source_id="schema")["key"]
@@ -304,7 +323,9 @@ def test_only_external_access_failures_cross_human_boundary(tmp_path: Path) -> N
     assert auth_failure["item"]["next_attempt_at"] is None
 
 
-def test_human_required_resumes_only_with_capability_fingerprint(tmp_path: Path) -> None:
+def test_human_required_resumes_only_with_capability_fingerprint(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     key = _merge(store)["key"]
     store.escalate(key, reason="frontier needed", now=NOW)
@@ -396,16 +417,24 @@ def test_merge_reopens_legacy_non_external_human_required_item(tmp_path: Path) -
     assert merged["item"]["frontier_attempts"] == 1
 
 
-def test_active_lease_blocks_duplicate_worker_and_expiry_counts_crash(tmp_path: Path) -> None:
+def test_active_lease_blocks_duplicate_worker_and_expiry_counts_crash(
+    tmp_path: Path,
+) -> None:
     store = _store(
         tmp_path,
-        policy=RetryPolicy(max_local_attempts=2, max_frontier_attempts=1, lease_seconds=30),
+        policy=RetryPolicy(
+            max_local_attempts=2, max_frontier_attempts=1, lease_seconds=30
+        ),
     )
     key = _merge(store)["key"]
 
     first = store.claim_attempt(key, "local", owner="worker-1", now=NOW)
-    blocked = store.claim_attempt(key, "local", owner="worker-2", now=NOW + timedelta(seconds=29))
-    recovered = store.claim_attempt(key, "local", owner="worker-2", now=NOW + timedelta(seconds=30))
+    blocked = store.claim_attempt(
+        key, "local", owner="worker-2", now=NOW + timedelta(seconds=29)
+    )
+    recovered = store.claim_attempt(
+        key, "local", owner="worker-2", now=NOW + timedelta(seconds=30)
+    )
 
     assert first["claimed"] is True
     assert blocked["claimed"] is False
@@ -487,15 +516,21 @@ def test_complete_many_rewrites_state_once_and_skips_active_leases(
     assert {row["key"] for row in completed_events} == {first, second}
 
 
-def test_expired_crash_at_limit_routes_to_frontier_without_another_call(tmp_path: Path) -> None:
+def test_expired_crash_at_limit_routes_to_frontier_without_another_call(
+    tmp_path: Path,
+) -> None:
     store = _store(
         tmp_path,
-        policy=RetryPolicy(max_local_attempts=1, max_frontier_attempts=1, lease_seconds=10),
+        policy=RetryPolicy(
+            max_local_attempts=1, max_frontier_attempts=1, lease_seconds=10
+        ),
     )
     key = _merge(store)["key"]
     store.claim_attempt(key, "local", owner="crashed", now=NOW)
 
-    recovered = store.claim_attempt(key, "local", owner="new-worker", now=NOW + timedelta(seconds=10))
+    recovered = store.claim_attempt(
+        key, "local", owner="new-worker", now=NOW + timedelta(seconds=10)
+    )
 
     assert recovered["claimed"] is False
     assert recovered["reason"] == "retry_exhausted"
@@ -518,7 +553,9 @@ def test_cycle_budget_bounds_calls_mutations_bytes_and_elapsed(tmp_path: Path) -
     second_key = _merge(store, source_id="second")["key"]
 
     first = store.claim_attempt(first_key, "local", owner="one", budget=budget, now=NOW)
-    second = store.claim_attempt(second_key, "local", owner="two", budget=budget, now=NOW)
+    second = store.claim_attempt(
+        second_key, "local", owner="two", budget=budget, now=NOW
+    )
 
     assert first["claimed"] is True
     assert second["claimed"] is False
@@ -608,10 +645,14 @@ def test_corrupt_state_fails_closed_without_overwrite(tmp_path: Path) -> None:
     assert store.state_file.read_bytes() == before
 
 
-def test_explicit_quarantine_is_terminal_and_completion_is_idempotent(tmp_path: Path) -> None:
+def test_explicit_quarantine_is_terminal_and_completion_is_idempotent(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     quarantine_key = _merge(store, source_id="unsafe")["key"]
-    quarantined = store.quarantine(quarantine_key, reason="CAS verification failed", now=NOW)
+    quarantined = store.quarantine(
+        quarantine_key, reason="CAS verification failed", now=NOW
+    )
 
     assert quarantined["item"]["status"] == "quarantined"
     assert quarantined["item"]["quarantine_reason"] == "CAS verification failed"
@@ -624,7 +665,10 @@ def test_explicit_quarantine_is_terminal_and_completion_is_idempotent(tmp_path: 
 
     assert first["item"]["result"] == {"writes": 1}
     assert second["item"]["result"] == {"writes": 1}
-    assert json.loads(store.state_file.read_text())["items"][applied_key]["status"] == "applied"
+    assert (
+        json.loads(store.state_file.read_text())["items"][applied_key]["status"]
+        == "applied"
+    )
 
 
 def test_due_nonhuman_quarantine_is_reopened_without_resetting_other_lanes(
@@ -662,6 +706,210 @@ def test_due_nonhuman_quarantine_is_reopened_without_resetting_other_lanes(
     assert result["resumed"] == 1
     assert store.get(retry_key)["status"] == "pending_frontier"
     assert store.get(excluded_key)["status"] == "quarantined"
+
+
+def test_generic_cooldown_never_resamples_semantic_no_quorum(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    semantic_key = _merge(store, source_id="semantic-split")["key"]
+    operational_key = _merge(store, source_id="operational-failure")["key"]
+    state = store.load()
+    state["items"][semantic_key].update(
+        {
+            "lane": "autonomy_duplicate_resolution",
+            "status": "quarantined",
+            "quarantine_reason": "retry_exhausted:frontier",
+            "last_failure_class": "local_semantic_no_quorum",
+            "updated_at": NOW.isoformat(),
+        }
+    )
+    state["items"][operational_key].update(
+        {
+            "lane": "autonomy_duplicate_resolution",
+            "status": "quarantined",
+            "quarantine_reason": "retry_exhausted:frontier",
+            "last_failure_class": "network_transient",
+            "updated_at": NOW.isoformat(),
+        }
+    )
+    store.state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    result = store.resume_due_quarantined(
+        cooldown_seconds=0,
+        now=NOW + timedelta(days=1),
+    )
+
+    assert result["resumed"] == 1
+    assert result["semantic_deferred"] == 1
+    assert store.get(semantic_key)["status"] == "quarantined"
+    assert store.get(operational_key)["status"] == "pending_frontier"
+
+
+def test_semantic_no_quorum_is_immediately_terminal_and_dry_run_is_read_only(
+    tmp_path: Path,
+) -> None:
+    lane = "recall_auto_apply"
+    store = _store(tmp_path)
+    key = _merge(store, source_id="semantic-hold")["key"]
+    store.escalate(key, reason="semantic review required", now=NOW)
+    claim = store.claim_attempt(key, "frontier", owner="worker", now=NOW)
+    assert claim["claimed"] is True
+    authority = semantic_authority(lane)
+    review = semantic_review(authority, lane=lane)
+    epoch = {"input_hash": store.get(key)["input_hash"], "prompt_sha256": "f" * 64}
+    state_before = store.state_file.read_bytes()
+    events_before = store.events_file.read_bytes()
+
+    preview = store.hold_semantic_no_quorum(
+        key,
+        lane=lane,
+        stage="frontier",
+        review=review,
+        epoch=epoch,
+        authority=authority,
+        owner="worker",
+        now=NOW,
+        dry_run=True,
+    )
+
+    assert preview["item"]["status"] == "quarantined"
+    assert preview["item"]["frontier_attempts"] == 1
+    assert store.state_file.read_bytes() == state_before
+    assert store.events_file.read_bytes() == events_before
+
+    terminal = store.hold_semantic_no_quorum(
+        key,
+        lane=lane,
+        stage="frontier",
+        review=review,
+        epoch=epoch,
+        authority=authority,
+        owner="worker",
+        now=NOW,
+    )["item"]
+
+    assert terminal["status"] == "quarantined"
+    assert terminal["frontier_attempts"] == 1
+    assert terminal["last_failure_class"] == "local_semantic_no_quorum"
+    assert terminal["quarantine_reason"] == f"semantic_no_quorum:{lane}"
+    assert (
+        persisted_semantic_no_quorum_hold(
+            terminal,
+            lane=lane,
+            epoch=epoch,
+            authority=authority,
+        )
+        is not None
+    )
+    events = [json.loads(line) for line in store.events_file.read_text().splitlines()]
+    assert events[-1]["event"] == "semantic_no_quorum_held"
+
+    recovery = store.resume_due_quarantined(cooldown_seconds=0, now=NOW)
+    assert recovery["resumed"] == 0
+    assert recovery["semantic_deferred"] == 1
+    assert store.get(key)["status"] == "quarantined"
+
+
+def test_resumed_semantic_hold_is_restored_before_same_epoch_resampling(
+    tmp_path: Path,
+) -> None:
+    lane = "recall_auto_apply"
+    store = _store(tmp_path)
+    key = _merge(store, source_id="semantic-aba")["key"]
+    store.escalate(key, reason="semantic review required", now=NOW)
+    store.claim_attempt(key, "frontier", owner="worker", now=NOW)
+    authority_a = semantic_authority(lane)
+    authority_b = semantic_authority(lane, artifact_sha256="9" * 64)
+    review_a = semantic_review(authority_a, lane=lane)
+    review_b = semantic_review(authority_b, lane=lane)
+    epoch = {"input_hash": store.get(key)["input_hash"]}
+    terminal = store.hold_semantic_no_quorum(
+        key,
+        lane=lane,
+        stage="frontier",
+        review=review_a,
+        epoch=epoch,
+        authority=authority_a,
+        owner="worker",
+        now=NOW,
+    )["item"]
+    hold = terminal["result"]["semantic_hold"]
+    store.resume_quarantined(
+        key,
+        stage="frontier",
+        reason="semantic hold authority changed",
+        resume_context={
+            "decision_lane": lane,
+            "invalidated_semantic_hold": hold,
+            "invalidated_hold_sha256": hold["hold_sha256"],
+            "expected_epoch": epoch,
+            "expected_epoch_sha256": hold["epoch_sha256"],
+            "expected_authority": authority_b,
+        },
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert (
+        store.restore_semantic_no_quorum_hold(
+            key,
+            lane=lane,
+            epoch=epoch,
+            authority=authority_b,
+            now=NOW + timedelta(seconds=2),
+        )
+        is None
+    )
+    claim_b = store.claim_attempt(
+        key,
+        "frontier",
+        owner="worker",
+        now=NOW + timedelta(seconds=2),
+    )
+    assert claim_b["claimed"] is True
+    terminal_b = store.hold_semantic_no_quorum(
+        key,
+        lane=lane,
+        stage="frontier",
+        review=review_b,
+        epoch=epoch,
+        authority=authority_b,
+        owner="worker",
+        now=NOW + timedelta(seconds=2),
+    )["item"]
+    hold_b = terminal_b["result"]["semantic_hold"]
+    assert terminal_b["result"]["semantic_hold_history"] == [hold]
+    store.resume_quarantined(
+        key,
+        stage="frontier",
+        reason="semantic hold authority changed",
+        resume_context={
+            "decision_lane": lane,
+            "invalidated_semantic_hold": hold_b,
+            "invalidated_hold_sha256": hold_b["hold_sha256"],
+            "expected_epoch": epoch,
+            "expected_epoch_sha256": hold_b["epoch_sha256"],
+            "expected_authority": authority_a,
+        },
+        now=NOW + timedelta(seconds=3),
+    )
+    resume_history = store.get(key)["result"]["resume_context"]["semantic_hold_history"]
+    assert [entry["hold_sha256"] for entry in resume_history] == [
+        hold["hold_sha256"],
+        hold_b["hold_sha256"],
+    ]
+    restored = store.restore_semantic_no_quorum_hold(
+        key,
+        lane=lane,
+        epoch=epoch,
+        authority=authority_a,
+        now=NOW + timedelta(seconds=4),
+    )
+
+    assert restored is not None
+    assert restored["item"]["status"] == "quarantined"
+    assert restored["item"]["result"]["semantic_hold"] == hold
+    assert restored["item"]["result"]["semantic_hold_history"] == [hold_b]
 
 
 def test_exponential_backoff_is_one_based_and_capped() -> None:

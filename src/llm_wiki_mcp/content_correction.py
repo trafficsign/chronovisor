@@ -19,6 +19,7 @@ import re
 import sys
 import tempfile
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +38,7 @@ from llm_wiki_mcp.decision_authority import (
     seal_semantic_artifact,
     semantic_authority_shape_error,
     semantic_verdict_authority_error,
+    semantic_verdict_authority_provenance_error,
 )
 from llm_wiki_mcp.evidence_grounding import (
     ProtectedLiteralGroundingError,
@@ -82,7 +84,7 @@ from llm_wiki_mcp.wiki import WIKI_ROOT, find_page, init_wiki
 
 PROJECT_ROOT = runtime_repo_root()
 LANE = "content_correction"
-RESOLVER_VERSION = "3"
+RESOLVER_VERSION = "4"
 HOOK_ENABLE_ENV = "LLM_WIKI_CONTENT_CORRECTION_ENABLED"
 RUNTIME_DIR = WIKI_ROOT / "runtime" / "content-correction"
 PROPOSALS_DIR = RUNTIME_DIR / "proposals"
@@ -106,6 +108,8 @@ CONTENT_CLASSIFICATIONS = ("page_fact_wrong", "outdated")
 ALL_CLASSIFICATIONS = (*CONTENT_CLASSIFICATIONS, *NON_MUTATION_CLASSIFICATIONS)
 CLASSIFICATION_LANE = "content_correction_classification"
 REVIEW_LANE = "content_correction_review"
+LOCAL_SEMANTIC_NO_QUORUM = "local_semantic_no_quorum"
+SEMANTIC_HOLD_KIND = "content_correction_semantic_no_quorum"
 
 _EXACT_REPLACEMENT_PATTERNS = (
     re.compile(
@@ -1341,6 +1345,324 @@ def _quarantine_retry_seconds() -> int:
         return DEFAULT_QUARANTINE_RETRY_SECONDS
 
 
+def _semantic_no_quorum_hold(
+    *,
+    item: Mapping[str, Any],
+    decision_lane: str,
+    authority: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+    page_evidence_hashes: Mapping[str, str],
+    review: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Freeze the exact epoch that produced a safe semantic non-decision."""
+
+    frontier_failure = review.get("frontier_failure")
+    local_consensus = review.get("local_consensus")
+    return {
+        "kind": SEMANTIC_HOLD_KIND,
+        "decision_lane": decision_lane,
+        # This is the resolver that interpreted the verdict, not necessarily
+        # the resolver stamped on a legacy queue item.
+        "resolver_version": RESOLVER_VERSION,
+        "input_hash": str(item.get("input_hash") or ""),
+        "proposal_sha256": _canonical_json_sha256(proposal),
+        "page_evidence_hashes": dict(sorted(page_evidence_hashes.items())),
+        "authority": dict(authority),
+        "frontier_failure": (
+            dict(frontier_failure) if isinstance(frontier_failure, Mapping) else {}
+        ),
+        # DecisionRouterResult.audit_record() is already the trusted redacted
+        # envelope: it contains digests and session metrics, never prompt or
+        # model response text.
+        "local_consensus": (
+            dict(local_consensus) if isinstance(local_consensus, Mapping) else {}
+        ),
+    }
+
+
+def _current_semantic_hold_authority(
+    decision_lane: str,
+    *,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if decision_lane == CLASSIFICATION_LANE:
+        return _current_content_classification_authority(reviewer=reviewer)
+    if decision_lane == REVIEW_LANE:
+        return _current_content_review_authority(reviewer=reviewer)
+    return None, f"unsupported semantic hold lane: {decision_lane}"
+
+
+def _semantic_hold_resume_stage(
+    item: Mapping[str, Any],
+    *,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+) -> str | None:
+    """Return the only justified reopen stage for a semantic hold.
+
+    Elapsed time is deliberately irrelevant. Re-sampling the same evidence
+    under the same authority is token-consuming nondeterminism, not recovery.
+    """
+
+    result = item.get("result")
+    hold = result.get("semantic_hold") if isinstance(result, Mapping) else None
+    if not isinstance(hold, Mapping) or hold.get("kind") != SEMANTIC_HOLD_KIND:
+        # Legacy/incomplete no-quorum records have no trustworthy authority or
+        # proposal epoch to replay.  Keep them fail-closed under identical
+        # inputs, but permit a fresh local proposal after an explicit resolver
+        # migration or a captured-page evidence change.
+        if str(item.get("resolver_version") or "") != RESOLVER_VERSION:
+            return "local"
+        metadata = (
+            item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+        )
+        candidate_pages = [
+            value
+            for value in metadata.get("candidate_pages", [])
+            if isinstance(value, str)
+        ]
+        captured_hashes = metadata.get("candidate_page_hashes")
+        if (
+            isinstance(captured_hashes, Mapping)
+            and all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in captured_hashes.items()
+            )
+            and dict(captured_hashes) != _current_candidate_page_hashes(candidate_pages)
+        ):
+            return "local"
+        return None
+
+    if hold.get("resolver_version") != RESOLVER_VERSION:
+        return "local"
+
+    proposal = _load_json(_proposal_path(str(item.get("key") or "")))
+    if proposal is None or hold.get("proposal_sha256") != _canonical_json_sha256(
+        proposal
+    ):
+        return "local"
+
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+    candidate_pages = [
+        value for value in metadata.get("candidate_pages", []) if isinstance(value, str)
+    ]
+    held_hashes = hold.get("page_evidence_hashes")
+    if not isinstance(held_hashes, Mapping) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in held_hashes.items()
+    ):
+        return None
+    if dict(held_hashes) != _current_candidate_page_hashes(candidate_pages):
+        return "local"
+
+    decision_lane = hold.get("decision_lane")
+    if decision_lane == CLASSIFICATION_LANE:
+        current_authority, authority_error = _current_content_classification_authority(
+            reviewer=reviewer
+        )
+    elif decision_lane == REVIEW_LANE:
+        current_authority, authority_error = _current_content_review_authority(
+            reviewer=reviewer
+        )
+    else:
+        return None
+    held_authority = hold.get("authority")
+    if (
+        authority_error is not None
+        or current_authority is None
+        or semantic_authority_shape_error(held_authority, lane=str(decision_lane))
+        is not None
+        or semantic_authority_shape_error(current_authority, lane=str(decision_lane))
+        is not None
+    ):
+        return None
+    if held_authority != current_authority:
+        return "frontier"
+    return None
+
+
+def _restore_invalidated_semantic_hold_if_rolled_back(
+    *,
+    store: ConvergenceStore,
+    item: Mapping[str, Any],
+    key: str,
+    owner: str | None,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    """Restore a prior hold if its exact epoch returned before re-sampling."""
+
+    result = item.get("result")
+    context = result.get("resume_context") if isinstance(result, Mapping) else None
+    if not isinstance(context, Mapping):
+        return None
+    hold = context.get("invalidated_semantic_hold")
+    if not isinstance(hold, Mapping) or hold.get("kind") != SEMANTIC_HOLD_KIND:
+        return None
+    hold_digest = context.get("invalidated_hold_sha256")
+    if hold_digest != _canonical_json_sha256(hold):
+        raise ValueError("semantic resume hold digest is invalid")
+    expected_epoch = context.get("expected_epoch")
+    if not isinstance(expected_epoch, Mapping) or context.get(
+        "expected_epoch_sha256"
+    ) != _canonical_json_sha256(expected_epoch):
+        raise ValueError("semantic resume expected epoch digest is invalid")
+    if hold.get("resolver_version") != RESOLVER_VERSION or hold.get(
+        "input_hash"
+    ) != item.get("input_hash"):
+        return None
+    proposal = _load_json(_proposal_path(key))
+    if proposal is None or hold.get("proposal_sha256") != _canonical_json_sha256(
+        proposal
+    ):
+        return None
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+    candidate_pages = [
+        value for value in metadata.get("candidate_pages", []) if isinstance(value, str)
+    ]
+    held_hashes = hold.get("page_evidence_hashes")
+    if not isinstance(held_hashes, Mapping) or dict(
+        held_hashes
+    ) != _current_candidate_page_hashes(candidate_pages):
+        return None
+    decision_lane = str(hold.get("decision_lane") or "")
+    authority_epoch = nullcontext() if dry_run else decision_authority_lock()
+    with authority_epoch:
+        current_authority, authority_error = _current_semantic_hold_authority(
+            decision_lane,
+            reviewer=reviewer,
+        )
+        if authority_error is not None:
+            raise ValueError(authority_error)
+        if (
+            compare_semantic_authority(
+                hold.get("authority"),
+                current_authority,
+                lane=decision_lane,
+            )
+            is not None
+        ):
+            return None
+        terminal_result = {
+            "terminal_reason": "semantic_no_quorum",
+            "semantic_hold": dict(hold),
+        }
+        summary = "semantic hold epoch restored before reevaluation"
+        if dry_run:
+            return {
+                "key": key,
+                "status": "dry_run",
+                "projected_status": "quarantined",
+                "error": summary,
+                "failure_class": LOCAL_SEMANTIC_NO_QUORUM,
+                "terminal_reason": "semantic_no_quorum",
+                "restored_semantic_hold": True,
+                "result": terminal_result,
+            }
+        transition = store.quarantine(
+            key,
+            reason=f"semantic_no_quorum:{decision_lane}",
+            error=summary,
+            failure_class=LOCAL_SEMANTIC_NO_QUORUM,
+            result=terminal_result,
+            owner=owner,
+        )
+    terminal = transition.get("item") if isinstance(transition, Mapping) else {}
+    return {
+        "key": key,
+        "status": str((terminal or {}).get("status") or "quarantined"),
+        "error": summary,
+        "failure_class": LOCAL_SEMANTIC_NO_QUORUM,
+        "terminal_reason": "semantic_no_quorum",
+        "restored_semantic_hold": True,
+    }
+
+
+def _terminal_semantic_no_quorum(
+    *,
+    store: ConvergenceStore,
+    item: Mapping[str, Any],
+    key: str,
+    owner: str | None,
+    decision_lane: str,
+    authority: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+    page_evidence_hashes: Mapping[str, str],
+    review: Mapping[str, Any],
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Persist a non-human semantic hold without scheduling a retry loop."""
+
+    summary = str(
+        review.get("summary") or "local models did not reach a two-vote semantic quorum"
+    )
+    authority_epoch = nullcontext() if dry_run else decision_authority_lock()
+    with authority_epoch:
+        current_authority, authority_error = _current_semantic_hold_authority(
+            decision_lane,
+            reviewer=reviewer,
+        )
+        epoch_error = authority_error or compare_semantic_authority(
+            authority,
+            current_authority,
+            lane=decision_lane,
+        )
+        if epoch_error is not None:
+            return _fail_claimed_frontier(
+                store=store,
+                key=key,
+                owner=owner,
+                error=epoch_error,
+                failure_class="review_artifact_invalid",
+                dry_run=dry_run,
+            )
+        assert isinstance(current_authority, dict)
+        semantic_hold = _semantic_no_quorum_hold(
+            item=item,
+            decision_lane=decision_lane,
+            authority=current_authority,
+            proposal=proposal,
+            page_evidence_hashes=page_evidence_hashes,
+            review=review,
+        )
+        terminal_result = {
+            "terminal_reason": "semantic_no_quorum",
+            "semantic_hold": semantic_hold,
+        }
+        if dry_run:
+            # ``claim_attempt(..., dry_run=True)`` projects a lease without
+            # persisting it.  Passing that synthetic owner to a later
+            # transition would therefore validate against the untouched
+            # pending item and raise InvalidTransition.  A dry run instead
+            # exposes the exact terminal projection while leaving both state
+            # and event bytes alone.
+            return {
+                "key": key,
+                "status": "dry_run",
+                "projected_status": "quarantined",
+                "error": summary,
+                "failure_class": LOCAL_SEMANTIC_NO_QUORUM,
+                "terminal_reason": "semantic_no_quorum",
+                "result": terminal_result,
+            }
+        transition = store.quarantine(
+            key,
+            reason=f"semantic_no_quorum:{decision_lane}",
+            error=summary,
+            failure_class=LOCAL_SEMANTIC_NO_QUORUM,
+            result=terminal_result,
+            owner=owner,
+        )
+    terminal = transition.get("item") if isinstance(transition, Mapping) else {}
+    return {
+        "key": key,
+        "status": str((terminal or {}).get("status") or "quarantined"),
+        "error": summary,
+        "failure_class": LOCAL_SEMANTIC_NO_QUORUM,
+        "terminal_reason": "semantic_no_quorum",
+    }
+
+
 def _archive_invalid_correction_artifacts(key: str) -> list[str]:
     """Preserve, but stop trusting, artifacts that exhausted integrity retries."""
 
@@ -1365,6 +1687,7 @@ def _resume_due_quarantined_corrections(
     store: ConvergenceStore,
     *,
     dry_run: bool,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Periodically reopen autonomous failures instead of accumulating them."""
@@ -1386,6 +1709,117 @@ def _resume_due_quarantined_corrections(
             or bool(item.get("human_required"))
             or is_human_required_failure(failure_class)
         ):
+            continue
+        if failure_class == LOCAL_SEMANTIC_NO_QUORUM:
+            # A semantic split is not an outage. Reopen only when a concrete
+            # decision input or its adopted authority changed.
+            try:
+                authority_epoch = (
+                    nullcontext() if dry_run else decision_authority_lock()
+                )
+                with authority_epoch:
+                    stage = _semantic_hold_resume_stage(item, reviewer=reviewer)
+                    if stage is None:
+                        continue
+                    result = (
+                        item.get("result")
+                        if isinstance(item.get("result"), Mapping)
+                        else {}
+                    )
+                    hold = result.get("semantic_hold")
+                    hold = (
+                        dict(hold)
+                        if isinstance(hold, Mapping)
+                        and hold.get("kind") == SEMANTIC_HOLD_KIND
+                        else None
+                    )
+                    metadata = (
+                        item.get("metadata")
+                        if isinstance(item.get("metadata"), Mapping)
+                        else {}
+                    )
+                    candidate_pages = [
+                        value
+                        for value in metadata.get("candidate_pages", [])
+                        if isinstance(value, str)
+                    ]
+                    expected_epoch: dict[str, Any] = {
+                        "stage": stage,
+                        "resolver_version": RESOLVER_VERSION,
+                        "page_evidence_hashes": _current_candidate_page_hashes(
+                            candidate_pages
+                        ),
+                    }
+                    resume_context: dict[str, Any] = {
+                        "reason": "semantic_hold_epoch_changed",
+                        "stage": stage,
+                    }
+                    if hold is not None:
+                        decision_lane = str(hold.get("decision_lane") or "")
+                        current_authority, authority_error = (
+                            _current_semantic_hold_authority(
+                                decision_lane,
+                                reviewer=reviewer,
+                            )
+                        )
+                        if authority_error is not None or current_authority is None:
+                            raise ValueError(
+                                authority_error
+                                or "semantic hold authority is unavailable"
+                            )
+                        expected_epoch.update(
+                            {
+                                "decision_lane": decision_lane,
+                                "authority": current_authority,
+                            }
+                        )
+                        resume_context.update(
+                            {
+                                "decision_lane": decision_lane,
+                                "invalidated_semantic_hold": hold,
+                                "invalidated_hold_sha256": _canonical_json_sha256(hold),
+                            }
+                        )
+                    archived = (
+                        [] if dry_run else _archive_invalid_correction_artifacts(key)
+                    )
+                    resume_context.update(
+                        {
+                            "archived_artifacts": archived,
+                            "expected_epoch": expected_epoch,
+                            "expected_epoch_sha256": _canonical_json_sha256(
+                                expected_epoch
+                            ),
+                        }
+                    )
+                    transition = store.resume_quarantined(
+                        key,
+                        stage=stage,
+                        reason=(f"semantic hold invalidated by {stage} evidence epoch"),
+                        resume_context=resume_context,
+                        now=current_time,
+                        dry_run=dry_run,
+                    )
+            except Exception as exc:
+                resumed.append(
+                    {
+                        "key": key,
+                        "status": "resume_skipped",
+                        "error": str(exc),
+                    }
+                )
+                continue
+            reopened = transition.get("item") if isinstance(transition, dict) else {}
+            resumed.append(
+                {
+                    "key": key,
+                    "status": str((reopened or {}).get("status") or f"pending_{stage}"),
+                    "stage": stage,
+                    "reason": "semantic_hold_epoch_changed",
+                    "archived_artifacts": archived,
+                    "dry_run": dry_run,
+                }
+            )
             continue
         updated_at = _normalized_time(item.get("updated_at"))
         metadata = (
@@ -3017,6 +3451,18 @@ def _fail_claimed_frontier(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     current = store.get(key)
+    if dry_run:
+        return {
+            "key": key,
+            "status": "dry_run",
+            "projected_status": (
+                str(current.get("status") or "unknown")
+                if isinstance(current, dict)
+                else "unknown"
+            ),
+            "error": error,
+            "failure_class": failure_class,
+        }
     if isinstance(current, dict) and current.get("status") != "frontier_running":
         return {
             "key": key,
@@ -3338,12 +3784,39 @@ def _process_local_item(
     budget: CycleBudget | None,
     generate_fn: Callable[..., str] | None,
     dry_run: bool,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     key = str(item["key"])
     claim = store.claim_attempt(key, "local", budget=budget, dry_run=dry_run)
     if not claim.get("claimed"):
         return {"key": key, "status": str(claim.get("reason") or "deferred")}
     owner = claim.get("owner")
+    try:
+        restored_hold = _restore_invalidated_semantic_hold_if_rolled_back(
+            store=store,
+            item=item,
+            key=key,
+            owner=str(owner) if owner is not None else None,
+            reviewer=reviewer,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:
+        if dry_run:
+            return {"key": key, "status": "dry_run", "error": str(exc)}
+        failed = store.fail_attempt(
+            key,
+            "local",
+            error=str(exc),
+            failure_class="review_artifact_invalid",
+            owner=str(owner) if owner is not None else None,
+        )
+        return {
+            "key": key,
+            "status": str(failed["item"]["status"]),
+            "error": str(exc),
+        }
+    if restored_hold is not None:
+        return restored_hold
     event = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     directive = _load_json(_classification_directive_path(key))
     directive_error = (
@@ -3851,6 +4324,27 @@ def _process_frontier_item(
     if not claim.get("claimed"):
         return {"key": key, "status": str(claim.get("reason") or "deferred")}
     owner = str(claim.get("owner")) if claim.get("owner") is not None else None
+    try:
+        restored_hold = _restore_invalidated_semantic_hold_if_rolled_back(
+            store=store,
+            item=item,
+            key=key,
+            owner=owner,
+            reviewer=reviewer,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:
+        if dry_run:
+            return {"key": key, "status": "dry_run", "error": str(exc)}
+        return _fail_claimed_frontier(
+            store=store,
+            key=key,
+            owner=owner,
+            error=str(exc),
+            failure_class="review_artifact_invalid",
+        )
+    if restored_hold is not None:
+        return restored_hold
     event = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     proposal = _load_json(_proposal_path(key))
     if proposal is None:
@@ -4033,6 +4527,34 @@ def _process_frontier_item(
             )
         assert isinstance(current_triage_authority, dict)
         triage_authority = current_triage_authority
+    if _frontier_failure_class(triage_review) == LOCAL_SEMANTIC_NO_QUORUM:
+        provenance_error = semantic_verdict_authority_provenance_error(
+            triage_review,
+            triage_authority,
+            lane=CLASSIFICATION_LANE,
+        )
+        if provenance_error is not None:
+            return _fail_claimed_frontier(
+                store=store,
+                key=key,
+                owner=owner,
+                error=provenance_error,
+                failure_class="review_artifact_invalid",
+                dry_run=dry_run,
+            )
+        return _terminal_semantic_no_quorum(
+            store=store,
+            item=item,
+            key=key,
+            owner=owner,
+            decision_lane=CLASSIFICATION_LANE,
+            authority=triage_authority,
+            proposal=proposal,
+            page_evidence_hashes=page_evidence_hashes,
+            review=triage_review,
+            reviewer=reviewer,
+            dry_run=dry_run,
+        )
     if authority_error := _classification_authority_error(
         triage_review,
         triage_authority,
@@ -4051,7 +4573,18 @@ def _process_frontier_item(
         event,
         require_approval=triage_requires_approval,
     )
-    if dry_run:
+    reviewed_classification = str(triage_review.get("classification") or "")
+    durable_triage = triage_artifact_review is not None or directive_review is not None
+    dry_run_can_continue_to_mutation = (
+        durable_triage
+        and triage_error is None
+        and triage_review.get("decision") == "approved"
+        and reviewed_classification in CONTENT_CLASSIFICATIONS
+        and decision == reviewed_classification
+        and bool(triage_mutations)
+        and triage_preparation_error is None
+    )
+    if dry_run and not dry_run_can_continue_to_mutation:
         return {
             "key": key,
             "status": "dry_run",
@@ -4147,7 +4680,6 @@ def _process_frontier_item(
                 )
         return {"key": key, "status": "rejected", "frontier_triage": triage_review}
 
-    reviewed_classification = str(triage_review.get("classification") or "")
     if reviewed_classification in NON_MUTATION_CLASSIFICATIONS:
         return _commit_nonmutation_classification(
             key=key,
@@ -4370,17 +4902,51 @@ def _process_frontier_item(
                 dry_run=dry_run,
             )
         validation_error = _validate_local_proposal(proposal, event=event, pages=pages)
-        review_authority, authority_error = _current_content_review_authority(
-            reviewer=reviewer
+        current_review_authority, current_authority_error = (
+            _current_content_review_authority(reviewer=reviewer)
         )
-        if authority_error is not None or review_authority is None:
+        epoch_error = current_authority_error or compare_semantic_authority(
+            review_authority,
+            current_review_authority,
+            lane=REVIEW_LANE,
+        )
+        if epoch_error is not None:
             return _fail_claimed_frontier(
                 store=store,
                 key=key,
                 owner=owner,
-                error=authority_error
-                or "content correction review authority is missing",
+                error=epoch_error,
                 failure_class="review_artifact_invalid",
+                dry_run=dry_run,
+            )
+        assert isinstance(current_review_authority, dict)
+        review_authority = current_review_authority
+        if _frontier_failure_class(review) == LOCAL_SEMANTIC_NO_QUORUM:
+            provenance_error = semantic_verdict_authority_provenance_error(
+                review,
+                review_authority,
+                lane=REVIEW_LANE,
+            )
+            if provenance_error is not None:
+                return _fail_claimed_frontier(
+                    store=store,
+                    key=key,
+                    owner=owner,
+                    error=provenance_error,
+                    failure_class="review_artifact_invalid",
+                    dry_run=dry_run,
+                )
+            return _terminal_semantic_no_quorum(
+                store=store,
+                item=item,
+                key=key,
+                owner=owner,
+                decision_lane=REVIEW_LANE,
+                authority=review_authority,
+                proposal=proposal,
+                page_evidence_hashes=page_evidence_hashes,
+                review=review,
+                reviewer=reviewer,
                 dry_run=dry_run,
             )
         if policy_error := _review_authority_error(review, review_authority):
@@ -4672,6 +5238,7 @@ def run_pending_corrections(
         _resume_due_quarantined_corrections(
             state,
             dry_run=dry_run,
+            reviewer=reviewer,
         )
         if eligible_keys is None
         else dict(skipped)
@@ -4719,6 +5286,7 @@ def run_pending_corrections(
                 budget=budget,
                 generate_fn=generate_fn,
                 dry_run=dry_run,
+                reviewer=reviewer,
             )
             results.append(result)
             if result.get("status") in deferred_statuses:

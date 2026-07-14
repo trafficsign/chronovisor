@@ -32,6 +32,15 @@ from llm_wiki_mcp.decision_authority import (
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.jobs import JobStatus, job_store
 from llm_wiki_mcp.page_mutation import decision_authority_lock
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    frontier_failure_class,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT
 
 RAW_DATE_RE = re.compile(r"(20\d{6})")
@@ -91,6 +100,9 @@ LIFECYCLE_FIELDS = (
     "frontier_review_artifact",
     "frontier_authorization_consumed_at",
     "frontier_authority_error",
+    "semantic_hold",
+    "last_failure_class",
+    "semantic_hold_recheck_sha256",
     "human_required_at",
     "recovery_kind",
     "semantic_deferred_at",
@@ -203,6 +215,9 @@ def _resume_due_autonomous_terminal(
     """
 
     if _raw_name(row) in semantic_deferred_raws:
+        return False
+
+    if _has_semantic_no_quorum_marker(row):
         return False
 
     status = str(row.get("status") or "")
@@ -1212,6 +1227,9 @@ _REVIEW_MUTABLE_ROW_FIELDS = frozenset(
         "frontier_authorization_consumed_at",
         "frontier_authority_error",
         "next_frontier_retry_at",
+        "semantic_hold",
+        "last_failure_class",
+        "semantic_hold_recheck_sha256",
     }
 )
 
@@ -1259,6 +1277,69 @@ def _canonical_sha256(value: object) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _has_semantic_no_quorum_marker(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    return (
+        "semantic_hold" in value
+        or value.get("last_failure_class") == LOCAL_SEMANTIC_NO_QUORUM
+        or frontier_failure_class(value) == LOCAL_SEMANTIC_NO_QUORUM
+    )
+
+
+def _raw_replay_semantic_epoch(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "queue_schema_version": SCHEMA_VERSION,
+        "review_schema_version": RAW_REPLAY_APPROVAL_SCHEMA_VERSION,
+        "review_input_sha256": _canonical_sha256(evidence),
+        "review_schema_sha256": canonical_sha256(RAW_REPLAY_RECONCILIATION_SCHEMA),
+    }
+
+
+def _restore_raw_replay_semantic_hold(
+    row: dict[str, Any],
+    *,
+    hold: Mapping[str, Any] | None,
+    now: datetime,
+    malformed: bool = False,
+) -> None:
+    row["status"] = "quarantined"
+    row["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+    row["last_error"] = (
+        "malformed local semantic no-quorum hold; refusing resample"
+        if malformed
+        else "local semantic models did not reach a safe quorum"
+    )
+    row["terminal_reason"] = row["last_error"]
+    row["quarantined_at"] = row.get("quarantined_at") or _iso(now)
+    row["next_frontier_retry_at"] = None
+    row["next_retry_at"] = None
+    row["updated_at"] = _iso(now)
+    if hold is not None:
+        row["semantic_hold"] = dict(hold)
+
+
+def _historical_raw_replay_hold(
+    history_file: Path,
+    *,
+    key: object,
+    epoch: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    for record in reversed(_read_jsonl(history_file)):
+        if record.get("key") != key:
+            continue
+        hold = persisted_semantic_no_quorum_hold(
+            record,
+            lane=RAW_REPLAY_DECISION_LANE,
+            epoch=epoch,
+            authority=authority,
+        )
+        if hold is not None:
+            return hold
+    return None
 
 
 def _current_raw_replay_authority(
@@ -1381,14 +1462,81 @@ def _review_indeterminate_rows(
     retry_delay_seconds: int,
     reviewer: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    candidates = [
-        row
-        for row in sorted(rows, key=_queue_sort_key)
-        if row.get("status") == "indeterminate" and _frontier_due(row, now=now)
-    ]
-    if not candidates:
-        return {"reviewed": 0, "budget_deferred": []}
-    row = candidates[0]
+    injected_reviewer = reviewer is not None
+    row: dict[str, Any] | None = None
+    evidence: dict[str, Any] | None = None
+    authority: dict[str, Any] | None = None
+    authority_error: str | None = None
+    held = 0
+    for candidate in sorted(rows, key=_queue_sort_key):
+        if _has_semantic_no_quorum_marker(candidate):
+            candidate_evidence = _raw_replay_review_evidence(
+                candidate, claims_file=claims_file
+            )
+            current_authority, current_error = _current_raw_replay_authority(
+                injected_reviewer=injected_reviewer
+            )
+            persisted_hold = persisted_semantic_no_quorum_hold(
+                candidate, lane=RAW_REPLAY_DECISION_LANE
+            )
+            if persisted_hold is None:
+                _restore_raw_replay_semantic_hold(
+                    candidate, hold=None, now=now, malformed=True
+                )
+                held += 1
+                continue
+            if current_error is not None or current_authority is None:
+                _restore_raw_replay_semantic_hold(
+                    candidate, hold=persisted_hold, now=now
+                )
+                held += 1
+                continue
+            hold_error = semantic_no_quorum_hold_error(
+                persisted_hold,
+                RAW_REPLAY_DECISION_LANE,
+                epoch=_raw_replay_semantic_epoch(candidate_evidence),
+                authority=current_authority,
+            )
+            if hold_error is None:
+                _restore_raw_replay_semantic_hold(
+                    candidate, hold=persisted_hold, now=now
+                )
+                held += 1
+                continue
+            if hold_error not in {
+                "semantic hold epoch changed",
+                "semantic hold authority changed",
+            }:
+                _restore_raw_replay_semantic_hold(
+                    candidate, hold=None, now=now, malformed=True
+                )
+                held += 1
+                continue
+            historical_hold = _historical_raw_replay_hold(
+                history_file,
+                key=candidate.get("key"),
+                epoch=_raw_replay_semantic_epoch(candidate_evidence),
+                authority=current_authority,
+            )
+            if historical_hold is not None:
+                _restore_raw_replay_semantic_hold(
+                    candidate, hold=historical_hold, now=now
+                )
+                held += 1
+                continue
+            if not _frontier_due(candidate, now=now):
+                continue
+            row = candidate
+            evidence = candidate_evidence
+            authority = current_authority
+            break
+        if candidate.get("status") == "indeterminate" and _frontier_due(
+            candidate, now=now
+        ):
+            row = candidate
+            break
+    if row is None:
+        return {"reviewed": 0, "semantic_held": held, "budget_deferred": []}
     if budget is not None:
         allowed, reason = budget.consume("frontier")
         if not allowed:
@@ -1401,12 +1549,12 @@ def _review_indeterminate_rows(
         build_raw_replay_reconciliation_prompt,
     )
 
-    evidence = _raw_replay_review_evidence(row, claims_file=claims_file)
+    evidence = evidence or _raw_replay_review_evidence(row, claims_file=claims_file)
     prompt = build_raw_replay_reconciliation_prompt(evidence)
-    injected_reviewer = reviewer is not None
-    authority, authority_error = _current_raw_replay_authority(
-        injected_reviewer=injected_reviewer
-    )
+    if authority is None:
+        authority, authority_error = _current_raw_replay_authority(
+            injected_reviewer=injected_reviewer
+        )
     if authority_error is None:
         if reviewer is not None:
             raw_review = reviewer(prompt, RAW_REPLAY_RECONCILIATION_SCHEMA)
@@ -1426,6 +1574,71 @@ def _review_indeterminate_rows(
     else:
         review = {}
     attempts = _nonnegative_int(row.get("frontier_attempts")) + 1
+    if (
+        authority_error is None
+        and authority is not None
+        and is_local_semantic_no_quorum(review)
+    ):
+        hold: dict[str, Any] | None = None
+        hold_error: str | None = None
+        try:
+            with decision_authority_lock():
+                current, current_error = _current_raw_replay_authority(
+                    injected_reviewer=injected_reviewer
+                )
+                hold_error = current_error or compare_semantic_authority(
+                    authority,
+                    current,
+                    lane=RAW_REPLAY_DECISION_LANE,
+                )
+                current_evidence = _raw_replay_review_evidence(
+                    row, claims_file=claims_file
+                )
+                if hold_error is None and _canonical_sha256(
+                    current_evidence
+                ) != _canonical_sha256(evidence):
+                    hold_error = (
+                        "raw replay review evidence changed before semantic hold"
+                    )
+                if hold_error is not None:
+                    raise ValueError(hold_error)
+                hold = build_semantic_no_quorum_hold(
+                    RAW_REPLAY_DECISION_LANE,
+                    _raw_replay_semantic_epoch(evidence),
+                    authority,
+                    review,
+                )
+                _restore_raw_replay_semantic_hold(row, hold=hold, now=now)
+                row["frontier_attempts"] = attempts
+                row["frontier_decision"] = "semantic_hold"
+                row["frontier_failure"] = hold["frontier_failure"]
+                row["frontier_authority_error"] = None
+                row.pop("frontier_review_artifact", None)
+                row.pop("semantic_hold_recheck_sha256", None)
+                record = {
+                    "ts": _iso(now),
+                    "schema_version": SCHEMA_VERSION,
+                    "key": row.get("key"),
+                    "raw": row.get("raw"),
+                    "status": "quarantined",
+                    "frontier_attempts": attempts,
+                    "frontier_decision": "semantic_hold",
+                    "frontier_failure": hold["frontier_failure"],
+                    "semantic_hold": hold,
+                    "next_frontier_retry_at": None,
+                    "terminal_reason": row.get("terminal_reason"),
+                }
+                _append_history(record, history_file)
+        except (TypeError, ValueError) as exc:
+            hold_error = str(exc)
+        if hold is not None:
+            return {
+                "reviewed": 1,
+                "semantic_held": held + 1,
+                "record": record,
+                "budget_deferred": [],
+            }
+        authority_error = hold_error or "semantic no-quorum hold provenance is invalid"
     decision = str(review.get("decision") or "needs_retry")
     confidence_raw = review.get("confidence")
     confidence_valid = (
@@ -1524,8 +1737,18 @@ def _review_indeterminate_rows(
             row["last_error"] = reason
             row["frontier_authority_error"] = reason
             row.pop("frontier_review_artifact", None)
+            if _has_semantic_no_quorum_marker(row) and authority is not None:
+                row["semantic_hold_recheck_sha256"] = canonical_sha256(
+                    {
+                        "epoch": _raw_replay_semantic_epoch(evidence),
+                        "authority": authority,
+                    }
+                )
         else:
             assert approval is not None
+            row.pop("semantic_hold", None)
+            row.pop("last_failure_class", None)
+            row.pop("semantic_hold_recheck_sha256", None)
             row["frontier_review_artifact"] = approval
             row["frontier_authority_error"] = None
             if human_required:

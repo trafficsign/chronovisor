@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from llm_wiki_mcp import frontier_guard
 from llm_wiki_mcp.frontier_guard import (
     EvidenceValidationError,
     FrontierGuard,
@@ -130,6 +131,10 @@ def test_reserve_does_not_spend_budget_and_start_records_pid_owner(
     incident = reserved["incidents"][permit.incident_id]
     assert incident["status"] == "reserved"
     assert incident["started_at"] is None
+    owner_process_started_at = datetime.fromisoformat(
+        incident["owner_process_started_at"].replace("Z", "+00:00")
+    )
+    assert owner_process_started_at.tzinfo is not None
     assert reserved["fingerprints"] == {}
 
     started = permit.start(pid=os.getpid(), now=BASE + timedelta(seconds=1))
@@ -250,6 +255,151 @@ def test_crashed_started_incident_becomes_terminal_abandoned(tmp_path: Path) -> 
 
     with pytest.raises(PermitDenied, match="incident_already_started"):
         permit.start(pid=os.getpid(), now=BASE + timedelta(hours=25))
+
+
+def test_reused_or_legacy_owner_process_identity_is_abandoned(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    recorded_start = "2026-07-11T07:00:00.000000Z"
+    monkeypatch.setattr(
+        frontier_guard,
+        "_process_started_at",
+        lambda _pid: recorded_start,
+    )
+    reused_guard = FrontierGuard(tmp_path / "reused")
+    reused = reused_guard.reserve(evidence("reused"), now=BASE)
+    monkeypatch.setattr(
+        frontier_guard,
+        "_process_started_at",
+        lambda _pid: "2026-07-11T07:30:00.000000Z",
+    )
+
+    recovered = reused_guard.inspect(now=BASE + timedelta(seconds=1))
+
+    reused_incident = recovered.state["incidents"][reused.incident_id]
+    assert reused_incident["status"] == "abandoned"
+    assert reused_incident["abandon_reason"] == "owner_process_reused"
+    assert recovered.state["active_incident_id"] is None
+
+    monkeypatch.setattr(
+        frontier_guard,
+        "_process_started_at",
+        lambda _pid: recorded_start,
+    )
+    legacy_guard = FrontierGuard(tmp_path / "legacy")
+    legacy = legacy_guard.reserve(evidence("legacy"), now=BASE)
+    state = json.loads(legacy_guard.state_file.read_text(encoding="utf-8"))
+    del state["incidents"][legacy.incident_id]["owner_process_started_at"]
+    legacy_guard.state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    legacy_recovered = legacy_guard.inspect(now=BASE + timedelta(seconds=1))
+
+    legacy_incident = legacy_recovered.state["incidents"][legacy.incident_id]
+    assert legacy_incident["status"] == "abandoned"
+    assert legacy_incident["abandon_reason"] == "owner_process_identity_missing"
+    assert legacy_recovered.state["active_incident_id"] is None
+
+
+def test_owner_identity_observation_unavailable_preserves_live_incident(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    recorded_start = "2026-07-11T07:00:00.000000Z"
+    monkeypatch.setattr(
+        frontier_guard,
+        "_process_started_at",
+        lambda _pid: recorded_start,
+    )
+    root = tmp_path / "guard"
+    guard = FrontierGuard(root, default_lease=timedelta(minutes=5))
+    permit = guard.reserve(evidence("observation-unavailable"), now=BASE)
+
+    monkeypatch.setattr(frontier_guard, "_process_started_at", lambda _pid: None)
+    started = permit.start(now=BASE + timedelta(seconds=1))
+    assert started["status"] == "started"
+
+    state_before = guard.state_file.read_bytes()
+    events_before = guard.events_file.read_bytes()
+    dry = guard.inspect(dry_run=True, now=BASE + timedelta(seconds=2))
+    assert dry.would_abandon == ()
+    assert dry.state["active_incident_id"] == permit.incident_id
+    assert dry.state["incidents"][permit.incident_id]["status"] == "started"
+
+    persisted = guard.inspect(dry_run=False, now=BASE + timedelta(seconds=3))
+    assert persisted.would_abandon == ()
+    assert guard.state_file.read_bytes() == state_before
+    assert guard.events_file.read_bytes() == events_before
+
+    observations = iter((recorded_start, None))
+    monkeypatch.setattr(
+        frontier_guard,
+        "_process_started_at",
+        lambda _pid: next(observations),
+    )
+    with pytest.raises(PermitDenied) as active_denied:
+        guard.reserve(evidence("other-observation"), now=BASE + timedelta(seconds=4))
+    assert active_denied.value.reason == "active_incident"
+
+    monkeypatch.setattr(frontier_guard, "_process_started_at", lambda _pid: None)
+    heartbeat = permit.heartbeat(
+        now=BASE + timedelta(minutes=1),
+        lease=timedelta(minutes=5),
+    )
+    assert heartbeat["status"] == "started"
+    assert heartbeat["last_heartbeat_at"]
+
+    finished = permit.finish("succeeded", now=BASE + timedelta(minutes=2))
+    assert finished["status"] == "succeeded"
+    final = guard.inspect(dry_run=True, now=BASE + timedelta(minutes=2, seconds=1))
+    assert final.state["active_incident_id"] is None
+    assert not any(
+        row.get("event") == "incident_abandoned"
+        for row in (
+            json.loads(line)
+            for line in guard.events_file.read_text(encoding="utf-8").splitlines()
+        )
+    )
+
+
+def test_owner_identity_observation_unavailable_still_obeys_lease(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    recorded_start = "2026-07-11T07:00:00.000000Z"
+    monkeypatch.setattr(
+        frontier_guard,
+        "_process_started_at",
+        lambda _pid: recorded_start,
+    )
+    guard = FrontierGuard(tmp_path / "guard", default_lease=timedelta(seconds=5))
+    permit = guard.reserve(evidence("unavailable-expired"), now=BASE)
+    permit.start(now=BASE)
+
+    monkeypatch.setattr(frontier_guard, "_process_started_at", lambda _pid: None)
+    recovered = guard.inspect(dry_run=False, now=BASE + timedelta(seconds=6))
+
+    incident = recovered.state["incidents"][permit.incident_id]
+    assert recovered.would_abandon == (permit.incident_id,)
+    assert incident["status"] == "abandoned"
+    assert incident["abandon_reason"] == "lease_expired"
+    assert recovered.state["active_incident_id"] is None
+
+
+def test_reserve_fails_closed_when_owner_identity_cannot_be_established(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "guard"
+    monkeypatch.setattr(frontier_guard, "_process_started_at", lambda _pid: None)
+
+    with pytest.raises(
+        frontier_guard.FrontierGuardError,
+        match="cannot establish owner process identity",
+    ):
+        FrontierGuard(root).reserve(evidence("identity-unavailable"), now=BASE)
+
+    assert not root.exists()
 
 
 def test_dry_inspect_projects_recovery_without_any_filesystem_write(

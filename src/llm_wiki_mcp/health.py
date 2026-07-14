@@ -7,8 +7,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.decision_authority import semantic_authority_shape_error
 from llm_wiki_mcp.index_store import get_store
 from llm_wiki_mcp.jsonl import count_jsonl, read_jsonl
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    canonical_sha256,
+    persisted_semantic_no_quorum_hold,
+)
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT
 
 
@@ -30,7 +36,9 @@ def summary_coverage() -> dict[str, Any]:
     typed: dict[str, int] = {}
     sensitivity: dict[str, int] = {}
     for meta in knowledge:
-        typed[str(meta.get("page_type") or "knowledge")] = typed.get(str(meta.get("page_type") or "knowledge"), 0) + 1
+        typed[str(meta.get("page_type") or "knowledge")] = (
+            typed.get(str(meta.get("page_type") or "knowledge"), 0) + 1
+        )
         tier = str(meta.get("sensitivity") or "normal")
         sensitivity[tier] = sensitivity.get(tier, 0) + 1
         full = store.meta(str(meta.get("page_id", ""))) or {}
@@ -172,7 +180,9 @@ def read_back_kpi() -> dict[str, Any]:
     rows = _read_jsonl(run_path, limit=200)
     cohort = "all_ingest_runs"
     if not rows:
-        rows = _read_jsonl(WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl", limit=200)
+        rows = _read_jsonl(
+            WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl", limit=200
+        )
         cohort = "legacy_failure_bearing_runs_only"
     failures = 0
     checked = 0
@@ -207,8 +217,126 @@ def recall_feedback_kpi() -> dict[str, Any]:
         "samples": len(rows),
         "counts": counts,
         "precision_proxy": (used / denominator) if denominator else None,
-        "missed_candidates": counts.get("missed_candidate", 0) + counts.get("missed", 0),
+        "missed_candidates": counts.get("missed_candidate", 0)
+        + counts.get("missed", 0),
     }
+
+
+_CONTENT_CORRECTION_SEMANTIC_HOLD_KIND = "content_correction_semantic_no_quorum"
+_CONTENT_CORRECTION_DECISION_LANES = frozenset(
+    {"content_correction_classification", "content_correction_review"}
+)
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _is_terminal_semantic_defer(item: dict[str, Any]) -> bool:
+    """Separate a safe semantic non-decision from an operational quarantine."""
+
+    common_hold = persisted_semantic_no_quorum_hold(item)
+    if common_hold is not None:
+        decision_lane = str(common_hold.get("lane") or "")
+        result = item.get("result")
+        return bool(
+            str(item.get("status") or "") == "quarantined"
+            and str(item.get("last_failure_class") or "") == LOCAL_SEMANTIC_NO_QUORUM
+            and isinstance(result, dict)
+            and result.get("terminal_reason") == "semantic_no_quorum"
+            and item.get("quarantine_reason") == f"semantic_no_quorum:{decision_lane}"
+        )
+
+    result = item.get("result")
+    legacy_hold = (
+        result.get("legacy_semantic_hold") if isinstance(result, dict) else None
+    )
+    if isinstance(legacy_hold, dict):
+        expected_fields = {
+            "schema_version",
+            "kind",
+            "lane",
+            "epoch",
+            "epoch_sha256",
+            "authority",
+            "authority_sha256",
+            "migrated_from",
+            "hold_sha256",
+        }
+        unsigned = dict(legacy_hold)
+        unsigned.pop("hold_sha256", None)
+        try:
+            legacy_valid = bool(
+                set(legacy_hold) == expected_fields
+                and legacy_hold.get("schema_version") == 1
+                and legacy_hold.get("kind")
+                == "legacy_local_semantic_no_quorum_fail_closed"
+                and isinstance(legacy_hold.get("lane"), str)
+                and isinstance(legacy_hold.get("epoch"), dict)
+                and isinstance(legacy_hold.get("authority"), dict)
+                and isinstance(legacy_hold.get("migrated_from"), dict)
+                and semantic_authority_shape_error(
+                    legacy_hold["authority"],
+                    lane=str(legacy_hold.get("lane") or ""),
+                )
+                is None
+                and legacy_hold.get("epoch_sha256")
+                == canonical_sha256(legacy_hold["epoch"])
+                and legacy_hold.get("authority_sha256")
+                == canonical_sha256(legacy_hold["authority"])
+                and legacy_hold.get("hold_sha256") == canonical_sha256(unsigned)
+            )
+        except (TypeError, ValueError):
+            legacy_valid = False
+        if legacy_valid:
+            decision_lane = str(legacy_hold["lane"])
+            return bool(
+                item.get("status") == "quarantined"
+                and item.get("last_failure_class") == LOCAL_SEMANTIC_NO_QUORUM
+                and item.get("quarantine_reason")
+                == f"semantic_no_quorum_legacy:{decision_lane}"
+                and result.get("terminal_reason") == "semantic_no_quorum"
+            )
+
+    if (
+        str(item.get("status") or "") != "quarantined"
+        or str(item.get("lane") or "") != "content_correction"
+        or str(item.get("last_failure_class") or "") != "local_semantic_no_quorum"
+        or not str(item.get("quarantine_reason") or "").startswith(
+            "semantic_no_quorum:"
+        )
+    ):
+        return False
+    result = item.get("result")
+    if not isinstance(result, dict):
+        return False
+    semantic_hold = result.get("semantic_hold")
+    if (
+        result.get("terminal_reason") != "semantic_no_quorum"
+        or not isinstance(semantic_hold, dict)
+        or semantic_hold.get("kind") != _CONTENT_CORRECTION_SEMANTIC_HOLD_KIND
+    ):
+        return False
+    decision_lane = semantic_hold.get("decision_lane")
+    evidence_hashes = semantic_hold.get("page_evidence_hashes")
+    return (
+        decision_lane in _CONTENT_CORRECTION_DECISION_LANES
+        and item.get("quarantine_reason") == f"semantic_no_quorum:{decision_lane}"
+        and semantic_hold.get("input_hash") == item.get("input_hash")
+        and _is_sha256(semantic_hold.get("input_hash"))
+        and _is_sha256(semantic_hold.get("proposal_sha256"))
+        and isinstance(evidence_hashes, dict)
+        and all(
+            isinstance(page_id, str) and _is_sha256(page_hash)
+            for page_id, page_hash in evidence_hashes.items()
+        )
+        and isinstance(semantic_hold.get("authority"), dict)
+        and bool(semantic_hold["authority"])
+    )
 
 
 def convergence_kpi() -> dict[str, Any]:
@@ -216,10 +344,22 @@ def convergence_kpi() -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"status": "missing", "path": str(path), "items": 0, "by_status": {}, "by_lane": {}}
+        return {
+            "status": "missing",
+            "path": str(path),
+            "items": 0,
+            "by_status": {},
+            "by_lane": {},
+        }
     items = payload.get("items") if isinstance(payload, dict) else None
     if not isinstance(items, dict):
-        return {"status": "invalid", "path": str(path), "items": 0, "by_status": {}, "by_lane": {}}
+        return {
+            "status": "invalid",
+            "path": str(path),
+            "items": 0,
+            "by_status": {},
+            "by_lane": {},
+        }
     by_status: dict[str, int] = {}
     by_lane: dict[str, dict[str, int]] = {}
     now = datetime.now(timezone.utc)
@@ -228,19 +368,36 @@ def convergence_kpi() -> dict[str, Any]:
     for item in items.values():
         if not isinstance(item, dict):
             continue
-        status = str(item.get("status") or "unknown")
+        status = (
+            "semantic_deferred"
+            if _is_terminal_semantic_defer(item)
+            else str(item.get("status") or "unknown")
+        )
         lane = str(item.get("lane") or "unknown")
         by_status[status] = by_status.get(status, 0) + 1
         lane_counts = by_lane.setdefault(lane, {})
         lane_counts[status] = lane_counts.get(status, 0) + 1
-        if status in {"pending_local", "local_retry", "pending_frontier", "frontier_retry", "local_running", "frontier_running"}:
+        if status in {
+            "pending_local",
+            "local_retry",
+            "pending_frontier",
+            "frontier_retry",
+            "local_running",
+            "frontier_running",
+        }:
             try:
-                actionable_dates.append(datetime.fromisoformat(str(item.get("created_at") or "")).astimezone(timezone.utc))
+                actionable_dates.append(
+                    datetime.fromisoformat(
+                        str(item.get("created_at") or "")
+                    ).astimezone(timezone.utc)
+                )
             except ValueError:
                 pass
         if status in {"local_running", "frontier_running"}:
             try:
-                expires = datetime.fromisoformat(str(item.get("lease_expires_at") or "")).astimezone(timezone.utc)
+                expires = datetime.fromisoformat(
+                    str(item.get("lease_expires_at") or "")
+                ).astimezone(timezone.utc)
                 expired_running += int(expires <= now)
             except ValueError:
                 expired_running += 1
@@ -249,30 +406,50 @@ def convergence_kpi() -> dict[str, Any]:
     recent = []
     for event in events:
         try:
-            ts = datetime.fromisoformat(str(event.get("ts") or "")).astimezone(timezone.utc)
+            ts = datetime.fromisoformat(str(event.get("ts") or "")).astimezone(
+                timezone.utc
+            )
         except ValueError:
             continue
         if ts >= cutoff:
             recent.append(event)
     arrivals = sum(event.get("event") == "candidate_merged" for event in recent)
-    completions = sum(event.get("event") in {"completed", "candidate_completed"} for event in recent)
+    completions = sum(
+        event.get("event") in {"completed", "candidate_completed"} for event in recent
+    )
     oldest = min(actionable_dates) if actionable_dates else None
     return {
         "status": "ok",
         "path": str(path),
         "items": sum(by_status.values()),
         "by_status": dict(sorted(by_status.items())),
-        "by_lane": {lane: dict(sorted(counts.items())) for lane, counts in sorted(by_lane.items())},
+        "by_lane": {
+            lane: dict(sorted(counts.items()))
+            for lane, counts in sorted(by_lane.items())
+        },
         "actionable": sum(
             count
             for status, count in by_status.items()
-            if status in {"pending_local", "local_retry", "pending_frontier", "frontier_retry", "local_running", "frontier_running"}
+            if status
+            in {
+                "pending_local",
+                "local_retry",
+                "pending_frontier",
+                "frontier_retry",
+                "local_running",
+                "frontier_running",
+            }
         ),
         "quarantined": by_status.get("quarantined", 0),
+        "semantic_deferred": by_status.get("semantic_deferred", 0),
         "human_required": by_status.get("human_required", 0),
         "expired_running": expired_running,
-        "oldest_actionable_at": oldest.isoformat(timespec="seconds") if oldest else None,
-        "oldest_actionable_age_hours": round((now - oldest).total_seconds() / 3600, 2) if oldest else 0.0,
+        "oldest_actionable_at": oldest.isoformat(timespec="seconds")
+        if oldest
+        else None,
+        "oldest_actionable_age_hours": round((now - oldest).total_seconds() / 3600, 2)
+        if oldest
+        else 0.0,
         "arrivals_24h": arrivals,
         "completions_24h": completions,
         "net_growth_24h": arrivals - completions,
@@ -300,6 +477,7 @@ def _queue_status_counts(path: Path, field: str) -> dict[str, int]:
 
 def health_snapshot() -> dict[str, Any]:
     from llm_wiki_mcp.runtime_config import runtime_identity
+
     coverage = summary_coverage()
     duplicate_queue = WIKI_ROOT / "review" / "duplicate-candidates.jsonl"
     lint_queue = WIKI_ROOT / "review" / "lint-repair-queue.jsonl"
@@ -329,7 +507,14 @@ def health_snapshot() -> dict[str, Any]:
             "search_labels_pending": sum(
                 count
                 for status, count in label_statuses.items()
-                if status in {"unknown", "pending_review", "pending_frontier_review", "frontier_retry", "frontier_uncertain"}
+                if status
+                in {
+                    "unknown",
+                    "pending_review",
+                    "pending_frontier_review",
+                    "frontier_retry",
+                    "frontier_uncertain",
+                }
             ),
             "raw_replay": _jsonl_count(raw_replay_queue),
             "raw_replay_pending": sum(

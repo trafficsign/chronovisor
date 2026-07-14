@@ -45,6 +45,13 @@ from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.local_structured import ChatTransport, LocalStructuredSession
 from llm_wiki_mcp.page_mutation import decision_authority_lock, wiki_mutation_lock
 from llm_wiki_mcp.runtime_config import load_ingest_config, runtime_repo_root
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    canonical_sha256,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from llm_wiki_mcp.tags import SEED_TAGS, parse_tags, validate_axis_counts, validate_tag
 
 
@@ -213,6 +220,23 @@ def valid_tag_set(tags: object) -> bool:
 
 def _page_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _tag_semantic_epoch(
+    item: Mapping[str, Any],
+    *,
+    page_text: str,
+    prompt: str,
+) -> dict[str, Any]:
+    """Return the exact deterministic input reviewed by the tag panel."""
+
+    return {
+        "resolver_version": REPAIR_RESOLVER_VERSION,
+        "contract_version": TAG_REVIEW_CONTRACT_VERSION,
+        "input_hash": str(item.get("input_hash") or ""),
+        "page_sha256": _page_hash(page_text),
+        "prompt_sha256": _page_hash(prompt),
+    }
 
 
 def _page_excerpt(text: str, *, limit: int = 6000) -> str:
@@ -911,6 +935,29 @@ def _run_frontier_tag_review(
             if authority_error is None and isinstance(authority, Mapping)
             else None
         )
+        current_item = store.get(key) or {}
+        restored_hold = (
+            store.restore_semantic_no_quorum_hold(
+                key,
+                lane=TAG_REPAIR_DECISION_LANE,
+                epoch=_tag_semantic_epoch(
+                    current_item,
+                    page_text=page_text,
+                    prompt=prompt,
+                ),
+                authority=authority,
+                now=now,
+            )
+            if authority_error is None and isinstance(authority, Mapping)
+            else None
+        )
+    if restored_hold is not None:
+        return {
+            "status": "quarantined",
+            "state": restored_hold["item"],
+            "frontier_lane": True,
+            "restored_semantic_hold": True,
+        }
     # Replaying a durable verdict does not spend another model-call budget.
     # It still acquires the convergence lease before applying or terminalizing.
     claim = store.claim_attempt(
@@ -1062,15 +1109,59 @@ def _run_frontier_tag_review(
             "decision": decision,
             "frontier_lane": True,
         }
-    failure_class = _failure_class(decision, "frontier_uncertain")
-    failed = store.fail_attempt(
-        key,
-        "frontier",
-        owner=owner,
-        error=decision.get("reason") or "frontier tag review was uncertain",
-        failure_class=failure_class,
-        now=now,
-    )
+    if is_local_semantic_no_quorum(decision):
+        try:
+            with decision_authority_lock():
+                current_authority, current_error = current_semantic_authority(
+                    TAG_REPAIR_DECISION_LANE,
+                    injected_reviewer=injected_reviewer,
+                )
+                epoch_error = current_error or compare_semantic_authority(
+                    authority,
+                    current_authority,
+                    lane=TAG_REPAIR_DECISION_LANE,
+                )
+                if epoch_error is not None or not isinstance(
+                    current_authority, Mapping
+                ):
+                    raise ValueError(epoch_error or "decision authority is unavailable")
+                current_item = store.get(key) or {}
+                failed = store.hold_semantic_no_quorum(
+                    key,
+                    lane=TAG_REPAIR_DECISION_LANE,
+                    stage="frontier",
+                    review=decision,
+                    epoch=_tag_semantic_epoch(
+                        current_item,
+                        page_text=page_text,
+                        prompt=prompt,
+                    ),
+                    authority=current_authority,
+                    owner=owner,
+                    error=(
+                        str(decision.get("reason") or "") or "local semantic no quorum"
+                    ),
+                    now=now,
+                )
+        except (TypeError, ValueError) as exc:
+            failed = store.fail_attempt(
+                key,
+                "frontier",
+                owner=owner,
+                error=f"semantic hold rejected: {exc}",
+                failure_class="review_artifact_invalid",
+                now=now,
+            )
+    else:
+        failure_class = _failure_class(decision, "frontier_uncertain")
+        failed = store.fail_attempt(
+            key,
+            "frontier",
+            owner=owner,
+            error=decision.get("reason") or "frontier tag review was uncertain",
+            failure_class=failure_class,
+            now=now,
+        )
     persisted_status = str(failed["item"].get("status") or "")
     status = (
         persisted_status
@@ -1319,6 +1410,91 @@ def run_lint_repair(
             counts["out_of_scope"] += 1
             continue
         existing = convergence.get(key)
+        if (
+            existing is not None
+            and existing.get("status") == "quarantined"
+            and str(existing.get("last_failure_class") or "")
+            == LOCAL_SEMANTIC_NO_QUORUM
+            and page_text is not None
+        ):
+            hold = persisted_semantic_no_quorum_hold(
+                existing,
+                lane=TAG_REPAIR_DECISION_LANE,
+            )
+            # Incomplete legacy rows have no trustworthy authority epoch and
+            # remain fail-closed. A strict common hold can be reopened only
+            # after the exact prompt or adopted authority changes.
+            if hold is not None:
+                local_proposal = _load_local_proposal_artifact(
+                    convergence,
+                    key,
+                    page_text=page_text,
+                )
+                prompt = build_frontier_tag_repair_prompt(
+                    row,
+                    page_text,
+                    local_proposal=local_proposal,
+                )
+                with decision_authority_lock():
+                    authority, authority_error = current_semantic_authority(
+                        TAG_REPAIR_DECISION_LANE,
+                        injected_reviewer=injected_frontier_reviewer,
+                    )
+                    hold_error = authority_error
+                    if isinstance(authority, Mapping) and hold_error is None:
+                        hold_error = semantic_no_quorum_hold_error(
+                            hold,
+                            TAG_REPAIR_DECISION_LANE,
+                            epoch=_tag_semantic_epoch(
+                                existing,
+                                page_text=page_text,
+                                prompt=prompt,
+                            ),
+                            authority=authority,
+                        )
+                    if (
+                        hold_error is not None
+                        and authority_error is None
+                        and isinstance(authority, Mapping)
+                    ):
+                        if dry_run:
+                            rows_scanned += 1
+                            results.append(
+                                {
+                                    "key": key,
+                                    "page": page_id,
+                                    "issue_type": issue_type,
+                                    "status": "would_resume_semantic_hold",
+                                    "reason": hold_error,
+                                }
+                            )
+                            continue
+                        transition = convergence.resume_quarantined(
+                            key,
+                            stage="frontier",
+                            reason=hold_error,
+                            resume_context={
+                                "reason": "semantic_hold_epoch_changed",
+                                "decision_lane": TAG_REPAIR_DECISION_LANE,
+                                "invalidated_semantic_hold": hold,
+                                "invalidated_hold_sha256": str(hold["hold_sha256"]),
+                                "expected_epoch": _tag_semantic_epoch(
+                                    existing,
+                                    page_text=page_text,
+                                    prompt=prompt,
+                                ),
+                                "expected_epoch_sha256": canonical_sha256(
+                                    _tag_semantic_epoch(
+                                        existing,
+                                        page_text=page_text,
+                                        prompt=prompt,
+                                    )
+                                ),
+                                "expected_authority": dict(authority),
+                            },
+                            now=now,
+                        )
+                        existing = transition["item"]
         if existing is not None and existing.get("status") in TERMINAL_STATUSES:
             rows_scanned += 1
             counts["terminal_skipped"] += 1

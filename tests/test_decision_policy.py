@@ -14,6 +14,7 @@ from llm_wiki_mcp.decision_policy import (
 )
 from llm_wiki_mcp.decision_router import DecisionRouterResult
 from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
+from tests.semantic_hold_support import semantic_authority
 
 
 SCHEMA = frontier_review.FRONTIER_DECISION_SCHEMA
@@ -22,11 +23,13 @@ SCHEMA = frontier_review.FRONTIER_DECISION_SCHEMA
 class FakeRouter:
     source = "bootstrap_current_policy"
     calls = 0
+    router_audit: dict[str, object] = {}
 
     def __init__(self, **_kwargs) -> None:
+        policy_audit = {**type(self).router_audit, "source": self.source}
         self.policy = SimpleNamespace(
             source=self.source,
-            audit_record=lambda: {"source": self.source},
+            audit_record=lambda: dict(policy_audit),
         )
 
     def decide(self, _prompt, _schema):
@@ -45,6 +48,57 @@ class FakeRouter:
             },
             agreement_sha256="a" * 64,
         )
+
+
+@pytest.fixture(autouse=True)
+def isolate_structured_review_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SimpleNamespace:
+    """Keep adopted authority and semantic-cache locks deterministic and local."""
+
+    artifact_sha256 = "d" * 64
+    authority = semantic_authority(artifact_sha256=artifact_sha256)
+    router_audit = authority["router"]
+    assert isinstance(router_audit, dict)
+    FakeRouter.source = "bootstrap_current_policy"
+    FakeRouter.calls = 0
+    FakeRouter.router_audit = dict(router_audit)
+    cache_root = tmp_path / "structured-review-holds"
+    cache_roots: list[Path] = []
+    real_cache = frontier_review.semantic_hold.StructuredReviewSemanticHoldCache
+
+    def isolated_cache(*, root: Path | None = None):
+        assert root is not None
+        resolved_root = Path(root).resolve()
+        assert resolved_root == cache_root.resolve()
+        cache_roots.append(resolved_root)
+        return real_cache(root=root)
+
+    monkeypatch.setattr(
+        frontier_review,
+        "STRUCTURED_REVIEW_HOLD_CACHE_ROOT",
+        cache_root,
+    )
+    monkeypatch.setattr(
+        frontier_review.semantic_hold,
+        "StructuredReviewSemanticHoldCache",
+        isolated_cache,
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: (
+            semantic_authority(lane, artifact_sha256=artifact_sha256),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: "0" * 64,
+    )
+    return SimpleNamespace(cache_root=cache_root, cache_roots=cache_roots)
 
 
 def test_unknown_lane_fails_closed_without_starting_models(
@@ -116,6 +170,7 @@ def test_enabled_lane_requires_adopted_artifact(
 def test_enabled_lane_can_return_only_adopted_consensus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolate_structured_review_runtime: SimpleNamespace,
 ) -> None:
     FakeRouter.calls = 0
     FakeRouter.source = "adopted_artifact"
@@ -131,6 +186,10 @@ def test_enabled_lane_can_return_only_adopted_consensus(
 
     assert result["decision"] == "approved"
     assert result["decision_policy"]["router_policy"]["source"] == "adopted_artifact"
+    cache_root = isolate_structured_review_runtime.cache_root
+    assert frontier_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT == cache_root
+    assert isolate_structured_review_runtime.cache_roots == [cache_root.resolve()]
+    assert list((cache_root / "locks").glob("*.lock"))
 
 
 def test_every_registered_lane_names_a_production_schema() -> None:

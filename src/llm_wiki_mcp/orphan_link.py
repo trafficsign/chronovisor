@@ -44,6 +44,7 @@ from llm_wiki_mcp.decision_authority import (
     current_semantic_authority,
     seal_semantic_artifact,
     semantic_verdict_authority_error,
+    semantic_verdict_authority_provenance_error,
 )
 from llm_wiki_mcp.wiki import find_page
 from llm_wiki_mcp.wiki import WIKI_ROOT
@@ -54,6 +55,7 @@ from llm_wiki_mcp.runtime_config import (
     load_decision_router_config,
     runtime_repo_root,
 )
+from llm_wiki_mcp.semantic_hold import is_local_semantic_no_quorum
 
 
 DECISIONS_FILE = WIKI_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
@@ -619,6 +621,19 @@ def _canonical_payload_sha256(payload: Mapping[str, Any]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _orphan_semantic_epoch(
+    item: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind a semantic hold to the exact orphan evidence and local proposal."""
+
+    return {
+        "resolver_version": RESOLVER_VERSION,
+        "input_hash": str(item.get("input_hash") or ""),
+        "proposal_sha256": _canonical_payload_sha256(proposal),
+    }
 
 
 def _effect_artifact_path(state: Any, key: str) -> Path:
@@ -1489,10 +1504,19 @@ def run_autonomous(
                 "summary": f"{exc.__class__.__name__}: {exc}",
             }
         review = _normalize_frontier_review(raw_review)
-        verdict_error = semantic_verdict_authority_error(
-            review,
-            review_authority,
-            lane=DECISION_LANE,
+        semantic_no_quorum = is_local_semantic_no_quorum(review)
+        verdict_error = (
+            semantic_verdict_authority_provenance_error(
+                review,
+                review_authority,
+                lane=DECISION_LANE,
+            )
+            if semantic_no_quorum
+            else semantic_verdict_authority_error(
+                review,
+                review_authority,
+                lane=DECISION_LANE,
+            )
         )
         if verdict_error is not None:
             failed = state.fail_attempt(
@@ -1532,10 +1556,18 @@ def run_autonomous(
                     lane=DECISION_LANE,
                 )
             if effect_authority_error is None:
-                effect_authority_error = semantic_verdict_authority_error(
-                    review,
-                    review_authority,
-                    lane=DECISION_LANE,
+                effect_authority_error = (
+                    semantic_verdict_authority_provenance_error(
+                        review,
+                        review_authority,
+                        lane=DECISION_LANE,
+                    )
+                    if semantic_no_quorum
+                    else semantic_verdict_authority_error(
+                        review,
+                        review_authority,
+                        lane=DECISION_LANE,
+                    )
                 )
             if current_authority is None or effect_authority_error is not None:
                 failed = state.fail_attempt(
@@ -1587,13 +1619,40 @@ def run_autonomous(
                     )
                 continue
             if decision != "approved":
-                failed = state.fail_attempt(
-                    key,
-                    "frontier",
-                    error=str(review.get("summary") or "frontier needs retry"),
-                    failure_class=_frontier_failure_class(review),
-                    owner=claim["owner"],
-                )
+                if semantic_no_quorum:
+                    try:
+                        current_item = state.get(key) or item
+                        failed = state.hold_semantic_no_quorum(
+                            key,
+                            lane=DECISION_LANE,
+                            stage="frontier",
+                            review=review,
+                            epoch=_orphan_semantic_epoch(
+                                current_item,
+                                frontier_proposal,
+                            ),
+                            authority=current_authority,
+                            owner=claim["owner"],
+                            error=str(
+                                review.get("summary") or "local semantic no quorum"
+                            ),
+                        )
+                    except (TypeError, ValueError) as exc:
+                        failed = state.fail_attempt(
+                            key,
+                            "frontier",
+                            error=f"semantic hold rejected: {exc}",
+                            failure_class="review_artifact_invalid",
+                            owner=claim["owner"],
+                        )
+                else:
+                    failed = state.fail_attempt(
+                        key,
+                        "frontier",
+                        error=str(review.get("summary") or "frontier needs retry"),
+                        failure_class=_frontier_failure_class(review),
+                        owner=claim["owner"],
+                    )
                 results.append(
                     {
                         "orphan": orphan_id,

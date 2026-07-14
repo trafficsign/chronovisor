@@ -22,12 +22,13 @@ import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from llm_wiki_mcp.convergence import (
     ConvergenceStateError,
     ConvergenceStore,
     CycleBudget,
+    InvalidTransition,
     is_human_required_result,
     stable_item_key,
 )
@@ -42,6 +43,13 @@ from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.frontmatter import patch as patch_frontmatter
 from llm_wiki_mcp.page_mutation import decision_authority_lock, wiki_mutation_lock
 from llm_wiki_mcp.runtime_config import runtime_repo_root, uvx_runtime_command
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    canonical_sha256,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from llm_wiki_mcp.wiki import WIKI_ROOT, find_page
 
 
@@ -64,6 +72,7 @@ RETENTION_FRONTIER_LANE = "autonomy_retention"
 CONTENT_CORRECTION_LANE = "content_correction"
 DUPLICATE_FRONTIER_RESOLVER_VERSION = "duplicate-frontier-v3-exact-postimage"
 RETENTION_FRONTIER_RESOLVER_VERSION = "retention-frontier-v3-exact-postimage"
+LEGACY_SEMANTIC_HOLD_KIND = "legacy_local_semantic_no_quorum_fail_closed"
 DUPLICATE_FRONTIER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -560,6 +569,227 @@ def _autonomy_authority_epoch_error(
         or compare_semantic_authority(expected, current, lane=lane)
         or semantic_verdict_authority_error(review, expected, lane=lane)
     )
+
+
+def _without_observation_timestamps(value: Any) -> Any:
+    """Remove timestamps that are not part of a semantic review request."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): _without_observation_timestamps(item)
+            for key, item in value.items()
+            if str(key) not in {"ts", "timestamp", "observed_at"}
+        }
+    if isinstance(value, list):
+        return [_without_observation_timestamps(item) for item in value]
+    return value
+
+
+def _duplicate_semantic_epoch(
+    item: Mapping[str, Any],
+    *,
+    candidate: Mapping[str, Any],
+    local_decision: Mapping[str, Any],
+    page_hashes: Mapping[str, str],
+) -> dict[str, Any]:
+    return {
+        "resolver_version": DUPLICATE_FRONTIER_RESOLVER_VERSION,
+        "input_hash": str(item.get("input_hash") or ""),
+        "candidate": dict(candidate),
+        "local_proposal": _without_observation_timestamps(dict(local_decision)),
+        "page_hashes": dict(sorted(page_hashes.items())),
+    }
+
+
+def _retention_semantic_epoch(
+    item: Mapping[str, Any],
+    *,
+    page_id: str,
+    page_hash: str,
+    retention: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "resolver_version": RETENTION_FRONTIER_RESOLVER_VERSION,
+        "input_hash": str(item.get("input_hash") or ""),
+        "page_id": page_id,
+        "page_hash": page_hash,
+        "retention": dict(retention),
+        "local_recommendation": "archive",
+    }
+
+
+def _legacy_semantic_hold(
+    *,
+    lane: str,
+    epoch: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    item: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind an old retry-exhausted no-quorum row without inventing a verdict."""
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": LEGACY_SEMANTIC_HOLD_KIND,
+        "lane": lane,
+        "epoch": dict(epoch),
+        "epoch_sha256": canonical_sha256(epoch),
+        "authority": dict(authority),
+        "authority_sha256": canonical_sha256(authority),
+        "migrated_from": {
+            "quarantine_reason": str(item.get("quarantine_reason") or ""),
+            "frontier_attempts": int(item.get("frontier_attempts") or 0),
+            "last_error": str(item.get("last_error") or ""),
+        },
+    }
+    payload["hold_sha256"] = canonical_sha256(payload)
+    return payload
+
+
+def _legacy_semantic_hold_error(
+    hold: object,
+    *,
+    lane: str,
+    epoch: Mapping[str, Any] | None = None,
+    authority: Mapping[str, Any] | None = None,
+) -> str | None:
+    if not isinstance(hold, Mapping):
+        return "legacy semantic hold is missing"
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "lane",
+        "epoch",
+        "epoch_sha256",
+        "authority",
+        "authority_sha256",
+        "migrated_from",
+        "hold_sha256",
+    }
+    if set(hold) != expected_fields:
+        return "legacy semantic hold fields are invalid"
+    if (
+        hold.get("schema_version") != 1
+        or hold.get("kind") != LEGACY_SEMANTIC_HOLD_KIND
+        or hold.get("lane") != lane
+        or not isinstance(hold.get("epoch"), Mapping)
+        or not isinstance(hold.get("authority"), Mapping)
+        or not isinstance(hold.get("migrated_from"), Mapping)
+    ):
+        return "legacy semantic hold identity is invalid"
+    stored_epoch = hold["epoch"]
+    stored_authority = hold["authority"]
+    authority_error = semantic_authority_shape_error(stored_authority, lane=lane)
+    if authority_error is not None:
+        return authority_error
+    if hold.get("epoch_sha256") != canonical_sha256(stored_epoch):
+        return "legacy semantic hold epoch digest is invalid"
+    if hold.get("authority_sha256") != canonical_sha256(stored_authority):
+        return "legacy semantic hold authority digest is invalid"
+    unsigned = dict(hold)
+    unsigned.pop("hold_sha256", None)
+    if hold.get("hold_sha256") != canonical_sha256(unsigned):
+        return "legacy semantic hold self digest is invalid"
+    if epoch is not None and dict(stored_epoch) != dict(epoch):
+        return "legacy semantic hold epoch changed"
+    if authority is not None and dict(stored_authority) != dict(authority):
+        return "legacy semantic hold authority changed"
+    return None
+
+
+def _resume_or_migrate_autonomy_semantic_hold(
+    store: ConvergenceStore,
+    item: Mapping[str, Any],
+    *,
+    lane: str,
+    epoch: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    now: datetime | None,
+    dry_run: bool,
+) -> tuple[dict[str, Any], bool]:
+    """Return ``(item, held)`` after exact semantic-hold validation."""
+
+    key = str(item.get("key") or "")
+    common_hold = persisted_semantic_no_quorum_hold(item, lane=lane)
+    if common_hold is not None:
+        hold_error = semantic_no_quorum_hold_error(
+            common_hold,
+            lane,
+            epoch=epoch,
+            authority=authority,
+        )
+        if hold_error is None:
+            return dict(item), True
+        resumed = store.resume_quarantined(
+            key,
+            stage="frontier",
+            reason=hold_error,
+            resume_context={
+                "reason": "semantic_hold_epoch_changed",
+                "decision_lane": lane,
+                "invalidated_semantic_hold": common_hold,
+                "invalidated_hold_sha256": str(common_hold["hold_sha256"]),
+                "expected_epoch": dict(epoch),
+                "expected_epoch_sha256": canonical_sha256(epoch),
+                "expected_authority": dict(authority),
+            },
+            now=now,
+            dry_run=dry_run,
+        )
+        return dict(resumed["item"]), False
+
+    result = item.get("result") if isinstance(item.get("result"), Mapping) else {}
+    legacy_hold = result.get("legacy_semantic_hold")
+    if _legacy_semantic_hold_error(legacy_hold, lane=lane) is None:
+        hold_error = _legacy_semantic_hold_error(
+            legacy_hold,
+            lane=lane,
+            epoch=epoch,
+            authority=authority,
+        )
+        if hold_error is None:
+            return dict(item), True
+        resumed = store.resume_quarantined(
+            key,
+            stage="frontier",
+            reason=hold_error,
+            resume_context={
+                "reason": "legacy_semantic_hold_epoch_changed",
+                "decision_lane": lane,
+                "invalidated_semantic_hold": dict(legacy_hold),
+                "invalidated_hold_sha256": str(legacy_hold["hold_sha256"]),
+                "expected_epoch": dict(epoch),
+                "expected_epoch_sha256": canonical_sha256(epoch),
+                "expected_authority": dict(authority),
+            },
+            now=now,
+            dry_run=dry_run,
+        )
+        return dict(resumed["item"]), False
+
+    if str(item.get("last_failure_class") or "") != LOCAL_SEMANTIC_NO_QUORUM:
+        return dict(item), True
+    marker = _legacy_semantic_hold(
+        lane=lane,
+        epoch=epoch,
+        authority=authority,
+        item=item,
+    )
+    migrated = store.quarantine(
+        key,
+        reason=f"semantic_no_quorum_legacy:{lane}",
+        error=(
+            str(item.get("last_error") or "")
+            or "legacy local semantic no-quorum preserved fail-closed"
+        ),
+        failure_class=LOCAL_SEMANTIC_NO_QUORUM,
+        result={
+            "terminal_reason": "semantic_no_quorum",
+            "legacy_semantic_hold": marker,
+        },
+        now=now,
+        dry_run=dry_run,
+    )
+    return dict(migrated["item"]), True
 
 
 def _persist_frontier_approval(
@@ -1605,6 +1835,74 @@ def resolve_deferred_duplicates_with_frontier(
             continue
         seen_keys.add(key)
         result: dict[str, Any] = {"key": key, "pair": input_data["pair"]}
+        item_result = (
+            item.get("result") if isinstance(item.get("result"), Mapping) else {}
+        )
+        semantic_terminal = bool(
+            item.get("status") == "quarantined"
+            and (
+                str(item.get("last_failure_class") or "") == LOCAL_SEMANTIC_NO_QUORUM
+                or persisted_semantic_no_quorum_hold(
+                    item,
+                    lane=DUPLICATE_FRONTIER_LANE,
+                )
+                is not None
+                or isinstance(item_result.get("legacy_semantic_hold"), Mapping)
+            )
+        )
+        if semantic_terminal:
+            current_authority, authority_error = _current_autonomy_authority(
+                DUPLICATE_FRONTIER_LANE,
+                reviewer=reviewer,
+            )
+            if authority_error is not None or current_authority is None:
+                results.append(
+                    {
+                        **result,
+                        "status": "quarantined",
+                        "cached": True,
+                        "semantic_deferred": True,
+                        "reason": authority_error or "decision_authority_unavailable",
+                    }
+                )
+                continue
+            semantic_epoch = _duplicate_semantic_epoch(
+                item,
+                candidate=candidate,
+                local_decision=local_decision,
+                page_hashes=input_data["content_hashes"],
+            )
+            try:
+                item, held = _resume_or_migrate_autonomy_semantic_hold(
+                    state,
+                    item,
+                    lane=DUPLICATE_FRONTIER_LANE,
+                    epoch=semantic_epoch,
+                    authority=current_authority,
+                    now=now,
+                    dry_run=dry_run,
+                )
+            except (TypeError, ValueError, InvalidTransition) as exc:
+                results.append(
+                    {
+                        **result,
+                        "status": "quarantined",
+                        "cached": True,
+                        "semantic_deferred": True,
+                        "reason": f"semantic hold validation failed: {exc}",
+                    }
+                )
+                continue
+            if held:
+                results.append(
+                    {
+                        **result,
+                        "status": "quarantined",
+                        "cached": True,
+                        "semantic_deferred": True,
+                    }
+                )
+                continue
         if item.get("status") in {
             "applied",
             "rejected",
@@ -1710,6 +2008,30 @@ def resolve_deferred_duplicates_with_frontier(
                     **result,
                     "status": transition["item"]["status"],
                     "reason": authority_error or "decision_authority_missing",
+                }
+            )
+            continue
+        restored_hold = state.restore_semantic_no_quorum_hold(
+            key,
+            lane=DUPLICATE_FRONTIER_LANE,
+            epoch=_duplicate_semantic_epoch(
+                item,
+                candidate=candidate,
+                local_decision=local_decision,
+                page_hashes=page_hashes,
+            ),
+            authority=authority,
+            owner=owner,
+            now=now,
+        )
+        if restored_hold is not None:
+            results.append(
+                {
+                    **result,
+                    "status": "quarantined",
+                    "cached": True,
+                    "semantic_deferred": True,
+                    "restored_semantic_hold": True,
                 }
             )
             continue
@@ -1862,14 +2184,58 @@ def resolve_deferred_duplicates_with_frontier(
         transition: dict[str, Any]
         apply_result: dict[str, Any] | None = None
         if frontier_decision == "needs_retry":
-            transition = state.fail_attempt(
-                key,
-                "frontier",
-                error=str(review.get("summary") or "frontier needs retry"),
-                failure_class=_duplicate_frontier_failure_class(review),
-                owner=owner,
-                now=now,
-            )
+            if is_local_semantic_no_quorum(review):
+                try:
+                    with decision_authority_lock():
+                        current_authority, current_error = _current_autonomy_authority(
+                            DUPLICATE_FRONTIER_LANE,
+                            reviewer=reviewer,
+                        )
+                        epoch_error = current_error or compare_semantic_authority(
+                            authority,
+                            current_authority,
+                            lane=DUPLICATE_FRONTIER_LANE,
+                        )
+                        if epoch_error is not None or current_authority is None:
+                            raise ValueError(
+                                epoch_error or "decision authority is unavailable"
+                            )
+                        transition = state.hold_semantic_no_quorum(
+                            key,
+                            lane=DUPLICATE_FRONTIER_LANE,
+                            stage="frontier",
+                            review=review,
+                            epoch=_duplicate_semantic_epoch(
+                                item,
+                                candidate=candidate,
+                                local_decision=local_decision,
+                                page_hashes=page_hashes,
+                            ),
+                            authority=current_authority,
+                            owner=owner,
+                            error=str(
+                                review.get("summary") or "local semantic no quorum"
+                            ),
+                            now=now,
+                        )
+                except (InvalidTransition, TypeError, ValueError) as exc:
+                    transition = state.fail_attempt(
+                        key,
+                        "frontier",
+                        error=f"semantic hold rejected: {exc}",
+                        failure_class="review_artifact_invalid",
+                        owner=owner,
+                        now=now,
+                    )
+            else:
+                transition = state.fail_attempt(
+                    key,
+                    "frontier",
+                    error=str(review.get("summary") or "frontier needs retry"),
+                    failure_class=_duplicate_frontier_failure_class(review),
+                    owner=owner,
+                    now=now,
+                )
         elif frontier_decision == "keep_both":
             with decision_authority_lock():
                 epoch_error = _autonomy_authority_epoch_error(
@@ -2249,6 +2615,76 @@ def apply_retention_archives(
             continue
         seen_keys.add(key)
         status = str(item.get("status") or "")
+        item_result = (
+            item.get("result") if isinstance(item.get("result"), Mapping) else {}
+        )
+        semantic_terminal = bool(
+            status == "quarantined"
+            and (
+                str(item.get("last_failure_class") or "") == LOCAL_SEMANTIC_NO_QUORUM
+                or persisted_semantic_no_quorum_hold(
+                    item,
+                    lane=RETENTION_FRONTIER_LANE,
+                )
+                is not None
+                or isinstance(item_result.get("legacy_semantic_hold"), Mapping)
+            )
+        )
+        if semantic_terminal:
+            current_authority, authority_error = _current_autonomy_authority(
+                RETENTION_FRONTIER_LANE,
+                reviewer=reviewer,
+            )
+            if authority_error is not None or current_authority is None:
+                decision.update(
+                    {
+                        "reason": authority_error or "decision_authority_unavailable",
+                        "status": "quarantined",
+                        "cached": True,
+                        "semantic_deferred": True,
+                    }
+                )
+                decisions.append(decision)
+                continue
+            semantic_epoch = _retention_semantic_epoch(
+                item,
+                page_id=page_id,
+                page_hash=str(snapshot["content_hash"]),
+                retention=row,
+            )
+            try:
+                item, held = _resume_or_migrate_autonomy_semantic_hold(
+                    state,
+                    item,
+                    lane=RETENTION_FRONTIER_LANE,
+                    epoch=semantic_epoch,
+                    authority=current_authority,
+                    now=now,
+                    dry_run=dry_run,
+                )
+            except (TypeError, ValueError, InvalidTransition) as exc:
+                decision.update(
+                    {
+                        "reason": f"semantic hold validation failed: {exc}",
+                        "status": "quarantined",
+                        "cached": True,
+                        "semantic_deferred": True,
+                    }
+                )
+                decisions.append(decision)
+                continue
+            if held:
+                decision.update(
+                    {
+                        "reason": "cached_semantic_no_quorum",
+                        "status": "quarantined",
+                        "cached": True,
+                        "semantic_deferred": True,
+                    }
+                )
+                decisions.append(decision)
+                continue
+            status = str(item.get("status") or "")
         if status in {"applied", "rejected", "quarantined", "human_required"}:
             decision.update(
                 {
@@ -2308,6 +2744,31 @@ def apply_retention_archives(
                 {
                     "reason": authority_error or "decision_authority_missing",
                     "status": transition["item"]["status"],
+                }
+            )
+            decisions.append(decision)
+            continue
+        restored_hold = state.restore_semantic_no_quorum_hold(
+            key,
+            lane=RETENTION_FRONTIER_LANE,
+            epoch=_retention_semantic_epoch(
+                item,
+                page_id=page_id,
+                page_hash=str(snapshot["content_hash"]),
+                retention=row,
+            ),
+            authority=authority,
+            owner=owner,
+            now=now,
+        )
+        if restored_hold is not None:
+            decision.update(
+                {
+                    "reason": "semantic hold epoch restored before reevaluation",
+                    "status": "quarantined",
+                    "cached": True,
+                    "semantic_deferred": True,
+                    "restored_semantic_hold": True,
                 }
             )
             decisions.append(decision)
@@ -2455,14 +2916,58 @@ def apply_retention_archives(
 
         result: dict[str, Any] | None = None
         if frontier_decision == "needs_retry":
-            transition = state.fail_attempt(
-                key,
-                "frontier",
-                error=str(review.get("summary") or "frontier needs retry"),
-                failure_class=_duplicate_frontier_failure_class(review),
-                owner=owner,
-                now=now,
-            )
+            if is_local_semantic_no_quorum(review):
+                try:
+                    with decision_authority_lock():
+                        current_authority, current_error = _current_autonomy_authority(
+                            RETENTION_FRONTIER_LANE,
+                            reviewer=reviewer,
+                        )
+                        epoch_error = current_error or compare_semantic_authority(
+                            authority,
+                            current_authority,
+                            lane=RETENTION_FRONTIER_LANE,
+                        )
+                        if epoch_error is not None or current_authority is None:
+                            raise ValueError(
+                                epoch_error or "decision authority is unavailable"
+                            )
+                        transition = state.hold_semantic_no_quorum(
+                            key,
+                            lane=RETENTION_FRONTIER_LANE,
+                            stage="frontier",
+                            review=review,
+                            epoch=_retention_semantic_epoch(
+                                item,
+                                page_id=page_id,
+                                page_hash=str(snapshot["content_hash"]),
+                                retention=row,
+                            ),
+                            authority=current_authority,
+                            owner=owner,
+                            error=str(
+                                review.get("summary") or "local semantic no quorum"
+                            ),
+                            now=now,
+                        )
+                except (InvalidTransition, TypeError, ValueError) as exc:
+                    transition = state.fail_attempt(
+                        key,
+                        "frontier",
+                        error=f"semantic hold rejected: {exc}",
+                        failure_class="review_artifact_invalid",
+                        owner=owner,
+                        now=now,
+                    )
+            else:
+                transition = state.fail_attempt(
+                    key,
+                    "frontier",
+                    error=str(review.get("summary") or "frontier needs retry"),
+                    failure_class=_duplicate_frontier_failure_class(review),
+                    owner=owner,
+                    now=now,
+                )
         elif frontier_decision == "keep_active":
             with decision_authority_lock():
                 epoch_error = _autonomy_authority_epoch_error(
@@ -2843,6 +3348,13 @@ def watchdog_snapshot(
             {
                 "type": "convergence_expired_leases",
                 "value": convergence.get("expired_running"),
+            }
+        )
+    if int(convergence.get("quarantined") or 0) > 0:
+        alerts.append(
+            {
+                "type": "convergence_quarantined",
+                "value": convergence.get("quarantined"),
             }
         )
     if float(convergence.get("oldest_actionable_age_hours") or 0.0) > 24.0:

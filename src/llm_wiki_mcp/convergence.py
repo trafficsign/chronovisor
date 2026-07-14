@@ -38,6 +38,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from llm_wiki_mcp import wiki
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    persisted_semantic_no_quorum_hold,
+)
 
 
 SCHEMA_VERSION = 1
@@ -334,6 +339,65 @@ def canonical_json(value: Any) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _semantic_hold_history(
+    *values: object,
+    lane: str | None = None,
+) -> list[dict[str, Any]]:
+    """Collect strict common holds in stable oldest-to-newest order.
+
+    A resumed item temporarily stores its terminal result under
+    ``resume_context``.  A later no-quorum result must carry every earlier
+    exact hold forward so an A -> B -> A authority rollback can be restored
+    without another model sample.  Only self-validating common holds are
+    retained; malformed or lane-mismatched history is ignored fail-closed.
+    """
+
+    holds: list[dict[str, Any]] = []
+    seen_digests: set[str] = set()
+    visited: set[int] = set()
+
+    def append_hold(value: object) -> None:
+        hold = persisted_semantic_no_quorum_hold(value, lane=lane)
+        if hold is None:
+            return
+        digest = str(hold.get("hold_sha256") or "")
+        if not digest or digest in seen_digests:
+            return
+        seen_digests.add(digest)
+        holds.append(hold)
+
+    def visit(value: object) -> None:
+        if not isinstance(value, Mapping):
+            return
+        identity = id(value)
+        if identity in visited:
+            return
+        visited.add(identity)
+
+        # Preserve previously accumulated history before the current hold so
+        # the resulting list remains chronological across repeated resumes.
+        nested_result = value.get("result")
+        if isinstance(nested_result, Mapping):
+            visit(nested_result)
+        nested_context = value.get("resume_context")
+        if isinstance(nested_context, Mapping):
+            visit(nested_context)
+        history = value.get("semantic_hold_history")
+        if isinstance(history, Sequence) and not isinstance(
+            history, (str, bytes, bytearray)
+        ):
+            for candidate in history:
+                append_hold(candidate)
+        append_hold(value)
+        invalidated = value.get("invalidated_semantic_hold")
+        if isinstance(invalidated, Mapping):
+            append_hold(invalidated)
+
+    for value in values:
+        visit(value)
+    return holds
 
 
 def input_fingerprint(input_data: Any) -> str:
@@ -1533,6 +1597,7 @@ class ConvergenceStore:
         *,
         stage: Stage = "frontier",
         reason: str = "autonomous_cooldown_elapsed",
+        resume_context: Mapping[str, Any] | None = None,
         now: datetime | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
@@ -1541,6 +1606,19 @@ class ConvergenceStore:
         if stage not in {"local", "frontier"}:
             raise ValueError(f"unknown stage: {stage!r}")
         current_time = _utc_now(now)
+        normalized_resume_context = (
+            _canonicalize(dict(resume_context)) if resume_context is not None else None
+        )
+        resume_event_context = {
+            field: normalized_resume_context[field]
+            for field in (
+                "decision_lane",
+                "invalidated_hold_sha256",
+                "expected_epoch_sha256",
+            )
+            if isinstance(normalized_resume_context, Mapping)
+            and isinstance(normalized_resume_context.get(field), str)
+        }
 
         def project(state: dict[str, Any]) -> tuple[dict[str, Any], str]:
             item = state["items"].get(key)
@@ -1560,7 +1638,23 @@ class ConvergenceStore:
                 item["frontier_attempts"] = 0
             item["next_attempt_at"] = None
             item["quarantine_reason"] = None
-            item["result"] = None
+            if normalized_resume_context is not None:
+                effective_context = copy.deepcopy(normalized_resume_context)
+                decision_lane = effective_context.get("decision_lane")
+                history = _semantic_hold_history(
+                    item.get("result"),
+                    effective_context,
+                    lane=(
+                        decision_lane
+                        if isinstance(decision_lane, str) and decision_lane
+                        else None
+                    ),
+                )
+                if history:
+                    effective_context["semantic_hold_history"] = history
+                item["result"] = {"resume_context": effective_context}
+            else:
+                item["result"] = None
             item["last_error"] = str(reason)[:4000]
             item["updated_at"] = _iso(current_time)
             return item, previous_status
@@ -1571,6 +1665,7 @@ class ConvergenceStore:
             now=current_time,
             dry_run=dry_run,
             project=project,
+            event_extra=resume_event_context,
         )
 
     def resume_due_quarantined(
@@ -1588,6 +1683,7 @@ class ConvergenceStore:
         current_time = _utc_now(now)
         excluded = set(exclude_lanes)
         results: list[dict[str, Any]] = []
+        semantic_deferred = 0
         for item in self.list_items(statuses={"quarantined"}):
             key = str(item.get("key") or "")
             lane = str(item.get("lane") or "")
@@ -1598,6 +1694,18 @@ class ConvergenceStore:
                 or bool(item.get("human_required"))
                 or is_human_required_failure(failure_class)
             ):
+                continue
+            # A local semantic split is a safe terminal non-decision, not an
+            # outage.  Time cannot change its evidence or adopted authority,
+            # so the generic cooldown worker must never turn it into another
+            # model sample.  Strict common holds and incomplete legacy rows are
+            # both fail-closed here; the owning lane may reopen a strict hold
+            # only after validating a concrete epoch/authority change.
+            if (
+                failure_class == LOCAL_SEMANTIC_NO_QUORUM
+                or persisted_semantic_no_quorum_hold(item) is not None
+            ):
+                semantic_deferred += 1
                 continue
             updated_at = _parse_iso(item.get("updated_at"))
             if (
@@ -1640,9 +1748,174 @@ class ConvergenceStore:
             "resumed": len(
                 [row for row in results if row.get("status") != "resume_skipped"]
             ),
+            "semantic_deferred": semantic_deferred,
             "results": results,
             "dry_run": dry_run,
         }
+
+    def hold_semantic_no_quorum(
+        self,
+        key: str,
+        *,
+        lane: str,
+        stage: Stage,
+        review: Mapping[str, Any],
+        epoch: Mapping[str, Any],
+        authority: Mapping[str, Any],
+        owner: str | None = None,
+        error: str | None = None,
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Persist one exact-epoch semantic non-decision without retrying.
+
+        The claimed attempt has already been counted by :meth:`claim_attempt`.
+        This transition deliberately preserves that count: lack of a local
+        two-vote quorum is terminal for the exact decision epoch and must not
+        consume the remaining retry window.
+        """
+
+        if stage not in {"local", "frontier"}:
+            raise ValueError(f"unknown stage: {stage!r}")
+        semantic_hold = build_semantic_no_quorum_hold(
+            lane,
+            epoch,
+            authority,
+            review,
+        )
+        current_time = _utc_now(now)
+        summary = str(error or review.get("summary") or "local semantic no quorum")
+        terminal_result = {
+            "terminal_reason": "semantic_no_quorum",
+            "semantic_hold": semantic_hold,
+            "stage": stage,
+        }
+
+        def project(state: dict[str, Any]) -> tuple[dict[str, Any], str]:
+            item = state["items"].get(key)
+            if not isinstance(item, dict):
+                raise KeyError(key)
+            previous_status = str(item.get("status") or "")
+            if previous_status == "quarantined":
+                existing = persisted_semantic_no_quorum_hold(
+                    item,
+                    lane=lane,
+                    epoch=epoch,
+                    authority=authority,
+                )
+                if existing == semantic_hold:
+                    return item, previous_status
+                raise InvalidTransition(
+                    "cannot replace a quarantined item with a different semantic hold"
+                )
+            if previous_status != f"{stage}_running":
+                raise InvalidTransition(
+                    f"cannot hold {stage} attempt from status {previous_status!r}"
+                )
+            self._validate_owner(item, owner)
+            self._clear_lease(item)
+            history = [
+                hold
+                for hold in _semantic_hold_history(item.get("result"), lane=lane)
+                if hold.get("hold_sha256") != semantic_hold.get("hold_sha256")
+            ]
+            persisted_result = copy.deepcopy(terminal_result)
+            if history:
+                persisted_result["semantic_hold_history"] = history
+            item["status"] = "quarantined"
+            item["quarantine_reason"] = f"semantic_no_quorum:{lane}"
+            item["last_error"] = summary[:4000]
+            item["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+            item["result"] = persisted_result
+            item["next_attempt_at"] = None
+            item["human_required"] = False
+            item["updated_at"] = _iso(current_time)
+            return item, previous_status
+
+        return self._persist_transition(
+            key=key,
+            name="semantic_no_quorum_held",
+            now=current_time,
+            dry_run=dry_run,
+            project=project,
+            event_extra={
+                "decision_lane": lane,
+                "hold_sha256": semantic_hold["hold_sha256"],
+                "stage": stage,
+            },
+        )
+
+    def restore_semantic_no_quorum_hold(
+        self,
+        key: str,
+        *,
+        lane: str,
+        epoch: Mapping[str, Any],
+        authority: Mapping[str, Any],
+        owner: str | None = None,
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any] | None:
+        """Restore an invalidated hold if its exact epoch returned (ABA)."""
+
+        item = self.get(key)
+        if not isinstance(item, dict):
+            return None
+        result = item.get("result")
+        context = result.get("resume_context") if isinstance(result, Mapping) else None
+        if not isinstance(context, Mapping):
+            return None
+        invalidated = context.get("invalidated_semantic_hold")
+        if not isinstance(invalidated, Mapping):
+            return None
+        strict_invalidated = persisted_semantic_no_quorum_hold(
+            invalidated,
+            lane=lane,
+        )
+        if strict_invalidated is None or context.get(
+            "invalidated_hold_sha256"
+        ) != strict_invalidated.get("hold_sha256"):
+            return None
+
+        history = _semantic_hold_history(result, context, lane=lane)
+        strict_hold = next(
+            (
+                candidate
+                for candidate in reversed(history)
+                if persisted_semantic_no_quorum_hold(
+                    candidate,
+                    lane=lane,
+                    epoch=epoch,
+                    authority=authority,
+                )
+                is not None
+            ),
+            None,
+        )
+        if strict_hold is None:
+            return None
+        preserved_history = [
+            candidate
+            for candidate in history
+            if candidate.get("hold_sha256") != strict_hold.get("hold_sha256")
+        ]
+        terminal_result: dict[str, Any] = {
+            "terminal_reason": "semantic_no_quorum",
+            "semantic_hold": strict_hold,
+            "stage": str((item.get("lease_stage") or "frontier")),
+        }
+        if preserved_history:
+            terminal_result["semantic_hold_history"] = preserved_history
+        return self.quarantine(
+            key,
+            reason=f"semantic_no_quorum:{lane}",
+            error="semantic hold epoch restored before reevaluation",
+            failure_class=LOCAL_SEMANTIC_NO_QUORUM,
+            result=terminal_result,
+            owner=owner,
+            now=now,
+            dry_run=dry_run,
+        )
 
     def complete(
         self,
@@ -1791,11 +2064,15 @@ class ConvergenceStore:
         key: str,
         *,
         reason: str,
+        error: str | None = None,
+        failure_class: str | None = None,
+        result: Mapping[str, Any] | None = None,
         owner: str | None = None,
         now: datetime | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         current_time = _utc_now(now)
+        normalized_result = _canonicalize(dict(result)) if result is not None else None
 
         def project(state: dict[str, Any]) -> tuple[dict[str, Any], str]:
             item = state["items"].get(key)
@@ -1813,6 +2090,12 @@ class ConvergenceStore:
             self._clear_lease(item)
             item["status"] = "quarantined"
             item["quarantine_reason"] = str(reason)[:4000]
+            if error is not None:
+                item["last_error"] = str(error)[:4000]
+            if failure_class is not None:
+                item["last_failure_class"] = str(failure_class)[:4000]
+            if normalized_result is not None:
+                item["result"] = normalized_result
             item["next_attempt_at"] = None
             item["updated_at"] = _iso(current_time)
             return item, previous_status
@@ -1933,6 +2216,7 @@ class ConvergenceStore:
         now: datetime,
         dry_run: bool,
         project: Callable[[dict[str, Any]], tuple[dict[str, Any], str]],
+        event_extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if dry_run:
             state = self._load_unlocked()
@@ -1952,6 +2236,7 @@ class ConvergenceStore:
                         now=now,
                         previous_status=previous_status,
                         item=item,
+                        **dict(event_extra or {}),
                     )
                 )
             return {"dry_run": False, "item": copy.deepcopy(item)}

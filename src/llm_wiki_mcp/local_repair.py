@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable
 
 from llm_wiki_mcp.decision_authority import (
@@ -12,6 +13,13 @@ from llm_wiki_mcp.decision_authority import (
     current_semantic_authority,
     seal_semantic_artifact,
     semantic_verdict_authority_error,
+)
+from llm_wiki_mcp.decision_schema_manifest import schema_sha256
+from llm_wiki_mcp.page_mutation import decision_authority_lock
+from llm_wiki_mcp.semantic_hold import (
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    is_local_semantic_no_quorum,
 )
 
 
@@ -73,6 +81,62 @@ repair is needed.
 
 _CREATE_SAFE_PAGE_ID = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _MAX_PAGE_ID_LEN = 200
+LOCAL_REPAIR_SEMANTIC_HOLD_RESOLVER_VERSION = "local-repair-semantic-hold-v2"
+
+# The repair model must see only immutable failure evidence.  Self-heal updates
+# the fields below while leasing, retrying, quarantining, and reporting a
+# packet.  Excluding that bookkeeping from both the prompt and the hold epoch
+# makes their identities identical, while retaining every current or future
+# producer-owned evidence field by default.
+_LOCAL_REPAIR_BOOKKEEPING_FIELDS = frozenset(
+    {
+        "action_error",
+        "applied_action_path",
+        "approved_action",
+        "frontier_attempts",
+        "frontier_eligibility_error",
+        "frontier_error",
+        "frontier_queue_path",
+        "frontier_result",
+        "frontier_status",
+        "human_boundary_reclassified_at",
+        "human_notification",
+        "human_recheck_count",
+        "human_required_at",
+        "invalidated_semantic_hold",
+        "last_attempt_at",
+        "last_failure_class",
+        "lease_expires_at",
+        "lease_owner",
+        "local_decision",
+        "local_error",
+        "local_failure_reason",
+        "local_model",
+        "local_repair_attempts",
+        "next_attempt_at",
+        "operational_local_repair_evidence",
+        "pending_frontier_review_path",
+        "quarantine_reopen_count",
+        "quarantined_at",
+        "rejected_action_path",
+        "self_heal_attempts",
+        "self_heal_queued",
+        "semantic_hold",
+        "semantic_hold_history",
+        "semantic_hold_invalidated_at",
+        "status",
+        "system_incident_fingerprint",
+        "system_incident_packet_path",
+        "system_incident_status",
+        "terminal_reason",
+        "terminal_resume_kind",
+        "terminal_resumed_at",
+        "transient_read_back_retired_at",
+        "updated_at",
+        "verified_local_repair",
+        "verified_local_repair_applied_at",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -88,10 +152,17 @@ class LocalRepairDecision:
     authority: dict[str, Any] | None = None
     decision_policy: dict[str, Any] | None = None
     local_consensus: dict[str, Any] | None = None
+    semantic_hold: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema_version": 2 if self.authority is not None else 1,
+        payload = {
+            "schema_version": (
+                3
+                if self.semantic_hold is not None
+                else 2
+                if self.authority is not None
+                else 1
+            ),
             "status": self.status,
             "action": self.action,
             "confidence": self.confidence,
@@ -104,6 +175,9 @@ class LocalRepairDecision:
             "decision_policy": self.decision_policy,
             "local_consensus": self.local_consensus,
         }
+        if self.semantic_hold is not None:
+            payload["semantic_hold"] = self.semantic_hold
+        return payload
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -306,10 +380,42 @@ def deterministic_repair(packet: dict[str, Any]) -> LocalRepairDecision:
     )
 
 
+def semantic_request_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    """Project one packet to the exact immutable evidence shown to voters.
+
+    Unknown fields are evidence by default.  That is intentionally fail-safe:
+    a future producer can add evidence without also remembering to extend the
+    semantic-hold resolver, while newly added self-heal bookkeeping merely
+    causes an unnecessary cache miss until explicitly classified here.
+    """
+
+    return {
+        str(field): value
+        for field, value in packet.items()
+        if str(field) not in _LOCAL_REPAIR_BOOKKEEPING_FIELDS
+    }
+
+
+def semantic_hold_epoch(packet: dict[str, Any]) -> dict[str, Any]:
+    """Bind a hold to the exact request, system policy, and output schema."""
+
+    evidence = semantic_request_packet(packet)
+    prompt = build_prompt(packet)
+    return {
+        "resolver_version": LOCAL_REPAIR_SEMANTIC_HOLD_RESOLVER_VERSION,
+        "failure_id": str(packet.get("failure_id") or ""),
+        "failure_class": str(packet.get("failure_class") or ""),
+        "evidence_sha256": canonical_sha256(evidence),
+        "prompt_sha256": canonical_sha256(prompt),
+        "system_sha256": canonical_sha256(LOCAL_REPAIR_SYSTEM_PROMPT),
+        "schema_sha256": schema_sha256(LOCAL_REPAIR_SCHEMA),
+    }
+
+
 def build_prompt(packet: dict[str, Any]) -> str:
     return (
         "Diagnose this LLM Wiki failure packet and return one JSON repair decision.\n\n"
-        + json.dumps(packet, ensure_ascii=False, indent=2)
+        + json.dumps(semantic_request_packet(packet), ensure_ascii=False, indent=2)
     )
 
 
@@ -339,43 +445,33 @@ def propose_repair(
     if use_qwen:
         try:
             if generator is None:
-                from llm_wiki_mcp.decision_policy import resolve_decision_policy
-                from llm_wiki_mcp.decision_router import DecisionRouter
-
-                policy, mode, policy_error = resolve_decision_policy("local_repair")
-                if policy_error is not None or mode == "off":
-                    return deterministic
                 authority, authority_error = current_semantic_authority("local_repair")
                 if authority is None or authority_error is not None:
                     return deterministic
-                router = DecisionRouter(
-                    audit_role="local_repair",
-                    require_adopted=mode == "enabled",
-                    decision_lane="local_repair",
-                )
-                routed = router.decide(
+                from llm_wiki_mcp.frontier_review import run_structured_review
+
+                review = run_structured_review(
                     build_prompt(packet),
                     LOCAL_REPAIR_SCHEMA,
+                    repo_root=Path(__file__).resolve().parents[2],
+                    execute_patch=False,
+                    decision_lane="local_repair",
                     system=LOCAL_REPAIR_SYSTEM_PROMPT,
                 )
-                parsed = (
-                    routed.decision
-                    if (
-                        mode == "enabled"
-                        and router.policy.source == "adopted_artifact"
-                        and routed.ok
-                    )
-                    else None
+                if not isinstance(review, dict):
+                    return deterministic
+                policy_value = review.get("decision_policy")
+                consensus_value = review.get("local_consensus")
+                decision_policy = (
+                    dict(policy_value) if isinstance(policy_value, dict) else {}
+                )
+                local_consensus = (
+                    dict(consensus_value) if isinstance(consensus_value, dict) else {}
                 )
                 source = "local_consensus"
-                decision_policy = {
-                    "kind": policy.kind if policy is not None else None,
-                    "schema_name": policy.schema_name if policy is not None else None,
-                    "mode": mode,
-                    "error": policy_error,
-                    "router_policy": router.policy.audit_record(),
-                }
-                local_consensus = routed.audit_record()
+                parsed = (
+                    None if isinstance(review.get("frontier_failure"), dict) else review
+                )
             else:
                 output = generator(
                     build_prompt(packet),
@@ -384,6 +480,52 @@ def propose_repair(
                 )
                 parsed = _extract_json_object(output)
                 source = "legacy_generator"
+            if source == "local_consensus" and is_local_semantic_no_quorum(review):
+                failure = review.get("frontier_failure")
+                reason = str(
+                    (failure.get("summary") if isinstance(failure, dict) else None)
+                    or review.get("summary")
+                    or "local_models_did_not_reach_two_vote_quorum"
+                )
+                try:
+                    with decision_authority_lock():
+                        current, current_error = current_semantic_authority(
+                            "local_repair"
+                        )
+                        epoch_error = current_error or compare_semantic_authority(
+                            authority,
+                            current,
+                            lane="local_repair",
+                        )
+                        if epoch_error is not None:
+                            raise ValueError(epoch_error)
+                        semantic_hold = build_semantic_no_quorum_hold(
+                            "local_repair",
+                            semantic_hold_epoch(packet),
+                            authority,
+                            review,
+                        )
+                except Exception as exc:
+                    return LocalRepairDecision(
+                        status="rejected",
+                        action="quarantine_raw",
+                        confidence=0.0,
+                        requested_page_id=packet.get("requested_page_id"),
+                        reason=f"local semantic hold deferred: {exc}",
+                        source="local_deferred",
+                    )
+                return LocalRepairDecision(
+                    status="rejected",
+                    action="quarantine_raw",
+                    confidence=0.0,
+                    requested_page_id=packet.get("requested_page_id"),
+                    reason=reason,
+                    source="semantic_hold",
+                    authority=dict(authority),
+                    decision_policy=dict(decision_policy),
+                    local_consensus=dict(local_consensus),
+                    semantic_hold=semantic_hold,
+                )
             if parsed is not None:
                 decision = _validate_decision(parsed, packet)
                 if decision is not None:

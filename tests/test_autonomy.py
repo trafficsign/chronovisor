@@ -14,9 +14,24 @@ from llm_wiki_mcp.convergence import ConvergenceStore, CycleBudget, RetryPolicy
 from llm_wiki_mcp.decision_router import canonical_agreement_signature
 from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def isolate_decision_authority_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import page_mutation
+
+    monkeypatch.setattr(
+        page_mutation,
+        "DECISION_AUTHORITY_LOCK",
+        tmp_path / "runtime" / "decision-authority.lock",
+    )
 
 
 def _write_page(path: Path, title: str, body: str) -> None:
@@ -137,6 +152,20 @@ def _authority_bound_review(
     }
     review["local_consensus"] = _local_consensus_proof(review, authority)
     return review
+
+
+def _semantic_no_quorum_review(lane: str, authority: dict) -> dict:
+    review = semantic_review(authority, lane=lane)
+    return {
+        "decision": "needs_retry",
+        "confidence": 0.0,
+        "summary": review["summary"],
+        "reviewer": review["reviewer"],
+        "frontier_failure": review["frontier_failure"],
+        "human_required": False,
+        "decision_policy": review["decision_policy"],
+        "local_consensus": review["local_consensus"],
+    }
 
 
 def _deferred_record(left: str = "a", right: str = "b") -> dict:
@@ -1335,6 +1364,192 @@ def test_frontier_duplicate_retries_with_backoff_then_quarantines(
     assert calls == 2
 
 
+def test_duplicate_no_quorum_holds_exact_epoch_until_authority_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    _write_page(pages / "a.md", "Alpha", "A")
+    _write_page(pages / "b.md", "Beta", "B")
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: pages / f"{page_id}.md")
+    store = _convergence_store(tmp_path)
+    authority_a = semantic_authority(
+        autonomy.DUPLICATE_FRONTIER_LANE,
+        schema_name="duplicate_resolution",
+    )
+    authority_b = semantic_authority(
+        autonomy.DUPLICATE_FRONTIER_LANE,
+        schema_name="duplicate_resolution",
+        artifact_sha256="9" * 64,
+    )
+    current = [authority_a]
+    monkeypatch.setattr(
+        autonomy,
+        "_current_autonomy_authority",
+        lambda *_args, **_kwargs: (current[0], None),
+    )
+    calls = 0
+
+    def reviewer(_candidate: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        return _semantic_no_quorum_review(
+            autonomy.DUPLICATE_FRONTIER_LANE,
+            current[0],
+        )
+
+    first = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_deferred_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1),
+        reviewer=reviewer,
+        now=NOW,
+    )
+    same_epoch = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_deferred_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1),
+        reviewer=reviewer,
+        now=NOW + timedelta(seconds=1),
+    )
+    current[0] = authority_b
+    changed_authority = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_deferred_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1),
+        reviewer=reviewer,
+        now=NOW + timedelta(seconds=2),
+    )
+    current[0] = authority_a
+    restored_authority = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_deferred_record()],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1),
+        reviewer=lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("A-B-A must restore the A hold without resampling")
+        ),
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert first["status_counts"] == {"quarantined": 1}
+    assert same_epoch["results"][0]["semantic_deferred"] is True
+    assert same_epoch["frontier_calls"] == 0
+    assert changed_authority["status_counts"] == {"quarantined": 1}
+    assert changed_authority["frontier_calls"] == 1
+    assert restored_authority["status_counts"] == {"quarantined": 1}
+    assert restored_authority["results"][0]["restored_semantic_hold"] is True
+    assert calls == 2
+    item = store.list_items(lane=autonomy.DUPLICATE_FRONTIER_LANE)[0]
+    assert item["frontier_attempts"] == 1
+    assert item["result"]["semantic_hold"]["authority"] == authority_a
+    assert [hold["authority"] for hold in item["result"]["semantic_hold_history"]] == [
+        authority_b
+    ]
+
+
+def test_legacy_duplicate_no_quorum_migrates_without_resampling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    _write_page(pages / "a.md", "Alpha", "A")
+    _write_page(pages / "b.md", "Beta", "B")
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: pages / f"{page_id}.md")
+    store = _convergence_store(tmp_path)
+    record = _deferred_record()
+    candidate = autonomy._canonical_duplicate_record(record)
+    assert candidate is not None
+    input_data = {
+        "pair": ["a", "b"],
+        "content_hashes": {
+            page_id: autonomy._duplicate_page_snapshot(page_id)["content_hash"]
+            for page_id in ("a", "b")
+        },
+    }
+    item = store.merge_item(
+        lane=autonomy.DUPLICATE_FRONTIER_LANE,
+        source_id="a<->b",
+        input_data=input_data,
+        resolver_version=autonomy.DUPLICATE_FRONTIER_RESOLVER_VERSION,
+        metadata={"candidate": candidate},
+        now=NOW,
+    )["item"]
+    state = store.load()
+    state["items"][item["key"]].update(
+        {
+            "status": "quarantined",
+            "frontier_attempts": 3,
+            "quarantine_reason": "retry_exhausted:frontier",
+            "last_failure_class": "local_semantic_no_quorum",
+            "last_error": "mutating_local_majority_vetoed_by_conservative_vote",
+        }
+    )
+    store.state_file.write_text(json.dumps(state), encoding="utf-8")
+    calls = 0
+
+    def reviewer(_candidate: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "decision": "needs_retry",
+            "confidence": 0.0,
+            "summary": "operational retry after evidence change",
+        }
+
+    state_before = store.state_file.read_bytes()
+    events_before = store.events_file.read_bytes()
+    preview = autonomy.resolve_deferred_duplicates_with_frontier(
+        [record],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1),
+        reviewer=reviewer,
+        now=NOW + timedelta(milliseconds=500),
+        dry_run=True,
+    )
+    assert preview["results"][0]["semantic_deferred"] is True
+    assert store.state_file.read_bytes() == state_before
+    assert store.events_file.read_bytes() == events_before
+    migrated = autonomy.resolve_deferred_duplicates_with_frontier(
+        [record],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1),
+        reviewer=reviewer,
+        now=NOW + timedelta(seconds=1),
+    )
+    repeated = autonomy.resolve_deferred_duplicates_with_frontier(
+        [record],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1),
+        reviewer=reviewer,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    assert calls == 0
+    assert store.state_file.read_bytes() != state_before
+    assert migrated["results"][0]["semantic_deferred"] is True
+    assert repeated["results"][0]["semantic_deferred"] is True
+    migrated_item = store.get(item["key"])
+    assert migrated_item["quarantine_reason"] == (
+        f"semantic_no_quorum_legacy:{autonomy.DUPLICATE_FRONTIER_LANE}"
+    )
+    assert migrated_item["result"]["legacy_semantic_hold"]["kind"] == (
+        autonomy.LEGACY_SEMANTIC_HOLD_KIND
+    )
+
+    _write_page(pages / "b.md", "Beta", "B changed")
+    changed = autonomy.resolve_deferred_duplicates_with_frontier(
+        [record],
+        convergence_store=store,
+        budget=_frontier_budget(calls=1),
+        reviewer=reviewer,
+        now=NOW + timedelta(seconds=3),
+    )
+    assert calls == 1
+    assert changed["status_counts"] == {"frontier_retry": 1}
+
+
 def test_frontier_duplicate_uses_narrow_human_boundary_and_cycle_budget(
     monkeypatch,
     tmp_path: Path,
@@ -1555,6 +1770,59 @@ def test_retention_frontier_rejection_keeps_page_active_and_is_cached(
     meta, body = parse_frontmatter(page.read_text(encoding="utf-8"))
     assert meta["status"] == "active"
     assert body == "Distinct source of truth\n"
+
+
+def test_retention_no_quorum_is_terminal_and_reused_without_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Still semantically ambiguous")
+    monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
+    store = _convergence_store(tmp_path)
+    payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
+    authority = semantic_authority(
+        autonomy.RETENTION_FRONTIER_LANE,
+        schema_name="retention",
+    )
+    monkeypatch.setattr(
+        autonomy,
+        "_current_autonomy_authority",
+        lambda *_args, **_kwargs: (authority, None),
+    )
+    calls = 0
+
+    def reviewer(_candidate: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        return _semantic_no_quorum_review(
+            autonomy.RETENTION_FRONTIER_LANE,
+            authority,
+        )
+
+    first = autonomy.apply_retention_archives(
+        payload,
+        write=False,
+        convergence_store=store,
+        reviewer=reviewer,
+        now=NOW,
+    )
+    second = autonomy.apply_retention_archives(
+        payload,
+        write=False,
+        convergence_store=store,
+        reviewer=reviewer,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert first["status_counts"] == {"quarantined": 1}
+    assert second["decisions"][0]["semantic_deferred"] is True
+    assert second["frontier_calls"] == 0
+    assert calls == 1
+    assert (
+        store.list_items(lane=autonomy.RETENTION_FRONTIER_LANE)[0]["frontier_attempts"]
+        == 1
+    )
 
 
 def test_retention_reuses_durable_approval_after_mutation_budget_retry(
@@ -1844,6 +2112,106 @@ def test_watchdog_alerts_when_sleep_never_ran(monkeypatch) -> None:
     assert payload["alerts"][0]["type"] == "sleep_never_ran"
     assert writes[0][0] == autonomy.WATCHDOG_FILE
     assert history == [payload]
+
+
+def test_watchdog_does_not_alert_on_convergence_semantic_defer(monkeypatch) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    monkeypatch.setattr(
+        "llm_wiki_mcp.health.health_snapshot",
+        lambda: {
+            "memory_integrity": {"capture_rate": 0.95},
+            "queues": {"duplicate_candidates": 0, "lint_repair": 0},
+            "convergence": {
+                "semantic_deferred": 1,
+                "quarantined": 0,
+                "expired_running": 0,
+                "oldest_actionable_age_hours": 0,
+            },
+            "capture_pipeline": {
+                "background_jobs": {"by_status": {"completed": 1}},
+                "session_sweeper": {"status": "ok"},
+            },
+            "runtime": {"commit_id": "abc123", "drift": False},
+        },
+    )
+    monkeypatch.setattr(
+        autonomy,
+        "_latest_jsonl",
+        lambda _path: {"status": "ok", "started_at": now},
+    )
+
+    payload = autonomy.watchdog_snapshot(write=False)
+
+    assert payload["status"] == "ok"
+    assert not any(
+        alert.get("type") == "convergence_quarantined" for alert in payload["alerts"]
+    )
+
+
+def test_watchdog_alerts_on_operational_convergence_quarantine(monkeypatch) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    monkeypatch.setattr(
+        "llm_wiki_mcp.health.health_snapshot",
+        lambda: {
+            "memory_integrity": {"capture_rate": 0.95},
+            "queues": {"duplicate_candidates": 0, "lint_repair": 0},
+            "convergence": {
+                "semantic_deferred": 1,
+                "quarantined": 2,
+                "expired_running": 0,
+                "oldest_actionable_age_hours": 0,
+            },
+            "capture_pipeline": {
+                "background_jobs": {"by_status": {"completed": 1}},
+                "session_sweeper": {"status": "ok"},
+            },
+            "runtime": {"commit_id": "abc123", "drift": False},
+        },
+    )
+    monkeypatch.setattr(
+        autonomy,
+        "_latest_jsonl",
+        lambda _path: {"status": "ok", "started_at": now},
+    )
+
+    payload = autonomy.watchdog_snapshot(write=False)
+
+    assert payload["status"] == "alert"
+    assert payload["alerts"] == [{"type": "convergence_quarantined", "value": 2}]
+
+
+def test_watchdog_still_alerts_on_operational_background_quarantine(
+    monkeypatch,
+) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    monkeypatch.setattr(
+        "llm_wiki_mcp.health.health_snapshot",
+        lambda: {
+            "memory_integrity": {"capture_rate": 0.95},
+            "queues": {"duplicate_candidates": 0, "lint_repair": 0},
+            "convergence": {
+                "semantic_deferred": 1,
+                "quarantined": 0,
+                "expired_running": 0,
+                "oldest_actionable_age_hours": 0,
+            },
+            "capture_pipeline": {
+                "background_jobs": {"by_status": {"quarantined": 2}},
+                "session_sweeper": {"status": "ok"},
+            },
+            "runtime": {"commit_id": "abc123", "drift": False},
+        },
+    )
+    monkeypatch.setattr(
+        autonomy,
+        "_latest_jsonl",
+        lambda _path: {"status": "ok", "started_at": now},
+    )
+
+    payload = autonomy.watchdog_snapshot(write=False)
+
+    assert payload["status"] == "alert"
+    assert payload["alerts"] == [{"type": "background_jobs_quarantined", "value": 2}]
 
 
 def test_watchdog_history_is_compact_and_bounded_to_1000_lines(

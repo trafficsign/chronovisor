@@ -52,6 +52,15 @@ from llm_wiki_mcp.runtime_config import (
     runtime_repo_root,
 )
 from llm_wiki_mcp.wiki import SYSTEM_DIR, WIKI_ROOT, find_page
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    frontier_failure_class,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 
 
 REPO_ROOT = runtime_repo_root()
@@ -246,6 +255,67 @@ def _label_candidate_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "ref": str(row.get("ref") or ""),
         "ts": str(row.get("ts") or ""),
     }
+
+
+def _has_semantic_no_quorum_marker(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    return (
+        "semantic_hold" in value
+        or value.get("last_failure_class") == LOCAL_SEMANTIC_NO_QUORUM
+        or frontier_failure_class(value) == LOCAL_SEMANTIC_NO_QUORUM
+    )
+
+
+def _label_semantic_epoch(row: Mapping[str, Any]) -> dict[str, Any]:
+    evidence = _label_candidate_payload(row)
+    return {
+        "artifact_schema_version": SEARCH_REVIEW_ARTIFACT_SCHEMA_VERSION,
+        "prompt_policy_version": SEARCH_LABEL_PROMPT_POLICY_VERSION,
+        "evidence_sha256": _canonical_json_sha256(evidence),
+        "review_schema_sha256": canonical_sha256(FRONTIER_LABEL_SCHEMA),
+    }
+
+
+def _restore_label_semantic_hold(
+    row: dict[str, Any],
+    *,
+    hold: Mapping[str, Any] | None,
+    reviewed_at: str,
+    malformed: bool = False,
+) -> None:
+    row["queue_status"] = "frontier_quarantined"
+    row["promoted_to_golden"] = False
+    row["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+    row["review_note"] = (
+        "malformed local semantic no-quorum hold; refusing resample"
+        if malformed
+        else "local semantic models did not reach a safe quorum"
+    )
+    row["quarantined_at"] = row.get("quarantined_at") or reviewed_at
+    row.pop("next_attempt_at", None)
+    row.pop("decision_artifact", None)
+    row.pop("frontier_review", None)
+    if hold is not None:
+        existing = persisted_semantic_no_quorum_hold(row, lane=SEARCH_LABEL_LANE)
+        if existing is not None and existing.get("hold_sha256") != hold.get(
+            "hold_sha256"
+        ):
+            history = [
+                item
+                for item in row.get("semantic_hold_history", [])
+                if isinstance(item, Mapping)
+            ]
+            if not any(
+                item.get("hold_sha256") == existing.get("hold_sha256")
+                for item in history
+            ):
+                history.append(existing)
+            # This is a durable identity ledger rather than a bounded retry
+            # cache.  Retaining every distinct hold guarantees that returning
+            # to any prior epoch/authority restores it before model execution.
+            row["semantic_hold_history"] = history
+        row["semantic_hold"] = dict(hold)
 
 
 def _label_review_claim_error(
@@ -1548,7 +1618,72 @@ def review_label_queue_with_frontier(
         review_value = artifact.get("review") if isinstance(artifact, Mapping) else None
         return dict(review_value) if isinstance(review_value, Mapping) else None
 
+    semantic_rows = [row for row in rows if _has_semantic_no_quorum_marker(row)]
+    semantic_authority: dict[str, Any] | None = None
+    semantic_authority_error: str | None = None
+    if semantic_rows:
+        with decision_authority_lock():
+            semantic_authority, semantic_authority_error = (
+                decision_authority.current_semantic_authority(
+                    SEARCH_LABEL_LANE,
+                    injected_reviewer=injected_reviewer,
+                )
+            )
+    for row in semantic_rows:
+        hold = persisted_semantic_no_quorum_hold(row, lane=SEARCH_LABEL_LANE)
+        if hold is None:
+            _restore_label_semantic_hold(
+                row, hold=None, reviewed_at=reviewed_at, malformed=True
+            )
+            continue
+        if semantic_authority_error is not None or semantic_authority is None:
+            _restore_label_semantic_hold(row, hold=hold, reviewed_at=reviewed_at)
+            continue
+        hold_error = semantic_no_quorum_hold_error(
+            hold,
+            SEARCH_LABEL_LANE,
+            epoch=_label_semantic_epoch(row),
+            authority=semantic_authority,
+        )
+        if hold_error is None:
+            _restore_label_semantic_hold(row, hold=hold, reviewed_at=reviewed_at)
+        elif hold_error in {
+            "semantic hold epoch changed",
+            "semantic hold authority changed",
+        }:
+            historical_hold: dict[str, Any] | None = None
+            history = row.get("semantic_hold_history")
+            if isinstance(history, list):
+                for candidate in reversed(history):
+                    historical_hold = persisted_semantic_no_quorum_hold(
+                        candidate,
+                        lane=SEARCH_LABEL_LANE,
+                        epoch=_label_semantic_epoch(row),
+                        authority=semantic_authority,
+                    )
+                    if historical_hold is not None:
+                        break
+            if historical_hold is not None:
+                _restore_label_semantic_hold(
+                    row,
+                    hold=historical_hold,
+                    reviewed_at=reviewed_at,
+                )
+                continue
+            # Keep the old hold attached while granting this exact new epoch
+            # one ordinary review opportunity.  A rollback restores it before
+            # another model call.
+            row["queue_status"] = "frontier_retry"
+            row["promoted_to_golden"] = False
+            row.pop("decision_artifact", None)
+        else:
+            _restore_label_semantic_hold(
+                row, hold=None, reviewed_at=reviewed_at, malformed=True
+            )
+
     for row in rows:
+        if _has_semantic_no_quorum_marker(row):
+            continue
         review = row.get("frontier_review")
         if (
             row.get("queue_status") == "human_required"
@@ -1578,6 +1713,8 @@ def review_label_queue_with_frontier(
         quarantine_retry_seconds = DEFAULT_QUARANTINE_RETRY_SECONDS
     for row in rows:
         if row.get("queue_status") != "frontier_quarantined":
+            continue
+        if _has_semantic_no_quorum_marker(row):
             continue
         raw_quarantined_at = row.get("quarantined_at") or row.get("last_attempt_at")
         try:
@@ -1613,6 +1750,7 @@ def review_label_queue_with_frontier(
         for index, row in enumerate(rows)
         if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
         and row.get("queue_status") != "frontier_approved"
+        and not _has_semantic_no_quorum_marker(row)
         and not (
             isinstance(row.get("authority_recovery"), Mapping)
             and row["authority_recovery"].get("kind") == ALREADY_APPLIED_RECOVERY
@@ -1855,6 +1993,7 @@ def review_label_queue_with_frontier(
             continue
 
         reviews: list[dict[str, Any]] = []
+        semantic_review: dict[str, Any] | None = None
         try:
             for _idx in range(max_votes):
                 review = (
@@ -1864,17 +2003,76 @@ def review_label_queue_with_frontier(
                         row, repo_root=repo_root, timeout=timeout
                     )
                 )
-                reviews.append(
-                    _normalize_frontier_label_result(review)
-                    if "decision" in review
-                    else review
+                normalized_review = (
+                    dict(review)
+                    if is_local_semantic_no_quorum(review)
+                    else (
+                        _normalize_frontier_label_result(review)
+                        if "decision" in review
+                        else review
+                    )
                 )
+                reviews.append(normalized_review)
+                if is_local_semantic_no_quorum(normalized_review):
+                    semantic_review = normalized_review
+                    break
         except Exception as exc:
             reviews = [
                 _frontier_label_failure(
                     f"frontier label reviewer raised {exc.__class__.__name__}: {exc}"
                 )
             ]
+        if semantic_review is not None:
+            hold: dict[str, Any] | None = None
+            hold_error: str | None = None
+            try:
+                with decision_authority_lock():
+                    current_authority, current_error = (
+                        decision_authority.current_semantic_authority(
+                            SEARCH_LABEL_LANE,
+                            injected_reviewer=injected_reviewer,
+                        )
+                    )
+                    hold_error = current_error or (
+                        decision_authority.compare_semantic_authority(
+                            authority,
+                            current_authority,
+                            lane=SEARCH_LABEL_LANE,
+                        )
+                    )
+                    if hold_error is not None:
+                        raise ValueError(hold_error)
+                    hold = build_semantic_no_quorum_hold(
+                        SEARCH_LABEL_LANE,
+                        _label_semantic_epoch(row),
+                        authority,
+                        semantic_review,
+                    )
+            except (TypeError, ValueError) as exc:
+                hold_error = str(exc)
+            attempted += 1
+            if hold is None:
+                updated_rows.append(
+                    authority_retry(
+                        row,
+                        hold_error or "search label semantic hold authority invalid",
+                    )
+                )
+                status_counts["frontier_retry"] = (
+                    status_counts.get("frontier_retry", 0) + 1
+                )
+                continue
+            updated = dict(row)
+            _restore_label_semantic_hold(
+                updated,
+                hold=hold,
+                reviewed_at=reviewed_at,
+            )
+            updated["frontier_attempts"] = int(row.get("frontier_attempts") or 0) + 1
+            updated["last_attempt_at"] = reviewed_at
+            updated_rows.append(updated)
+            status_counts["semantic_hold"] = status_counts.get("semantic_hold", 0) + 1
+            continue
         combined = _combine_frontier_label_reviews(
             reviews, min_confidence=min_confidence
         )
@@ -1949,6 +2147,10 @@ def review_label_queue_with_frontier(
             "frontier_attempts": frontier_attempts,
             "last_attempt_at": reviewed_at,
         }
+        if next_status in {"frontier_approved", "frontier_rejected"}:
+            updated.pop("semantic_hold", None)
+            updated.pop("semantic_hold_history", None)
+            updated.pop("last_failure_class", None)
 
         if next_status in {"frontier_retry", "frontier_uncertain"}:
             delay = max(0, backoff_base_seconds) * (2 ** max(0, frontier_attempts - 1))
@@ -2181,6 +2383,45 @@ def _self_tune_review_evidence(record: Mapping[str, Any]) -> dict[str, Any]:
         "previous_sha256": record.get("previous_policy_sha256"),
         "previous_summary": record.get("previous_policy_summary", {}),
     }
+
+
+def _self_tune_semantic_epoch(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "artifact_schema_version": SEARCH_REVIEW_ARTIFACT_SCHEMA_VERSION,
+        "evidence_sha256": _canonical_json_sha256(dict(evidence)),
+    }
+
+
+def _persisted_self_tune_hold(
+    history: list[dict[str, Any]],
+    *,
+    epoch: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    """Find an exact old epoch in append-only history, including A-B-A."""
+
+    saw_marker = False
+    for row in reversed(history):
+        if not _has_semantic_no_quorum_marker(row):
+            continue
+        saw_marker = True
+        hold = persisted_semantic_no_quorum_hold(row, lane=SEARCH_SELF_TUNE_LANE)
+        if hold is None:
+            return "malformed", None
+        error = semantic_no_quorum_hold_error(
+            hold,
+            SEARCH_SELF_TUNE_LANE,
+            epoch=epoch,
+            authority=authority,
+        )
+        if error is None:
+            return "same", hold
+        if error not in {
+            "semantic hold epoch changed",
+            "semantic hold authority changed",
+        }:
+            return "malformed", None
+    return ("changed", None) if saw_marker else ("none", None)
 
 
 def _self_tune_artifact_error(
@@ -2516,96 +2757,172 @@ def self_tune(
                 "search policy mutation requires local semantic authority"
             )
         else:
-            allowed = True
-            if budget is not None:
-                allowed, _reason = budget.consume("frontier")
-            if not allowed:
-                record["status"] = "budget_deferred"
-                record["reason"] = "frontier cycle budget exhausted"
-            else:
-                with decision_authority_lock():
-                    authority, authority_error = (
-                        decision_authority.current_semantic_authority(
-                            SEARCH_SELF_TUNE_LANE,
-                            injected_reviewer=injected_reviewer,
-                        )
+            semantic_evidence = _self_tune_review_evidence(record)
+            semantic_epoch = _self_tune_semantic_epoch(semantic_evidence)
+            prior_history = read_jsonl(history_file)
+            with decision_authority_lock():
+                authority, authority_error = (
+                    decision_authority.current_semantic_authority(
+                        SEARCH_SELF_TUNE_LANE,
+                        injected_reviewer=injected_reviewer,
                     )
-                if authority_error is not None or authority is None:
+                )
+            if authority_error is not None or authority is None:
+                prior_markers = [
+                    row
+                    for row in reversed(prior_history)
+                    if _has_semantic_no_quorum_marker(row)
+                ]
+                if prior_markers:
+                    prior_hold = persisted_semantic_no_quorum_hold(
+                        prior_markers[0], lane=SEARCH_SELF_TUNE_LANE
+                    )
+                    record["status"] = (
+                        "semantic_hold"
+                        if prior_hold is not None
+                        else "semantic_hold_malformed"
+                    )
+                    record["semantic_hold"] = prior_hold
+                    record["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+                    record["reason"] = (
+                        "semantic authority unavailable; retaining durable hold"
+                    )
+                else:
                     record["status"] = "frontier_retry"
                     record["reason"] = (
                         authority_error or "search self-tune authority unavailable"
                     )
+            else:
+                hold_state, prior_hold = _persisted_self_tune_hold(
+                    prior_history,
+                    epoch=semantic_epoch,
+                    authority=authority,
+                )
+                if hold_state in {"same", "malformed"}:
+                    record["status"] = (
+                        "semantic_hold"
+                        if hold_state == "same"
+                        else "semantic_hold_malformed"
+                    )
+                    record["semantic_hold"] = prior_hold
+                    record["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+                    record["reason"] = (
+                        "local semantic models did not reach a safe quorum"
+                        if hold_state == "same"
+                        else "malformed local semantic no-quorum hold; refusing resample"
+                    )
                 else:
-                    try:
-                        frontier = (
-                            frontier_reviewer(record)
-                            if frontier_reviewer is not None
-                            else review_search_policy_with_frontier(record)
-                        )
-                    except Exception as exc:
-                        frontier = {
-                            "decision": "needs_retry",
-                            "summary": (
-                                "search policy reviewer failed: "
-                                f"{exc.__class__.__name__}: {exc}"
-                            ),
-                        }
-                    record["frontier_review"] = frontier
-                    semantic_evidence = _self_tune_review_evidence(record)
-                    with decision_authority_lock():
-                        current_authority, current_error = (
-                            decision_authority.current_semantic_authority(
-                                SEARCH_SELF_TUNE_LANE,
-                                injected_reviewer=injected_reviewer,
-                            )
-                        )
-                        authority_error = current_error or (
-                            decision_authority.compare_semantic_authority(
-                                authority,
-                                current_authority,
-                                lane=SEARCH_SELF_TUNE_LANE,
-                            )
-                        )
-                        authority_error = authority_error or (
-                            decision_authority.semantic_verdict_authority_error(
-                                frontier,
-                                authority,
-                                lane=SEARCH_SELF_TUNE_LANE,
-                            )
-                        )
-                        if authority_error is None:
-                            semantic_artifact = _seal_search_review(
-                                kind="search_self_tune_verdict",
-                                lane=SEARCH_SELF_TUNE_LANE,
-                                evidence=semantic_evidence,
-                                review=frontier,
-                                authority=authority,
-                            )
-                    if authority_error is not None or semantic_artifact is None:
-                        record["status"] = "frontier_retry"
-                        record["reason"] = (
-                            authority_error
-                            or "search self-tune verdict authority invalid"
-                        )
+                    allowed = True
+                    if budget is not None:
+                        allowed, _reason = budget.consume("frontier")
+                    if not allowed:
+                        record["status"] = "budget_deferred"
+                        record["reason"] = "frontier cycle budget exhausted"
                     else:
-                        record["decision_artifact"] = semantic_artifact
-                        if is_human_required_result(frontier):
-                            record["status"] = "human_required"
-                            record["reason"] = str(
-                                frontier.get("summary")
-                                or "frontier access requires external authority"
+                        try:
+                            frontier = (
+                                frontier_reviewer(record)
+                                if frontier_reviewer is not None
+                                else review_search_policy_with_frontier(record)
                             )
-                        elif frontier.get("decision") != "approved":
-                            record["status"] = (
-                                "frontier_rejected"
-                                if frontier.get("decision")
-                                in {"rejected", "quarantined"}
-                                else "frontier_retry"
-                            )
-                            record["reason"] = str(
-                                frontier.get("summary")
-                                or "frontier did not approve search policy"
-                            )
+                        except Exception as exc:
+                            frontier = {
+                                "decision": "needs_retry",
+                                "summary": (
+                                    "search policy reviewer failed: "
+                                    f"{exc.__class__.__name__}: {exc}"
+                                ),
+                            }
+                        if is_local_semantic_no_quorum(frontier):
+                            try:
+                                with decision_authority_lock():
+                                    current_authority, current_error = (
+                                        decision_authority.current_semantic_authority(
+                                            SEARCH_SELF_TUNE_LANE,
+                                            injected_reviewer=injected_reviewer,
+                                        )
+                                    )
+                                    hold_error = current_error or (
+                                        decision_authority.compare_semantic_authority(
+                                            authority,
+                                            current_authority,
+                                            lane=SEARCH_SELF_TUNE_LANE,
+                                        )
+                                    )
+                                    if hold_error is not None:
+                                        raise ValueError(hold_error)
+                                    semantic_hold = build_semantic_no_quorum_hold(
+                                        SEARCH_SELF_TUNE_LANE,
+                                        semantic_epoch,
+                                        authority,
+                                        frontier,
+                                    )
+                            except (TypeError, ValueError) as exc:
+                                record["status"] = "frontier_retry"
+                                record["reason"] = str(exc)
+                            else:
+                                record["status"] = "semantic_hold"
+                                record["reason"] = (
+                                    "local semantic models did not reach a safe quorum"
+                                )
+                                record["semantic_hold"] = semantic_hold
+                                record["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+                        else:
+                            record["frontier_review"] = frontier
+                            with decision_authority_lock():
+                                current_authority, current_error = (
+                                    decision_authority.current_semantic_authority(
+                                        SEARCH_SELF_TUNE_LANE,
+                                        injected_reviewer=injected_reviewer,
+                                    )
+                                )
+                                authority_error = current_error or (
+                                    decision_authority.compare_semantic_authority(
+                                        authority,
+                                        current_authority,
+                                        lane=SEARCH_SELF_TUNE_LANE,
+                                    )
+                                )
+                                authority_error = authority_error or (
+                                    decision_authority.semantic_verdict_authority_error(
+                                        frontier,
+                                        authority,
+                                        lane=SEARCH_SELF_TUNE_LANE,
+                                    )
+                                )
+                                if authority_error is None:
+                                    semantic_artifact = _seal_search_review(
+                                        kind="search_self_tune_verdict",
+                                        lane=SEARCH_SELF_TUNE_LANE,
+                                        evidence=semantic_evidence,
+                                        review=frontier,
+                                        authority=authority,
+                                    )
+                            if authority_error is not None or semantic_artifact is None:
+                                record["status"] = "frontier_retry"
+                                record["reason"] = (
+                                    authority_error
+                                    or "search self-tune verdict authority invalid"
+                                )
+                            else:
+                                record["decision_artifact"] = semantic_artifact
+                                if is_human_required_result(frontier):
+                                    record["status"] = "human_required"
+                                    record["reason"] = str(
+                                        frontier.get("summary")
+                                        or "frontier access requires external authority"
+                                    )
+                                elif frontier.get("decision") != "approved":
+                                    record["status"] = (
+                                        "frontier_rejected"
+                                        if frontier.get("decision")
+                                        in {"rejected", "quarantined"}
+                                        else "frontier_retry"
+                                    )
+                                    record["reason"] = str(
+                                        frontier.get("summary")
+                                        or "frontier did not approve search policy"
+                                    )
         if record["status"] == "shadow_pass" and semantic_artifact is not None:
             artifact = {
                 "version": 1,

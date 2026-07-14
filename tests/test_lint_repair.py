@@ -13,10 +13,25 @@ from llm_wiki_mcp.convergence import CycleBudget, ConvergenceStore, RetryPolicy
 from llm_wiki_mcp.decision_router import canonical_agreement_signature
 from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 VALID_TAGS = ["d/tools-config", "t/howto", "s/evergreen"]
+
+
+@pytest.fixture(autouse=True)
+def isolate_decision_authority_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import page_mutation
+
+    monkeypatch.setattr(
+        page_mutation,
+        "DECISION_AUTHORITY_LOCK",
+        tmp_path / "runtime" / "decision-authority.lock",
+    )
 
 
 def _semantic_authority(digest: str) -> dict:
@@ -92,6 +107,23 @@ def _authority_bound_tag_decision(
         value["tags"] = []
     value["local_consensus"] = _local_consensus_proof(value, authority)
     return value
+
+
+def _semantic_no_quorum_tag_decision(authority: dict) -> dict:
+    review = semantic_review(
+        authority,
+        lane=lint_repair.TAG_REPAIR_DECISION_LANE,
+    )
+    return {
+        "decision": "needs_retry",
+        "tags": [],
+        "reason": review["summary"],
+        "reviewer": review["reviewer"],
+        "frontier_failure": review["frontier_failure"],
+        "human_required": False,
+        "decision_policy": review["decision_policy"],
+        "local_consensus": review["local_consensus"],
+    }
 
 
 def test_default_local_reviewer_repairs_schema_error_in_same_session(
@@ -741,6 +773,86 @@ def test_frontier_rejection_is_terminal_and_does_not_mutate_page(
     assert page_path.read_text(encoding="utf-8") == original
     assert item["status"] == "rejected"
     assert item["result"]["action"] == "tag_repair_rejected"
+
+
+def test_tag_no_quorum_reuses_hold_until_exact_authority_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page_id = "semantic-split"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    original = _page(page_path)
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, [_row(page_id)])
+    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    store = _store(tmp_path)
+    authority_a = semantic_authority(
+        lint_repair.TAG_REPAIR_DECISION_LANE,
+        schema_name="lint_tag_repair",
+    )
+    authority_b = semantic_authority(
+        lint_repair.TAG_REPAIR_DECISION_LANE,
+        schema_name="lint_tag_repair",
+        artifact_sha256="9" * 64,
+    )
+    current = [authority_a]
+    monkeypatch.setattr(
+        lint_repair,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (current[0], None),
+    )
+    calls = 0
+
+    def frontier(_prompt: str, _schema: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        return _semantic_no_quorum_tag_decision(current[0])
+
+    kwargs = {
+        "queue_file": queue_path,
+        "store": store,
+        "local_reviewer": lambda _prompt, _schema: {
+            "decision": "approved",
+            "tags": VALID_TAGS,
+            "reason": "exact local proposal",
+        },
+        "frontier_reviewer": frontier,
+    }
+    first = lint_repair.run_lint_repair(**kwargs, now=NOW)
+    same_epoch = lint_repair.run_lint_repair(
+        **kwargs,
+        now=NOW + timedelta(seconds=1),
+    )
+    current[0] = authority_b
+    changed_authority = lint_repair.run_lint_repair(
+        **kwargs,
+        now=NOW + timedelta(seconds=2),
+    )
+    current[0] = authority_a
+    restored_authority = lint_repair.run_lint_repair(
+        **{
+            **kwargs,
+            "frontier_reviewer": lambda _prompt, _schema: (_ for _ in ()).throw(
+                AssertionError("A-B-A must restore the A hold without resampling")
+            ),
+        },
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert first["quarantined"] == 1
+    assert first["deferred"] == 0
+    assert same_epoch["terminal_skipped"] == 1
+    assert changed_authority["quarantined"] == 1
+    assert restored_authority["quarantined"] == 1
+    assert restored_authority["results"][0]["restored_semantic_hold"] is True
+    assert calls == 2
+    item = store.list_items()[0]
+    assert item["frontier_attempts"] == 0
+    assert item["result"]["semantic_hold"]["authority"] == authority_a
+    assert [hold["authority"] for hold in item["result"]["semantic_hold_history"]] == [
+        authority_b
+    ]
+    assert page_path.read_text(encoding="utf-8") == original
 
 
 def test_frontier_auth_failure_is_the_only_kind_that_requires_a_human(

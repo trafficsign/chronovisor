@@ -15,7 +15,24 @@ from pathlib import Path
 import pytest
 
 from llm_wiki_mcp.decision_router import canonical_agreement_signature
-from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
+from llm_wiki_mcp.decision_schema_manifest import (
+    production_decision_schemas,
+    schema_sha256,
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_decision_authority_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import page_mutation
+
+    monkeypatch.setattr(
+        page_mutation,
+        "DECISION_AUTHORITY_LOCK",
+        tmp_path / "runtime" / "decision-authority.lock",
+    )
 
 
 @pytest.fixture()
@@ -150,6 +167,82 @@ def _authority_bound_decision(decision: str, authority: dict) -> dict:
     return value
 
 
+def _authority_bound_semantic_no_quorum(authority: dict) -> dict:
+    reason = "local_models_did_not_reach_two_vote_quorum"
+    schema = production_decision_schemas()[authority["policy"]["schema_name"]]
+
+    def vote(role: str, model: str, digit: str) -> dict:
+        return {
+            "role": role,
+            "model": model,
+            "requested_num_ctx": 32768,
+            "valid": True,
+            "signature_sha256": digit * 64,
+            "invalid_reason": None,
+            "runtime_observation": {
+                "status": "observed",
+                "model_size_bytes": 1024,
+                "num_ctx": 32768,
+            },
+            "session": {
+                "ok": True,
+                "model": model,
+                "failure_class": None,
+                "first_pass_valid": True,
+                "repair_turns": 0,
+                "attempts": [
+                    {
+                        "index": 1,
+                        "valid": True,
+                        "output_sha256": digit * 64,
+                        "output_chars": 16,
+                        "normalized": False,
+                        "error_fingerprint": None,
+                        "issues": [],
+                    }
+                ],
+            },
+        }
+
+    value = _frontier_decision("needs_retry", reason)
+    value.update(
+        {
+            "reviewer": "local_consensus",
+            "human_required": False,
+            "frontier_failure": {
+                "failure_class": "local_semantic_no_quorum",
+                "rescue_status": "local_quarantined",
+                "summary": reason,
+                "human_required": False,
+                "notify_user": False,
+            },
+            "decision_policy": {
+                "lane": authority["lane"],
+                **authority["policy"],
+                "expected_schema_sha256": schema_sha256(schema),
+                "actual_schema_sha256": schema_sha256(schema),
+                "router_policy": authority["router"],
+            },
+            "local_consensus": {
+                "status": "quarantined",
+                "ok": False,
+                "quorum_safety_policy_version": 1,
+                "agreement_sha256": None,
+                "failure_class": "local_consensus_failed",
+                "quarantine_reason": reason,
+                "num_ctx": 32768,
+                "residency": {},
+                "votes": [
+                    vote("primary", authority["router"]["models"][0], "a"),
+                    vote("challenger", authority["router"]["models"][1], "b"),
+                    vote("tie_break", authority["router"]["models"][2], "c"),
+                ],
+            },
+        }
+    )
+    return value
+
+
 @pytest.mark.parametrize(
     "lane",
     [
@@ -206,6 +299,147 @@ def test_shared_semantic_review_preserves_local_consensus_artifact(
     artifact = next((artifact_dir / "frontier-verdicts").glob("*.json"))
     stored = json.loads(artifact.read_text(encoding="utf-8"))
     assert stored["verdict"]["local_consensus"] == reviewed["local_consensus"]
+
+
+@pytest.mark.parametrize(
+    "lane",
+    [
+        "entity_backfill",
+        "lint_safe_semantic_mutation",
+        "metadata_backfill",
+        "page_normalize",
+    ],
+)
+def test_shared_semantic_no_quorum_is_exact_epoch_hold_with_aba_reuse(
+    lane: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import lint as lint_mod
+
+    authority_a = _semantic_authority(lane, "a" * 64)
+    authority_b = _semantic_authority(lane, "b" * 64)
+    active = [authority_a]
+    monkeypatch.setattr(
+        lint_mod,
+        "current_semantic_authority",
+        lambda _lane, *, injected_reviewer=False: (active[0], None),
+    )
+    proposal = lint_mod.build_semantic_mutation_proposal(
+        page_id="p",
+        operation="shared_lane_test",
+        expected_text="before",
+        updated_text="after",
+        details={"lane": lane},
+    )
+    calls = 0
+
+    def split(_prompt, _schema):
+        nonlocal calls
+        calls += 1
+        return _authority_bound_semantic_no_quorum(active[0])
+
+    def run() -> dict:
+        return lint_mod.review_semantic_mutation(
+            proposal,
+            expected_text="before",
+            updated_text="after",
+            reviewer=split,
+            artifact_dir=tmp_path / lane,
+            decision_lane=lane,
+        )
+
+    first = run()
+    same_epoch = run()
+    active[0] = authority_b
+    changed_authority = run()
+    active[0] = authority_a
+    rolled_back = run()
+
+    assert calls == 2
+    assert first["semantic_hold"]["authority"] == authority_a
+    assert same_epoch["reused"] is True
+    assert changed_authority["semantic_hold"]["authority"] == authority_b
+    assert rolled_back["reused"] is True
+    assert rolled_back["semantic_hold"] == first["semantic_hold"]
+    assert len(list((tmp_path / lane / "semantic-holds").glob("*.json"))) == 2
+
+
+def test_shared_semantic_no_quorum_hold_changes_with_exact_proposal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import lint as lint_mod
+
+    lane = "lint_safe_semantic_mutation"
+    authority = _semantic_authority(lane, "a" * 64)
+    monkeypatch.setattr(
+        lint_mod,
+        "current_semantic_authority",
+        lambda _lane, *, injected_reviewer=False: (authority, None),
+    )
+    calls = 0
+
+    def split(_prompt, _schema):
+        nonlocal calls
+        calls += 1
+        return _authority_bound_semantic_no_quorum(authority)
+
+    for updated in ("after-one", "after-two"):
+        proposal = lint_mod.build_semantic_mutation_proposal(
+            page_id="p",
+            operation="shared_lane_test",
+            expected_text="before",
+            updated_text=updated,
+            details={},
+        )
+        lint_mod.review_semantic_mutation(
+            proposal,
+            expected_text="before",
+            updated_text=updated,
+            reviewer=split,
+            artifact_dir=tmp_path,
+            decision_lane=lane,
+        )
+    assert calls == 2
+
+
+def test_shared_operational_review_failure_is_not_a_semantic_hold(
+    tmp_path: Path,
+) -> None:
+    from llm_wiki_mcp import lint as lint_mod
+
+    proposal = lint_mod.build_semantic_mutation_proposal(
+        page_id="p",
+        operation="shared_lane_test",
+        expected_text="before",
+        updated_text="after",
+        details={},
+    )
+    calls = 0
+
+    def unavailable(_prompt, _schema):
+        nonlocal calls
+        calls += 1
+        return {
+            **_frontier_decision("needs_retry"),
+            "frontier_failure": {
+                "failure_class": "local_resource_quarantined",
+            },
+        }
+
+    for _ in range(2):
+        lint_mod.review_semantic_mutation(
+            proposal,
+            expected_text="before",
+            updated_text="after",
+            reviewer=unavailable,
+            artifact_dir=tmp_path,
+            decision_lane="lint_safe_semantic_mutation",
+            injected_reviewer=True,
+        )
+    assert calls == 2
+    assert not (tmp_path / "semantic-holds").exists()
 
 
 # ---------------------------------------------------------------------------

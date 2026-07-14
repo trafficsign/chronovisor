@@ -144,6 +144,14 @@ def _valid_jsonl_rows(path: Path) -> list[dict]:
     return rows
 
 
+def _snapshot_tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 def _event(page_id: str = "memory") -> dict:
     return {
         "schema_version": 1,
@@ -220,6 +228,81 @@ def _approve_mutations(bundle: dict) -> dict:
     }
 
 
+def _semantic_no_quorum_review(bundle: dict) -> dict:
+    return {
+        "decision": "needs_retry",
+        "confidence": 0.0,
+        "summary": "local_models_did_not_reach_two_vote_quorum",
+        "classification": "ambiguous",
+        "source_decision_id": str(bundle["event"].get("source_decision_id") or ""),
+        "candidate_pages": list(bundle.get("candidate_pages") or []),
+        "ignored_pages": [],
+        "semantic_checks": {key: False for key in CLASSIFICATION_CHECKS},
+        "frontier_failure": {
+            "failure_class": "local_semantic_no_quorum",
+            "status": "local_quarantined",
+            "reason": "local_models_did_not_reach_two_vote_quorum",
+            "human_required": False,
+        },
+        "local_consensus": {
+            "status": "quarantined",
+            "ok": False,
+            "agreement_sha256": None,
+            "failure_class": "local_consensus_failed",
+            "quarantine_reason": "local_models_did_not_reach_two_vote_quorum",
+            "votes": [
+                {
+                    "role": role,
+                    "model": model,
+                    "valid": True,
+                    "signature_sha256": signature * 64,
+                    "invalid_reason": None,
+                }
+                for role, model, signature in (
+                    ("primary", "model-a", "a"),
+                    ("challenger", "model-b", "b"),
+                    ("tie_break", "model-c", "c"),
+                )
+            ],
+        },
+    }
+
+
+def _semantic_no_quorum_review_with_authority(
+    bundle: dict,
+    authority: dict,
+) -> dict:
+    review = _semantic_no_quorum_review(bundle)
+    review["decision_policy"] = {
+        **dict(authority["policy"]),
+        "router_policy": dict(authority["router"]),
+    }
+    return review
+
+
+def _adopted_authority(lane: str, *, artifact_digit: str = "d") -> dict:
+    return {
+        "source": "adopted_local_consensus",
+        "authority_version": 1,
+        "lane": lane,
+        "lane_contract_sha256": "a" * 64,
+        "lane_contract_manifest_sha256": "b" * 64,
+        "lane_contract_case_manifest_sha256": "c" * 64,
+        "policy": {
+            "kind": "consensus",
+            "schema_name": lane,
+            "mode": "enabled",
+            "error": None,
+        },
+        "router": {
+            "source": "adopted_artifact",
+            "artifact_sha256": artifact_digit * 64,
+            "error": None,
+            "models": ["model-a", "model-b", "model-c"],
+        },
+    }
+
+
 def _patch_page_lookup(monkeypatch, pages: Path) -> None:
     def lookup(page_id: str) -> Path | None:
         candidate = pages / f"{page_id}.md"
@@ -230,6 +313,11 @@ def _patch_page_lookup(monkeypatch, pages: Path) -> None:
         page_mutation,
         "WIKI_MUTATION_LOCK",
         pages.parent / "runtime" / "wiki-mutation.lock",
+    )
+    monkeypatch.setattr(
+        page_mutation,
+        "DECISION_AUTHORITY_LOCK",
+        pages.parent / "runtime" / "decision-authority.lock",
     )
     monkeypatch.setattr(page_mutation, "find_page", lookup)
     monkeypatch.setattr(content_correction, "find_page", lookup)
@@ -3050,6 +3138,1035 @@ def test_patch_rejection_revalidates_review_authority_before_requeue(
     assert len(store.list_items()) == 1
     assert store.get(merged["item"]["key"])["status"] != "rejected"
     assert page.read_bytes() == before
+
+
+def _create_classification_semantic_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, ConvergenceStore, str, dict]:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: json.dumps(
+            {
+                "decision": "ambiguous",
+                "confidence": 0.4,
+                "reason": "The correction class needs semantic review.",
+                "proposals": [],
+            }
+        ),
+        reviewer=_semantic_no_quorum_review,
+    )
+    return page, store, str(merged["item"]["key"]), result
+
+
+def _prepare_pending_frontier(
+    *,
+    store: ConvergenceStore,
+    key: str,
+    proposal: dict,
+) -> None:
+    item = store.get(key)
+    assert item is not None
+    local = content_correction._process_local_item(
+        item,
+        store=store,
+        budget=None,
+        generate_fn=lambda *_args, **_kwargs: json.dumps(
+            proposal,
+            ensure_ascii=False,
+        ),
+        dry_run=False,
+    )
+    assert local["status"] == "pending_frontier"
+
+
+def _create_review_semantic_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    authority: dict,
+) -> tuple[Path, ConvergenceStore, str, dict]:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    before = page.read_bytes()
+    _patch_page_lookup(monkeypatch, pages)
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_review_authority",
+        lambda **_kwargs: (dict(authority), None),
+    )
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+
+    def reviewer(bundle: dict) -> dict:
+        if bundle.get("review_kind") == "triage":
+            return _approve_mutations(bundle)
+        return _semantic_no_quorum_review_with_authority(bundle, authority)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: json.dumps(
+            _ram_proposal(hashlib.sha256(before).hexdigest()),
+            ensure_ascii=False,
+        ),
+        reviewer=reviewer,
+    )
+    key = str(merged["item"]["key"])
+    item = store.get(key)
+    assert result["results"][-1]["terminal_reason"] == "semantic_no_quorum"
+    assert item["result"]["semantic_hold"]["decision_lane"] == (
+        content_correction.REVIEW_LANE
+    )
+    return page, store, key, dict(item["result"]["semantic_hold"])
+
+
+def test_local_semantic_no_quorum_is_terminal_before_authority_proof_and_cooldown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        content_correction,
+        "_classification_authority_error",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a non-decision must not enter success-proof validation")
+        ),
+    )
+    page, store, key, result = _create_classification_semantic_hold(
+        tmp_path,
+        monkeypatch,
+    )
+
+    assert result["results"][-1] == {
+        "key": key,
+        "status": "quarantined",
+        "error": "local_models_did_not_reach_two_vote_quorum",
+        "failure_class": "local_semantic_no_quorum",
+        "terminal_reason": "semantic_no_quorum",
+    }
+    item = store.get(key)
+    assert item is not None
+    assert item["status"] == "quarantined"
+    assert item["frontier_attempts"] == 1
+    assert item["last_failure_class"] == "local_semantic_no_quorum"
+    assert item["quarantine_reason"] == (
+        "semantic_no_quorum:content_correction_classification"
+    )
+    hold = item["result"]["semantic_hold"]
+    assert hold["resolver_version"] == content_correction.RESOLVER_VERSION
+    assert hold["page_evidence_hashes"] == {
+        "memory": hashlib.sha256(page.read_bytes()).hexdigest()
+    }
+    assert not content_correction._triage_path(key).exists()
+    assert not content_correction.CONTENT_FEEDBACK_FILE.exists()
+
+    monkeypatch.setenv(content_correction.QUARANTINE_RETRY_ENV, "0")
+    second = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=_semantic_no_quorum_review,
+    )
+
+    assert second["resumed_quarantined"] == []
+    assert second["results"] == []
+    assert store.get(key) == item
+
+
+@pytest.mark.parametrize("changed_epoch", ["evidence", "resolver"])
+def test_semantic_hold_reopens_local_only_for_changed_input_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_epoch: str,
+) -> None:
+    page, store, key, _result = _create_classification_semantic_hold(
+        tmp_path,
+        monkeypatch,
+    )
+    if changed_epoch == "evidence":
+        page.write_text(
+            "---\ntitle: Memory\n---\nInstalled RAM is 32GB.\n",
+            encoding="utf-8",
+        )
+    else:
+        monkeypatch.setattr(content_correction, "RESOLVER_VERSION", "next-resolver")
+
+    resumed = content_correction._resume_due_quarantined_corrections(
+        store,
+        dry_run=False,
+        reviewer=_semantic_no_quorum_review,
+    )
+
+    assert resumed == [
+        {
+            "key": key,
+            "status": "pending_local",
+            "stage": "local",
+            "reason": "semantic_hold_epoch_changed",
+            "archived_artifacts": [],
+            "dry_run": False,
+        }
+    ]
+    assert store.get(key)["status"] == "pending_local"
+
+
+def test_semantic_hold_reopens_frontier_when_adopted_authority_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _page, store, key, _result = _create_classification_semantic_hold(
+        tmp_path,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_classification_authority",
+        lambda **_kwargs: (
+            _adopted_authority(content_correction.CLASSIFICATION_LANE),
+            None,
+        ),
+    )
+
+    resumed = content_correction._resume_due_quarantined_corrections(
+        store,
+        dry_run=False,
+    )
+
+    assert resumed[0]["key"] == key
+    assert resumed[0]["status"] == "pending_frontier"
+    assert resumed[0]["stage"] == "frontier"
+    assert resumed[0]["reason"] == "semantic_hold_epoch_changed"
+    assert store.get(key)["status"] == "pending_frontier"
+
+
+def test_mutation_review_semantic_no_quorum_holds_without_page_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    before = page.read_bytes()
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+
+    def reviewer(bundle: dict) -> dict:
+        if bundle.get("review_kind") == "triage":
+            return _approve_mutations(bundle)
+        return _semantic_no_quorum_review(bundle)
+
+    monkeypatch.setattr(
+        content_correction,
+        "_review_authority_error",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a non-decision must not enter success-proof validation")
+        ),
+    )
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: json.dumps(
+            _ram_proposal(hashlib.sha256(before).hexdigest()),
+            ensure_ascii=False,
+        ),
+        reviewer=reviewer,
+    )
+
+    key = str(merged["item"]["key"])
+    item = store.get(key)
+    assert result["results"][-1]["terminal_reason"] == "semantic_no_quorum"
+    assert item["result"]["semantic_hold"]["decision_lane"] == (
+        content_correction.REVIEW_LANE
+    )
+    assert item["last_failure_class"] == "local_semantic_no_quorum"
+    assert page.read_bytes() == before
+    assert not content_correction._review_path(key).exists()
+
+
+def test_classification_semantic_hold_dry_run_is_byte_identical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    key = str(merged["item"]["key"])
+    _prepare_pending_frontier(
+        store=store,
+        key=key,
+        proposal={
+            "decision": "ambiguous",
+            "confidence": 0.4,
+            "reason": "The correction class needs semantic review.",
+            "proposals": [],
+        },
+    )
+    before = _snapshot_tree_bytes(tmp_path)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=_semantic_no_quorum_review,
+        eligible_keys={key},
+        dry_run=True,
+    )
+
+    terminal = result["results"][-1]
+    assert terminal["status"] == "dry_run"
+    assert terminal["projected_status"] == "quarantined"
+    assert terminal["terminal_reason"] == "semantic_no_quorum"
+    assert terminal["result"]["semantic_hold"]["decision_lane"] == (
+        content_correction.CLASSIFICATION_LANE
+    )
+    assert _snapshot_tree_bytes(tmp_path) == before
+    assert store.get(key)["status"] == "pending_frontier"
+
+
+def test_mutation_semantic_hold_dry_run_is_byte_identical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    before_page = page.read_bytes()
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    key = str(merged["item"]["key"])
+    _prepare_pending_frontier(
+        store=store,
+        key=key,
+        proposal=_ram_proposal(hashlib.sha256(before_page).hexdigest()),
+    )
+    prepared = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        budget=CycleBudget(
+            max_local_calls=0,
+            max_frontier_calls=1,
+            max_mutations=1,
+        ),
+        reviewer=_approve_mutations,
+        eligible_keys={key},
+    )
+    assert prepared["results"][-1]["status"] == "frontier_retry"
+    assert content_correction._triage_path(key).exists()
+    before = _snapshot_tree_bytes(tmp_path)
+
+    def reviewer(bundle: dict) -> dict:
+        assert bundle.get("review_kind") != "triage"
+        return _semantic_no_quorum_review(bundle)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=reviewer,
+        eligible_keys={key},
+        dry_run=True,
+    )
+
+    terminal = result["results"][-1]
+    assert terminal["status"] == "dry_run"
+    assert terminal["projected_status"] == "quarantined"
+    assert terminal["result"]["semantic_hold"]["decision_lane"] == (
+        content_correction.REVIEW_LANE
+    )
+    assert _snapshot_tree_bytes(tmp_path) == before
+    assert store.get(key)["status"] == "frontier_retry"
+    assert page.read_bytes() == before_page
+
+
+@pytest.mark.parametrize(
+    "triage_case",
+    ["rejected", "needs_retry", "unsupported", "mismatch", "invalid_artifact"],
+)
+def test_saved_triage_dry_run_never_crosses_mutating_branches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    triage_case: str,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    key = str(merged["item"]["key"])
+    proposal = _ram_proposal(hashlib.sha256(page.read_bytes()).hexdigest())
+    _prepare_pending_frontier(store=store, key=key, proposal=proposal)
+    item = store.get(key)
+    assert item is not None
+    event = item["metadata"]
+    page_hashes = {"memory": hashlib.sha256(page.read_bytes()).hexdigest()}
+    review = _approve_mutations(
+        {
+            "review_kind": "triage",
+            "proposal": proposal,
+            "event": event,
+            "candidate_pages": ["memory"],
+            "mutations": [],
+        }
+    )
+    if triage_case in {"rejected", "needs_retry"}:
+        review["decision"] = triage_case
+    elif triage_case == "unsupported":
+        review["classification"] = "unsupported"
+    elif triage_case == "mismatch":
+        review["classification"] = "outdated"
+    authority = content_correction._current_content_classification_authority(
+        reviewer=lambda _bundle: review
+    )[0]
+    assert authority is not None
+    artifact = content_correction._classification_review_artifact_payload(
+        key,
+        proposal,
+        event,
+        review,
+        page_hashes,
+        authority,
+    )
+    if triage_case == "invalid_artifact":
+        artifact["key"] = "wrong-key"
+    content_correction._write_json_atomic(
+        content_correction._triage_path(key),
+        artifact,
+    )
+    before = _snapshot_tree_bytes(tmp_path)
+
+    def unexpected_reviewer(_bundle: dict) -> dict:
+        raise AssertionError("saved non-continuable triage must not sample a model")
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=unexpected_reviewer,
+        eligible_keys={key},
+        dry_run=True,
+    )
+
+    assert result["results"][-1]["status"] == "dry_run"
+    assert _snapshot_tree_bytes(tmp_path) == before
+    assert store.get(key)["status"] == "pending_frontier"
+
+
+def test_classification_no_quorum_cannot_cross_inflight_authority_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "memory.md").write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    key = str(merged["item"]["key"])
+    _prepare_pending_frontier(
+        store=store,
+        key=key,
+        proposal={
+            "decision": "ambiguous",
+            "confidence": 0.4,
+            "reason": "The correction class needs semantic review.",
+            "proposals": [],
+        },
+    )
+    authorities = iter(
+        [
+            _adopted_authority(
+                content_correction.CLASSIFICATION_LANE,
+                artifact_digit="a",
+            ),
+            _adopted_authority(
+                content_correction.CLASSIFICATION_LANE,
+                artifact_digit="b",
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_classification_authority",
+        lambda **_kwargs: (next(authorities), None),
+    )
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=_semantic_no_quorum_review,
+        eligible_keys={key},
+    )
+
+    terminal = result["results"][-1]
+    assert terminal["status"] == "frontier_retry"
+    assert terminal["error"] == "decision authority changed before effect"
+    item = store.get(key)
+    assert item["last_failure_class"] == "review_artifact_invalid"
+    assert item["result"] is None
+
+
+def test_mutation_no_quorum_cannot_cross_inflight_authority_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    before = page.read_bytes()
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    key = str(merged["item"]["key"])
+    _prepare_pending_frontier(
+        store=store,
+        key=key,
+        proposal=_ram_proposal(hashlib.sha256(before).hexdigest()),
+    )
+    authorities = iter(
+        [
+            _adopted_authority(content_correction.REVIEW_LANE, artifact_digit="a"),
+            _adopted_authority(content_correction.REVIEW_LANE, artifact_digit="b"),
+        ]
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_review_authority",
+        lambda **_kwargs: (next(authorities), None),
+    )
+
+    def reviewer(bundle: dict) -> dict:
+        if bundle.get("review_kind") == "triage":
+            return _approve_mutations(bundle)
+        return _semantic_no_quorum_review(bundle)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=reviewer,
+        eligible_keys={key},
+    )
+
+    terminal = result["results"][-1]
+    assert terminal["status"] == "frontier_retry"
+    assert terminal["error"] == "decision authority changed before effect"
+    item = store.get(key)
+    assert item["last_failure_class"] == "review_artifact_invalid"
+    assert item["result"] is None
+    assert page.read_bytes() == before
+
+
+def test_classification_no_quorum_rejects_embedded_router_epoch_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "memory.md").write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    key = str(merged["item"]["key"])
+    _prepare_pending_frontier(
+        store=store,
+        key=key,
+        proposal={
+            "decision": "ambiguous",
+            "confidence": 0.4,
+            "reason": "The correction class needs semantic review.",
+            "proposals": [],
+        },
+    )
+    authority_a = _adopted_authority(
+        content_correction.CLASSIFICATION_LANE,
+        artifact_digit="a",
+    )
+    authority_b = _adopted_authority(
+        content_correction.CLASSIFICATION_LANE,
+        artifact_digit="b",
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_classification_authority",
+        lambda **_kwargs: (dict(authority_a), None),
+    )
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=lambda bundle: _semantic_no_quorum_review_with_authority(
+            bundle,
+            authority_b,
+        ),
+        eligible_keys={key},
+    )
+
+    terminal = result["results"][-1]
+    assert terminal["status"] == "frontier_retry"
+    assert terminal["error"] == "decision verdict router authority changed"
+    assert store.get(key)["result"] is None
+
+
+def test_mutation_no_quorum_rejects_embedded_router_epoch_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    before = page.read_bytes()
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    key = str(merged["item"]["key"])
+    _prepare_pending_frontier(
+        store=store,
+        key=key,
+        proposal=_ram_proposal(hashlib.sha256(before).hexdigest()),
+    )
+    authority_a = _adopted_authority(
+        content_correction.REVIEW_LANE,
+        artifact_digit="a",
+    )
+    authority_b = _adopted_authority(
+        content_correction.REVIEW_LANE,
+        artifact_digit="b",
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_review_authority",
+        lambda **_kwargs: (dict(authority_a), None),
+    )
+
+    def reviewer(bundle: dict) -> dict:
+        if bundle.get("review_kind") == "triage":
+            return _approve_mutations(bundle)
+        return _semantic_no_quorum_review_with_authority(bundle, authority_b)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=reviewer,
+        eligible_keys={key},
+    )
+
+    terminal = result["results"][-1]
+    assert terminal["status"] == "frontier_retry"
+    assert terminal["error"] == "decision verdict router authority changed"
+    assert store.get(key)["result"] is None
+    assert page.read_bytes() == before
+
+
+def test_classification_hold_revalidates_authority_inside_publish_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "memory.md").write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    key = str(merged["item"]["key"])
+    _prepare_pending_frontier(
+        store=store,
+        key=key,
+        proposal={
+            "decision": "ambiguous",
+            "confidence": 0.4,
+            "reason": "The correction class needs semantic review.",
+            "proposals": [],
+        },
+    )
+    inside_publish = False
+
+    @contextmanager
+    def authority_lock():
+        nonlocal inside_publish
+        inside_publish = True
+        try:
+            yield
+        finally:
+            inside_publish = False
+
+    def authority(**_kwargs):
+        return (
+            _adopted_authority(
+                content_correction.CLASSIFICATION_LANE,
+                artifact_digit="b" if inside_publish else "a",
+            ),
+            None,
+        )
+
+    monkeypatch.setattr(content_correction, "decision_authority_lock", authority_lock)
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_classification_authority",
+        authority,
+    )
+    authority_a = _adopted_authority(
+        content_correction.CLASSIFICATION_LANE,
+        artifact_digit="a",
+    )
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=lambda bundle: _semantic_no_quorum_review_with_authority(
+            bundle,
+            authority_a,
+        ),
+        eligible_keys={key},
+    )
+
+    terminal = result["results"][-1]
+    assert terminal["status"] == "frontier_retry"
+    assert terminal["error"] == "decision authority changed before effect"
+    assert store.get(key)["result"] is None
+
+
+def test_mutation_hold_revalidates_authority_inside_publish_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    before = page.read_bytes()
+    _patch_page_lookup(monkeypatch, pages)
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(_event(), store=store)
+    key = str(merged["item"]["key"])
+    _prepare_pending_frontier(
+        store=store,
+        key=key,
+        proposal=_ram_proposal(hashlib.sha256(before).hexdigest()),
+    )
+    inside_publish = False
+
+    @contextmanager
+    def authority_lock():
+        nonlocal inside_publish
+        inside_publish = True
+        try:
+            yield
+        finally:
+            inside_publish = False
+
+    def authority(**_kwargs):
+        return (
+            _adopted_authority(
+                content_correction.REVIEW_LANE,
+                artifact_digit="b" if inside_publish else "a",
+            ),
+            None,
+        )
+
+    monkeypatch.setattr(content_correction, "decision_authority_lock", authority_lock)
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_review_authority",
+        authority,
+    )
+
+    def reviewer(bundle: dict) -> dict:
+        if bundle.get("review_kind") == "triage":
+            return _approve_mutations(bundle)
+        return _semantic_no_quorum_review_with_authority(
+            bundle,
+            _adopted_authority(
+                content_correction.REVIEW_LANE,
+                artifact_digit="a",
+            ),
+        )
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=reviewer,
+        eligible_keys={key},
+    )
+
+    terminal = result["results"][-1]
+    assert terminal["status"] == "frontier_retry"
+    assert terminal["error"] == "decision authority changed before effect"
+    assert store.get(key)["result"] is None
+    assert page.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("migration", "should_resume"),
+    [("unchanged", False), ("resolver", True), ("evidence", True)],
+)
+def test_incomplete_legacy_semantic_hold_only_reopens_for_input_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    migration: str,
+    should_resume: bool,
+) -> None:
+    page, store, key, _result = _create_classification_semantic_hold(
+        tmp_path,
+        monkeypatch,
+    )
+    state = json.loads(store.state_file.read_text(encoding="utf-8"))
+    state["items"][key]["result"] = {"terminal_reason": "semantic_no_quorum"}
+    if migration == "resolver":
+        state["items"][key]["resolver_version"] = "legacy-resolver"
+    store.state_file.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    if migration == "evidence":
+        page.write_text(
+            "---\ntitle: Memory\n---\nInstalled RAM is 32GB.\n",
+            encoding="utf-8",
+        )
+
+    resumed = content_correction._resume_due_quarantined_corrections(
+        store,
+        dry_run=False,
+        reviewer=_semantic_no_quorum_review,
+    )
+
+    if not should_resume:
+        assert resumed == []
+        assert store.get(key)["status"] == "quarantined"
+        return
+    assert resumed[0]["key"] == key
+    assert resumed[0]["status"] == "pending_local"
+    assert resumed[0]["stage"] == "local"
+    assert resumed[0]["reason"] == "semantic_hold_epoch_changed"
+    assert (
+        store.get(key)["result"]["resume_context"]["expected_epoch"]["stage"] == "local"
+    )
+
+
+def test_review_hold_authority_invalidation_archives_artifacts_and_reevaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_a = _adopted_authority(
+        content_correction.REVIEW_LANE,
+        artifact_digit="a",
+    )
+    authority_b = _adopted_authority(
+        content_correction.REVIEW_LANE,
+        artifact_digit="b",
+    )
+    page, store, key, old_hold = _create_review_semantic_hold(
+        tmp_path,
+        monkeypatch,
+        authority=authority_a,
+    )
+    assert content_correction._triage_path(key).exists()
+    for path in (
+        content_correction._review_path(key),
+        content_correction._classification_directive_path(key),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"stale": true}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_review_authority",
+        lambda **_kwargs: (dict(authority_b), None),
+    )
+
+    resumed = content_correction._resume_due_quarantined_corrections(
+        store,
+        dry_run=False,
+    )
+
+    assert resumed[0]["status"] == "pending_frontier"
+    assert resumed[0]["stage"] == "frontier"
+    assert len(resumed[0]["archived_artifacts"]) == 3
+    assert all(Path(path).exists() for path in resumed[0]["archived_artifacts"])
+    assert not content_correction._triage_path(key).exists()
+    assert not content_correction._review_path(key).exists()
+    assert not content_correction._classification_directive_path(key).exists()
+    item = store.get(key)
+    context = item["result"]["resume_context"]
+    assert context["invalidated_semantic_hold"] == old_hold
+    assert context["expected_epoch"]["authority"] == authority_b
+    events = _valid_jsonl_rows(store.events_file)
+    resume_event = events[-1]
+    assert resume_event["event"] == "quarantine_resumed"
+    assert resume_event["invalidated_hold_sha256"] == context["invalidated_hold_sha256"]
+    assert resume_event["expected_epoch_sha256"] == context["expected_epoch_sha256"]
+
+    review_kinds: list[str] = []
+
+    def reviewer(bundle: dict) -> dict:
+        review_kinds.append(str(bundle.get("review_kind") or "mutation"))
+        if bundle.get("review_kind") == "triage":
+            return _approve_mutations(bundle)
+        return _semantic_no_quorum_review_with_authority(bundle, authority_b)
+
+    reevaluated = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=reviewer,
+        eligible_keys={key},
+    )
+
+    assert reevaluated["results"][-1]["status"] == "quarantined"
+    assert reevaluated["results"][-1]["terminal_reason"] == "semantic_no_quorum"
+    assert "mutation" in review_kinds
+    new_item = store.get(key)
+    assert new_item["result"]["semantic_hold"]["authority"] == authority_b
+    assert page.read_text(encoding="utf-8").endswith("Installed RAM is 16GB.\n")
+
+
+def test_resumed_review_hold_restores_without_model_call_after_authority_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_a = _adopted_authority(
+        content_correction.REVIEW_LANE,
+        artifact_digit="a",
+    )
+    authority_b = _adopted_authority(
+        content_correction.REVIEW_LANE,
+        artifact_digit="b",
+    )
+    _page, store, key, old_hold = _create_review_semantic_hold(
+        tmp_path,
+        monkeypatch,
+        authority=authority_a,
+    )
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_review_authority",
+        lambda **_kwargs: (dict(authority_b), None),
+    )
+    resumed = content_correction._resume_due_quarantined_corrections(
+        store,
+        dry_run=False,
+    )
+    assert resumed[0]["status"] == "pending_frontier"
+    context_before = store.get(key)["result"]["resume_context"]
+
+    deferred = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        budget=CycleBudget(
+            max_local_calls=0,
+            max_frontier_calls=0,
+            max_mutations=0,
+        ),
+        reviewer=lambda _bundle: (_ for _ in ()).throw(
+            AssertionError("budget-deferred resume must not sample a model")
+        ),
+        eligible_keys={key},
+    )
+    assert deferred["results"][-1]["status"] == "frontier_budget_exhausted"
+    assert store.get(key)["result"]["resume_context"] == context_before
+
+    monkeypatch.setattr(
+        content_correction,
+        "_current_content_review_authority",
+        lambda **_kwargs: (dict(authority_a), None),
+    )
+    restored = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        reviewer=lambda _bundle: (_ for _ in ()).throw(
+            AssertionError("restored epoch must reuse its durable semantic hold")
+        ),
+        eligible_keys={key},
+    )
+
+    terminal = restored["results"][-1]
+    assert terminal["status"] == "quarantined"
+    assert terminal["restored_semantic_hold"] is True
+    assert store.get(key)["result"]["semantic_hold"] == old_hold
+
+
+def test_local_semantic_invalidation_archives_all_stale_decision_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page, store, key, _result = _create_classification_semantic_hold(
+        tmp_path,
+        monkeypatch,
+    )
+    artifact_paths = (
+        content_correction._triage_path(key),
+        content_correction._review_path(key),
+        content_correction._classification_directive_path(key),
+    )
+    for path in artifact_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"stale": true}\n', encoding="utf-8")
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 32GB.\n",
+        encoding="utf-8",
+    )
+
+    resumed = content_correction._resume_due_quarantined_corrections(
+        store,
+        dry_run=False,
+        reviewer=_semantic_no_quorum_review,
+    )
+
+    assert resumed[0]["status"] == "pending_local"
+    assert resumed[0]["stage"] == "local"
+    assert len(resumed[0]["archived_artifacts"]) == 3
+    assert all(not path.exists() for path in artifact_paths)
+    assert all(Path(path).exists() for path in resumed[0]["archived_artifacts"])
 
 
 def test_autonomous_quarantine_is_reopened_after_cooldown(

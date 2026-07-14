@@ -15,7 +15,7 @@ import tempfile
 import time
 import uuid
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from html import unescape
 from dataclasses import dataclass, replace
@@ -27,11 +27,12 @@ from llm_wiki_mcp.convergence import (
     HUMAN_REQUIRED_FAILURE_CLASSES as CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES,
     is_human_required_failure,
 )
-from llm_wiki_mcp import runtime_status
+from llm_wiki_mcp import runtime_status, semantic_hold
 from llm_wiki_mcp.runtime_config import uvx_runtime_command
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 FRONTIER_ACTIVITY_DIR = WIKI_ROOT / "runtime" / "frontier-reviews" / "active"
+STRUCTURED_REVIEW_HOLD_CACHE_ROOT: Path | None = None
 
 FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -785,6 +786,188 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _structured_route_result(
+    routed: Any,
+    *,
+    schema: dict[str, Any],
+    decision_lane: str | None,
+    lane_mode: str,
+    router_policy_source: str,
+    policy_audit: dict[str, Any],
+) -> dict[str, Any]:
+    """Convert one trusted local-router result into the compatibility envelope."""
+
+    if lane_mode == "shadow":
+        reason = f"decision_lane_shadow:{decision_lane}"
+        failure = _frontier_failure(
+            "local_decision_shadow_only",
+            "local_quarantined",
+            reason,
+            human_required=False,
+        )
+        result = _structured_failure_payload(
+            schema,
+            summary=reason,
+            failure=failure,
+            reviewer="local_consensus_shadow",
+        )
+        result["local_consensus"] = routed.audit_record()
+        result["decision_policy"] = policy_audit
+        return result
+    if router_policy_source != "adopted_artifact":
+        reason = f"decision_lane_unadopted:{decision_lane}"
+        failure = _frontier_failure(
+            "local_decision_artifact_required",
+            "local_quarantined",
+            reason,
+            human_required=False,
+        )
+        result = _structured_failure_payload(
+            schema,
+            summary=reason,
+            failure=failure,
+            reviewer="local_policy",
+        )
+        result["local_consensus"] = routed.audit_record()
+        result["decision_policy"] = policy_audit
+        return result
+    if routed.ok and isinstance(routed.decision, dict):
+        result = _validated_structured_result(
+            routed.decision,
+            schema,
+            reviewer="local_consensus",
+        )
+        result["local_consensus"] = routed.audit_record()
+        result["decision_policy"] = policy_audit
+        return result
+
+    reason = (
+        routed.quarantine_reason or routed.failure_class or "local consensus failed"
+    )
+    valid_signatures = {
+        vote.signature_sha256
+        for vote in routed.votes
+        if vote.valid and vote.signature_sha256 is not None
+    }
+    vote_signature_sha256s = [vote.signature_sha256 for vote in routed.votes]
+    three_valid_votes = bool(
+        len(routed.votes) == 3 and all(vote.valid for vote in routed.votes)
+    )
+    conservative_veto_semantic_no_quorum = bool(
+        routed.failure_class == "local_consensus_failed"
+        and routed.quarantine_reason
+        == "mutating_local_majority_vetoed_by_conservative_vote"
+        and len(vote_signature_sha256s) == 3
+        and all(
+            isinstance(signature, str)
+            and re.fullmatch(r"[0-9a-f]{64}", signature) is not None
+            for signature in vote_signature_sha256s
+        )
+        and sorted(Counter(vote_signature_sha256s).values()) == [1, 2]
+    )
+    three_way_semantic_no_quorum = bool(
+        three_valid_votes
+        and (
+            (
+                routed.quarantine_reason == "local_models_did_not_reach_two_vote_quorum"
+                and len(valid_signatures) == 3
+            )
+            or conservative_veto_semantic_no_quorum
+        )
+    )
+    failure = _frontier_failure(
+        (
+            semantic_hold.LOCAL_SEMANTIC_NO_QUORUM
+            if three_way_semantic_no_quorum
+            else "local_consensus_failed"
+        ),
+        "local_quarantined",
+        reason,
+        human_required=False,
+    )
+    result = _structured_failure_payload(
+        schema,
+        summary=reason,
+        failure=failure,
+        reviewer="local_consensus",
+    )
+    result["local_consensus"] = routed.audit_record()
+    result["decision_policy"] = policy_audit
+    return result
+
+
+def _structured_semantic_cache_result_error(
+    result: object,
+    *,
+    schema: dict[str, Any],
+    policy_audit: dict[str, Any],
+    authority: dict[str, Any],
+) -> str | None:
+    """Validate a cached failure against this exact schema and authority."""
+
+    if not isinstance(result, dict):
+        return "structured semantic cache result is missing"
+    lane = policy_audit.get("lane")
+    if not isinstance(lane, str) or not lane:
+        return "structured semantic cache lane is missing"
+    if result.get("decision_policy") != policy_audit:
+        return "structured semantic cache policy changed"
+    if not semantic_hold.is_local_semantic_no_quorum(result):
+        return "structured semantic cache no-quorum proof is invalid"
+    consensus = result.get("local_consensus")
+    assert isinstance(consensus, dict)
+    reason = consensus.get("quarantine_reason")
+    assert isinstance(reason, str)
+    expected = _structured_failure_payload(
+        schema,
+        summary=reason,
+        failure=_frontier_failure(
+            semantic_hold.LOCAL_SEMANTIC_NO_QUORUM,
+            "local_quarantined",
+            reason,
+            human_required=False,
+        ),
+        reviewer="local_consensus",
+    )
+    expected["local_consensus"] = consensus
+    expected["decision_policy"] = policy_audit
+    if result != expected:
+        return "structured semantic cache failure payload is not canonical"
+    try:
+        semantic_hold.build_semantic_no_quorum_hold(
+            lane,
+            {"validation": "structured_review_cache"},
+            authority,
+            result,
+        )
+    except (TypeError, ValueError) as exc:
+        return f"structured semantic cache authority is invalid:{exc}"
+    return None
+
+
+def _structured_authority_observation(
+    authority: dict[str, Any],
+) -> str | None:
+    """Return an opaque mutable-source generation for the in-flight guard."""
+
+    try:
+        return semantic_hold.structured_review_authority_observation_sha256(authority)
+    except Exception:
+        # Enabled adopted lanes fail closed before inference when the mutable
+        # authority generation cannot be observed.
+        return None
+
+
+def _current_structured_authority(
+    lane: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve lane authority behind a narrow, test-isolated seam."""
+
+    from llm_wiki_mcp.decision_authority import current_semantic_authority
+
+    return current_semantic_authority(lane)
+
+
 def _structured_subprocess_failure(
     exc: subprocess.TimeoutExpired | OSError,
     *,
@@ -1447,7 +1630,10 @@ def run_structured_review(
     )
 
     from llm_wiki_mcp.decision_policy import resolve_decision_policy
-    from llm_wiki_mcp.decision_router import DecisionRouter
+    from llm_wiki_mcp.decision_router import (
+        DecisionRouter,
+        decision_request_fingerprint_sha256,
+    )
     from llm_wiki_mcp.decision_schema_manifest import (
         production_schema_manifest,
         schema_sha256,
@@ -1516,6 +1702,47 @@ def run_structured_review(
         result["decision_policy"] = policy_audit
         return result
 
+    authority: dict[str, Any] | None = None
+    authority_observation_sha256: str | None = None
+    cache_epoch: dict[str, Any] | None = None
+    if isinstance(decision_lane, str) and decision_lane and lane_mode == "enabled":
+        candidate_authority, authority_error = _current_structured_authority(
+            decision_lane
+        )
+        if authority_error is None and isinstance(candidate_authority, dict):
+            expected_policy_authority = {
+                "kind": lane_policy.kind,
+                "schema_name": lane_policy.schema_name,
+                "mode": lane_mode,
+                "error": lane_error,
+            }
+            if candidate_authority.get("policy") == expected_policy_authority:
+                candidate_observation_sha256 = _structured_authority_observation(
+                    candidate_authority
+                )
+                try:
+                    if candidate_observation_sha256 is None:
+                        raise ValueError("authority observation unavailable")
+                    effective_request_sha256 = decision_request_fingerprint_sha256(
+                        prompt=prompt,
+                        schema=schema,
+                        system=system,
+                        decision_lane=decision_lane,
+                    )
+                    cache_epoch = semantic_hold.build_structured_review_hold_epoch(
+                        lane=decision_lane,
+                        authority=candidate_authority,
+                        schema_sha256=actual_digest,
+                        prompt=prompt,
+                        system=system,
+                        effective_request_sha256=effective_request_sha256,
+                    )
+                except (TypeError, ValueError):
+                    cache_epoch = None
+                else:
+                    authority = candidate_authority
+                    authority_observation_sha256 = candidate_observation_sha256
+
     router = DecisionRouter(
         audit_root=audit_root,
         audit_role=decision_lane or model_role,
@@ -1523,109 +1750,135 @@ def run_structured_review(
         require_adopted=lane_mode == "enabled",
         decision_lane=decision_lane,
     )
-    routed = (
-        router.decide(prompt, schema)
-        if system is None
-        else router.decide(prompt, schema, system=system)
-    )
     policy_audit["router_policy"] = router.policy.audit_record()
-    if lane_mode == "shadow":
-        reason = f"decision_lane_shadow:{decision_lane}"
-        failure = _frontier_failure(
-            "local_decision_shadow_only",
-            "local_quarantined",
-            reason,
-            human_required=False,
+    cache_eligible = bool(
+        authority is not None
+        and cache_epoch is not None
+        and router.policy.source == "adopted_artifact"
+        and router.policy.audit_record() == authority.get("router")
+    )
+
+    def authority_guard_error(stage: str) -> str | None:
+        if (
+            authority is None
+            or authority_observation_sha256 is None
+            or not isinstance(decision_lane, str)
+        ):
+            return f"decision authority observation unavailable {stage} local review"
+        current_authority, current_error = _current_structured_authority(decision_lane)
+        current_observation = (
+            _structured_authority_observation(current_authority)
+            if isinstance(current_authority, dict)
+            else None
+        )
+        if current_error is not None or current_observation is None:
+            return f"decision authority observation unavailable {stage} local review"
+        if (
+            current_authority != authority
+            or current_observation != authority_observation_sha256
+        ):
+            return f"decision authority changed {stage} local review"
+        return None
+
+    def authority_failure(reason: str) -> dict[str, Any]:
+        failure_class = (
+            "decision_authority_changed"
+            if "changed" in reason
+            else "decision_authority_unavailable"
         )
         result = _structured_failure_payload(
             schema,
             summary=reason,
-            failure=failure,
-            reviewer="local_consensus_shadow",
-        )
-        result["local_consensus"] = routed.audit_record()
-        result["decision_policy"] = policy_audit
-        return result
-    if router.policy.source != "adopted_artifact":
-        reason = f"decision_lane_unadopted:{decision_lane}"
-        failure = _frontier_failure(
-            "local_decision_artifact_required",
-            "local_quarantined",
-            reason,
-            human_required=False,
-        )
-        result = _structured_failure_payload(
-            schema,
-            summary=reason,
-            failure=failure,
+            failure=_frontier_failure(
+                failure_class,
+                "local_retry",
+                reason,
+                human_required=False,
+            ),
             reviewer="local_policy",
         )
-        result["local_consensus"] = routed.audit_record()
-        result["decision_policy"] = policy_audit
-        return result
-    if routed.ok and isinstance(routed.decision, dict):
-        result = _validated_structured_result(
-            routed.decision,
-            schema,
-            reviewer="local_consensus",
-        )
-        result["local_consensus"] = routed.audit_record()
         result["decision_policy"] = policy_audit
         return result
 
-    reason = (
-        routed.quarantine_reason or routed.failure_class or "local consensus failed"
-    )
-    valid_signatures = {
-        vote.signature_sha256
-        for vote in routed.votes
-        if vote.valid and vote.signature_sha256 is not None
-    }
-    vote_signature_sha256s = [vote.signature_sha256 for vote in routed.votes]
-    three_valid_votes = bool(
-        len(routed.votes) == 3 and all(vote.valid for vote in routed.votes)
-    )
-    conservative_veto_semantic_no_quorum = bool(
-        routed.failure_class == "local_consensus_failed"
-        and routed.quarantine_reason
-        == "mutating_local_majority_vetoed_by_conservative_vote"
-        and len(vote_signature_sha256s) == 3
-        and all(
-            isinstance(signature, str)
-            and re.fullmatch(r"[0-9a-f]{64}", signature) is not None
-            for signature in vote_signature_sha256s
+    def route_once() -> dict[str, Any]:
+        routed = (
+            router.decide(prompt, schema)
+            if system is None
+            else router.decide(prompt, schema, system=system)
         )
-        and sorted(Counter(vote_signature_sha256s).values()) == [1, 2]
-    )
-    three_way_semantic_no_quorum = bool(
-        three_valid_votes
-        and (
-            (
-                routed.quarantine_reason == "local_models_did_not_reach_two_vote_quorum"
-                and len(valid_signatures) == 3
+        return _structured_route_result(
+            routed,
+            schema=schema,
+            decision_lane=decision_lane,
+            lane_mode=lane_mode,
+            router_policy_source=router.policy.source,
+            policy_audit=policy_audit,
+        )
+
+    if lane_mode == "enabled" and router.policy.source == "adopted_artifact":
+        if not cache_eligible:
+            return authority_failure(
+                "decision authority observation unavailable before local review"
             )
-            or conservative_veto_semantic_no_quorum
+        assert authority is not None
+        assert authority_observation_sha256 is not None
+        assert cache_epoch is not None
+        assert isinstance(decision_lane, str)
+        cache = semantic_hold.StructuredReviewSemanticHoldCache(
+            root=STRUCTURED_REVIEW_HOLD_CACHE_ROOT
         )
-    )
-    failure = _frontier_failure(
-        (
-            "local_semantic_no_quorum"
-            if three_way_semantic_no_quorum
-            else "local_consensus_failed"
-        ),
-        "local_quarantined",
-        reason,
-        human_required=False,
-    )
-    result = _structured_failure_payload(
-        schema,
-        summary=reason,
-        failure=failure,
-        reviewer="local_consensus",
-    )
-    result["local_consensus"] = routed.audit_record()
-    result["decision_policy"] = policy_audit
-    return result
+        with ExitStack() as stack:
+            try:
+                lease = stack.enter_context(
+                    cache.locked(
+                        lane=decision_lane,
+                        epoch=cache_epoch,
+                        authority=authority,
+                    )
+                )
+            except (OSError, TypeError, ValueError):
+                lease = None
+            pre_error = authority_guard_error("before")
+            if pre_error is not None:
+                return authority_failure(pre_error)
+            if lease is not None:
+                cached = lease.load()
+                if cached is not None and (
+                    _structured_semantic_cache_result_error(
+                        cached,
+                        schema=schema,
+                        policy_audit=policy_audit,
+                        authority=authority,
+                    )
+                    is None
+                ):
+                    post_error = authority_guard_error("during")
+                    return (
+                        cached if post_error is None else authority_failure(post_error)
+                    )
+            result = route_once()
+            post_error = authority_guard_error("during")
+            if post_error is not None:
+                return authority_failure(post_error)
+            if lease is not None and (
+                _structured_semantic_cache_result_error(
+                    result,
+                    schema=schema,
+                    policy_audit=policy_audit,
+                    authority=authority,
+                )
+                is None
+            ):
+                try:
+                    lease.store(result)
+                except (OSError, TypeError, ValueError):
+                    pass
+                post_store_error = authority_guard_error("during")
+                if post_store_error is not None:
+                    return authority_failure(post_store_error)
+            return result
+
+    return route_once()
 
 
 def _git_probe(

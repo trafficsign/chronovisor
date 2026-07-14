@@ -5,6 +5,7 @@ import json
 import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,6 +54,11 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         page_mutation,
         "WIKI_MUTATION_LOCK",
         runtime / "wiki-mutation.lock",
+    )
+    monkeypatch.setattr(
+        page_mutation,
+        "DECISION_AUTHORITY_LOCK",
+        runtime / "decision-authority.lock",
     )
     monkeypatch.setattr(page_mutation, "WIKI_ROOT", wiki_root)
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
@@ -134,6 +140,167 @@ def _write_packet(wiki_root: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(packet))
     return path
+
+
+def _strict_no_quorum_audit(models: list[str]) -> dict:
+    reason = "local_models_did_not_reach_two_vote_quorum"
+
+    def vote(role: str, model: str, digit: str) -> dict:
+        return {
+            "role": role,
+            "model": model,
+            "requested_num_ctx": 32768,
+            "valid": True,
+            "signature_sha256": digit * 64,
+            "invalid_reason": None,
+            "runtime_observation": {
+                "status": "observed",
+                "model_size_bytes": 1024,
+                "num_ctx": 32768,
+            },
+            "session": {
+                "ok": True,
+                "model": model,
+                "failure_class": None,
+                "first_pass_valid": True,
+                "repair_turns": 0,
+                "attempts": [
+                    {
+                        "index": 1,
+                        "valid": True,
+                        "output_sha256": digit * 64,
+                        "output_chars": 16,
+                        "normalized": False,
+                        "error_fingerprint": None,
+                        "issues": [],
+                    }
+                ],
+            },
+        }
+
+    return {
+        "status": "quarantined",
+        "ok": False,
+        "quorum_safety_policy_version": 1,
+        "agreement_sha256": None,
+        "failure_class": "local_consensus_failed",
+        "quarantine_reason": reason,
+        "num_ctx": 32768,
+        "residency": {},
+        "votes": [
+            vote("primary", models[0], "a"),
+            vote("challenger", models[1], "b"),
+            vote("tie_break", models[2], "c"),
+        ],
+    }
+
+
+def _install_local_no_quorum_router(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cache_root: Path,
+    artifact_digit: str = "d",
+) -> tuple[dict, list[str]]:
+    from llm_wiki_mcp import (
+        decision_policy,
+        decision_router,
+        frontier_review,
+        local_repair,
+        semantic_hold,
+    )
+
+    models = ["primary-model", "challenger-model", "tie-model"]
+    router_audit = {
+        "source": "adopted_artifact",
+        "artifact_sha256": artifact_digit * 64,
+        "error": None,
+        "models": models,
+    }
+    authority = {
+        "source": "adopted_local_consensus",
+        "authority_version": 1,
+        "lane": "local_repair",
+        "lane_contract_sha256": "a" * 64,
+        "lane_contract_manifest_sha256": "b" * 64,
+        "lane_contract_case_manifest_sha256": "c" * 64,
+        "policy": {
+            "kind": "consensus",
+            "schema_name": "local_repair",
+            "mode": "enabled",
+            "error": None,
+        },
+        "router": router_audit,
+    }
+    audit = _strict_no_quorum_audit(models)
+    calls: list[str] = []
+
+    class FakePolicy:
+        source = "adopted_artifact"
+
+        @staticmethod
+        def audit_record():
+            return router_audit
+
+    class FakeResult:
+        ok = False
+        decision = None
+        failure_class = "local_consensus_failed"
+        quarantine_reason = "local_models_did_not_reach_two_vote_quorum"
+        votes = tuple(
+            SimpleNamespace(
+                valid=True,
+                signature_sha256=digit * 64,
+            )
+            for digit in ("a", "b", "c")
+        )
+
+        @staticmethod
+        def audit_record():
+            return audit
+
+    class FakeRouter:
+        policy = FakePolicy()
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def decide(self, *_args, **_kwargs):
+            calls.append(artifact_digit)
+            return FakeResult()
+
+    monkeypatch.setattr(
+        decision_policy,
+        "resolve_decision_policy",
+        lambda _lane: (
+            decision_policy.DECISION_POLICIES["local_repair"],
+            "enabled",
+            None,
+        ),
+    )
+    monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
+    monkeypatch.setattr(
+        local_repair,
+        "current_semantic_authority",
+        lambda _lane: (authority, None),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "STRUCTURED_REVIEW_HOLD_CACHE_ROOT",
+        cache_root,
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: local_repair.current_semantic_authority(lane),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda current: semantic_hold.canonical_sha256(
+            {"authority": current, "fixture_generation": "stable"}
+        ),
+    )
+    return authority, calls
 
 
 def _write_operational_packet(wiki_root: Path) -> Path:
@@ -412,7 +579,13 @@ def test_local_consensus_repair_carries_authority_seal(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import decision_policy, decision_router, local_repair
+    from llm_wiki_mcp import (
+        decision_policy,
+        decision_router,
+        frontier_review,
+        local_repair,
+        semantic_hold,
+    )
     from llm_wiki_mcp.decision_router import canonical_agreement_signature
     from llm_wiki_mcp.local_repair import LOCAL_REPAIR_SCHEMA
 
@@ -507,6 +680,23 @@ def test_local_consensus_repair_carries_authority_seal(
         "current_semantic_authority",
         lambda _lane: (authority, None),
     )
+    monkeypatch.setattr(
+        frontier_review,
+        "STRUCTURED_REVIEW_HOLD_CACHE_ROOT",
+        isolated_wiki / "runtime" / "structured-review-holds",
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        lambda lane: local_repair.current_semantic_authority(lane),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda current: semantic_hold.canonical_sha256(
+            {"authority": current, "fixture_generation": "stable"}
+        ),
+    )
 
     decision = local_repair.propose_repair(
         {"failure_class": "semantic.ambiguous_repair"},
@@ -517,6 +707,367 @@ def test_local_consensus_repair_carries_authority_seal(
     assert decision.authority == authority
     assert decision.decision_policy["mode"] == "enabled"
     assert decision.local_consensus["agreement_sha256"] == agreement
+
+
+def test_local_repair_no_quorum_builds_strict_semantic_hold(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import local_repair
+    from llm_wiki_mcp.semantic_hold import persisted_semantic_no_quorum_hold
+
+    authority, calls = _install_local_no_quorum_router(
+        monkeypatch,
+        cache_root=isolated_wiki / "runtime" / "structured-review-holds",
+    )
+    packet = {
+        "failure_id": "semantic-split",
+        "failure_class": "semantic.ambiguous_repair",
+        "fingerprint": "semantic.ambiguous_repair:one",
+        "error": "two safe repairs remain plausible",
+    }
+
+    decision = local_repair.propose_repair(packet, use_qwen=True)
+
+    assert calls == ["d"]
+    assert decision.source == "semantic_hold"
+    assert decision.status == "rejected"
+    assert decision.action == "quarantine_raw"
+    assert decision.authority == authority
+    assert (
+        persisted_semantic_no_quorum_hold(
+            decision.to_dict(),
+            "local_repair",
+            epoch=local_repair.semantic_hold_epoch(packet),
+            authority=authority,
+        )
+        == decision.semantic_hold
+    )
+
+
+def test_local_repair_semantic_hold_never_opens_live_authority_lock(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import local_repair
+
+    _authority, calls = _install_local_no_quorum_router(
+        monkeypatch,
+        cache_root=isolated_wiki / "runtime" / "structured-review-holds",
+    )
+    live_lock = (Path.home() / ".wiki" / "runtime" / "decision-authority.lock").resolve(
+        strict=False
+    )
+    isolated_lock = (isolated_wiki / "runtime" / "decision-authority.lock").resolve(
+        strict=False
+    )
+    opened: list[Path] = []
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args, **kwargs):
+        resolved = path.resolve(strict=False)
+        if resolved == live_lock:
+            raise AssertionError("tests must never open the live authority lock")
+        opened.append(resolved)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    decision = local_repair.propose_repair(
+        {
+            "failure_id": "isolated-authority-lock",
+            "failure_class": "semantic.ambiguous_repair",
+            "error": "two safe repairs remain plausible",
+        },
+        use_qwen=True,
+    )
+
+    assert decision.source == "semantic_hold"
+    assert calls == ["d"]
+    assert isolated_lock in opened
+    assert live_lock not in opened
+
+
+def test_local_repair_recovers_model_return_crash_from_common_cache_after_aba(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import frontier_review, local_repair
+
+    authority_a, calls = _install_local_no_quorum_router(
+        monkeypatch,
+        cache_root=isolated_wiki / "runtime" / "structured-review-holds",
+    )
+    authority_b = json.loads(json.dumps(authority_a))
+    authority_b["lane_contract_sha256"] = "f" * 64
+    authority_box = {"value": authority_a}
+    observation_box = {"value": "0" * 64}
+    monkeypatch.setattr(
+        local_repair,
+        "current_semantic_authority",
+        lambda _lane: (authority_box["value"], None),
+    )
+    monkeypatch.setattr(
+        frontier_review,
+        "_structured_authority_observation",
+        lambda _authority: observation_box["value"],
+    )
+    packet = {
+        "failure_id": "semantic-crash-window",
+        "failure_class": "semantic.ambiguous_repair",
+        "fingerprint": "semantic.ambiguous_repair:crash-window",
+        "error": "two safe repairs remain plausible",
+    }
+
+    first_a = local_repair.propose_repair(packet, use_qwen=True)
+    # Simulate a process crash after the common boundary persisted its result,
+    # but before self-heal could write this returned lane decision to a packet.
+    assert first_a.source == "semantic_hold"
+    assert calls == ["d"]
+
+    authority_box["value"] = authority_b
+    observation_box["value"] = "1" * 64
+    first_b = local_repair.propose_repair(packet, use_qwen=True)
+    assert first_b.source == "semantic_hold"
+    assert calls == ["d", "d"]
+
+    authority_box["value"] = authority_a
+    observation_box["value"] = "2" * 64
+    recovered_a = local_repair.propose_repair(packet, use_qwen=True)
+
+    assert recovered_a.source == "semantic_hold"
+    assert recovered_a.authority == authority_a
+    assert recovered_a.semantic_hold == first_a.semantic_hold
+    assert calls == ["d", "d"]
+
+
+def test_local_repair_semantic_epoch_matches_prompt_evidence_projection(
+    isolated_wiki: Path,
+) -> None:
+    from llm_wiki_mcp import local_repair
+
+    packet = {
+        "failure_id": "semantic-split",
+        "failure_class": "semantic.ambiguous_repair",
+        "error": "two safe repairs remain plausible",
+        "raw_preview": "grounded source evidence",
+        "auto_apply_error": {"error_kind": "invalid_page_tag"},
+        "status": "pending_local_repair",
+    }
+    initial_epoch = local_repair.semantic_hold_epoch(packet)
+    initial_prompt = local_repair.build_prompt(packet)
+
+    bookkeeping_changed = {
+        **packet,
+        "status": "local_quarantined",
+        "updated_at": "2026-07-15T01:00:00",
+        "local_decision": {"source": "semantic_hold"},
+        "semantic_hold": {"prompt": "must never enter a repair prompt"},
+        "semantic_hold_history": [{"raw_response": "also excluded"}],
+    }
+    assert local_repair.semantic_hold_epoch(bookkeeping_changed) == initial_epoch
+    assert local_repair.build_prompt(bookkeeping_changed) == initial_prompt
+    assert "semantic_hold" not in initial_prompt
+
+    producer_evidence_changed = {
+        **packet,
+        "auto_apply_error": {"error_kind": "different_failure"},
+    }
+    assert local_repair.semantic_hold_epoch(producer_evidence_changed) != initial_epoch
+
+    future_evidence_added = {**packet, "future_producer_evidence": {"value": 1}}
+    assert local_repair.semantic_hold_epoch(future_evidence_added) != initial_epoch
+    assert "future_producer_evidence" in local_repair.build_prompt(
+        future_evidence_added
+    )
+
+
+def test_self_heal_no_quorum_is_terminal_until_exact_evidence_changes(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    authority, calls = _install_local_no_quorum_router(
+        monkeypatch,
+        cache_root=isolated_wiki / "runtime" / "structured-review-holds",
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "current_semantic_authority",
+        lambda _lane: (authority, None),
+    )
+    packet = {
+        "failure_id": "semantic-split",
+        "raw_file": "split.md",
+        "failure_class": "semantic.ambiguous_repair",
+        "fingerprint": "semantic.ambiguous_repair:one",
+        "error": "two safe repairs remain plausible",
+        "status": "pending_local_repair",
+    }
+    packet_path = (
+        isolated_wiki / "runtime" / "failures" / "packets" / "semantic-split.json"
+    )
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+
+    first = self_heal.handle_packet(packet_path, enable_frontier=True)
+    first_bytes = packet_path.read_bytes()
+    cached = self_heal.handle_packet(packet_path, enable_frontier=True)
+    dry_run = self_heal.handle_packet(
+        packet_path,
+        enable_frontier=True,
+        dry_run=True,
+    )
+
+    assert first["status"] == "local_quarantined"
+    assert first["semantic_deferred"] is True
+    assert cached["cached"] is True
+    assert dry_run["projected_status"] == "local_quarantined"
+    assert packet_path.read_bytes() == first_bytes
+    assert calls == ["d"]
+
+    changed = json.loads(packet_path.read_text(encoding="utf-8"))
+    changed["error"] = "the exact failure evidence changed"
+    packet_path.write_text(json.dumps(changed), encoding="utf-8")
+    assert packet_path in self_heal.pending_packets()
+
+    reevaluated = self_heal.handle_packet(packet_path, enable_frontier=True)
+    assert reevaluated["status"] == "local_quarantined"
+    assert calls == ["d", "d"]
+    latest = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert (
+        latest["semantic_hold"]["epoch"]
+        != first["local_decision"]["semantic_hold"]["epoch"]
+    )
+
+
+def test_existing_semantic_hold_dry_run_preserves_entire_isolated_tree(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    authority, calls = _install_local_no_quorum_router(
+        monkeypatch,
+        cache_root=isolated_wiki / "runtime" / "structured-review-holds",
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "current_semantic_authority",
+        lambda _lane: (authority, None),
+    )
+    packet_path = (
+        isolated_wiki / "runtime" / "failures" / "packets" / "held-dry-run.json"
+    )
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(
+        json.dumps(
+            {
+                "failure_id": "held-dry-run",
+                "failure_class": "semantic.ambiguous_repair",
+                "fingerprint": "semantic.ambiguous_repair:held-dry-run",
+                "error": "two safe repairs remain plausible",
+                "status": "pending_local_repair",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first = self_heal.handle_packet(packet_path, enable_frontier=True)
+    assert first["status"] == "local_quarantined"
+    assert calls == ["d"]
+    (isolated_wiki / "runtime" / "decision-authority.lock").unlink()
+
+    def snapshot() -> tuple[list[str], dict[str, bytes]]:
+        paths = sorted(
+            path.relative_to(isolated_wiki).as_posix()
+            for path in isolated_wiki.rglob("*")
+        )
+        files = {
+            path.relative_to(isolated_wiki).as_posix(): path.read_bytes()
+            for path in isolated_wiki.rglob("*")
+            if path.is_file()
+        }
+        return paths, files
+
+    before = snapshot()
+    projected = self_heal.handle_packet(
+        packet_path,
+        enable_frontier=True,
+        dry_run=True,
+    )
+    after = snapshot()
+
+    assert projected["status"] == "dry_run"
+    assert projected["cached"] is True
+    assert projected["projected_status"] == "local_quarantined"
+    assert after == before
+    assert calls == ["d"]
+
+    before_aggregate = snapshot()
+    aggregate = self_heal.run_pending(dry_run=True)
+    after_aggregate = snapshot()
+
+    assert aggregate["status"] == "ok"
+    assert aggregate["packets_seen"] == 0
+    assert after_aggregate == before_aggregate
+    assert calls == ["d"]
+
+
+def test_self_heal_no_quorum_reuses_historical_hold_after_authority_aba(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import local_repair, self_heal
+
+    authority_a, calls = _install_local_no_quorum_router(
+        monkeypatch,
+        cache_root=isolated_wiki / "runtime" / "structured-review-holds",
+    )
+    authority_b = json.loads(json.dumps(authority_a))
+    authority_b["lane_contract_sha256"] = "f" * 64
+    current_authority = [authority_a]
+    monkeypatch.setattr(
+        local_repair,
+        "current_semantic_authority",
+        lambda _lane: (current_authority[0], None),
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "current_semantic_authority",
+        lambda _lane: (current_authority[0], None),
+    )
+    packet = {
+        "failure_id": "semantic-aba",
+        "raw_file": "split.md",
+        "failure_class": "semantic.ambiguous_repair",
+        "fingerprint": "semantic.ambiguous_repair:aba",
+        "error": "two safe repairs remain plausible",
+        "status": "pending_local_repair",
+    }
+    packet_path = (
+        isolated_wiki / "runtime" / "failures" / "packets" / "semantic-aba.json"
+    )
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+
+    first_a = self_heal.handle_packet(packet_path, enable_frontier=True)
+    assert first_a["status"] == "local_quarantined"
+    assert calls == ["d"]
+
+    current_authority[0] = authority_b
+    first_b = self_heal.handle_packet(packet_path, enable_frontier=True)
+    assert first_b["status"] == "local_quarantined"
+    assert calls == ["d", "d"]
+
+    current_authority[0] = authority_a
+    restored_a = self_heal.handle_packet(packet_path, enable_frontier=True)
+    assert restored_a["status"] == "local_quarantined"
+    assert restored_a["cached"] is True
+    assert calls == ["d", "d"]
+    persisted = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert len(persisted["semantic_hold_history"]) == 2
+    assert persisted["semantic_hold"]["authority"] == authority_a != authority_b
 
 
 def test_local_consensus_repair_fails_closed_when_authority_changes_before_effect(
@@ -1464,6 +2015,55 @@ def test_handle_packet_dry_run_is_byte_for_byte_read_only(isolated_wiki: Path) -
     assert not (failures / "local-repair").exists()
     assert not (failures / "frontier-queue").exists()
     assert not (failures / "locks").exists()
+
+
+def test_fresh_semantic_dry_run_never_starts_local_model_or_writes_audit(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import decision_router, self_heal
+
+    packet_path = (
+        isolated_wiki / "runtime" / "failures" / "packets" / "ambiguous-dry-run.json"
+    )
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(
+        json.dumps(
+            {
+                "failure_id": "ambiguous-dry-run",
+                "failure_class": "semantic.ambiguous_repair",
+                "fingerprint": "semantic.ambiguous_repair:dry-run",
+                "error": "two safe repairs remain plausible",
+                "status": "pending_local_repair",
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(isolated_wiki).as_posix(): path.read_bytes()
+        for path in isolated_wiki.rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(
+        decision_router,
+        "DecisionRouter",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dry-run must not construct a local model router")
+        ),
+    )
+
+    result = self_heal.handle_packet(packet_path, dry_run=True)
+
+    after = {
+        path.relative_to(isolated_wiki).as_posix(): path.read_bytes()
+        for path in isolated_wiki.rglob("*")
+        if path.is_file()
+    }
+    assert result["status"] == "dry_run"
+    assert result["projected_status"] == "local_review_required"
+    assert result["model_review_skipped"] is True
+    assert result["local_decision"]["source"] == "deterministic"
+    assert after == before
 
 
 def _force_frontier(monkeypatch: pytest.MonkeyPatch, self_heal) -> None:

@@ -31,6 +31,12 @@ from llm_wiki_mcp.link_fix import (
 )
 from llm_wiki_mcp.page_mutation import decision_authority_lock, wiki_mutation_lock
 from llm_wiki_mcp.runtime_config import runtime_repo_root
+from llm_wiki_mcp.semantic_hold import (
+    build_semantic_no_quorum_hold,
+    canonical_sha256 as semantic_hold_sha256,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+)
 from llm_wiki_mcp.tags import (
     parse_tags,
     validate_axis_counts,
@@ -47,6 +53,7 @@ REPO_ROOT = runtime_repo_root()
 # most pages to be reviewed with complete pre/post bytes.
 SAFE_FIX_REVIEW_PACKET_MAX_CHARS = 106_000
 SAFE_FIX_REPACKET_CONTEXT_LINES = 4
+SAFE_FIX_SEMANTIC_HOLD_RESOLVER_VERSION = "lint-safe-fix-semantic-hold-v1"
 
 StructuredReviewer = Callable[[str, dict[str, Any]], Mapping[str, Any] | str]
 
@@ -908,6 +915,28 @@ def _verdict_artifact_path(artifact_dir: Path, proposal_hash: str) -> Path:
     return artifact_dir / "frontier-verdicts" / f"{proposal_hash}.json"
 
 
+def _semantic_hold_artifact_path(
+    artifact_dir: Path,
+    *,
+    proposal_hash: str,
+    epoch: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> Path:
+    """Address a semantic split by its full immutable decision epoch.
+
+    Successful verdicts retain the legacy single-current artifact.  Semantic
+    splits are multi-versioned so an A -> B -> A authority rollback can reuse
+    the old A hold before consuming a review budget or starting a model.
+    """
+
+    identity = {
+        "proposal_sha256": proposal_hash,
+        "epoch_sha256": semantic_hold_sha256(epoch),
+        "authority_sha256": semantic_hold_sha256(authority),
+    }
+    return artifact_dir / "semantic-holds" / f"{semantic_hold_sha256(identity)}.json"
+
+
 @contextmanager
 def _safe_fix_review_lock(artifact_dir: Path, proposal_hash: str) -> Iterator[None]:
     """Serialize one exact proposal across local processes.
@@ -983,6 +1012,10 @@ def _normalize_safe_fix_review(value: Mapping[str, Any] | str) -> dict[str, Any]
         normalized["decision_policy"] = dict(parsed["decision_policy"])
     if isinstance(parsed.get("local_consensus"), Mapping):
         normalized["local_consensus"] = dict(parsed["local_consensus"])
+    if isinstance(parsed.get("reviewer"), str):
+        normalized["reviewer"] = parsed["reviewer"]
+    if isinstance(parsed.get("human_required"), bool):
+        normalized["human_required"] = parsed["human_required"]
     return normalized
 
 
@@ -1461,6 +1494,124 @@ def _load_safe_fix_verdict(
     return normalized
 
 
+def _safe_fix_semantic_epoch(
+    *,
+    proposal_hash: str,
+    prompt_hash: str,
+    evidence_hash: str,
+) -> dict[str, Any]:
+    return {
+        "resolver_version": SAFE_FIX_SEMANTIC_HOLD_RESOLVER_VERSION,
+        "proposal_sha256": proposal_hash,
+        "prompt_sha256": prompt_hash,
+        "evidence_sha256": evidence_hash,
+    }
+
+
+def _load_safe_fix_semantic_hold(
+    artifact_dir: Path,
+    proposal_hash: str,
+    *,
+    epoch: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    decision_lane: str,
+) -> dict[str, Any] | None:
+    path = _semantic_hold_artifact_path(
+        artifact_dir,
+        proposal_hash=proposal_hash,
+        epoch=epoch,
+        authority=authority,
+    )
+    try:
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(envelope, Mapping)
+        or set(envelope)
+        != {
+            "schema_version",
+            "kind",
+            "proposal_sha256",
+            "semantic_hold",
+        }
+        or envelope.get("schema_version") != 1
+        or envelope.get("kind") != "lint_safe_fix_semantic_no_quorum_hold"
+        or envelope.get("proposal_sha256") != proposal_hash
+    ):
+        return None
+    hold = persisted_semantic_no_quorum_hold(
+        envelope,
+        decision_lane,
+        epoch=epoch,
+        authority=authority,
+    )
+    if hold is None:
+        return None
+    return {
+        "decision": "needs_retry",
+        "summary": "exact local semantic disagreement remains held",
+        "tests_run": [],
+        "commit": None,
+        "committed": False,
+        "pushed": False,
+        "risk": "no mutation was authorized without a two-vote quorum",
+        "notes": None,
+        "valid": True,
+        "frontier_failure": dict(hold["frontier_failure"]),
+        "decision_policy": dict(hold["decision_policy"]),
+        "local_consensus": dict(hold["local_consensus"]),
+        "semantic_hold": hold,
+        "authority": dict(authority),
+        "evidence_sha256": epoch["evidence_sha256"],
+        "hold_sha256": hold["hold_sha256"],
+        "reused": True,
+    }
+
+
+def _write_safe_fix_semantic_hold(
+    artifact_dir: Path,
+    proposal_hash: str,
+    *,
+    epoch: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    decision_lane: str,
+    review: Mapping[str, Any],
+) -> dict[str, Any]:
+    hold = build_semantic_no_quorum_hold(
+        decision_lane,
+        epoch,
+        authority,
+        review,
+    )
+    path = _semantic_hold_artifact_path(
+        artifact_dir,
+        proposal_hash=proposal_hash,
+        epoch=epoch,
+        authority=authority,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    envelope = {
+        "schema_version": 1,
+        "kind": "lint_safe_fix_semantic_no_quorum_hold",
+        "proposal_sha256": proposal_hash,
+        "semantic_hold": hold,
+    }
+    atomic_write(
+        path,
+        json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    persisted = persisted_semantic_no_quorum_hold(
+        json.loads(path.read_text(encoding="utf-8")),
+        decision_lane,
+        epoch=epoch,
+        authority=authority,
+    )
+    if persisted is None:
+        raise RuntimeError("durable semantic hold failed read-back validation")
+    return persisted
+
+
 def _write_safe_fix_verdict(
     artifact_dir: Path,
     proposal_hash: str,
@@ -1564,6 +1715,11 @@ def _review_safe_fix(
         updated_text=updated_text,
     )
     prompt_hash = _sha256_text(prompt)
+    semantic_epoch = _safe_fix_semantic_epoch(
+        proposal_hash=proposal_hash,
+        prompt_hash=prompt_hash,
+        evidence_hash=evidence_hash,
+    )
     with _safe_fix_review_lock(artifact_dir, proposal_hash):
         # The exact proposal must be durable before calling the frontier model.
         proposal_hash = _write_or_validate_proposal(artifact_dir, proposal)
@@ -1578,6 +1734,13 @@ def _review_safe_fix(
                     "summary": authority_error or "decision authority unavailable",
                     "valid": False,
                 }
+            reused_semantic_hold = _load_safe_fix_semantic_hold(
+                artifact_dir,
+                proposal_hash,
+                epoch=semantic_epoch,
+                authority=authority,
+                decision_lane=decision_lane,
+            )
             reused = _load_safe_fix_verdict(
                 artifact_dir,
                 proposal_hash,
@@ -1610,6 +1773,8 @@ def _review_safe_fix(
                 verdict["authority"] = dict(authority)
                 verdict["evidence_sha256"] = evidence_hash
                 return verdict
+        if reused_semantic_hold is not None:
+            return reused_semantic_hold
         if reused is not None:
             return reused
         try:
@@ -1628,8 +1793,11 @@ def _review_safe_fix(
             "quarantined",
             "needs_retry",
         }:
-            if verdict.get("decision") == "needs_retry" and isinstance(
-                verdict.get("frontier_failure"), Mapping
+            semantic_no_quorum = is_local_semantic_no_quorum(verdict)
+            if (
+                verdict.get("decision") == "needs_retry"
+                and isinstance(verdict.get("frontier_failure"), Mapping)
+                and not semantic_no_quorum
             ):
                 # Transport/resource/budget deferrals are not semantic holds.
                 # They may run again after the transient condition changes.
@@ -1644,11 +1812,15 @@ def _review_safe_fix(
                     current_authority,
                     lane=decision_lane,
                 )
-                authority_error = authority_error or semantic_verdict_authority_error(
-                    verdict,
-                    authority,
-                    lane=decision_lane,
-                )
+                if not semantic_no_quorum:
+                    authority_error = (
+                        authority_error
+                        or semantic_verdict_authority_error(
+                            verdict,
+                            authority,
+                            lane=decision_lane,
+                        )
+                    )
                 if authority_error is not None:
                     return {
                         "decision": "needs_retry",
@@ -1656,17 +1828,27 @@ def _review_safe_fix(
                         "valid": False,
                     }
                 try:
-                    _write_safe_fix_verdict(
-                        artifact_dir,
-                        proposal_hash,
-                        prompt_hash=prompt_hash,
-                        evidence_hash=evidence_hash,
-                        review_packet=review_packet,
-                        verdict=verdict,
-                        authority=authority,
-                        decision_lane=decision_lane,
-                        verdict_source="semantic_reviewer",
-                    )
+                    if semantic_no_quorum:
+                        semantic_hold = _write_safe_fix_semantic_hold(
+                            artifact_dir,
+                            proposal_hash,
+                            epoch=semantic_epoch,
+                            authority=authority,
+                            decision_lane=decision_lane,
+                            review=verdict,
+                        )
+                    else:
+                        _write_safe_fix_verdict(
+                            artifact_dir,
+                            proposal_hash,
+                            prompt_hash=prompt_hash,
+                            evidence_hash=evidence_hash,
+                            review_packet=review_packet,
+                            verdict=verdict,
+                            authority=authority,
+                            decision_lane=decision_lane,
+                            verdict_source="semantic_reviewer",
+                        )
                 except Exception as exc:
                     return {
                         "decision": "needs_retry",
@@ -1675,6 +1857,9 @@ def _review_safe_fix(
                     }
             verdict["authority"] = dict(authority)
             verdict["evidence_sha256"] = evidence_hash
+            if semantic_no_quorum:
+                verdict["semantic_hold"] = semantic_hold
+                verdict["hold_sha256"] = semantic_hold["hold_sha256"]
         return verdict
 
 

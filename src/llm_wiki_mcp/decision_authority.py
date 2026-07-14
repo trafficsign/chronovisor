@@ -147,13 +147,13 @@ def semantic_authority_shape_error(
     return None
 
 
-def semantic_verdict_authority_error(
+def semantic_verdict_authority_provenance_error(
     review: object,
     authority: object,
     *,
     lane: str,
 ) -> str | None:
-    """Cross-check a verdict's embedded policy audit against its seal."""
+    """Cross-check only a verdict's embedded lane/router epoch provenance."""
 
     shape_error = semantic_authority_shape_error(authority, lane=lane)
     if shape_error is not None:
@@ -176,6 +176,28 @@ def semantic_verdict_authority_error(
         return "decision verdict lane authority changed"
     if policy_audit.get("router_policy") != authority.get("router"):
         return "decision verdict router authority changed"
+    return None
+
+
+def semantic_verdict_authority_error(
+    review: object,
+    authority: object,
+    *,
+    lane: str,
+) -> str | None:
+    """Cross-check a verdict's provenance and successful quorum proof."""
+
+    provenance_error = semantic_verdict_authority_provenance_error(
+        review,
+        authority,
+        lane=lane,
+    )
+    if provenance_error is not None:
+        return provenance_error
+    assert isinstance(authority, Mapping)
+    if authority.get("source") == INJECTED_REVIEWER_SOURCE:
+        return None
+    assert isinstance(review, Mapping)
     router = authority.get("router")
     router_models = router.get("models") if isinstance(router, Mapping) else None
     consensus_error = _local_consensus_proof_error(
@@ -348,4 +370,5 @@ __all__ = [
     "seal_semantic_artifact",
     "semantic_authority_shape_error",
     "semantic_verdict_authority_error",
+    "semantic_verdict_authority_provenance_error",
 ]

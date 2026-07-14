@@ -159,12 +159,17 @@ def _sleep_history_summary(row: dict[str, Any]) -> dict[str, Any]:
 
 def _atomic_write_history(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             for row in rows:
-                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+                handle.write(
+                    json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+                    + "\n"
+                )
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
@@ -180,12 +185,16 @@ def _append_history(row: dict[str, Any], *, max_lines: int = HISTORY_MAX_LINES) 
 
     max_lines = max(1, int(max_lines))
     try:
-        lines = [line for line in HISTORY_FILE.read_text(encoding="utf-8").split("\n") if line.strip()]
+        lines = [
+            line
+            for line in HISTORY_FILE.read_text(encoding="utf-8").split("\n")
+            if line.strip()
+        ]
     except OSError:
         lines = []
     previous: list[dict[str, Any]] = []
     keep_previous = max_lines - 1
-    for line in (lines[-keep_previous:] if keep_previous else []):
+    for line in lines[-keep_previous:] if keep_previous else []:
         try:
             existing = json.loads(line)
         except json.JSONDecodeError:
@@ -233,7 +242,11 @@ def _run_lane(name: str, fn) -> dict[str, Any]:
         }
     if isinstance(result, dict):
         return result
-    return {"status": "error", "lane": name, "error": "lane returned a non-object result"}
+    return {
+        "status": "error",
+        "lane": name,
+        "error": "lane returned a non-object result",
+    }
 
 
 def render_summary(payload: dict[str, Any]) -> str:
@@ -249,7 +262,9 @@ def render_summary(payload: dict[str, Any]) -> str:
 
     lines = [f"sleep_cycle\t{payload.get('status', 'unknown')}"]
     if payload.get("locked"):
-        lines.append(f"reason\t{payload.get('reason', 'sleep cycle already in progress')}")
+        lines.append(
+            f"reason\t{payload.get('reason', 'sleep cycle already in progress')}"
+        )
         return "\n".join(lines)
     lines.extend(
         [
@@ -336,13 +351,20 @@ def _run_sleep_cycle(
     from llm_wiki_mcp.cofire import build_cofire_graph
     from llm_wiki_mcp.claims import rebuild_claim_index
     from llm_wiki_mcp.distill import export_distill_dataset
-    from llm_wiki_mcp.duplicate_review import build_duplicate_review_queue, write_review_queue
+    from llm_wiki_mcp.duplicate_review import (
+        build_duplicate_review_queue,
+        write_review_queue,
+    )
     from llm_wiki_mcp.health import health_snapshot
     from llm_wiki_mcp.golden_expand import expand_golden_from_recall_questions
     from llm_wiki_mcp.hubs import build_hub_pages
     from llm_wiki_mcp.memory_integrity import run_eval
     from llm_wiki_mcp.prefetch import build_prefetch_cache
-    from llm_wiki_mcp.raw_replay import AUTO_SIGNAL_SOURCES, build_queue, run_pending_queue
+    from llm_wiki_mcp.raw_replay import (
+        AUTO_SIGNAL_SOURCES,
+        build_queue,
+        run_pending_queue,
+    )
     from llm_wiki_mcp.reflection import write_reflection_page
     from llm_wiki_mcp.retention import build_retention_scores
     from llm_wiki_mcp import recall_improvement
@@ -352,7 +374,9 @@ def _run_sleep_cycle(
     from llm_wiki_mcp.wiki_snapshot import snapshot_wiki
 
     try:
-        per_lane_frontier = max(1, int(os.getenv("LLM_WIKI_FRONTIER_CALLS_PER_LANE", "3")))
+        per_lane_frontier = max(
+            1, int(os.getenv("LLM_WIKI_FRONTIER_CALLS_PER_LANE", "3"))
+        )
     except ValueError:
         per_lane_frontier = 3
     cycle_budget = CycleBudget(
@@ -375,7 +399,9 @@ def _run_sleep_cycle(
 
     started = datetime.now().isoformat(timespec="seconds")
     run_id = uuid.uuid4().hex
-    before_health_result = artifact_lane("health_before", health_snapshot, mutates=False)
+    before_health_result = artifact_lane(
+        "health_before", health_snapshot, mutates=False
+    )
     before_health = (
         before_health_result if before_health_result.get("status") != "error" else {}
     )
@@ -391,6 +417,9 @@ def _run_sleep_cycle(
         )
     except ValueError:
         quarantine_cooldown = 21_600
+    # This global pass reopens operational outages only. ConvergenceStore
+    # deliberately leaves semantic no-quorum holds to each owning lane, which
+    # can prove an exact evidence/authority epoch change before resampling.
     convergence_quarantine_recovery = _run_lane(
         "convergence_quarantine_recovery",
         lambda: ConvergenceStore().resume_due_quarantined(
@@ -437,28 +466,41 @@ def _run_sleep_cycle(
         ),
     )
     cofire = artifact_lane("cofire", lambda: build_cofire_graph(write=not dry_run))
-    prefetch = artifact_lane("prefetch", lambda: build_prefetch_cache(write=not dry_run))
-    retention = artifact_lane("retention", lambda: build_retention_scores(write=not dry_run))
+    prefetch = artifact_lane(
+        "prefetch", lambda: build_prefetch_cache(write=not dry_run)
+    )
+    retention = artifact_lane(
+        "retention", lambda: build_retention_scores(write=not dry_run)
+    )
     claims = artifact_lane("claims", lambda: rebuild_claim_index(write=not dry_run))
     claim_conflicts = _run_lane(
         "claim_conflicts",
-        lambda: __import__("llm_wiki_mcp.claims", fromlist=["review_claim_conflicts"]).review_claim_conflicts(
+        lambda: __import__(
+            "llm_wiki_mcp.claims", fromlist=["review_claim_conflicts"]
+        ).review_claim_conflicts(
             limit=per_lane_frontier,
             write=not dry_run,
         ),
     )
     golden = artifact_lane(
-        "golden", lambda: expand_golden_from_recall_questions(limit=0, write=not dry_run)
+        "golden",
+        lambda: expand_golden_from_recall_questions(limit=0, write=not dry_run),
     )
-    distill = artifact_lane("distill", lambda: export_distill_dataset(write=not dry_run))
+    distill = artifact_lane(
+        "distill", lambda: export_distill_dataset(write=not dry_run)
+    )
     hubs = artifact_lane("hubs", lambda: build_hub_pages(write=not dry_run))
-    reflection = artifact_lane("reflection", lambda: write_reflection_page(write=not dry_run))
+    reflection = artifact_lane(
+        "reflection", lambda: write_reflection_page(write=not dry_run)
+    )
     state_register = artifact_lane(
         "state_register", lambda: refresh_state_register(write=not dry_run)
     )
     page_normalization = artifact_lane(
         "page_normalization",
-        lambda: __import__("llm_wiki_mcp.page_normalize", fromlist=["normalize_pages"]).normalize_pages(
+        lambda: __import__(
+            "llm_wiki_mcp.page_normalize", fromlist=["normalize_pages"]
+        ).normalize_pages(
             write=not dry_run,
             limit=100,
             max_frontier_calls=per_lane_frontier,
@@ -466,7 +508,9 @@ def _run_sleep_cycle(
     )
     metadata_backfill = _run_lane(
         "metadata_backfill",
-        lambda: __import__("llm_wiki_mcp.metadata_backfill", fromlist=["backfill_metadata"]).backfill_metadata(
+        lambda: __import__(
+            "llm_wiki_mcp.metadata_backfill", fromlist=["backfill_metadata"]
+        ).backfill_metadata(
             limit=per_lane_frontier,
             max_frontier_calls=per_lane_frontier,
             dry_run=dry_run,
@@ -474,7 +518,9 @@ def _run_sleep_cycle(
     )
     entity_backfill = _run_lane(
         "entity_backfill",
-        lambda: __import__("llm_wiki_mcp.entities", fromlist=["backfill_entities"]).backfill_entities(
+        lambda: __import__(
+            "llm_wiki_mcp.entities", fromlist=["backfill_entities"]
+        ).backfill_entities(
             limit=per_lane_frontier,
             max_frontier_calls=per_lane_frontier,
             dry_run=dry_run,
@@ -494,22 +540,38 @@ def _run_sleep_cycle(
         "read_back_repair": cycle_budget.slice(
             max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
         ),
-        "labels": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
+        "labels": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
         "recall_auto_apply": cycle_budget.slice(
             max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
         ),
         "self_heal": cycle_budget.slice(
-            max_local_calls=per_lane_frontier, max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+            max_local_calls=per_lane_frontier,
+            max_frontier_calls=per_lane_frontier,
+            max_mutations=per_lane_frontier,
         ),
-        "recall_improve": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
-        "calibration": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
-        "self_tune": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
-        "duplicates": cycle_budget.slice(max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier),
+        "recall_improve": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "calibration": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "self_tune": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "duplicates": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
         "orphans": cycle_budget.slice(
-            max_local_calls=8, max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+            max_local_calls=8,
+            max_frontier_calls=per_lane_frontier,
+            max_mutations=per_lane_frontier,
         ),
         "raw": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier, max_raw_bytes=2_000_000
+            max_frontier_calls=per_lane_frontier,
+            max_mutations=per_lane_frontier,
+            max_raw_bytes=2_000_000,
         ),
         "autonomy_duplicates": cycle_budget.slice(max_mutations=1),
         "autonomy_retention": cycle_budget.slice(
@@ -519,25 +581,31 @@ def _run_sleep_cycle(
     if dry_run:
         lint_due = _run_lane(
             "lint_due",
-            lambda: __import__("llm_wiki_mcp.orchestrator", fromlist=["run_lint_if_due"]).run_lint_if_due(
-                dry_run=True
-            ),
+            lambda: __import__(
+                "llm_wiki_mcp.orchestrator", fromlist=["run_lint_if_due"]
+            ).run_lint_if_due(dry_run=True),
         )
     else:
         lint_allowed, lint_reason = lane_budgets["lint"].consume("mutation")
         lint_due = (
             _run_lane(
                 "lint_due",
-                lambda: __import__("llm_wiki_mcp.orchestrator", fromlist=["run_lint_if_due"]).run_lint_if_due(
-                    dry_run=False
-                ),
+                lambda: __import__(
+                    "llm_wiki_mcp.orchestrator", fromlist=["run_lint_if_due"]
+                ).run_lint_if_due(dry_run=False),
             )
             if lint_allowed
-            else {"status": "budget_deferred", "lane": "lint_due", "reason": lint_reason}
+            else {
+                "status": "budget_deferred",
+                "lane": "lint_due",
+                "reason": lint_reason,
+            }
         )
     lint_repair = _run_lane(
         "lint_repair",
-        lambda: __import__("llm_wiki_mcp.lint_repair", fromlist=["run_lint_repair"]).run_lint_repair(
+        lambda: __import__(
+            "llm_wiki_mcp.lint_repair", fromlist=["run_lint_repair"]
+        ).run_lint_repair(
             max_items=5,
             budget=lane_budgets["lint"],
             dry_run=dry_run,
@@ -545,7 +613,9 @@ def _run_sleep_cycle(
     )
     read_back_repair = _run_lane(
         "read_back_repair",
-        lambda: __import__("llm_wiki_mcp.read_back_repair", fromlist=["run_read_back_repair"]).run_read_back_repair(
+        lambda: __import__(
+            "llm_wiki_mcp.read_back_repair", fromlist=["run_read_back_repair"]
+        ).run_read_back_repair(
             max_items=5,
             budget=lane_budgets["read_back_repair"],
             dry_run=dry_run,
@@ -584,7 +654,9 @@ def _run_sleep_cycle(
     search_labels = (
         _run_lane(
             "search_label_queue",
-            lambda: __import__("llm_wiki_mcp.search_eval", fromlist=["build_label_queue"]).build_label_queue(
+            lambda: __import__(
+                "llm_wiki_mcp.search_eval", fromlist=["build_label_queue"]
+            ).build_label_queue(
                 limit=eval_limit,
                 dry_run=dry_run,
                 budget=lane_budgets["labels"],
@@ -596,7 +668,10 @@ def _run_sleep_cycle(
     search_label_review = (
         _run_lane(
             "search_label_review",
-            lambda: __import__("llm_wiki_mcp.search_eval", fromlist=["review_label_queue_with_frontier"]).review_label_queue_with_frontier(
+            lambda: __import__(
+                "llm_wiki_mcp.search_eval",
+                fromlist=["review_label_queue_with_frontier"],
+            ).review_label_queue_with_frontier(
                 limit=min(2, eval_limit),
                 max_attempts=3,
                 dry_run=dry_run,
@@ -608,14 +683,18 @@ def _run_sleep_cycle(
     )
     recall_auto_apply = _run_lane(
         "recall_auto_apply",
-        lambda: __import__("llm_wiki_mcp.recall_auto_apply", fromlist=["apply_feedback_file"]).apply_feedback_file(
+        lambda: __import__(
+            "llm_wiki_mcp.recall_auto_apply", fromlist=["apply_feedback_file"]
+        ).apply_feedback_file(
             dry_run=dry_run,
             budget=lane_budgets["recall_auto_apply"],
         ),
     )
     self_heal = _run_lane(
         "self_heal",
-        lambda: __import__("llm_wiki_mcp.self_heal", fromlist=["run_pending"]).run_pending(
+        lambda: __import__(
+            "llm_wiki_mcp.self_heal", fromlist=["run_pending"]
+        ).run_pending(
             max_packets=1,
             enable_frontier=False,
             dry_run=dry_run,
@@ -640,7 +719,8 @@ def _run_sleep_cycle(
     duplicate_error = duplicate_build.get("error")
     if not dry_run and duplicate_status != "error":
         duplicate_write = artifact_lane(
-            "duplicates", lambda: {"status": "ok", "path": str(write_review_queue(duplicates))}
+            "duplicates",
+            lambda: {"status": "ok", "path": str(write_review_queue(duplicates))},
         )
         duplicate_status = str(duplicate_write.get("status") or "ok")
         duplicate_path = str(duplicate_write.get("path") or "")
@@ -667,7 +747,9 @@ def _run_sleep_cycle(
     )
     calibration = _run_lane(
         "recall_calibration",
-        lambda: __import__("llm_wiki_mcp.recall_calibration", fromlist=["run_due"]).run_due(
+        lambda: __import__(
+            "llm_wiki_mcp.recall_calibration", fromlist=["run_due"]
+        ).run_due(
             min_interval_hours=7 * 24,
             max_samples=2000,
             max_recomputed_features=50,
@@ -678,7 +760,9 @@ def _run_sleep_cycle(
     )
     search_self_tune = _run_lane(
         "search_self_tune",
-        lambda: __import__("llm_wiki_mcp.search_eval", fromlist=["run_self_tune_due"]).run_self_tune_due(
+        lambda: __import__(
+            "llm_wiki_mcp.search_eval", fromlist=["run_self_tune_due"]
+        ).run_self_tune_due(
             min_interval_hours=7 * 24,
             apply=True,
             dry_run=dry_run,
@@ -753,7 +837,10 @@ def _run_sleep_cycle(
     )
     payload["duplicate_frontier"] = _run_lane(
         "duplicate_frontier",
-        lambda: __import__("llm_wiki_mcp.autonomy", fromlist=["resolve_deferred_duplicates_with_frontier"]).resolve_deferred_duplicates_with_frontier(
+        lambda: __import__(
+            "llm_wiki_mcp.autonomy",
+            fromlist=["resolve_deferred_duplicates_with_frontier"],
+        ).resolve_deferred_duplicates_with_frontier(
             duplicates,
             budget=lane_budgets["duplicates"],
             dry_run=dry_run,
@@ -761,7 +848,9 @@ def _run_sleep_cycle(
     )
     payload["orphan_links"] = _run_lane(
         "orphan_links",
-        lambda: __import__("llm_wiki_mcp.orphan_link", fromlist=["run_autonomous"]).run_autonomous(
+        lambda: __import__(
+            "llm_wiki_mcp.orphan_link", fromlist=["run_autonomous"]
+        ).run_autonomous(
             orphan_limit=2,
             max_candidates=2,
             budget=lane_budgets["orphans"],

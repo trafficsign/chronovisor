@@ -24,6 +24,15 @@ from llm_wiki_mcp import decision_authority
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.page_mutation import decision_authority_lock, wiki_mutation_lock
 from llm_wiki_mcp.runtime_config import runtime_repo_root
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    frontier_failure_class,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 
 
 FAILURE_FILE = wiki.WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl"
@@ -340,6 +349,12 @@ def _resume_due_quarantines(
             or str(entry.get("status") or "") != "quarantined"
         ):
             continue
+        # A local semantic disagreement is an exact-epoch terminal hold, not
+        # an operational quarantine.  Even a malformed/legacy marker fails
+        # closed here; the lane may only reconsider it after reconstructing
+        # and comparing the current epoch below.
+        if _has_semantic_no_quorum_marker(entry):
+            continue
         failure = entry.get("failure") if isinstance(entry.get("failure"), dict) else {}
         if _human_required(failure):
             entry["status"] = "human_required"
@@ -513,6 +528,114 @@ def _proposal_fingerprint(proposal: Mapping[str, Any]) -> str:
         dict(proposal), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _has_semantic_no_quorum_marker(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if "semantic_hold" in value:
+        return True
+    if value.get("last_failure_class") == LOCAL_SEMANTIC_NO_QUORUM:
+        return True
+    return frontier_failure_class(value) == LOCAL_SEMANTIC_NO_QUORUM
+
+
+def _query_hint_semantic_epoch(
+    proposal: Mapping[str, Any],
+    proposal_fingerprint: str,
+) -> dict[str, Any]:
+    """Return the redacted identity that may legitimately reopen a hold."""
+
+    return {
+        "ledger_schema_version": SCHEMA_VERSION,
+        "proposal_sha256": proposal_fingerprint,
+        "target_page_sha256": str(proposal.get("target_page_hash") or ""),
+        "review_schema_sha256": canonical_sha256(READ_BACK_FRONTIER_SCHEMA),
+    }
+
+
+def _semantic_hold_state(
+    entry: Mapping[str, Any],
+    *,
+    epoch: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    """Classify a durable marker without treating corruption as retryable."""
+
+    if not _has_semantic_no_quorum_marker(entry):
+        return "none", None
+    hold = persisted_semantic_no_quorum_hold(entry, lane=READ_BACK_DECISION_LANE)
+    if hold is None:
+        return "malformed", None
+    error = semantic_no_quorum_hold_error(
+        hold,
+        READ_BACK_DECISION_LANE,
+        epoch=epoch,
+        authority=authority,
+    )
+    if error is None:
+        return "same", hold
+    if error in {"semantic hold epoch changed", "semantic hold authority changed"}:
+        history = entry.get("semantic_hold_history")
+        if isinstance(history, list):
+            for candidate in reversed(history):
+                historical = persisted_semantic_no_quorum_hold(
+                    candidate,
+                    lane=READ_BACK_DECISION_LANE,
+                    epoch=epoch,
+                    authority=authority,
+                )
+                if historical is not None:
+                    return "same", historical
+        return "changed", hold
+    return "malformed", None
+
+
+def _apply_semantic_hold(
+    entry: dict[str, Any],
+    *,
+    hold: Mapping[str, Any] | None,
+    now: datetime,
+    malformed: bool = False,
+) -> None:
+    entry["status"] = "quarantined"
+    entry["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+    entry["last_error"] = (
+        "malformed local semantic no-quorum hold; refusing resample"
+        if malformed
+        else "local semantic models did not reach a safe quorum"
+    )
+    entry["quarantined_at"] = entry.get("quarantined_at") or now.isoformat(
+        timespec="seconds"
+    )
+    entry.pop("next_attempt_at", None)
+    entry.pop("quarantine_retry_at", None)
+    entry.pop("frontier_review", None)
+    entry.pop("frontier_review_authority", None)
+    entry.pop("frontier_proposal_fingerprint", None)
+    if hold is not None:
+        existing = persisted_semantic_no_quorum_hold(
+            entry, lane=READ_BACK_DECISION_LANE
+        )
+        if existing is not None and existing.get("hold_sha256") != hold.get(
+            "hold_sha256"
+        ):
+            history = [
+                item
+                for item in entry.get("semantic_hold_history", [])
+                if isinstance(item, Mapping)
+            ]
+            if not any(
+                item.get("hold_sha256") == existing.get("hold_sha256")
+                for item in history
+            ):
+                history.append(existing)
+            # Hold identities are durable evidence, not a retry cache.  Keep
+            # every distinct epoch/authority so an A -> ... -> A transition
+            # can restore the original terminal hold without another model
+            # call, regardless of how many authorities were adopted between.
+            entry["semantic_hold_history"] = history
+        entry["semantic_hold"] = dict(hold)
 
 
 def _normalize_frontier_review(value: object) -> dict[str, Any]:
@@ -725,8 +848,13 @@ def run_read_back_repair(
         entry
         for entry in entries.values()
         if isinstance(entry, dict)
-        and str(entry.get("status") or "pending") not in TERMINAL_STATUSES
-        and _due(entry, now=now_utc)
+        and (
+            _has_semantic_no_quorum_marker(entry)
+            or (
+                str(entry.get("status") or "pending") not in TERMINAL_STATUSES
+                and _due(entry, now=now_utc)
+            )
+        )
     ]
     candidates.sort(
         key=lambda entry: (
@@ -744,6 +872,7 @@ def run_read_back_repair(
         "human_required": 0,
         "rejected": 0,
         "frontier_review": 0,
+        "semantic_hold": 0,
         "budget_deferred": 0,
     }
     mutation_consumed = False
@@ -756,6 +885,62 @@ def run_read_back_repair(
             "page_id": str(failure.get("page_id") or ""),
             "reason": reason,
         }
+
+        prepared_proposal: dict[str, Any] | None = None
+        prepared_fingerprint: str | None = None
+        prepared_authority: dict[str, Any] | None = None
+        if _has_semantic_no_quorum_marker(entry):
+            page_id = str(failure.get("page_id") or "").strip()
+            query = str(failure.get("query") or "").strip()
+            if (
+                reason != "not-in-top-results"
+                or not page_id
+                or not query
+                or not _target_page_exists(page_id)
+            ):
+                _apply_semantic_hold(entry, hold=None, now=now_utc, malformed=True)
+                counts["semantic_hold"] += 1
+                action["outcome"] = "semantic_hold_malformed"
+                actions.append(action)
+                continue
+            prepared_proposal = _query_hint_proposal(entry)
+            prepared_fingerprint = _proposal_fingerprint(prepared_proposal)
+            prepared_authority, prepared_authority_error = (
+                _current_query_hint_authority(reviewer=reviewer)
+            )
+            if prepared_authority_error is not None or prepared_authority is None:
+                # Authority cannot be compared, so the previously durable hold
+                # remains authoritative.  This is not an operational retry.
+                existing_hold = persisted_semantic_no_quorum_hold(
+                    entry, lane=READ_BACK_DECISION_LANE
+                )
+                _apply_semantic_hold(entry, hold=existing_hold, now=now_utc)
+                counts["semantic_hold"] += 1
+                action["outcome"] = "semantic_hold_authority_unavailable"
+                actions.append(action)
+                continue
+            hold_state, existing_hold = _semantic_hold_state(
+                entry,
+                epoch=_query_hint_semantic_epoch(
+                    prepared_proposal, prepared_fingerprint
+                ),
+                authority=prepared_authority,
+            )
+            if hold_state in {"same", "malformed"}:
+                _apply_semantic_hold(
+                    entry,
+                    hold=existing_hold,
+                    now=now_utc,
+                    malformed=hold_state == "malformed",
+                )
+                counts["semantic_hold"] += 1
+                action["outcome"] = (
+                    "semantic_hold"
+                    if hold_state == "same"
+                    else "semantic_hold_malformed"
+                )
+                actions.append(action)
+                continue
 
         if budget is not None and not dry_run:
             allowed, budget_reason = budget.consume("mutation")
@@ -856,11 +1041,16 @@ def run_read_back_repair(
             elif dry_run:
                 outcome = "frontier_review"
             else:
-                proposal = _query_hint_proposal(entry)
-                proposal_fingerprint = _proposal_fingerprint(proposal)
-                review_authority, authority_error = _current_query_hint_authority(
-                    reviewer=reviewer
+                proposal = prepared_proposal or _query_hint_proposal(entry)
+                proposal_fingerprint = prepared_fingerprint or _proposal_fingerprint(
+                    proposal
                 )
+                if prepared_authority is not None:
+                    review_authority, authority_error = prepared_authority, None
+                else:
+                    review_authority, authority_error = _current_query_hint_authority(
+                        reviewer=reviewer
+                    )
                 persisted_review = entry.get("frontier_review")
                 persisted_authority = entry.get("frontier_review_authority")
                 review = (
@@ -942,6 +1132,60 @@ def run_read_back_repair(
                 else:
                     action["frontier_review_reused"] = True
 
+                if is_local_semantic_no_quorum(review):
+                    hold: dict[str, Any] | None = None
+                    hold_error: str | None = None
+                    try:
+                        with decision_authority_lock():
+                            current_authority, current_authority_error = (
+                                _current_query_hint_authority(reviewer=reviewer)
+                            )
+                            hold_error = (
+                                current_authority_error
+                                or decision_authority.compare_semantic_authority(
+                                    review_authority,
+                                    current_authority,
+                                    lane=READ_BACK_DECISION_LANE,
+                                )
+                            )
+                            current_proposal = _query_hint_proposal(entry)
+                            if (
+                                hold_error is None
+                                and _proposal_fingerprint(current_proposal)
+                                != proposal_fingerprint
+                            ):
+                                hold_error = (
+                                    "query hint proposal changed before semantic hold"
+                                )
+                            if hold_error is None:
+                                assert review_authority is not None
+                                hold = build_semantic_no_quorum_hold(
+                                    READ_BACK_DECISION_LANE,
+                                    _query_hint_semantic_epoch(
+                                        proposal, proposal_fingerprint
+                                    ),
+                                    review_authority,
+                                    review,
+                                )
+                                _apply_semantic_hold(entry, hold=hold, now=now_utc)
+                                persist_ledger()
+                    except (TypeError, ValueError) as exc:
+                        hold_error = str(exc)
+                    if hold is not None:
+                        outcome = "semantic_hold"
+                        counts[outcome] += 1
+                        action["outcome"] = outcome
+                        action["semantic_hold_sha256"] = hold["hold_sha256"]
+                        actions.append(action)
+                        continue
+                    review = {
+                        **review,
+                        "decision": "needs_retry",
+                        "summary": hold_error
+                        or "semantic no-quorum hold provenance is invalid",
+                        "valid": False,
+                    }
+
                 decision = review.get("decision")
                 if decision == "rejected":
                     try:
@@ -972,6 +1216,9 @@ def run_read_back_repair(
                                 proposal_fingerprint
                             )
                             entry["frontier_review_authority"] = review_authority
+                            entry.pop("semantic_hold", None)
+                            entry.pop("semantic_hold_history", None)
+                            entry.pop("last_failure_class", None)
                             entry["rejected_at"] = now_utc.isoformat(timespec="seconds")
                             entry["resolved_occurrences"] = int(
                                 entry.get("occurrences") or 0
@@ -1007,6 +1254,9 @@ def run_read_back_repair(
                     entry["frontier_review"] = review
                     entry["frontier_proposal_fingerprint"] = proposal_fingerprint
                     entry["frontier_review_authority"] = review_authority
+                    entry.pop("semantic_hold", None)
+                    entry.pop("semantic_hold_history", None)
+                    entry.pop("last_failure_class", None)
                     entry["frontier_approved_at"] = now_utc.isoformat(
                         timespec="seconds"
                     )

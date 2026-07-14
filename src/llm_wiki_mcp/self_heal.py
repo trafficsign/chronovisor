@@ -13,7 +13,8 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,8 +39,14 @@ from llm_wiki_mcp.local_repair import (
     LocalRepairDecision,
     is_review_budget_nonconvergence,
     propose_repair,
+    semantic_hold_epoch,
 )
 from llm_wiki_mcp.page_mutation import decision_authority_lock
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 
 
 SELF_HEAL_STATUSES = {
@@ -1443,7 +1450,11 @@ def _update_packet(path: Path, packet: dict[str, Any], **updates: Any) -> None:
     _write_json(path, packet)
 
 
-def pending_packets(*, now: datetime | None = None) -> list[Path]:
+def pending_packets(
+    *,
+    now: datetime | None = None,
+    lock_authority: bool = True,
+) -> list[Path]:
     if not _packet_dir().exists():
         return []
     current = now or datetime.now()
@@ -1463,6 +1474,13 @@ def pending_packets(*, now: datetime | None = None) -> list[Path]:
         status = packet.get("status")
         if status in SELF_HEAL_STATUSES and due:
             out.append(path)
+        elif status == "local_quarantined":
+            _exact_hold, stale_hold = _current_local_semantic_hold(
+                packet,
+                lock_authority=lock_authority,
+            )
+            if stale_hold is not None:
+                out.append(path)
         elif packet.get("incident_kind") == "system_code_repair" and (
             int(packet.get("frontier_attempts") or 0) > 0
             or (
@@ -1615,9 +1633,193 @@ def _local_decision_from_payload(
                 if isinstance(payload.get("local_consensus"), dict)
                 else None
             ),
+            semantic_hold=(
+                dict(payload["semantic_hold"])
+                if isinstance(payload.get("semantic_hold"), dict)
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _packet_semantic_hold(packet: Mapping[str, Any]) -> dict[str, Any] | None:
+    hold = persisted_semantic_no_quorum_hold(packet, "local_repair")
+    if hold is not None:
+        return hold
+    local_decision = packet.get("local_decision")
+    return persisted_semantic_no_quorum_hold(local_decision, "local_repair")
+
+
+def _packet_semantic_holds(packet: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return every valid historical hold without trusting packet metadata."""
+
+    candidates: list[object] = [
+        packet,
+        packet.get("local_decision"),
+        packet.get("invalidated_semantic_hold"),
+    ]
+    history = packet.get("semantic_hold_history")
+    if isinstance(history, list):
+        candidates.extend(history)
+    holds: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        hold = persisted_semantic_no_quorum_hold(candidate, "local_repair")
+        if hold is None:
+            continue
+        digest = str(hold["hold_sha256"])
+        if digest in seen:
+            continue
+        seen.add(digest)
+        holds.append(hold)
+    return holds
+
+
+def _semantic_hold_history_with(
+    packet: Mapping[str, Any],
+    *new_holds: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Append strict holds once so authority A -> B -> A never re-samples A."""
+
+    ordered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    history = packet.get("semantic_hold_history")
+    candidates: list[object] = list(history) if isinstance(history, list) else []
+    candidates.extend(
+        [
+            packet,
+            packet.get("local_decision"),
+            packet.get("invalidated_semantic_hold"),
+            *new_holds,
+        ]
+    )
+    for candidate in candidates:
+        hold = persisted_semantic_no_quorum_hold(candidate, "local_repair")
+        if hold is None:
+            continue
+        digest = str(hold["hold_sha256"])
+        if digest in seen:
+            continue
+        seen.add(digest)
+        ordered.append(hold)
+    return ordered
+
+
+def _current_local_semantic_hold(
+    packet: dict[str, Any],
+    *,
+    lock_authority: bool = True,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return (exact current hold, resumable stale hold).
+
+    Malformed or legacy incomplete no-quorum records deliberately return
+    ``(None, None)`` and remain fail-closed.  Only a structurally valid hold
+    whose concrete evidence or adopted authority changed may reopen.
+    """
+
+    holds = _packet_semantic_holds(packet)
+    if not holds:
+        return None, None
+    epoch = semantic_hold_epoch(packet)
+    authority_epoch = decision_authority_lock() if lock_authority else nullcontext()
+    with authority_epoch:
+        authority, authority_error = current_semantic_authority("local_repair")
+        if authority_error is not None or authority is None:
+            return None, None
+        errors = [
+            semantic_no_quorum_hold_error(
+                hold,
+                "local_repair",
+                epoch=epoch,
+                authority=authority,
+            )
+            for hold in holds
+        ]
+    for hold, error in zip(holds, errors, strict=True):
+        if error is None:
+            return hold, None
+    active_hold = _packet_semantic_hold(packet)
+    if active_hold is not None:
+        active_error = semantic_no_quorum_hold_error(
+            active_hold,
+            "local_repair",
+            epoch=epoch,
+            authority=authority,
+        )
+        if active_error in {
+            "semantic hold epoch changed",
+            "semantic hold authority changed",
+        }:
+            return None, active_hold
+    return None, None
+
+
+def _restore_invalidated_local_semantic_hold(
+    packet_path: Path,
+    packet: dict[str, Any],
+    *,
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    old_holds = _packet_semantic_holds(packet)
+    if not old_holds:
+        return None
+    epoch = semantic_hold_epoch(packet)
+    authority_epoch = nullcontext() if dry_run else decision_authority_lock()
+    with authority_epoch:
+        authority, authority_error = current_semantic_authority("local_repair")
+        if authority_error is not None or authority is None:
+            return None
+        old_hold = next(
+            (
+                hold
+                for hold in old_holds
+                if semantic_no_quorum_hold_error(
+                    hold,
+                    "local_repair",
+                    epoch=epoch,
+                    authority=authority,
+                )
+                is None
+            ),
+            None,
+        )
+        if old_hold is None:
+            return None
+        if (
+            semantic_no_quorum_hold_error(
+                old_hold,
+                "local_repair",
+                epoch=epoch,
+                authority=authority,
+            )
+            is not None
+        ):
+            return None
+        result = {
+            "packet": str(packet_path),
+            "failure_id": packet.get("failure_id"),
+            "status": "dry_run" if dry_run else "local_quarantined",
+            "projected_status": "local_quarantined",
+            "terminal_reason": "semantic_no_quorum",
+            "restored_semantic_hold": True,
+            "semantic_hold": old_hold,
+        }
+        if dry_run:
+            return result
+        _update_packet(
+            packet_path,
+            packet,
+            status="local_quarantined",
+            semantic_hold=old_hold,
+            semantic_hold_history=_semantic_hold_history_with(packet, old_hold),
+            invalidated_semantic_hold=None,
+            terminal_reason="semantic_no_quorum",
+            last_failure_class=LOCAL_SEMANTIC_NO_QUORUM,
+            next_attempt_at=None,
+            quarantined_at=datetime.now().isoformat(timespec="seconds"),
+        )
+    return result
 
 
 def _local_decision_authority_error(decision: LocalRepairDecision) -> str | None:
@@ -2170,6 +2372,68 @@ def _handle_packet_unlocked(
             packet,
             dry_run=dry_run,
         )
+    if packet.get("status") == "local_quarantined":
+        exact_hold, stale_hold = _current_local_semantic_hold(
+            packet,
+            lock_authority=not dry_run,
+        )
+        if exact_hold is not None:
+            active_hold = _packet_semantic_hold(packet)
+            if not dry_run and active_hold != exact_hold:
+                _update_packet(
+                    packet_path,
+                    packet,
+                    semantic_hold=exact_hold,
+                    semantic_hold_history=_semantic_hold_history_with(
+                        packet,
+                        exact_hold,
+                    ),
+                    invalidated_semantic_hold=None,
+                    terminal_reason="semantic_no_quorum",
+                    last_failure_class=LOCAL_SEMANTIC_NO_QUORUM,
+                    next_attempt_at=None,
+                )
+            return {
+                "packet": str(packet_path),
+                "failure_id": packet.get("failure_id"),
+                "status": "dry_run" if dry_run else "local_quarantined",
+                "projected_status": "local_quarantined",
+                "cached": True,
+                "terminal_reason": "semantic_no_quorum",
+                "semantic_deferred": True,
+                "semantic_hold": exact_hold,
+            }
+        if stale_hold is not None:
+            if dry_run:
+                return {
+                    "packet": str(packet_path),
+                    "failure_id": packet.get("failure_id"),
+                    "status": "dry_run",
+                    "projected_status": "pending_local_repair",
+                    "would_resume_semantic_hold": True,
+                }
+            _update_packet(
+                packet_path,
+                packet,
+                status="pending_local_repair",
+                semantic_hold=None,
+                semantic_hold_history=_semantic_hold_history_with(
+                    packet,
+                    stale_hold,
+                ),
+                invalidated_semantic_hold=stale_hold,
+                semantic_hold_invalidated_at=datetime.now().isoformat(
+                    timespec="seconds"
+                ),
+                next_attempt_at=None,
+            )
+    restored_semantic_hold = _restore_invalidated_local_semantic_hold(
+        packet_path,
+        packet,
+        dry_run=dry_run,
+    )
+    if restored_semantic_hold is not None:
+        return restored_semantic_hold
     resume_kind = _resume_terminal_packet(
         packet_path,
         packet,
@@ -2251,15 +2515,122 @@ def _handle_packet_unlocked(
                 )
         if not dry_run:
             _raise_if_packet_cancelled(packet_path, packet)
-        decision = propose_repair(packet, use_qwen=use_qwen)
+        # A dry-run is a byte-for-byte read-only projection, not an inference
+        # rehearsal.  Local structured sessions write active/audit/replay
+        # artifacts and change model residency even when the packet itself is
+        # untouched, so only deterministic repair logic may run here.  Exact
+        # persisted semantic holds were already handled above without a model.
+        decision = propose_repair(
+            packet,
+            use_qwen=False if dry_run else use_qwen,
+        )
         if not dry_run:
             _raise_if_packet_cancelled(packet_path, packet)
         local_decision = decision.to_dict()
         if dry_run:
+            deterministic_terminal = (
+                decision.status == "resolved"
+                and decision.action
+                in {
+                    "resolve_update_target",
+                    "retry_raw",
+                    "quarantine_raw",
+                }
+            )
+            semantic_review_skipped = bool(use_qwen and not deterministic_terminal)
             return {
                 "packet": str(packet_path),
                 "failure_id": packet.get("failure_id"),
                 "status": "dry_run",
+                "local_decision": local_decision,
+                **(
+                    {
+                        "projected_status": "local_quarantined",
+                        "terminal_reason": "semantic_no_quorum",
+                    }
+                    if decision.source == "semantic_hold"
+                    else {}
+                ),
+                **(
+                    {
+                        "projected_status": "local_review_required",
+                        "model_review_skipped": True,
+                    }
+                    if semantic_review_skipped
+                    else {}
+                ),
+            }
+
+        semantic_hold = persisted_semantic_no_quorum_hold(
+            local_decision,
+            "local_repair",
+            epoch=semantic_hold_epoch(packet),
+            authority=decision.authority,
+        )
+        if decision.source == "semantic_hold" and semantic_hold is not None:
+            with decision_authority_lock():
+                current_authority, authority_error = current_semantic_authority(
+                    "local_repair"
+                )
+                if authority_error is None and current_authority is None:
+                    authority_error = "local repair decision authority is unavailable"
+                if authority_error is None:
+                    authority_error = semantic_no_quorum_hold_error(
+                        semantic_hold,
+                        "local_repair",
+                        epoch=semantic_hold_epoch(packet),
+                        authority=current_authority,
+                    )
+                if authority_error is None:
+                    _update_packet(
+                        packet_path,
+                        packet,
+                        status="local_quarantined",
+                        local_decision=local_decision,
+                        semantic_hold=semantic_hold,
+                        semantic_hold_history=_semantic_hold_history_with(
+                            packet,
+                            semantic_hold,
+                        ),
+                        invalidated_semantic_hold=None,
+                        terminal_reason="semantic_no_quorum",
+                        last_failure_class=LOCAL_SEMANTIC_NO_QUORUM,
+                        next_attempt_at=None,
+                        quarantined_at=datetime.now().isoformat(timespec="seconds"),
+                    )
+                    return {
+                        "packet": str(packet_path),
+                        "failure_id": packet.get("failure_id"),
+                        "status": "local_quarantined",
+                        "terminal_reason": "semantic_no_quorum",
+                        "semantic_deferred": True,
+                        "local_decision": local_decision,
+                    }
+            decision = replace(
+                decision,
+                source="local_deferred",
+                reason=f"local semantic hold authority changed: {authority_error}",
+                semantic_hold=None,
+            )
+            local_decision = decision.to_dict()
+
+        if decision.source == "local_deferred":
+            delay = max(0, backoff_base_seconds)
+            _update_packet(
+                packet_path,
+                packet,
+                status="pending_local_repair",
+                local_decision=local_decision,
+                last_failure_class="decision_authority_changed",
+                next_attempt_at=(datetime.now() + timedelta(seconds=delay)).isoformat(
+                    timespec="seconds"
+                ),
+            )
+            return {
+                "packet": str(packet_path),
+                "failure_id": packet.get("failure_id"),
+                "status": "pending_local_repair",
+                "reason": decision.reason,
                 "local_decision": local_decision,
             }
 
@@ -2855,6 +3226,48 @@ def handle_packet(
             current = _read_json(packet_path)
             _raise_if_packet_cancelled(packet_path, current)
             current_status = current.get("status")
+            exact_semantic_hold: dict[str, Any] | None = None
+            stale_semantic_hold: dict[str, Any] | None = None
+            if current_status == "local_quarantined":
+                exact_semantic_hold, stale_semantic_hold = _current_local_semantic_hold(
+                    current
+                )
+                active_semantic_hold = _packet_semantic_hold(current)
+                if (
+                    exact_semantic_hold is not None
+                    and active_semantic_hold != exact_semantic_hold
+                    and not dry_run
+                ):
+                    _update_packet(
+                        packet_path,
+                        current,
+                        semantic_hold=exact_semantic_hold,
+                        semantic_hold_history=_semantic_hold_history_with(
+                            current,
+                            exact_semantic_hold,
+                        ),
+                        invalidated_semantic_hold=None,
+                        terminal_reason="semantic_no_quorum",
+                        last_failure_class=LOCAL_SEMANTIC_NO_QUORUM,
+                        next_attempt_at=None,
+                    )
+                if stale_semantic_hold is not None:
+                    _update_packet(
+                        packet_path,
+                        current,
+                        status="pending_local_repair",
+                        semantic_hold=None,
+                        semantic_hold_history=_semantic_hold_history_with(
+                            current,
+                            stale_semantic_hold,
+                        ),
+                        invalidated_semantic_hold=stale_semantic_hold,
+                        semantic_hold_invalidated_at=datetime.now().isoformat(
+                            timespec="seconds"
+                        ),
+                        next_attempt_at=None,
+                    )
+                    current_status = "pending_local_repair"
             legacy_non_external_human = (
                 current_status == "human_required"
                 and not is_human_required_result(current.get("frontier_result"))
@@ -2882,6 +3295,14 @@ def handle_packet(
                     "status": current_status,
                     "cached": True,
                 }
+                if exact_semantic_hold is not None:
+                    result.update(
+                        {
+                            "terminal_reason": "semantic_no_quorum",
+                            "semantic_deferred": True,
+                            "semantic_hold": exact_semantic_hold,
+                        }
+                    )
                 source_sync = _sync_system_incident_outcome(packet_path)
                 if source_sync is not None:
                     result["operational_source_sync"] = source_sync
@@ -2909,7 +3330,7 @@ def run_pending(
     backoff_base_seconds: int = 6 * 60 * 60,
     frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
-    packets = pending_packets()[:max_packets]
+    packets = pending_packets(lock_authority=not dry_run)[:max_packets]
     results: list[dict[str, Any]] = []
     for packet in packets:
         try:

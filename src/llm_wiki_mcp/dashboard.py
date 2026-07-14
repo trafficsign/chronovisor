@@ -76,6 +76,9 @@ ACTIVE_BATCH_STAGES = {
 DECISION_ROUTER_DASHBOARD_CACHE_SECONDS = 15.0
 SNAPSHOT_ACTIVE_CACHE_SECONDS = 5.0
 SNAPSHOT_IDLE_CACHE_SECONDS = 60.0
+_PROCESS_IDENTITY_MATCH = "match"
+_PROCESS_IDENTITY_MISMATCH = "mismatch"
+_PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
 _DECISION_ROUTER_CACHE_LOCK = threading.Lock()
 _DECISION_ROUTER_CACHE: dict[str, Any] = {
     "key": None,
@@ -1530,7 +1533,9 @@ def _frontier_repair_snapshot(limit: int = 40) -> dict[str, Any]:
                 "reserved_at": raw.get("reserved_at"),
                 "started_at": started_at,
                 "finished_at": raw.get("finished_at"),
+                "lease_expires_at": raw.get("lease_expires_at"),
                 "owner_pid": raw.get("owner_pid"),
+                "owner_process_started_at": raw.get("owner_process_started_at"),
                 "pid": raw.get("pid"),
             }
         )
@@ -1555,10 +1560,33 @@ def _frontier_repair_snapshot(limit: int = 40) -> dict[str, Any]:
         and active_status in {"reserved", "started"}
         and runtime_status._pid_is_alive(active_row.get("owner_pid"))
     )
+    owner_identity_status = (
+        _process_start_identity_status(
+            active_row.get("owner_pid"),
+            active_row.get("owner_process_started_at"),
+        )
+        if active_row and active_status in {"reserved", "started"}
+        else None
+    )
+    lease_expired = bool(
+        active_row
+        and active_status in {"reserved", "started"}
+        and _timestamp_is_expired(active_row.get("lease_expires_at"))
+    )
+    active = bool(
+        active_row
+        and active_status in {"reserved", "started"}
+        and owner_alive
+        and not lease_expired
+        and owner_identity_status
+        in {_PROCESS_IDENTITY_MATCH, _PROCESS_IDENTITY_UNAVAILABLE}
+    )
     if active_row is not None:
         active_row = {
             **active_row,
             "owner_alive": owner_alive,
+            "owner_identity_status": owner_identity_status,
+            "lease_expired": lease_expired,
             "elapsed_seconds": _activity_age_seconds(
                 active_row.get("started_at") or active_row.get("reserved_at")
             ),
@@ -1584,9 +1612,9 @@ def _frontier_repair_snapshot(limit: int = 40) -> dict[str, Any]:
         )
     return {
         "available": state_path.exists(),
-        "active": owner_alive,
+        "active": active,
         "active_incident": active_row,
-        "stale_active_incident": bool(active_row and not owner_alive),
+        "stale_active_incident": bool(active_row and not active),
         "summary": {
             "total": len(incidents),
             "starts_24h": starts_24h,
@@ -2113,6 +2141,47 @@ def _job_process_identity_matches(
     # The orchestrator records current_job_started_at after this process was
     # launched. A process that started later is necessarily a reused PID.
     return process_start <= job_start
+
+
+def _process_start_identity_status(
+    pid: object,
+    expected_started_at: object,
+) -> str:
+    """Classify exact process identity while preserving transient uncertainty."""
+
+    if not runtime_status._pid_is_alive(pid) or not isinstance(
+        expected_started_at, str
+    ):
+        return _PROCESS_IDENTITY_MISMATCH
+    try:
+        expected = datetime.fromisoformat(expected_started_at.replace("Z", "+00:00"))
+    except ValueError:
+        return _PROCESS_IDENTITY_MISMATCH
+    if expected.tzinfo is not None:
+        expected = expected.astimezone().replace(tzinfo=None)
+    observed = _process_started_at(pid)
+    if observed is None:
+        return _PROCESS_IDENTITY_UNAVAILABLE
+    if observed == expected:
+        return _PROCESS_IDENTITY_MATCH
+    return _PROCESS_IDENTITY_MISMATCH
+
+
+def _timestamp_is_expired(value: object) -> bool:
+    """Match the guard's lease semantics; missing or invalid legacy values survive."""
+
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    now = datetime.now().astimezone()
+    if expires_at.tzinfo is not None:
+        now = now.astimezone(expires_at.tzinfo)
+    else:
+        now = now.replace(tzinfo=None)
+    return expires_at <= now
 
 
 def _canonicalize_runtime_status(

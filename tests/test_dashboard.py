@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -345,6 +345,7 @@ def test_frontier_repair_snapshot_uses_guard_ledger_and_dead_owner_is_inactive(
     root = wiki_root / "runtime" / "frontier-repair"
     root.mkdir(parents=True)
     incident_id = "incident-1"
+    owner_process_started_at = datetime.fromisoformat("2026-07-11T11:00:00")
     state = {
         "schema_version": 1,
         "active_incident_id": incident_id,
@@ -355,7 +356,11 @@ def test_frontier_repair_snapshot_uses_guard_ledger_and_dead_owner_is_inactive(
                 "reserved_at": "2026-07-11T11:59:00Z",
                 "started_at": datetime.now().astimezone().isoformat(),
                 "finished_at": None,
+                "lease_expires_at": (
+                    datetime.now().astimezone() + timedelta(hours=1)
+                ).isoformat(),
                 "owner_pid": os.getpid(),
+                "owner_process_started_at": owner_process_started_at.isoformat(),
                 "pid": os.getpid(),
                 "fingerprint_key": "b" * 64,
                 "evidence": {
@@ -382,6 +387,11 @@ def test_frontier_repair_snapshot_uses_guard_ledger_and_dead_owner_is_inactive(
     )
     monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        dashboard,
+        "_process_started_at",
+        lambda _pid: owner_process_started_at,
+    )
 
     active = dashboard._frontier_repair_snapshot()
 
@@ -397,6 +407,114 @@ def test_frontier_repair_snapshot_uses_guard_ledger_and_dead_owner_is_inactive(
     assert dead["stale_active_incident"] is True
 
 
+def test_frontier_repair_snapshot_rejects_reused_pid_and_legacy_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    root = wiki_root / "runtime" / "frontier-repair"
+    root.mkdir(parents=True)
+    incident_id = "incident-1"
+    incident = {
+        "incident_id": incident_id,
+        "status": "started",
+        "reserved_at": "2026-07-11T11:59:00Z",
+        "started_at": "2026-07-11T12:00:00Z",
+        "finished_at": None,
+        "lease_expires_at": (
+            datetime.now().astimezone() + timedelta(hours=1)
+        ).isoformat(),
+        "owner_pid": 4242,
+        "owner_process_started_at": "2026-07-11T11:00:00",
+        "pid": 4243,
+        "fingerprint_key": "b" * 64,
+        "evidence": {},
+    }
+    state = {
+        "schema_version": 1,
+        "active_incident_id": incident_id,
+        "incidents": {incident_id: incident},
+    }
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        dashboard,
+        "_process_started_at",
+        lambda _pid: datetime.fromisoformat("2026-07-11T18:00:00"),
+    )
+
+    reused = dashboard._frontier_repair_snapshot()
+
+    assert reused["active"] is False
+    assert reused["stale_active_incident"] is True
+
+    del incident["owner_process_started_at"]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(
+        dashboard,
+        "_process_started_at",
+        lambda _pid: datetime.fromisoformat("2026-07-11T11:00:00"),
+    )
+
+    legacy = dashboard._frontier_repair_snapshot()
+
+    assert legacy["active"] is False
+    assert legacy["stale_active_incident"] is True
+
+
+def test_frontier_repair_snapshot_preserves_unavailable_identity_until_lease(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    root = wiki_root / "runtime" / "frontier-repair"
+    root.mkdir(parents=True)
+    incident_id = "incident-unavailable"
+    now = datetime.now().astimezone()
+    incident = {
+        "incident_id": incident_id,
+        "status": "started",
+        "reserved_at": (now - timedelta(minutes=2)).isoformat(),
+        "started_at": (now - timedelta(minutes=1)).isoformat(),
+        "finished_at": None,
+        "lease_expires_at": (now + timedelta(hours=1)).isoformat(),
+        "owner_pid": 4242,
+        "owner_process_started_at": (now - timedelta(hours=1)).isoformat(),
+        "pid": 4243,
+        "fingerprint_key": "c" * 64,
+        "evidence": {},
+    }
+    state = {
+        "schema_version": 1,
+        "active_incident_id": incident_id,
+        "incidents": {incident_id: incident},
+    }
+    state_path = root / "state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(dashboard, "_process_started_at", lambda _pid: None)
+
+    unavailable = dashboard._frontier_repair_snapshot()
+
+    assert unavailable["active"] is True
+    assert unavailable["stale_active_incident"] is False
+    assert unavailable["active_incident"]["owner_alive"] is True
+    assert unavailable["active_incident"]["owner_identity_status"] == "unavailable"
+    assert unavailable["active_incident"]["lease_expired"] is False
+
+    incident["lease_expires_at"] = (now - timedelta(seconds=1)).isoformat()
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    expired = dashboard._frontier_repair_snapshot()
+
+    assert expired["active"] is False
+    assert expired["stale_active_incident"] is True
+    assert expired["active_incident"]["owner_identity_status"] == "unavailable"
+    assert expired["active_incident"]["lease_expired"] is True
+
+
 def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     app = (dashboard.STATIC_DIR / "app.js").read_text(encoding="utf-8")
     page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -405,6 +523,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "Frontier reviewing" not in app
     assert "Local consensus reviewing" in app
     assert "Local model evaluation" in app
+    assert "correction uncertainty" in app
     assert "batch.active === true ? 1 : 0" in app
     assert "batch.total ? 1 : 0" not in app
     assert 'id="local-consensus"' in page

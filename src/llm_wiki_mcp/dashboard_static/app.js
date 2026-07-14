@@ -1520,6 +1520,7 @@ function renderHealth(health) {
   const convergenceBits = convergence.status === "ok"
     ? [
         `${intValue(convergence.actionable).toLocaleString()} active`,
+        `${intValue(convergence.semantic_deferred).toLocaleString()} correction uncertainty`,
         `${intValue(convergence.quarantined).toLocaleString()} quarantined`,
         `${intValue(convergence.human_required).toLocaleString()} human`,
       ]

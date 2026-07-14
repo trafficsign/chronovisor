@@ -26,6 +26,7 @@ from llm_wiki_mcp.orphan_link import (
     apply_suggestion,
     run_autonomous,
 )
+from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +228,84 @@ def test_autonomous_orphan_lane_applies_once(
     assert (isolated_pages / "source.md").read_text().count("[[target") == 1
 
 
+def test_orphan_no_quorum_is_cached_until_authority_epoch_changes(
+    tmp_path: Path,
+    isolated_pages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp.convergence import ConvergenceStore, RetryPolicy
+
+    _seed_page(isolated_pages, "source", "durable anchor")
+    _seed_page(isolated_pages, "target", "target topic")
+    store = _FakeStore()
+    store.add_page("source")
+    store.add_page("target")
+    store.link("other", "source")
+    state = ConvergenceStore(
+        tmp_path / "state.json",
+        policy=RetryPolicy(local_base_delay_seconds=0, frontier_base_delay_seconds=0),
+    )
+    authority_a = semantic_authority(
+        ol_mod.DECISION_LANE,
+        schema_name="orphan_link",
+    )
+    authority_b = semantic_authority(
+        ol_mod.DECISION_LANE,
+        schema_name="orphan_link",
+        artifact_sha256="9" * 64,
+    )
+    current = [authority_a]
+    monkeypatch.setattr(
+        ol_mod,
+        "current_semantic_authority",
+        lambda *_args, **_kwargs: (current[0], None),
+    )
+    generated = json.dumps(
+        {
+            "confidence": 0.92,
+            "reason": "related",
+            "suggested_anchor": "durable anchor",
+            "suggested_section": "Related",
+        }
+    )
+    calls = 0
+
+    def reviewer(_candidate: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            **semantic_review(current[0], lane=ol_mod.DECISION_LANE),
+            "confidence": 0.0,
+        }
+
+    kwargs = {
+        "orphan_limit": 1,
+        "store": store,
+        "generate_fn": lambda *_args, **_kwargs: generated,
+        "semantic_search_fn": lambda _query, _top_n: [_ScoredPage("source", 0.9)],
+        "reviewer": reviewer,
+        "convergence_store": state,
+    }
+    first = run_autonomous(**kwargs)
+    same_epoch = run_autonomous(**kwargs)
+    current[0] = authority_b
+    changed_authority = run_autonomous(**kwargs)
+
+    assert first["results"][0]["status"] == "quarantined"
+    assert same_epoch["results"][0]["status"] == "quarantined"
+    assert same_epoch["results"][0]["cached"] is True
+    assert changed_authority["results"][0]["status"] == "quarantined"
+    assert calls == 2
+    held_authorities = {
+        item["result"]["semantic_hold"]["authority"]["router"]["artifact_sha256"]
+        for item in state.list_items(lane=ol_mod.DECISION_LANE)
+        if isinstance(item.get("result"), dict)
+        and isinstance(item["result"].get("semantic_hold"), dict)
+    }
+    assert held_authorities == {"a" * 64, "9" * 64}
+    assert "[[target" not in (isolated_pages / "source.md").read_text()
+
+
 @pytest.fixture()
 def isolated_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Stub ``find_page`` so ``_page_head`` reads from tmp_path instead
@@ -238,6 +317,13 @@ def isolated_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         cand = pages_dir / f"{page_id}.md"
         return cand if cand.exists() else None
 
+    from llm_wiki_mcp import page_mutation
+
+    monkeypatch.setattr(
+        page_mutation,
+        "DECISION_AUTHORITY_LOCK",
+        tmp_path / "runtime" / "decision-authority.lock",
+    )
     monkeypatch.setattr(ol_mod, "find_page", fake_find_page)
     return pages_dir
 

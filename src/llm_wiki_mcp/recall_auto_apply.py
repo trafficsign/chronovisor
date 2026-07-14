@@ -36,6 +36,15 @@ from llm_wiki_mcp.recall_runtime import (
     append_jsonl,
 )
 from llm_wiki_mcp.runtime_config import active_config_file
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    frontier_failure_class,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from llm_wiki_mcp.tags import record_new_tag, validate_tag
 
 
@@ -146,6 +155,17 @@ def read_apply_states(
     except OSError:
         return {}
     return states
+
+
+def read_apply_histories(
+    path: Path | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    histories: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in read_jsonl(_auto_apply_log_file(path)):
+        key = record.get("apply_key") if isinstance(record, dict) else None
+        if isinstance(key, str) and key:
+            histories[key].append(record)
+    return dict(histories)
 
 
 def _parsed_state_time(value: object, *, now: datetime) -> datetime | None:
@@ -332,6 +352,97 @@ def _proposal_requires_mutation(proposal: dict[str, Any]) -> bool:
     return str(preview.get("status") or "") in {"dry_run", "fallback_dry_run"}
 
 
+def _has_semantic_no_quorum_marker(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return (
+        "semantic_hold" in value
+        or value.get("last_failure_class") == LOCAL_SEMANTIC_NO_QUORUM
+        or frontier_failure_class(value) == LOCAL_SEMANTIC_NO_QUORUM
+    )
+
+
+def _auto_apply_semantic_epoch(
+    *, apply_key: str, proposal_sha256: str
+) -> dict[str, Any]:
+    return {
+        "review_schema_version": AUTO_APPLY_REVIEW_SCHEMA_VERSION,
+        "apply_key_sha256": hashlib.sha256(apply_key.encode("utf-8")).hexdigest(),
+        "proposal_sha256": proposal_sha256,
+    }
+
+
+def _semantic_recheck_sha256(epoch: dict[str, Any], authority: dict[str, Any]) -> str:
+    return canonical_sha256({"epoch": epoch, "authority": authority})
+
+
+def _write_semantic_hold_artifact(
+    path: Path,
+    *,
+    apply_key: str,
+    proposal_sha256: str,
+    hold: dict[str, Any],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(
+        path,
+        json.dumps(
+            {
+                "schema_version": AUTO_APPLY_REVIEW_SCHEMA_VERSION,
+                "kind": "recall_auto_apply_semantic_hold",
+                "apply_key_sha256": hashlib.sha256(
+                    apply_key.encode("utf-8")
+                ).hexdigest(),
+                "proposal_sha256": proposal_sha256,
+                "semantic_hold": hold,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
+def _semantic_hold_artifact_state(
+    path: Path,
+    *,
+    apply_key: str,
+    proposal_sha256: str,
+    epoch: dict[str, Any],
+    authority: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "none", None
+    if not isinstance(payload, dict) or (
+        payload.get("kind") != "recall_auto_apply_semantic_hold"
+        and "semantic_hold" not in payload
+    ):
+        return "none", None
+    if (
+        payload.get("apply_key_sha256")
+        != hashlib.sha256(apply_key.encode("utf-8")).hexdigest()
+        or payload.get("proposal_sha256") != proposal_sha256
+    ):
+        return "malformed", None
+    hold = persisted_semantic_no_quorum_hold(payload, lane=AUTO_APPLY_DECISION_LANE)
+    if hold is None:
+        return "malformed", None
+    error = semantic_no_quorum_hold_error(
+        hold,
+        AUTO_APPLY_DECISION_LANE,
+        epoch=epoch,
+        authority=authority,
+    )
+    if error is None:
+        return "same", hold
+    if error in {"semantic hold epoch changed", "semantic hold authority changed"}:
+        return "changed", hold
+    return "malformed", None
+
+
 def review_auto_apply_with_frontier(
     proposal: dict[str, Any],
     *,
@@ -483,6 +594,9 @@ def _frontier_gate(
     timeout: int | None,
     budget: Any | None,
     now: datetime,
+    prior: dict[str, Any] | None = None,
+    prior_history: list[dict[str, Any]] | None = None,
+    quarantine_cooldown_seconds: int = DEFAULT_QUARANTINE_COOLDOWN_SECONDS,
 ) -> dict[str, Any]:
     authority, authority_error = _current_review_authority(reviewer=reviewer)
     if authority is None or authority_error is not None:
@@ -511,11 +625,99 @@ def _frontier_gate(
         }
 
     proposal_sha256 = _canonical_json_sha256(proposal)
+    semantic_epoch = _auto_apply_semantic_epoch(
+        apply_key=apply_key, proposal_sha256=proposal_sha256
+    )
+    if _has_semantic_no_quorum_marker(prior):
+        persisted_hold = persisted_semantic_no_quorum_hold(
+            prior, lane=AUTO_APPLY_DECISION_LANE
+        )
+        if persisted_hold is None:
+            return {
+                "status": "semantic_hold_malformed",
+                "proposal_sha256": proposal_sha256,
+                "authority": authority,
+            }
+        hold_error = semantic_no_quorum_hold_error(
+            persisted_hold,
+            AUTO_APPLY_DECISION_LANE,
+            epoch=semantic_epoch,
+            authority=authority,
+        )
+        if hold_error is None:
+            return {
+                "status": "semantic_hold_reused",
+                "proposal_sha256": proposal_sha256,
+                "semantic_hold": persisted_hold,
+                "authority": authority,
+            }
+        if hold_error not in {
+            "semantic hold epoch changed",
+            "semantic hold authority changed",
+        }:
+            return {
+                "status": "semantic_hold_malformed",
+                "proposal_sha256": proposal_sha256,
+                "authority": authority,
+            }
+        for historical_state in reversed(prior_history or []):
+            historical_hold = persisted_semantic_no_quorum_hold(
+                historical_state,
+                lane=AUTO_APPLY_DECISION_LANE,
+                epoch=semantic_epoch,
+                authority=authority,
+            )
+            if historical_hold is not None:
+                return {
+                    "status": "semantic_hold_reused",
+                    "proposal_sha256": proposal_sha256,
+                    "semantic_hold": historical_hold,
+                    "authority": authority,
+                }
+        recheck_sha256 = _semantic_recheck_sha256(semantic_epoch, authority)
+        if (
+            isinstance(prior, dict)
+            and prior.get("semantic_hold_recheck_sha256") == recheck_sha256
+            and not _retry_ready(
+                prior,
+                now=now,
+                quarantine_cooldown_seconds=quarantine_cooldown_seconds,
+            )
+        ):
+            return {
+                "status": "retry_deferred",
+                "proposal_sha256": proposal_sha256,
+                "semantic_hold": persisted_hold,
+                "semantic_hold_recheck_sha256": recheck_sha256,
+                "authority": authority,
+            }
     artifact_path = _review_artifact_path(
         review_dir,
         apply_key=apply_key,
         proposal_sha256=proposal_sha256,
     )
+    artifact_hold_state, artifact_hold = _semantic_hold_artifact_state(
+        artifact_path,
+        apply_key=apply_key,
+        proposal_sha256=proposal_sha256,
+        epoch=semantic_epoch,
+        authority=authority,
+    )
+    if artifact_hold_state == "same":
+        return {
+            "status": "semantic_hold_reused",
+            "proposal_sha256": proposal_sha256,
+            "semantic_hold": artifact_hold,
+            "artifact_path": str(artifact_path),
+            "authority": authority,
+        }
+    if artifact_hold_state == "malformed":
+        return {
+            "status": "semantic_hold_malformed",
+            "proposal_sha256": proposal_sha256,
+            "artifact_path": str(artifact_path),
+            "authority": authority,
+        }
     artifact = _load_review_artifact(
         artifact_path,
         apply_key=apply_key,
@@ -566,6 +768,53 @@ def _frontier_gate(
         review = {
             "decision": "needs_retry",
             "summary": "frontier reviewer returned invalid payload",
+        }
+    if is_local_semantic_no_quorum(review):
+        try:
+            with decision_authority_lock():
+                authority_error = _review_authority_error(
+                    expected_authority=authority,
+                    review=None,
+                    reviewer=reviewer,
+                    require_verdict_proof=False,
+                )
+                current_proposal = _frontier_action_proposal(
+                    record, apply_key=apply_key
+                )
+                if (
+                    authority_error is None
+                    and _canonical_json_sha256(current_proposal) != proposal_sha256
+                ):
+                    authority_error = (
+                        "recall action proposal changed before semantic hold"
+                    )
+                if authority_error is not None:
+                    raise ValueError(authority_error)
+                hold = build_semantic_no_quorum_hold(
+                    AUTO_APPLY_DECISION_LANE,
+                    semantic_epoch,
+                    authority,
+                    review,
+                )
+                _write_semantic_hold_artifact(
+                    artifact_path,
+                    apply_key=apply_key,
+                    proposal_sha256=proposal_sha256,
+                    hold=hold,
+                )
+        except (OSError, TypeError, ValueError) as exc:
+            return {
+                "status": "needs_retry",
+                "proposal_sha256": proposal_sha256,
+                "result": {"status": "error", "error": str(exc)},
+                "authority": authority,
+            }
+        return {
+            "status": "semantic_hold",
+            "proposal_sha256": proposal_sha256,
+            "semantic_hold": hold,
+            "artifact_path": str(artifact_path),
+            "authority": authority,
         }
     decision = str(review.get("decision") or "needs_retry")
     if decision not in {"approved", "rejected", "quarantined", "needs_retry"}:
@@ -1247,13 +1496,14 @@ def apply_feedback_records(
         return {"status": "disabled", "actions": []}
     applied_keys = read_applied_keys(log_file)
     states = read_apply_states(log_file)
+    state_histories = read_apply_histories(log_file)
     actions: list[dict[str, Any]] = []
     now = now or datetime.now()
     resolved_review_dir = _resolved_review_dir(log_file, review_dir)
     for record in eligible_records(records, policy=policy, applied_keys=applied_keys):
         key = apply_key_for(record)
         prior = states.get(key)
-        if not _retry_ready(
+        if not _has_semantic_no_quorum_marker(prior) and not _retry_ready(
             prior,
             now=now,
             quarantine_cooldown_seconds=quarantine_cooldown_seconds,
@@ -1287,7 +1537,30 @@ def apply_feedback_records(
                 timeout=frontier_timeout,
                 budget=budget,
                 now=now,
+                prior=prior,
+                prior_history=state_histories.get(key),
+                quarantine_cooldown_seconds=quarantine_cooldown_seconds,
             )
+        if gate.get("status") in {
+            "semantic_hold_reused",
+            "semantic_hold_malformed",
+            "retry_deferred",
+        }:
+            # Exact holds and malformed legacy markers are read-only terminal
+            # observations.  Do not append an identical log row forever.
+            actions.append(
+                {
+                    "ts": now.isoformat(timespec="seconds"),
+                    "apply_key": key,
+                    "status": str(gate.get("status")),
+                    "convergence_status": "quarantined",
+                    "semantic_hold": gate.get("semantic_hold")
+                    or (prior or {}).get("semantic_hold"),
+                    "semantic_hold_reused": gate.get("status")
+                    == "semantic_hold_reused",
+                }
+            )
+            continue
         if gate.get("status") == "budget_deferred":
             actions.append(
                 {
@@ -1307,10 +1580,16 @@ def apply_feedback_records(
                 }
             )
             continue
-        attempt = (
-            1 if resumed_from_quarantine else int((prior or {}).get("attempt") or 0) + 1
-        )
         gate_status = str(gate.get("status") or "needs_retry")
+        attempt = (
+            int((prior or {}).get("attempt") or 0)
+            if gate_status == "semantic_hold"
+            else (
+                1
+                if resumed_from_quarantine
+                else int((prior or {}).get("attempt") or 0) + 1
+            )
+        )
         review = gate.get("review") if isinstance(gate.get("review"), dict) else None
         if gate_status == "approved" and not dry_run:
             if budget is not None:
@@ -1361,6 +1640,11 @@ def apply_feedback_records(
                 "reason": (review or {}).get("summary")
                 or "frontier rejected recall mutation",
             }
+        elif gate_status == "semantic_hold":
+            result = {
+                "status": "semantic_hold",
+                "reason": "local semantic models did not reach a safe quorum",
+            }
         else:
             result = {
                 "status": "frontier_retry",
@@ -1375,6 +1659,8 @@ def apply_feedback_records(
             convergence_status = "rejected"
         elif status == "human_required":
             convergence_status = "human_required"
+        elif status == "semantic_hold":
+            convergence_status = "quarantined"
         else:
             convergence_status = "retry_wait"
         next_attempt_at: str | None = None
@@ -1404,12 +1690,34 @@ def apply_feedback_records(
             "proposal_sha256": gate.get("proposal_sha256"),
             "review_authority": gate.get("authority"),
         }
+        if gate_status == "semantic_hold":
+            entry["semantic_hold"] = gate.get("semantic_hold")
+            entry["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+            entry["frontier_review"] = None
+        elif (
+            _has_semantic_no_quorum_marker(prior)
+            and convergence_status == "retry_wait"
+            and isinstance((prior or {}).get("semantic_hold"), dict)
+            and isinstance(gate.get("authority"), dict)
+            and isinstance(gate.get("proposal_sha256"), str)
+        ):
+            # Preserve the old A epoch while B has an operational retry.  A
+            # rollback to A can restore the hold before another model call.
+            entry["semantic_hold"] = (prior or {})["semantic_hold"]
+            entry["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+            entry["semantic_hold_recheck_sha256"] = _semantic_recheck_sha256(
+                _auto_apply_semantic_epoch(
+                    apply_key=key,
+                    proposal_sha256=str(gate["proposal_sha256"]),
+                ),
+                gate["authority"],
+            )
         if resumed_from_quarantine:
             entry["resumed_from_quarantine"] = True
             entry["quarantine_resume_count"] = (
                 int((prior or {}).get("quarantine_resume_count") or 0) + 1
             )
-        if convergence_status == "quarantined":
+        if convergence_status == "quarantined" and gate_status != "semantic_hold":
             entry["quarantined_at"] = now.isoformat(timespec="seconds")
             entry["quarantine_retry_at"] = (
                 now + timedelta(seconds=max(0, quarantine_cooldown_seconds))
@@ -1427,6 +1735,7 @@ def apply_feedback_records(
         actions.append(entry)
         if persisted:
             states[key] = entry
+            state_histories.setdefault(key, []).append(entry)
             if entry.get("convergence_status") == "applied":
                 applied_keys.add(key)
     if not dry_run:
@@ -1498,13 +1807,14 @@ def apply_review_feedback_records(
         candidates_by_key[key] = record
 
     states = read_apply_states(log_file)
+    state_histories = read_apply_histories(log_file)
     now = now or datetime.now()
     resolved_review_dir = _resolved_review_dir(log_file, review_dir)
     actions: list[dict[str, Any]] = []
     for record in candidates_by_key.values():
         key = apply_key_for(record)
         prior = states.get(key)
-        if not _retry_ready(
+        if not _has_semantic_no_quorum_marker(prior) and not _retry_ready(
             prior,
             now=now,
             quarantine_cooldown_seconds=quarantine_cooldown_seconds,
@@ -1560,7 +1870,26 @@ def apply_review_feedback_records(
                     timeout=frontier_timeout,
                     budget=budget,
                     now=now,
+                    prior=prior,
+                    prior_history=state_histories.get(key),
+                    quarantine_cooldown_seconds=quarantine_cooldown_seconds,
                 )
+            if gate.get("status") in {
+                "semantic_hold_reused",
+                "semantic_hold_malformed",
+                "retry_deferred",
+            }:
+                actions.append(
+                    {
+                        "ts": now.isoformat(timespec="seconds"),
+                        "apply_key": key,
+                        "status": str(gate.get("status")),
+                        "convergence_status": "quarantined",
+                        "semantic_hold": gate.get("semantic_hold")
+                        or (prior or {}).get("semantic_hold"),
+                    }
+                )
+                continue
             if gate.get("status") == "budget_deferred":
                 actions.append(
                     {
@@ -1635,6 +1964,11 @@ def apply_review_feedback_records(
                     if review
                     else "frontier rejected recall mutation",
                 }
+            elif gate_status == "semantic_hold":
+                result = {
+                    "status": "semantic_hold",
+                    "reason": "local semantic models did not reach a safe quorum",
+                }
             else:
                 result = {
                     "status": "frontier_retry",
@@ -1643,7 +1977,13 @@ def apply_review_feedback_records(
                     or "local-consensus verdict is not ready",
                 }
         attempt = (
-            1 if resumed_from_quarantine else int((prior or {}).get("attempt") or 0) + 1
+            int((prior or {}).get("attempt") or 0)
+            if str(gate.get("status") or "") == "semantic_hold"
+            else (
+                1
+                if resumed_from_quarantine
+                else int((prior or {}).get("attempt") or 0) + 1
+            )
         )
         status = str(result.get("status") or "error")
         if status in TERMINAL_SUCCESS_STATUSES or status == "dry_run":
@@ -1652,6 +1992,8 @@ def apply_review_feedback_records(
             convergence_status = "rejected"
         elif status == "human_required":
             convergence_status = "human_required"
+        elif status == "semantic_hold":
+            convergence_status = "quarantined"
         else:
             convergence_status = "retry_wait"
         next_attempt_at: str | None = None
@@ -1683,12 +2025,35 @@ def apply_review_feedback_records(
             "proposal_sha256": gate.get("proposal_sha256"),
             "review_authority": gate.get("authority"),
         }
+        if str(gate.get("status") or "") == "semantic_hold":
+            entry["semantic_hold"] = gate.get("semantic_hold")
+            entry["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+            entry["frontier_review"] = None
+        elif (
+            _has_semantic_no_quorum_marker(prior)
+            and convergence_status == "retry_wait"
+            and isinstance((prior or {}).get("semantic_hold"), dict)
+            and isinstance(gate.get("authority"), dict)
+            and isinstance(gate.get("proposal_sha256"), str)
+        ):
+            entry["semantic_hold"] = (prior or {})["semantic_hold"]
+            entry["last_failure_class"] = LOCAL_SEMANTIC_NO_QUORUM
+            entry["semantic_hold_recheck_sha256"] = _semantic_recheck_sha256(
+                _auto_apply_semantic_epoch(
+                    apply_key=key,
+                    proposal_sha256=str(gate["proposal_sha256"]),
+                ),
+                gate["authority"],
+            )
         if resumed_from_quarantine:
             entry["resumed_from_quarantine"] = True
             entry["quarantine_resume_count"] = (
                 int((prior or {}).get("quarantine_resume_count") or 0) + 1
             )
-        if convergence_status == "quarantined":
+        if (
+            convergence_status == "quarantined"
+            and str(gate.get("status") or "") != "semantic_hold"
+        ):
             entry["quarantined_at"] = now.isoformat(timespec="seconds")
             entry["quarantine_retry_at"] = (
                 now + timedelta(seconds=max(0, quarantine_cooldown_seconds))
@@ -1707,6 +2072,7 @@ def apply_review_feedback_records(
         actions.append(entry)
         if persisted:
             states[key] = entry
+            state_histories.setdefault(key, []).append(entry)
     return {
         "status": (
             "budget_deferred"

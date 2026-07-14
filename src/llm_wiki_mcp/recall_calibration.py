@@ -33,6 +33,13 @@ from llm_wiki_mcp.recall_runtime import (
     run_recall,
 )
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
+from llm_wiki_mcp.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+)
 
 
 CALIBRATION_FILE = RECALL_DIR / "calibration.json"
@@ -134,6 +141,72 @@ def _calibration_review_path(
     review_dir: Path = CALIBRATION_REVIEW_DIR,
 ) -> Path:
     return review_dir / f"candidate-{proposal_hash}.json"
+
+
+def _calibration_semantic_epoch(proposal_hash: str) -> dict[str, Any]:
+    return {
+        "review_schema_version": CALIBRATION_REVIEW_SCHEMA_VERSION,
+        "proposal_sha256": proposal_hash,
+    }
+
+
+def _calibration_semantic_hold_path(
+    review_path: Path,
+    authority: dict[str, Any],
+) -> Path:
+    authority_sha256 = canonical_sha256(authority)
+    return review_path.with_name(
+        f"{review_path.stem}-{authority_sha256[:24]}.semantic-hold.json"
+    )
+
+
+def _load_calibration_semantic_hold(
+    path: Path,
+    *,
+    proposal_hash: str,
+    authority: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "none", None
+    if not isinstance(payload, dict) or (
+        payload.get("kind") != "recall_calibration_semantic_hold"
+        and "semantic_hold" not in payload
+    ):
+        return "none", None
+    if payload.get("proposal_sha256") != proposal_hash:
+        return "malformed", None
+    hold = persisted_semantic_no_quorum_hold(
+        payload,
+        lane=CALIBRATION_DECISION_LANE,
+        epoch=_calibration_semantic_epoch(proposal_hash),
+        authority=authority,
+    )
+    return ("same", hold) if hold is not None else ("malformed", None)
+
+
+def _persist_calibration_semantic_hold(
+    path: Path,
+    *,
+    proposal_hash: str,
+    hold: dict[str, Any],
+) -> None:
+    _atomic_write_json(
+        path,
+        {
+            "schema_version": CALIBRATION_REVIEW_SCHEMA_VERSION,
+            "kind": "recall_calibration_semantic_hold",
+            "proposal_sha256": proposal_hash,
+            "semantic_hold": hold,
+        },
+    )
+    verified = persisted_semantic_no_quorum_hold(
+        json.loads(path.read_text(encoding="utf-8")),
+        lane=CALIBRATION_DECISION_LANE,
+    )
+    if verified is None or verified.get("hold_sha256") != hold.get("hold_sha256"):
+        raise OSError("calibration semantic hold failed read-back verification")
 
 
 def _load_calibration_review(
@@ -576,6 +649,34 @@ def calibrate(
             "reason": authority_error or "calibration review authority is missing",
             "candidate": artifact,
         }
+    semantic_hold_path = _calibration_semantic_hold_path(review_path, review_authority)
+    hold_state, semantic_hold = _load_calibration_semantic_hold(
+        semantic_hold_path,
+        proposal_hash=proposal_hash,
+        authority=review_authority,
+    )
+    if hold_state == "none":
+        # Fail closed for an early/legacy implementation that wrote a hold in
+        # the ordinary verdict slot.
+        hold_state, semantic_hold = _load_calibration_semantic_hold(
+            review_path,
+            proposal_hash=proposal_hash,
+            authority=review_authority,
+        )
+    if hold_state in {"same", "malformed"}:
+        return {
+            "status": (
+                "semantic_hold" if hold_state == "same" else "semantic_hold_malformed"
+            ),
+            "reason": (
+                "local semantic models did not reach a safe quorum"
+                if hold_state == "same"
+                else "malformed local semantic no-quorum hold; refusing resample"
+            ),
+            "candidate": artifact,
+            "semantic_hold": semantic_hold,
+            "last_failure_class": LOCAL_SEMANTIC_NO_QUORUM,
+        }
     persisted = _load_calibration_review(
         review_path,
         proposal_hash=proposal_hash,
@@ -615,6 +716,54 @@ def calibrate(
             frontier = {
                 "decision": "needs_retry",
                 "summary": "frontier result is not an object",
+            }
+        if is_local_semantic_no_quorum(frontier):
+            try:
+                with decision_authority_lock():
+                    current_authority, current_authority_error = (
+                        _current_calibration_authority(
+                            frontier_reviewer=frontier_reviewer
+                        )
+                    )
+                    hold_error = (
+                        current_authority_error
+                        or decision_authority.compare_semantic_authority(
+                            review_authority,
+                            current_authority,
+                            lane=CALIBRATION_DECISION_LANE,
+                        )
+                    )
+                    if (
+                        hold_error is None
+                        and _canonical_hash(load_calibration(CALIBRATION_FILE) or {})
+                        != old_hash
+                    ):
+                        hold_error = "active calibration changed before semantic hold"
+                    if hold_error is not None:
+                        raise ValueError(hold_error)
+                    semantic_hold = build_semantic_no_quorum_hold(
+                        CALIBRATION_DECISION_LANE,
+                        _calibration_semantic_epoch(proposal_hash),
+                        review_authority,
+                        frontier,
+                    )
+                    _persist_calibration_semantic_hold(
+                        semantic_hold_path,
+                        proposal_hash=proposal_hash,
+                        hold=semantic_hold,
+                    )
+            except (OSError, TypeError, ValueError) as exc:
+                return {
+                    "status": "frontier_retry",
+                    "reason": str(exc),
+                    "candidate": artifact,
+                }
+            return {
+                "status": "semantic_hold",
+                "reason": "local semantic models did not reach a safe quorum",
+                "candidate": artifact,
+                "semantic_hold": semantic_hold,
+                "last_failure_class": LOCAL_SEMANTIC_NO_QUORUM,
             }
         if is_human_required_result(frontier):
             return {
@@ -869,6 +1018,13 @@ def _record_due_result(
                 "candidate_hash": candidate_hash,
                 "frontier_attempts": frontier_attempts,
                 "next_retry_at": next_retry_at,
+                "last_failure_class": (
+                    LOCAL_SEMANTIC_NO_QUORUM
+                    if result.get("status")
+                    in {"semantic_hold", "semantic_hold_malformed"}
+                    else None
+                ),
+                "semantic_hold": result.get("semantic_hold"),
             },
         )
     return result
