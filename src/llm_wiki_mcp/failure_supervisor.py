@@ -181,6 +181,49 @@ def _save_state(state: dict[str, Any]) -> None:
     atomic_write(path, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
 
 
+def _operational_failure_group_snapshot_unlocked(
+    packet_path: Path,
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Return state rows bound to one packet from the current state snapshot."""
+
+    target = packet_path.expanduser().resolve(strict=False)
+    failures = _load_state().get("failures")
+    if not isinstance(failures, dict):
+        return ()
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for raw_file, entry in failures.items():
+        if not isinstance(raw_file, str) or not isinstance(entry, dict):
+            continue
+        value = entry.get("packet_path")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if Path(value).expanduser().resolve(strict=False) == target:
+            rows.append((raw_file, dict(entry)))
+    return tuple(sorted(rows, key=lambda row: row[0]))
+
+
+def operational_failure_group_snapshot(
+    packet_path: Path,
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Read one packet's affected raw group without creating a lock file."""
+
+    return _operational_failure_group_snapshot_unlocked(packet_path)
+
+
+@contextmanager
+def lock_operational_failure_group(packet_path: Path):
+    """Freeze raw attachment to one operational packet through caller commit.
+
+    A mutating caller acquires the packet lock first, then enters this context.
+    Existing packet handlers use that same packet -> state order; raw attachment
+    only takes the state lock. The yielded snapshot and caller commit therefore
+    form one transaction without adding a state -> packet deadlock edge.
+    """
+
+    with _failure_state_lock():
+        yield _operational_failure_group_snapshot_unlocked(packet_path)
+
+
 def reset_raw_failure(raw_file: str) -> None:
     """Forget tracked failures for a raw after it succeeds."""
 
@@ -733,6 +776,20 @@ def _semantic_source_evidence(paths: Sequence[Path]) -> list[dict[str, Any]]:
     return evidence
 
 
+def _raw_source_evidence(path: Path) -> dict[str, Any] | None:
+    """Return an exact-byte binding for one source raw when it is readable."""
+
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    return {
+        "filename": path.name,
+        "bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
 def _read_packet_object(packet_path: Path) -> dict[str, Any] | None:
     try:
         packet = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -1093,8 +1150,18 @@ def _record_semantic_no_quorum_defer_unlocked(
         "packet_path": str(packet_path),
         "related_raw_files": list(filenames),
     }
+    evidence_by_name = {
+        str(row["filename"]): row
+        for row in packet.get("source_raws", [])
+        if isinstance(row, dict) and isinstance(row.get("filename"), str)
+    }
     for filename in filenames:
-        failures[filename] = dict(entry)
+        per_raw_entry = dict(entry)
+        evidence = evidence_by_name.get(filename)
+        if evidence is not None:
+            per_raw_entry["raw_sha256"] = evidence.get("sha256")
+            per_raw_entry["raw_bytes"] = evidence.get("bytes")
+        failures[filename] = per_raw_entry
     _supersede_replaced_operational_packets(
         state,
         replaced_entries=replaced_entries,
@@ -1164,6 +1231,9 @@ def _record_operational_raw_failure(
         )
     )
     raw_files = tuple(path.name for path in source_paths)
+    source_evidence = {
+        str(row["filename"]): row for row in _semantic_source_evidence(source_paths)
+    }
     state = _load_state()
     failures = state.setdefault("failures", {})
     if not isinstance(failures, dict):
@@ -1182,7 +1252,8 @@ def _record_operational_raw_failure(
         first_seen_at: str,
     ) -> None:
         for source_file in raw_files:
-            failures[source_file] = {
+            prior = failures.get(source_file)
+            entry = {
                 "fingerprint": record.fingerprint,
                 "failure_class": record.failure_class,
                 "attempts": 1,
@@ -1196,6 +1267,29 @@ def _record_operational_raw_failure(
                 "launch_error": launch_error,
                 "related_raw_files": list(raw_files),
             }
+            # Fresh incidents bind the exact source bytes at failure time.  A
+            # row already attached to this packet but lacking these fields is
+            # legacy state; do not silently bless its current bytes as its
+            # historical preimage.  The release CLI must supply that manifest.
+            same_prior_binding = (
+                isinstance(prior, dict)
+                and prior.get("fingerprint") == record.fingerprint
+                and prior.get("packet_path") == packet_path
+            )
+            if same_prior_binding:
+                # Never repair historical evidence from the raw's current
+                # bytes. A complete binding stays complete, a legacy row with
+                # neither field stays legacy, and partial/malformed evidence
+                # is preserved verbatim so the release CAS fails closed.
+                assert isinstance(prior, dict)
+                for field in ("raw_sha256", "raw_bytes"):
+                    if field in prior:
+                        entry[field] = prior[field]
+            else:
+                evidence = source_evidence[source_file]
+                entry["raw_sha256"] = evidence["sha256"]
+                entry["raw_bytes"] = evidence["bytes"]
+            failures[source_file] = entry
 
     current = failures.get(raw_file)
     if isinstance(current, dict) and (
@@ -1301,6 +1395,7 @@ def _record_operational_raw_failure(
         evidence={
             "raw_file": raw_file,
             "raw_files": list(raw_files),
+            "source_raws": [source_evidence[name] for name in raw_files],
             "job_id": job_id,
             "raw_preview": (raw_text or "")[:4000],
         },
@@ -1616,6 +1711,10 @@ def record_raw_failure(
                 "first_seen_at": datetime.now().isoformat(),
                 "last_error": record.message,
             }
+            source_evidence = _raw_source_evidence(raw_path)
+            if source_evidence is not None:
+                current["raw_sha256"] = source_evidence["sha256"]
+                current["raw_bytes"] = source_evidence["bytes"]
 
         current["attempts"] = int(current.get("attempts", 0)) + 1
         current["last_seen_at"] = datetime.now().isoformat()

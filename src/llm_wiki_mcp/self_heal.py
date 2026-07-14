@@ -12,10 +12,12 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from llm_wiki_mcp import runtime_status, wiki
 from llm_wiki_mcp.alias_store import add_alias
@@ -58,6 +60,9 @@ RUNNING_STATUSES = {
 PACKET_CANCELLATION_SCHEMA_VERSION = 1
 PACKET_CANCELLATION_STATUS = "superseded_semantic_defer"
 _PACKET_SUCCESS_STATUSES = frozenset({"local_repair_applied", "frontier_approved"})
+_FULL_GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_RAW_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_EXPECTED_GITHUB_REPOSITORY = "trafficsign/llm-wiki-mcp"
 
 DEFAULT_RUNNING_LEASE_SECONDS = 2 * 60 * 60
 DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
@@ -628,6 +633,530 @@ def _packet_lock(packet_path: Path):
             yield True
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _verified_runtime_github_source(value: object) -> str:
+    """Return one canonical GitHub SSH repository or fail closed."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("repair_runtime_source_unavailable")
+    source = value.strip()
+    if source.startswith("git+"):
+        source = source[4:]
+    parsed = urlsplit(source)
+    repository = parsed.path.strip("/")
+    if repository.endswith(".git"):
+        repository = repository[:-4]
+    if (
+        parsed.scheme != "ssh"
+        or parsed.hostname != "github.com"
+        or parsed.username != "git"
+        or parsed.password is not None
+        or parsed.port is not None
+        or parsed.query
+        or parsed.fragment
+        or repository != _EXPECTED_GITHUB_REPOSITORY
+    ):
+        raise ValueError("repair_runtime_source_not_exact_github_vcs")
+    return f"ssh://git@github.com/{repository}"
+
+
+def _verified_uv_archive_root(value: object) -> Path:
+    """Resolve one runtime path to its exact immutable uv archive root."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("repair_runtime_archive_unavailable")
+    try:
+        resolved = Path(value).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("repair_runtime_archive_unavailable") from exc
+    indices = [
+        index for index, part in enumerate(resolved.parts) if part == "archive-v0"
+    ]
+    if not indices:
+        raise ValueError("repair_runtime_not_uv_archive")
+    index = indices[-1]
+    if index + 1 >= len(resolved.parts) or resolved.parts[index + 1] in {"", ".", ".."}:
+        raise ValueError("repair_runtime_not_uv_archive")
+    return Path(*resolved.parts[: index + 2])
+
+
+def _verified_local_repair_git_state(expected_commit: str) -> dict[str, Any]:
+    """Bind a repair ACK to the clean, pushed, executing revision."""
+
+    expected = expected_commit.strip().casefold()
+    if _FULL_GIT_SHA_RE.fullmatch(expected) is None:
+        raise ValueError("repair_commit_must_be_full_git_sha")
+
+    repo_root = _repo_root().expanduser().resolve(strict=True)
+
+    def git_output(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"repair_git_verification_failed:{args[0]}")
+        return completed.stdout.strip()
+
+    head_commit = git_output("rev-parse", "--verify", "HEAD^{commit}").casefold()
+    if head_commit != expected:
+        raise ValueError("repair_commit_not_current_head")
+    origin_main_commit = git_output(
+        "rev-parse", "--verify", "origin/main^{commit}"
+    ).casefold()
+    if origin_main_commit != expected:
+        raise ValueError("repair_commit_not_pushed_origin_main")
+    if git_output("status", "--porcelain", "--untracked-files=no"):
+        raise ValueError("repair_checkout_has_uncommitted_tracked_changes")
+
+    from llm_wiki_mcp.runtime_config import runtime_identity
+
+    identity = runtime_identity()
+    if not isinstance(identity, dict):
+        raise ValueError("repair_runtime_identity_invalid")
+    runtime_commit = identity.get("commit_id")
+    if (
+        not isinstance(runtime_commit, str)
+        or _FULL_GIT_SHA_RE.fullmatch(runtime_commit.strip().casefold()) is None
+    ):
+        raise ValueError("repair_runtime_commit_unavailable")
+    runtime_commit = runtime_commit.strip().casefold()
+    if runtime_commit != expected:
+        raise ValueError("repair_commit_not_executing_runtime")
+
+    expected_runtime_commit = identity.get("expected_commit")
+    if (
+        not isinstance(expected_runtime_commit, str)
+        or _FULL_GIT_SHA_RE.fullmatch(expected_runtime_commit.strip().casefold())
+        is None
+    ):
+        raise ValueError("repair_runtime_expected_commit_unavailable")
+    expected_runtime_commit = expected_runtime_commit.strip().casefold()
+    if expected_runtime_commit != expected:
+        raise ValueError("repair_runtime_expected_commit_mismatch")
+    if identity.get("drift") is not False:
+        raise ValueError("repair_runtime_drift_not_false")
+
+    archive_root = _verified_uv_archive_root(identity.get("archive_path"))
+    module_path = identity.get("module_path")
+    try:
+        resolved_module_path = Path(str(module_path)).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("repair_runtime_module_unavailable") from exc
+    if not resolved_module_path.is_relative_to(archive_root):
+        raise ValueError("repair_runtime_module_outside_archive")
+
+    runtime_source = _verified_runtime_github_source(identity.get("runtime_source"))
+    direct_url = identity.get("direct_url")
+    if not isinstance(direct_url, dict):
+        raise ValueError("repair_runtime_direct_url_invalid")
+    direct_source = _verified_runtime_github_source(direct_url.get("url"))
+    vcs_info = direct_url.get("vcs_info")
+    if not isinstance(vcs_info, dict) or vcs_info.get("vcs") != "git":
+        raise ValueError("repair_runtime_direct_url_not_git")
+    direct_commit = vcs_info.get("commit_id")
+    if (
+        not isinstance(direct_commit, str)
+        or _FULL_GIT_SHA_RE.fullmatch(direct_commit.strip().casefold()) is None
+    ):
+        raise ValueError("repair_runtime_direct_url_commit_unavailable")
+    direct_commit = direct_commit.strip().casefold()
+    if direct_commit != expected:
+        raise ValueError("repair_runtime_direct_url_commit_mismatch")
+    if direct_source != runtime_source:
+        raise ValueError("repair_runtime_source_direct_url_mismatch")
+
+    return {
+        "git_commit_sha": expected,
+        "checkout_head_sha": head_commit,
+        "origin_main_sha": origin_main_commit,
+        "runtime_commit_sha": runtime_commit,
+        "runtime_expected_commit_sha": expected_runtime_commit,
+        "runtime_archive_root": str(archive_root),
+        "runtime_module_path": str(resolved_module_path),
+        "runtime_source": runtime_source,
+        "runtime_direct_url": direct_source,
+        "runtime_drift": False,
+    }
+
+
+def _operational_release_refusal(
+    packet_path: Path,
+    reason: str,
+    *,
+    packet: dict[str, Any] | None = None,
+    **details: Any,
+) -> dict[str, Any]:
+    return {
+        "packet": str(packet_path),
+        "failure_id": packet.get("failure_id") if packet is not None else None,
+        "status": "refused",
+        "accepted": False,
+        "reason": reason,
+        **details,
+    }
+
+
+def _normalize_expected_raw_manifest(
+    values: Mapping[str, str] | Sequence[str],
+) -> dict[str, str]:
+    """Normalize API/CLI filename=sha256 evidence into one exact group CAS."""
+
+    if isinstance(values, Mapping):
+        pairs = list(values.items())
+    elif isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+        pairs = []
+        for value in values:
+            if not isinstance(value, str) or "=" not in value:
+                raise ValueError("expected_raw_sha256_malformed")
+            filename, digest = value.split("=", 1)
+            pairs.append((filename, digest))
+    else:
+        raise ValueError("expected_raw_sha256_malformed")
+    if not pairs:
+        raise ValueError("expected_raw_sha256_required")
+
+    manifest: dict[str, str] = {}
+    for raw_filename, raw_digest in pairs:
+        filename = str(raw_filename).strip()
+        digest = str(raw_digest).strip().casefold()
+        if (
+            not filename
+            or Path(filename).name != filename
+            or filename in {".", ".."}
+            or _RAW_SHA256_RE.fullmatch(digest) is None
+        ):
+            raise ValueError("expected_raw_sha256_malformed")
+        if filename in manifest:
+            raise ValueError("expected_raw_sha256_duplicate_filename")
+        manifest[filename] = digest
+    return dict(sorted(manifest.items()))
+
+
+def _release_operational_failure_after_local_repair_unlocked(
+    packet_path: Path,
+    *,
+    affected_group: tuple[tuple[str, dict[str, Any]], ...],
+    expected_status: str,
+    expected_failure_class: str,
+    expected_fingerprint: str,
+    expected_raw_manifest: Mapping[str, str],
+    repair_commit: str,
+    reason: str,
+    verification_command: str | None,
+    verification_result: str | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    try:
+        loaded = _read_json(packet_path)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return _operational_release_refusal(packet_path, "packet_unreadable")
+    if not isinstance(loaded, dict):
+        return _operational_release_refusal(packet_path, "packet_invalid")
+    packet = loaded
+
+    def refuse(reason_code: str, **details: Any) -> dict[str, Any]:
+        return _operational_release_refusal(
+            packet_path,
+            reason_code,
+            packet=packet,
+            **details,
+        )
+
+    from llm_wiki_mcp.failure_supervisor import SEMANTIC_NO_QUORUM_FAILURE_CLASS
+
+    if (
+        packet.get("failure_class") == SEMANTIC_NO_QUORUM_FAILURE_CLASS
+        or packet.get("terminal_deferred") is True
+        or packet.get("defer_reason") == "semantic_no_quorum"
+    ):
+        return refuse("semantic_defer_not_releasable")
+    if packet.get("failure_class") != expected_failure_class:
+        return refuse("failure_class_mismatch")
+    if packet.get("fingerprint") != expected_fingerprint:
+        return refuse("fingerprint_mismatch")
+    if not _is_operational_source_packet(packet):
+        return refuse("failure_class_not_operational")
+    if _read_packet_cancellation(packet_path, packet) is not None:
+        return refuse("packet_cancellation_requested")
+
+    status = str(packet.get("status") or "")
+    existing_receipt = packet.get("verified_local_repair")
+    normalized_reason = reason.strip()
+    command = str(verification_command or "").strip()
+    verification = str(verification_result or "").strip()
+    normalized_repair_commit = repair_commit.strip().casefold()
+    expected_manifest_rows = [
+        {"filename": filename, "sha256": digest}
+        for filename, digest in sorted(expected_raw_manifest.items())
+    ]
+    if status == "local_repair_applied":
+        receipt_matches = bool(
+            isinstance(existing_receipt, dict)
+            and existing_receipt.get("failure_id") == packet.get("failure_id")
+            and existing_receipt.get("packet_raw_file") == packet.get("raw_file")
+            and existing_receipt.get("expected_status") == expected_status
+            and existing_receipt.get("failure_class") == expected_failure_class
+            and existing_receipt.get("fingerprint") == expected_fingerprint
+            and existing_receipt.get("expected_raw_manifest") == expected_manifest_rows
+            and existing_receipt.get("git_commit_sha") == normalized_repair_commit
+            and existing_receipt.get("reason") == normalized_reason
+            and existing_receipt.get("verification_command") == (command or None)
+            and existing_receipt.get("verification_result") == (verification or None)
+        )
+        if receipt_matches:
+            return {
+                "packet": str(packet_path),
+                "failure_id": packet.get("failure_id"),
+                "status": "dry_run" if dry_run else "local_repair_applied",
+                "projected_status": "local_repair_applied" if dry_run else None,
+                "accepted": True,
+                "cached": True,
+                "verified_local_repair": existing_receipt,
+            }
+        return refuse("completed_packet_repair_evidence_mismatch")
+
+    if status != expected_status:
+        return refuse(
+            "packet_status_mismatch",
+            expected_status=expected_status,
+            observed_status=status,
+        )
+    if status in RUNNING_STATUSES:
+        return refuse("packet_already_running")
+    if status not in SELF_HEAL_STATUSES:
+        return refuse("packet_status_not_releasable")
+
+    if not affected_group:
+        return refuse("failure_state_group_missing")
+    if any(
+        entry.get("failure_class") != expected_failure_class
+        or entry.get("fingerprint") != expected_fingerprint
+        for _raw_file, entry in affected_group
+    ):
+        return refuse("failure_state_group_mismatch")
+
+    observed_group_names = {raw_file for raw_file, _entry in affected_group}
+    expected_group_names = set(expected_raw_manifest)
+    if observed_group_names != expected_group_names:
+        return refuse(
+            "failure_state_group_manifest_mismatch",
+            expected_raw_files=sorted(expected_group_names),
+            observed_raw_files=sorted(observed_group_names),
+        )
+
+    raw_root = wiki.RAW_DIR.expanduser().resolve(strict=True)
+    affected_raws: list[dict[str, Any]] = []
+    legacy_state_raws: list[str] = []
+    try:
+        for raw_file, entry in affected_group:
+            raw_path = wiki.RAW_DIR / raw_file
+            if (
+                Path(raw_file).name != raw_file
+                or raw_path.is_symlink()
+                or raw_path.resolve(strict=True).parent != raw_root
+            ):
+                raise ValueError("affected_raw_invalid")
+            raw = raw_path.read_bytes()
+            digest = hashlib.sha256(raw).hexdigest()
+            expected_digest = expected_raw_manifest[raw_file]
+            if digest != expected_digest:
+                return refuse(
+                    "expected_raw_sha256_mismatch",
+                    raw_file=raw_file,
+                    expected_sha256=expected_digest,
+                    observed_sha256=digest,
+                )
+
+            stored_digest = entry.get("raw_sha256")
+            stored_bytes = entry.get("raw_bytes")
+            has_stored_digest = "raw_sha256" in entry
+            has_stored_bytes = "raw_bytes" in entry
+            if has_stored_digest != has_stored_bytes:
+                return refuse("failure_state_raw_binding_invalid", raw_file=raw_file)
+            binding_source = "failure_state"
+            if not has_stored_digest:
+                binding_source = "expected_manifest_legacy"
+                legacy_state_raws.append(raw_file)
+            else:
+                if (
+                    not isinstance(stored_digest, str)
+                    or _RAW_SHA256_RE.fullmatch(stored_digest) is None
+                    or isinstance(stored_bytes, bool)
+                    or not isinstance(stored_bytes, int)
+                    or stored_bytes < 0
+                ):
+                    return refuse(
+                        "failure_state_raw_binding_invalid", raw_file=raw_file
+                    )
+                if stored_digest != expected_digest or stored_bytes != len(raw):
+                    return refuse(
+                        "failure_state_raw_binding_mismatch",
+                        raw_file=raw_file,
+                        state_sha256=stored_digest,
+                        expected_sha256=expected_digest,
+                        state_bytes=stored_bytes,
+                        observed_bytes=len(raw),
+                    )
+            affected_raws.append(
+                {
+                    "filename": raw_file,
+                    "sha256": digest,
+                    "bytes": len(raw),
+                    "binding_source": binding_source,
+                }
+            )
+    except (OSError, ValueError):
+        return refuse("affected_raw_evidence_unavailable")
+
+    if not normalized_reason:
+        return refuse("repair_reason_required")
+    if bool(command) != bool(verification):
+        return refuse("verification_command_and_result_must_be_provided_together")
+    if max(len(normalized_reason), len(command), len(verification)) > 8000:
+        return refuse("repair_evidence_field_too_large")
+    try:
+        git_state = _verified_local_repair_git_state(repair_commit)
+    except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
+        return refuse(str(exc))
+    evidence = {
+        "failure_id": packet.get("failure_id"),
+        "expected_status": expected_status,
+        "failure_class": expected_failure_class,
+        "fingerprint": expected_fingerprint,
+        "packet_raw_file": packet.get("raw_file"),
+        "reason": normalized_reason,
+        **git_state,
+        "affected_raw_scope": "fingerprint_group",
+        "affected_raws": affected_raws,
+        "expected_raw_manifest": expected_manifest_rows,
+        "legacy_state_raws": sorted(legacy_state_raws),
+        "verification_command": command or None,
+        "verification_result": verification or None,
+    }
+
+    if dry_run:
+        return {
+            "packet": str(packet_path),
+            "failure_id": packet.get("failure_id"),
+            "status": "dry_run",
+            "projected_status": "local_repair_applied",
+            "accepted": True,
+            "cached": False,
+            "verified_local_repair": evidence,
+        }
+
+    applied_at = datetime.now().isoformat()
+    evidence["recorded_at"] = applied_at
+    _update_packet(
+        packet_path,
+        packet,
+        status="local_repair_applied",
+        self_heal_queued=False,
+        next_attempt_at=None,
+        frontier_status="not_required",
+        verified_local_repair=evidence,
+        verified_local_repair_applied_at=applied_at,
+    )
+    return {
+        "packet": str(packet_path),
+        "failure_id": packet.get("failure_id"),
+        "status": "local_repair_applied",
+        "accepted": True,
+        "cached": False,
+        "verified_local_repair": evidence,
+    }
+
+
+def release_operational_failure_after_local_repair(
+    packet_path: Path,
+    *,
+    expected_status: str,
+    expected_failure_class: str,
+    expected_fingerprint: str,
+    expected_raw_sha256: Mapping[str, str] | Sequence[str],
+    repair_commit: str,
+    reason: str,
+    verification_command: str | None = None,
+    verification_result: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Release immutable raws only after a guarded operational repair ACK.
+
+    Expected status, class, fingerprint, and the complete filename/SHA group are
+    one compare-and-swap guard. Semantic no-quorum packets and terminal outcomes
+    are deliberately never writable by this boundary. Dry runs do not create
+    the packet lock or mutate any file.
+    """
+
+    requested = packet_path.expanduser()
+    try:
+        if requested.is_symlink():
+            raise ValueError("packet_symlink_not_allowed")
+        resolved = requested.resolve(strict=True)
+        packet_root = _packet_dir().expanduser().resolve(strict=True)
+    except (OSError, ValueError) as exc:
+        reason_code = str(exc) if str(exc).startswith("packet_") else "packet_not_found"
+        return _operational_release_refusal(requested, reason_code)
+    if resolved.parent != packet_root or resolved.suffix != ".json":
+        return _operational_release_refusal(
+            resolved,
+            "packet_outside_failure_packet_dir",
+        )
+
+    normalized_status = expected_status.strip()
+    if not normalized_status:
+        return _operational_release_refusal(resolved, "expected_status_required")
+    try:
+        expected_raw_manifest = _normalize_expected_raw_manifest(expected_raw_sha256)
+    except ValueError as exc:
+        return _operational_release_refusal(resolved, str(exc))
+
+    kwargs = {
+        "expected_status": normalized_status,
+        "expected_failure_class": expected_failure_class.strip(),
+        "expected_fingerprint": expected_fingerprint.strip(),
+        "expected_raw_manifest": expected_raw_manifest,
+        "repair_commit": repair_commit.strip(),
+        "reason": reason,
+        "verification_command": verification_command,
+        "verification_result": verification_result,
+        "dry_run": dry_run,
+    }
+    from llm_wiki_mcp.failure_supervisor import (
+        lock_operational_failure_group,
+        operational_failure_group_snapshot,
+    )
+
+    if dry_run:
+        kwargs["affected_group"] = operational_failure_group_snapshot(resolved)
+        return _release_operational_failure_after_local_repair_unlocked(
+            resolved, **kwargs
+        )
+    with _packet_lock(resolved) as acquired:
+        if not acquired:
+            return _operational_release_refusal(
+                resolved,
+                "packet_already_running",
+                observed_status="busy",
+            )
+        with lock_operational_failure_group(resolved) as affected_group:
+            kwargs["affected_group"] = affected_group
+            try:
+                return _release_operational_failure_after_local_repair_unlocked(
+                    resolved, **kwargs
+                )
+            except _PacketCancellationRequested as exc:
+                return _operational_release_refusal(
+                    resolved,
+                    "packet_cancellation_requested",
+                    cancellation=exc.result,
+                )
 
 
 def _append_registry(record: dict[str, Any]) -> None:
@@ -2808,6 +3337,32 @@ def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run LLM Wiki self-healing.")
     parser.add_argument("--packet", type=Path, help="Process one failure packet.")
+    parser.add_argument(
+        "--release-operational-repair",
+        type=Path,
+        metavar="PACKET",
+        help=(
+            "Mark one operational packet repaired after verifying its exact "
+            "class, fingerprint, and pushed runtime commit."
+        ),
+    )
+    parser.add_argument("--expected-status")
+    parser.add_argument("--expected-failure-class")
+    parser.add_argument("--expected-fingerprint")
+    parser.add_argument(
+        "--expected-raw-sha256",
+        action="append",
+        default=[],
+        metavar="FILENAME=SHA256",
+        help=(
+            "Repeat once for every raw currently attached to the packet; the "
+            "exact filename set and byte hashes form the release CAS."
+        ),
+    )
+    parser.add_argument("--repair-commit")
+    parser.add_argument("--repair-reason")
+    parser.add_argument("--verification-command")
+    parser.add_argument("--verification-result")
     parser.add_argument("--max-packets", type=int, default=3)
     parser.add_argument(
         "--auto-apply-errors",
@@ -2884,6 +3439,51 @@ def _background_exit_code(result: dict[str, Any]) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     frontier_enabled = args.enable_frontier_repair and not args.no_frontier
+    release_evidence = (
+        args.expected_status,
+        args.expected_failure_class,
+        args.expected_fingerprint,
+        *(args.expected_raw_sha256 or []),
+        args.repair_commit,
+        args.repair_reason,
+        args.verification_command,
+        args.verification_result,
+    )
+    if args.release_operational_repair is not None:
+        if (
+            args.packet is not None
+            or args.sandbox_drill
+            or args.drill
+            or args.auto_apply_errors
+        ):
+            result = {
+                "status": "refused",
+                "accepted": False,
+                "reason": "release_operational_repair_action_conflict",
+            }
+        else:
+            result = release_operational_failure_after_local_repair(
+                args.release_operational_repair,
+                expected_status=str(args.expected_status or ""),
+                expected_failure_class=str(args.expected_failure_class or ""),
+                expected_fingerprint=str(args.expected_fingerprint or ""),
+                expected_raw_sha256=args.expected_raw_sha256 or [],
+                repair_commit=str(args.repair_commit or ""),
+                reason=str(args.repair_reason or ""),
+                verification_command=args.verification_command,
+                verification_result=args.verification_result,
+                dry_run=args.dry_run,
+            )
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0 if result.get("accepted") is True else 2
+    if any(value is not None for value in release_evidence):
+        result = {
+            "status": "refused",
+            "accepted": False,
+            "reason": "release_operational_repair_evidence_without_action",
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2
     if args.sandbox_drill:
         print(
             json.dumps(

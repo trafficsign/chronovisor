@@ -76,12 +76,241 @@ class _FakeJobStore:
     def get(self, job_id: str) -> SimpleNamespace | None:
         return self.jobs.get(job_id)
 
+    def update(self, job_id: str, **kwargs: object) -> None:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return
+        for key, value in kwargs.items():
+            setattr(job, key, value)
+
     def finish(self, job_id: str) -> None:
         job = self.jobs[job_id]
         job.status = self.result_status
         job.error = self.error
         if self.result_status == JobStatus.COMPLETED:
             job.pages_created = ["created-page"]
+
+
+def test_build_queue_distinguishes_operational_hold_and_resumes_after_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260714-operational-hold.md"
+    raw.write_text("immutable operational source", encoding="utf-8")
+    deferred = {raw.name: "pending_local_repair"}
+    monkeypatch.setattr(
+        raw_replay,
+        "_active_terminal_semantic_deferred_raw_names",
+        lambda: frozenset(deferred),
+    )
+    monkeypatch.setattr(
+        raw_replay,
+        "_active_operational_deferred_raw_statuses",
+        lambda: dict(deferred),
+    )
+
+    held = raw_replay.build_queue(
+        path=paths["queue"],
+        include_migration=True,
+        include_auto_signals=False,
+    )
+
+    assert held["candidates"] == 0
+    assert held["skipped_semantic_deferred"] == 0
+    assert held["skipped_operational_deferred"] == 1
+    assert paths["queue"].read_text(encoding="utf-8") == ""
+
+    # A successful release removes the supervisor hold; no raw mutation or
+    # queue surgery is needed for the next build to admit the same source.
+    deferred.clear()
+    released = raw_replay.build_queue(
+        path=paths["queue"],
+        include_migration=True,
+        include_auto_signals=False,
+    )
+
+    assert released["candidates"] == 1
+    assert released["candidate_keys"] == [raw_replay.stable_key(raw)]
+    assert released["skipped_semantic_deferred"] == 0
+    assert released["skipped_operational_deferred"] == 0
+
+
+def test_operational_hold_blocks_existing_queue_selection_until_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor
+
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260714-operational-selection.md"
+    raw.write_text("immutable operational source", encoding="utf-8")
+    key = raw_replay.stable_key(raw)
+    _write_jsonl(
+        paths["queue"],
+        [
+            {
+                "key": key,
+                "raw": raw.name,
+                "path": str(raw),
+                "status": "pending",
+                "attempts": 0,
+                "sources": ["ingest_failure"],
+                "priority": 300,
+                "bytes": raw.stat().st_size,
+                "date": "20260714",
+            }
+        ],
+    )
+    deferred = {raw.name: "pending_local_repair"}
+    monkeypatch.setattr(
+        failure_supervisor,
+        "operational_deferred_raw_files",
+        lambda *_args, **_kwargs: dict(deferred),
+    )
+    monkeypatch.setattr(
+        "llm_wiki_mcp.ingest.run_ingest",
+        lambda *_args, **_kwargs: pytest.fail(
+            "operational hold must not launch ingest"
+        ),
+    )
+
+    held = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+    )
+
+    assert held["count"] == 0
+    assert held["semantic_deferred"] == []
+    assert held["operational_deferred"] == [
+        {"key": key, "raw": raw.name, "reason": "pending_local_repair"}
+    ]
+    [held_row] = _read_jsonl(paths["queue"])
+    assert held_row["status"] == "pending"
+    assert held_row["attempts"] == 0
+    assert "job_id" not in held_row
+
+    deferred.clear()
+    released = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+        dry_run=True,
+        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+    )
+
+    assert released["count"] == 1
+    assert released["planned"][0]["raw"] == raw.name
+
+
+def test_operational_hold_published_after_running_marker_cancels_launch_and_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor
+
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260714-operational-race.md"
+    raw.write_text("immutable operational source", encoding="utf-8")
+    key = raw_replay.stable_key(raw)
+    _write_jsonl(
+        paths["queue"],
+        [
+            {
+                "key": key,
+                "raw": raw.name,
+                "path": str(raw),
+                "status": "pending",
+                "attempts": 0,
+                "sources": ["ingest_failure"],
+                "priority": 300,
+                "bytes": raw.stat().st_size,
+                "date": "20260714",
+            }
+        ],
+    )
+    deferred: dict[str, str] = {}
+    monkeypatch.setattr(
+        failure_supervisor,
+        "operational_deferred_raw_files",
+        lambda *_args, **_kwargs: dict(deferred),
+    )
+    store = _FakeJobStore(result_status=JobStatus.COMPLETED)
+    original_create = store.create
+    publish_on_create = True
+
+    def create_and_publish(*, processor: str) -> SimpleNamespace:
+        job = original_create(processor=processor)
+        if publish_on_create:
+            deferred[raw.name] = "pending_local_repair"
+        return job
+
+    store.create = create_and_publish  # type: ignore[method-assign]
+    monkeypatch.setattr(raw_replay, "job_store", store)
+    ingest_calls: list[str] = []
+
+    def run_ingest(
+        _content: str,
+        job_id: str,
+        *,
+        on_complete,
+        metadata: dict[str, str],
+    ) -> None:
+        ingest_calls.append(str(metadata["source_raw"]))
+        store.finish(job_id)
+        on_complete()
+
+    monkeypatch.setattr("llm_wiki_mcp.ingest.run_ingest", run_ingest)
+
+    held = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+    )
+
+    assert held["count"] == 0
+    assert held["operational_deferred"] == [
+        {"key": key, "raw": raw.name, "reason": "pending_local_repair"}
+    ]
+    assert ingest_calls == []
+    assert store.jobs["job-1"].status == JobStatus.FAILED
+    [held_row] = _read_jsonl(paths["queue"])
+    assert held_row["status"] == "pending"
+    assert held_row["attempts"] == 0
+    assert held_row["job_id"] is None
+    assert "attempt_id" not in held_row
+    assert "started_at" not in held_row
+    assert not paths["history"].exists()
+
+    # Simulate a verified release. The same durable row is eligible again and
+    # now reaches inference exactly once.
+    publish_on_create = False
+    deferred.clear()
+    resumed = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+    )
+
+    assert resumed["count"] == 1
+    assert resumed["runs"][0]["status"] == "completed"
+    assert ingest_calls == [f"replay:{raw.name}"]
 
 
 def test_build_queue_selects_raws_by_date(tmp_path: Path, monkeypatch) -> None:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -132,6 +134,90 @@ def _write_packet(wiki_root: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(packet))
     return path
+
+
+def _write_operational_packet(wiki_root: Path) -> Path:
+    path = _write_packet(wiki_root)
+    packet = json.loads(path.read_text(encoding="utf-8"))
+    packet.update(
+        {
+            "failure_class": "ingest.generation_context_window_exceeded",
+            "fingerprint": "ingest.generation_context_window_exceeded",
+            "error": (
+                "ingest generation context_window_exceeded: required context "
+                "268078 exceeds configured max_num_ctx 262144"
+            ),
+        }
+    )
+    path.write_text(json.dumps(packet), encoding="utf-8")
+    return path
+
+
+def _verified_git_state(commit: str) -> dict[str, str]:
+    return {
+        "git_commit_sha": commit,
+        "checkout_head_sha": commit,
+        "origin_main_sha": commit,
+        "runtime_commit_sha": commit,
+    }
+
+
+def _expected_raw_manifest(*paths: Path) -> dict[str, str]:
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(paths, key=lambda item: item.name)
+    }
+
+
+@pytest.fixture()
+def operational_release_case(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, dict[str, str]]:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = _write_operational_packet(isolated_wiki)
+    raw_path = isolated_wiki / "raw" / "broken.md"
+    raw_path.write_text("immutable source", encoding="utf-8")
+    state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "failures": {
+                    raw_path.name: {
+                        "failure_class": "ingest.generation_context_window_exceeded",
+                        "fingerprint": "ingest.generation_context_window_exceeded",
+                        "self_heal_queued": True,
+                        "packet_path": str(packet_path),
+                        "raw_sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+                        "raw_bytes": len(raw_path.read_bytes()),
+                    }
+                },
+                "operational_failures": {
+                    "ingest.generation_context_window_exceeded": {
+                        "failure_class": "ingest.generation_context_window_exceeded",
+                        "fingerprint": "ingest.generation_context_window_exceeded",
+                        "self_heal_queued": True,
+                        "packet_path": str(packet_path),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "_verified_local_repair_git_state",
+        _verified_git_state,
+    )
+    return packet_path, {
+        "expected_status": "pending_local_repair",
+        "expected_failure_class": "ingest.generation_context_window_exceeded",
+        "expected_fingerprint": "ingest.generation_context_window_exceeded",
+        "expected_raw_sha256": _expected_raw_manifest(raw_path),
+        "repair_commit": "a" * 40,
+        "reason": "bounded output repair",
+    }
 
 
 def _mark_system_code_repair(
@@ -2184,6 +2270,1030 @@ def test_packet_lock_enforces_single_flight_without_packet_mutation(
     assert result["status"] == "busy"
     assert result["reason"] == "packet_already_running"
     assert packet_path.read_bytes() == before
+
+
+def test_operational_failure_state_binds_each_raw_exact_bytes(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor
+
+    primary = isolated_wiki / "raw" / "primary.md"
+    related = isolated_wiki / "raw" / "related.md"
+    primary.write_bytes(b"primary\r\nsource\n")
+    related.write_bytes(b"related\x00source\n")
+    monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
+
+    result = failure_supervisor.record_raw_failure(
+        raw_path=primary,
+        related_raw_paths=(related,),
+        raw_text=primary.read_text(encoding="utf-8"),
+        error=(
+            "ingest generation context_window_exceeded: required context "
+            "268078 exceeds configured max_num_ctx 262144"
+        ),
+    )
+
+    state = json.loads(
+        (isolated_wiki / "runtime" / "failures" / "state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert result.packet_path
+    for path in (primary, related):
+        entry = state["failures"][path.name]
+        assert entry["raw_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert entry["raw_bytes"] == len(path.read_bytes())
+
+
+@pytest.mark.parametrize(
+    "stored_binding",
+    [
+        {"raw_sha256": "valid_digest_is_injected_below"},
+        {"raw_bytes": 0},
+        {"raw_sha256": "malformed", "raw_bytes": 0},
+    ],
+    ids=("sha-only", "bytes-only", "malformed-complete"),
+)
+def test_repeated_operational_failure_preserves_invalid_binding_and_release_refuses(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored_binding: dict[str, object],
+) -> None:
+    from llm_wiki_mcp import failure_supervisor, self_heal
+
+    raw_path = isolated_wiki / "raw" / "partial-binding.md"
+    raw_path.write_bytes(b"immutable\r\nsource\n")
+    error = (
+        "ingest generation context_window_exceeded: required context "
+        "268078 exceeds configured max_num_ctx 262144"
+    )
+    monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
+    first = failure_supervisor.record_raw_failure(
+        raw_path=raw_path,
+        raw_text=raw_path.read_text(encoding="utf-8"),
+        error=error,
+    )
+    assert first.packet_path is not None
+
+    binding = dict(stored_binding)
+    if binding.get("raw_sha256") == "valid_digest_is_injected_below":
+        binding["raw_sha256"] = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    if "raw_bytes" in binding:
+        binding["raw_bytes"] = len(raw_path.read_bytes())
+    state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    entry = state["failures"][raw_path.name]
+    entry.pop("raw_sha256", None)
+    entry.pop("raw_bytes", None)
+    entry.update(binding)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    repeated = failure_supervisor.record_raw_failure(
+        raw_path=raw_path,
+        raw_text=raw_path.read_text(encoding="utf-8"),
+        error=error,
+    )
+
+    assert repeated.packet_path == first.packet_path
+    refreshed = json.loads(state_path.read_text(encoding="utf-8"))["failures"][
+        raw_path.name
+    ]
+    for field in ("raw_sha256", "raw_bytes"):
+        assert refreshed.get(field) == binding.get(field)
+        assert (field in refreshed) is (field in binding)
+
+    monkeypatch.setattr(
+        self_heal,
+        "_verified_local_repair_git_state",
+        lambda _commit: pytest.fail("invalid state binding must fail before git ACK"),
+    )
+    release = self_heal.release_operational_failure_after_local_repair(
+        Path(first.packet_path),
+        expected_status="pending_local_repair",
+        expected_failure_class=first.failure_class,
+        expected_fingerprint=first.fingerprint,
+        expected_raw_sha256=_expected_raw_manifest(raw_path),
+        repair_commit="a" * 40,
+        reason="must remain fail closed",
+    )
+
+    assert release["accepted"] is False
+    assert release["reason"] == "failure_state_raw_binding_invalid"
+
+
+def test_verified_local_repair_releases_exact_operational_packet(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+) -> None:
+    from llm_wiki_mcp import failure_supervisor, self_heal
+
+    packet_path, kwargs = operational_release_case
+    raw_path = isolated_wiki / "raw" / "broken.md"
+    second_raw = isolated_wiki / "raw" / "second.md"
+    second_raw.write_text("second immutable source", encoding="utf-8")
+    state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["failures"][second_raw.name] = dict(state["failures"][raw_path.name])
+    state["failures"][second_raw.name]["raw_sha256"] = hashlib.sha256(
+        second_raw.read_bytes()
+    ).hexdigest()
+    state["failures"][second_raw.name]["raw_bytes"] = len(second_raw.read_bytes())
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    kwargs["expected_raw_sha256"] = _expected_raw_manifest(raw_path, second_raw)
+    assert failure_supervisor.operational_deferred_raw_files(
+        [raw_path, second_raw]
+    ) == {
+        raw_path.name: "pending_local_repair",
+        second_raw.name: "pending_local_repair",
+    }
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+        verification_command="pytest -q tests/test_ingest.py",
+        verification_result="4 passed",
+    )
+
+    updated = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert result["accepted"] is True
+    assert result["status"] == "local_repair_applied"
+    assert result["cached"] is False
+    assert updated["status"] == "local_repair_applied"
+    assert updated["self_heal_queued"] is False
+    assert updated["verified_local_repair"]["git_commit_sha"] == "a" * 40
+    assert updated["verified_local_repair"]["failure_class"] == (
+        "ingest.generation_context_window_exceeded"
+    )
+    assert updated["verified_local_repair"]["verification_command"] == (
+        "pytest -q tests/test_ingest.py"
+    )
+    assert updated["verified_local_repair"]["verification_result"] == "4 passed"
+    assert updated["verified_local_repair"]["affected_raw_scope"] == (
+        "fingerprint_group"
+    )
+    assert updated["verified_local_repair"]["affected_raws"] == [
+        {
+            "filename": raw_path.name,
+            "sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+            "bytes": len(raw_path.read_bytes()),
+            "binding_source": "failure_state",
+        },
+        {
+            "filename": second_raw.name,
+            "sha256": hashlib.sha256(second_raw.read_bytes()).hexdigest(),
+            "bytes": len(second_raw.read_bytes()),
+            "binding_source": "failure_state",
+        },
+    ]
+    assert (
+        failure_supervisor.operational_deferred_raw_files([raw_path, second_raw]) == {}
+    )
+
+
+def test_verified_local_repair_accepts_remaining_partial_group(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+    remaining = isolated_wiki / "raw" / "remaining.md"
+    remaining.write_text("remaining immutable source", encoding="utf-8")
+    state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    original = state["failures"].pop("broken.md")
+    original.pop("raw_sha256", None)
+    original.pop("raw_bytes", None)
+    state["failures"][remaining.name] = original
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    kwargs["expected_raw_sha256"] = _expected_raw_manifest(remaining)
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+
+    assert result["accepted"] is True
+    assert result["verified_local_repair"]["packet_raw_file"] == "broken.md"
+    assert result["verified_local_repair"]["affected_raws"] == [
+        {
+            "filename": remaining.name,
+            "sha256": hashlib.sha256(remaining.read_bytes()).hexdigest(),
+            "bytes": len(remaining.read_bytes()),
+            "binding_source": "expected_manifest_legacy",
+        }
+    ]
+    assert result["verified_local_repair"]["legacy_state_raws"] == [remaining.name]
+
+
+def test_verified_local_repair_refuses_expected_status_mismatch(
+    operational_release_case: tuple[Path, dict[str, str]],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+    kwargs["expected_status"] = "frontier_retry"
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == "packet_status_mismatch"
+    assert result["observed_status"] == "pending_local_repair"
+
+
+def test_verified_local_repair_refuses_incomplete_group_manifest(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+    second = isolated_wiki / "raw" / "second.md"
+    second.write_text("second source", encoding="utf-8")
+    state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    second_entry = dict(state["failures"]["broken.md"])
+    second_entry["raw_sha256"] = hashlib.sha256(second.read_bytes()).hexdigest()
+    second_entry["raw_bytes"] = len(second.read_bytes())
+    state["failures"][second.name] = second_entry
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == "failure_state_group_manifest_mismatch"
+    assert result["observed_raw_files"] == ["broken.md", "second.md"]
+
+
+def test_verified_local_repair_refuses_raw_changed_since_failure(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+    raw_path = isolated_wiki / "raw" / "broken.md"
+    raw_path.write_text("mutated source", encoding="utf-8")
+
+    stale_expected = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+    assert stale_expected["reason"] == "expected_raw_sha256_mismatch"
+
+    kwargs["expected_raw_sha256"] = _expected_raw_manifest(raw_path)
+    state_mismatch = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+    assert state_mismatch["reason"] == "failure_state_raw_binding_mismatch"
+
+
+def test_verified_local_repair_refuses_cancelled_packet(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+    before = packet_path.read_bytes()
+    cancellation = self_heal.request_packet_cancellation(
+        packet_path,
+        reason="semantic defer superseded this repair",
+        superseded_by_packet=(
+            isolated_wiki / "runtime" / "failures" / "packets" / "semantic.json"
+        ),
+    )
+    assert cancellation["accepted"] is True
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == "packet_cancellation_requested"
+    assert packet_path.read_bytes() == before
+
+
+def test_verified_local_repair_late_cancellation_wins_before_packet_commit(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+
+    def cancel_during_verification(commit: str) -> dict[str, str]:
+        cancellation = self_heal.request_packet_cancellation(
+            packet_path,
+            reason="semantic defer superseded repair during verification",
+            superseded_by_packet=(
+                isolated_wiki
+                / "runtime"
+                / "failures"
+                / "packets"
+                / "semantic-late.json"
+            ),
+        )
+        assert cancellation["accepted"] is True
+        return _verified_git_state(commit)
+
+    monkeypatch.setattr(
+        self_heal,
+        "_verified_local_repair_git_state",
+        cancel_during_verification,
+    )
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == "packet_cancellation_requested"
+    updated = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert updated["status"] == self_heal.PACKET_CANCELLATION_STATUS
+    assert "verified_local_repair" not in updated
+
+
+@pytest.mark.parametrize(
+    ("expected_class", "expected_fingerprint", "reason"),
+    [
+        (
+            "ingest.generation_output_truncated",
+            "ingest.generation_context_window_exceeded",
+            "failure_class_mismatch",
+        ),
+        (
+            "ingest.generation_context_window_exceeded",
+            "ingest.generation_context_window_exceeded:other",
+            "fingerprint_mismatch",
+        ),
+    ],
+)
+def test_verified_local_repair_refuses_stale_packet_identity(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    expected_class: str,
+    expected_fingerprint: str,
+    reason: str,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = _write_operational_packet(isolated_wiki)
+    before = packet_path.read_bytes()
+    monkeypatch.setattr(
+        self_heal,
+        "_verified_local_repair_git_state",
+        lambda _expected: pytest.fail("identity mismatch must fail before git ACK"),
+    )
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        expected_status="pending_local_repair",
+        expected_failure_class=expected_class,
+        expected_fingerprint=expected_fingerprint,
+        expected_raw_sha256={"broken.md": "c" * 64},
+        repair_commit="a" * 40,
+        reason="claimed repair",
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == reason
+    assert packet_path.read_bytes() == before
+
+
+def test_verified_local_repair_never_releases_semantic_defer(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = _write_operational_packet(isolated_wiki)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet.update(
+        {
+            "failure_class": "ingest.semantic_no_quorum",
+            "fingerprint": f"ingest.semantic_no_quorum:{'b' * 64}",
+            "status": "local_quarantined",
+            "terminal_deferred": True,
+            "defer_reason": "semantic_no_quorum",
+        }
+    )
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    before = packet_path.read_bytes()
+    monkeypatch.setattr(
+        self_heal,
+        "_verified_local_repair_git_state",
+        lambda _expected: pytest.fail("semantic packet must fail before git ACK"),
+    )
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        expected_status="local_quarantined",
+        expected_failure_class="ingest.semantic_no_quorum",
+        expected_fingerprint=f"ingest.semantic_no_quorum:{'b' * 64}",
+        expected_raw_sha256={"broken.md": "c" * 64},
+        repair_commit="a" * 40,
+        reason="must not apply",
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == "semantic_defer_not_releasable"
+    assert packet_path.read_bytes() == before
+
+
+def test_verified_local_repair_is_idempotent_and_packet_locked(
+    operational_release_case: tuple[Path, dict[str, str]],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+
+    with self_heal._packet_lock(packet_path) as acquired:
+        assert acquired is True
+        busy = self_heal.release_operational_failure_after_local_repair(
+            packet_path, **kwargs
+        )
+    assert busy["accepted"] is False
+    assert busy["reason"] == "packet_already_running"
+
+    first = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+    after_first = packet_path.read_bytes()
+    second = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+
+    assert first["accepted"] is True
+    assert first["cached"] is False
+    assert second["accepted"] is True
+    assert second["cached"] is True
+    assert packet_path.read_bytes() == after_first
+
+
+def test_verified_local_repair_cached_retry_survives_partial_and_full_state_cleanup(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor, self_heal
+
+    packet_path, kwargs = operational_release_case
+    first_raw = isolated_wiki / "raw" / "broken.md"
+    second_raw = isolated_wiki / "raw" / "second.md"
+    second_raw.write_text("second immutable source", encoding="utf-8")
+    state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    second_entry = dict(state["failures"][first_raw.name])
+    second_entry["raw_sha256"] = hashlib.sha256(second_raw.read_bytes()).hexdigest()
+    second_entry["raw_bytes"] = len(second_raw.read_bytes())
+    state["failures"][second_raw.name] = second_entry
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    kwargs["expected_raw_sha256"] = _expected_raw_manifest(first_raw, second_raw)
+
+    first = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+    assert first["accepted"] is True
+    assert first["cached"] is False
+    packet_after_first = packet_path.read_bytes()
+    monkeypatch.setattr(
+        self_heal,
+        "_verified_local_repair_git_state",
+        lambda _commit: pytest.fail("cached retry must not revalidate current git"),
+    )
+
+    failure_supervisor.reset_raw_failure(first_raw.name)
+    state_after_partial_cleanup = state_path.read_bytes()
+    partial = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+
+    assert partial["accepted"] is True
+    assert partial["cached"] is True
+    assert packet_path.read_bytes() == packet_after_first
+    assert state_path.read_bytes() == state_after_partial_cleanup
+
+    failure_supervisor.reset_raw_failure(second_raw.name)
+    state_after_full_cleanup = state_path.read_bytes()
+    complete = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+
+    assert complete["accepted"] is True
+    assert complete["cached"] is True
+    assert packet_path.read_bytes() == packet_after_first
+    assert state_path.read_bytes() == state_after_full_cleanup
+
+
+def test_verified_local_repair_cached_retry_refuses_different_receipt_evidence(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor, self_heal
+
+    packet_path, fixture_kwargs = operational_release_case
+    raw_path = isolated_wiki / "raw" / "broken.md"
+    baseline: dict[str, object] = {
+        **fixture_kwargs,
+        "verification_command": "pytest -q focused",
+        "verification_result": "passed",
+    }
+    first = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **baseline
+    )
+    assert first["accepted"] is True
+    failure_supervisor.reset_raw_failure(raw_path.name)
+    packet_after_first = packet_path.read_bytes()
+    state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+    state_after_cleanup = state_path.read_bytes()
+    monkeypatch.setattr(
+        self_heal,
+        "_verified_local_repair_git_state",
+        lambda _commit: pytest.fail("completed retry must not inspect current git"),
+    )
+
+    changed_inputs = [
+        {"expected_status": "frontier_retry"},
+        {"expected_raw_sha256": {raw_path.name: "b" * 64}},
+        {"repair_commit": "b" * 40},
+        {"reason": "different repair"},
+        {"verification_command": "pytest -q different"},
+        {"verification_result": "failed"},
+    ]
+    for changed in changed_inputs:
+        retry = dict(baseline)
+        retry.update(changed)
+        result = self_heal.release_operational_failure_after_local_repair(
+            packet_path, **retry
+        )
+        assert result["accepted"] is False
+        assert result["reason"] == "completed_packet_repair_evidence_mismatch"
+        assert packet_path.read_bytes() == packet_after_first
+        assert state_path.read_bytes() == state_after_cleanup
+
+    class_mismatch = dict(baseline)
+    class_mismatch["expected_failure_class"] = "ingest.generation_output_truncated"
+    assert (
+        self_heal.release_operational_failure_after_local_repair(
+            packet_path, **class_mismatch
+        )["reason"]
+        == "failure_class_mismatch"
+    )
+    fingerprint_mismatch = dict(baseline)
+    fingerprint_mismatch["expected_fingerprint"] = "different:fingerprint"
+    assert (
+        self_heal.release_operational_failure_after_local_repair(
+            packet_path, **fingerprint_mismatch
+        )["reason"]
+        == "fingerprint_mismatch"
+    )
+
+
+def test_verified_local_repair_freezes_group_until_packet_commit(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor, self_heal
+
+    packet_path, kwargs = operational_release_case
+    late_raw = isolated_wiki / "raw" / "late.md"
+    late_raw.write_text("late immutable source", encoding="utf-8")
+    started = threading.Event()
+    finished = threading.Event()
+    attached: dict[str, object] = {}
+    worker: list[threading.Thread] = []
+    original_update = self_heal._update_packet
+    monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
+
+    def attach_late_raw() -> None:
+        started.set()
+        attached["result"] = failure_supervisor.record_raw_failure(
+            raw_path=late_raw,
+            error=(
+                "ingest generation context_window_exceeded: required context "
+                "268078 exceeds configured max_num_ctx 262144"
+            ),
+            raw_text=late_raw.read_text(encoding="utf-8"),
+        )
+        finished.set()
+
+    def update_packet(path: Path, packet: dict, **updates: object) -> None:
+        thread = threading.Thread(target=attach_late_raw)
+        worker.append(thread)
+        thread.start()
+        assert started.wait(timeout=1)
+        assert not finished.wait(timeout=0.05)
+        original_update(path, packet, **updates)
+
+    monkeypatch.setattr(self_heal, "_update_packet", update_packet)
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+    worker[0].join(timeout=2)
+
+    assert finished.is_set()
+    assert [
+        row["filename"] for row in result["verified_local_repair"]["affected_raws"]
+    ] == ["broken.md"]
+    assert attached["result"].packet_path != str(packet_path)
+
+
+def test_operational_release_lock_order_does_not_block_state_writer(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor, self_heal
+
+    packet_path, kwargs = operational_release_case
+    late_raw = isolated_wiki / "raw" / "late.md"
+    late_raw.write_text("late immutable source", encoding="utf-8")
+    held = threading.Event()
+    release_holder = threading.Event()
+    writer_done = threading.Event()
+    writer_result: dict[str, object] = {}
+    monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
+
+    def hold_packet() -> None:
+        with self_heal._packet_lock(packet_path) as acquired:
+            assert acquired is True
+            held.set()
+            assert release_holder.wait(timeout=2)
+
+    def write_state() -> None:
+        writer_result["value"] = failure_supervisor.record_raw_failure(
+            raw_path=late_raw,
+            error=(
+                "ingest generation context_window_exceeded: required context "
+                "268078 exceeds configured max_num_ctx 262144"
+            ),
+            raw_text=late_raw.read_text(encoding="utf-8"),
+        )
+        writer_done.set()
+
+    holder = threading.Thread(target=hold_packet)
+    holder.start()
+    assert held.wait(timeout=1)
+    writer = threading.Thread(target=write_state)
+    writer.start()
+    try:
+        assert writer_done.wait(timeout=1)
+        busy = self_heal.release_operational_failure_after_local_repair(
+            packet_path, **kwargs
+        )
+    finally:
+        release_holder.set()
+        holder.join(timeout=2)
+        writer.join(timeout=2)
+
+    assert busy["reason"] == "packet_already_running"
+    assert writer_result["value"].packet_path == str(packet_path)
+    kwargs["expected_raw_sha256"] = _expected_raw_manifest(
+        isolated_wiki / "raw" / "broken.md",
+        late_raw,
+    )
+    released = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+    assert [
+        row["filename"] for row in released["verified_local_repair"]["affected_raws"]
+    ] == ["broken.md", "late.md"]
+
+
+def test_verified_local_repair_dry_run_is_byte_for_byte_read_only(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+    before = packet_path.read_bytes()
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+        dry_run=True,
+    )
+
+    assert result["accepted"] is True
+    assert result["status"] == "dry_run"
+    assert result["projected_status"] == "local_repair_applied"
+    assert packet_path.read_bytes() == before
+    assert not (isolated_wiki / "runtime" / "failures" / "locks").exists()
+
+
+def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import runtime_config, self_heal
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    tracked = repo / "repair.py"
+    tracked.write_text("fixed = True\n", encoding="utf-8")
+    git("add", "repair.py")
+    git("commit", "-qm", "repair")
+    commit = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/main", commit)
+    monkeypatch.setattr(self_heal, "_repo_root", lambda: repo)
+    archive_root = tmp_path / "cache" / "archive-v0" / "runtime-id"
+    archive_path = archive_root / "lib" / "python3.13"
+    module_path = archive_path / "site-packages" / "llm_wiki_mcp" / "runtime_config.py"
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("# installed runtime\n", encoding="utf-8")
+
+    def identity(**overrides: object) -> dict[str, object]:
+        value: dict[str, object] = {
+            "commit_id": commit,
+            "expected_commit": commit,
+            "drift": False,
+            "archive_path": str(archive_path),
+            "module_path": str(module_path),
+            "runtime_source": ("git+ssh://git@github.com/trafficsign/llm-wiki-mcp"),
+            "direct_url": {
+                "url": "ssh://git@github.com/trafficsign/llm-wiki-mcp",
+                "vcs_info": {"vcs": "git", "commit_id": commit},
+            },
+        }
+        value.update(overrides)
+        return value
+
+    monkeypatch.setattr(
+        runtime_config,
+        "runtime_identity",
+        identity,
+    )
+
+    evidence = self_heal._verified_local_repair_git_state(commit)
+
+    assert evidence["git_commit_sha"] == commit
+    assert evidence["checkout_head_sha"] == commit
+    assert evidence["origin_main_sha"] == commit
+    assert evidence["runtime_commit_sha"] == commit
+    assert evidence["runtime_archive_root"] == str(archive_root)
+    assert evidence["runtime_drift"] is False
+
+    monkeypatch.setattr(
+        runtime_config, "runtime_identity", lambda: identity(commit_id=None)
+    )
+    with pytest.raises(ValueError, match="repair_runtime_commit_unavailable"):
+        self_heal._verified_local_repair_git_state(commit)
+    monkeypatch.setattr(
+        runtime_config,
+        "runtime_identity",
+        lambda: identity(commit_id="b" * 40),
+    )
+    with pytest.raises(ValueError, match="repair_commit_not_executing_runtime"):
+        self_heal._verified_local_repair_git_state(commit)
+
+    monkeypatch.setattr(
+        runtime_config,
+        "runtime_identity",
+        lambda: identity(expected_commit="b" * 40),
+    )
+    with pytest.raises(ValueError, match="repair_runtime_expected_commit_mismatch"):
+        self_heal._verified_local_repair_git_state(commit)
+    monkeypatch.setattr(
+        runtime_config,
+        "runtime_identity",
+        lambda: identity(drift=True),
+    )
+    with pytest.raises(ValueError, match="repair_runtime_drift_not_false"):
+        self_heal._verified_local_repair_git_state(commit)
+    monkeypatch.setattr(
+        runtime_config,
+        "runtime_identity",
+        lambda: identity(archive_path=str(repo), module_path=str(tracked)),
+    )
+    with pytest.raises(ValueError, match="repair_runtime_not_uv_archive"):
+        self_heal._verified_local_repair_git_state(commit)
+    monkeypatch.setattr(
+        runtime_config,
+        "runtime_identity",
+        lambda: identity(
+            direct_url={
+                "url": "ssh://git@github.com/attacker/llm-wiki-mcp",
+                "vcs_info": {"vcs": "git", "commit_id": commit},
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="repair_runtime_source_not_exact_github_vcs"):
+        self_heal._verified_local_repair_git_state(commit)
+    monkeypatch.setattr(
+        runtime_config,
+        "runtime_identity",
+        identity,
+    )
+
+    tracked.write_text("fixed = False\n", encoding="utf-8")
+    with pytest.raises(
+        ValueError, match="repair_checkout_has_uncommitted_tracked_changes"
+    ):
+        self_heal._verified_local_repair_git_state(commit)
+
+
+def test_release_operational_repair_cli_routes_all_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = tmp_path / "packet.json"
+    packet_path.write_text("{}", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def release(path: Path, **kwargs: object) -> dict[str, object]:
+        seen["path"] = path
+        seen.update(kwargs)
+        return {"status": "dry_run", "accepted": True}
+
+    monkeypatch.setattr(
+        self_heal,
+        "release_operational_failure_after_local_repair",
+        release,
+    )
+
+    exit_code = self_heal.main(
+        [
+            "--release-operational-repair",
+            str(packet_path),
+            "--expected-status",
+            "pending_local_repair",
+            "--expected-failure-class",
+            "ingest.generation_context_window_exceeded",
+            "--expected-fingerprint",
+            "ingest.generation_context_window_exceeded",
+            "--expected-raw-sha256",
+            f"broken.md={'b' * 64}",
+            "--expected-raw-sha256",
+            f"second.md={'c' * 64}",
+            "--repair-commit",
+            "a" * 40,
+            "--repair-reason",
+            "adaptive output budget",
+            "--verification-command",
+            "pytest focused",
+            "--verification-result",
+            "passed",
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["accepted"] is True
+    assert seen == {
+        "path": packet_path,
+        "expected_status": "pending_local_repair",
+        "expected_failure_class": "ingest.generation_context_window_exceeded",
+        "expected_fingerprint": "ingest.generation_context_window_exceeded",
+        "expected_raw_sha256": [
+            f"broken.md={'b' * 64}",
+            f"second.md={'c' * 64}",
+        ],
+        "repair_commit": "a" * 40,
+        "reason": "adaptive output budget",
+        "verification_command": "pytest focused",
+        "verification_result": "passed",
+        "dry_run": True,
+    }
+
+
+def test_release_operational_repair_cli_releases_legacy_state_with_manifest(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+    raw_path = isolated_wiki / "raw" / "broken.md"
+    state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state_entry = state["failures"][raw_path.name]
+    state_entry.pop("raw_sha256")
+    state_entry.pop("raw_bytes")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+
+    exit_code = self_heal.main(
+        [
+            "--release-operational-repair",
+            str(packet_path),
+            "--expected-status",
+            str(kwargs["expected_status"]),
+            "--expected-failure-class",
+            str(kwargs["expected_failure_class"]),
+            "--expected-fingerprint",
+            str(kwargs["expected_fingerprint"]),
+            "--expected-raw-sha256",
+            f"{raw_path.name}={digest}",
+            "--repair-commit",
+            str(kwargs["repair_commit"]),
+            "--repair-reason",
+            str(kwargs["reason"]),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["accepted"] is True
+    assert payload["verified_local_repair"]["legacy_state_raws"] == [raw_path.name]
+    assert payload["verified_local_repair"]["affected_raws"] == [
+        {
+            "filename": raw_path.name,
+            "sha256": digest,
+            "bytes": len(raw_path.read_bytes()),
+            "binding_source": "expected_manifest_legacy",
+        }
+    ]
+    assert json.loads(packet_path.read_text(encoding="utf-8"))["status"] == (
+        "local_repair_applied"
+    )
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        ["--packet", "/tmp/other.json"],
+        ["--sandbox-drill"],
+        ["--drill"],
+        ["--auto-apply-errors"],
+    ],
+)
+def test_release_operational_repair_cli_refuses_other_actions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    conflict: list[str],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path = tmp_path / "packet.json"
+    packet_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        self_heal,
+        "release_operational_failure_after_local_repair",
+        lambda *_args, **_kwargs: pytest.fail("conflicting action must not release"),
+    )
+
+    exit_code = self_heal.main(
+        ["--release-operational-repair", str(packet_path), *conflict]
+    )
+
+    assert exit_code == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == (
+        "release_operational_repair_action_conflict"
+    )
+
+
+@pytest.mark.parametrize(
+    "evidence_flag",
+    [
+        "--expected-status",
+        "--expected-failure-class",
+        "--expected-fingerprint",
+        "--expected-raw-sha256",
+        "--repair-commit",
+        "--repair-reason",
+        "--verification-command",
+        "--verification-result",
+    ],
+)
+def test_release_evidence_flags_require_release_action(
+    capsys: pytest.CaptureFixture[str],
+    evidence_flag: str,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    exit_code = self_heal.main([evidence_flag, "unexpected"])
+
+    assert exit_code == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == (
+        "release_operational_repair_evidence_without_action"
+    )
 
 
 def test_completed_packet_is_cached_instead_of_reprocessed(

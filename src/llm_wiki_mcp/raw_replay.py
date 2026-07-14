@@ -146,26 +146,25 @@ def _quarantine_retry_seconds() -> int:
 
 
 def _active_terminal_semantic_deferred_raw_names() -> frozenset[str]:
-    """Return raws whose semantic split is still bound to the live authority.
+    """Return every raw held by the failure supervisor.
 
-    The failure supervisor owns the durable defer and releases it only when the
-    adopted authority artifact changes.  Raw replay must consult that same
-    source of truth at both queue refresh and execution time: an explicit
-    migration signal, a stale failure signal, or elapsed quarantine cooldown
-    must never turn an unchanged three-way semantic split into a blind replay.
+    The legacy private name is retained for compatibility with existing tests
+    and callers, but operational repair packets are just as authoritative as a
+    semantic no-quorum defer. Raw replay must not bypass either kind of hold.
     """
 
-    from llm_wiki_mcp.failure_supervisor import (
-        SEMANTIC_NO_QUORUM_DEFER_REASON,
-        operational_deferred_raw_files,
-    )
+    from llm_wiki_mcp.failure_supervisor import operational_deferred_raw_files
 
     deferred = operational_deferred_raw_files()
-    return frozenset(
-        raw_file
-        for raw_file, reason in deferred.items()
-        if reason == SEMANTIC_NO_QUORUM_DEFER_REASON
-    )
+    return frozenset(deferred)
+
+
+def _active_operational_deferred_raw_statuses() -> dict[str, str]:
+    """Return the reason/status mapping used for accurate queue metrics."""
+
+    from llm_wiki_mcp.failure_supervisor import operational_deferred_raw_files
+
+    return operational_deferred_raw_files()
 
 
 def _at_or_before(left: datetime, right: datetime) -> bool:
@@ -1612,6 +1611,7 @@ def _build_queue_unlocked(
 ) -> dict[str, Any]:
     now = _now()
     semantic_deferred_raws = _active_terminal_semantic_deferred_raw_names()
+    deferred_statuses = _active_operational_deferred_raw_statuses()
     history_states = _history_lifecycle_states()
     existing_by_key: dict[str, dict[str, Any]] = {}
     for raw_row in _read_jsonl(path):
@@ -1701,6 +1701,7 @@ def _build_queue_unlocked(
     skipped_completed = 0
     skipped_terminal = 0
     skipped_semantic_deferred = 0
+    skipped_operational_deferred = 0
     for incoming_row in sorted(incoming_by_key.values(), key=_queue_sort_key):
         key = str(incoming_row["key"])
         current = existing_by_key.get(key)
@@ -1727,7 +1728,10 @@ def _build_queue_unlocked(
             semantic_deferred_raws=semantic_deferred_raws,
         )
         if _raw_name(combined) in semantic_deferred_raws:
-            skipped_semantic_deferred += 1
+            if deferred_statuses.get(_raw_name(combined)) == "semantic_no_quorum":
+                skipped_semantic_deferred += 1
+            else:
+                skipped_operational_deferred += 1
             if current is not None:
                 existing_by_key[key] = combined
             continue
@@ -1770,6 +1774,7 @@ def _build_queue_unlocked(
         "skipped_completed": skipped_completed,
         "skipped_terminal": skipped_terminal,
         "skipped_semantic_deferred": skipped_semantic_deferred,
+        "skipped_operational_deferred": skipped_operational_deferred,
         "status_counts": dict(sorted(status_counts.items())),
     }
 
@@ -1884,6 +1889,56 @@ def _failure_text(job: object, status: str) -> str:
     return f"replay job ended with status {status}"
 
 
+def _operational_deferred_candidate_result(
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    job_id: str | None,
+    attempt_started: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Undo a prelaunch marker when a failure hold wins the final race."""
+
+    if job_id:
+        job_store.update(
+            job_id,
+            status=JobStatus.FAILED,
+            completed_at=_iso(now),
+            error="operational failure hold published before replay launch",
+        )
+    updated = dict(row)
+    updated["status"] = "pending"
+    updated["attempts"] = max(
+        0,
+        _nonnegative_int(row.get("attempts")) - (1 if attempt_started else 0),
+    )
+    updated["job_id"] = None
+    updated["next_retry_at"] = None
+    updated["last_error"] = None
+    updated["updated_at"] = _iso(now)
+    for field in ("attempt_id", "started_at"):
+        updated.pop(field, None)
+    raw_bytes = _nonnegative_int(row.get("bytes"))
+    return updated, {
+        "ts": _iso(now),
+        "schema_version": SCHEMA_VERSION,
+        "key": updated.get("key"),
+        "raw": updated.get("raw"),
+        "path": updated.get("path"),
+        "status": "pending",
+        "attempts": updated["attempts"],
+        "job_id": job_id,
+        "job_status": "operational_deferred",
+        "pages_created": [],
+        "pages_updated": [],
+        "failed_ops": [],
+        "bytes": raw_bytes,
+        "charged_bytes": 0,
+        "error": None,
+        "operational_deferred": True,
+        "defer_reason": "operational_failure_hold",
+    }
+
+
 def _run_candidate(
     row: dict[str, Any],
     *,
@@ -1908,6 +1963,13 @@ def _run_candidate(
     failed_ops: list[Any] = []
     completion_written = False
     completion_uncertain = False
+    if _raw_name(row) in _active_terminal_semantic_deferred_raw_names():
+        return _operational_deferred_candidate_result(
+            row,
+            now=now,
+            job_id=job_id,
+            attempt_started=attempt_started,
+        )
     if raw_bytes > max_bytes:
         error = f"raw exceeds replay byte budget: {raw_bytes} > {max_bytes}"
         job_status = "oversized"
@@ -1955,6 +2017,16 @@ def _run_candidate(
                 )
                 completion_written = True
 
+            # Failure state can change after queue selection and even after the
+            # durable running marker. This is the last instruction before
+            # inference; a newly published hold wins and consumes no replay.
+            if _raw_name(row) in _active_terminal_semantic_deferred_raw_names():
+                return _operational_deferred_candidate_result(
+                    row,
+                    now=now,
+                    job_id=active_job_id,
+                    attempt_started=attempt_started,
+                )
             run_ingest(
                 content,
                 active_job_id,
@@ -2237,23 +2309,47 @@ def run_pending_queue(
         by_key = {str(row["key"]): row for row in rows}
         runs: list[dict[str, Any]] = []
         budget_deferred: list[dict[str, Any]] = []
-        semantic_deferred: list[dict[str, Any]] = []
+        operational_deferred: list[dict[str, Any]] = []
+        operational_deferred_keys: set[str] = set()
         authorization_rejected: list[dict[str, Any]] = []
 
-        def semantic_hold_is_active(row: dict[str, Any]) -> bool:
-            if _raw_name(row) not in _active_terminal_semantic_deferred_raw_names():
-                return False
-            semantic_deferred.append(
+        def record_operational_hold(
+            row: dict[str, Any],
+            *,
+            reason: str,
+        ) -> None:
+            key = str(row.get("key") or "")
+            if key in operational_deferred_keys:
+                return
+            operational_deferred_keys.add(key)
+            operational_deferred.append(
                 {
                     "key": row.get("key"),
                     "raw": row.get("raw"),
-                    "reason": "semantic_no_quorum",
+                    "reason": reason,
                 }
             )
+
+        deferred_statuses = _active_operational_deferred_raw_statuses()
+        for row in rows:
+            raw_name = _raw_name(row)
+            if raw_name in semantic_deferred_raws:
+                record_operational_hold(
+                    row,
+                    reason=deferred_statuses.get(raw_name) or "semantic_no_quorum",
+                )
+
+        def operational_hold_is_active(row: dict[str, Any]) -> bool:
+            raw_name = _raw_name(row)
+            if raw_name not in _active_terminal_semantic_deferred_raw_names():
+                return False
+            status = _active_operational_deferred_raw_statuses().get(raw_name)
+            reason = status or "semantic_no_quorum"
+            record_operational_hold(row, reason=reason)
             return True
 
         for selected_row in selected:
-            if semantic_hold_is_active(selected_row):
+            if operational_hold_is_active(selected_row):
                 continue
             raw_bytes = _nonnegative_int(selected_row.get("bytes"))
             charge_bytes = raw_bytes if raw_bytes <= byte_limit else 0
@@ -2273,7 +2369,7 @@ def run_pending_queue(
                 # either classifying a budget defer or consuming a counter so
                 # the authority-bound semantic state remains the terminal
                 # reason for this attempt.
-                if semantic_hold_is_active(selected_row):
+                if operational_hold_is_active(selected_row):
                     continue
                 if not bytes_allowed or not mutation_allowed:
                     budget_deferred.append(
@@ -2303,7 +2399,7 @@ def run_pending_queue(
                         claims_file=claims_target,
                         injected_reviewer=frontier_reviewer is not None,
                     )
-                    if semantic_hold_is_active(selected_row):
+                    if operational_hold_is_active(selected_row):
                         continue
                     if approval_error is not None:
                         updated = _invalidate_safe_replay_authorization(
@@ -2346,7 +2442,7 @@ def run_pending_queue(
                 # at-most-once launch boundary.  It prevents an authority
                 # validation race from turning a terminal semantic split into
                 # a replay attempt.
-                if semantic_hold_is_active(selected_row):
+                if operational_hold_is_active(selected_row):
                     continue
 
                 if budget is not None:
@@ -2355,7 +2451,7 @@ def run_pending_queue(
                             "raw_bytes", charge_bytes
                         )
                     mutation_allowed, mutation_reason = budget.consume("mutation")
-                    if semantic_hold_is_active(selected_row):
+                    if operational_hold_is_active(selected_row):
                         continue
                     if not bytes_allowed or not mutation_allowed:
                         budget_deferred.append(
@@ -2373,7 +2469,7 @@ def run_pending_queue(
                 # refund contract.  If a hold is published during consume(),
                 # retain the charge but never create a job, write a running
                 # marker, or invoke ingest.
-                if semantic_hold_is_active(selected_row):
+                if operational_hold_is_active(selected_row):
                     continue
 
                 candidate = selected_row
@@ -2431,6 +2527,17 @@ def run_pending_queue(
                         "frontier_review_artifact"
                     )
                 by_key[str(updated["key"])] = updated
+                if record.get("operational_deferred") is True:
+                    raw_name = _raw_name(updated)
+                    record_operational_hold(
+                        updated,
+                        reason=_active_operational_deferred_raw_statuses().get(raw_name)
+                        or "operational_failure_hold",
+                    )
+                    _atomic_write_queue(
+                        target, sorted(by_key.values(), key=_queue_sort_key)
+                    )
+                    continue
                 runs.append(record)
                 _append_history(record, history_target)
                 # Persist every terminal/retry transition so a later candidate is
@@ -2451,7 +2558,12 @@ def run_pending_queue(
             "runs": runs,
             "count": len(runs),
             "budget_deferred": budget_deferred,
-            "semantic_deferred": semantic_deferred,
+            "semantic_deferred": [
+                row
+                for row in operational_deferred
+                if row.get("reason") == "semantic_no_quorum"
+            ],
+            "operational_deferred": operational_deferred,
             "authorization_rejected": authorization_rejected,
             "reconciled": reconciled,
             "frontier_reconciliation": frontier_reconciliation,
