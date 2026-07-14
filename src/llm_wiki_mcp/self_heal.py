@@ -55,6 +55,10 @@ RUNNING_STATUSES = {
     "frontier_running",
 }
 
+PACKET_CANCELLATION_SCHEMA_VERSION = 1
+PACKET_CANCELLATION_STATUS = "superseded_semantic_defer"
+_PACKET_SUCCESS_STATUSES = frozenset({"local_repair_applied", "frontier_approved"})
+
 DEFAULT_RUNNING_LEASE_SECONDS = 2 * 60 * 60
 DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
 DEFAULT_HUMAN_RECHECK_SECONDS = 60 * 60
@@ -128,6 +132,10 @@ def _packet_dir() -> Path:
     return _failures_dir() / "packets"
 
 
+def _packet_cancellation_dir() -> Path:
+    return _failures_dir() / "packet-cancellations"
+
+
 def _local_repair_dir() -> Path:
     return _failures_dir() / "local-repair"
 
@@ -185,6 +193,151 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+class _PacketCancellationRequested(RuntimeError):
+    """Internal control signal carrying a durable cancellation result."""
+
+    def __init__(self, result: dict[str, Any]) -> None:
+        super().__init__(str(result.get("reason") or "packet cancellation requested"))
+        self.result = result
+
+
+def _packet_cancellation_path(packet_path: Path) -> Path:
+    return _packet_cancellation_dir() / f"{packet_path.name}.json"
+
+
+def _read_packet_cancellation(
+    packet_path: Path,
+    packet: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    path = _packet_cancellation_path(packet_path)
+    try:
+        cancellation = _read_json(path)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    resolved_packet = str(packet_path.expanduser().resolve(strict=False))
+    if (
+        not isinstance(cancellation, dict)
+        or cancellation.get("schema_version") != PACKET_CANCELLATION_SCHEMA_VERSION
+        or cancellation.get("status") != PACKET_CANCELLATION_STATUS
+        or cancellation.get("packet_path") != resolved_packet
+        or not isinstance(cancellation.get("requested_at"), str)
+        or not str(cancellation.get("requested_at") or "").strip()
+    ):
+        return None
+    if packet is not None:
+        for field in ("failure_id", "fingerprint"):
+            expected = cancellation.get(field)
+            observed = packet.get(field)
+            if expected is not None and expected != observed:
+                return None
+    return cancellation
+
+
+def request_packet_cancellation(
+    packet_path: Path,
+    *,
+    reason: str,
+    superseded_by_packet: Path,
+) -> dict[str, Any]:
+    """Publish a lock-free cancellation observed by an in-flight worker.
+
+    A worker owns the packet lock for the duration of local/frontier inference,
+    so waiting for that lock would make supersession ineffective.  This sidecar
+    is the durable out-of-band CAS signal.  The worker checks it after model
+    calls and immediately before every mutation or frontier boundary.
+    """
+
+    resolved = packet_path.expanduser().resolve(strict=False)
+    superseded_by = superseded_by_packet.expanduser().resolve(strict=False)
+    try:
+        loaded_packet = _read_json(resolved)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        loaded_packet = {}
+    packet = loaded_packet if isinstance(loaded_packet, dict) else {}
+    if packet.get("status") in _PACKET_SUCCESS_STATUSES:
+        return {
+            "accepted": False,
+            "reason": "packet_already_completed",
+            "packet_path": str(resolved),
+            "status": packet.get("status"),
+        }
+    cancellation_path = _packet_cancellation_path(resolved)
+    prior = _read_packet_cancellation(resolved, packet)
+    requested_at = (
+        str(prior.get("requested_at"))
+        if isinstance(prior, dict)
+        else datetime.now().isoformat()
+    )
+    cancellation = {
+        "schema_version": PACKET_CANCELLATION_SCHEMA_VERSION,
+        "status": PACKET_CANCELLATION_STATUS,
+        "packet_path": str(resolved),
+        "packet_name": resolved.name,
+        "failure_id": packet.get("failure_id"),
+        "fingerprint": packet.get("fingerprint"),
+        "requested_at": requested_at,
+        "reason": str(reason).strip() or "superseded",
+        "superseded_by_packet": str(superseded_by),
+    }
+    _write_json(cancellation_path, cancellation)
+    return {
+        "accepted": True,
+        "cancellation_path": str(cancellation_path),
+        **cancellation,
+    }
+
+
+def _apply_packet_cancellation(
+    packet_path: Path,
+    packet: dict[str, Any],
+    cancellation: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist terminal cancellation without trusting a stale worker snapshot."""
+
+    try:
+        current = _read_json(packet_path)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        current = dict(packet)
+    cancelled_at = datetime.now().isoformat()
+    current.update(
+        {
+            "status": PACKET_CANCELLATION_STATUS,
+            "self_heal_queued": False,
+            "next_attempt_at": None,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "cancellation_requested_at": cancellation.get("requested_at"),
+            "cancellation_observed_at": cancelled_at,
+            "cancellation_reason": cancellation.get("reason"),
+            "superseded_by_packet": cancellation.get("superseded_by_packet"),
+            "updated_at": cancelled_at,
+        }
+    )
+    _write_json(packet_path, current)
+    packet.clear()
+    packet.update(current)
+    return {
+        "packet": str(packet_path),
+        "failure_id": current.get("failure_id"),
+        "status": PACKET_CANCELLATION_STATUS,
+        "reason": cancellation.get("reason"),
+        "superseded_by_packet": cancellation.get("superseded_by_packet"),
+        "cancelled": True,
+    }
+
+
+def _raise_if_packet_cancelled(
+    packet_path: Path,
+    packet: dict[str, Any],
+) -> None:
+    cancellation = _read_packet_cancellation(packet_path, packet)
+    if cancellation is None:
+        return
+    raise _PacketCancellationRequested(
+        _apply_packet_cancellation(packet_path, packet, cancellation)
+    )
 
 
 def _canonical_read_back_reason(value: object) -> str:
@@ -751,6 +904,7 @@ def maybe_notify_human_required(
 
 
 def _update_packet(path: Path, packet: dict[str, Any], **updates: Any) -> None:
+    _raise_if_packet_cancelled(path, packet)
     next_status = updates.get("status", packet.get("status"))
     if next_status not in RUNNING_STATUSES:
         updates.setdefault("lease_owner", None)
@@ -769,6 +923,8 @@ def pending_packets(*, now: datetime | None = None) -> list[Path]:
         try:
             packet = _read_json(path)
         except Exception:
+            continue
+        if _read_packet_cancellation(path, packet) is not None:
             continue
         next_attempt = _parse_iso(packet.get("next_attempt_at"))
         due = True
@@ -1400,6 +1556,19 @@ def _handle_packet_unlocked(
     frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
     packet = _read_json(packet_path)
+    cancellation = _read_packet_cancellation(packet_path, packet)
+    if cancellation is not None and dry_run:
+        return {
+            "packet": str(packet_path),
+            "failure_id": packet.get("failure_id"),
+            "status": "dry_run",
+            "projected_status": PACKET_CANCELLATION_STATUS,
+            "reason": cancellation.get("reason"),
+            "superseded_by_packet": cancellation.get("superseded_by_packet"),
+            "would_cancel": True,
+        }
+    if cancellation is not None:
+        _raise_if_packet_cancelled(packet_path, packet)
     human_boundary = _human_boundary_result(
         packet_path,
         packet,
@@ -1551,7 +1720,11 @@ def _handle_packet_unlocked(
                     kind="local",
                     reason=reason,
                 )
+        if not dry_run:
+            _raise_if_packet_cancelled(packet_path, packet)
         decision = propose_repair(packet, use_qwen=use_qwen)
+        if not dry_run:
+            _raise_if_packet_cancelled(packet_path, packet)
         local_decision = decision.to_dict()
         if dry_run:
             return {
@@ -1662,6 +1835,7 @@ def _handle_packet_unlocked(
                 result["local_decision_path"] = str(decision_path)
             if will_apply_local:
                 with _local_decision_effect(decision):
+                    _raise_if_packet_cancelled(packet_path, packet)
                     action = apply_local_decision(packet, decision, dry_run=False)
                     action_path = _save_action(packet_path, action, applied=True)
                     _update_packet(
@@ -1693,6 +1867,8 @@ def _handle_packet_unlocked(
                 result["status"] = "local_repair_applied"
                 result["action"] = action
                 return result
+        except _PacketCancellationRequested:
+            raise
         except Exception as exc:
             action = {
                 "action": decision.action,
@@ -1746,6 +1922,8 @@ def _handle_packet_unlocked(
                         frontier_ineligible_reason if repair_evidence is None else None
                     ),
                 )
+        except _PacketCancellationRequested:
+            raise
         except RuntimeError as exc:
             _update_packet(
                 packet_path,
@@ -1757,11 +1935,11 @@ def _handle_packet_unlocked(
             result["status"] = "local_repair_failed"
             result["local_error"] = str(exc)
             return result
-        incident_result = (
-            _promote_operational_source_packet(packet_path, packet)
-            if terminal
-            else None
-        )
+        if terminal:
+            _raise_if_packet_cancelled(packet_path, packet)
+            incident_result = _promote_operational_source_packet(packet_path, packet)
+        else:
+            incident_result = None
         result["status"] = status
         result["reason"] = local_failure_reason
         if incident_result is not None:
@@ -1772,7 +1950,10 @@ def _handle_packet_unlocked(
 
     try:
         with _local_decision_effect(effect_decision):
+            _raise_if_packet_cancelled(packet_path, packet)
             queue_path = _queue_frontier(packet_path, packet, local_decision)
+    except _PacketCancellationRequested:
+        raise
     except RuntimeError as exc:
         _update_packet(
             packet_path,
@@ -1799,6 +1980,8 @@ def _handle_packet_unlocked(
                     frontier_error="frontier attempt limit reached before execution",
                     quarantined_at=datetime.now().isoformat(timespec="seconds"),
                 )
+        except _PacketCancellationRequested:
+            raise
         except RuntimeError as exc:
             result["status"] = "local_repair_failed"
             result["local_error"] = str(exc)
@@ -1831,6 +2014,7 @@ def _handle_packet_unlocked(
     attempt = prior_frontier_attempts + 1
     try:
         with _local_decision_effect(effect_decision):
+            _raise_if_packet_cancelled(packet_path, packet)
             _update_packet(
                 packet_path,
                 packet,
@@ -1843,6 +2027,8 @@ def _handle_packet_unlocked(
                 frontier_queue_path=str(queue_path),
                 **_lease_updates(lease_owner),
             )
+    except _PacketCancellationRequested:
+        raise
     except RuntimeError as exc:
         _update_packet(
             packet_path,
@@ -1855,6 +2041,7 @@ def _handle_packet_unlocked(
         result["local_error"] = str(exc)
         return result
     try:
+        _raise_if_packet_cancelled(packet_path, packet)
         frontier_result = _run_frontier(
             packet_path,
             packet,
@@ -1864,6 +2051,8 @@ def _handle_packet_unlocked(
                 execute_frontier_patch and not requires_frontier_action and not dry_run
             ),
         )
+    except _PacketCancellationRequested:
+        raise
     except Exception as exc:
         # Once control enters the guarded execution call we cannot safely
         # prove that a child was never spawned.  Fail terminally so one packet
@@ -1912,6 +2101,7 @@ def _handle_packet_unlocked(
         result["status"] = final_status
         result["frontier_error"] = frontier_error
         return result
+    _raise_if_packet_cancelled(packet_path, packet)
     if frontier_result.get("execution_started") is False:
         # Guard denial, guard failure, and preflight failure happen before the
         # one permitted Codex process begins.  They are durable deferrals, not
@@ -1973,6 +2163,7 @@ def _handle_packet_unlocked(
         else:
             try:
                 with _local_decision_effect(approved_decision):
+                    _raise_if_packet_cancelled(packet_path, packet)
                     approved_action = apply_local_decision(
                         packet,
                         approved_decision,
@@ -1996,6 +2187,8 @@ def _handle_packet_unlocked(
                             "action": approved_action,
                         }
                     )
+            except _PacketCancellationRequested:
+                raise
             except Exception as exc:
                 action_error = f"frontier-approved local action failed: {exc}"
                 _save_action(
@@ -2129,41 +2322,47 @@ def handle_packet(
                 "status": "busy",
                 "reason": "packet_already_running",
             }
-        current = _read_json(packet_path)
-        current_status = current.get("status")
-        legacy_non_external_human = (
-            current_status == "human_required"
-            and not is_human_required_result(current.get("frontier_result"))
-        )
-        resumable_terminal = _terminal_resume_kind(current) is not None
-        if current_status in RUNNING_STATUSES and not _running_lease_expired(current):
-            return {
-                "packet": str(packet_path),
-                "failure_id": current.get("failure_id"),
-                "status": "busy",
-                "reason": "running_lease_active",
-            }
-        if (
-            current_status
-            and current_status not in SELF_HEAL_STATUSES
-            and current_status not in RUNNING_STATUSES
-            and not legacy_non_external_human
-            and not resumable_terminal
-        ):
-            result = {
-                "packet": str(packet_path),
-                "failure_id": current.get("failure_id"),
-                "status": current_status,
-                "cached": True,
-            }
-            source_sync = _sync_system_incident_outcome(packet_path)
-            if source_sync is not None:
-                result["operational_source_sync"] = source_sync
-            return result
-        # The packet is read inside the lock by the implementation.  This is
-        # the CAS boundary that prevents a stale pre-lock snapshot from being
-        # applied after another worker completes.
-        result = _handle_packet_unlocked(packet_path, **kwargs)
+        try:
+            current = _read_json(packet_path)
+            _raise_if_packet_cancelled(packet_path, current)
+            current_status = current.get("status")
+            legacy_non_external_human = (
+                current_status == "human_required"
+                and not is_human_required_result(current.get("frontier_result"))
+            )
+            resumable_terminal = _terminal_resume_kind(current) is not None
+            if current_status in RUNNING_STATUSES and not _running_lease_expired(
+                current
+            ):
+                return {
+                    "packet": str(packet_path),
+                    "failure_id": current.get("failure_id"),
+                    "status": "busy",
+                    "reason": "running_lease_active",
+                }
+            if (
+                current_status
+                and current_status not in SELF_HEAL_STATUSES
+                and current_status not in RUNNING_STATUSES
+                and not legacy_non_external_human
+                and not resumable_terminal
+            ):
+                result = {
+                    "packet": str(packet_path),
+                    "failure_id": current.get("failure_id"),
+                    "status": current_status,
+                    "cached": True,
+                }
+                source_sync = _sync_system_incident_outcome(packet_path)
+                if source_sync is not None:
+                    result["operational_source_sync"] = source_sync
+                return result
+            # The packet is read inside the lock by the implementation.  This is
+            # the CAS boundary that prevents a stale pre-lock snapshot from being
+            # applied after another worker completes.
+            result = _handle_packet_unlocked(packet_path, **kwargs)
+        except _PacketCancellationRequested as exc:
+            return exc.result
         source_sync = _sync_system_incident_outcome(packet_path)
         if source_sync is not None:
             result["operational_source_sync"] = source_sync

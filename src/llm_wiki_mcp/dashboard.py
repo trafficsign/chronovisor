@@ -445,6 +445,16 @@ def _drain_history(limit: int = 200) -> list[dict[str, Any]]:
                 continue
             if not isinstance(data, dict):
                 continue
+            result = data.get("result")
+            if not isinstance(result, dict):
+                result = {}
+
+            def result_count(key: str, fallback: Any = None) -> Any:
+                value = result.get(key, fallback)
+                if isinstance(value, list):
+                    return len(value)
+                return value
+
             records.append(
                 {
                     "timestamp": data.get("timestamp"),
@@ -452,6 +462,10 @@ def _drain_history(limit: int = 200) -> list[dict[str, Any]]:
                     "pending_before": data.get("pending_before"),
                     "pending_after": data.get("pending_after"),
                     "files_processed": data.get("files_processed"),
+                    "files_attempted": result_count("files_attempted"),
+                    "files_deferred": result_count("files_deferred", 0),
+                    "files_failed": result_count("files_failed"),
+                    "elapsed_seconds": result.get("elapsed_seconds"),
                     "batch": data.get("batch"),
                 }
             )
@@ -633,11 +647,13 @@ def _new_save_day(day: date) -> dict[str, Any]:
         "raw_bytes": 0,
         "processed_bytes": 0,
         "pending_bytes": 0,
+        "deferred_bytes": 0,
         "failed_bytes": 0,
         "raw_segments": [],
         "processed": 0,
         "attempted": 0,
         "succeeded": 0,
+        "deferred": 0,
         "failed": 0,
         "pages_created": 0,
         "pages_updated": 0,
@@ -651,6 +667,25 @@ def _add_sample(row: dict[str, Any], key: str, value: str, limit: int = 6) -> No
     samples = row.setdefault(key, [])
     if isinstance(samples, list) and value not in samples and len(samples) < limit:
         samples.append(value)
+
+
+def _operational_deferred_raw_statuses(raw_paths: list[Path]) -> dict[str, str]:
+    """Return active queue holds keyed by immutable raw filename."""
+
+    from llm_wiki_mcp.failure_supervisor import operational_deferred_raw_files
+
+    return operational_deferred_raw_files(raw_paths)
+
+
+def _semantic_deferred_raw_names(raw_paths: list[Path]) -> list[str]:
+    """Return active semantic holds without including operational repairs."""
+
+    deferred = _operational_deferred_raw_statuses(raw_paths)
+    return sorted(
+        raw_file
+        for raw_file, status in deferred.items()
+        if status == "semantic_no_quorum"
+    )
 
 
 def _save_history_snapshot(
@@ -716,6 +751,11 @@ def _save_history_snapshot(
                     if isinstance(result.get("files_processed"), list)
                     else []
                 )
+                deferred_files = (
+                    result.get("files_deferred")
+                    if isinstance(result.get("files_deferred"), list)
+                    else []
+                )
                 per_raw = (
                     result.get("per_raw")
                     if isinstance(result.get("per_raw"), list)
@@ -732,19 +772,39 @@ def _save_history_snapshot(
                         if isinstance(item, dict) and item.get("succeeded") is True
                     )
                     attempted = len(per_raw)
+                    deferred = sum(
+                        1
+                        for item in per_raw
+                        if isinstance(item, dict)
+                        and (
+                            item.get("deferred") is True
+                            or (
+                                isinstance(item.get("supervision"), dict)
+                                and item["supervision"].get("terminal_deferred") is True
+                            )
+                        )
+                    )
                     failed = sum(
                         1
                         for item in per_raw
-                        if isinstance(item, dict) and item.get("succeeded") is False
+                        if isinstance(item, dict)
+                        and item.get("succeeded") is False
+                        and item.get("deferred") is not True
+                        and not (
+                            isinstance(item.get("supervision"), dict)
+                            and item["supervision"].get("terminal_deferred") is True
+                        )
                     )
                 else:
                     attempted = len(attempted_files) or processed
                     succeeded = processed
-                    failed = max(0, attempted - succeeded)
+                    deferred = len(deferred_files)
+                    failed = max(0, attempted - succeeded - deferred)
 
                 row["processed"] += processed
                 row["attempted"] += attempted
                 row["succeeded"] += succeeded
+                row["deferred"] += deferred
                 row["failed"] += failed
                 for filename in processed_files:
                     if isinstance(filename, str):
@@ -765,9 +825,23 @@ def _save_history_snapshot(
                             and filename not in status_filenames
                         ):
                             status_filenames.append(filename)
+                        item_deferred = item.get("deferred") is True or (
+                            isinstance(item.get("supervision"), dict)
+                            and item["supervision"].get("terminal_deferred") is True
+                        )
                         if item.get("succeeded") is True:
                             for status_filename in status_filenames:
                                 raw_status[status_filename] = "processed"
+                        elif item_deferred:
+                            for status_filename in status_filenames:
+                                if raw_status.get(status_filename) != "processed":
+                                    # A historical defer is not a failed save.
+                                    # The live authority projection below turns
+                                    # it into deferred while active; after that
+                                    # authority changes, it returns to pending
+                                    # until a later attempt establishes a new
+                                    # terminal state.
+                                    raw_status[status_filename] = "deferred"
                         else:
                             for status_filename in status_filenames:
                                 if raw_status.get(status_filename) != "processed":
@@ -776,10 +850,17 @@ def _save_history_snapshot(
                     processed_names = {
                         name for name in processed_files if isinstance(name, str)
                     }
+                    deferred_names = {
+                        name for name in deferred_files if isinstance(name, str)
+                    }
+                    for filename in deferred_names:
+                        if raw_status.get(filename) != "processed":
+                            raw_status[filename] = "deferred"
                     for filename in attempted_files:
                         if (
                             isinstance(filename, str)
                             and filename not in processed_names
+                            and filename not in deferred_names
                             and raw_status.get(filename) != "processed"
                         ):
                             raw_status[filename] = "failed"
@@ -798,6 +879,12 @@ def _save_history_snapshot(
         for filename in processed_raw_files:
             if isinstance(filename, str) and filename in raw_files:
                 raw_status[filename] = "processed"
+
+    semantic_deferred = set(
+        _semantic_deferred_raw_names(
+            [raw_dir / filename for filename in sorted(raw_files)]
+        )
+    )
 
     try:
         log_lines = LOG_FILE.read_text(encoding="utf-8").splitlines()
@@ -824,10 +911,12 @@ def _save_history_snapshot(
         "raw_bytes": 0,
         "processed_bytes": 0,
         "pending_bytes": 0,
+        "deferred_bytes": 0,
         "failed_bytes": 0,
         "processed": 0,
         "attempted": 0,
         "succeeded": 0,
+        "deferred": 0,
         "failed": 0,
         "pages_created": 0,
         "pages_updated": 0,
@@ -840,7 +929,10 @@ def _save_history_snapshot(
             continue
         raw_bytes = int(meta["bytes"])
         status = raw_status.get(filename)
-        if status == "processed":
+        if filename in semantic_deferred:
+            row["deferred_bytes"] += raw_bytes
+            status = "deferred"
+        elif status == "processed":
             row["processed_bytes"] += raw_bytes
         elif status == "failed":
             row["failed_bytes"] += raw_bytes
@@ -882,10 +974,12 @@ def _save_history_snapshot(
             "raw_bytes",
             "processed_bytes",
             "pending_bytes",
+            "deferred_bytes",
             "failed_bytes",
             "processed",
             "attempted",
             "succeeded",
+            "deferred",
             "failed",
             "pages_created",
             "pages_updated",
@@ -960,6 +1054,11 @@ def _self_heal_packet_index() -> dict[str, dict[str, Any]]:
     for path in sorted(packets_dir.glob("*.json")):
         packet = _read_json_file(path)
         if not packet:
+            continue
+        if (
+            packet.get("failure_class") == "ingest.semantic_no_quorum"
+            or packet.get("status") == "superseded_semantic_defer"
+        ):
             continue
         failure_id = packet.get("failure_id")
         if isinstance(failure_id, str):
@@ -1573,6 +1672,8 @@ def _self_heal_snapshot(limit: int = 12) -> dict[str, Any]:
     history: list[dict[str, Any]] = []
 
     for record in registry:
+        if record.get("failure_class") == "ingest.semantic_no_quorum":
+            continue
         failure_id = record.get("failure_id")
         packet = packets.get(failure_id) if isinstance(failure_id, str) else None
         if isinstance(failure_id, str):
@@ -1906,7 +2007,29 @@ def build_snapshot() -> dict[str, Any]:
     cached_status = runtime_status.read_status()
     orch_state = orchestrator._load_state()
     pending = len(orchestrator.get_pending_raw_files())
+    deferred_statuses = _operational_deferred_raw_statuses(
+        sorted((WIKI_ROOT / "raw").glob("*.md"))
+    )
+    semantic_deferred_names = sorted(
+        raw_file
+        for raw_file, reason in deferred_statuses.items()
+        if reason == "semantic_no_quorum"
+    )
+    operational_deferred_names = sorted(
+        raw_file
+        for raw_file, reason in deferred_statuses.items()
+        if reason != "semantic_no_quorum"
+    )
     status = _canonicalize_runtime_status(cached_status, orch_state, pending=pending)
+    status["semantic_deferred"] = {
+        "count": len(semantic_deferred_names),
+        "samples": semantic_deferred_names[:5],
+    }
+    status["operational_deferred"] = {
+        "count": len(operational_deferred_names),
+        "samples": operational_deferred_names[:5],
+    }
+    status["raw_outstanding"] = pending + len(deferred_statuses)
 
     local_consensus = _safe_snapshot_component(
         "local_consensus",
@@ -1990,6 +2113,7 @@ def build_snapshot() -> dict[str, Any]:
             "kind": "current",
             "pending_after": pending,
             "files_processed": 0,
+            "files_deferred": 0,
             "files_failed": 0,
         }
     )

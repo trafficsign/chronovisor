@@ -50,6 +50,52 @@ def _local_router_config() -> DecisionRouterConfig:
     )
 
 
+def _quarantined_router_class(
+    *,
+    valid: tuple[bool, bool, bool],
+    signatures: tuple[str | None, str | None, str | None],
+    reason: str,
+):
+    votes = tuple(
+        SimpleNamespace(valid=is_valid, signature_sha256=signature)
+        for is_valid, signature in zip(valid, signatures, strict=True)
+    )
+
+    class QuarantinedLocalRouter:
+        def __init__(self, **_kwargs) -> None:
+            self.policy = SimpleNamespace(
+                source="adopted_artifact",
+                audit_record=lambda: {
+                    "source": "adopted_artifact",
+                    "artifact_sha256": "d" * 64,
+                },
+            )
+
+        def decide(self, _prompt, _schema):
+            return SimpleNamespace(
+                ok=False,
+                decision=None,
+                failure_class="local_consensus_failed",
+                quarantine_reason=reason,
+                votes=votes,
+                audit_record=lambda: {
+                    "status": "quarantined",
+                    "ok": False,
+                    "failure_class": "local_consensus_failed",
+                    "quarantine_reason": reason,
+                    "votes": [
+                        {
+                            "valid": vote.valid,
+                            "signature_sha256": vote.signature_sha256,
+                        }
+                        for vote in votes
+                    ],
+                },
+            )
+
+    return QuarantinedLocalRouter
+
+
 @pytest.fixture(autouse=True)
 def isolate_frontier_activity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -1153,6 +1199,70 @@ def test_structured_review_quarantines_mutating_majority_with_conservative_vote(
     )
     assert result["human_required"] is False
     assert calls == ["ornith:test", "gpt-oss:test", "gemma:test"]
+
+
+def test_structured_review_types_three_valid_distinct_semantic_no_quorum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = _quarantined_router_class(
+        valid=(True, True, True),
+        signatures=("a" * 64, "b" * 64, "c" * 64),
+        reason="local_models_did_not_reach_two_vote_quorum",
+    )
+    monkeypatch.setattr(decision_router, "DecisionRouter", router)
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "review this",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["frontier_failure"]["failure_class"] == ("local_semantic_no_quorum")
+    assert result["frontier_failure"]["rescue_status"] == "local_quarantined"
+    assert result["local_consensus"]["quarantine_reason"] == (
+        "local_models_did_not_reach_two_vote_quorum"
+    )
+    assert result["decision_policy"]["router_policy"]["artifact_sha256"] == ("d" * 64)
+    assert result["human_required"] is False
+
+
+@pytest.mark.parametrize(
+    ("valid", "signatures"),
+    [
+        ((True, True, False), ("a" * 64, "b" * 64, None)),
+        ((True, True, True), ("a" * 64, "a" * 64, "b" * 64)),
+    ],
+    ids=("invalid-tie-break", "duplicate-signature"),
+)
+def test_structured_review_keeps_non_three_way_no_quorum_operational(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid: tuple[bool, bool, bool],
+    signatures: tuple[str | None, str | None, str | None],
+) -> None:
+    router = _quarantined_router_class(
+        valid=valid,
+        signatures=signatures,
+        reason="local_models_did_not_reach_two_vote_quorum",
+    )
+    monkeypatch.setattr(decision_router, "DecisionRouter", router)
+    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "review this",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["decision"] == "needs_retry"
+    assert result["frontier_failure"]["failure_class"] == "local_consensus_failed"
+    assert result["frontier_failure"]["rescue_status"] == "local_quarantined"
+    assert result["human_required"] is False
 
 
 def test_structured_review_local_model_failures_quarantine_without_tie_or_frontier(

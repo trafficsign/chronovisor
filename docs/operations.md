@@ -37,9 +37,10 @@ Fleet` combines configured roles with Ollama installed/loaded state, so unused
 local models should not appear once they are removed from config and from the
 local model store. Local review activity is labeled as local consensus, with
 bounded completion counts for first-pass validity, repaired responses, repair
-turns, pair agreement, tie-break use, and unresolved quarantine. Guarded Codex
-repair has a separate incident/budget view. A missing or dead worker PID is idle,
-not live work.
+turns, pair agreement, tie-break use, and unresolved quarantine. Save Load and
+Batch Yield render artifact-bound ingest semantic defers separately from
+pending and failed work. Guarded Codex repair has a separate incident/budget
+view. A missing or dead worker PID is idle, not live work.
 
 ## Hook Install
 
@@ -339,6 +340,18 @@ can then complete the job and publish the ACK with zero model calls. Incomplete,
 legacy, stale-authority, malformed, or changed proofs re-enter the ordinary
 fail-closed path and can never receive this shortcut.
 
+One ingest consensus outcome is terminal without becoming an operational
+failure. If all three configured voters return schema-valid, pairwise-distinct
+decisions under the currently validated adopted-artifact SHA, no two-vote quorum
+exists and the exact source raw enters semantic defer. Its bytes remain
+unchanged in `raw/`; it is excluded from self-heal, frontier repair,
+explicit/automatic raw replay, and cooldown reopening. It becomes runnable
+exactly once when the router fully validates a different adopted-artifact SHA.
+A merely byte-different, partial, stale, or otherwise invalid nominated artifact
+fails closed. Runtime, transport, capacity, schema, and other operational
+failures do not use semantic defer and continue through the separate bounded
+repair queue.
+
 Changing the ingest model does not require a semantic reindex unless
 `[embedding].model` also changes.
 
@@ -422,6 +435,11 @@ llm-wiki raw-replay --since 2026-07-01 --limit 1 --run
 Without `--run`, replay writes `~/.wiki/review/raw-replay-queue.jsonl`.
 With `--run`, selected raw files go back through the normal ingest path, so
 search-before-create and read-back verification still apply.
+Active artifact-bound semantic defers are excluded from explicit replay,
+automatic replay signals, existing queue rows, cooldown reopening, and crash
+reconciliation. A different adoption-artifact SHA releases one deduplicated
+candidate back to the ordinary ingest queue only after full router validation;
+elapsed time or an invalid file change alone never releases it.
 Read-back misses caused only by ranking (`not-in-top-results`) stay in the
 lighter query-hint repair lane; raw replay is reserved for structural ingest,
 metadata, quarantine, and integrity failures.
@@ -666,6 +684,10 @@ OAuth/authentication, billing or quota changes, or Keychain/secret-store
 permission. These failures go directly to the user boundary and are not sent to
 any model. Missing tools or models, ambiguity, low confidence, schema errors,
 and model disagreement use autonomous retry and cooldown quarantine instead.
+The exact ingest three-valid/three-distinct outcome is handled separately as an
+artifact-bound semantic defer: it is not a cooldown quarantine and is reopened
+only by a different fully validated adopted-artifact SHA. Operational runtime
+failures remain in their repair queue.
 
 ## Exceptional System-Code Repair
 

@@ -29,7 +29,8 @@ Background convergence
   -> refresh derived recall/search artifacts and integrity signals
   -> bounded consumers drain lint/raw/read-back/label/self-heal queues
   -> deterministic gate -> local structured consensus when semantics are needed
-  -> apply atomically or reach rejected/quarantined/human_required terminal state
+  -> apply atomically or reach a terminal state:
+     rejected / quarantined / semantic_deferred / human_required (external only)
   -> weekly search self-tune and recall calibration with locked holdouts
 
 Exceptional system repair
@@ -97,6 +98,14 @@ Exceptional system repair
   differently seeded artifact cannot authorize production.
   No local failure or disagreement has a frontier fallback. Frontier execution
   exists only in the separately guarded system-code-repair plane.
+  Ingest treats one narrowly defined outcome differently from an operational
+  failure: when all three voters return valid, pairwise-distinct decisions under
+  the currently validated adopted-artifact SHA, the immutable source raw enters
+  terminal semantic defer. It remains in `raw/` and is excluded from self-heal,
+  frontier repair, and time-based replay. It reopens only after the router fully
+  validates a different adopted-artifact SHA; a changed but invalid nomination
+  fails closed. Runtime, transport, capacity, and other operational failures
+  remain in the separate repair queue.
 - **Content correction**: binds explicit user corrections to the preceding
   complete turn by exact prompt hash, host, session, and timestamped recall
   provenance. Stop only schedules its capture-only worker; the sleep/local
@@ -137,7 +146,8 @@ Exceptional system repair
   also enforces one started repair globally per 24 hours.
 - **Dashboard**: local browser observability for ingest work, self-heal status,
   local-consensus activity/summaries, guarded frontier-repair state, recall
-  improvement runs, save history, knowledge mix, and model fleet roles. A dead
+  improvement runs, save history, knowledge mix, and model fleet roles. Ingest
+  semantic defers are reported separately from pending and failed work. A dead
   worker PID is rendered as idle rather than as live work.
 
 Production entry points load `llm-wiki-mcp` from the pushed GitHub source via
@@ -153,7 +163,9 @@ waits for a human review queue.
 The human boundary is external authority: authentication/OAuth, billing or
 quota, and Keychain/secret-store permission. These failures are never sent to a
 model. Missing tools or models and all other routine uncertainty use bounded
-retry, rejection, or cooldown quarantine that is reopened autonomously.
+retry, rejection, or cooldown quarantine that is reopened autonomously. The
+artifact-bound ingest semantic defer described above is the exception: it is
+not a timed quarantine, and operational failures never enter that state.
 
 ## Compatibility Names
 

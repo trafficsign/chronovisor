@@ -38,7 +38,13 @@ Semantic work is handled later by bounded convergence workers. When a routine
 lane needs a structured decision it uses local consensus: Ornith 35B primary,
 GPT-OSS 20B challenger, and Gemma 4 26B only as a tie-breaker. Invalid JSON gets
 at most two targeted repair turns in the same local session. Failure or
-disagreement is quarantined rather than escalated to a frontier model.
+disagreement is never escalated to a frontier model. For ingest specifically,
+three valid, pairwise-distinct decisions bound to the currently validated
+adopted-artifact SHA terminally defer the immutable source raw. That raw
+receives no self-heal or cooldown replay and is eligible again only after the
+router fully validates a different adopted-artifact SHA. A changed but invalid
+nomination fails closed. Operational runtime failures stay in the separate
+repair queue.
 
 ## Legacy Wrappers
 

@@ -2783,6 +2783,106 @@ class TestRunIngestPartialFailure:
         )
         assert classified.fingerprint.endswith(":schema_invalid")
 
+    @pytest.mark.parametrize(
+        ("authority_sha256", "semantic_defer"),
+        [("d" * 64, True), (None, False), ("not-a-valid-sha", False)],
+        ids=("valid-authority", "missing-authority", "invalid-authority"),
+    )
+    def test_three_way_semantic_no_quorum_does_not_regenerate(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        authority_sha256: str | None,
+        semantic_defer: bool,
+    ) -> None:
+        from llm_wiki_mcp import ingest, jobs
+
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/semantic-no-quorum.md",
+                "title": "Semantic no quorum",
+            }
+        ]
+        monkeypatch.setattr(ingest, "_triage", lambda _content, **_kwargs: plan)
+        generation_calls: list[str] = []
+
+        def generate(op, _raw, **_kwargs):
+            generation_calls.append(op["filename"])
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Semantic no quorum\nupdated: 2026-07-14\n---\nbody\n"
+                ),
+            }
+
+        review_calls: list[dict] = []
+
+        def reviewer(proposal: dict) -> dict:
+            review_calls.append(proposal)
+            review = {
+                "decision": "retry",
+                "summary": "local_models_did_not_reach_two_vote_quorum",
+                "failed_operations_disposition": "none",
+                "frontier_failure": {
+                    "failure_class": "local_semantic_no_quorum",
+                    "rescue_status": "local_quarantined",
+                    "summary": "local_models_did_not_reach_two_vote_quorum",
+                    "human_required": False,
+                    "notify_user": False,
+                },
+                "human_required": False,
+                "reviewer": "local_consensus",
+                "local_consensus": {
+                    "status": "quarantined",
+                    "ok": False,
+                    "failure_class": "local_consensus_failed",
+                    "quarantine_reason": ("local_models_did_not_reach_two_vote_quorum"),
+                    "votes": [
+                        {"valid": True, "signature_sha256": "a" * 64},
+                        {"valid": True, "signature_sha256": "b" * 64},
+                        {"valid": True, "signature_sha256": "c" * 64},
+                    ],
+                },
+            }
+            if authority_sha256 is not None:
+                review["decision_policy"] = {
+                    "router_policy": {"artifact_sha256": authority_sha256}
+                }
+            return review
+
+        monkeypatch.setattr(ingest, "_generate_one", generate)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest(
+            "grounded source with a semantic disagreement",
+            job.job_id,
+            frontier_reviewer=reviewer,
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        if semantic_defer:
+            assert str(finished.error) == (
+                "local consensus semantic no quorum "
+                f"[authority_sha256={authority_sha256}]: "
+                "local_models_did_not_reach_two_vote_quorum"
+            )
+            assert "authority unavailable" not in str(finished.error)
+        else:
+            assert str(finished.error) == (
+                "local consensus authority unavailable: "
+                "local_semantic_no_quorum: "
+                "local_models_did_not_reach_two_vote_quorum"
+            )
+        assert generation_calls == ["memory/semantic-no-quorum.md"]
+        assert len(review_calls) == 1
+        assert not (
+            isolated_wiki / "pages" / "memory" / "semantic-no-quorum.md"
+        ).exists()
+
     def test_structured_frontier_failure_is_not_actionable_page_feedback(
         self,
     ) -> None:

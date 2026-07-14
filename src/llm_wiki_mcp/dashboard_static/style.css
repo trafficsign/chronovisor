@@ -325,6 +325,14 @@ canvas {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.save-load-summary {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.batch-yield-summary.chart-summary.compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .health-summary.chart-summary.compact {
   grid-template-columns: repeat(9, minmax(0, 1fr));
 }
@@ -1234,7 +1242,9 @@ canvas {
   }
 
   .chart-summary,
-  .chart-summary.compact {
+  .chart-summary.compact,
+  .save-load-summary,
+  .batch-yield-summary.chart-summary.compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

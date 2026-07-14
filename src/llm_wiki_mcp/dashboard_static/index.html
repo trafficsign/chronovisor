@@ -109,7 +109,7 @@
           <canvas id="pending-chart" height="300"></canvas>
           <div class="chart-tooltip" id="save-load-tooltip" hidden></div>
         </div>
-        <div class="chart-summary" aria-label="Save load summary">
+        <div class="chart-summary save-load-summary" aria-label="Save load summary">
           <div class="chart-stat">
             <span>Saved</span>
             <strong id="pending-current">--</strong>
@@ -121,6 +121,10 @@
           <div class="chart-stat">
             <span>Pending</span>
             <strong id="pending-rate">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Deferred</span>
+            <strong id="pending-deferred">--</strong>
           </div>
           <div class="chart-stat">
             <span>Failed</span>
@@ -265,17 +269,21 @@
         <div class="panel-head">
           <div>
             <h2>Batch Yield</h2>
-            <p>Processed vs failed per batch.</p>
+            <p>Processed, semantic deferred, and failed per batch.</p>
           </div>
           <span id="batch-caption">waiting</span>
         </div>
         <div class="chart-frame">
           <canvas id="batch-chart" height="300"></canvas>
         </div>
-        <div class="chart-summary compact" aria-label="Batch yield summary">
+        <div class="chart-summary compact batch-yield-summary" aria-label="Batch yield summary">
           <div class="chart-stat">
             <span>OK</span>
             <strong id="batch-ok">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Deferred</span>
+            <strong id="batch-deferred">--</strong>
           </div>
           <div class="chart-stat">
             <span>Failed</span>

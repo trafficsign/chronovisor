@@ -4973,6 +4973,27 @@ def _structured_frontier_failure_class(result: dict[str, Any]) -> str | None:
     return None
 
 
+def _structured_frontier_authority_sha256(result: dict[str, Any]) -> str | None:
+    """Return the adopted router artifact identity carried by a review."""
+
+    review = result.get("review")
+    for candidate in (result, review):
+        if not isinstance(candidate, dict):
+            continue
+        decision_policy = candidate.get("decision_policy")
+        if not isinstance(decision_policy, dict):
+            continue
+        router_policy = decision_policy.get("router_policy")
+        if not isinstance(router_policy, dict):
+            continue
+        artifact_sha256 = router_policy.get("artifact_sha256")
+        if isinstance(artifact_sha256, str) and re.fullmatch(
+            r"[0-9a-f]{64}", artifact_sha256
+        ):
+            return artifact_sha256
+    return None
+
+
 def _frontier_retry_is_actionable(result: dict[str, Any]) -> bool:
     """False when regenerating local content cannot repair the frontier lane."""
 
@@ -5548,6 +5569,16 @@ def run_ingest(
             frontier_feedback = _frontier_feedback_text(frontier_result)
             if not _frontier_retry_is_actionable(frontier_result):
                 structured_failure = _structured_frontier_failure_class(frontier_result)
+                if structured_failure == "local_semantic_no_quorum":
+                    authority_sha256 = _structured_frontier_authority_sha256(
+                        frontier_result
+                    )
+                    if authority_sha256 is not None:
+                        raise IngestApplyError(
+                            "local consensus semantic no quorum "
+                            f"[authority_sha256={authority_sha256}]: "
+                            + frontier_feedback
+                        )
                 typed_feedback = (
                     f"{structured_failure}: {frontier_feedback}"
                     if structured_failure is not None

@@ -1575,8 +1575,23 @@ def run_structured_review(
     reason = (
         routed.quarantine_reason or routed.failure_class or "local consensus failed"
     )
+    valid_signatures = {
+        vote.signature_sha256
+        for vote in routed.votes
+        if vote.valid and vote.signature_sha256 is not None
+    }
+    three_way_semantic_no_quorum = bool(
+        routed.quarantine_reason == "local_models_did_not_reach_two_vote_quorum"
+        and len(routed.votes) == 3
+        and all(vote.valid for vote in routed.votes)
+        and len(valid_signatures) == 3
+    )
     failure = _frontier_failure(
-        "local_consensus_failed",
+        (
+            "local_semantic_no_quorum"
+            if three_way_semantic_no_quorum
+            else "local_consensus_failed"
+        ),
         "local_quarantined",
         reason,
         human_required=False,

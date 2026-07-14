@@ -30,8 +30,15 @@ The routine decision fleet is:
 
 The primary and challenger must agree. If they do not, the tie-break model is
 called and any two matching votes form the quorum. Invalid JSON gets at most two
-targeted repair turns in the same local chat session. Exhausted repair or model
-disagreement is quarantined; it is never escalated to a frontier model.
+targeted repair turns in the same local chat session. Exhausted repair and
+ordinary lane disagreement fail closed; neither is escalated to a frontier
+model. In ingest, an exact three-way split of three valid, pairwise-distinct
+decisions under the currently validated adopted-artifact SHA becomes a terminal
+semantic defer. The immutable source stays in `raw/`, receives no self-heal,
+frontier, or cooldown replay, and re-enters the ingest queue only when the router
+fully validates a different adopted-artifact SHA. A merely changed, partial, or
+invalid nominated file never releases it. Operational runtime failures remain in
+their separate repair queue.
 
 ## Storage Layout
 

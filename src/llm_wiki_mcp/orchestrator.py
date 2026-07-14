@@ -882,6 +882,7 @@ def run_pending_ingest(
         per_raw: list[dict] = []
         job_ids: list[str] = []
         succeeded_filenames: list[str] = []
+        deferred_filenames: list[str] = []
         batch_started = time.time()
 
         # Reserve the batch-wide in-flight slot only after all prerequisites
@@ -905,6 +906,7 @@ def run_pending_ingest(
                 "index": 0,
                 "total": len(filenames),
                 "succeeded": 0,
+                "deferred": 0,
                 "failed": 0,
                 "files": filenames,
             },
@@ -913,6 +915,7 @@ def run_pending_ingest(
         )
 
         succeeded_units = 0
+        deferred_units = 0
         try:
             for raw_index, unit in enumerate(units, start=1):
                 raw_path = unit.representative
@@ -963,7 +966,8 @@ def run_pending_ingest(
                         "index": raw_index,
                         "total": len(units),
                         "succeeded": succeeded_units,
-                        "failed": len(per_raw) - succeeded_units,
+                        "deferred": deferred_units,
+                        "failed": len(per_raw) - succeeded_units - deferred_units,
                         "files": filenames,
                     },
                     ollama=get_ollama_status(),
@@ -1271,11 +1275,20 @@ def run_pending_ingest(
                                 f"{fname}: {e}"
                             )
 
+                semantic_deferred = bool(
+                    isinstance(supervision, dict)
+                    and supervision.get("terminal_deferred") is True
+                )
+                if semantic_deferred:
+                    deferred_filenames.extend(source_filenames)
+                    deferred_units += 1
+
                 raw_result = {
                     "filename": fname,
                     "source_files": source_filenames,
                     "job_id": job.job_id,
                     "succeeded": raw_success_flag[0],
+                    "deferred": semantic_deferred,
                 }
                 if unit.fragment_record_sha256 is not None:
                     raw_result["reassembled_fragment_record_sha256"] = (
@@ -1289,10 +1302,22 @@ def run_pending_ingest(
                     raw_result["completion_ack"] = completion_ack_summary[0]
                 per_raw.append(raw_result)
                 runtime_status.safe_append_event(
-                    "success" if raw_success_flag[0] else "warn",
+                    (
+                        "success"
+                        if raw_success_flag[0]
+                        else "info"
+                        if semantic_deferred
+                        else "warn"
+                    ),
                     (
                         f"orchestrator | raw {fname} "
-                        + ("processed" if raw_success_flag[0] else "not processed")
+                        + (
+                            "processed"
+                            if raw_success_flag[0]
+                            else "semantic deferred"
+                            if semantic_deferred
+                            else "not processed"
+                        )
                     ),
                     source="orchestrator",
                     raw_file=fname,
@@ -1307,16 +1332,22 @@ def run_pending_ingest(
         elapsed = time.time() - batch_started
         _orch_log(
             f"orchestrator | batch done: {len(succeeded_filenames)}/{len(filenames)} "
-            f"succeeded, {elapsed:.1f}s, jobs={len(job_ids)}"
+            f"succeeded, {len(deferred_filenames)} deferred, "
+            f"{elapsed:.1f}s, jobs={len(job_ids)}"
         )
         pending_after = len(get_pending_raw_files())
+        failed_filenames = max(
+            0,
+            len(filenames) - len(succeeded_filenames) - len(deferred_filenames),
+        )
         runtime_status.safe_append_metric(
             "batch",
             pending_before=pending_before_count,
             pending_after=pending_after,
             files_attempted=len(filenames),
             files_processed=len(succeeded_filenames),
-            files_failed=len(filenames) - len(succeeded_filenames),
+            files_deferred=len(deferred_filenames),
+            files_failed=failed_filenames,
             elapsed_seconds=round(elapsed, 2),
             processor=get_ollama_status()["processor"],
         )
@@ -1333,7 +1364,8 @@ def run_pending_ingest(
                 "index": len(units),
                 "total": len(units),
                 "succeeded": succeeded_units,
-                "failed": len(units) - succeeded_units,
+                "deferred": deferred_units,
+                "failed": len(units) - succeeded_units - deferred_units,
                 "elapsed_seconds": round(elapsed, 2),
                 "files": filenames,
             },
@@ -1347,6 +1379,8 @@ def run_pending_ingest(
             "job_ids": job_ids,
             "files_attempted": filenames,
             "files_processed": succeeded_filenames,
+            "files_deferred": deferred_filenames,
+            "files_failed": failed_filenames,
             "files_quarantined": [
                 name for row in fragment_quarantined for name in row.get("files", [])
             ],

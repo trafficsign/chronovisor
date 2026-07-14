@@ -35,6 +35,7 @@ class FailureRecord:
     fingerprint: str
     message: str
     requested_page_id: str | None = None
+    authority_artifact_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class SupervisionResult:
     quarantine_path: str | None = None
     tracked: bool = True
     transient: bool = False
+    terminal_deferred: bool = False
 
 
 TRANSIENT_FAILURE_CLASSES = {
@@ -124,6 +126,14 @@ IMMEDIATE_SELF_HEAL_FAILURE_CLASSES = {
     "ingest.local_consensus_nonconvergent",
 }
 
+SEMANTIC_NO_QUORUM_FAILURE_CLASS = "ingest.semantic_no_quorum"
+SEMANTIC_NO_QUORUM_DEFER_REASON = "semantic_no_quorum"
+SEMANTIC_DEFER_RELEASE_PACKET_STATUSES = {
+    "semantic_defer_released",
+    "superseded_semantic_defer",
+}
+_SEMANTIC_AUTHORITY_MARKER_RE = re.compile(r"\[authority_sha256=([0-9a-f]{64})\]")
+
 
 def _runtime_failures_dir() -> Path:
     return wiki.WIKI_ROOT / "runtime" / "failures"
@@ -155,7 +165,7 @@ def _load_state() -> dict[str, Any]:
         return {"failures": {}}
     try:
         data = json.loads(path.read_text())
-    except json.JSONDecodeError:
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {"failures": {}}
     if not isinstance(data, dict):
         return {"failures": {}}
@@ -177,28 +187,143 @@ def reset_raw_failure(raw_file: str) -> None:
     with _failure_state_lock():
         state = _load_state()
         failures = state.get("failures", {})
-        if isinstance(failures, dict) and raw_file in failures:
-            removed = failures.pop(raw_file, None)
-            if isinstance(removed, dict):
-                fingerprint = removed.get("fingerprint")
-                operational_failures = state.get("operational_failures")
+        if not isinstance(failures, dict):
+            failures = {}
+            state["failures"] = failures
+
+        # Packet publication intentionally precedes the state transaction.  A
+        # successful retry must therefore retire both state-backed and orphaned
+        # semantic packets before deleting state, or packet reconciliation would
+        # resurrect the hold on the next queue scan.
+        related_raw_files = {raw_file}
+        semantic_packet_paths: set[Path] = set()
+        packet_records = _semantic_defer_packet_records(verify_sources=False)
+        changed = True
+        while changed:
+            changed = False
+            for tracked_raw, entry in failures.items():
                 if (
-                    isinstance(fingerprint, str)
-                    and isinstance(operational_failures, dict)
-                    and not any(
-                        isinstance(entry, dict)
-                        and entry.get("fingerprint") == fingerprint
-                        for entry in failures.values()
+                    not isinstance(tracked_raw, str)
+                    or not isinstance(entry, dict)
+                    or entry.get("terminal_deferred") is not True
+                    or entry.get("failure_class") != SEMANTIC_NO_QUORUM_FAILURE_CLASS
+                ):
+                    continue
+                entry_related = _safe_raw_filenames(entry.get("related_raw_files"))
+                entry_related.add(tracked_raw)
+                packet_value = entry.get("packet_path")
+                entry_packet = (
+                    Path(packet_value).expanduser()
+                    if isinstance(packet_value, str) and packet_value.strip()
+                    else None
+                )
+                if not (
+                    related_raw_files.intersection(entry_related)
+                    or (
+                        entry_packet is not None
+                        and entry_packet in semantic_packet_paths
                     )
                 ):
+                    continue
+                before_raws = len(related_raw_files)
+                before_packets = len(semantic_packet_paths)
+                related_raw_files.update(entry_related)
+                if entry_packet is not None:
+                    semantic_packet_paths.add(entry_packet)
+                changed = changed or before_raws != len(related_raw_files)
+                changed = changed or before_packets != len(semantic_packet_paths)
+
+            for packet_path, _packet, packet_raws in packet_records:
+                if (
+                    packet_path in semantic_packet_paths
+                    or related_raw_files.intersection(packet_raws)
+                ):
+                    before_raws = len(related_raw_files)
+                    before_packets = len(semantic_packet_paths)
+                    related_raw_files.update(packet_raws)
+                    semantic_packet_paths.add(packet_path)
+                    changed = changed or before_raws != len(related_raw_files)
+                    changed = changed or before_packets != len(semantic_packet_paths)
+
+        released_at = datetime.now().isoformat()
+        for packet_path in sorted(semantic_packet_paths):
+            _release_semantic_defer_packet(packet_path, released_at=released_at)
+
+        removed_entries: list[dict[str, Any]] = []
+        for tracked_raw, entry in list(failures.items()):
+            remove = tracked_raw == raw_file
+            if isinstance(entry, dict) and (
+                entry.get("terminal_deferred") is True
+                and entry.get("failure_class") == SEMANTIC_NO_QUORUM_FAILURE_CLASS
+            ):
+                packet_value = entry.get("packet_path")
+                entry_packet = (
+                    Path(packet_value).expanduser()
+                    if isinstance(packet_value, str) and packet_value.strip()
+                    else None
+                )
+                remove = (
+                    remove
+                    or tracked_raw in related_raw_files
+                    or (
+                        entry_packet is not None
+                        and entry_packet in semantic_packet_paths
+                    )
+                )
+            if not remove:
+                continue
+            removed = failures.pop(tracked_raw, None)
+            if isinstance(removed, dict):
+                removed_entries.append(removed)
+
+        operational_failures = state.get("operational_failures")
+        if isinstance(operational_failures, dict):
+            for fingerprint in {
+                entry.get("fingerprint")
+                for entry in removed_entries
+                if isinstance(entry.get("fingerprint"), str)
+            }:
+                if not any(
+                    isinstance(entry, dict) and entry.get("fingerprint") == fingerprint
+                    for entry in failures.values()
+                ):
                     operational_failures.pop(fingerprint, None)
+
+        if removed_entries:
             _save_state(state)
+
+
+def _authority_artifact_sha256_from_error(message: str) -> str | None:
+    """Extract the content hash bound to one semantic authority epoch."""
+
+    match = _SEMANTIC_AUTHORITY_MARKER_RE.search(message)
+    return match.group(1) if match is not None else None
 
 
 def classify_failure(message: str | None) -> FailureRecord:
     """Return a stable failure class and fingerprint for a job error."""
 
     msg = (message or "unknown failure").strip() or "unknown failure"
+
+    if re.search(
+        r"\blocal consensus semantic no quorum\b",
+        msg,
+        flags=re.IGNORECASE,
+    ):
+        authority_sha256 = _authority_artifact_sha256_from_error(msg)
+        if authority_sha256 is None:
+            failure_class = "ingest.runtime_local_consensus_authority_unavailable"
+            return FailureRecord(
+                failure_class=failure_class,
+                fingerprint=f"{failure_class}:semantic_no_quorum_authority_invalid",
+                message=msg,
+            )
+        return FailureRecord(
+            failure_class=SEMANTIC_NO_QUORUM_FAILURE_CLASS,
+            fingerprint=f"{SEMANTIC_NO_QUORUM_FAILURE_CLASS}:{authority_sha256}",
+            message=msg,
+            authority_artifact_sha256=authority_sha256,
+        )
 
     raw_completion_failure = re.match(
         r"raw completion (receipt publish failed|receipt invalid|"
@@ -418,6 +543,7 @@ def _write_packet(
     raw_text: str | None,
     status: str = "pending_local_repair",
     local_decision: dict[str, Any] | None = None,
+    extra_fields: dict[str, Any] | None = None,
 ) -> Path:
     created_at = datetime.now()
     now = created_at.isoformat()
@@ -449,6 +575,8 @@ def _write_packet(
     }
     if local_decision is not None:
         packet["local_decision"] = local_decision
+    if extra_fields is not None:
+        packet.update(extra_fields)
     packets_dir = _runtime_failures_dir() / "packets"
     packets_dir.mkdir(parents=True, exist_ok=True)
     path = packets_dir / f"{failure_id}.json"
@@ -540,6 +668,483 @@ def _quarantine_raw(raw_path: Path, packet_path: Path) -> Path | None:
     pointer = target.with_suffix(target.suffix + ".packet")
     atomic_write(pointer, str(packet_path) + "\n")
     return target
+
+
+def _current_adopted_authority_sha256() -> str | None:
+    """Return only the artifact hash of a currently valid adopted authority.
+
+    A byte-different nominated file is not sufficient evidence for reopening a
+    semantic hold.  The artifact may be partial, corrupt, unevaluated, or bound
+    to model metadata that is no longer installed.  Reuse the router's full
+    adoption resolver and fail closed whenever it cannot prove that the new
+    artifact is the live authority.
+    """
+
+    try:
+        from llm_wiki_mcp.decision_router import resolve_router_policy
+        from llm_wiki_mcp.runtime_config import load_decision_router_config
+
+        resolution = resolve_router_policy(load_decision_router_config())
+    except Exception:
+        return None
+    artifact_sha256 = resolution.artifact_sha256
+    if (
+        resolution.source != "adopted_artifact"
+        or resolution.error is not None
+        or not isinstance(artifact_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None
+    ):
+        return None
+    return artifact_sha256
+
+
+def _semantic_unit_paths(
+    raw_path: Path,
+    related_raw_paths: Sequence[Path],
+) -> tuple[Path, ...]:
+    paths = tuple(
+        sorted(
+            dict.fromkeys(
+                [
+                    raw_path,
+                    *(path for path in related_raw_paths if isinstance(path, Path)),
+                ]
+            ),
+            key=lambda path: path.name,
+        )
+    )
+    filenames = [path.name for path in paths]
+    if not paths or len(filenames) != len(set(filenames)):
+        raise ValueError("semantic defer source filenames must be unique")
+    return paths
+
+
+def _semantic_source_evidence(paths: Sequence[Path]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for path in paths:
+        raw = path.read_bytes()
+        evidence.append(
+            {
+                "filename": path.name,
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+    return evidence
+
+
+def _read_packet_object(packet_path: Path) -> dict[str, Any] | None:
+    try:
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return packet if isinstance(packet, dict) else None
+
+
+def _safe_raw_filenames(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {
+        filename
+        for filename in value
+        if isinstance(filename, str)
+        and filename
+        and Path(filename).name == filename
+        and filename not in {".", ".."}
+    }
+
+
+def _semantic_packet_source_raws(
+    packet: dict[str, Any],
+    *,
+    verify_sources: bool,
+) -> frozenset[str] | None:
+    """Validate packet source evidence and optionally bind it to RAW_DIR bytes."""
+
+    source_raws = packet.get("source_raws")
+    if not isinstance(source_raws, list) or not source_raws:
+        return None
+    filenames: set[str] = set()
+    for source in source_raws:
+        if not isinstance(source, dict):
+            return None
+        filename = source.get("filename")
+        byte_count = source.get("bytes")
+        sha256 = source.get("sha256")
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or Path(filename).name != filename
+            or filename in {".", ".."}
+            or filename in filenames
+            or isinstance(byte_count, bool)
+            or not isinstance(byte_count, int)
+            or byte_count < 0
+            or not isinstance(sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+        ):
+            return None
+        if verify_sources:
+            try:
+                raw = (wiki.RAW_DIR / filename).read_bytes()
+            except (OSError, ValueError):
+                return None
+            if len(raw) != byte_count or hashlib.sha256(raw).hexdigest() != sha256:
+                return None
+        filenames.add(filename)
+    return frozenset(filenames)
+
+
+def _semantic_defer_packet_records(
+    *,
+    verify_sources: bool,
+) -> list[tuple[Path, dict[str, Any], frozenset[str]]]:
+    """Read active semantic packets; superseded/released packets are excluded."""
+
+    packets_dir = _runtime_failures_dir() / "packets"
+    try:
+        packet_paths = sorted(packets_dir.glob("*.json"))
+    except OSError:
+        return []
+    records: list[tuple[Path, dict[str, Any], frozenset[str]]] = []
+    for packet_path in packet_paths:
+        packet = _read_packet_object(packet_path)
+        if (
+            packet is None
+            or packet.get("status") != "local_quarantined"
+            or packet.get("terminal_deferred") is not True
+            or packet.get("failure_class") != SEMANTIC_NO_QUORUM_FAILURE_CLASS
+        ):
+            continue
+        authority_sha256 = packet.get("authority_artifact_sha256")
+        if (
+            not isinstance(authority_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", authority_sha256) is None
+        ):
+            continue
+        source_raws = _semantic_packet_source_raws(
+            packet,
+            verify_sources=verify_sources,
+        )
+        if source_raws is None:
+            continue
+        records.append((packet_path, packet, source_raws))
+    return records
+
+
+def _release_semantic_defer_packet(
+    packet_path: Path,
+    *,
+    released_at: str,
+) -> None:
+    """Atomically make one semantic packet ineligible for hold reconstruction."""
+
+    packet = _read_packet_object(packet_path)
+    if (
+        packet is None
+        or packet.get("status") != "local_quarantined"
+        or packet.get("terminal_deferred") is not True
+        or packet.get("failure_class") != SEMANTIC_NO_QUORUM_FAILURE_CLASS
+    ):
+        return
+    packet.update(
+        {
+            "status": "semantic_defer_released",
+            "terminal_deferred": False,
+            "released_at": released_at,
+            "updated_at": released_at,
+        }
+    )
+    atomic_write(
+        packet_path,
+        json.dumps(packet, indent=2, ensure_ascii=False) + "\n",
+    )
+
+
+def _reusable_semantic_defer_packet(
+    failures: dict[str, Any],
+    *,
+    filenames: Sequence[str],
+    record: FailureRecord,
+    source_evidence: Sequence[dict[str, Any]],
+) -> tuple[Path, dict[str, Any]] | None:
+    evidence_by_name = {
+        str(row.get("filename")): row
+        for row in source_evidence
+        if isinstance(row, dict) and isinstance(row.get("filename"), str)
+    }
+    for filename in filenames:
+        entry = failures.get(filename)
+        if (
+            not isinstance(entry, dict)
+            or entry.get("terminal_deferred") is not True
+            or entry.get("failure_class") != SEMANTIC_NO_QUORUM_FAILURE_CLASS
+            or entry.get("fingerprint") != record.fingerprint
+            or entry.get("authority_artifact_sha256")
+            != record.authority_artifact_sha256
+        ):
+            continue
+        packet_value = entry.get("packet_path")
+        if not isinstance(packet_value, str):
+            continue
+        packet_path = Path(packet_value).expanduser()
+        try:
+            packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(packet, dict)
+            or packet.get("status") != "local_quarantined"
+            or packet.get("terminal_deferred") is not True
+            or packet.get("authority_artifact_sha256")
+            != record.authority_artifact_sha256
+        ):
+            continue
+        prior_evidence = packet.get("source_raws")
+        if not isinstance(prior_evidence, list):
+            continue
+        prior_by_name = {
+            str(row.get("filename")): row
+            for row in prior_evidence
+            if isinstance(row, dict) and isinstance(row.get("filename"), str)
+        }
+        if any(
+            name in prior_by_name and prior_by_name[name] != evidence
+            for name, evidence in evidence_by_name.items()
+        ):
+            continue
+        return packet_path, packet
+    return None
+
+
+def _supersede_replaced_operational_packets(
+    state: dict[str, Any],
+    *,
+    replaced_entries: Sequence[dict[str, Any]],
+    superseded_by_packet: Path,
+    superseded_at: str,
+) -> None:
+    """Retire unshared operational packets replaced by a semantic defer."""
+
+    failures = state.get("failures")
+    if not isinstance(failures, dict):
+        return
+    operational_failures = state.get("operational_failures")
+    candidates: dict[str, tuple[str, str]] = {}
+    for entry in replaced_entries:
+        fingerprint = entry.get("fingerprint")
+        packet_path = entry.get("packet_path")
+        if (
+            entry.get("self_heal_queued") is not True
+            or not isinstance(fingerprint, str)
+            or not isinstance(packet_path, str)
+            or not packet_path
+        ):
+            continue
+        candidates[packet_path] = (fingerprint, packet_path)
+
+    for fingerprint, packet_value in candidates.values():
+        if any(
+            isinstance(entry, dict) and entry.get("packet_path") == packet_value
+            for entry in failures.values()
+        ):
+            continue
+        packet_path = Path(packet_value).expanduser()
+        try:
+            packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(packet, dict)
+            or packet.get("fingerprint") != fingerprint
+            or packet.get("status") in REPAIR_SUCCESS_PACKET_STATUSES
+        ):
+            continue
+        from llm_wiki_mcp.self_heal import request_packet_cancellation
+
+        cancellation = request_packet_cancellation(
+            packet_path,
+            reason="semantic_no_quorum_terminal_defer",
+            superseded_by_packet=superseded_by_packet,
+        )
+        if cancellation.get("accepted") is not True:
+            continue
+        packet.update(
+            {
+                "status": "superseded_semantic_defer",
+                "self_heal_queued": False,
+                "next_attempt_at": None,
+                "cancellation_requested_at": cancellation.get("requested_at"),
+                "cancellation_path": cancellation.get("cancellation_path"),
+                "superseded_at": superseded_at,
+                "superseded_by_packet": str(superseded_by_packet),
+                "updated_at": superseded_at,
+            }
+        )
+        atomic_write(
+            packet_path,
+            json.dumps(packet, indent=2, ensure_ascii=False) + "\n",
+        )
+        if isinstance(operational_failures, dict):
+            operational_entry = operational_failures.get(fingerprint)
+            if (
+                isinstance(operational_entry, dict)
+                and operational_entry.get("packet_path") == packet_value
+            ):
+                operational_failures.pop(fingerprint, None)
+
+
+def _record_semantic_no_quorum_defer_unlocked(
+    *,
+    raw_path: Path,
+    record: FailureRecord,
+    job_id: str | None,
+    raw_text: str | None,
+    related_raw_paths: Sequence[Path],
+) -> SupervisionResult:
+    """Bind one immutable semantic unit to a terminal, model-free defer."""
+
+    authority_sha256 = record.authority_artifact_sha256
+    if authority_sha256 is None:
+        raise ValueError("semantic no-quorum defer requires an authority artifact hash")
+    source_paths = _semantic_unit_paths(raw_path, related_raw_paths)
+    source_evidence = _semantic_source_evidence(source_paths)
+    filenames = [path.name for path in source_paths]
+    now = datetime.now().isoformat()
+    state = _load_state()
+    failures = state.setdefault("failures", {})
+    if not isinstance(failures, dict):
+        failures = {}
+        state["failures"] = failures
+    replaced_entries = [
+        dict(entry)
+        for filename in filenames
+        if isinstance((entry := failures.get(filename)), dict)
+    ]
+
+    reusable = _reusable_semantic_defer_packet(
+        failures,
+        filenames=filenames,
+        record=record,
+        source_evidence=source_evidence,
+    )
+    if reusable is None:
+        packet_path = _write_packet(
+            raw_file=raw_path.name,
+            record=record,
+            attempts=1,
+            job_id=job_id,
+            raw_text=raw_text,
+            status="local_quarantined",
+            extra_fields={
+                "frontier_status": "not_requested",
+                "terminal_deferred": True,
+                "self_heal_queued": False,
+                "defer_reason": SEMANTIC_NO_QUORUM_DEFER_REASON,
+                "authority_artifact_sha256": authority_sha256,
+                "related_raw_files": filenames,
+                "source_raws": source_evidence,
+                "quarantined_at": now,
+                "next_attempt_at": None,
+            },
+        )
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    else:
+        packet_path, packet = reusable
+        prior_evidence = packet.get("source_raws")
+        combined_evidence = {
+            str(row["filename"]): dict(row)
+            for row in prior_evidence
+            if isinstance(row, dict) and isinstance(row.get("filename"), str)
+        }
+        combined_evidence.update(
+            {
+                str(row["filename"]): dict(row)
+                for row in source_evidence
+                if isinstance(row.get("filename"), str)
+            }
+        )
+        combined_files = sorted(combined_evidence)
+        if packet.get("related_raw_files") != combined_files or packet.get(
+            "source_raws"
+        ) != [combined_evidence[name] for name in combined_files]:
+            packet["related_raw_files"] = combined_files
+            packet["source_raws"] = [combined_evidence[name] for name in combined_files]
+            packet["updated_at"] = now
+            atomic_write(
+                packet_path,
+                json.dumps(packet, indent=2, ensure_ascii=False) + "\n",
+            )
+        filenames = combined_files
+
+    first_seen_at = str(packet.get("created_at") or now)
+    entry = {
+        "fingerprint": record.fingerprint,
+        "failure_class": record.failure_class,
+        "attempts": 1,
+        "first_seen_at": first_seen_at,
+        "last_seen_at": now,
+        "last_error": record.message,
+        "job_id": job_id,
+        "terminal_deferred": True,
+        "self_heal_queued": False,
+        "defer_reason": SEMANTIC_NO_QUORUM_DEFER_REASON,
+        "authority_artifact_sha256": authority_sha256,
+        "packet_path": str(packet_path),
+        "related_raw_files": list(filenames),
+    }
+    for filename in filenames:
+        failures[filename] = dict(entry)
+    _supersede_replaced_operational_packets(
+        state,
+        replaced_entries=replaced_entries,
+        superseded_by_packet=packet_path,
+        superseded_at=now,
+    )
+    _save_state(state)
+    runtime_status.safe_append_event(
+        "warn",
+        f"failure-supervisor | terminal semantic defer for {raw_path.name}",
+        source="failure-supervisor",
+        raw_file=raw_path.name,
+        related_raw_files=list(filenames),
+        failure_class=record.failure_class,
+        fingerprint=record.fingerprint,
+        authority_artifact_sha256=authority_sha256,
+        packet_path=str(packet_path),
+        outcome_kind="terminal_semantic_defer",
+    )
+    return SupervisionResult(
+        raw_file=raw_path.name,
+        failure_class=record.failure_class,
+        fingerprint=record.fingerprint,
+        attempts=1,
+        packet_path=str(packet_path),
+        terminal_deferred=True,
+    )
+
+
+def record_semantic_no_quorum_defer(
+    *,
+    raw_path: Path,
+    error: str | None,
+    job_id: str | None = None,
+    raw_text: str | None = None,
+    related_raw_paths: Sequence[Path] = (),
+) -> SupervisionResult:
+    """Record a terminal semantic no-quorum unit without moving or retrying it."""
+
+    record = classify_failure(error)
+    if record.failure_class != SEMANTIC_NO_QUORUM_FAILURE_CLASS:
+        raise ValueError("error is not an authority-bound semantic no-quorum failure")
+    with _failure_state_lock():
+        return _record_semantic_no_quorum_defer_unlocked(
+            raw_path=raw_path,
+            record=record,
+            job_id=job_id,
+            raw_text=raw_text,
+            related_raw_paths=related_raw_paths,
+        )
 
 
 def _record_operational_raw_failure(
@@ -861,7 +1466,7 @@ def _operational_deferred_raw_files_unlocked(
     state = _load_state()
     failures = state.get("failures")
     if not isinstance(failures, dict):
-        return {}
+        failures = {}
     available_paths = {
         path.name: path
         for path in (
@@ -869,9 +1474,34 @@ def _operational_deferred_raw_files_unlocked(
         )
     }
     deferred: dict[str, str] = {}
+    authority_sha256_loaded = False
+    current_authority_sha256: str | None = None
 
     for raw_file, value in list(failures.items()):
         if not isinstance(raw_file, str) or not isinstance(value, dict):
+            continue
+        if (
+            value.get("terminal_deferred") is True
+            and value.get("failure_class") == SEMANTIC_NO_QUORUM_FAILURE_CLASS
+        ):
+            if _packet_status(value) in SEMANTIC_DEFER_RELEASE_PACKET_STATUSES:
+                # reset_raw_failure publishes the packet release before state
+                # cleanup. A crash between those writes must stay released.
+                continue
+            stored_authority_sha256 = value.get("authority_artifact_sha256")
+            if not authority_sha256_loaded:
+                current_authority_sha256 = _current_adopted_authority_sha256()
+                authority_sha256_loaded = True
+            if (
+                not isinstance(stored_authority_sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", stored_authority_sha256)
+                or current_authority_sha256 is None
+                or current_authority_sha256 == stored_authority_sha256
+            ):
+                deferred[raw_file] = SEMANTIC_NO_QUORUM_DEFER_REASON
+            # A different fully validated adopted artifact is a new authority
+            # epoch. The immutable raw remains in place and automatically
+            # re-enters ingest; an invalid nomination stays fail-closed.
             continue
         if (
             value.get("failure_class") not in OPERATIONAL_SELF_HEAL_FAILURE_CLASSES
@@ -887,6 +1517,26 @@ def _operational_deferred_raw_files_unlocked(
         # state must be explicitly added to the success allowlist before it
         # can re-enable inference.
         deferred[raw_file] = _packet_status(value)
+
+    # The semantic packet is published before state.json. Rebuild the hold
+    # directly from byte-bound packet evidence so a crash, missing state file,
+    # malformed state JSON, or a lost per-raw entry cannot trigger blind replay.
+    for _packet_path, packet, packet_raws in _semantic_defer_packet_records(
+        verify_sources=True
+    ):
+        stored_authority_sha256 = packet["authority_artifact_sha256"]
+        if not authority_sha256_loaded:
+            current_authority_sha256 = _current_adopted_authority_sha256()
+            authority_sha256_loaded = True
+        if (
+            current_authority_sha256 is None
+            or current_authority_sha256 == stored_authority_sha256
+        ):
+            for raw_file in packet_raws:
+                deferred[raw_file] = SEMANTIC_NO_QUORUM_DEFER_REASON
+        # A different fully validated adopted artifact is the only automatic
+        # release condition. Superseded and explicitly released packets never
+        # reach this loop because their status is not local_quarantined.
     return dict(sorted(deferred.items()))
 
 
@@ -903,6 +1553,15 @@ def record_raw_failure(
 
     record = classify_failure(error)
     raw_file = raw_path.name
+    if record.failure_class == SEMANTIC_NO_QUORUM_FAILURE_CLASS:
+        with _failure_state_lock():
+            return _record_semantic_no_quorum_defer_unlocked(
+                raw_path=raw_path,
+                record=record,
+                job_id=job_id,
+                raw_text=raw_text,
+                related_raw_paths=related_raw_paths,
+            )
     if record.failure_class in TRANSIENT_FAILURE_CLASSES:
         runtime_status.safe_append_event(
             "warn",

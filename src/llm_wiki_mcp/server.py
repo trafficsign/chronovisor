@@ -149,6 +149,22 @@ def wiki_log(limit: int = 20) -> str:
     return json.dumps({"entries": recent}, ensure_ascii=False)
 
 
+def _raw_defer_counts() -> tuple[int, int, int]:
+    """Return raw total plus semantic and operational queue-hold counts."""
+    from llm_wiki_mcp.failure_supervisor import (
+        SEMANTIC_NO_QUORUM_DEFER_REASON,
+        operational_deferred_raw_files,
+    )
+
+    raw_paths = sorted(RAW_DIR.glob("*.md"))
+    deferred = operational_deferred_raw_files(raw_paths)
+    semantic_deferred = sum(
+        reason == SEMANTIC_NO_QUORUM_DEFER_REASON for reason in deferred.values()
+    )
+    operational_deferred = len(deferred) - semantic_deferred
+    return len(raw_paths), semantic_deferred, operational_deferred
+
+
 @mcp.tool()
 def wiki_status() -> str:
     """Return wiki health, Ollama status, and basic statistics."""
@@ -158,7 +174,7 @@ def wiki_status() -> str:
     store.refresh()
 
     page_count = store.page_count(include_system=False)
-    raw_total = len(list(RAW_DIR.glob("*.md")))
+    raw_total, semantic_deferred, operational_deferred = _raw_defer_counts()
     raw_pending = len(get_pending_raw_files())
 
     # Check Ollama via the shared httpx client used by every other Ollama
@@ -197,6 +213,9 @@ def wiki_status() -> str:
         "page_count": page_count,
         "raw_total": raw_total,
         "raw_pending": raw_pending,
+        "semantic_deferred": semantic_deferred,
+        "operational_deferred": operational_deferred,
+        "raw_outstanding": raw_pending + semantic_deferred + operational_deferred,
         "orphan_count": orphan_count,
         "page_types": page_types,
         "health": health,
@@ -251,11 +270,11 @@ def wiki_init() -> str:
     # alongside the on-disk scans hides its latency.
     with ThreadPoolExecutor(max_workers=4) as ex:
         f_refresh = ex.submit(store.refresh)
-        f_raw = ex.submit(lambda: len(list(RAW_DIR.glob("*.md"))))
+        f_raw = ex.submit(_raw_defer_counts)
         f_pending = ex.submit(lambda: len(get_pending_raw_files()))
         f_ollama = ex.submit(is_available)
         f_refresh.result()
-        raw_total = f_raw.result()
+        raw_total, semantic_deferred, operational_deferred = f_raw.result()
         raw_pending = f_pending.result()
         ollama_status = "running" if f_ollama.result() else "stopped"
 
@@ -279,6 +298,11 @@ def wiki_init() -> str:
             "page_count": page_count,
             "raw_total": raw_total,
             "raw_pending": raw_pending,
+            "semantic_deferred": semantic_deferred,
+            "operational_deferred": operational_deferred,
+            "raw_outstanding": (
+                raw_pending + semantic_deferred + operational_deferred
+            ),
             "ollama_status": ollama_status,
             "wiki_root": str(WIKI_ROOT),
         },

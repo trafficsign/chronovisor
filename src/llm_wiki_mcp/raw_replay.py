@@ -145,6 +145,29 @@ def _quarantine_retry_seconds() -> int:
         return DEFAULT_QUARANTINE_RETRY_SECONDS
 
 
+def _active_terminal_semantic_deferred_raw_names() -> frozenset[str]:
+    """Return raws whose semantic split is still bound to the live authority.
+
+    The failure supervisor owns the durable defer and releases it only when the
+    adopted authority artifact changes.  Raw replay must consult that same
+    source of truth at both queue refresh and execution time: an explicit
+    migration signal, a stale failure signal, or elapsed quarantine cooldown
+    must never turn an unchanged three-way semantic split into a blind replay.
+    """
+
+    from llm_wiki_mcp.failure_supervisor import (
+        SEMANTIC_NO_QUORUM_DEFER_REASON,
+        operational_deferred_raw_files,
+    )
+
+    deferred = operational_deferred_raw_files()
+    return frozenset(
+        raw_file
+        for raw_file, reason in deferred.items()
+        if reason == SEMANTIC_NO_QUORUM_DEFER_REASON
+    )
+
+
 def _at_or_before(left: datetime, right: datetime) -> bool:
     compare_left = left
     compare_right = right
@@ -155,13 +178,21 @@ def _at_or_before(left: datetime, right: datetime) -> bool:
     return compare_left <= compare_right
 
 
-def _resume_due_autonomous_terminal(row: dict[str, Any], *, now: datetime) -> bool:
+def _resume_due_autonomous_terminal(
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    semantic_deferred_raws: frozenset[str] = frozenset(),
+) -> bool:
     """Reopen non-human raw replay quarantine after a bounded cooldown.
 
     ``quarantine_resumed_at`` survives the legacy history projection. That
     makes the migration idempotent even when an older terminal history record
     would otherwise win again on every queue load.
     """
+
+    if _raw_name(row) in semantic_deferred_raws:
+        return False
 
     status = str(row.get("status") or "")
     if status == "human_required" and is_human_required_result(row):
@@ -1580,6 +1611,7 @@ def _build_queue_unlocked(
     include_auto_signals: bool = True,
 ) -> dict[str, Any]:
     now = _now()
+    semantic_deferred_raws = _active_terminal_semantic_deferred_raw_names()
     history_states = _history_lifecycle_states()
     existing_by_key: dict[str, dict[str, Any]] = {}
     for raw_row in _read_jsonl(path):
@@ -1594,7 +1626,11 @@ def _build_queue_unlocked(
     for key, row in existing_by_key.items():
         existing_by_key[key] = _merge_history_lifecycle(row, history_states.get(key))
         _coerce_exhausted(existing_by_key[key], now=now)
-        _resume_due_autonomous_terminal(existing_by_key[key], now=now)
+        _resume_due_autonomous_terminal(
+            existing_by_key[key],
+            now=now,
+            semantic_deferred_raws=semantic_deferred_raws,
+        )
 
     incoming: list[dict[str, Any]] = []
     if include_auto_signals:
@@ -1609,7 +1645,11 @@ def _build_queue_unlocked(
         key = str(row["key"])
         row = _merge_history_lifecycle(row, history_states.get(key))
         _coerce_exhausted(row, now=now)
-        _resume_due_autonomous_terminal(row, now=now)
+        _resume_due_autonomous_terminal(
+            row,
+            now=now,
+            semantic_deferred_raws=semantic_deferred_raws,
+        )
         current = incoming_by_key.get(key)
         incoming_by_key[key] = (
             row if current is None else _merge_durable_rows(current, row, now=now)
@@ -1660,6 +1700,7 @@ def _build_queue_unlocked(
     actionable: list[dict[str, Any]] = []
     skipped_completed = 0
     skipped_terminal = 0
+    skipped_semantic_deferred = 0
     for incoming_row in sorted(incoming_by_key.values(), key=_queue_sort_key):
         key = str(incoming_row["key"])
         current = existing_by_key.get(key)
@@ -1680,7 +1721,16 @@ def _build_queue_unlocked(
             if current is None
             else _merge_durable_rows(current, incoming_row, now=now)
         )
-        _resume_due_autonomous_terminal(combined, now=now)
+        _resume_due_autonomous_terminal(
+            combined,
+            now=now,
+            semantic_deferred_raws=semantic_deferred_raws,
+        )
+        if _raw_name(combined) in semantic_deferred_raws:
+            skipped_semantic_deferred += 1
+            if current is not None:
+                existing_by_key[key] = combined
+            continue
         if key in completed or combined.get("status") == "completed":
             skipped_completed += 1
             if current is not None:
@@ -1719,6 +1769,7 @@ def _build_queue_unlocked(
         "candidate_keys": candidate_keys,
         "skipped_completed": skipped_completed,
         "skipped_terminal": skipped_terminal,
+        "skipped_semantic_deferred": skipped_semantic_deferred,
         "status_counts": dict(sorted(status_counts.items())),
     }
 
@@ -1782,12 +1833,15 @@ def _select_bounded(
     max_bytes: int,
     eligible_keys: set[str] | None = None,
     eligible_sources: set[str] | frozenset[str] | None = None,
+    semantic_deferred_raws: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     used_bytes = 0
     for row in sorted(rows, key=_queue_sort_key):
         if len(selected) >= max_runs:
             break
+        if _raw_name(row) in semantic_deferred_raws:
+            continue
         eligibility_checks: list[bool] = []
         if eligible_keys is not None:
             eligibility_checks.append(row.get("key") in eligible_keys)
@@ -2035,6 +2089,7 @@ def run_pending_queue(
     current_time = now or _now()
     run_limit = _nonnegative_int(max_runs)
     byte_limit = _nonnegative_int(max_bytes)
+    semantic_deferred_raws = _active_terminal_semantic_deferred_raw_names()
 
     def load_rows() -> list[dict[str, Any]]:
         by_key: dict[str, dict[str, Any]] = {}
@@ -2054,7 +2109,11 @@ def run_pending_queue(
         for key, row in by_key.items():
             by_key[key] = _merge_history_lifecycle(row, history_states.get(key))
             _coerce_exhausted(by_key[key], now=current_time)
-            _resume_due_autonomous_terminal(by_key[key], now=current_time)
+            _resume_due_autonomous_terminal(
+                by_key[key],
+                now=current_time,
+                semantic_deferred_raws=semantic_deferred_raws,
+            )
         return list(by_key.values())
 
     if dry_run:
@@ -2072,6 +2131,7 @@ def run_pending_queue(
             max_bytes=byte_limit,
             eligible_keys=eligible_keys,
             eligible_sources=eligible_sources,
+            semantic_deferred_raws=semantic_deferred_raws,
         )
         return {
             "status": "dry_run",
@@ -2112,8 +2172,15 @@ def run_pending_queue(
 
     with _queue_lock(target):
         rows = load_rows()
+        # A normal ingest may publish a semantic defer while this runner waits
+        # for its queue lease.  Preserve any earlier hold and add newly active
+        # ones before crash reconciliation can invoke a reviewer.
+        semantic_deferred_raws |= _active_terminal_semantic_deferred_raw_names()
+        replayable_rows = [
+            row for row in rows if _raw_name(row) not in semantic_deferred_raws
+        ]
         reconciled = _reconcile_running_rows(
-            rows,
+            replayable_rows,
             completions_file=completions_target,
             history_file=history_target,
             now=current_time,
@@ -2139,8 +2206,14 @@ def run_pending_queue(
             row["recovery_kind"] = "exact_already_applied"
         for row in rows:
             _coerce_exhausted(row, now=current_time)
+        semantic_deferred_raws |= _active_terminal_semantic_deferred_raw_names()
+        replayable_rows = [
+            row
+            for row in replayable_rows
+            if _raw_name(row) not in semantic_deferred_raws
+        ]
         frontier_reconciliation = _review_indeterminate_rows(
-            rows,
+            replayable_rows,
             claims_file=claims_target,
             history_file=history_target,
             now=current_time,
@@ -2155,6 +2228,7 @@ def run_pending_queue(
             max_bytes=byte_limit,
             eligible_keys=eligible_keys,
             eligible_sources=eligible_sources,
+            semantic_deferred_raws=semantic_deferred_raws,
         )
         # Persist history reconciliation, duplicate collapse and legacy schema
         # normalization before running any expensive candidate.
@@ -2163,10 +2237,30 @@ def run_pending_queue(
         by_key = {str(row["key"]): row for row in rows}
         runs: list[dict[str, Any]] = []
         budget_deferred: list[dict[str, Any]] = []
+        semantic_deferred: list[dict[str, Any]] = []
         authorization_rejected: list[dict[str, Any]] = []
+
+        def semantic_hold_is_active(row: dict[str, Any]) -> bool:
+            if _raw_name(row) not in _active_terminal_semantic_deferred_raw_names():
+                return False
+            semantic_deferred.append(
+                {
+                    "key": row.get("key"),
+                    "raw": row.get("raw"),
+                    "reason": "semantic_no_quorum",
+                }
+            )
+            return True
+
         for selected_row in selected:
+            if semantic_hold_is_active(selected_row):
+                continue
             raw_bytes = _nonnegative_int(selected_row.get("bytes"))
             charge_bytes = raw_bytes if raw_bytes <= byte_limit else 0
+            bytes_allowed = True
+            bytes_reason: str | None = None
+            mutation_allowed = True
+            mutation_reason: str | None = None
             if budget is not None:
                 bytes_allowed, bytes_reason = (
                     budget.can_consume("raw_bytes", charge_bytes)
@@ -2174,6 +2268,13 @@ def run_pending_queue(
                     else (True, None)
                 )
                 mutation_allowed, mutation_reason = budget.can_consume("mutation")
+                # Budget preflight is user-injectable and may overlap a normal
+                # ingest publishing a terminal semantic hold.  Recheck before
+                # either classifying a budget defer or consuming a counter so
+                # the authority-bound semantic state remains the terminal
+                # reason for this attempt.
+                if semantic_hold_is_active(selected_row):
+                    continue
                 if not bytes_allowed or not mutation_allowed:
                     budget_deferred.append(
                         {
@@ -2185,9 +2286,6 @@ def run_pending_queue(
                         }
                     )
                     continue
-                if charge_bytes:
-                    budget.consume("raw_bytes", charge_bytes)
-                budget.consume("mutation")
 
             requires_semantic_authorization = (
                 selected_row.get("frontier_decision") == "safe_replay"
@@ -2205,6 +2303,8 @@ def run_pending_queue(
                         claims_file=claims_target,
                         injected_reviewer=frontier_reviewer is not None,
                     )
+                    if semantic_hold_is_active(selected_row):
+                        continue
                     if approval_error is not None:
                         updated = _invalidate_safe_replay_authorization(
                             selected_row,
@@ -2241,6 +2341,40 @@ def run_pending_queue(
                             }
                         )
                         continue
+
+                # This is the last non-budget authority check before the
+                # at-most-once launch boundary.  It prevents an authority
+                # validation race from turning a terminal semantic split into
+                # a replay attempt.
+                if semantic_hold_is_active(selected_row):
+                    continue
+
+                if budget is not None:
+                    if charge_bytes:
+                        bytes_allowed, bytes_reason = budget.consume(
+                            "raw_bytes", charge_bytes
+                        )
+                    mutation_allowed, mutation_reason = budget.consume("mutation")
+                    if semantic_hold_is_active(selected_row):
+                        continue
+                    if not bytes_allowed or not mutation_allowed:
+                        budget_deferred.append(
+                            {
+                                "key": selected_row.get("key"),
+                                "raw": selected_row.get("raw"),
+                                "reason": bytes_reason
+                                if not bytes_allowed
+                                else mutation_reason,
+                            }
+                        )
+                        continue
+
+                # CycleBudget has deliberately conservative counters and no
+                # refund contract.  If a hold is published during consume(),
+                # retain the charge but never create a job, write a running
+                # marker, or invoke ingest.
+                if semantic_hold_is_active(selected_row):
+                    continue
 
                 candidate = selected_row
                 candidate_path = _resolve_raw_path(
@@ -2317,6 +2451,7 @@ def run_pending_queue(
             "runs": runs,
             "count": len(runs),
             "budget_deferred": budget_deferred,
+            "semantic_deferred": semantic_deferred,
             "authorization_rejected": authorization_rejected,
             "reconciled": reconciled,
             "frontier_reconciliation": frontier_reconciliation,

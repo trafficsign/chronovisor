@@ -44,9 +44,11 @@ const els = {
   pendingCurrent: document.getElementById("pending-current"),
   pendingDelta: document.getElementById("pending-delta"),
   pendingRate: document.getElementById("pending-rate"),
+  pendingDeferred: document.getElementById("pending-deferred"),
   pendingEta: document.getElementById("pending-eta"),
   batchCaption: document.getElementById("batch-caption"),
   batchOk: document.getElementById("batch-ok"),
+  batchDeferred: document.getElementById("batch-deferred"),
   batchFailed: document.getElementById("batch-failed"),
   batchDuration: document.getElementById("batch-duration"),
   saveTotal: document.getElementById("save-total"),
@@ -251,7 +253,7 @@ function roundRect(ctx, x, y, width, height, radius) {
 function metricScore(row) {
   let score = 0;
   if (row.kind === "batch") score += 4;
-  if (numeric(row.files_failed)) score += 2;
+  if (numeric(row.files_failed) || numeric(row.files_deferred)) score += 2;
   if (numeric(row.elapsed_seconds)) score += 1;
   return score;
 }
@@ -521,13 +523,14 @@ function saveLoadRows(saveHistory, status) {
       .map((segment) => ({
         name: fmt(segment.name, "raw"),
         bytes: intValue(segment.bytes),
-        status: ["processed", "pending", "failed"].includes(segment.status) ? segment.status : "pending",
+        status: ["processed", "pending", "deferred", "failed"].includes(segment.status) ? segment.status : "pending",
         source: fmt(segment.source, "raw"),
       }))
       .filter((segment) => segment.bytes > 0);
     if (!segments.length && intValue(day.raw_bytes)) {
       [
         ["processed", intValue(day.processed_bytes)],
+        ["deferred", intValue(day.deferred_bytes)],
         ["failed", intValue(day.failed_bytes)],
         ["pending", intValue(day.pending_bytes)],
       ].forEach(([statusName, bytes]) => {
@@ -538,12 +541,14 @@ function saveLoadRows(saveHistory, status) {
     }
     const total = segments.reduce((sum, segment) => sum + segment.bytes, 0);
     const processed = segments.filter((segment) => segment.status === "processed").reduce((sum, segment) => sum + segment.bytes, 0);
+    const deferred = segments.filter((segment) => segment.status === "deferred").reduce((sum, segment) => sum + segment.bytes, 0);
     const failed = segments.filter((segment) => segment.status === "failed").reduce((sum, segment) => sum + segment.bytes, 0);
-    const pending = Math.max(0, total - processed - failed);
+    const pending = Math.max(0, total - processed - deferred - failed);
     return {
       date: day.date,
       total,
       processed,
+      deferred,
       failed,
       pending,
       segments,
@@ -559,6 +564,9 @@ function segmentColor(status, bytes, maxBytes) {
   }
   if (status === "pending") {
     return `hsl(187, 72%, ${32 + ratio * 28}%)`;
+  }
+  if (status === "deferred") {
+    return `hsl(274, 58%, ${46 + ratio * 22}%)`;
   }
   return `hsl(126, 43%, ${40 + ratio * 30}%)`;
 }
@@ -600,7 +608,8 @@ function showSaveLoadTooltip(region, x, y) {
   const raw = document.createElement("span");
   raw.textContent = region.name;
   const meta = document.createElement("small");
-  meta.textContent = `${region.status} · ${region.source}`;
+  const statusLabel = region.status === "deferred" ? "semantic deferred" : region.status;
+  meta.textContent = `${statusLabel} · ${region.source}`;
   els.saveLoadTooltip.append(title, raw, meta);
   const parent = els.pendingChart.parentElement;
   const maxLeft = Math.max(0, (parent?.clientWidth || 0) - 220);
@@ -646,13 +655,15 @@ function drawLineChart(canvas, saveHistory, status = {}) {
     acc.total += row.total;
     acc.processed += row.processed;
     acc.pending += row.pending;
+    acc.deferred += row.deferred;
     acc.failed += row.failed;
     return acc;
-  }, { total: 0, processed: 0, pending: 0, failed: 0 });
+  }, { total: 0, processed: 0, pending: 0, deferred: 0, failed: 0 });
 
   els.pendingCurrent.textContent = formatBytes(totals.total);
   els.pendingDelta.textContent = formatBytes(totals.processed);
   els.pendingRate.textContent = formatBytes(totals.pending);
+  els.pendingDeferred.textContent = formatBytes(totals.deferred);
   els.pendingEta.textContent = formatBytes(totals.failed);
   els.trendCaption.textContent = rows.length
     ? `${dateKeyLabel(rows[0].date)}-${dateKeyLabel(rows[rows.length - 1].date)} · ${formatBytes(totals.total)} saved`
@@ -709,11 +720,16 @@ function drawLineChart(canvas, saveHistory, status = {}) {
   ctx.setLineDash([]);
   ctx.fillStyle = "rgba(169,164,148,0.9)";
   ctx.fillText("pending", pad.left + 114, 13);
-  ctx.fillStyle = "#f0bc62";
+  ctx.fillStyle = "#b986dc";
   roundRect(ctx, pad.left + 176, 9, 16, 8, 4);
   ctx.fill();
   ctx.fillStyle = "rgba(169,164,148,0.9)";
-  ctx.fillText("failed", pad.left + 198, 13);
+  ctx.fillText("deferred", pad.left + 198, 13);
+  ctx.fillStyle = "#f0bc62";
+  roundRect(ctx, pad.left + 268, 9, 16, 8, 4);
+  ctx.fill();
+  ctx.fillStyle = "rgba(169,164,148,0.9)";
+  ctx.fillText("failed", pad.left + 290, 13);
 
   const pulse = 0.48 + 0.32 * Math.sin(Date.now() / 170);
   rows.forEach((row, index) => {
@@ -787,19 +803,21 @@ function drawBatchChart(canvas, rows, status) {
   ctx.clearRect(0, 0, width, height);
 
   const completed = completedRows(rows)
-    .filter((row) => numeric(row.files_processed) || numeric(row.files_failed))
+    .filter((row) => numeric(row.files_processed) || numeric(row.files_deferred) || numeric(row.files_failed))
     .slice(-6)
     .map((row) => {
       const processed = row.files_processed || 0;
+      const deferred = row.files_deferred || 0;
       const failed = numeric(row.files_failed)
         ? row.files_failed
-        : Math.max(0, (row.files_attempted || processed) - processed);
+        : Math.max(0, (row.files_attempted || processed + deferred) - processed - deferred);
       return {
         label: timeLabel(row.timestamp),
         sub: numeric(row.pending_before) ? `${row.pending_before}->${row.pending_after}` : "batch",
         processed,
+        deferred,
         failed,
-        attempted: row.files_attempted || processed + failed || processed,
+        attempted: row.files_attempted || processed + deferred + failed || processed,
         elapsed: row.elapsed_seconds,
         live: false,
       };
@@ -811,6 +829,7 @@ function drawBatchChart(canvas, rows, status) {
       label: "live",
       sub: `${batch.index || 0}/${batch.total}`,
       processed: batch.succeeded || 0,
+      deferred: batch.deferred || 0,
       failed: batch.failed || 0,
       attempted: batch.total,
       live: true,
@@ -819,10 +838,12 @@ function drawBatchChart(canvas, rows, status) {
 
   const data = completed.slice(-7);
   const totalOk = completed.filter((row) => !row.live).reduce((sum, row) => sum + row.processed, 0);
+  const totalDeferred = completed.filter((row) => !row.live).reduce((sum, row) => sum + row.deferred, 0);
   const totalFailed = completed.filter((row) => !row.live).reduce((sum, row) => sum + row.failed, 0);
   const durations = completed.filter((row) => !row.live && numeric(row.elapsed)).map((row) => row.elapsed);
   const avgDuration = durations.length ? durations.reduce((sum, value) => sum + value, 0) / durations.length : null;
   els.batchOk.textContent = totalOk ? String(totalOk) : "--";
+  els.batchDeferred.textContent = String(totalDeferred);
   els.batchFailed.textContent = totalFailed ? String(totalFailed) : "0";
   els.batchDuration.textContent = compactDuration(avgDuration);
   els.batchCaption.textContent = data.length ? `${Math.max(0, data.length - (batch.active === true ? 1 : 0))} batches` : "waiting";
@@ -839,7 +860,7 @@ function drawBatchChart(canvas, rows, status) {
   const rowHeight = Math.max(22, (height - pad.top - pad.bottom - rowGap * (data.length - 1)) / data.length);
   const barHeight = Math.min(18, rowHeight * 0.56);
   const barWidth = Math.max(80, width - pad.left - pad.right);
-  const maxTotal = Math.max(1, ...data.map((row) => row.attempted || row.processed + row.failed));
+  const maxTotal = Math.max(1, ...data.map((row) => row.attempted || row.processed + row.deferred + row.failed));
 
   ctx.save();
   ctx.font = "11px system-ui";
@@ -851,9 +872,14 @@ function drawBatchChart(canvas, rows, status) {
   roundRect(ctx, pad.left + 18, 8, 16, 8, 4);
   ctx.fill();
   ctx.fillStyle = "rgba(169,164,148,0.88)";
-  ctx.fillText("failed", pad.left + 44, 14);
+  ctx.fillText("deferred", pad.left + 44, 14);
+  ctx.fillStyle = "#b986dc";
+  roundRect(ctx, pad.left + 94, 8, 16, 8, 4);
+  ctx.fill();
+  ctx.fillStyle = "rgba(169,164,148,0.88)";
+  ctx.fillText("failed", pad.left + 120, 14);
   ctx.fillStyle = "#f0bc62";
-  roundRect(ctx, pad.left + 88, 8, 16, 8, 4);
+  roundRect(ctx, pad.left + 164, 8, 16, 8, 4);
   ctx.fill();
 
   for (let i = 0; i <= 2; i += 1) {
@@ -869,8 +895,9 @@ function drawBatchChart(canvas, rows, status) {
     const y = pad.top + index * (rowHeight + rowGap);
     const barY = y + (rowHeight - barHeight) / 2;
     const processedWidth = (barWidth * row.processed) / maxTotal;
+    const deferredWidth = (barWidth * row.deferred) / maxTotal;
     const failedWidth = (barWidth * row.failed) / maxTotal;
-    const attemptedWidth = (barWidth * (row.attempted || row.processed + row.failed)) / maxTotal;
+    const attemptedWidth = (barWidth * (row.attempted || row.processed + row.deferred + row.failed)) / maxTotal;
 
     ctx.fillStyle = row.live ? "rgba(102,217,232,0.13)" : "rgba(242,239,229,0.08)";
     roundRect(ctx, pad.left, barY, Math.max(2, attemptedWidth), barHeight, 7);
@@ -883,7 +910,12 @@ function drawBatchChart(canvas, rows, status) {
     }
     if (row.failed) {
       ctx.fillStyle = "#f0bc62";
-      roundRect(ctx, pad.left + processedWidth, barY, Math.max(2, failedWidth), barHeight, 7);
+      roundRect(ctx, pad.left + processedWidth + deferredWidth, barY, Math.max(2, failedWidth), barHeight, 7);
+      ctx.fill();
+    }
+    if (row.deferred) {
+      ctx.fillStyle = "#b986dc";
+      roundRect(ctx, pad.left + processedWidth, barY, Math.max(2, deferredWidth), barHeight, 7);
       ctx.fill();
     }
     if (row.live) {
@@ -903,8 +935,11 @@ function drawBatchChart(canvas, rows, status) {
     ctx.font = "10px system-ui";
     ctx.fillText(row.sub, pad.left - 12, y + rowHeight * 0.74);
 
-    const count = row.failed ? `${row.processed} ok ${row.failed} fail` : `${row.processed} ok`;
-    ctx.fillStyle = row.failed ? "#f0bc62" : "rgba(242,239,229,0.9)";
+    const countParts = [`${row.processed} ok`];
+    if (row.deferred) countParts.push(`${row.deferred} defer`);
+    if (row.failed) countParts.push(`${row.failed} fail`);
+    const count = countParts.join(" ");
+    ctx.fillStyle = row.failed ? "#f0bc62" : row.deferred ? "#b986dc" : "rgba(242,239,229,0.9)";
     ctx.font = "700 12px system-ui";
     ctx.textAlign = "left";
     ctx.fillText(count, pad.left + barWidth + 10, barY + barHeight / 2);
@@ -1140,6 +1175,7 @@ function saveTooltip(day, value) {
     day.date,
     metric,
     `${intValue(day.processed)} processed`,
+    `${intValue(day.deferred)} deferred`,
     `${intValue(day.failed)} failed`,
     `${pages} page changes`,
     `sources: ${formatSources(day.sources)}`,
@@ -1196,6 +1232,7 @@ function renderSaveDetail(day) {
   [
     ["saved", intValue(day.raw_saved)],
     ["processed", intValue(day.processed)],
+    ["deferred", intValue(day.deferred)],
     ["created", intValue(day.pages_created)],
     ["updated", intValue(day.pages_updated)],
     ["failed", intValue(day.failed)],
@@ -1842,11 +1879,16 @@ function render(snapshot) {
 
   setState(status.state);
   els.pending.textContent = fmt(status.pending);
-  els.pendingSub.textContent = `updated ${timeLabel(status.updated_at)}`;
+  const semanticDeferred = intValue(status.semantic_deferred?.count);
+  els.pendingSub.textContent = semanticDeferred
+    ? `${semanticDeferred} semantic held · updated ${timeLabel(status.updated_at)}`
+    : `updated ${timeLabel(status.updated_at)}`;
   els.stage.textContent = fmt(status.stage);
   els.raw.textContent = shortName(status.current_raw || "no active raw");
   els.batch.textContent = batch.total ? `${batch.index || 0}/${batch.total}` : "--";
-  els.batchSub.textContent = batch.total ? `${batch.succeeded || 0} ok / ${batch.failed || 0} miss` : "waiting";
+  els.batchSub.textContent = batch.total
+    ? `${batch.succeeded || 0} ok / ${batch.deferred || 0} deferred / ${batch.failed || 0} fail`
+    : "waiting";
   els.ollama.textContent = modelStatus.available || ollama.available ? "online" : "offline";
   els.ollamaSub.textContent = modelSummary.installed !== undefined
     ? `${intValue(modelSummary.loaded)} loaded · ${intValue(modelSummary.installed)} installed`
