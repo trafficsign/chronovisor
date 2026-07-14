@@ -427,7 +427,7 @@ def classify_failure(message: str | None) -> FailureRecord:
         )
 
     structured_failure = re.search(
-        r"triage structured failure \[([^\]]+)\]:\s*(.*)",
+        r"(?:triage|local consensus) structured failure \[([^\]]+)\]:\s*(.*)",
         msg,
         flags=re.IGNORECASE | re.DOTALL,
     )

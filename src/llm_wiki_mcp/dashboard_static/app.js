@@ -49,6 +49,7 @@ const els = {
   batchCaption: document.getElementById("batch-caption"),
   batchOk: document.getElementById("batch-ok"),
   batchDeferred: document.getElementById("batch-deferred"),
+  batchContinued: document.getElementById("batch-continued"),
   batchFailed: document.getElementById("batch-failed"),
   batchDuration: document.getElementById("batch-duration"),
   saveTotal: document.getElementById("save-total"),
@@ -803,21 +804,23 @@ function drawBatchChart(canvas, rows, status) {
   ctx.clearRect(0, 0, width, height);
 
   const completed = completedRows(rows)
-    .filter((row) => numeric(row.files_processed) || numeric(row.files_deferred) || numeric(row.files_failed))
+    .filter((row) => numeric(row.files_processed) || numeric(row.files_deferred) || numeric(row.files_continued) || numeric(row.files_failed))
     .slice(-6)
     .map((row) => {
       const processed = row.files_processed || 0;
       const deferred = row.files_deferred || 0;
+      const continued = row.files_continued || 0;
       const failed = numeric(row.files_failed)
         ? row.files_failed
-        : Math.max(0, (row.files_attempted || processed + deferred) - processed - deferred);
+        : Math.max(0, (row.files_attempted || processed + deferred + continued) - processed - deferred - continued);
       return {
         label: timeLabel(row.timestamp),
         sub: numeric(row.pending_before) ? `${row.pending_before}->${row.pending_after}` : "batch",
         processed,
         deferred,
+        continued,
         failed,
-        attempted: row.files_attempted || processed + deferred + failed || processed,
+        attempted: row.files_attempted || processed + deferred + continued + failed || processed,
         elapsed: row.elapsed_seconds,
         live: false,
       };
@@ -830,6 +833,7 @@ function drawBatchChart(canvas, rows, status) {
       sub: `${batch.index || 0}/${batch.total}`,
       processed: batch.succeeded || 0,
       deferred: batch.deferred || 0,
+      continued: batch.continued || 0,
       failed: batch.failed || 0,
       attempted: batch.total,
       live: true,
@@ -839,11 +843,13 @@ function drawBatchChart(canvas, rows, status) {
   const data = completed.slice(-7);
   const totalOk = completed.filter((row) => !row.live).reduce((sum, row) => sum + row.processed, 0);
   const totalDeferred = completed.filter((row) => !row.live).reduce((sum, row) => sum + row.deferred, 0);
+  const totalContinued = completed.filter((row) => !row.live).reduce((sum, row) => sum + row.continued, 0);
   const totalFailed = completed.filter((row) => !row.live).reduce((sum, row) => sum + row.failed, 0);
   const durations = completed.filter((row) => !row.live && numeric(row.elapsed)).map((row) => row.elapsed);
   const avgDuration = durations.length ? durations.reduce((sum, value) => sum + value, 0) / durations.length : null;
   els.batchOk.textContent = totalOk ? String(totalOk) : "--";
   els.batchDeferred.textContent = String(totalDeferred);
+  els.batchContinued.textContent = String(totalContinued);
   els.batchFailed.textContent = totalFailed ? String(totalFailed) : "0";
   els.batchDuration.textContent = compactDuration(avgDuration);
   els.batchCaption.textContent = data.length ? `${Math.max(0, data.length - (batch.active === true ? 1 : 0))} batches` : "waiting";
@@ -860,7 +866,7 @@ function drawBatchChart(canvas, rows, status) {
   const rowHeight = Math.max(22, (height - pad.top - pad.bottom - rowGap * (data.length - 1)) / data.length);
   const barHeight = Math.min(18, rowHeight * 0.56);
   const barWidth = Math.max(80, width - pad.left - pad.right);
-  const maxTotal = Math.max(1, ...data.map((row) => row.attempted || row.processed + row.deferred + row.failed));
+  const maxTotal = Math.max(1, ...data.map((row) => row.attempted || row.processed + row.deferred + row.continued + row.failed));
 
   ctx.save();
   ctx.font = "11px system-ui";
@@ -877,9 +883,14 @@ function drawBatchChart(canvas, rows, status) {
   roundRect(ctx, pad.left + 94, 8, 16, 8, 4);
   ctx.fill();
   ctx.fillStyle = "rgba(169,164,148,0.88)";
-  ctx.fillText("failed", pad.left + 120, 14);
+  ctx.fillText("continued", pad.left + 120, 14);
+  ctx.fillStyle = "#66d9e8";
+  roundRect(ctx, pad.left + 176, 8, 16, 8, 4);
+  ctx.fill();
+  ctx.fillStyle = "rgba(169,164,148,0.88)";
+  ctx.fillText("failed", pad.left + 202, 14);
   ctx.fillStyle = "#f0bc62";
-  roundRect(ctx, pad.left + 164, 8, 16, 8, 4);
+  roundRect(ctx, pad.left + 246, 8, 16, 8, 4);
   ctx.fill();
 
   for (let i = 0; i <= 2; i += 1) {
@@ -896,8 +907,9 @@ function drawBatchChart(canvas, rows, status) {
     const barY = y + (rowHeight - barHeight) / 2;
     const processedWidth = (barWidth * row.processed) / maxTotal;
     const deferredWidth = (barWidth * row.deferred) / maxTotal;
+    const continuedWidth = (barWidth * row.continued) / maxTotal;
     const failedWidth = (barWidth * row.failed) / maxTotal;
-    const attemptedWidth = (barWidth * (row.attempted || row.processed + row.deferred + row.failed)) / maxTotal;
+    const attemptedWidth = (barWidth * (row.attempted || row.processed + row.deferred + row.continued + row.failed)) / maxTotal;
 
     ctx.fillStyle = row.live ? "rgba(102,217,232,0.13)" : "rgba(242,239,229,0.08)";
     roundRect(ctx, pad.left, barY, Math.max(2, attemptedWidth), barHeight, 7);
@@ -910,12 +922,17 @@ function drawBatchChart(canvas, rows, status) {
     }
     if (row.failed) {
       ctx.fillStyle = "#f0bc62";
-      roundRect(ctx, pad.left + processedWidth + deferredWidth, barY, Math.max(2, failedWidth), barHeight, 7);
+      roundRect(ctx, pad.left + processedWidth + deferredWidth + continuedWidth, barY, Math.max(2, failedWidth), barHeight, 7);
       ctx.fill();
     }
     if (row.deferred) {
       ctx.fillStyle = "#b986dc";
       roundRect(ctx, pad.left + processedWidth, barY, Math.max(2, deferredWidth), barHeight, 7);
+      ctx.fill();
+    }
+    if (row.continued) {
+      ctx.fillStyle = "#66d9e8";
+      roundRect(ctx, pad.left + processedWidth + deferredWidth, barY, Math.max(2, continuedWidth), barHeight, 7);
       ctx.fill();
     }
     if (row.live) {
@@ -937,9 +954,10 @@ function drawBatchChart(canvas, rows, status) {
 
     const countParts = [`${row.processed} ok`];
     if (row.deferred) countParts.push(`${row.deferred} defer`);
+    if (row.continued) countParts.push(`${row.continued} continue`);
     if (row.failed) countParts.push(`${row.failed} fail`);
     const count = countParts.join(" ");
-    ctx.fillStyle = row.failed ? "#f0bc62" : row.deferred ? "#b986dc" : "rgba(242,239,229,0.9)";
+    ctx.fillStyle = row.failed ? "#f0bc62" : row.deferred ? "#b986dc" : row.continued ? "#66d9e8" : "rgba(242,239,229,0.9)";
     ctx.font = "700 12px system-ui";
     ctx.textAlign = "left";
     ctx.fillText(count, pad.left + barWidth + 10, barY + barHeight / 2);
@@ -1887,7 +1905,7 @@ function render(snapshot) {
   els.raw.textContent = shortName(status.current_raw || "no active raw");
   els.batch.textContent = batch.total ? `${batch.index || 0}/${batch.total}` : "--";
   els.batchSub.textContent = batch.total
-    ? `${batch.succeeded || 0} ok / ${batch.deferred || 0} deferred / ${batch.failed || 0} fail`
+    ? `${batch.succeeded || 0} ok / ${batch.deferred || 0} deferred / ${batch.continued || 0} continued / ${batch.failed || 0} fail`
     : "waiting";
   els.ollama.textContent = modelStatus.available || ollama.available ? "online" : "offline";
   els.ollamaSub.textContent = modelSummary.installed !== undefined
@@ -1934,6 +1952,10 @@ function render(snapshot) {
 
 let refreshInFlight = null;
 const SNAPSHOT_TIMEOUT_MS = 180000;
+const ACTIVE_REFRESH_DELAY_MS = 5000;
+const IDLE_REFRESH_DELAY_MS = 10000;
+const ERROR_REFRESH_DELAY_MS = 5000;
+let nextRefreshDelayMs = IDLE_REFRESH_DELAY_MS;
 
 function refresh() {
   if (refreshInFlight !== null) return refreshInFlight;
@@ -1946,8 +1968,22 @@ function refresh() {
         signal: controller.signal,
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      render(await response.json());
+      const snapshot = await response.json();
+      render(snapshot);
+      const status = snapshot.status || {};
+      const batch = status.batch || {};
+      const llm = status.llm || {};
+      const localConsensus = status.local_consensus || {};
+      const frontierRepair = status.frontier_repair || {};
+      nextRefreshDelayMs = (
+        status.state === "running"
+        || batch.active === true
+        || llm.active === true
+        || localConsensus.active === true
+        || frontierRepair.active === true
+      ) ? ACTIVE_REFRESH_DELAY_MS : IDLE_REFRESH_DELAY_MS;
     } catch (error) {
+      nextRefreshDelayMs = ERROR_REFRESH_DELAY_MS;
       setState("error");
       els.stateText.textContent = "disconnected";
       els.eventFeed.textContent = "";
@@ -1970,7 +2006,7 @@ async function refreshLoop() {
   } catch {
     // refresh() reports normal fetch failures; keep polling after unexpected ones.
   } finally {
-    window.setTimeout(refreshLoop, 1000);
+    window.setTimeout(refreshLoop, nextRefreshDelayMs);
   }
 }
 

@@ -74,11 +74,19 @@ ACTIVE_BATCH_STAGES = {
     "apply",
 }
 DECISION_ROUTER_DASHBOARD_CACHE_SECONDS = 15.0
+SNAPSHOT_ACTIVE_CACHE_SECONDS = 5.0
+SNAPSHOT_IDLE_CACHE_SECONDS = 60.0
 _DECISION_ROUTER_CACHE_LOCK = threading.Lock()
 _DECISION_ROUTER_CACHE: dict[str, Any] = {
     "key": None,
     "expires_at": 0.0,
     "config": None,
+}
+_SNAPSHOT_CACHE_LOCK = threading.Lock()
+_SNAPSHOT_CACHE: dict[str, Any] = {
+    "built_at": 0.0,
+    "fingerprint": None,
+    "snapshot": None,
 }
 
 
@@ -465,6 +473,7 @@ def _drain_history(limit: int = 200) -> list[dict[str, Any]]:
                     "files_processed": data.get("files_processed"),
                     "files_attempted": result_count("files_attempted"),
                     "files_deferred": result_count("files_deferred", 0),
+                    "files_continued": result_count("files_continued", 0),
                     "files_failed": result_count("files_failed"),
                     "elapsed_seconds": result.get("elapsed_seconds"),
                     "batch": data.get("batch"),
@@ -655,6 +664,7 @@ def _new_save_day(day: date) -> dict[str, Any]:
         "attempted": 0,
         "succeeded": 0,
         "deferred": 0,
+        "continued": 0,
         "failed": 0,
         "pages_created": 0,
         "pages_updated": 0,
@@ -786,13 +796,19 @@ def _projection_save_states(
     raw_files: dict[str, dict[str, Any]],
     raw_paths: list[Path],
     processed_raw_names: set[str],
+    *,
+    deferred_statuses: dict[str, str] | None = None,
 ) -> tuple[set[str], set[str]]:
     """Return active semantic-deferred and unresolved-pending saved raws."""
 
-    deferred_statuses = _operational_deferred_raw_statuses(raw_paths)
+    active_deferred = (
+        deferred_statuses
+        if deferred_statuses is not None
+        else _operational_deferred_raw_statuses(raw_paths)
+    )
     semantic_deferred_raws = {
         name
-        for name, reason in deferred_statuses.items()
+        for name, reason in active_deferred.items()
         if reason == "semantic_no_quorum"
     }
     saved_names = set(raw_files)
@@ -819,7 +835,11 @@ def _projection_save_states(
 
 
 def _save_history_snapshot(
-    days: int = 371, today: date | None = None
+    days: int = 371,
+    today: date | None = None,
+    *,
+    raw_paths: list[Path] | None = None,
+    deferred_statuses: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     end = today or datetime.now().date()
     start = end - timedelta(days=max(1, days) - 1)
@@ -833,7 +853,13 @@ def _save_history_snapshot(
     raw_dir = WIKI_ROOT / "raw"
     raw_files: dict[str, dict[str, Any]] = {}
     raw_status: dict[str, str] = {}
-    raw_paths = sorted(raw_dir.glob("*.md")) if raw_dir.exists() else []
+    raw_paths = (
+        list(raw_paths)
+        if raw_paths is not None
+        else sorted(raw_dir.glob("*.md"))
+        if raw_dir.exists()
+        else []
+    )
     if raw_dir.exists():
         for path in raw_paths:
             # Projection children are generated processing artifacts.  The
@@ -887,6 +913,11 @@ def _save_history_snapshot(
                     if isinstance(result.get("files_deferred"), list)
                     else []
                 )
+                continued_files = (
+                    result.get("files_continued")
+                    if isinstance(result.get("files_continued"), list)
+                    else []
+                )
                 per_raw = (
                     result.get("per_raw")
                     if isinstance(result.get("per_raw"), list)
@@ -915,12 +946,18 @@ def _save_history_snapshot(
                             )
                         )
                     )
+                    continued = sum(
+                        1
+                        for item in per_raw
+                        if isinstance(item, dict) and item.get("continued") is True
+                    )
                     failed = sum(
                         1
                         for item in per_raw
                         if isinstance(item, dict)
                         and item.get("succeeded") is False
                         and item.get("deferred") is not True
+                        and item.get("continued") is not True
                         and not (
                             isinstance(item.get("supervision"), dict)
                             and item["supervision"].get("terminal_deferred") is True
@@ -930,12 +967,14 @@ def _save_history_snapshot(
                     attempted = len(attempted_files) or processed
                     succeeded = processed
                     deferred = len(deferred_files)
-                    failed = max(0, attempted - succeeded - deferred)
+                    continued = len(continued_files)
+                    failed = max(0, attempted - succeeded - deferred - continued)
 
                 row["processed"] += processed
                 row["attempted"] += attempted
                 row["succeeded"] += succeeded
                 row["deferred"] += deferred
+                row["continued"] += continued
                 row["failed"] += failed
                 for filename in processed_files:
                     if isinstance(filename, str):
@@ -960,6 +999,7 @@ def _save_history_snapshot(
                             isinstance(item.get("supervision"), dict)
                             and item["supervision"].get("terminal_deferred") is True
                         )
+                        item_continued = item.get("continued") is True
                         if item.get("succeeded") is True:
                             for status_filename in status_filenames:
                                 raw_status[status_filename] = "processed"
@@ -973,6 +1013,10 @@ def _save_history_snapshot(
                                     # until a later attempt establishes a new
                                     # terminal state.
                                     raw_status[status_filename] = "deferred"
+                        elif item_continued:
+                            for status_filename in status_filenames:
+                                if raw_status.get(status_filename) != "processed":
+                                    raw_status[status_filename] = "continued"
                         else:
                             for status_filename in status_filenames:
                                 if raw_status.get(status_filename) != "processed":
@@ -984,6 +1028,9 @@ def _save_history_snapshot(
                     deferred_names = {
                         name for name in deferred_files if isinstance(name, str)
                     }
+                    continued_names = {
+                        name for name in continued_files if isinstance(name, str)
+                    }
                     for filename in deferred_names:
                         if raw_status.get(filename) != "processed":
                             raw_status[filename] = "deferred"
@@ -992,6 +1039,7 @@ def _save_history_snapshot(
                             isinstance(filename, str)
                             and filename not in processed_names
                             and filename not in deferred_names
+                            and filename not in continued_names
                             and raw_status.get(filename) != "processed"
                         ):
                             raw_status[filename] = "failed"
@@ -1021,6 +1069,7 @@ def _save_history_snapshot(
         raw_files,
         raw_paths,
         processed_raw_names,
+        deferred_statuses=deferred_statuses,
     )
 
     try:
@@ -1054,6 +1103,7 @@ def _save_history_snapshot(
         "attempted": 0,
         "succeeded": 0,
         "deferred": 0,
+        "continued": 0,
         "failed": 0,
         "pages_created": 0,
         "pages_updated": 0,
@@ -1120,6 +1170,7 @@ def _save_history_snapshot(
             "attempted",
             "succeeded",
             "deferred",
+            "continued",
             "failed",
             "pages_created",
             "pages_updated",
@@ -2146,9 +2197,22 @@ def build_snapshot() -> dict[str, Any]:
     init_wiki()
     cached_status = runtime_status.read_status()
     orch_state = orchestrator._load_state()
-    pending = len(orchestrator.get_pending_raw_files())
-    deferred_statuses = _operational_deferred_raw_statuses(
-        sorted((WIKI_ROOT / "raw").glob("*.md"))
+    raw_paths = sorted((WIKI_ROOT / "raw").glob("*.md"))
+    deferred_statuses = _operational_deferred_raw_statuses(raw_paths)
+    processed_raw_files = orch_state.get("processed_raw_files")
+    processed_raw_names = (
+        {name for name in processed_raw_files if isinstance(name, str)}
+        if isinstance(processed_raw_files, list)
+        else set()
+    )
+    from llm_wiki_mcp.raw_replay import is_raw_retracted
+
+    pending = sum(
+        1
+        for raw_path in raw_paths
+        if raw_path.name not in processed_raw_names
+        and raw_path.name not in deferred_statuses
+        and not is_raw_retracted(raw_path)
     )
     semantic_deferred_names = sorted(
         raw_file
@@ -2254,6 +2318,7 @@ def build_snapshot() -> dict[str, Any]:
             "pending_after": pending,
             "files_processed": 0,
             "files_deferred": 0,
+            "files_continued": 0,
             "files_failed": 0,
         }
     )
@@ -2314,7 +2379,10 @@ def build_snapshot() -> dict[str, Any]:
         ),
         "save_history": _safe_snapshot_component(
             "save_history",
-            _save_history_snapshot,
+            lambda: _save_history_snapshot(
+                raw_paths=raw_paths,
+                deferred_statuses=deferred_statuses,
+            ),
             {"days": [], "recent": [], "totals": {}, "sources": []},
         ),
         "knowledge_mix": _safe_snapshot_component(
@@ -2334,6 +2402,137 @@ def build_snapshot() -> dict[str, Any]:
     }
 
 
+def _snapshot_source_fingerprint() -> tuple[Any, ...]:
+    """Return a cheap identity for files that make an idle snapshot stale."""
+
+    tracked: list[Path] = [
+        WIKI_ROOT / "raw",
+        WIKI_ROOT / "pages",
+        WIKI_ROOT / "runtime",
+        WIKI_ROOT / "runtime" / "failures" / "state.json",
+        WIKI_ROOT / "runtime" / "failures" / "failure-registry.jsonl",
+        WIKI_ROOT / "runtime" / "convergence" / "state.json",
+        WIKI_ROOT / "runtime" / "local-consensus" / "active",
+        WIKI_ROOT / "runtime" / "local-consensus" / "summary.json",
+        WIKI_ROOT / "runtime" / "local-consensus" / "audit.jsonl",
+        WIKI_ROOT / "runtime" / "frontier-reviews" / "active",
+        WIKI_ROOT / "runtime" / "frontier-repair" / "state.json",
+        WIKI_ROOT / "runtime" / "frontier-repair" / "events.jsonl",
+        WIKI_ROOT / "runtime" / "recall-improvement" / "active-policy.json",
+        WIKI_ROOT / "runtime" / "recall-improvement" / "policy-registry.jsonl",
+        WIKI_ROOT / "runtime" / "recall-improvement" / "schedule-state.json",
+        WIKI_ROOT / "runtime" / "model-lab" / "active-policy.json",
+        WIKI_ROOT / "runtime" / "model-lab" / "state.json",
+        WIKI_ROOT / "runtime" / "model-lab" / "history.jsonl",
+        WIKI_ROOT / "runtime" / "model-lab" / "replay.jsonl",
+        WIKI_ROOT / "review" / "raw-replay-queue.jsonl",
+        WIKI_ROOT / "runtime" / "raw-replay-history.jsonl",
+        WIKI_ROOT / "runtime" / "raw-replay-completions.jsonl",
+        WIKI_ROOT / "recall" / "recall-log.jsonl",
+        WIKI_ROOT / "recall" / "pull-log.jsonl",
+        WIKI_ROOT / "recall" / "calibration.json",
+        WIKI_ROOT / "recall" / "calibration-history.jsonl",
+        WIKI_ROOT / "config.toml",
+        WIKI_ROOT / "recall.toml",
+        LOG_FILE,
+        orchestrator.STATE_FILE,
+        runtime_status.STATUS_FILE,
+        runtime_status.EVENTS_FILE,
+        runtime_status.METRICS_FILE,
+    ]
+    # Existing append-only files do not change their parent directory mtime.
+    # Bound each dynamic tail so the cache check stays cheap while still
+    # observing standalone review activity that does not write status.json.
+    for pattern, limit in (
+        (WIKI_ROOT / "runtime" / "local-consensus" / "active" / "*.json", 16),
+        (WIKI_ROOT / "runtime" / "frontier-reviews" / "active" / "*.json", 8),
+        (WIKI_ROOT / "runtime" / "failures" / "packets" / "*.json", 24),
+        (WIKI_ROOT / "runtime" / "eval" / "*.json", 16),
+        (WIKI_ROOT / "runtime" / "recall-improvement" / "runs" / "*.json", 16),
+        (WIKI_ROOT / "logs" / "ingest-drain-*.jsonl", 14),
+    ):
+        tracked.extend(sorted(pattern.parent.glob(pattern.name))[-limit:])
+    identities: list[tuple[Any, ...]] = []
+    for path in dict.fromkeys(tracked):
+        try:
+            stat = path.stat()
+        except OSError:
+            identities.append((str(path), "missing"))
+            continue
+        identities.append((str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    # Tests and embedded callers may replace the builder without changing the
+    # wiki paths. Binding the callable prevents a cached success from masking
+    # the replacement (or its exception).
+    return (id(build_snapshot), *identities)
+
+
+def _snapshot_is_active(snapshot: dict[str, Any]) -> bool:
+    status = snapshot.get("status")
+    if not isinstance(status, dict):
+        return True
+    batch = status.get("batch") if isinstance(status.get("batch"), dict) else {}
+    llm = status.get("llm") if isinstance(status.get("llm"), dict) else {}
+    local = (
+        status.get("local_consensus")
+        if isinstance(status.get("local_consensus"), dict)
+        else {}
+    )
+    repair = (
+        status.get("frontier_repair")
+        if isinstance(status.get("frontier_repair"), dict)
+        else {}
+    )
+    return bool(
+        status.get("state") == "running"
+        or batch.get("active") is True
+        or llm.get("active") is True
+        or local.get("active") is True
+        or repair.get("active") is True
+    )
+
+
+def _cached_snapshot() -> dict[str, Any]:
+    """Single-flight expensive snapshots and reuse unchanged idle results."""
+
+    with _SNAPSHOT_CACHE_LOCK:
+        # Compute after acquiring the single-flight lock. A request that
+        # waited for another build must compare against the post-build source
+        # state, not the fingerprint it observed before waiting.
+        fingerprint = _snapshot_source_fingerprint()
+        now = time.monotonic()
+        cached = _SNAPSHOT_CACHE.get("snapshot")
+        if isinstance(cached, dict):
+            max_age = (
+                SNAPSHOT_ACTIVE_CACHE_SECONDS
+                if _snapshot_is_active(cached)
+                else SNAPSHOT_IDLE_CACHE_SECONDS
+            )
+            if (
+                _SNAPSHOT_CACHE.get("fingerprint") == fingerprint
+                and now - float(_SNAPSHOT_CACHE.get("built_at") or 0.0) < max_age
+            ):
+                return cached
+
+        snapshot = build_snapshot()
+        post_build_fingerprint = _snapshot_source_fingerprint()
+        _SNAPSHOT_CACHE.update(
+            {
+                "built_at": time.monotonic(),
+                # A write during the multi-component build may have happened
+                # after its component was read. Leave the cache deliberately
+                # unmatched so the next request rebuilds from one stable
+                # source epoch instead of serving false idle for the full TTL.
+                "fingerprint": (
+                    post_build_fingerprint
+                    if post_build_fingerprint == fingerprint
+                    else None
+                ),
+                "snapshot": snapshot,
+            }
+        )
+        return snapshot
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "LLMWikiDashboard/0.1"
 
@@ -2344,43 +2543,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/":
                 _file_response(self, STATIC_DIR / "index.html")
             elif path == "/api/snapshot":
-                _json_response(self, build_snapshot())
+                _json_response(self, _cached_snapshot())
             elif path == "/api/status":
-                _json_response(self, {"status": build_snapshot()["status"]})
+                _json_response(self, {"status": _cached_snapshot()["status"]})
             elif path == "/api/local-consensus":
                 _json_response(
                     self,
-                    {"local_consensus": build_snapshot()["local_consensus"]},
+                    {"local_consensus": _cached_snapshot()["local_consensus"]},
                 )
             elif path == "/api/frontier-repair":
                 _json_response(
                     self,
-                    {"frontier_repair": build_snapshot()["frontier_repair"]},
+                    {"frontier_repair": _cached_snapshot()["frontier_repair"]},
                 )
             elif path == "/api/events":
-                _json_response(self, {"events": build_snapshot()["events"]})
+                _json_response(self, {"events": _cached_snapshot()["events"]})
             elif path == "/api/metrics":
-                _json_response(self, {"metrics": build_snapshot()["metrics"]})
+                _json_response(self, {"metrics": _cached_snapshot()["metrics"]})
             elif path == "/api/self-heal":
-                _json_response(self, {"self_heal": build_snapshot()["self_heal"]})
+                _json_response(self, {"self_heal": _cached_snapshot()["self_heal"]})
             elif path == "/api/recall":
-                _json_response(self, {"recall": build_snapshot()["recall"]})
+                _json_response(self, {"recall": _cached_snapshot()["recall"]})
             elif path == "/api/recall-improvement":
                 _json_response(
-                    self, {"recall_improvement": build_snapshot()["recall_improvement"]}
+                    self,
+                    {"recall_improvement": _cached_snapshot()["recall_improvement"]},
                 )
             elif path == "/api/model-lab":
-                _json_response(self, {"model_lab": build_snapshot()["model_lab"]})
+                _json_response(self, {"model_lab": _cached_snapshot()["model_lab"]})
             elif path == "/api/save-history":
-                _json_response(self, {"save_history": build_snapshot()["save_history"]})
+                _json_response(
+                    self, {"save_history": _cached_snapshot()["save_history"]}
+                )
             elif path == "/api/knowledge-mix":
                 _json_response(
-                    self, {"knowledge_mix": build_snapshot()["knowledge_mix"]}
+                    self, {"knowledge_mix": _cached_snapshot()["knowledge_mix"]}
                 )
             elif path == "/api/health":
-                _json_response(self, {"health": build_snapshot()["health"]})
+                _json_response(self, {"health": _cached_snapshot()["health"]})
             elif path == "/api/model-status":
-                snapshot = build_snapshot()
+                snapshot = _cached_snapshot()
                 _json_response(
                     self,
                     {

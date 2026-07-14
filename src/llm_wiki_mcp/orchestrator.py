@@ -41,6 +41,53 @@ class _CompletionAckResumed(Exception):
     """Internal control signal: semantic work was already durably completed."""
 
 
+def _valid_ingest_review_shard_continuation(value: object) -> bool:
+    """Accept only the exact bounded-progress envelope emitted by ingest."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "kind",
+        "full_proposal_sha256",
+        "manifest_sha256",
+        "approved_shards",
+        "total_shards",
+        "remaining_shards",
+        "review_calls_used",
+        "review_call_limit",
+    }:
+        return False
+    if value.get("schema_version") != 1 or value.get("kind") != (
+        "ingest_review_shard_continuation"
+    ):
+        return False
+    if any(
+        not isinstance(value.get(field), str)
+        or len(value[field]) != 64
+        or any(character not in "0123456789abcdef" for character in value[field])
+        for field in ("full_proposal_sha256", "manifest_sha256")
+    ):
+        return False
+    integer_fields = (
+        "approved_shards",
+        "total_shards",
+        "remaining_shards",
+        "review_calls_used",
+        "review_call_limit",
+    )
+    if any(
+        not isinstance(value.get(field), int) or isinstance(value.get(field), bool)
+        for field in integer_fields
+    ):
+        return False
+    approved = value["approved_shards"]
+    total = value["total_shards"]
+    return (
+        0 <= approved < total
+        and value["remaining_shards"] == total - approved
+        and 0 < value["review_calls_used"] <= value["review_call_limit"]
+    )
+
+
 @contextmanager
 def _cross_process_ingest_lease():
     """Fail closed when another process already owns the ingest batch."""
@@ -883,6 +930,7 @@ def run_pending_ingest(
         job_ids: list[str] = []
         succeeded_filenames: list[str] = []
         deferred_filenames: list[str] = []
+        continued_filenames: list[str] = []
         batch_started = time.time()
 
         # Reserve the batch-wide in-flight slot only after all prerequisites
@@ -907,6 +955,7 @@ def run_pending_ingest(
                 "total": len(filenames),
                 "succeeded": 0,
                 "deferred": 0,
+                "continued": 0,
                 "failed": 0,
                 "files": filenames,
             },
@@ -916,6 +965,7 @@ def run_pending_ingest(
 
         succeeded_units = 0
         deferred_units = 0
+        continued_units = 0
         try:
             for raw_index, unit in enumerate(units, start=1):
                 raw_path = unit.representative
@@ -967,7 +1017,13 @@ def run_pending_ingest(
                         "total": len(units),
                         "succeeded": succeeded_units,
                         "deferred": deferred_units,
-                        "failed": len(per_raw) - succeeded_units - deferred_units,
+                        "continued": continued_units,
+                        "failed": (
+                            len(per_raw)
+                            - succeeded_units
+                            - deferred_units
+                            - continued_units
+                        ),
                         "files": filenames,
                     },
                     ollama=get_ollama_status(),
@@ -1220,6 +1276,18 @@ def run_pending_ingest(
                             )
                         _orch_log(f"orchestrator | raw {fname} ingest exception: {e}")
 
+                job_record = job_store.get(job.job_id)
+                continuation = (
+                    job_record.result.get("ingest_continuation")
+                    if job_record is not None and isinstance(job_record.result, dict)
+                    else None
+                )
+                shard_continuing = bool(
+                    not raw_success_flag[0]
+                    and job_record is not None
+                    and job_record.status is JobStatus.COMPLETED
+                    and _valid_ingest_review_shard_continuation(continuation)
+                )
                 supervision = None
                 if raw_success_flag[0]:
                     succeeded_filenames.extend(source_filenames)
@@ -1234,6 +1302,9 @@ def run_pending_ingest(
                             f"orchestrator | failure supervisor reset failed "
                             f"for {fname}: {e}"
                         )
+                elif shard_continuing:
+                    continued_filenames.extend(source_filenames)
+                    continued_units += 1
                 else:
                     if projection_group_quarantine is not None:
                         supervision = {
@@ -1289,7 +1360,10 @@ def run_pending_ingest(
                     "job_id": job.job_id,
                     "succeeded": raw_success_flag[0],
                     "deferred": semantic_deferred,
+                    "continued": shard_continuing,
                 }
+                if shard_continuing:
+                    raw_result["continuation"] = continuation
                 if unit.fragment_record_sha256 is not None:
                     raw_result["reassembled_fragment_record_sha256"] = (
                         unit.fragment_record_sha256
@@ -1306,7 +1380,7 @@ def run_pending_ingest(
                         "success"
                         if raw_success_flag[0]
                         else "info"
-                        if semantic_deferred
+                        if semantic_deferred or shard_continuing
                         else "warn"
                     ),
                     (
@@ -1314,6 +1388,8 @@ def run_pending_ingest(
                         + (
                             "processed"
                             if raw_success_flag[0]
+                            else "shard review continuation pending"
+                            if shard_continuing
                             else "semantic deferred"
                             if semantic_deferred
                             else "not processed"
@@ -1333,12 +1409,16 @@ def run_pending_ingest(
         _orch_log(
             f"orchestrator | batch done: {len(succeeded_filenames)}/{len(filenames)} "
             f"succeeded, {len(deferred_filenames)} deferred, "
+            f"{len(continued_filenames)} continued, "
             f"{elapsed:.1f}s, jobs={len(job_ids)}"
         )
         pending_after = len(get_pending_raw_files())
         failed_filenames = max(
             0,
-            len(filenames) - len(succeeded_filenames) - len(deferred_filenames),
+            len(filenames)
+            - len(succeeded_filenames)
+            - len(deferred_filenames)
+            - len(continued_filenames),
         )
         runtime_status.safe_append_metric(
             "batch",
@@ -1347,6 +1427,7 @@ def run_pending_ingest(
             files_attempted=len(filenames),
             files_processed=len(succeeded_filenames),
             files_deferred=len(deferred_filenames),
+            files_continued=len(continued_filenames),
             files_failed=failed_filenames,
             elapsed_seconds=round(elapsed, 2),
             processor=get_ollama_status()["processor"],
@@ -1365,7 +1446,10 @@ def run_pending_ingest(
                 "total": len(units),
                 "succeeded": succeeded_units,
                 "deferred": deferred_units,
-                "failed": len(units) - succeeded_units - deferred_units,
+                "continued": continued_units,
+                "failed": (
+                    len(units) - succeeded_units - deferred_units - continued_units
+                ),
                 "elapsed_seconds": round(elapsed, 2),
                 "files": filenames,
             },
@@ -1380,6 +1464,7 @@ def run_pending_ingest(
             "files_attempted": filenames,
             "files_processed": succeeded_filenames,
             "files_deferred": deferred_filenames,
+            "files_continued": continued_filenames,
             "files_failed": failed_filenames,
             "files_quarantined": [
                 name for row in fragment_quarantined for name in row.get("files", [])

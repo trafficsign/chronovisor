@@ -277,6 +277,7 @@ class TestExtractPageBody:
 
 def test_generate_one_supplies_current_date_and_forbids_date_inference(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
 ) -> None:
     from llm_wiki_mcp import ingest
 
@@ -346,6 +347,7 @@ def test_generate_one_supplies_current_date_and_forbids_date_inference(
 )
 def test_generate_one_repairs_missing_end_marker_in_same_logical_session(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
     op_type: str,
     filename: str,
     invalid: str,
@@ -404,6 +406,7 @@ def test_generate_one_repairs_missing_end_marker_in_same_logical_session(
 )
 def test_generate_one_restores_only_transport_attested_terminal_marker(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
     op_type: str,
     filename: str,
     output: str,
@@ -486,6 +489,7 @@ def test_transport_attested_boundary_repair_remains_fail_closed(
 
 def test_generate_one_stops_when_repair_repeats_same_invalid_output(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
 ) -> None:
     from llm_wiki_mcp import ingest
 
@@ -522,6 +526,7 @@ def test_generate_one_stops_when_repair_repeats_same_invalid_output(
 
 def test_generate_one_records_runtime_transport_failure_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
 ) -> None:
     from llm_wiki_mcp import ingest
 
@@ -548,8 +553,36 @@ def test_generate_one_records_runtime_transport_failure_diagnostics(
     assert "socket reset" in diagnostics["reason"]
 
 
+def test_generate_one_failure_logs_are_confined_to_isolated_wiki(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
+) -> None:
+    from llm_wiki_mcp import ingest, runtime_status
+
+    def fake_generate(_prompt: str, **_kwargs) -> str:
+        raise RuntimeError("isolated transport sentinel")
+
+    monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+    result = ingest._generate_one(
+        {
+            "type": "create",
+            "filename": "memory/isolated-log.md",
+            "title": "Isolated log",
+            "summary": "prove generation diagnostics stay in tmp wiki",
+        },
+        "raw",
+    )
+
+    assert result is None
+    assert ingest.LOG_FILE == isolated_wiki / "log.md"
+    assert runtime_status.EVENTS_FILE == isolated_wiki / "runtime" / "events.jsonl"
+    assert "isolated transport sentinel" in ingest.LOG_FILE.read_text()
+    assert "isolated transport sentinel" in runtime_status.EVENTS_FILE.read_text()
+
+
 def test_generate_one_exhausts_after_two_distinct_targeted_repairs(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
 ) -> None:
     from llm_wiki_mcp import ingest
 
@@ -589,6 +622,7 @@ def test_generate_one_exhausts_after_two_distinct_targeted_repairs(
 
 def test_generate_one_holds_one_exclusive_lease_across_repair_session(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
 ) -> None:
     from llm_wiki_mcp import ingest
     from llm_wiki_mcp.runtime_config import IngestConfig
@@ -672,6 +706,7 @@ def test_generate_one_holds_one_exclusive_lease_across_repair_session(
 
 def test_generate_one_rejects_context_accounting_at_admitted_boundary(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
 ) -> None:
     from llm_wiki_mcp import ingest
     from llm_wiki_mcp.runtime_config import IngestConfig
@@ -731,6 +766,7 @@ def test_generate_one_rejects_context_accounting_at_admitted_boundary(
 
 def test_generate_one_oversized_full_repair_envelope_fails_before_resources(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
 ) -> None:
     from llm_wiki_mcp import ingest
     from llm_wiki_mcp.runtime_config import IngestConfig
@@ -1282,6 +1318,37 @@ class TestIngestFrontierGate:
         }
 
     @staticmethod
+    def _oversized_create_ops(
+        *, count: int = 8, body_bytes: int = 18_000
+    ) -> list[dict]:
+        return [
+            {
+                "type": "create",
+                "filename": f"memory/sharded-{index}.md",
+                "content": (
+                    "---\n"
+                    f"title: Sharded {index}\n"
+                    "updated: 2026-07-14\n"
+                    "---\n"
+                    f"Grounded fact {index}.\n"
+                    + (chr(ord("a") + index) * body_bytes)
+                    + "\n"
+                ),
+            }
+            for index in range(count)
+        ]
+
+    @staticmethod
+    def _fixed_review_config():
+        from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+
+        return DecisionRouterConfig(
+            num_ctx=114_688,
+            max_input_chars=93_000,
+            adoption_artifact="",
+        )
+
+    @staticmethod
     def _production_authority(marker: str) -> dict:
         return {
             "source": "adopted_local_consensus",
@@ -1537,6 +1604,1400 @@ class TestIngestFrontierGate:
         assert len(planned) == 1
         assert "The exact proposed fact." in planned[0].new_body
         assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
+
+    def test_oversized_eight_operation_proposal_uses_complete_bounded_shards(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        config = self._fixed_review_config()
+        monkeypatch.setattr(ingest, "_ingest_review_router_config", lambda: config)
+        captured: list[dict] = []
+
+        result = ingest._review_and_apply_ingest_operations(
+            self._oversized_create_ops(),
+            raw_content="Eight independently grounded facts.",
+            reviewer=lambda proposal: (
+                captured.append(proposal)
+                or {
+                    "decision": "apply_available",
+                    "summary": "exact shard is grounded",
+                    "failed_operations_disposition": "none",
+                }
+            ),
+        )
+
+        assert result["status"] == "apply_available"
+        assert len(captured) > 1
+        proof = result["review"]["review_shard_proof"]
+        manifest = proof["manifest"]
+        assert manifest["full_operation_count"] == 8
+        assert [
+            index
+            for row in manifest["shards"]
+            for index in row["original_operation_indices"]
+        ] == list(range(8))
+        assert all(
+            row["effective_input_bytes"] <= config.max_input_chars
+            and row["required_num_ctx"] <= config.num_ctx
+            for row in manifest["shards"]
+        )
+        assert len(result["created"]) == 8
+        assert all(
+            (isolated_wiki / "pages" / "memory" / f"sharded-{index}.md").exists()
+            for index in range(8)
+        )
+
+    def test_shard_budget_charges_each_new_call_and_resume_reuses_approvals(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        config = self._fixed_review_config()
+        monkeypatch.setattr(ingest, "_ingest_review_router_config", lambda: config)
+        operations = self._oversized_create_ops(body_bytes=30_000)
+        calls = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "decision": "apply_available",
+                "summary": "exact shard approved",
+                "failed_operations_disposition": "none",
+            }
+
+        first_budget = ingest._FrontierCallBudget(limit=2)
+        first = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content="Four bounded review shards resume durably.",
+            reviewer=reviewer,
+            frontier_budget=first_budget,
+        )
+
+        assert first["status"] == "shard_continuation_pending"
+        assert first["shard_continuation"]["approved_shards"] == 2
+        assert first["shard_continuation"]["total_shards"] == 4
+        assert first_budget.used == 2
+        assert calls == 2
+        assert first["created"] == []
+        assert not any(
+            (isolated_wiki / "pages" / "memory" / f"sharded-{index}.md").exists()
+            for index in range(8)
+        )
+
+        continuation = ingest._load_pretriage_ingest_shard_continuation(
+            "Four bounded review shards resume durably.",
+            None,
+            reviewer=reviewer,
+        )
+        assert continuation is not None
+        assert continuation.approved_shards == 2
+        second_budget = ingest._FrontierCallBudget(limit=2)
+        second = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content="Four bounded review shards resume durably.",
+            reviewer=reviewer,
+            frontier_budget=second_budget,
+            shard_continuation=continuation,
+        )
+
+        assert second["status"] == "apply_available"
+        assert len(second["review"]["review_shard_proof"]["manifest"]["shards"]) == 4
+        assert second_budget.used == 2
+        assert calls == 4
+        assert len(second["created"]) == 8
+
+    def test_standard_review_budget_charges_exactly_one_call(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        calls = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "decision": "apply_available",
+                "summary": "standard review approved",
+                "failed_operations_disposition": "none",
+            }
+
+        budget = ingest._FrontierCallBudget(limit=1)
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="One standard review.",
+            reviewer=reviewer,
+            frontier_budget=budget,
+        )
+
+        assert result["status"] == "apply_available"
+        assert calls == 1
+        assert budget.used == 1
+
+    def test_shard_budget_exhaustion_does_not_publish_stale_authority_continuation(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+
+        def reviewer(_proposal):
+            return {
+                "decision": "apply_available",
+                "summary": "exact shard approved before authority race",
+                "failed_operations_disposition": "none",
+            }
+
+        stable_authority, error = ingest._current_ingest_review_authority(
+            reviewer=reviewer
+        )
+        assert error is None and stable_authority is not None
+        authority_checks = 0
+
+        def changing_authority(*, reviewer):
+            nonlocal authority_checks
+            del reviewer
+            authority_checks += 1
+            if authority_checks == 4:
+                return None, "simulated authority replacement after last approval"
+            return stable_authority, None
+
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            changing_authority,
+        )
+        result = ingest._review_and_apply_ingest_operations(
+            self._oversized_create_ops(body_bytes=30_000),
+            raw_content="Authority changes at the shard budget boundary.",
+            reviewer=reviewer,
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+        )
+
+        assert authority_checks == 4
+        assert result["status"] == "needs_retry"
+        assert "shard_continuation" not in result
+        assert "authority changed before shard continuation" in result["summary"]
+        assert result["created"] == []
+        assert not any(
+            (isolated_wiki / "pages" / "memory" / f"sharded-{index}.md").exists()
+            for index in range(8)
+        )
+
+    def test_zero_approval_manifest_without_transition_marker_is_not_resumed(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        raw = "A bare manifest cannot authorize zero-progress continuation."
+        dry = ingest._review_and_apply_ingest_operations(
+            self._oversized_create_ops(body_bytes=30_000),
+            raw_content=raw,
+            reviewer=lambda _proposal: pytest.fail("dry run must not review"),
+            dry_run=True,
+        )
+        proposal = dry["proposal"]
+        source_key = dry["source_key"]
+        proposal_path, _review_path = ingest._ingest_artifact_paths(source_key)
+        ingest._write_ingest_artifact(
+            proposal_path,
+            {
+                "schema_version": ingest.INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+                "kind": "ingest_frontier_proposal_artifact",
+                "source_key": source_key,
+                "proposal_sha256": dry["proposal_sha256"],
+                "proposal": proposal,
+            },
+        )
+        plan = ingest._build_ingest_review_shard_plan(
+            proposal,
+            force_review_unit=True,
+        )
+        assert plan is not None
+        assert (
+            ingest._persist_ingest_review_shard_manifest(
+                plan,
+                source_key=source_key,
+            )
+            is None
+        )
+
+        assert (
+            ingest._load_pretriage_ingest_shard_continuation(
+                raw,
+                None,
+                reviewer=lambda _proposal: pytest.fail("reviewer must not run"),
+            )
+            is None
+        )
+
+    def test_zero_approval_transition_marker_is_tamper_evident_and_claimed_resumeable(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        raw = "A hash-bound exact repair continuation survives a worker crash."
+        operations = self._oversized_create_ops(body_bytes=30_000)
+        dry = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: pytest.fail("dry run must not review"),
+            dry_run=True,
+        )
+        proposal = dry["proposal"]
+        source_key = dry["source_key"]
+        proposal_path, _review_path = ingest._ingest_artifact_paths(source_key)
+        ingest._write_ingest_artifact(
+            proposal_path,
+            {
+                "schema_version": ingest.INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+                "kind": "ingest_frontier_proposal_artifact",
+                "source_key": source_key,
+                "proposal_sha256": dry["proposal_sha256"],
+                "proposal": proposal,
+            },
+        )
+        plan = ingest._build_ingest_review_shard_plan(
+            proposal,
+            force_review_unit=True,
+        )
+        assert plan is not None
+        assert (
+            ingest._persist_ingest_review_shard_manifest(
+                plan,
+                source_key=source_key,
+            )
+            is None
+        )
+        authority, error = ingest._current_ingest_review_authority(
+            reviewer=lambda _proposal: {}
+        )
+        assert error is None and authority is not None
+        assert (
+            ingest._persist_ingest_review_continuation_marker(
+                source_key=source_key,
+                plan=plan,
+                reason="exact_repair_reseed",
+                previous_full_proposal_sha256="f" * 64,
+                previous_authority=authority,
+                current_authority=authority,
+            )
+            is None
+        )
+        marker_path = ingest._ingest_review_continuation_marker_path(source_key)
+        original_marker = marker_path.read_bytes()
+        tampered = json.loads(original_marker)
+        tampered["reason"] = "authority_epoch_reseed"
+        marker_path.write_text(json.dumps(tampered), encoding="utf-8")
+        with pytest.raises(IngestApplyError, match="marker is invalid"):
+            ingest._load_pretriage_ingest_shard_continuation(
+                raw,
+                None,
+                reviewer=lambda _proposal: {},
+            )
+
+        marker_path.write_bytes(original_marker)
+        first = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=lambda _proposal: {},
+        )
+        assert first is not None and first.approved_shards == 0
+        assert json.loads(marker_path.read_text())["state"] == "claimed"
+        crash_recovery = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=lambda _proposal: {},
+        )
+        assert crash_recovery is not None
+        assert crash_recovery.plan.manifest_sha256 == first.plan.manifest_sha256
+
+    def test_exact_repair_transition_is_idempotent_but_bounded_to_one_per_raw(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        raw = "Only one exact repaired postimage transition is permitted."
+        original_operations = self._oversized_create_ops(body_bytes=30_000)
+        original_dry = ingest._review_and_apply_ingest_operations(
+            original_operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: pytest.fail("dry run must not review"),
+            dry_run=True,
+        )
+        first_repair = {
+            "status": "needs_retry",
+            "source_key": original_dry["source_key"],
+            "proposal_sha256": original_dry["proposal_sha256"],
+            "review": {
+                "decision": "retry",
+                "summary": "first exact replacement",
+                "failed_operations_disposition": "retry_required",
+                "replacement_operations": [
+                    {
+                        "filename": original_operations[0]["filename"],
+                        "content": original_operations[0]["content"]
+                        + "\nFIRST-EXACT-REPAIR\n",
+                    }
+                ],
+            },
+        }
+        repaired, first_reseed = ingest._review_exact_ingest_repair_once(
+            original_operations,
+            first_repair,
+            raw_content=raw,
+            raw_keywords=None,
+            source_raw=None,
+            reviewer=lambda _proposal: pytest.fail("dry run must not review"),
+            frontier_budget=ingest._FrontierCallBudget(limit=0),
+        )
+        assert first_reseed["status"] == "shard_continuation_pending"
+        repaired_sha256 = ingest._canonical_json_sha256(repaired)
+        assert (
+            ingest._seal_ingest_review_repair_transition(
+                source_key=original_dry["source_key"],
+                previous_full_proposal_sha256=original_dry["proposal_sha256"],
+                repaired_operations_sha256=repaired_sha256,
+            )
+            is None
+        )
+
+        second_repair = {
+            "status": "needs_retry",
+            "source_key": original_dry["source_key"],
+            "proposal_sha256": first_reseed["proposal_sha256"],
+            "review": {
+                "decision": "retry",
+                "summary": "different second replacement",
+                "failed_operations_disposition": "retry_required",
+                "replacement_operations": [
+                    {
+                        "filename": repaired[0]["filename"],
+                        "content": repaired[0]["content"]
+                        + "\nSECOND-DIFFERENT-REPAIR\n",
+                    }
+                ],
+            },
+        }
+        unchanged, blocked = ingest._review_exact_ingest_repair_once(
+            repaired,
+            second_repair,
+            raw_content=raw,
+            raw_keywords=None,
+            source_raw=None,
+            reviewer=lambda _proposal: pytest.fail("second repair must be blocked"),
+            frontier_budget=ingest._FrontierCallBudget(limit=0),
+        )
+        assert unchanged == repaired
+        assert blocked["status"] == "needs_retry"
+        assert blocked["summary"] == "exact repair transition limit exceeded"
+
+    @pytest.mark.parametrize("drift_kind", ["authority", "router_config"])
+    def test_zero_approval_marker_reseeds_once_across_identity_drift(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        drift_kind: str,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+
+        config = {"value": self._fixed_review_config()}
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: config["value"],
+        )
+        authority_a = self._production_authority("a")
+        authority_b = self._production_authority("b")
+        active = {"authority": authority_a}
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (active["authority"], None),
+        )
+        raw = f"Zero approval marker survives {drift_kind} drift."
+        dry = ingest._review_and_apply_ingest_operations(
+            self._oversized_create_ops(body_bytes=30_000),
+            raw_content=raw,
+            reviewer=lambda _proposal: pytest.fail("dry run must not review"),
+            dry_run=True,
+        )
+        source_key = dry["source_key"]
+        proposal_path, _review_path = ingest._ingest_artifact_paths(source_key)
+        ingest._write_ingest_artifact(
+            proposal_path,
+            {
+                "schema_version": ingest.INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+                "kind": "ingest_frontier_proposal_artifact",
+                "source_key": source_key,
+                "proposal_sha256": dry["proposal_sha256"],
+                "proposal": dry["proposal"],
+            },
+        )
+        old_plan = ingest._build_ingest_review_shard_plan(
+            dry["proposal"],
+            force_review_unit=True,
+        )
+        assert old_plan is not None
+        assert (
+            ingest._persist_ingest_review_shard_manifest(
+                old_plan,
+                source_key=source_key,
+            )
+            is None
+        )
+        assert (
+            ingest._persist_ingest_review_continuation_marker(
+                source_key=source_key,
+                plan=old_plan,
+                reason="exact_repair_reseed",
+                previous_full_proposal_sha256="f" * 64,
+                previous_authority=authority_a,
+                current_authority=authority_a,
+            )
+            is None
+        )
+
+        if drift_kind == "authority":
+            active["authority"] = authority_b
+        else:
+            config["value"] = DecisionRouterConfig(
+                num_ctx=1_048_576,
+                min_num_ctx=16_384,
+                max_input_chars=1_000_000,
+                adoption_artifact="",
+            )
+        continuation = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=lambda _proposal: {},
+        )
+        assert continuation is not None and continuation.approved_shards == 0
+        current_marker = json.loads(
+            ingest._ingest_review_continuation_marker_path(source_key).read_text()
+        )
+        assert current_marker["state"] == "claimed"
+        assert current_marker["manifest_sha256"] == continuation.plan.manifest_sha256
+        assert current_marker["current_authority_sha256"] == (
+            ingest._canonical_json_sha256(active["authority"])
+        )
+        assert current_marker["previous_authority_sha256"] == (
+            ingest._canonical_json_sha256(authority_a)
+        )
+
+    def test_same_sha_no_progress_is_tombstoned_without_repeat_review(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        calls = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "decision": "retry",
+                "summary": "same postimage remains ungrounded",
+                "failed_operations_disposition": "retry_required",
+            }
+
+        raw = "No verified shard approval means no continuation progress."
+        first = ingest._review_and_apply_ingest_operations(
+            self._oversized_create_ops(body_bytes=30_000),
+            raw_content=raw,
+            reviewer=reviewer,
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+        )
+        assert first["status"] == "frontier_budget_exhausted"
+        assert "shard_continuation" not in first
+        assert calls == 2
+        with pytest.raises(IngestApplyError, match="previously made no progress"):
+            ingest._load_pretriage_ingest_shard_continuation(
+                raw,
+                None,
+                reviewer=reviewer,
+            )
+        assert calls == 2
+
+    def test_existing_shard_approval_stall_is_not_republished_as_progress(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        raw = "One old approval cannot be recounted as new progress."
+        calls = 0
+
+        def first_reviewer(_proposal: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {
+                    "decision": "apply_available",
+                    "summary": "only the first shard is approved",
+                    "failed_operations_disposition": "none",
+                }
+            return {
+                "decision": "retry",
+                "summary": "remaining shard is not approved",
+                "failed_operations_disposition": "retry_required",
+            }
+
+        operations = self._oversized_create_ops(body_bytes=30_000)
+        first = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=first_reviewer,
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+        )
+        assert first["status"] == "shard_continuation_pending"
+        assert first["shard_continuation"]["approved_shards"] == 1
+        continuation = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=first_reviewer,
+        )
+        assert continuation is not None and continuation.approved_shards == 1
+        second = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: {
+                "decision": "retry",
+                "summary": "no new shard approval",
+                "failed_operations_disposition": "retry_required",
+            },
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+            shard_continuation=continuation,
+        )
+        assert second["status"] == "frontier_budget_exhausted"
+        assert "shard_continuation" not in second
+        with pytest.raises(IngestApplyError, match="previously made no progress"):
+            ingest._load_pretriage_ingest_shard_continuation(
+                raw,
+                None,
+                reviewer=first_reviewer,
+            )
+
+    def test_authority_epoch_reapproves_stale_shards_with_verified_progress(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        authority_a = self._production_authority("a")
+        authority_b = self._production_authority("b")
+        active = {"authority": authority_a}
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (active["authority"], None),
+        )
+        raw = "All stale approvals must be replayed under the new authority."
+        operations = self._oversized_create_ops(body_bytes=30_000)
+        first = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: self._authority_review(authority_a),
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+        )
+        continuation = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=lambda _proposal: self._authority_review(authority_a),
+        )
+        assert first["status"] == "shard_continuation_pending"
+        assert continuation is not None
+        for shard_index, shard in enumerate(continuation.plan.shards):
+            shard_source_key, shard_path = ingest._ingest_review_shard_review_identity(
+                continuation.plan,
+                shard_index=shard_index,
+                shard=shard,
+            )
+            if shard_path.exists():
+                continue
+            review = ingest._normalize_ingest_frontier_review(
+                self._authority_review(authority_a),
+                proposal=shard.proposal,
+            )
+            _artifact, artifact_error = (
+                ingest._write_and_readback_ingest_review_artifact(
+                    shard_path,
+                    source_key=shard_source_key,
+                    proposal_sha256=shard.proposal_sha256,
+                    review=review,
+                    authority=authority_a,
+                    integrity=True,
+                )
+            )
+            assert artifact_error is None
+
+        active["authority"] = authority_b
+        stale = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=lambda _proposal: self._authority_review(authority_b),
+        )
+        assert stale is not None and stale.approved_shards == 0
+        b_calls = 0
+
+        def reviewer_b(_proposal: dict) -> dict:
+            nonlocal b_calls
+            b_calls += 1
+            return self._authority_review(authority_b)
+
+        second = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=reviewer_b,
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+            shard_continuation=stale,
+        )
+        assert second["status"] == "shard_continuation_pending"
+        assert second["shard_continuation"]["approved_shards"] == 2
+        resumed = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=reviewer_b,
+        )
+        assert resumed is not None and resumed.approved_shards == 2
+        final = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=reviewer_b,
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+            shard_continuation=resumed,
+        )
+        assert final["status"] == "apply_available", final
+        assert b_calls == len(resumed.plan.shards)
+
+    def test_exact_repair_can_reseed_as_one_standard_review_unit(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        operations = self._oversized_create_ops(count=2, body_bytes=40_000)
+        repair_marker = "REPAIRED-TO-STANDARD"
+
+        def reviewer(proposal: dict) -> dict:
+            contract = proposal["audit_decision"].get("review_shard_contract")
+            generated = proposal["local_generated_operations"]
+            if (
+                contract
+                and contract["shard_index"] == 0
+                and repair_marker not in generated[0]["content"]
+            ):
+                header = generated[0]["content"].split("Grounded fact", 1)[0]
+                return {
+                    "decision": "retry",
+                    "summary": "replace one oversized postimage exactly",
+                    "failed_operations_disposition": "retry_required",
+                    "replacement_operations": [
+                        {
+                            "filename": generated[0]["filename"],
+                            "content": header
+                            + "Grounded fact repaired."
+                            + f"\n{repair_marker}\n",
+                        }
+                    ],
+                }
+            return {
+                "decision": "apply_available",
+                "summary": "exact review unit approved",
+                "failed_operations_disposition": "none",
+            }
+
+        raw = "One shard repair shrinks the complete proposal to standard size."
+        budget = ingest._FrontierCallBudget(limit=2)
+        first = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=reviewer,
+            frontier_budget=budget,
+        )
+        assert first["status"] == "needs_retry"
+        repaired, reseeded = ingest._review_exact_ingest_repair_once(
+            operations,
+            first,
+            raw_content=raw,
+            raw_keywords=None,
+            source_raw=None,
+            reviewer=reviewer,
+            frontier_budget=budget,
+        )
+        assert reseeded["status"] == "shard_continuation_pending"
+        assert reseeded["shard_continuation"]["approved_shards"] == 0
+        assert reseeded["shard_continuation"]["total_shards"] == 1
+        assert not any((isolated_wiki / "pages" / "memory").glob("sharded-*.md"))
+        continuation = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=reviewer,
+        )
+        assert continuation is not None and len(continuation.plan.shards) == 1
+        final = ingest._review_and_apply_ingest_operations(
+            repaired,
+            raw_content=raw,
+            reviewer=reviewer,
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+            shard_continuation=continuation,
+        )
+        assert final["status"] == "apply_available", final
+        assert len(final["created"]) == 2
+
+    def test_router_context_change_reseeds_verified_progress_without_regeneration(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+
+        config = {"value": self._fixed_review_config()}
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: config["value"],
+        )
+        operations = self._oversized_create_ops(body_bytes=30_000)
+        raw = "Verified partial progress survives a router context expansion."
+        calls = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "decision": "apply_available",
+                "summary": "current exact review unit approved",
+                "failed_operations_disposition": "none",
+            }
+
+        first = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=reviewer,
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+        )
+        assert first["status"] == "shard_continuation_pending"
+        old_manifest_sha256 = first["shard_continuation"]["manifest_sha256"]
+        config["value"] = DecisionRouterConfig(
+            num_ctx=1_048_576,
+            min_num_ctx=16_384,
+            max_input_chars=1_000_000,
+            adoption_artifact="",
+        )
+        continuation = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=reviewer,
+        )
+        assert continuation is not None
+        assert continuation.approved_shards == 0
+        assert continuation.plan.manifest_sha256 != old_manifest_sha256
+        assert len(continuation.plan.shards) == 1
+        final = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=reviewer,
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+            shard_continuation=continuation,
+        )
+        assert final["status"] == "apply_available"
+        assert len(final["created"]) == 8
+
+    def test_oversized_shard_rejection_has_no_partial_page_apply(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        calls = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "decision": "apply_available" if calls == 1 else "retry",
+                "summary": "approved shard" if calls == 1 else "reject later shard",
+                "failed_operations_disposition": (
+                    "none" if calls == 1 else "retry_required"
+                ),
+            }
+
+        result = ingest._review_and_apply_ingest_operations(
+            self._oversized_create_ops(),
+            raw_content="Eight facts, one unsafe proposed shard.",
+            reviewer=reviewer,
+        )
+
+        assert calls > 1
+        assert result["status"] == "needs_retry"
+        assert result["created"] == []
+        assert not any(
+            (isolated_wiki / "pages" / "memory" / f"sharded-{index}.md").exists()
+            for index in range(8)
+        )
+
+    def test_one_shard_confirmed_noop_cannot_discard_complete_raw(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+
+        def reviewer(proposal: dict) -> dict:
+            shard_index = proposal["audit_decision"]["review_shard_contract"][
+                "shard_index"
+            ]
+            return {
+                "decision": "confirmed_noop" if shard_index == 0 else "apply_available",
+                "summary": "one shard noop" if shard_index == 0 else "shard approved",
+                "failed_operations_disposition": "none",
+            }
+
+        result = ingest._review_and_apply_ingest_operations(
+            self._oversized_create_ops(),
+            raw_content="A complete raw cannot be discarded by one shard.",
+            reviewer=reviewer,
+        )
+
+        assert result["status"] == "needs_retry"
+        assert result["created"] == []
+        assert (
+            result["review"]["frontier_failure"]["failure_class"]
+            == "ingest_review_shard_nonapproval"
+        )
+
+    def test_oversized_terminal_reuse_recomputes_manifest_and_rejects_tamper(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        config = self._fixed_review_config()
+        monkeypatch.setattr(ingest, "_ingest_review_router_config", lambda: config)
+        operations = self._oversized_create_ops()
+        calls = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "decision": "apply_available",
+                "summary": "exact shard is grounded",
+                "failed_operations_disposition": "none",
+            }
+
+        first = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content="Eight facts with durable shard proofs.",
+            reviewer=reviewer,
+        )
+        first_calls = calls
+        recovered = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content="Eight facts with durable shard proofs.",
+            reviewer=reviewer,
+        )
+        assert recovered["status"] == "apply_available"
+        assert recovered["reused_review"] is True
+        assert calls == first_calls
+        pretriage = ingest._load_pretriage_terminal_recovery(
+            "Eight facts with durable shard proofs.",
+            None,
+            reviewer=reviewer,
+        )
+        assert pretriage is not None
+        assert pretriage["status"] == "apply_available"
+        assert pretriage["recovery_basis"] == "exact_postimages_already_applied"
+        assert calls == first_calls
+
+        proposal_path, review_path = ingest._ingest_artifact_paths(first["source_key"])
+        proposal_bytes = proposal_path.read_bytes()
+        review_bytes = review_path.read_bytes()
+        corrupt_review = json.loads(review_bytes)
+        corrupt_review["review"]["review_shard_proof"]["shard_reviews"].pop()
+        review_path.write_text(json.dumps(corrupt_review), encoding="utf-8")
+        corrupt_rejected = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content="Eight facts with durable shard proofs.",
+            reviewer=reviewer,
+        )
+        assert corrupt_rejected["status"] == "needs_retry"
+        assert corrupt_rejected["created"] == []
+        assert proposal_path.read_bytes() == proposal_bytes
+        assert calls == first_calls
+        review_path.write_bytes(review_bytes)
+
+        plan = ingest._build_ingest_review_shard_plan(
+            json.loads(proposal_path.read_text())["proposal"],
+            config=config,
+        )
+        assert plan is not None
+        manifest_path = ingest._ingest_review_shard_manifest_path(plan)
+        artifact = json.loads(manifest_path.read_text())
+        artifact["manifest"]["full_operation_count"] = 999
+        manifest_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+        rejected = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content="Eight facts with durable shard proofs.",
+            reviewer=reviewer,
+        )
+        assert rejected["status"] == "needs_retry"
+        assert rejected["created"] == []
+        assert calls == first_calls
+        assert (
+            rejected["review"]["frontier_failure"]["failure_class"]
+            == "ingest_review_shard_reuse_invalid"
+        )
+
+    def test_exact_postimage_recovery_uses_sealed_historical_shard_limits(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+
+        historical_config = self._fixed_review_config()
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: historical_config,
+        )
+        operations = self._oversized_create_ops()
+        raw = "Applied shards survive a later context-window expansion."
+        calls = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "decision": "apply_available",
+                "summary": "historical exact shard approved",
+                "failed_operations_disposition": "none",
+            }
+
+        first = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=reviewer,
+        )
+        assert first["status"] == "apply_available"
+        first_calls = calls
+        proposal_path, _review_path = ingest._ingest_artifact_paths(first["source_key"])
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))["proposal"]
+        historical_plan = ingest._build_ingest_review_shard_plan(
+            proposal,
+            config=historical_config,
+        )
+        assert historical_plan is not None
+
+        wide_config = DecisionRouterConfig(
+            num_ctx=1_048_576,
+            min_num_ctx=16_384,
+            max_input_chars=1_000_000,
+            adoption_artifact="",
+        )
+        assert (
+            ingest._build_ingest_review_shard_plan(
+                proposal,
+                config=wide_config,
+            )
+            is None
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: wide_config,
+        )
+        page_paths = sorted((isolated_wiki / "pages" / "memory").glob("sharded-*.md"))
+        page_bytes = {path: path.read_bytes() for path in page_paths}
+        real_apply = ingest._apply_prepared_operations
+        recovery_modes: list[bool] = []
+
+        def track_recovery(*args, **kwargs):
+            recovery_modes.append(bool(kwargs.get("recovery_only")))
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(ingest, "_apply_prepared_operations", track_recovery)
+        recovered = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=reviewer,
+        )
+        assert recovered["status"] == "apply_available"
+        assert recovered["reused_review"] is True
+        assert recovered["recovery_basis"] == "exact_postimages_already_applied"
+        assert recovery_modes == [True]
+        assert calls == first_calls
+        assert {path: path.read_bytes() for path in page_paths} == page_bytes
+
+        pretriage = ingest._load_pretriage_terminal_recovery(
+            raw,
+            None,
+            reviewer=reviewer,
+        )
+        assert pretriage is not None
+        assert pretriage["recovery_basis"] == "exact_postimages_already_applied"
+        assert recovery_modes == [True]
+        assert calls == first_calls
+        assert {path: path.read_bytes() for path in page_paths} == page_bytes
+
+    @pytest.mark.parametrize("tamper_target", ["manifest", "shard_review"])
+    def test_historical_shard_recovery_rejects_durable_proof_tamper_without_writes(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tamper_target: str,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+
+        historical_config = self._fixed_review_config()
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: historical_config,
+        )
+        operations = self._oversized_create_ops()
+        raw = f"Historical shard tamper is fail closed: {tamper_target}."
+        first = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "exact shard approved before tamper",
+                "failed_operations_disposition": "none",
+            },
+        )
+        assert first["status"] == "apply_available"
+        proposal_path, _review_path = ingest._ingest_artifact_paths(first["source_key"])
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))["proposal"]
+        plan = ingest._build_ingest_review_shard_plan(
+            proposal,
+            config=historical_config,
+        )
+        assert plan is not None
+        if tamper_target == "manifest":
+            target = ingest._ingest_review_shard_manifest_path(plan)
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            payload["manifest"]["full_operation_count"] += 1
+        else:
+            _source_key, target = ingest._ingest_review_shard_review_identity(
+                plan,
+                shard_index=0,
+                shard=plan.shards[0],
+            )
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            payload["review"]["summary"] = "tampered durable shard review"
+        target.write_text(json.dumps(payload), encoding="utf-8")
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: DecisionRouterConfig(
+                num_ctx=1_048_576,
+                min_num_ctx=16_384,
+                max_input_chars=1_000_000,
+                adoption_artifact="",
+            ),
+        )
+        page_paths = sorted((isolated_wiki / "pages" / "memory").glob("sharded-*.md"))
+        page_bytes = {path: path.read_bytes() for path in page_paths}
+        apply_calls = 0
+
+        def forbid_apply(*_args, **_kwargs):
+            nonlocal apply_calls
+            apply_calls += 1
+            raise AssertionError("tampered historical proof must not reach page apply")
+
+        monkeypatch.setattr(ingest, "_apply_prepared_operations", forbid_apply)
+        rejected = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: pytest.fail("reviewer must not run"),
+        )
+        assert rejected["status"] == "needs_retry"
+        assert rejected["created"] == []
+        assert apply_calls == 0
+        assert {path: path.read_bytes() for path in page_paths} == page_bytes
+        with pytest.raises(IngestApplyError, match="shard review binding is invalid"):
+            ingest._load_pretriage_terminal_recovery(
+                raw,
+                None,
+                reviewer=lambda _proposal: pytest.fail("reviewer must not run"),
+            )
+        assert apply_calls == 0
+        assert {path: path.read_bytes() for path in page_paths} == page_bytes
+
+    def test_standard_size_review_path_has_no_shard_contract(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        captured: list[dict] = []
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="One grounded fact.",
+            reviewer=lambda proposal: (
+                captured.append(proposal)
+                or {
+                    "decision": "apply_available",
+                    "summary": "standard request approved",
+                    "failed_operations_disposition": "none",
+                }
+            ),
+        )
+
+        assert result["status"] == "apply_available"
+        assert len(captured) == 1
+        assert "review_shard_contract" not in captured[0]["audit_decision"]
+        assert "review_shard_proof" not in result["review"]
+
+    @pytest.mark.parametrize(
+        ("operations", "failed_specs", "reason"),
+        [
+            (
+                None,
+                [],
+                "one prepared ingest operation exceeds the bounded review capacity",
+            ),
+            (
+                "eight",
+                [{"filename": "memory/missing.md", "error": "generation failed"}],
+                "failed_operation_specs cannot be sharded safely",
+            ),
+        ],
+    )
+    def test_unsupported_oversized_shapes_fail_closed_with_typed_capacity(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        operations: str | None,
+        failed_specs: list[dict],
+        reason: str,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        reviewer_calls = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal reviewer_calls
+            reviewer_calls += 1
+            return {
+                "decision": "apply_available",
+                "summary": "should not run",
+                "failed_operations_disposition": "none",
+            }
+
+        selected_operations = (
+            self._oversized_create_ops()
+            if operations == "eight"
+            else self._oversized_create_ops(count=1, body_bytes=120_000)
+        )
+        result = ingest._review_and_apply_ingest_operations(
+            selected_operations,
+            raw_content="Oversized bounded review evidence.",
+            failed_operation_specs=failed_specs,
+            local_disposition=(
+                "partial_generation_failed" if failed_specs else "operations_available"
+            ),
+            reviewer=reviewer,
+        )
+
+        assert result["status"] == "needs_retry"
+        assert result["created"] == []
+        assert reviewer_calls == 0
+        assert reason in result["review"]["summary"]
+        assert result["review"]["frontier_failure"]["failure_class"] in {
+            "input_too_large",
+            "context_window_exceeded",
+        }
+
+    def test_multiple_shard_repairs_fail_closed_without_applying(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+
+        def reviewer(proposal: dict) -> dict:
+            operation = proposal["local_generated_operations"][0]
+            return {
+                "decision": "retry",
+                "summary": "one exact shard repair",
+                "failed_operations_disposition": "retry_required",
+                "replacement_operations": [
+                    {
+                        "filename": operation["filename"],
+                        "content": operation["content"] + "repaired\n",
+                    }
+                ],
+            }
+
+        result = ingest._review_and_apply_ingest_operations(
+            self._oversized_create_ops(),
+            raw_content="Multiple shards each request a repair.",
+            reviewer=reviewer,
+        )
+
+        assert result["status"] == "needs_retry"
+        assert result["created"] == []
+        assert (
+            result["review"]["frontier_failure"]["failure_class"]
+            == "ingest_review_multiple_repairs_unsupported"
+        )
+        assert not any(
+            (isolated_wiki / "pages" / "memory" / f"sharded-{index}.md").exists()
+            for index in range(8)
+        )
+
+    def test_one_exact_shard_repair_is_returned_to_existing_convergence_path(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+
+        def reviewer(proposal: dict) -> dict:
+            contract = proposal["audit_decision"]["review_shard_contract"]
+            if contract["shard_index"] == 0:
+                operation = proposal["local_generated_operations"][0]
+                return {
+                    "decision": "retry",
+                    "summary": "one exact shard repair",
+                    "failed_operations_disposition": "retry_required",
+                    "replacement_operations": [
+                        {
+                            "filename": operation["filename"],
+                            "content": operation["content"] + "repaired\n",
+                        }
+                    ],
+                }
+            return {
+                "decision": "apply_available",
+                "summary": "other shard approved",
+                "failed_operations_disposition": "none",
+            }
+
+        result = ingest._review_and_apply_ingest_operations(
+            self._oversized_create_ops(),
+            raw_content="Only one exact shard requires a repair.",
+            reviewer=reviewer,
+        )
+
+        assert result["status"] == "needs_retry"
+        assert len(result["review"]["replacement_operations"]) == 1
+        assert result["review"]["replacement_operations"][0]["filename"].startswith(
+            "memory/sharded-"
+        )
+        assert "frontier_failure" not in result["review"]
+        assert result["created"] == []
 
     def test_low_risk_proposal_still_requires_semantic_consensus(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -4411,6 +5872,282 @@ class TestOrchestrator:
             paths.append(path)
         return record_sha256, paths
 
+    def test_oversized_review_continues_without_failure_or_repeating_generation(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import (
+            failure_supervisor,
+            ingest,
+            orchestrator,
+            runtime_status,
+        )
+        from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+
+        raw_path = isolated_wiki / "raw" / "eight-shard-continuation.md"
+        raw_content = "Eight grounded memories require bounded local review."
+        raw_path.write_text(raw_content, encoding="utf-8")
+        operations = TestIngestFrontierGate._oversized_create_ops(body_bytes=45_000)
+        triage_plan = [
+            {
+                "type": "create",
+                "filename": operation["filename"],
+                "title": f"Sharded {index}",
+            }
+            for index, operation in enumerate(operations)
+        ]
+        calls = {"triage": 0, "generation": 0, "review": 0, "apply": 0}
+
+        def triage(*_args, **_kwargs):
+            calls["triage"] += 1
+            return triage_plan
+
+        def generate(*_args, **_kwargs):
+            calls["generation"] += 1
+            return operations, []
+
+        def review(proposal, **_kwargs):
+            calls["review"] += 1
+            return ingest._normalize_ingest_frontier_review(
+                {
+                    "decision": "apply_available",
+                    "summary": "exact shard approved",
+                    "failed_operations_disposition": "none",
+                },
+                proposal=proposal,
+            )
+
+        real_apply = ingest._apply_prepared_operations
+
+        def counted_apply(*args, **kwargs):
+            if not kwargs.get("recovery_only"):
+                calls["apply"] += 1
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        monkeypatch.setattr(ingest, "_triage_with_progress", triage)
+        monkeypatch.setattr(ingest, "_generate_local_operations", generate)
+        monkeypatch.setattr(ingest, "_run_ingest_frontier_review", review)
+        monkeypatch.setattr(ingest, "_apply_prepared_operations", counted_apply)
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: DecisionRouterConfig(
+                num_ctx=114_688,
+                max_input_chars=93_000,
+                adoption_artifact="",
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_refresh_ingest_derived_artifacts",
+            lambda *_args, **_kwargs: {"checked": 0, "passed": 0, "failed": []},
+        )
+
+        continuation_results: list[dict] = []
+        final_result: dict | None = None
+        for _attempt in range(8):
+            result = orchestrator.run_pending_ingest(force=True)
+            if result["files_processed"]:
+                final_result = result
+                break
+            continuation_results.append(result)
+            row = result["per_raw"][0]
+            continuation = row["continuation"]
+            assert result["files_continued"] == [raw_path.name], result
+            assert result["files_failed"] == 0
+            assert result["files_deferred"] == []
+            assert row["continued"] is True
+            assert row["deferred"] is False
+            assert "supervision" not in row
+            assert continuation["approved_shards"] == calls["review"]
+            assert continuation["approved_shards"] % 2 == 0
+            assert calls["triage"] == 1
+            assert calls["generation"] == 1
+            assert calls["apply"] == 0
+            assert not any((isolated_wiki / "pages" / "memory").glob("sharded-*.md"))
+            assert failure_supervisor._load_state()["failures"] == {}
+            assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
+            assert not list(
+                (isolated_wiki / "runtime" / "failures" / "packets").glob("*.json")
+            )
+            status = runtime_status.read_status()
+            assert status["batch"]["continued"] == 1
+            assert status["batch"]["deferred"] == 0
+            assert status["batch"]["failed"] == 0
+            batch_metric = next(
+                metric
+                for metric in reversed(runtime_status.read_metrics(limit=20))
+                if metric.get("kind") == "batch"
+            )
+            assert batch_metric["files_continued"] == 1
+            assert batch_metric["files_deferred"] == 0
+            assert batch_metric["files_failed"] == 0
+
+        assert final_result is not None
+        assert len(continuation_results) >= 3
+        total_shards = continuation_results[0]["per_raw"][0]["continuation"][
+            "total_shards"
+        ]
+        assert total_shards >= 8
+        assert len(continuation_results) == (total_shards - 1) // 2
+        assert final_result["files_processed"] == [raw_path.name]
+        assert final_result["files_continued"] == []
+        assert final_result["files_deferred"] == []
+        assert final_result["files_failed"] == 0
+        assert calls == {
+            "triage": 1,
+            "generation": 1,
+            "review": total_shards,
+            "apply": 1,
+        }
+        assert len(list((isolated_wiki / "pages" / "memory").glob("sharded-*.md"))) == 8
+        assert orchestrator.get_pending_raw_files() == []
+        assert failure_supervisor._load_state()["failures"] == {}
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
+        assert not list(
+            (isolated_wiki / "runtime" / "failures" / "packets").glob("*.json")
+        )
+
+    def test_shard_repair_starts_zero_approval_continuation_without_regeneration(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import failure_supervisor, ingest, orchestrator
+        from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+
+        raw_path = isolated_wiki / "raw" / "shard-repair-continuation.md"
+        raw_content = "One exact shard needs repair before bounded review resumes."
+        raw_path.write_text(raw_content, encoding="utf-8")
+        operations = TestIngestFrontierGate._oversized_create_ops(body_bytes=30_000)
+        triage_plan = [
+            {
+                "type": "create",
+                "filename": operation["filename"],
+                "title": f"Sharded {index}",
+            }
+            for index, operation in enumerate(operations)
+        ]
+        calls = {"triage": 0, "generation": 0, "review": 0, "apply": 0}
+        repair_marker = "REPAIRED-BY-EXACT-SHARD-REVIEW"
+
+        def triage(*_args, **_kwargs):
+            calls["triage"] += 1
+            return triage_plan
+
+        def generate(*_args, **_kwargs):
+            calls["generation"] += 1
+            return operations, []
+
+        def review(proposal, **_kwargs):
+            calls["review"] += 1
+            contract = proposal["audit_decision"]["review_shard_contract"]
+            generated = proposal["local_generated_operations"]
+            if (
+                contract["shard_index"] == 0
+                and repair_marker not in generated[0]["content"]
+            ):
+                return ingest._normalize_ingest_frontier_review(
+                    {
+                        "decision": "retry",
+                        "summary": "repair the exact first shard",
+                        "failed_operations_disposition": "retry_required",
+                        "replacement_operations": [
+                            {
+                                "filename": generated[0]["filename"],
+                                "content": generated[0]["content"]
+                                + f"\n{repair_marker}\n",
+                            }
+                        ],
+                    },
+                    proposal=proposal,
+                )
+            return ingest._normalize_ingest_frontier_review(
+                {
+                    "decision": "apply_available",
+                    "summary": "exact shard approved",
+                    "failed_operations_disposition": "none",
+                },
+                proposal=proposal,
+            )
+
+        real_apply = ingest._apply_prepared_operations
+
+        def counted_apply(*args, **kwargs):
+            if not kwargs.get("recovery_only"):
+                calls["apply"] += 1
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        monkeypatch.setattr(ingest, "_triage_with_progress", triage)
+        monkeypatch.setattr(ingest, "_generate_local_operations", generate)
+        monkeypatch.setattr(ingest, "_run_ingest_frontier_review", review)
+        monkeypatch.setattr(ingest, "_apply_prepared_operations", counted_apply)
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: DecisionRouterConfig(
+                num_ctx=114_688,
+                max_input_chars=93_000,
+                adoption_artifact="",
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_refresh_ingest_derived_artifacts",
+            lambda *_args, **_kwargs: {"checked": 0, "passed": 0, "failed": []},
+        )
+
+        approved_progress: list[int] = []
+        final_result: dict | None = None
+        for _attempt in range(8):
+            result = orchestrator.run_pending_ingest(force=True)
+            if result["files_processed"]:
+                final_result = result
+                break
+            assert result["files_continued"] == [raw_path.name], result
+            assert result["files_failed"] == 0
+            assert result["files_deferred"] == []
+            assert result["per_raw"][0]["continued"] is True
+            assert "supervision" not in result["per_raw"][0]
+            approved_progress.append(
+                result["per_raw"][0]["continuation"]["approved_shards"]
+            )
+            assert calls["triage"] == 1
+            assert calls["generation"] == 1
+            assert calls["apply"] == 0
+            assert not any((isolated_wiki / "pages" / "memory").glob("sharded-*.md"))
+            assert failure_supervisor._load_state()["failures"] == {}
+            assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
+            assert not list(
+                (isolated_wiki / "runtime" / "failures" / "packets").glob("*.json")
+            )
+
+        assert final_result is not None
+        assert 0 in approved_progress
+        assert approved_progress.index(0) > 0
+        assert final_result["files_processed"] == [raw_path.name]
+        assert final_result["files_continued"] == []
+        assert final_result["files_deferred"] == []
+        assert final_result["files_failed"] == 0
+        assert calls["triage"] == 1
+        assert calls["generation"] == 1
+        assert calls["apply"] == 1
+        assert len(list((isolated_wiki / "pages" / "memory").glob("sharded-*.md"))) == 8
+        repaired_page = (isolated_wiki / "pages" / "memory" / "sharded-0.md").read_text(
+            encoding="utf-8"
+        )
+        assert repair_marker.strip() in repaired_page
+        assert orchestrator.get_pending_raw_files() == []
+        assert failure_supervisor._load_state()["failures"] == {}
+        assert not list(
+            (isolated_wiki / "runtime" / "failures" / "packets").glob("*.json")
+        )
+
     def test_complete_fragment_group_is_projected_then_child_is_ingested(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -6291,6 +8028,10 @@ class TestPerRawOrchestrator:
                 "ingest.runtime_input_too_large",
             ),
             (
+                "local consensus structured failure [input_too_large]: one op too large",
+                "ingest.runtime_input_too_large",
+            ),
+            (
                 "triage structured failure [feedback_too_large]: feedback too large",
                 "ingest.runtime_feedback_too_large",
             ),
@@ -6308,6 +8049,10 @@ class TestPerRawOrchestrator:
             ),
             (
                 "triage structured failure [context_window_exceeded]: input too large",
+                "ingest.runtime_context_window_exceeded",
+            ),
+            (
+                "local consensus structured failure [context_window_exceeded]: 130000>114688",
                 "ingest.runtime_context_window_exceeded",
             ),
             (

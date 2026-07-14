@@ -2,6 +2,7 @@
 
 import ast
 import base64
+import copy
 import hashlib
 import json
 import re
@@ -3705,6 +3706,31 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
 INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION = INGEST_PROPOSAL_SCHEMA_VERSION
 _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION = 1
 INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION = 2
+INGEST_REVIEW_SHARD_POLICY_VERSION = 1
+INGEST_REVIEW_SHARD_SCHEMA_VERSION = 1
+_MAX_INGEST_REVIEW_SHARDS = 32
+_INGEST_REVIEW_LIMIT_FIELDS = frozenset(
+    {
+        "num_ctx",
+        "min_num_ctx",
+        "num_predict",
+        "max_input_chars",
+        "max_output_chars",
+        "max_feedback_chars",
+    }
+)
+_INGEST_REVIEW_SHARD_ROW_FIELDS = frozenset(
+    {
+        "shard_index",
+        "original_operation_indices",
+        "proposal_sha256",
+        "effective_request_sha256",
+        "effective_input_chars",
+        "effective_input_bytes",
+        "required_num_ctx",
+        "selected_num_ctx",
+    }
+)
 INGEST_FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -3758,6 +3784,402 @@ INGEST_FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
 }
 
 
+class IngestReviewShardCapacityError(RuntimeError):
+    """The exact proposal cannot be reviewed within bounded local contexts."""
+
+    def __init__(self, failure_class: str, reason: str) -> None:
+        self.failure_class = failure_class
+        self.reason = reason
+        super().__init__(reason)
+
+
+class IngestReviewBudgetExhausted(RuntimeError):
+    """A local-consensus call was blocked before inference by its raw budget."""
+
+
+@dataclass(frozen=True)
+class _IngestReviewShard:
+    """One deterministic, read-only review unit of a full ingest proposal."""
+
+    original_operation_indices: tuple[int, ...]
+    proposal: dict[str, Any]
+    prompt: str
+    proposal_sha256: str
+    effective_request_sha256: str
+    effective_input_chars: int
+    effective_input_bytes: int
+    required_num_ctx: int
+    selected_num_ctx: int
+
+
+@dataclass(frozen=True)
+class _IngestReviewShardPlan:
+    """A complete deterministic partition of one oversized proposal."""
+
+    full_proposal_sha256: str
+    manifest: dict[str, Any]
+    manifest_sha256: str
+    shards: tuple[_IngestReviewShard, ...]
+
+
+@dataclass(frozen=True)
+class _IngestReviewShardContinuation:
+    """Strict pre-triage resume state for a partially approved shard plan."""
+
+    proposal: dict[str, Any]
+    planned: tuple[PreparedIngestOperation, ...]
+    plan: _IngestReviewShardPlan
+    approved_shards: int
+
+
+@dataclass(frozen=True)
+class _IngestReviewShardPlanState:
+    """Read-only classification of every durable verdict in one shard plan."""
+
+    statuses: tuple[str, ...]
+    reviews: tuple[dict[str, Any] | None, ...]
+    authorities: tuple[dict[str, Any] | None, ...]
+    invalid_reason: str | None = None
+
+    @property
+    def current_approved_indices(self) -> tuple[int, ...]:
+        return tuple(
+            index
+            for index, status in enumerate(self.statuses)
+            if status == "current_approved"
+        )
+
+    @property
+    def approved_shards(self) -> int:
+        return len(self.current_approved_indices)
+
+
+def _ingest_review_router_config() -> Any:
+    """Resolve the same adopted router configuration used by live review."""
+
+    from llm_wiki_mcp.decision_router import resolve_router_policy
+    from llm_wiki_mcp.runtime_config import load_decision_router_config
+
+    config = load_decision_router_config()
+    if not config.adoption_artifact.strip():
+        return config
+    resolution = resolve_router_policy(config)
+    if resolution.error is not None:
+        raise IngestReviewShardCapacityError(
+            "local_decision_artifact_invalid",
+            f"review router policy is unavailable: {resolution.error}",
+        )
+    return resolution.config
+
+
+def _measure_ingest_review_request(
+    proposal: dict[str, Any],
+    *,
+    original_operation_indices: tuple[int, ...],
+    config: Any,
+) -> _IngestReviewShard:
+    """Measure the exact effective request the decision router will execute."""
+
+    from llm_wiki_mcp.decision_lane_prompts import (
+        build_ingest_reconciliation_prompt,
+    )
+    from llm_wiki_mcp.decision_router import (
+        decision_effective_request,
+        decision_request_context,
+        decision_request_fingerprint_sha256,
+    )
+    from llm_wiki_mcp.local_structured import preflight_structured_request
+
+    prompt = build_ingest_reconciliation_prompt(proposal)
+    effective_prompt, effective_system = decision_effective_request(
+        prompt=prompt,
+        schema=INGEST_FRONTIER_DECISION_SCHEMA,
+        system=None,
+        decision_lane="ingest_reconciliation",
+    )
+    preflight = preflight_structured_request(
+        effective_prompt,
+        INGEST_FRONTIER_DECISION_SCHEMA,
+        system=effective_system,
+        max_input_chars=config.max_input_chars,
+    )
+    required_num_ctx, selected_num_ctx = decision_request_context(
+        config,
+        prompt,
+        INGEST_FRONTIER_DECISION_SCHEMA,
+        None,
+        "ingest_reconciliation",
+    )
+    if not preflight.ok:
+        raise IngestReviewShardCapacityError(
+            preflight.failure_class or "input_invalid",
+            preflight.failure_reason or "structured review preflight failed",
+        )
+    if required_num_ctx > config.num_ctx:
+        raise IngestReviewShardCapacityError(
+            "context_window_exceeded",
+            "structured ingest review requires context "
+            f"{required_num_ctx}>{config.num_ctx}",
+        )
+    effective_input_chars = sum(
+        len(message["content"]) for message in preflight.messages
+    )
+    return _IngestReviewShard(
+        original_operation_indices=original_operation_indices,
+        proposal=proposal,
+        prompt=prompt,
+        proposal_sha256=_canonical_json_sha256(proposal),
+        effective_request_sha256=decision_request_fingerprint_sha256(
+            prompt=prompt,
+            schema=INGEST_FRONTIER_DECISION_SCHEMA,
+            system=None,
+            decision_lane="ingest_reconciliation",
+        ),
+        effective_input_chars=effective_input_chars,
+        effective_input_bytes=preflight.input_bytes,
+        required_num_ctx=required_num_ctx,
+        selected_num_ctx=selected_num_ctx,
+    )
+
+
+def _validate_ingest_shard_source_rows(
+    proposal: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return exact one-to-one source rows or fail closed before partitioning."""
+
+    prepared = proposal.get("prepared_operations")
+    generated = proposal.get("local_generated_operations")
+    triage = proposal.get("triage_plan")
+    if not isinstance(prepared, list) or not isinstance(generated, list):
+        raise IngestReviewShardCapacityError(
+            "input_invalid", "oversized proposal operation arrays are invalid"
+        )
+    if proposal.get("failed_operation_specs"):
+        raise IngestReviewShardCapacityError(
+            "input_too_large",
+            "oversized proposals with failed_operation_specs cannot be sharded safely",
+        )
+    if len(prepared) != len(generated) or not prepared:
+        raise IngestReviewShardCapacityError(
+            "input_too_large",
+            "oversized proposal lacks a complete one-to-one operation set",
+        )
+    by_source: dict[int, dict[str, Any]] = {}
+    for row in prepared:
+        source_index = (
+            row.get("source_operation_index") if isinstance(row, dict) else None
+        )
+        if (
+            not isinstance(source_index, int)
+            or isinstance(source_index, bool)
+            or source_index in by_source
+            or not 0 <= source_index < len(generated)
+        ):
+            raise IngestReviewShardCapacityError(
+                "input_invalid",
+                "oversized proposal source-operation provenance is incomplete",
+            )
+        generated_row = generated[source_index]
+        if (
+            not isinstance(generated_row, dict)
+            or row.get("source_operation_type") != generated_row.get("type")
+            or row.get("source_filename") != generated_row.get("filename")
+        ):
+            raise IngestReviewShardCapacityError(
+                "input_invalid",
+                "oversized proposal source-operation binding is invalid",
+            )
+        by_source[source_index] = row
+    if set(by_source) != set(range(len(generated))):
+        raise IngestReviewShardCapacityError(
+            "input_invalid", "oversized proposal operation coverage is incomplete"
+        )
+    if not isinstance(triage, list) or (triage and len(triage) != len(generated)):
+        raise IngestReviewShardCapacityError(
+            "input_invalid", "oversized proposal triage coverage is incomplete"
+        )
+    ordered_prepared = [by_source[index] for index in range(len(generated))]
+    return ordered_prepared, generated, triage
+
+
+def _build_ingest_review_shard_proposal(
+    proposal: dict[str, Any],
+    *,
+    group: tuple[int, ...],
+    groups: tuple[tuple[int, ...], ...],
+    shard_index: int,
+    full_proposal_sha256: str,
+) -> dict[str, Any]:
+    """Rebase one exact operation subset while retaining the full raw evidence."""
+
+    prepared, generated, triage = _validate_ingest_shard_source_rows(proposal)
+    shard = copy.deepcopy(proposal)
+    shard_prepared: list[dict[str, Any]] = []
+    shard_generated: list[dict[str, Any]] = []
+    shard_triage: list[dict[str, Any]] = []
+    for local_index, original_index in enumerate(group):
+        prepared_row = copy.deepcopy(prepared[original_index])
+        prepared_row["source_operation_index"] = local_index
+        shard_prepared.append(prepared_row)
+        shard_generated.append(copy.deepcopy(generated[original_index]))
+        if triage:
+            shard_triage.append(copy.deepcopy(triage[original_index]))
+    shard["prepared_operations"] = shard_prepared
+    shard["local_generated_operations"] = shard_generated
+    shard["triage_plan"] = shard_triage
+    audit = shard.get("audit_decision")
+    audit = copy.deepcopy(audit) if isinstance(audit, dict) else {}
+    audit["review_shard_contract"] = {
+        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+        "policy_version": INGEST_REVIEW_SHARD_POLICY_VERSION,
+        "full_proposal_sha256": full_proposal_sha256,
+        "full_operation_count": len(generated),
+        "shard_index": shard_index,
+        "original_operation_indices": list(group),
+        "complete_nonoverlap_operation_index_shards": [
+            list(indices) for indices in groups
+        ],
+    }
+    shard["audit_decision"] = audit
+    return shard
+
+
+def _build_ingest_review_shard_plan(
+    proposal: dict[str, Any],
+    *,
+    config: Any | None = None,
+    force_review_unit: bool = False,
+) -> _IngestReviewShardPlan | None:
+    """Return ``None`` for the unchanged standard path, else an exact partition."""
+
+    config = config or _ingest_review_router_config()
+    prepared_raw = proposal.get("prepared_operations")
+    full_indices = tuple(
+        range(len(prepared_raw)) if isinstance(prepared_raw, list) else range(0)
+    )
+    full_failure_class: str | None = None
+    try:
+        _measure_ingest_review_request(
+            proposal,
+            original_operation_indices=full_indices,
+            config=config,
+        )
+        if not force_review_unit:
+            return None
+    except IngestReviewShardCapacityError as full_error:
+        if full_error.failure_class not in {
+            "input_too_large",
+            "context_window_exceeded",
+        }:
+            raise
+        full_failure_class = full_error.failure_class
+    prepared, _generated, _triage = _validate_ingest_shard_source_rows(proposal)
+    full_indices = tuple(range(len(prepared)))
+    if proposal.get("failed_operation_specs"):
+        raise IngestReviewShardCapacityError(
+            full_failure_class or "input_too_large",
+            "oversized proposals with failed_operation_specs cannot be sharded safely",
+        )
+
+    full_proposal_sha256 = _canonical_json_sha256(proposal)
+    groups: tuple[tuple[int, ...], ...] = (full_indices,)
+    while True:
+        measured: list[_IngestReviewShard] = []
+        split_index: int | None = None
+        split_error: IngestReviewShardCapacityError | None = None
+        for shard_index, group in enumerate(groups):
+            shard_proposal = _build_ingest_review_shard_proposal(
+                proposal,
+                group=group,
+                groups=groups,
+                shard_index=shard_index,
+                full_proposal_sha256=full_proposal_sha256,
+            )
+            try:
+                measured.append(
+                    _measure_ingest_review_request(
+                        shard_proposal,
+                        original_operation_indices=group,
+                        config=config,
+                    )
+                )
+            except IngestReviewShardCapacityError as exc:
+                if exc.failure_class not in {
+                    "input_too_large",
+                    "context_window_exceeded",
+                }:
+                    raise
+                split_index = shard_index
+                split_error = exc
+                break
+        if split_index is None:
+            shards = tuple(measured)
+            break
+        group = groups[split_index]
+        if len(group) == 1:
+            assert split_error is not None
+            raise IngestReviewShardCapacityError(
+                split_error.failure_class,
+                "one prepared ingest operation exceeds the bounded review capacity: "
+                + split_error.reason,
+            )
+        if len(groups) >= _MAX_INGEST_REVIEW_SHARDS:
+            raise IngestReviewShardCapacityError(
+                split_error.failure_class
+                if split_error
+                else (full_failure_class or "input_too_large"),
+                f"ingest review requires more than {_MAX_INGEST_REVIEW_SHARDS} shards",
+            )
+        midpoint = len(group) // 2
+        groups = (
+            *groups[:split_index],
+            group[:midpoint],
+            group[midpoint:],
+            *groups[split_index + 1 :],
+        )
+
+    flattened = [index for group in groups for index in group]
+    if flattened != list(full_indices) or len(flattened) != len(set(flattened)):
+        raise IngestReviewShardCapacityError(
+            "input_invalid", "ingest review shard partition is not exact"
+        )
+    manifest = {
+        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+        "policy_version": INGEST_REVIEW_SHARD_POLICY_VERSION,
+        "kind": "ingest_review_shard_manifest",
+        "source_key": proposal.get("source_key"),
+        "full_proposal_sha256": full_proposal_sha256,
+        "full_operation_count": len(full_indices),
+        "review_limits": {
+            "num_ctx": config.num_ctx,
+            "min_num_ctx": config.min_num_ctx,
+            "num_predict": config.num_predict,
+            "max_input_chars": config.max_input_chars,
+            "max_output_chars": config.max_output_chars,
+            "max_feedback_chars": config.max_feedback_chars,
+        },
+        "shards": [
+            {
+                "shard_index": shard_index,
+                "original_operation_indices": list(shard.original_operation_indices),
+                "proposal_sha256": shard.proposal_sha256,
+                "effective_request_sha256": shard.effective_request_sha256,
+                "effective_input_chars": shard.effective_input_chars,
+                "effective_input_bytes": shard.effective_input_bytes,
+                "required_num_ctx": shard.required_num_ctx,
+                "selected_num_ctx": shard.selected_num_ctx,
+            }
+            for shard_index, shard in enumerate(shards)
+        ],
+    }
+    return _IngestReviewShardPlan(
+        full_proposal_sha256=full_proposal_sha256,
+        manifest=manifest,
+        manifest_sha256=_canonical_json_sha256(manifest),
+        shards=shards,
+    )
+
+
 def _canonical_json_sha256(value: Any) -> str:
     from llm_wiki_mcp.decision_lane_prompts import canonical_json_sha256
 
@@ -3779,6 +4201,335 @@ def _ingest_artifact_paths(source_key: str) -> tuple[Path, Path]:
         root / f"{source_key}.proposal.json",
         root / f"{source_key}.review.json",
     )
+
+
+def _ingest_review_continuation_marker_path(source_key: str) -> Path:
+    root = _ingest_artifact_paths(source_key)[0].parent
+    return root / f"{source_key}.continuation.json"
+
+
+def _ingest_review_repair_transition_path(source_key: str) -> Path:
+    root = _ingest_artifact_paths(source_key)[0].parent
+    return root / f"{source_key}.repair-transition.json"
+
+
+def _seal_ingest_review_repair_transition(
+    *,
+    source_key: str,
+    previous_full_proposal_sha256: str,
+    repaired_operations_sha256: str,
+) -> str | None:
+    """Allow one idempotent exact repair transition per source raw."""
+
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", previous_full_proposal_sha256) is None
+        or re.fullmatch(r"[0-9a-f]{64}", repaired_operations_sha256) is None
+    ):
+        return "exact repair transition identity is invalid"
+
+    identity = {
+        "source_key": source_key,
+        "previous_full_proposal_sha256": previous_full_proposal_sha256,
+        "repaired_operations_sha256": repaired_operations_sha256,
+    }
+    payload = {
+        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+        "kind": "ingest_review_exact_repair_transition",
+        **identity,
+        "identity_sha256": _canonical_json_sha256(identity),
+    }
+    path = _ingest_review_repair_transition_path(source_key)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return f"exact repair transition is unreadable: {type(exc).__name__}: {exc}"
+        if existing == payload:
+            return None
+        if not isinstance(existing, dict):
+            return "exact repair transition binding is invalid"
+        existing_identity = {
+            key: existing.get(key)
+            for key in (
+                "source_key",
+                "previous_full_proposal_sha256",
+                "repaired_operations_sha256",
+            )
+        }
+        if (
+            set(existing) != set(payload)
+            or existing.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
+            or existing.get("kind") != "ingest_review_exact_repair_transition"
+            or existing.get("identity_sha256")
+            != _canonical_json_sha256(existing_identity)
+        ):
+            return "exact repair transition binding is invalid"
+        return "exact repair transition limit exceeded"
+    try:
+        _write_ingest_artifact(path, payload)
+        readback = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return (
+            "exact repair transition write/readback failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    if readback != payload:
+        return "exact repair transition readback verification failed"
+    return None
+
+
+def _persist_ingest_review_continuation_marker(
+    *,
+    source_key: str,
+    plan: _IngestReviewShardPlan,
+    reason: str,
+    previous_full_proposal_sha256: str,
+    previous_authority: dict[str, Any] | str,
+    current_authority: dict[str, Any],
+) -> str | None:
+    """Seal the one exceptional zero-approval resume permission."""
+
+    if reason not in {
+        "exact_repair_reseed",
+        "authority_epoch_reseed",
+        "router_config_reseed",
+    }:
+        return "ingest review continuation marker reason is invalid"
+    if re.fullmatch(r"[0-9a-f]{64}", previous_full_proposal_sha256) is None or (
+        reason == "exact_repair_reseed"
+        and previous_full_proposal_sha256 == plan.full_proposal_sha256
+    ):
+        return "ingest review continuation marker transition is invalid"
+    if isinstance(previous_authority, str):
+        if re.fullmatch(r"[0-9a-f]{64}", previous_authority) is None:
+            return "ingest review continuation previous authority is invalid"
+        previous_authority_sha256 = previous_authority
+    else:
+        previous_authority_sha256 = _canonical_json_sha256(previous_authority)
+    transition = {
+        "source_key": source_key,
+        "previous_full_proposal_sha256": previous_full_proposal_sha256,
+        "full_proposal_sha256": plan.full_proposal_sha256,
+        "manifest_sha256": plan.manifest_sha256,
+        "reason": reason,
+        "previous_authority_sha256": previous_authority_sha256,
+        "current_authority_sha256": _canonical_json_sha256(current_authority),
+    }
+    payload = {
+        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+        "kind": "ingest_review_zero_progress_continuation",
+        **transition,
+        "transition_sha256": _canonical_json_sha256(transition),
+        "state": "available",
+    }
+    path = _ingest_review_continuation_marker_path(source_key)
+    try:
+        _write_ingest_artifact(path, payload)
+        readback = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return f"continuation marker write/readback failed: {type(exc).__name__}: {exc}"
+    if readback != payload:
+        return "continuation marker readback verification failed"
+    return None
+
+
+def _load_ingest_review_continuation_marker(
+    *,
+    source_key: str,
+    plan: _IngestReviewShardPlan,
+    authority: dict[str, Any],
+    allow_stale_identity: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    path = _ingest_review_continuation_marker_path(source_key)
+    if not path.exists():
+        return None, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return None, f"continuation marker is unreadable: {type(exc).__name__}: {exc}"
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "source_key",
+        "previous_full_proposal_sha256",
+        "full_proposal_sha256",
+        "manifest_sha256",
+        "reason",
+        "previous_authority_sha256",
+        "current_authority_sha256",
+        "transition_sha256",
+        "state",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_fields
+        or payload.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
+        or payload.get("kind") != "ingest_review_zero_progress_continuation"
+        or payload.get("source_key") != source_key
+        or not isinstance(payload.get("previous_full_proposal_sha256"), str)
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("previous_full_proposal_sha256")),
+        )
+        is None
+        or payload.get("reason")
+        not in {
+            "exact_repair_reseed",
+            "authority_epoch_reseed",
+            "router_config_reseed",
+        }
+        or payload.get("state") not in {"available", "claimed"}
+    ):
+        return None, "continuation marker schema is invalid"
+    transition = {
+        key: payload.get(key)
+        for key in (
+            "source_key",
+            "previous_full_proposal_sha256",
+            "full_proposal_sha256",
+            "manifest_sha256",
+            "reason",
+            "previous_authority_sha256",
+            "current_authority_sha256",
+        )
+    }
+    if (
+        not isinstance(payload.get("previous_authority_sha256"), str)
+        or not isinstance(payload.get("current_authority_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("previous_authority_sha256")))
+        is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("current_authority_sha256")))
+        is None
+        or payload.get("transition_sha256") != _canonical_json_sha256(transition)
+        or (
+            payload.get("reason") == "exact_repair_reseed"
+            and payload.get("previous_full_proposal_sha256")
+            == plan.full_proposal_sha256
+        )
+    ):
+        return None, "continuation marker transition binding is invalid"
+    if payload.get("full_proposal_sha256") != plan.full_proposal_sha256:
+        return None, None
+    if not allow_stale_identity and (
+        payload.get("current_authority_sha256") != _canonical_json_sha256(authority)
+        or payload.get("manifest_sha256") != plan.manifest_sha256
+    ):
+        return None, None
+    return payload, None
+
+
+def _consume_ingest_review_continuation_marker(
+    source_key: str,
+    marker: dict[str, Any],
+) -> str | None:
+    consumed = dict(marker)
+    consumed["state"] = "claimed"
+    try:
+        path = _ingest_review_continuation_marker_path(source_key)
+        _write_ingest_artifact(path, consumed)
+        readback = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return f"continuation marker consume failed: {type(exc).__name__}: {exc}"
+    if readback != consumed:
+        return "continuation marker consume readback verification failed"
+    return None
+
+
+def _ingest_review_stall_path(source_key: str) -> Path:
+    root = _ingest_artifact_paths(source_key)[0].parent
+    return root / f"{source_key}.stalled.json"
+
+
+def _persist_ingest_review_stall(
+    *,
+    source_key: str,
+    plan: _IngestReviewShardPlan,
+    authority: dict[str, Any],
+    approved_indices: tuple[int, ...],
+) -> str | None:
+    """Tombstone one same-plan, same-authority no-progress review epoch."""
+
+    identity = {
+        "source_key": source_key,
+        "full_proposal_sha256": plan.full_proposal_sha256,
+        "manifest_sha256": plan.manifest_sha256,
+        "authority_sha256": _canonical_json_sha256(authority),
+        "approved_indices": list(approved_indices),
+    }
+    payload = {
+        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+        "kind": "ingest_review_no_progress_stall",
+        **identity,
+        "identity_sha256": _canonical_json_sha256(identity),
+    }
+    try:
+        path = _ingest_review_stall_path(source_key)
+        _write_ingest_artifact(path, payload)
+        readback = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return f"review stall write/readback failed: {type(exc).__name__}: {exc}"
+    if readback != payload:
+        return "review stall readback verification failed"
+    return None
+
+
+def _matching_ingest_review_stall_error(
+    *,
+    source_key: str,
+    plan: _IngestReviewShardPlan,
+    authority: dict[str, Any],
+    approved_indices: tuple[int, ...],
+) -> str | None:
+    path = _ingest_review_stall_path(source_key)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return f"review stall is unreadable: {type(exc).__name__}: {exc}"
+    identity = {
+        "source_key": payload.get("source_key") if isinstance(payload, dict) else None,
+        "full_proposal_sha256": (
+            payload.get("full_proposal_sha256") if isinstance(payload, dict) else None
+        ),
+        "manifest_sha256": (
+            payload.get("manifest_sha256") if isinstance(payload, dict) else None
+        ),
+        "authority_sha256": (
+            payload.get("authority_sha256") if isinstance(payload, dict) else None
+        ),
+        "approved_indices": (
+            payload.get("approved_indices") if isinstance(payload, dict) else None
+        ),
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {
+            "schema_version",
+            "kind",
+            "source_key",
+            "full_proposal_sha256",
+            "manifest_sha256",
+            "authority_sha256",
+            "approved_indices",
+            "identity_sha256",
+        }
+        or payload.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
+        or payload.get("kind") != "ingest_review_no_progress_stall"
+        or payload.get("identity_sha256") != _canonical_json_sha256(identity)
+    ):
+        return "review stall binding is invalid"
+    expected_identity = {
+        "source_key": source_key,
+        "full_proposal_sha256": plan.full_proposal_sha256,
+        "manifest_sha256": plan.manifest_sha256,
+        "authority_sha256": _canonical_json_sha256(authority),
+        "approved_indices": list(approved_indices),
+    }
+    if identity == expected_identity:
+        return "same ingest review plan and authority previously made no progress"
+    return None
 
 
 def _write_ingest_artifact(path: Path, payload: dict[str, Any]) -> None:
@@ -4189,12 +4940,23 @@ def _load_ingest_review_artifact(
     *,
     source_key: str,
     proposal_sha256: str,
+    require_integrity: bool = False,
 ) -> dict[str, Any] | None:
     try:
         artifact = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(artifact, dict):
+        return None
+    artifact_sha256 = artifact.get("artifact_sha256")
+    if artifact_sha256 is not None:
+        unsigned_artifact = dict(artifact)
+        unsigned_artifact.pop("artifact_sha256", None)
+        if not isinstance(
+            artifact_sha256, str
+        ) or artifact_sha256 != _canonical_json_sha256(unsigned_artifact):
+            return None
+    elif require_integrity:
         return None
     review = artifact.get("review")
     authority = artifact.get("authority")
@@ -4245,10 +5007,11 @@ def _sealed_ingest_review_artifact(
     proposal_sha256: str,
     review: dict[str, Any],
     authority: dict[str, Any],
+    integrity: bool = False,
 ) -> dict[str, Any]:
     """Build the common authority-sealed terminal ingest artifact."""
 
-    return decision_authority.seal_semantic_artifact(
+    sealed = decision_authority.seal_semantic_artifact(
         {
             "schema_version": INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION,
             "kind": "ingest_frontier_review_artifact",
@@ -4259,6 +5022,9 @@ def _sealed_ingest_review_artifact(
         authority=authority,
         lane="ingest_reconciliation",
     )
+    if integrity:
+        sealed["artifact_sha256"] = _canonical_json_sha256(sealed)
+    return sealed
 
 
 def _write_and_readback_ingest_review_artifact(
@@ -4268,6 +5034,7 @@ def _write_and_readback_ingest_review_artifact(
     proposal_sha256: str,
     review: dict[str, Any],
     authority: dict[str, Any],
+    integrity: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Atomically persist and verify a terminal verdict before any effect.
 
@@ -4282,6 +5049,7 @@ def _write_and_readback_ingest_review_artifact(
             proposal_sha256=proposal_sha256,
             review=review,
             authority=authority,
+            integrity=integrity,
         )
         _write_ingest_artifact(path, sealed)
     except (OSError, ValueError) as exc:
@@ -4290,6 +5058,7 @@ def _write_and_readback_ingest_review_artifact(
         path,
         source_key=source_key,
         proposal_sha256=proposal_sha256,
+        require_integrity=integrity,
     )
     if readback != sealed:
         return None, "frontier review artifact readback verification failed"
@@ -4314,6 +5083,10 @@ def _ingest_review_authority_error(
 ) -> str | None:
     """Cross-check the verdict and trusted local quorum with its authority."""
 
+    shard_proof = review.get("review_shard_proof")
+    if shard_proof is not None:
+        return _ingest_review_shard_proof_error(review, authority)
+
     # Explicit dependency injection is the only boundary that is allowed to
     # bypass the production router proof.  Production ingest must use the same
     # central verifier as every other durable semantic lane so a copied policy
@@ -4325,6 +5098,166 @@ def _ingest_review_authority_error(
         authority,
         lane="ingest_reconciliation",
     )
+
+
+def _ingest_review_shard_proof_error(
+    review: dict[str, Any],
+    authority: dict[str, Any],
+) -> str | None:
+    """Validate every quorum proof in one host-aggregated shard verdict."""
+
+    if set(review) != {
+        "decision",
+        "summary",
+        "failed_operations_disposition",
+        "tests_run",
+        "risk",
+        "notes",
+        "review_shard_proof",
+    }:
+        return "ingest shard aggregate review schema is invalid"
+    if (
+        review.get("decision") != "apply_available"
+        or review.get("failed_operations_disposition") != "none"
+        or not isinstance(review.get("summary"), str)
+        or not str(review.get("summary")).strip()
+        or not isinstance(review.get("tests_run"), list)
+    ):
+        return "ingest shard aggregate disposition is invalid"
+    proof = review.get("review_shard_proof")
+    if not isinstance(proof, dict) or set(proof) != {
+        "schema_version",
+        "policy_version",
+        "full_proposal_sha256",
+        "manifest",
+        "manifest_sha256",
+        "shard_reviews",
+    }:
+        return "ingest shard aggregate proof schema is invalid"
+    manifest = proof.get("manifest")
+    manifest_sha256 = proof.get("manifest_sha256")
+    if (
+        proof.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
+        or proof.get("policy_version") != INGEST_REVIEW_SHARD_POLICY_VERSION
+        or not isinstance(manifest, dict)
+        or not isinstance(manifest_sha256, str)
+        or _canonical_json_sha256(manifest) != manifest_sha256
+        or proof.get("full_proposal_sha256") != manifest.get("full_proposal_sha256")
+    ):
+        return "ingest shard aggregate manifest binding is invalid"
+    manifest_rows = manifest.get("shards")
+    shard_reviews = proof.get("shard_reviews")
+    operation_count = manifest.get("full_operation_count")
+    review_limits = manifest.get("review_limits")
+    if (
+        set(manifest)
+        != {
+            "schema_version",
+            "policy_version",
+            "kind",
+            "source_key",
+            "full_proposal_sha256",
+            "full_operation_count",
+            "review_limits",
+            "shards",
+        }
+        or manifest.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
+        or manifest.get("policy_version") != INGEST_REVIEW_SHARD_POLICY_VERSION
+        or manifest.get("kind") != "ingest_review_shard_manifest"
+        or not isinstance(manifest.get("source_key"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("source_key")))
+        or not isinstance(manifest.get("full_proposal_sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("full_proposal_sha256")))
+        or not isinstance(operation_count, int)
+        or isinstance(operation_count, bool)
+        or operation_count < 1
+        or not isinstance(review_limits, dict)
+        or set(review_limits) != _INGEST_REVIEW_LIMIT_FIELDS
+        or not all(
+            isinstance(value, int) and not isinstance(value, bool) and value > 0
+            for value in review_limits.values()
+        )
+        or review_limits.get("min_num_ctx", 0) > review_limits.get("num_ctx", 0)
+        or not isinstance(manifest_rows, list)
+        or not manifest_rows
+        or not isinstance(shard_reviews, list)
+        or len(shard_reviews) != len(manifest_rows)
+    ):
+        return "ingest shard aggregate manifest is invalid"
+    flattened: list[int] = []
+    for expected_index, (manifest_row, review_row) in enumerate(
+        zip(manifest_rows, shard_reviews, strict=True)
+    ):
+        if (
+            not isinstance(manifest_row, dict)
+            or set(manifest_row) != _INGEST_REVIEW_SHARD_ROW_FIELDS
+            or manifest_row.get("shard_index") != expected_index
+            or not isinstance(manifest_row.get("proposal_sha256"), str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", str(manifest_row.get("proposal_sha256"))
+            )
+            or not isinstance(manifest_row.get("effective_request_sha256"), str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(manifest_row.get("effective_request_sha256")),
+            )
+            or not isinstance(manifest_row.get("original_operation_indices"), list)
+            or not manifest_row.get("original_operation_indices")
+            or not all(
+                isinstance(manifest_row.get(field), int)
+                and not isinstance(manifest_row.get(field), bool)
+                and manifest_row.get(field) > 0
+                for field in (
+                    "effective_input_chars",
+                    "effective_input_bytes",
+                    "required_num_ctx",
+                    "selected_num_ctx",
+                )
+            )
+            or manifest_row.get("effective_input_bytes")
+            > review_limits.get("max_input_chars", 0)
+            or manifest_row.get("required_num_ctx")
+            > manifest_row.get("selected_num_ctx")
+            or manifest_row.get("selected_num_ctx") > review_limits.get("num_ctx", 0)
+            or manifest_row.get("selected_num_ctx")
+            < review_limits.get("min_num_ctx", 0)
+            or not isinstance(review_row, dict)
+            or set(review_row) != {"shard_index", "proposal_sha256", "review"}
+            or review_row.get("shard_index") != expected_index
+            or review_row.get("proposal_sha256") != manifest_row.get("proposal_sha256")
+            or not isinstance(review_row.get("review"), dict)
+        ):
+            return "ingest shard aggregate review binding is invalid"
+        indices = manifest_row["original_operation_indices"]
+        if not all(
+            isinstance(index, int) and not isinstance(index, bool) and index >= 0
+            for index in indices
+        ):
+            return "ingest shard aggregate operation indices are invalid"
+        flattened.extend(indices)
+        shard_review = review_row["review"]
+        if (
+            shard_review.get("decision") != "apply_available"
+            or shard_review.get("failed_operations_disposition") != "none"
+            or any(
+                shard_review.get(field)
+                for field in ("invalid_tags", "replacement_operations")
+            )
+        ):
+            return "ingest shard aggregate contains a non-approval"
+        if authority.get("source") != "injected_reviewer_boundary":
+            proof_error = decision_authority.semantic_verdict_authority_error(
+                shard_review,
+                authority,
+                lane="ingest_reconciliation",
+            )
+            if proof_error is not None:
+                return proof_error
+    if flattened != list(range(operation_count)) or len(flattened) != len(
+        set(flattened)
+    ):
+        return "ingest shard aggregate coverage is not exact and non-overlapping"
+    return None
 
 
 def _ingest_review_authority_shape_error(authority: dict[str, Any]) -> str | None:
@@ -4586,11 +5519,42 @@ def _load_pretriage_terminal_recovery(
         raise IngestApplyError(
             "pre-triage terminal review is not canonical for its proposal"
         )
+    authority_shape_error = _ingest_review_authority_shape_error(authority)
+    authority_proof_error = _ingest_review_authority_error(review, authority)
+    if authority_shape_error is not None or authority_proof_error is not None:
+        raise IngestApplyError(
+            "pre-triage terminal review authority is invalid: "
+            + (authority_shape_error or authority_proof_error or "unknown error")
+        )
     decision = review.get("decision")
+    fully_applied = (
+        decision == "apply_available"
+        and bool(planned)
+        and _prepared_plan_is_fully_applied(planned)
+    )
+    if "review_shard_proof" in review:
+        shard_reuse_error = (
+            _historical_ingest_sharded_review_recovery_error(
+                review,
+                proposal,
+                authority,
+            )
+            if fully_applied
+            else _ingest_sharded_review_reuse_error(
+                review,
+                proposal,
+                authority,
+            )
+        )
+        if shard_reuse_error is not None:
+            raise IngestApplyError(
+                "pre-triage terminal shard review binding is invalid: "
+                + shard_reuse_error
+            )
     if decision not in {"apply_available", "confirmed_noop"}:
         return None
     if decision == "apply_available":
-        if not planned or not _prepared_plan_is_fully_applied(planned):
+        if not fully_applied:
             return None
     else:
         current_authority, current_authority_error = _current_ingest_review_authority(
@@ -4784,6 +5748,882 @@ def _run_ingest_frontier_review(
     return _normalize_ingest_frontier_review(result, proposal=proposal)
 
 
+def _ingest_review_shard_manifest_path(plan: _IngestReviewShardPlan) -> Path:
+    root = _ingest_artifact_paths("unused")[0].parent
+    identity = _canonical_json_sha256(
+        {
+            "kind": "ingest_review_shard_manifest_artifact",
+            "full_proposal_sha256": plan.full_proposal_sha256,
+            "manifest_sha256": plan.manifest_sha256,
+        }
+    )
+    return root / f"review-shard-manifest-{identity}.json"
+
+
+def _ingest_review_shard_review_identity(
+    plan: _IngestReviewShardPlan,
+    *,
+    shard_index: int,
+    shard: _IngestReviewShard,
+) -> tuple[str, Path]:
+    identity = _canonical_json_sha256(
+        {
+            "kind": "ingest_review_shard_verdict",
+            "full_proposal_sha256": plan.full_proposal_sha256,
+            "manifest_sha256": plan.manifest_sha256,
+            "shard_index": shard_index,
+            "shard_proposal_sha256": shard.proposal_sha256,
+        }
+    )
+    root = _ingest_artifact_paths("unused")[0].parent
+    return identity, root / f"review-shard-{identity}.review.json"
+
+
+def _ingest_review_shard_failure(
+    failure_class: str,
+    summary: str,
+) -> dict[str, Any]:
+    return {
+        "decision": "retry",
+        "summary": summary,
+        "failed_operations_disposition": "retry_required",
+        "tests_run": [],
+        "risk": "No page mutation was authorized.",
+        "notes": None,
+        "frontier_failure": {
+            "failure_class": failure_class,
+            "rescue_status": "local_quarantined",
+            "summary": summary,
+            "human_required": False,
+            "notify_user": False,
+        },
+    }
+
+
+def _persist_ingest_review_shard_manifest(
+    plan: _IngestReviewShardPlan,
+    *,
+    source_key: str,
+) -> str | None:
+    path = _ingest_review_shard_manifest_path(plan)
+    payload = _ingest_review_shard_manifest_artifact_payload(
+        plan,
+        source_key=source_key,
+    )
+    if path.exists():
+        return _stored_ingest_review_shard_manifest_error(
+            plan,
+            source_key=source_key,
+        )
+    try:
+        _write_ingest_artifact(path, payload)
+        readback = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return (
+            f"review shard manifest write/readback failed: {type(exc).__name__}: {exc}"
+        )
+    if readback != payload:
+        return "review shard manifest readback verification failed"
+    return None
+
+
+def _ingest_review_shard_manifest_artifact_payload(
+    plan: _IngestReviewShardPlan,
+    *,
+    source_key: str,
+) -> dict[str, Any]:
+    """Return the exact durable envelope for one deterministic shard plan."""
+
+    return {
+        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+        "kind": "ingest_review_shard_manifest_artifact",
+        "source_key": source_key,
+        "full_proposal_sha256": plan.full_proposal_sha256,
+        "manifest_sha256": plan.manifest_sha256,
+        "manifest": plan.manifest,
+    }
+
+
+def _stored_ingest_review_shard_manifest_error(
+    plan: _IngestReviewShardPlan,
+    *,
+    source_key: str,
+) -> str | None:
+    """Read-only exact validation for a manifest that must already be durable."""
+
+    path = _ingest_review_shard_manifest_path(plan)
+    if not path.exists():
+        return "review shard manifest is missing"
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return f"review shard manifest is unreadable: {type(exc).__name__}: {exc}"
+    expected = _ingest_review_shard_manifest_artifact_payload(
+        plan,
+        source_key=source_key,
+    )
+    if current != expected:
+        return "review shard manifest changed or failed exact recomputation"
+    return None
+
+
+def _ingest_review_shard_aggregate(
+    plan: _IngestReviewShardPlan,
+    shard_reviews: list[dict[str, Any]],
+) -> dict[str, Any]:
+    tests_run = list(
+        dict.fromkeys(
+            test
+            for review in shard_reviews
+            for test in review.get("tests_run", [])
+            if isinstance(test, str)
+        )
+    )
+    return {
+        "decision": "apply_available",
+        "summary": (
+            f"All {len(shard_reviews)} exact review shards received independent "
+            "local-consensus approval."
+        ),
+        "failed_operations_disposition": "none",
+        "tests_run": tests_run,
+        "risk": None,
+        "notes": None,
+        "review_shard_proof": {
+            "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+            "policy_version": INGEST_REVIEW_SHARD_POLICY_VERSION,
+            "full_proposal_sha256": plan.full_proposal_sha256,
+            "manifest": plan.manifest,
+            "manifest_sha256": plan.manifest_sha256,
+            "shard_reviews": [
+                {
+                    "shard_index": shard_index,
+                    "proposal_sha256": shard.proposal_sha256,
+                    "review": review,
+                }
+                for shard_index, (shard, review) in enumerate(
+                    zip(plan.shards, shard_reviews, strict=True)
+                )
+            ],
+        },
+    }
+
+
+def _run_ingest_sharded_review(
+    plan: _IngestReviewShardPlan,
+    *,
+    source_key: str,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    authority: dict[str, Any],
+    frontier_budget: "_FrontierCallBudget | None" = None,
+) -> dict[str, Any]:
+    """Review exact shards and aggregate only a complete all-approval proof."""
+
+    manifest_error = _persist_ingest_review_shard_manifest(
+        plan,
+        source_key=source_key,
+    )
+    if manifest_error is not None:
+        return _ingest_review_shard_failure(
+            "ingest_review_shard_manifest_invalid", manifest_error
+        )
+    shard_state = _inspect_ingest_review_shard_plan_state(
+        plan,
+        source_key=source_key,
+        authority=authority,
+    )
+    if shard_state.invalid_reason is not None:
+        return _ingest_review_shard_failure(
+            "ingest_review_shard_artifact_invalid",
+            shard_state.invalid_reason,
+        )
+
+    shard_reviews: list[dict[str, Any]] = []
+    for shard_index, shard in enumerate(plan.shards):
+        shard_source_key, shard_review_path = _ingest_review_shard_review_identity(
+            plan,
+            shard_index=shard_index,
+            shard=shard,
+        )
+        current_review = shard_state.reviews[shard_index]
+        if isinstance(current_review, dict):
+            review = current_review
+        else:
+            if frontier_budget is not None and not frontier_budget.consume():
+                raise IngestReviewBudgetExhausted
+            try:
+                review = _run_ingest_frontier_review(
+                    shard.proposal,
+                    reviewer=reviewer,
+                )
+            except Exception as exc:
+                return _ingest_review_shard_failure(
+                    "local_consensus_failed",
+                    "local consensus reviewer failed for ingest review shard "
+                    f"{shard_index}: {type(exc).__name__}: {exc}",
+                )
+            review = _normalize_ingest_frontier_review(
+                review,
+                proposal=shard.proposal,
+            )
+            if review.get("decision") == "apply_available":
+                from llm_wiki_mcp.page_mutation import decision_authority_lock
+
+                with decision_authority_lock():
+                    current_authority, current_error = _current_ingest_review_authority(
+                        reviewer=reviewer
+                    )
+                    compare_error = (
+                        current_error
+                        or decision_authority.compare_semantic_authority(
+                            authority,
+                            current_authority,
+                            lane="ingest_reconciliation",
+                        )
+                    )
+                    if compare_error is not None:
+                        return _ingest_review_shard_failure(
+                            "local_decision_authority_changed", compare_error
+                        )
+                    if proof_error := _ingest_review_authority_error(
+                        review,
+                        authority,
+                    ):
+                        return _ingest_review_shard_failure(
+                            "local_consensus_proof_invalid", proof_error
+                        )
+                    _readback, artifact_error = (
+                        _write_and_readback_ingest_review_artifact(
+                            shard_review_path,
+                            source_key=shard_source_key,
+                            proposal_sha256=shard.proposal_sha256,
+                            review=review,
+                            authority=authority,
+                            integrity=True,
+                        )
+                    )
+                if artifact_error is not None:
+                    return _ingest_review_shard_failure(
+                        "ingest_review_shard_artifact_invalid", artifact_error
+                    )
+        shard_reviews.append(review)
+
+    repair_reviews = [
+        review
+        for review in shard_reviews
+        if any(
+            isinstance(review.get(field), list) and bool(review.get(field))
+            for field in ("invalid_tags", "replacement_operations")
+        )
+    ]
+    non_approvals = [
+        review
+        for review in shard_reviews
+        if review.get("decision") != "apply_available"
+    ]
+    if not non_approvals:
+        return _ingest_review_shard_aggregate(plan, shard_reviews)
+    if len(repair_reviews) == 1 and non_approvals == repair_reviews:
+        # The existing exact filename-scoped repair path materializes this
+        # one shard's host-bound arrays and reviews the rebuilt full proposal.
+        return repair_reviews[0]
+    if repair_reviews:
+        return _ingest_review_shard_failure(
+            (
+                "ingest_review_multiple_repairs_unsupported"
+                if len(repair_reviews) > 1
+                else "ingest_review_mixed_repair_unsupported"
+            ),
+            (
+                "multiple ingest review shards requested repairs; no mutation was authorized"
+                if len(repair_reviews) > 1
+                else "one ingest review shard requested repair while another did not approve; "
+                "no mutation was authorized"
+            ),
+        )
+    if any(review.get("decision") == "confirmed_noop" for review in non_approvals):
+        return _ingest_review_shard_failure(
+            "ingest_review_shard_nonapproval",
+            "confirmed_noop on one operation shard cannot discard the complete raw",
+        )
+    return non_approvals[0]
+
+
+def _ingest_sharded_review_reuse_error(
+    review: dict[str, Any],
+    proposal: dict[str, Any],
+    authority: dict[str, Any],
+) -> str | None:
+    """Recompute with current limits before an ordinary unapplied reuse."""
+
+    if "review_shard_proof" not in review:
+        return None
+    try:
+        plan = _build_ingest_review_shard_plan(
+            proposal,
+            force_review_unit=True,
+        )
+    except (IngestReviewShardCapacityError, ValueError) as exc:
+        return f"ingest shard manifest recomputation failed: {exc}"
+    assert plan is not None
+    return _ingest_sharded_review_plan_artifact_error(
+        review,
+        proposal,
+        authority,
+        plan,
+    )
+
+
+def _ingest_sharded_review_plan_artifact_error(
+    review: dict[str, Any],
+    proposal: dict[str, Any],
+    authority: dict[str, Any],
+    plan: _IngestReviewShardPlan,
+) -> str | None:
+    """Verify an exact plan and every already-durable shard without writes."""
+
+    proof = review.get("review_shard_proof")
+    if (
+        not isinstance(proof, dict)
+        or proof.get("manifest") != plan.manifest
+        or proof.get("manifest_sha256") != plan.manifest_sha256
+        or proof.get("full_proposal_sha256") != plan.full_proposal_sha256
+    ):
+        return "ingest shard terminal review does not match exact recomputation"
+    shard_state = _inspect_ingest_review_shard_plan_state(
+        plan,
+        source_key=str(proposal.get("source_key") or ""),
+        authority=authority,
+    )
+    if shard_state.invalid_reason is not None:
+        return shard_state.invalid_reason
+    if shard_state.approved_shards != len(plan.shards):
+        return "ingest shard terminal review authority changed"
+    proof_rows = proof.get("shard_reviews")
+    if not isinstance(proof_rows, list) or len(proof_rows) != len(plan.shards):
+        return "ingest shard terminal review count changed"
+    for shard_index, (shard, proof_row, durable_review) in enumerate(
+        zip(plan.shards, proof_rows, shard_state.reviews, strict=True)
+    ):
+        if not isinstance(proof_row, dict):
+            return f"ingest shard {shard_index} proof is invalid"
+        if (
+            durable_review != proof_row.get("review")
+            or proof_row.get("proposal_sha256") != shard.proposal_sha256
+            or proof_row.get("shard_index") != shard_index
+        ):
+            return f"ingest shard {shard_index} durable proof changed"
+    return None
+
+
+def _historical_ingest_sharded_review_recovery_error(
+    review: dict[str, Any],
+    proposal: dict[str, Any],
+    authority: dict[str, Any],
+) -> str | None:
+    """Verify a fully-applied shard proof under its sealed historical limits.
+
+    Recovery is allowed to acknowledge exact postimages after live router limits
+    change, but it must never reinterpret the old partition under those new
+    limits.  The embedded limits are authority-sealed by the aggregate review;
+    recomputing with them proves the same shard proposals and artifact names.
+    """
+
+    if "review_shard_proof" not in review:
+        return None
+    if proof_error := _ingest_review_authority_error(review, authority):
+        return proof_error
+    proof = review.get("review_shard_proof")
+    manifest = proof.get("manifest") if isinstance(proof, dict) else None
+    if proof.get("full_proposal_sha256") != _canonical_json_sha256(proposal):
+        return "ingest shard historical proof does not bind the full proposal"
+    try:
+        plan = _ingest_review_shard_plan_from_sealed_manifest(
+            proposal,
+            manifest,
+        )
+    except (IngestReviewShardCapacityError, TypeError, ValueError) as exc:
+        return f"ingest shard historical manifest recomputation failed: {exc}"
+    return _ingest_sharded_review_plan_artifact_error(
+        review,
+        proposal,
+        authority,
+        plan,
+    )
+
+
+def _ingest_review_shard_plan_from_sealed_manifest(
+    proposal: dict[str, Any],
+    manifest: object,
+) -> _IngestReviewShardPlan:
+    """Rebuild one shard plan from the limits sealed into its manifest."""
+
+    limits = manifest.get("review_limits") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(limits, dict)
+        or set(limits) != _INGEST_REVIEW_LIMIT_FIELDS
+        or not all(
+            isinstance(value, int) and not isinstance(value, bool) and value > 0
+            for value in limits.values()
+        )
+        or limits.get("min_num_ctx", 0) > limits.get("num_ctx", 0)
+    ):
+        raise ValueError("ingest shard historical review limits are invalid")
+
+    from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+
+    historical_config = DecisionRouterConfig(
+        **limits,
+        adoption_artifact="",
+    )
+    plan = _build_ingest_review_shard_plan(
+        proposal,
+        config=historical_config,
+        force_review_unit=True,
+    )
+    assert plan is not None
+    if plan.manifest != manifest:
+        raise ValueError(
+            "ingest shard historical manifest is not an exact recomputation"
+        )
+    return plan
+
+
+def _inspect_ingest_review_shard_plan_state(
+    plan: _IngestReviewShardPlan,
+    *,
+    source_key: str,
+    authority: dict[str, Any],
+) -> _IngestReviewShardPlanState:
+    """Classify every durable shard against one exact current authority.
+
+    A well-formed verdict from an older authority epoch is retained as audit
+    evidence but contributes no approval to the current epoch.  Invalid,
+    non-terminal, or integrity-mismatched artifacts remain fail-closed.
+    """
+
+    manifest_error = _stored_ingest_review_shard_manifest_error(
+        plan,
+        source_key=source_key,
+    )
+    if manifest_error is not None:
+        return _IngestReviewShardPlanState(
+            statuses=(),
+            reviews=(),
+            authorities=(),
+            invalid_reason=manifest_error,
+        )
+    statuses: list[str] = []
+    reviews: list[dict[str, Any] | None] = []
+    authorities: list[dict[str, Any] | None] = []
+    for shard_index, shard in enumerate(plan.shards):
+        shard_source_key, shard_review_path = _ingest_review_shard_review_identity(
+            plan,
+            shard_index=shard_index,
+            shard=shard,
+        )
+        if not shard_review_path.exists():
+            statuses.append("missing")
+            reviews.append(None)
+            authorities.append(None)
+            continue
+        shard_artifact = _load_ingest_review_artifact(
+            shard_review_path,
+            source_key=shard_source_key,
+            proposal_sha256=shard.proposal_sha256,
+            require_integrity=True,
+        )
+        shard_review = (
+            shard_artifact.get("review") if isinstance(shard_artifact, dict) else None
+        )
+        artifact_authority = (
+            shard_artifact.get("authority")
+            if isinstance(shard_artifact, dict)
+            else None
+        )
+        if (
+            shard_artifact is None
+            or not isinstance(artifact_authority, dict)
+            or not isinstance(shard_review, dict)
+            or _normalize_ingest_frontier_review(
+                shard_review,
+                proposal=shard.proposal,
+            )
+            != shard_review
+            or shard_review.get("decision") != "apply_available"
+            or _ingest_review_authority_error(
+                shard_review,
+                artifact_authority,
+            )
+            is not None
+        ):
+            return _IngestReviewShardPlanState(
+                statuses=tuple(statuses + ["invalid"]),
+                reviews=tuple(reviews + [None]),
+                authorities=tuple(authorities + [None]),
+                invalid_reason=(
+                    f"review shard {shard_index} durable verdict is invalid"
+                ),
+            )
+        if artifact_authority == authority:
+            statuses.append("current_approved")
+            reviews.append(shard_review)
+            authorities.append(artifact_authority)
+        else:
+            statuses.append("stale_valid")
+            reviews.append(None)
+            authorities.append(artifact_authority)
+    return _IngestReviewShardPlanState(
+        statuses=tuple(statuses),
+        reviews=tuple(reviews),
+        authorities=tuple(authorities),
+    )
+
+
+def _load_pretriage_ingest_shard_continuation(
+    raw_content: str,
+    raw_keywords: list[str] | None,
+    *,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+) -> _IngestReviewShardContinuation | None:
+    """Load durable partial shard progress without rerunning semantic generation.
+
+    A continuation is intentionally narrower than terminal recovery: the full
+    proposal is still unapplied and no parent verdict exists yet.  Durable
+    approvals from the current authority are reused; self-consistent approvals
+    from an older epoch are treated as unapproved and reviewed again.
+    """
+
+    source_key = _ingest_source_key(raw_content, raw_keywords)
+    proposal_path, review_path = _ingest_artifact_paths(source_key)
+    if not proposal_path.exists() or review_path.exists():
+        return None
+    proposal, planned = _load_strict_ingest_proposal_for_recovery(
+        proposal_path,
+        source_key=source_key,
+        raw_content=raw_content,
+        raw_keywords=raw_keywords,
+    )
+    if _prepared_plan_targets_reserved_system_page(planned):
+        return None
+    if proposal.get("failed_operation_specs"):
+        # Partial generation is intentionally regenerated from the saved
+        # triage plan; it cannot be converted into an exact shard continuation.
+        return None
+    authority, authority_error = _current_ingest_review_authority(reviewer=reviewer)
+    authority_shape_error = (
+        _ingest_review_authority_shape_error(authority)
+        if authority is not None
+        else None
+    )
+    if authority_error is not None or authority is None or authority_shape_error:
+        raise IngestApplyError(
+            "pre-triage shard continuation authority is unavailable: "
+            + (authority_error or authority_shape_error or "authority is missing")
+        )
+
+    try:
+        plan = _build_ingest_review_shard_plan(
+            proposal,
+            force_review_unit=True,
+        )
+    except (IngestReviewShardCapacityError, TypeError, ValueError) as exc:
+        raise IngestApplyError(
+            f"pre-triage shard continuation recomputation failed: {exc}"
+        ) from exc
+    assert plan is not None
+    manifest_path = _ingest_review_shard_manifest_path(plan)
+    prior_authority: dict[str, Any] | None = None
+    prior_verified_progress = False
+    if not manifest_path.exists():
+        prior_plan_found = False
+        proposal_sha256 = _canonical_json_sha256(proposal)
+        for prior_path in sorted(
+            proposal_path.parent.glob("review-shard-manifest-*.json")
+        ):
+            try:
+                prior_artifact = json.loads(prior_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(prior_artifact, dict)
+                or prior_artifact.get("source_key") != source_key
+                or prior_artifact.get("full_proposal_sha256") != proposal_sha256
+            ):
+                continue
+            prior_manifest = prior_artifact.get("manifest")
+            try:
+                prior_plan = _ingest_review_shard_plan_from_sealed_manifest(
+                    proposal,
+                    prior_manifest,
+                )
+            except (IngestReviewShardCapacityError, TypeError, ValueError) as exc:
+                raise IngestApplyError(
+                    "pre-triage shard continuation prior manifest is invalid: "
+                    + str(exc)
+                ) from exc
+            if prior_path != _ingest_review_shard_manifest_path(prior_plan):
+                raise IngestApplyError(
+                    "pre-triage shard continuation prior manifest filename is invalid"
+                )
+            prior_state = _inspect_ingest_review_shard_plan_state(
+                prior_plan,
+                source_key=source_key,
+                authority=authority,
+            )
+            if prior_state.invalid_reason is not None:
+                raise IngestApplyError(
+                    "pre-triage shard continuation prior proof is invalid: "
+                    + prior_state.invalid_reason
+                )
+            prior_authority = next(
+                (
+                    candidate
+                    for candidate in prior_state.authorities
+                    if isinstance(candidate, dict) and candidate != authority
+                ),
+                prior_authority,
+            )
+            prior_verified_progress = prior_verified_progress or bool(
+                prior_state.current_approved_indices
+                or "stale_valid" in prior_state.statuses
+            )
+            prior_plan_found = True
+        if not prior_plan_found:
+            # A standard proposal with only a semantic retry is not a bounded
+            # continuation.  Let the ordinary convergence loop regenerate it.
+            return None
+        manifest_error = _persist_ingest_review_shard_manifest(
+            plan,
+            source_key=source_key,
+        )
+        if manifest_error is not None:
+            raise IngestApplyError(
+                "pre-triage shard continuation manifest reseed failed: "
+                + manifest_error
+            )
+    shard_state = _inspect_ingest_review_shard_plan_state(
+        plan,
+        source_key=source_key,
+        authority=authority,
+    )
+    if shard_state.invalid_reason is not None:
+        raise IngestApplyError(
+            "pre-triage shard continuation durable approval is invalid: "
+            + shard_state.invalid_reason
+        )
+    prior_authority = next(
+        (
+            candidate
+            for candidate in shard_state.authorities
+            if isinstance(candidate, dict) and candidate != authority
+        ),
+        prior_authority,
+    )
+    if stall_error := _matching_ingest_review_stall_error(
+        source_key=source_key,
+        plan=plan,
+        authority=authority,
+        approved_indices=shard_state.current_approved_indices,
+    ):
+        raise IngestApplyError(
+            "pre-triage shard continuation is stalled: " + stall_error
+        )
+    if shard_state.approved_shards == 0:
+        marker, marker_error = _load_ingest_review_continuation_marker(
+            source_key=source_key,
+            plan=plan,
+            authority=authority,
+        )
+        if marker_error is not None:
+            raise IngestApplyError(
+                "pre-triage zero-approval continuation marker is invalid: "
+                + marker_error
+            )
+        stale_marker: dict[str, Any] | None = None
+        if marker is None:
+            stale_marker, stale_marker_error = _load_ingest_review_continuation_marker(
+                source_key=source_key,
+                plan=plan,
+                authority=authority,
+                allow_stale_identity=True,
+            )
+            if stale_marker_error is not None:
+                raise IngestApplyError(
+                    "pre-triage stale continuation marker is invalid: "
+                    + stale_marker_error
+                )
+        if marker is None and (
+            prior_authority is not None
+            or prior_verified_progress
+            or stale_marker is not None
+        ):
+            stale_authority_sha256 = (
+                str(stale_marker.get("current_authority_sha256"))
+                if isinstance(stale_marker, dict)
+                else None
+            )
+            marker_reason = (
+                "authority_epoch_reseed"
+                if prior_authority is not None
+                or (
+                    stale_authority_sha256 is not None
+                    and stale_authority_sha256 != _canonical_json_sha256(authority)
+                )
+                else "router_config_reseed"
+            )
+            marker_write_error = _persist_ingest_review_continuation_marker(
+                source_key=source_key,
+                plan=plan,
+                reason=marker_reason,
+                previous_full_proposal_sha256=plan.full_proposal_sha256,
+                previous_authority=(
+                    prior_authority or stale_authority_sha256 or authority
+                ),
+                current_authority=authority,
+            )
+            if marker_write_error is not None:
+                raise IngestApplyError(
+                    "pre-triage authority reseed marker failed: " + marker_write_error
+                )
+            marker, marker_error = _load_ingest_review_continuation_marker(
+                source_key=source_key,
+                plan=plan,
+                authority=authority,
+            )
+            if marker_error is not None or marker is None:
+                raise IngestApplyError(
+                    "pre-triage authority reseed marker readback failed: "
+                    + (marker_error or "marker is missing")
+                )
+        if marker is None:
+            return None
+        if marker.get("state") == "available":
+            if consume_error := _consume_ingest_review_continuation_marker(
+                source_key,
+                marker,
+            ):
+                raise IngestApplyError(
+                    "pre-triage zero-approval continuation marker was not claimed: "
+                    + consume_error
+                )
+    return _IngestReviewShardContinuation(
+        proposal=proposal,
+        planned=tuple(planned),
+        plan=plan,
+        approved_shards=shard_state.approved_shards,
+    )
+
+
+def _tombstone_current_ingest_review_plan(
+    raw_content: str,
+    raw_keywords: list[str] | None,
+    *,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+) -> str | None:
+    """Durably stop a normally-returned continuation that made no terminal effect."""
+
+    source_key = _ingest_source_key(raw_content, raw_keywords)
+    proposal_path, review_path = _ingest_artifact_paths(source_key)
+    if not proposal_path.exists() or review_path.exists():
+        return None
+    proposal, _planned = _load_strict_ingest_proposal_for_recovery(
+        proposal_path,
+        source_key=source_key,
+        raw_content=raw_content,
+        raw_keywords=raw_keywords,
+    )
+    authority, authority_error = _current_ingest_review_authority(reviewer=reviewer)
+    if authority_error is not None or not isinstance(authority, dict):
+        return authority_error or "ingest review stall authority is missing"
+    plan = _build_ingest_review_shard_plan(
+        proposal,
+        force_review_unit=True,
+    )
+    assert plan is not None
+    if not _ingest_review_shard_manifest_path(plan).exists():
+        return "ingest review stall manifest is missing"
+    shard_state = _inspect_ingest_review_shard_plan_state(
+        plan,
+        source_key=source_key,
+        authority=authority,
+    )
+    if shard_state.invalid_reason is not None:
+        return shard_state.invalid_reason
+    return _persist_ingest_review_stall(
+        source_key=source_key,
+        plan=plan,
+        authority=authority,
+        approved_indices=shard_state.current_approved_indices,
+    )
+
+
+def _has_sharded_ingest_review_artifact_family(
+    review_path: Path,
+    *,
+    proposal: dict[str, Any],
+    source_key: str,
+) -> bool:
+    """Detect a sharded terminal family even when its aggregate was corrupted."""
+
+    try:
+        raw_review_artifact = json.loads(review_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raw_review_artifact = None
+    raw_review = (
+        raw_review_artifact.get("review")
+        if isinstance(raw_review_artifact, dict)
+        else None
+    )
+    if isinstance(raw_review, dict) and "review_shard_proof" in raw_review:
+        return True
+    try:
+        expected_shard_plan = _build_ingest_review_shard_plan(proposal)
+    except (IngestReviewShardCapacityError, ValueError):
+        expected_shard_plan = None
+    if (
+        expected_shard_plan is not None
+        and _ingest_review_shard_manifest_path(expected_shard_plan).exists()
+    ):
+        return True
+    shard_root = _ingest_artifact_paths(source_key)[0].parent
+    for candidate_path in shard_root.glob("review-shard-manifest-*.json"):
+        try:
+            candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if isinstance(candidate, dict) and candidate.get("source_key") == source_key:
+            return True
+    return False
+
+
+def _invalid_sharded_review_result(
+    *,
+    source_key: str,
+    proposal: dict[str, Any],
+    recovered_artifact: bool,
+) -> dict[str, Any]:
+    summary = (
+        "current sharded terminal review artifact is corrupt; "
+        "refusing replacement or page mutation"
+    )
+    audit = proposal.get("audit_decision")
+    return {
+        "status": "needs_retry",
+        "source_key": source_key,
+        "proposal_sha256": _canonical_json_sha256(proposal),
+        "review": _ingest_review_shard_failure(
+            "ingest_review_shard_reuse_invalid", summary
+        ),
+        "summary": summary,
+        "recovered_artifact": recovered_artifact,
+        "reused_review": False,
+        "created": [],
+        "updated": [],
+        "audit": dict(audit) if isinstance(audit, dict) else {},
+    }
+
+
 def _review_and_apply_ingest_operations(
     operations: list[dict],
     *,
@@ -4796,6 +6636,9 @@ def _review_and_apply_ingest_operations(
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     force_frontier_review: bool = False,
     frontier_budget: "_FrontierCallBudget | None" = None,
+    shard_continuation: _IngestReviewShardContinuation | None = None,
+    allow_empty_shard_continuation: bool = False,
+    continuation_reseed_from_sha256: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Authorize by risk policy, durably bind the verdict, and CAS apply."""
@@ -4815,15 +6658,44 @@ def _review_and_apply_ingest_operations(
     if recovered is not None:
         recovered_proposal, _recovered_planned = recovered
         recovered_sha256 = _canonical_json_sha256(recovered_proposal)
-        if (
-            _load_ingest_review(
-                review_path,
-                source_key=source_key,
-                proposal_sha256=recovered_sha256,
+        recovered_review = _load_ingest_review(
+            review_path,
+            source_key=source_key,
+            proposal_sha256=recovered_sha256,
+        )
+        if recovered_review is None:
+            if shard_continuation is not None:
+                if (
+                    recovered_proposal != shard_continuation.proposal
+                    or tuple(_recovered_planned) != shard_continuation.planned
+                    or recovered_sha256 != shard_continuation.plan.full_proposal_sha256
+                    or _stored_ingest_review_shard_manifest_error(
+                        shard_continuation.plan,
+                        source_key=source_key,
+                    )
+                    is not None
+                ):
+                    raise IngestApplyError(
+                        "pre-triage shard continuation changed before review"
+                    )
+            else:
+                if review_path.exists() and _has_sharded_ingest_review_artifact_family(
+                    review_path,
+                    proposal=recovered_proposal,
+                    source_key=source_key,
+                ):
+                    return _invalid_sharded_review_result(
+                        source_key=source_key,
+                        proposal=recovered_proposal,
+                        recovered_artifact=True,
+                    )
+                recovered = None
+        elif shard_continuation is not None:
+            raise IngestApplyError(
+                "pre-triage shard continuation unexpectedly has a parent review"
             )
-            is None
-        ):
-            recovered = None
+    elif shard_continuation is not None:
+        raise IngestApplyError("pre-triage shard continuation proposal is missing")
     if recovered is None:
         planned, totals = _prepare_operations(operations, read_only=dry_run)
         proposal = _build_ingest_frontier_proposal(
@@ -4915,6 +6787,20 @@ def _review_and_apply_ingest_operations(
         source_key=source_key,
         proposal_sha256=proposal_sha256,
     )
+    if (
+        review_artifact is None
+        and review_path.exists()
+        and _has_sharded_ingest_review_artifact_family(
+            review_path,
+            proposal=proposal,
+            source_key=source_key,
+        )
+    ):
+        return _invalid_sharded_review_result(
+            source_key=source_key,
+            proposal=proposal,
+            recovered_artifact=recovered_artifact,
+        )
     artifact_review = (
         review_artifact.get("review") if isinstance(review_artifact, dict) else None
     )
@@ -4925,6 +6811,46 @@ def _review_and_apply_ingest_operations(
     artifact_authority = (
         artifact_authority if isinstance(artifact_authority, dict) else None
     )
+    exact_postimages_already_applied = (
+        artifact_review is not None
+        and artifact_review.get("decision") == "apply_available"
+        and bool(planned)
+        and _prepared_plan_is_fully_applied(planned)
+    )
+    if (
+        artifact_review is not None
+        and artifact_authority is not None
+        and "review_shard_proof" in artifact_review
+    ):
+        shard_reuse_error = (
+            _historical_ingest_sharded_review_recovery_error(
+                artifact_review,
+                proposal,
+                artifact_authority,
+            )
+            if exact_postimages_already_applied
+            else _ingest_sharded_review_reuse_error(
+                artifact_review,
+                proposal,
+                artifact_authority,
+            )
+        )
+        if shard_reuse_error is not None:
+            return {
+                "status": "needs_retry",
+                "source_key": source_key,
+                "proposal_sha256": proposal_sha256,
+                "review": _ingest_review_shard_failure(
+                    "ingest_review_shard_reuse_invalid",
+                    shard_reuse_error,
+                ),
+                "summary": shard_reuse_error,
+                "recovered_artifact": recovered_artifact,
+                "reused_review": False,
+                "created": [],
+                "updated": [],
+                "audit": audit_decision,
+            }
 
     # A process may die after the reviewed postimages are durable but before
     # the surrounding raw/job state is committed.  Exact postimage equality
@@ -4938,7 +6864,7 @@ def _review_and_apply_ingest_operations(
         and artifact_authority is not None
         and _ingest_review_authority_shape_error(artifact_authority) is None
         and _ingest_review_authority_error(artifact_review, artifact_authority) is None
-        and _prepared_plan_is_fully_applied(planned)
+        and exact_postimages_already_applied
     ):
         created, updated = _apply_prepared_operations(
             planned,
@@ -5004,25 +6930,272 @@ def _review_and_apply_ingest_operations(
         # write or discard by itself.  Every semantic ingest disposition goes
         # through the lane-scoped local consensus gate, which fails closed
         # while shadowed or before an adoption artifact exists.
-        if frontier_budget is not None and not frontier_budget.consume():
+        frontier_used = True
+        runtime_status.safe_write_status(stage="local-consensus-review")
+        shard_plan: _IngestReviewShardPlan | None = None
+        shard_baseline_indices: tuple[int, ...] = ()
+        try:
+            shard_plan = (
+                shard_continuation.plan
+                if shard_continuation is not None
+                else _build_ingest_review_shard_plan(proposal)
+            )
+            if (
+                shard_plan is not None
+                and _ingest_review_shard_manifest_path(shard_plan).exists()
+            ):
+                baseline_state = _inspect_ingest_review_shard_plan_state(
+                    shard_plan,
+                    source_key=source_key,
+                    authority=review_authority,
+                )
+                if baseline_state.invalid_reason is None:
+                    shard_baseline_indices = baseline_state.current_approved_indices
+            if shard_plan is None:
+                if frontier_budget is not None and not frontier_budget.consume():
+                    raise IngestReviewBudgetExhausted
+                review = _run_ingest_frontier_review(proposal, reviewer=reviewer)
+            else:
+                review = _run_ingest_sharded_review(
+                    shard_plan,
+                    source_key=source_key,
+                    reviewer=reviewer,
+                    authority=review_authority,
+                    frontier_budget=frontier_budget,
+                )
+        except IngestReviewBudgetExhausted:
+            used = frontier_budget.used if frontier_budget is not None else 0
+            limit = frontier_budget.limit if frontier_budget is not None else 0
+            current_authority, current_authority_error = (
+                _current_ingest_review_authority(reviewer=reviewer)
+            )
+            current_authority_shape_error = (
+                _ingest_review_authority_shape_error(current_authority)
+                if isinstance(current_authority, dict)
+                else "current ingest review authority is missing"
+            )
+            if current_authority_error is not None or current_authority_shape_error:
+                stale_summary = (
+                    "ingest review authority changed before shard continuation "
+                    "or became unavailable: "
+                    + (current_authority_error or current_authority_shape_error)
+                )
+                return {
+                    "status": "needs_retry",
+                    "source_key": source_key,
+                    "proposal_sha256": proposal_sha256,
+                    "summary": stale_summary,
+                    "review": _ingest_review_shard_failure(
+                        "local_decision_authority_changed",
+                        stale_summary,
+                    ),
+                    "recovered_artifact": recovered_artifact,
+                    "reused_review": False,
+                    "created": [],
+                    "updated": [],
+                    "audit": audit_decision,
+                }
+            assert isinstance(current_authority, dict)
+            authority_epoch_changed = (
+                decision_authority.compare_semantic_authority(
+                    review_authority,
+                    current_authority,
+                    lane="ingest_reconciliation",
+                )
+                is not None
+            )
+            continuation_plan = shard_plan
+            if authority_epoch_changed or (
+                continuation_plan is None and allow_empty_shard_continuation
+            ):
+                try:
+                    continuation_plan = _build_ingest_review_shard_plan(
+                        proposal,
+                        force_review_unit=True,
+                    )
+                except (IngestReviewShardCapacityError, TypeError, ValueError) as exc:
+                    invalid_summary = (
+                        "ingest review continuation reseed failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    return {
+                        "status": "needs_retry",
+                        "source_key": source_key,
+                        "proposal_sha256": proposal_sha256,
+                        "summary": invalid_summary,
+                        "review": _ingest_review_shard_failure(
+                            "ingest_review_shard_manifest_invalid",
+                            invalid_summary,
+                        ),
+                        "recovered_artifact": recovered_artifact,
+                        "reused_review": False,
+                        "created": [],
+                        "updated": [],
+                        "audit": audit_decision,
+                    }
+            approved_shards = 0
+            continuation_error: str | None = None
+            shard_state: _IngestReviewShardPlanState | None = None
+            if continuation_plan is not None:
+                manifest_path = _ingest_review_shard_manifest_path(continuation_plan)
+                if not manifest_path.exists():
+                    continuation_error = _persist_ingest_review_shard_manifest(
+                        continuation_plan,
+                        source_key=source_key,
+                    )
+                if continuation_error is None:
+                    shard_state = _inspect_ingest_review_shard_plan_state(
+                        continuation_plan,
+                        source_key=source_key,
+                        authority=current_authority,
+                    )
+                    continuation_error = shard_state.invalid_reason
+                    approved_shards = shard_state.approved_shards
+            if continuation_error is not None:
+                invalid_summary = (
+                    "ingest review continuation proof is invalid: " + continuation_error
+                )
+                return {
+                    "status": "needs_retry",
+                    "source_key": source_key,
+                    "proposal_sha256": proposal_sha256,
+                    "summary": invalid_summary,
+                    "review": _ingest_review_shard_failure(
+                        "ingest_review_shard_artifact_invalid",
+                        invalid_summary,
+                    ),
+                    "recovered_artifact": recovered_artifact,
+                    "reused_review": False,
+                    "created": [],
+                    "updated": [],
+                    "audit": audit_decision,
+                }
+            current_approved_indices = (
+                shard_state.current_approved_indices if shard_state is not None else ()
+            )
+            made_progress = set(shard_baseline_indices) < set(current_approved_indices)
+            exact_repair_reseeded = (
+                allow_empty_shard_continuation
+                and continuation_plan is not None
+                and approved_shards == 0
+            )
+            continuation_allowed = (
+                continuation_plan is not None
+                and approved_shards < len(continuation_plan.shards)
+                and (made_progress or authority_epoch_changed or exact_repair_reseeded)
+            )
+            if (
+                continuation_plan is not None
+                and shard_state is not None
+                and not continuation_allowed
+                and not authority_epoch_changed
+                and not exact_repair_reseeded
+            ):
+                stall_write_error = _persist_ingest_review_stall(
+                    source_key=source_key,
+                    plan=continuation_plan,
+                    authority=current_authority,
+                    approved_indices=shard_state.current_approved_indices,
+                )
+                if stall_write_error is not None:
+                    invalid_summary = (
+                        "ingest review no-progress tombstone failed: "
+                        + stall_write_error
+                    )
+                    return {
+                        "status": "needs_retry",
+                        "source_key": source_key,
+                        "proposal_sha256": proposal_sha256,
+                        "summary": invalid_summary,
+                        "review": _ingest_review_shard_failure(
+                            "ingest_review_shard_artifact_invalid",
+                            invalid_summary,
+                        ),
+                        "recovered_artifact": recovered_artifact,
+                        "reused_review": False,
+                        "created": [],
+                        "updated": [],
+                        "audit": audit_decision,
+                    }
+            if (
+                continuation_allowed
+                and continuation_plan is not None
+                and approved_shards == 0
+            ):
+                marker_reason = (
+                    "authority_epoch_reseed"
+                    if authority_epoch_changed
+                    else "exact_repair_reseed"
+                )
+                previous_sha256 = (
+                    proposal_sha256
+                    if authority_epoch_changed
+                    else str(continuation_reseed_from_sha256 or "")
+                )
+                marker_error = _persist_ingest_review_continuation_marker(
+                    source_key=source_key,
+                    plan=continuation_plan,
+                    reason=marker_reason,
+                    previous_full_proposal_sha256=previous_sha256,
+                    previous_authority=review_authority,
+                    current_authority=current_authority,
+                )
+                if marker_error is not None:
+                    invalid_summary = (
+                        "ingest review continuation marker failed: " + marker_error
+                    )
+                    return {
+                        "status": "needs_retry",
+                        "source_key": source_key,
+                        "proposal_sha256": proposal_sha256,
+                        "summary": invalid_summary,
+                        "review": _ingest_review_shard_failure(
+                            "ingest_review_shard_artifact_invalid",
+                            invalid_summary,
+                        ),
+                        "recovered_artifact": recovered_artifact,
+                        "reused_review": False,
+                        "created": [],
+                        "updated": [],
+                        "audit": audit_decision,
+                    }
+            continuation = (
+                {
+                    "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+                    "kind": "ingest_review_shard_continuation",
+                    "full_proposal_sha256": continuation_plan.full_proposal_sha256,
+                    "manifest_sha256": continuation_plan.manifest_sha256,
+                    "approved_shards": approved_shards,
+                    "total_shards": len(continuation_plan.shards),
+                    "remaining_shards": (
+                        len(continuation_plan.shards) - approved_shards
+                    ),
+                    "review_calls_used": used,
+                    "review_call_limit": limit,
+                }
+                if continuation_allowed and continuation_plan is not None
+                else None
+            )
+            budget_status = (
+                "shard_continuation_pending"
+                if continuation is not None
+                else "frontier_budget_exhausted"
+            )
             runtime_status.safe_append_metric(
                 "ingest_authorization",
                 source_key=source_key,
                 mode=str(audit_decision.get("mode") or "unknown"),
-                frontier_used=False,
+                frontier_used=used > 0,
                 required=True,
                 sample_rate=audit_decision.get("sample_rate"),
                 caught_issue_rate=audit_decision.get("caught_issue_rate"),
-                decision="frontier_budget_exhausted",
+                decision=budget_status,
             )
-            return {
-                "status": "frontier_budget_exhausted",
+            result = {
+                "status": budget_status,
                 "source_key": source_key,
                 "proposal_sha256": proposal_sha256,
-                "summary": (
-                    "structured review budget exhausted "
-                    f"({frontier_budget.used}/{frontier_budget.limit})"
-                ),
+                "summary": f"structured review budget exhausted ({used}/{limit})",
                 "review": {
                     "decision": "retry",
                     "summary": (
@@ -5036,10 +7209,11 @@ def _review_and_apply_ingest_operations(
                 "updated": [],
                 "audit": audit_decision,
             }
-        frontier_used = True
-        runtime_status.safe_write_status(stage="local-consensus-review")
-        try:
-            review = _run_ingest_frontier_review(proposal, reviewer=reviewer)
+            if continuation is not None:
+                result["shard_continuation"] = continuation
+            return result
+        except IngestReviewShardCapacityError as exc:
+            review = _ingest_review_shard_failure(exc.failure_class, exc.reason)
         except Exception as exc:
             review = {
                 "decision": "needs_retry",
@@ -5579,6 +7753,71 @@ class _FrontierCallBudget:
         return True
 
 
+def _record_ingest_shard_continuation(
+    *,
+    job_id: str,
+    source_raw: str | None,
+    result: dict[str, Any],
+) -> None:
+    """Finish this bounded run successfully while leaving its raw pending."""
+
+    continuation = result.get("shard_continuation")
+    if (
+        result.get("status") != "shard_continuation_pending"
+        or not isinstance(continuation, dict)
+        or continuation.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
+        or continuation.get("kind") != "ingest_review_shard_continuation"
+        or not isinstance(continuation.get("approved_shards"), int)
+        or isinstance(continuation.get("approved_shards"), bool)
+        or not isinstance(continuation.get("total_shards"), int)
+        or continuation.get("approved_shards", -1) < 0
+        or continuation.get("approved_shards", 0) >= continuation.get("total_shards", 0)
+        or continuation.get("remaining_shards")
+        != continuation.get("total_shards", 0) - continuation.get("approved_shards", 0)
+    ):
+        raise IngestApplyError("ingest shard continuation result is invalid")
+    job_store.update(
+        job_id,
+        status=JobStatus.COMPLETED,
+        stage="authorization-continuation",
+        completed_at=_now(),
+        pages_created=[],
+        pages_updated=[],
+        result={
+            "ingest_continuation": dict(continuation),
+            "local_consensus": {
+                "status": "shard_continuation_pending",
+                "proposal_sha256": result.get("proposal_sha256"),
+                "source_key": result.get("source_key"),
+            },
+            "audit": result.get("audit"),
+        },
+        error=None,
+    )
+    runtime_status.safe_write_status(
+        state="running",
+        stage="authorization-continuation",
+        current_job_id=job_id,
+        current_raw=source_raw,
+        current_op=None,
+        llm=None,
+    )
+    runtime_status.safe_append_event(
+        "info",
+        "ingest | bounded shard review continuation saved",
+        source="ingest",
+        raw_file=source_raw,
+        job_id=job_id,
+        approved_shards=continuation["approved_shards"],
+        total_shards=continuation["total_shards"],
+    )
+    _safe_log(
+        "ingest | shard review continuation: "
+        f"{continuation['approved_shards']}/{continuation['total_shards']} approved; "
+        "raw remains pending"
+    )
+
+
 def _frontier_feedback_text(result: dict[str, Any]) -> str:
     """Return compact authoritative feedback for the next local proposal."""
 
@@ -5769,6 +8008,72 @@ def _apply_frontier_replacement_operations(
             updated["content"] = replacements[str(filename)]
         repaired.append(updated)
     return repaired, sorted(replacements)
+
+
+def _review_exact_ingest_repair_once(
+    operations: list[dict],
+    result: dict[str, Any],
+    *,
+    raw_content: str,
+    raw_keywords: list[str] | None,
+    source_raw: str | None,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    frontier_budget: "_FrontierCallBudget | None",
+    triage_plan: list[dict] | None = None,
+    failed_operation_specs: list[dict] | None = None,
+    local_disposition: str = "operations_available",
+) -> tuple[list[dict], dict[str, Any]]:
+    """Apply one exact quorum repair and re-review its complete postimage.
+
+    This transition is shared by fresh generation and pre-triage shard
+    continuation.  In both cases the repair arrays name complete host-bound
+    postimages; they never authorize a page write until the rebuilt full
+    proposal receives a fresh terminal review.
+    """
+
+    repaired_operations, replaced_files = _apply_frontier_replacement_operations(
+        operations,
+        result,
+    )
+    if not replaced_files:
+        return operations, result
+    _safe_log(
+        "ingest | exact local quorum repair replaced: " + ", ".join(replaced_files)
+    )
+    previous_proposal_sha256 = str(result.get("proposal_sha256") or "")
+    repair_error = _seal_ingest_review_repair_transition(
+        source_key=_ingest_source_key(raw_content, raw_keywords),
+        previous_full_proposal_sha256=previous_proposal_sha256,
+        repaired_operations_sha256=_canonical_json_sha256(repaired_operations),
+    )
+    if repair_error is not None:
+        blocked = {
+            **result,
+            "status": "needs_retry",
+            "summary": repair_error,
+            "review": _ingest_review_shard_failure(
+                "ingest_review_repair_limit_exceeded",
+                repair_error,
+            ),
+            "created": [],
+            "updated": [],
+        }
+        return operations, blocked
+    repaired_result = _review_and_apply_ingest_operations(
+        repaired_operations,
+        raw_content=raw_content,
+        raw_keywords=raw_keywords,
+        source_raw=source_raw,
+        triage_plan=triage_plan,
+        failed_operation_specs=failed_operation_specs,
+        local_disposition=local_disposition,
+        reviewer=reviewer,
+        force_frontier_review=True,
+        frontier_budget=frontier_budget,
+        allow_empty_shard_continuation=True,
+        continuation_reseed_from_sha256=previous_proposal_sha256,
+    )
+    return repaired_operations, repaired_result
 
 
 def _generate_local_operations(
@@ -6018,6 +8323,133 @@ def run_ingest(
                     "local consensus authority unavailable: " + review_authority_problem
                 )
 
+        shard_continuation = _load_pretriage_ingest_shard_continuation(
+            content,
+            raw_keywords_for_ops,
+            reviewer=frontier_reviewer,
+        )
+        if shard_continuation is not None:
+            runtime_status.safe_write_status(
+                state="running",
+                stage="authorization-continuation",
+                current_job_id=job_id,
+                current_raw=source_raw,
+                current_op=None,
+                llm=None,
+            )
+            continuation_budget = _FrontierCallBudget()
+            stored_operations = shard_continuation.proposal.get(
+                "local_generated_operations"
+            )
+            if not isinstance(stored_operations, list) or not all(
+                isinstance(operation, dict) for operation in stored_operations
+            ):
+                raise IngestApplyError(
+                    "pre-triage shard continuation operations are invalid"
+                )
+            stored_triage = shard_continuation.proposal.get("triage_plan")
+            stored_failed_specs = shard_continuation.proposal.get(
+                "failed_operation_specs"
+            )
+            stored_disposition = shard_continuation.proposal.get("local_disposition")
+            if (
+                not isinstance(stored_triage, list)
+                or not all(isinstance(item, dict) for item in stored_triage)
+                or not isinstance(stored_failed_specs, list)
+                or not all(isinstance(item, dict) for item in stored_failed_specs)
+                or not isinstance(stored_disposition, str)
+                or not stored_disposition
+            ):
+                raise IngestApplyError(
+                    "pre-triage shard continuation proposal context is invalid"
+                )
+            continuation_result = _review_and_apply_ingest_operations(
+                list(stored_operations),
+                raw_content=content,
+                raw_keywords=raw_keywords_for_ops,
+                source_raw=source_raw,
+                reviewer=frontier_reviewer,
+                frontier_budget=continuation_budget,
+                shard_continuation=shard_continuation,
+            )
+            stored_operations, continuation_result = _review_exact_ingest_repair_once(
+                list(stored_operations),
+                continuation_result,
+                raw_content=content,
+                raw_keywords=raw_keywords_for_ops,
+                source_raw=source_raw,
+                reviewer=frontier_reviewer,
+                frontier_budget=continuation_budget,
+                triage_plan=list(stored_triage),
+                failed_operation_specs=list(stored_failed_specs),
+                local_disposition=stored_disposition,
+            )
+            continuation_status = str(
+                continuation_result.get("status") or "needs_retry"
+            )
+            if continuation_status == "shard_continuation_pending":
+                _record_ingest_shard_continuation(
+                    job_id=job_id,
+                    source_raw=source_raw,
+                    result=continuation_result,
+                )
+                failed = False
+                return
+            if continuation_status != "apply_available":
+                stall_error = _tombstone_current_ingest_review_plan(
+                    content,
+                    raw_keywords_for_ops,
+                    reviewer=frontier_reviewer,
+                )
+                if stall_error is not None:
+                    raise IngestApplyError(
+                        "local consensus ingest shard continuation stall could not "
+                        "be sealed: " + stall_error
+                    )
+                raise IngestApplyError(
+                    "local consensus ingest shard continuation did not converge: "
+                    + _frontier_feedback_text(continuation_result)
+                )
+            completed_continuation = _load_pretriage_terminal_recovery(
+                content,
+                raw_keywords_for_ops,
+                reviewer=frontier_reviewer,
+            )
+            if completed_continuation is None:
+                raise IngestApplyError(
+                    "ingest shard continuation applied without a terminal recovery proof"
+                )
+            recovered_result = _complete_pretriage_terminal_recovery(
+                completed_continuation,
+                raw_content=content,
+                raw_keywords=raw_keywords_for_ops,
+                source_raw=source_raw,
+                job_id=job_id,
+                on_complete=on_complete,
+                reviewer=frontier_reviewer,
+            )
+            runtime_status.safe_write_status(
+                state="running",
+                stage="complete",
+                current_job_id=job_id,
+                current_raw=source_raw,
+                current_op=None,
+                llm=None,
+                last_success={
+                    "job_id": job_id,
+                    "raw": source_raw,
+                    "created": list(completed_continuation.get("created") or []),
+                    "updated": list(completed_continuation.get("updated") or []),
+                    "frontier_status": completed_continuation.get("status"),
+                    "audit": completed_continuation.get("audit"),
+                    "recovery_basis": "durable_shard_continuation",
+                    "model_calls": continuation_budget.used,
+                    "read_back": recovered_result.get("read_back"),
+                },
+            )
+            failed = False
+            return
+
         # Triage chooses the mutation target once.  A local-consensus rejection
         # critiques the generated postimage, so later attempts regenerate only
         # that postimage with the exact feedback. Re-running triage can silently
@@ -6136,6 +8568,15 @@ def run_ingest(
                 op_progress={"index": len(plan), "total": len(plan)},
                 llm=None,
             )
+            local_disposition = (
+                "triage_no_operations"
+                if not plan
+                else "all_generation_failed"
+                if failed_ops and not all_operations
+                else "partial_generation_failed"
+                if failed_ops
+                else "operations_available"
+            )
             frontier_result = _review_and_apply_ingest_operations(
                 all_operations,
                 raw_content=content,
@@ -6143,69 +8584,40 @@ def run_ingest(
                 source_raw=source_raw,
                 triage_plan=plan,
                 failed_operation_specs=failed_op_specs,
-                local_disposition=(
-                    "triage_no_operations"
-                    if not plan
-                    else "all_generation_failed"
-                    if failed_ops and not all_operations
-                    else "partial_generation_failed"
-                    if failed_ops
-                    else "operations_available"
-                ),
+                local_disposition=local_disposition,
                 reviewer=frontier_reviewer,
                 force_frontier_review=frontier_feedback is not None,
                 frontier_budget=frontier_budget,
             )
+            all_operations, frontier_result = _review_exact_ingest_repair_once(
+                all_operations,
+                frontier_result,
+                raw_content=content,
+                raw_keywords=raw_keywords_for_ops,
+                source_raw=source_raw,
+                reviewer=frontier_reviewer,
+                frontier_budget=frontier_budget,
+                triage_plan=plan,
+                failed_operation_specs=failed_op_specs,
+                local_disposition=local_disposition,
+            )
             frontier_status = str(frontier_result.get("status") or "needs_retry")
             if frontier_status in {"apply_available", "confirmed_noop"}:
                 break
+            if frontier_status == "shard_continuation_pending":
+                _record_ingest_shard_continuation(
+                    job_id=job_id,
+                    source_raw=source_raw,
+                    result=frontier_result,
+                )
+                failed = False
+                return
             if frontier_status == "frontier_budget_exhausted":
                 raise IngestApplyError(
                     "local consensus ingest review did not converge after "
                     f"{frontier_budget.used} local review calls: "
                     + _frontier_feedback_text(frontier_result)
                 )
-            repaired_operations, replaced_files = (
-                _apply_frontier_replacement_operations(
-                    all_operations,
-                    frontier_result,
-                )
-            )
-            if replaced_files:
-                _safe_log(
-                    "ingest | exact local quorum repair replaced: "
-                    + ", ".join(replaced_files)
-                )
-                all_operations = repaired_operations
-                frontier_result = _review_and_apply_ingest_operations(
-                    all_operations,
-                    raw_content=content,
-                    raw_keywords=raw_keywords_for_ops,
-                    source_raw=source_raw,
-                    triage_plan=plan,
-                    failed_operation_specs=failed_op_specs,
-                    local_disposition=(
-                        "triage_no_operations"
-                        if not plan
-                        else "all_generation_failed"
-                        if failed_ops and not all_operations
-                        else "partial_generation_failed"
-                        if failed_ops
-                        else "operations_available"
-                    ),
-                    reviewer=frontier_reviewer,
-                    force_frontier_review=True,
-                    frontier_budget=frontier_budget,
-                )
-                frontier_status = str(frontier_result.get("status") or "needs_retry")
-                if frontier_status in {"apply_available", "confirmed_noop"}:
-                    break
-                if frontier_status == "frontier_budget_exhausted":
-                    raise IngestApplyError(
-                        "local consensus ingest review did not converge after "
-                        f"{frontier_budget.used} local review calls: "
-                        + _frontier_feedback_text(frontier_result)
-                    )
             frontier_feedback = _frontier_feedback_text(frontier_result)
             if not _frontier_retry_is_actionable(frontier_result):
                 structured_failure = _structured_frontier_failure_class(frontier_result)
@@ -6219,6 +8631,14 @@ def run_ingest(
                             f"[authority_sha256={authority_sha256}]: "
                             + frontier_feedback
                         )
+                if structured_failure in {
+                    "input_too_large",
+                    "context_window_exceeded",
+                }:
+                    raise IngestApplyError(
+                        "local consensus structured failure "
+                        f"[{structured_failure}]: {frontier_feedback}"
+                    )
                 typed_feedback = (
                     f"{structured_failure}: {frontier_feedback}"
                     if structured_failure is not None

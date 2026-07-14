@@ -9,7 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from llm_wiki_mcp import dashboard, runtime_status
+from llm_wiki_mcp import dashboard, orchestrator, runtime_status
 
 
 def test_mark_batch_activity_requires_a_running_batch_job() -> None:
@@ -594,6 +594,147 @@ def test_snapshot_handler_returns_json_error_instead_of_empty_socket(
         "error_class": "RuntimeError",
         "error": "snapshot exploded",
     }
+
+
+def test_cached_snapshot_reuses_idle_result_until_a_source_changes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    runtime_dir = wiki_root / "runtime"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+    )
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
+    dashboard._SNAPSHOT_CACHE.update(
+        {"built_at": 0.0, "fingerprint": None, "snapshot": None}
+    )
+    calls = 0
+
+    def fake_build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "serial": calls,
+            "status": {"state": "idle", "batch": {"active": False}},
+        }
+
+    monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
+
+    assert dashboard._cached_snapshot()["serial"] == 1
+    assert dashboard._cached_snapshot()["serial"] == 1
+    runtime_status.STATUS_FILE.write_text("{}\n", encoding="utf-8")
+    assert dashboard._cached_snapshot()["serial"] == 2
+    assert calls == 2
+
+
+def test_cached_snapshot_uses_short_ttl_while_active(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+    )
+    dashboard._SNAPSHOT_CACHE.update(
+        {"built_at": 0.0, "fingerprint": None, "snapshot": None}
+    )
+    clock = [100.0]
+    calls = 0
+
+    def fake_build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "serial": calls,
+            "status": {"state": "running", "batch": {"active": True}},
+        }
+
+    monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: clock[0])
+
+    assert dashboard._cached_snapshot()["serial"] == 1
+    clock[0] += dashboard.SNAPSHOT_ACTIVE_CACHE_SECONDS / 2
+    assert dashboard._cached_snapshot()["serial"] == 1
+    clock[0] += dashboard.SNAPSHOT_ACTIVE_CACHE_SECONDS
+    assert dashboard._cached_snapshot()["serial"] == 2
+    assert calls == 2
+
+
+def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    runtime_dir = wiki_root / "runtime"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+    )
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
+    dashboard._SNAPSHOT_CACHE.update(
+        {"built_at": 0.0, "fingerprint": None, "snapshot": None}
+    )
+    calls = 0
+
+    def fake_build() -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            runtime_status.STATUS_FILE.write_text("{}\n", encoding="utf-8")
+        return {
+            "serial": calls,
+            "status": {"state": "idle", "batch": {"active": False}},
+        }
+
+    monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
+
+    assert dashboard._cached_snapshot()["serial"] == 1
+    assert dashboard._cached_snapshot()["serial"] == 2
+    assert dashboard._cached_snapshot()["serial"] == 2
+    assert calls == 2
+
+
+def test_cached_idle_snapshot_invalidates_on_standalone_consensus_activity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+    )
+    dashboard._SNAPSHOT_CACHE.update(
+        {"built_at": 0.0, "fingerprint": None, "snapshot": None}
+    )
+    calls = 0
+
+    def fake_build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "serial": calls,
+            "status": {"state": "idle", "batch": {"active": False}},
+        }
+
+    monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
+
+    assert dashboard._cached_snapshot()["serial"] == 1
+    active_dir = wiki_root / "runtime" / "local-consensus" / "active"
+    active_dir.mkdir(parents=True)
+    (active_dir / "request.json").write_text("{}\n", encoding="utf-8")
+    assert dashboard._cached_snapshot()["serial"] == 2
+    assert calls == 2
 
 
 def test_build_snapshot_surfaces_frontier_human_required(

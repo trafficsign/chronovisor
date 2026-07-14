@@ -111,6 +111,68 @@ def test_save_load_segments_semantic_defer_returns_to_pending_after_release(
     }
 
 
+def test_save_load_shard_continuation_is_pending_not_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import dashboard
+
+    wiki_root = tmp_path / "wiki"
+    raw_dir = wiki_root / "raw"
+    logs_dir = wiki_root / "logs"
+    raw_dir.mkdir(parents=True)
+    logs_dir.mkdir()
+    name = "20260714-101000-codex-continued-eeeeeeee.md"
+    (raw_dir / name).write_text("raw", encoding="utf-8")
+    (logs_dir / "ingest-drain-20260714.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-14T10:10:00",
+                "result": {
+                    "files_attempted": [name],
+                    "files_processed": [],
+                    "files_deferred": [],
+                    "files_continued": [name],
+                    "files_failed": 0,
+                    "per_raw": [
+                        {
+                            "filename": name,
+                            "succeeded": False,
+                            "deferred": False,
+                            "continued": True,
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "_operational_deferred_raw_statuses",
+        lambda _paths: {},
+    )
+
+    history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 14))
+
+    assert history["totals"]["continued"] == 1
+    assert history["totals"]["failed"] == 0
+    assert history["totals"]["pending_bytes"] == 3
+    assert history["totals"]["failed_bytes"] == 0
+    assert history["days"][0]["raw_segments"] == [
+        {
+            "name": name,
+            "bytes": 3,
+            "status": "pending",
+            "source": "codex",
+        }
+    ]
+    assert dashboard._drain_history(limit=10)[0]["files_continued"] == 1
+
+
 def test_save_load_attributes_held_projection_child_to_saved_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -280,11 +342,6 @@ def test_snapshot_separates_semantic_and_operational_holds_once(
         dashboard, "_operational_deferred_raw_statuses", deferred_statuses
     )
     monkeypatch.setattr(orchestrator, "_load_state", lambda: {})
-    monkeypatch.setattr(
-        orchestrator,
-        "get_pending_raw_files",
-        lambda: [raw_dir / "pending-a.md", raw_dir / "pending-b.md"],
-    )
     monkeypatch.setattr(runtime_status, "read_status", lambda: {})
     monkeypatch.setattr(runtime_status, "read_metrics", lambda limit: [])
     monkeypatch.setattr(runtime_status, "read_events", lambda limit: [])
@@ -324,7 +381,7 @@ def test_snapshot_separates_semantic_and_operational_holds_once(
     snapshot = dashboard.build_snapshot()
 
     assert scans == [["operational.md", "semantic.md"]]
-    assert snapshot["status"]["pending"] == 2
+    assert snapshot["status"]["pending"] == 0
     assert snapshot["status"]["semantic_deferred"] == {
         "count": 1,
         "samples": ["semantic.md"],
@@ -333,7 +390,7 @@ def test_snapshot_separates_semantic_and_operational_holds_once(
         "count": 1,
         "samples": ["operational.md"],
     }
-    assert snapshot["status"]["raw_outstanding"] == 4
+    assert snapshot["status"]["raw_outstanding"] == 2
     assert snapshot["self_heal"] is self_heal
 
 
@@ -539,20 +596,26 @@ def test_dashboard_static_contract_exposes_deferred_without_pending_dashes() -> 
 
     assert 'id="pending-deferred"' in html
     assert 'id="batch-deferred"' in html
+    assert 'id="batch-continued"' in html
     assert "semantic deferred" in html
     assert 'document.getElementById("pending-deferred")' in js
     assert 'document.getElementById("batch-deferred")' in js
+    assert 'document.getElementById("batch-continued")' in js
     assert 'dashed: segment.status === "pending"' in js
     assert 'dashed: segment.status === "deferred"' not in js
     assert "row.files_deferred" in js
+    assert "row.files_continued" in js
     assert "countParts.push(`${row.deferred} defer`)" in js
+    assert "countParts.push(`${row.continued} continue`)" in js
     assert "let refreshInFlight = null" in js
     assert "if (refreshInFlight !== null) return refreshInFlight" in js
-    assert "window.setTimeout(refreshLoop, 1000)" in js
+    assert "window.setTimeout(refreshLoop, nextRefreshDelayMs)" in js
+    assert "const ACTIVE_REFRESH_DELAY_MS = 5000" in js
+    assert "const IDLE_REFRESH_DELAY_MS = 10000" in js
     assert "setInterval(refresh" not in js
     assert "const SNAPSHOT_TIMEOUT_MS = 180000" in js
     assert "const controller = new AbortController()" in js
     assert "signal: controller.signal" in js
     assert "controller.abort()" in js
     assert "window.clearTimeout(timeoutId)" in js
-    assert "finally {\n    window.setTimeout(refreshLoop, 1000)" in js
+    assert "finally {\n    window.setTimeout(refreshLoop, nextRefreshDelayMs)" in js
