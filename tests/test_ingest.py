@@ -2232,6 +2232,127 @@ class TestIngestProposalSchemaCompatibility:
 
 
 class TestIngestProposalRollback:
+    def test_crlf_compact_apply_and_artifact_rollback_are_byte_exact(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        original = (
+            "---\r\ntitle: CRLF compact\r\nupdated: 2026-07-11\r\n"
+            "tags: [d/tools-config, t/reference, s/2026]\r\n---\r\n"
+            "# Existing\r\nold fact\r\n"
+            "## Product value\r\nproduct value evidence\r\n"
+        )
+        target = _seed_page(
+            isolated_wiki,
+            "memory/crlf-compact-rollback.md",
+            "placeholder",
+        )
+        target.write_bytes(original.encode("utf-8"))
+        triage_op = {
+            "type": "update",
+            "filename": "memory/crlf-compact-rollback.md",
+            "title": "Product value",
+            "keywords": ["product", "value"],
+            "summary": "Add product value evidence",
+        }
+        compact = ingest._build_compact_update_context(
+            triage_op,
+            "product value evidence",
+            max_selected_bytes=8_192,
+        )
+        assert compact is not None
+
+        result = ingest._review_and_apply_ingest_operations(
+            [
+                {
+                    "type": "update",
+                    "filename": triage_op["filename"],
+                    "content": "## Grounded append\nnew exact fact\n",
+                    "_compact_update_preimage_sha256": compact.page_sha256,
+                }
+            ],
+            raw_content="product value evidence",
+            reviewer=lambda _proposal: {
+                "decision": "apply_available",
+                "summary": "exact CRLF update",
+                "failed_operations_disposition": "none",
+            },
+        )
+        proposal_path, _review_path = ingest._ingest_artifact_paths(
+            result["source_key"]
+        )
+        artifact = json.loads(proposal_path.read_text(encoding="utf-8"))
+        planned = ingest._prepared_from_review_payload(
+            artifact["proposal"]["prepared_operations"]
+        )
+
+        assert planned is not None
+        assert planned[0].previous_text == original
+        assert target.read_bytes() == planned[0].new_body.encode("utf-8")
+        assert ingest._prepared_plan_is_recoverable(planned) is True
+        assert ingest._prepared_plan_is_fully_applied(planned) is True
+
+        rolled_back = ingest.rollback_ingest_proposal_artifact(
+            proposal_path,
+            reason="verify exact CRLF restoration",
+        )
+
+        assert rolled_back["status"] == "rolled_back"
+        assert target.read_bytes() == original.encode("utf-8")
+        assert ingest._prepared_plan_is_recoverable(planned) is True
+        assert ingest._prepared_plan_is_fully_applied(planned) is False
+
+    def test_partial_apply_failure_restores_exact_crlf_preimage(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        original = (
+            "---\r\ntitle: CRLF rollback\r\nupdated: 2026-07-11\r\n"
+            "tags: [d/tools-config, t/reference, s/2026]\r\n---\r\n"
+            "# Existing\r\nold fact\r\n"
+        )
+        target = _seed_page(
+            isolated_wiki,
+            "memory/crlf-partial-rollback.md",
+            "placeholder",
+        )
+        target.write_bytes(original.encode("utf-8"))
+        planned, totals = ingest._prepare_operations(
+            [
+                {
+                    "type": "update",
+                    "filename": "memory/crlf-partial-rollback.md",
+                    "content": "## First write\nnew fact",
+                    "_compact_update_preimage_sha256": hashlib.sha256(
+                        original.encode("utf-8")
+                    ).hexdigest(),
+                },
+                {
+                    "type": "create",
+                    "filename": "memory/late-conflict.md",
+                    "content": (
+                        "---\ntitle: Late conflict\nupdated: 2026-07-14\n"
+                        "tags: [d/tools-config, t/reference, s/2026]\n---\nbody\n"
+                    ),
+                },
+            ]
+        )
+        conflict = isolated_wiki / "pages" / "memory" / "late-conflict.md"
+        conflict.parent.mkdir(parents=True, exist_ok=True)
+        conflict.write_text("independent writer\n", encoding="utf-8")
+
+        with pytest.raises(
+            IngestApplyError, match="page appeared before ingest create"
+        ):
+            ingest._apply_prepared_operations(planned, link_totals=totals)
+
+        assert target.read_bytes() == original.encode("utf-8")
+        assert conflict.read_text(encoding="utf-8") == "independent writer\n"
+
     def test_v1_provenance_free_update_artifact_can_be_rolled_back(
         self, isolated_wiki: Path
     ) -> None:
@@ -7856,6 +7977,705 @@ class TestTriagePlanSchema:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
         assert _validate_triage_plan([{"type": "create", "filename": 123}]) is None
+
+
+class TestPageGenerationBudget:
+    def test_exact_live_boundary_reduces_only_output_reservation(self) -> None:
+        from llm_wiki_mcp import ingest
+
+        # Reproduce the live preflight value exactly: the immutable
+        # prompt/history envelope plus three 8192-token output reservations
+        # required 268078 tokens against Ornith's hard 262144 ceiling.
+        immutable_input_bytes = 238_318
+        prompt = "x" * immutable_input_bytes
+        assert (
+            ingest._required_generate_context_tokens(
+                prompt,
+                None,
+                num_predict=8_192,
+            )
+            == 268_078
+        )
+
+        budget = ingest._select_page_generation_budget(
+            prompt,
+            None,
+            configured_num_predict=8_192,
+            num_ctx=32_768,
+            max_num_ctx=262_144,
+        )
+
+        assert budget.num_predict == 6_214
+        assert budget.required_num_ctx == 262_144
+        assert budget.num_ctx == 262_144
+        assert prompt == "x" * immutable_input_bytes
+
+    def test_input_that_cannot_fit_fixed_output_floor_defers(self) -> None:
+        from llm_wiki_mcp import ingest
+
+        # At the fixed 2048-token floor this immutable input requires 262145.
+        prompt = "x" * 250_817
+        assert (
+            ingest._required_generate_context_tokens(
+                prompt,
+                None,
+                num_predict=ingest._MIN_ADAPTIVE_PAGE_NUM_PREDICT,
+            )
+            == 262_145
+        )
+
+        with pytest.raises(
+            ingest.IngestContextCapacityError,
+            match=r"minimum num_predict 2048.*max_num_ctx 262144",
+        ):
+            ingest._select_page_generation_budget(
+                prompt,
+                None,
+                configured_num_predict=8_192,
+                num_ctx=32_768,
+                max_num_ctx=262_144,
+            )
+
+    def test_normal_request_preserves_configured_output_budget(self) -> None:
+        from llm_wiki_mcp import ingest
+
+        budget = ingest._select_page_generation_budget(
+            "x" * 1_000,
+            None,
+            configured_num_predict=8_192,
+            num_ctx=32_768,
+            max_num_ctx=262_144,
+        )
+
+        assert budget.num_predict == 8_192
+        assert budget.required_num_ctx == 30_760
+        assert budget.num_ctx == 32_768
+
+    def test_generate_calls_reuse_adapted_budget_for_every_repair(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        invalid_one = "=== NEW PAGE: memory/adaptive.md ===\nmissing frontmatter"
+        invalid_two = "=== NEW PAGE: memory/adaptive.md ===\nstill invalid"
+        valid = (
+            "=== NEW PAGE: memory/adaptive.md ===\n"
+            "---\ntitle: Adaptive\nupdated: 2026-07-14\n---\nbody\n"
+            "=== END PAGE ==="
+        )
+        responses = iter([invalid_one, invalid_two, valid])
+        calls: list[tuple[int, int, str]] = []
+
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: IngestConfig(
+                num_ctx=32_768,
+                max_num_ctx=262_144,
+                num_predict=8_192,
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_build_focused_context",
+            lambda *_args, **_kwargs: "",
+        )
+
+        def fake_generate(prompt: str, **kwargs) -> str:
+            calls.append((kwargs["num_ctx"], kwargs["num_predict"], prompt))
+            return next(responses)
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+        diagnostics: dict = {}
+        raw = "r" * 230_000
+
+        result = ingest._generate_one(
+            {
+                "type": "create",
+                "filename": "memory/adaptive.md",
+                "title": "Adaptive",
+                "summary": "Preserve all source bytes",
+            },
+            raw,
+            diagnostics=diagnostics,
+        )
+
+        assert result is not None
+        assert len(calls) == 3
+        assert len({(num_ctx, num_predict) for num_ctx, num_predict, _ in calls}) == 1
+        selected_num_ctx, selected_num_predict, _ = calls[0]
+        assert selected_num_ctx == 262_144
+        assert 2_048 <= selected_num_predict < 8_192
+        assert diagnostics["num_predict"] == selected_num_predict
+        assert diagnostics["required_num_ctx"] <= selected_num_ctx
+        assert all(raw in transcript for _, _, transcript in calls)
+        assert invalid_one in calls[1][2]
+        assert invalid_two in calls[2][2]
+
+
+class TestOversizedAppendOnlyUpdateContext:
+    def test_sections_are_lossless_and_ignore_headings_inside_fences(self) -> None:
+        from llm_wiki_mcp import ingest
+
+        page = (
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\n"
+            "# Alpha\nalpha start\n"
+            "```python\n## not-a-heading\nprint('still alpha')\n"
+            "``` trailing text\n## still-inside-fence\n```\n"
+            "alpha end\n"
+            "## Relevant section\nunique product value evidence\n"
+            "### Nested evidence\nstays in the complete H2 section\n"
+        )
+
+        sections = ingest._markdown_sections(page)
+
+        assert "".join(section.content for section in sections) == page
+        assert [section.heading for section in sections] == [
+            None,
+            "# Alpha",
+            "## Relevant section",
+        ]
+        assert "## not-a-heading" in sections[1].content
+        assert "## still-inside-fence" in sections[1].content
+        assert "### Nested evidence" in sections[2].content
+        assert all(
+            section.sha256
+            == hashlib.sha256(section.content.encode("utf-8")).hexdigest()
+            for section in sections
+        )
+
+    def test_compact_context_is_deterministic_whole_section_and_read_only(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        page_text = (
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\n"
+            "# Unrelated\nother material\n"
+            "```text\n## fenced heading\n```\n"
+            "## Product value\nproduct value structure evidence\ncomplete tail\n"
+        )
+        page_path = _seed_page(
+            isolated_wiki,
+            "career/oversized-existing.md",
+            page_text,
+        )
+        relevant = next(
+            section
+            for section in ingest._markdown_sections(page_text)
+            if section.heading == "## Product value"
+        )
+        op = {
+            "type": "update",
+            "filename": "career/oversized-existing.md",
+            "title": "Product value",
+            "keywords": ["product", "value"],
+            "summary": "Add grounded structure evidence",
+        }
+
+        first = ingest._build_compact_update_context(
+            op,
+            "product value structure evidence",
+            max_selected_bytes=len(relevant.content.encode("utf-8")),
+        )
+        second = ingest._build_compact_update_context(
+            op,
+            "product value structure evidence",
+            max_selected_bytes=len(relevant.content.encode("utf-8")),
+        )
+
+        assert first is not None
+        assert second == first
+        assert first.selected_sections == (relevant,)
+        assert relevant.content in first.text
+        assert "other material" not in first.text
+        assert '"## fenced heading"' not in first.text
+        assert f"page_bytes: {len(page_text.encode('utf-8'))}" in first.text
+        assert hashlib.sha256(page_text.encode("utf-8")).hexdigest() in first.text
+        for section in ingest._markdown_sections(page_text):
+            digest_b64url = base64.urlsafe_b64encode(
+                bytes.fromhex(section.sha256)
+            ).rstrip(b"=")
+            row = (
+                f"{section.start_line}-{section.end_line}\t"
+                f"{len(section.content.encode('utf-8'))}\t"
+                f"{digest_b64url.decode('ascii')}\t"
+                f"{json.dumps(section.heading or '[preamble]', ensure_ascii=False)}"
+            )
+            assert row in first.text
+        assert page_path.read_text(encoding="utf-8") == page_text
+
+    def test_compact_defers_when_strongest_relevant_section_does_not_fit(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        _seed_page(
+            isolated_wiki,
+            "memory/oversized-relevant.md",
+            (
+                "---\ntitle: Existing\nupdated: 2026-01-01\n---\n"
+                "# Unrelated\nsmall unrelated filler\n"
+                "## Needle evidence\nneedle evidence " + "x" * 256 + "\n"
+            ),
+        )
+        op = {
+            "type": "update",
+            "filename": "memory/oversized-relevant.md",
+            "title": "Needle evidence",
+            "keywords": ["needle"],
+            "summary": "Add needle evidence",
+        }
+
+        compact = ingest._build_compact_update_context(
+            op,
+            "needle evidence",
+            max_selected_bytes=64,
+        )
+
+        assert compact is None
+
+    def test_compact_defers_when_no_section_has_positive_relevance(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        _seed_page(
+            isolated_wiki,
+            "memory/no-relevance.md",
+            (
+                "---\ntitle: Existing\nupdated: 2026-01-01\n---\n"
+                "# Completely unrelated\nsmall filler\n"
+            ),
+        )
+        op = {
+            "type": "update",
+            "filename": "memory/no-relevance.md",
+            "title": "Needle evidence",
+            "keywords": ["needle"],
+            "summary": "Add needle evidence",
+        }
+
+        compact = ingest._build_compact_update_context(
+            op,
+            "needle evidence",
+            max_selected_bytes=8_192,
+        )
+
+        assert compact is None
+
+    def test_h1_h2_manifest_keeps_nested_headings_and_full_digests_under_bound(
+        self,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        page_text = (
+            "---\ntitle: Large outline\nupdated: 2026-01-01\n---\n"
+            "# Complete title section\n"
+            + "".join(
+                f"## {index}. 完全な日本語見出し product value evidence {index}\n"
+                f"top-level body {index}\n"
+                f"### Nested heading {index}\nnested body {index}\n"
+                for index in range(1, 95)
+            )
+        )
+
+        sections = ingest._markdown_sections(page_text)
+        outline = ingest._render_compact_update_context(
+            page_id="large-outline",
+            page_text=page_text,
+            sections=sections,
+            selected=(),
+        )
+
+        assert len(sections) == 96  # frontmatter + H1 + all 94 H2 sections
+        assert "### Nested heading 94" in sections[-1].content
+        assert len(outline.encode("utf-8")) <= ingest._MAX_COMPACT_UPDATE_OUTLINE_BYTES
+        for section in sections:
+            digest_b64url = base64.urlsafe_b64encode(
+                bytes.fromhex(section.sha256)
+            ).rstrip(b"=")
+            assert digest_b64url.decode("ascii") in outline
+            assert (
+                json.dumps(
+                    section.heading or "[preamble]",
+                    ensure_ascii=False,
+                )
+                in outline
+            )
+
+    def test_compact_binding_uses_exact_crlf_disk_bytes(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        page_text = (
+            "---\r\ntitle: Existing\r\nupdated: 2026-01-01\r\n"
+            "tags: [d/tools-config, t/reference, s/2026]\r\n---\r\n"
+            "# Existing\r\nbody\r\n## Product value\r\nexact evidence\r\n"
+        )
+        page_path = _seed_page(
+            isolated_wiki,
+            "memory/exact-crlf.md",
+            "placeholder",
+        )
+        page_path.write_bytes(page_text.encode("utf-8"))
+        op = {
+            "type": "update",
+            "filename": "memory/exact-crlf.md",
+            "title": "Product value",
+            "keywords": ["product", "value"],
+            "summary": "Add exact evidence",
+        }
+
+        compact = ingest._build_compact_update_context(
+            op,
+            "product value exact evidence",
+            max_selected_bytes=8_192,
+        )
+
+        assert compact is not None
+        assert compact.page_bytes == len(page_text.encode("utf-8"))
+        assert (
+            compact.page_sha256 == hashlib.sha256(page_text.encode("utf-8")).hexdigest()
+        )
+        assert "\r\n" in compact.selected_sections[-1].content
+        planned, _totals = ingest._prepare_operations(
+            [
+                {
+                    "type": "update",
+                    "filename": "memory/exact-crlf.md",
+                    "content": "## Grounded append\nnew body",
+                    "_compact_update_preimage_sha256": compact.page_sha256,
+                }
+            ],
+            read_only=True,
+        )
+        assert len(planned) == 1
+        assert planned[0].previous_text == page_text
+        assert page_path.read_bytes() == page_text.encode("utf-8")
+
+    def test_exact_live_291077_boundary_compacts_without_dropping_raw(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        page_text = (
+            "---\ntitle: Interview Narrative\nupdated: 2026-01-01\n---\n"
+            "# Product value\nproduct value and performance evidence\n"
+        )
+        page_path = _seed_page(
+            isolated_wiki,
+            "career/interview-narrative-product-value-vs-politics.md",
+            page_text,
+        )
+        op = {
+            "type": "update",
+            "filename": "career/interview-narrative-product-value-vs-politics.md",
+            "title": "Interview Narrative",
+            "keywords": ["product", "value", "performance"],
+            "summary": "Add product-value interview evidence",
+        }
+        raw = "RAW-291077 product value and performance evidence"
+        empty_prompt = ingest._build_page_generation_prompt(
+            context="",
+            raw_content=raw,
+            op_type="update",
+            filename=op["filename"],
+            title=op["title"],
+            summary=op["summary"],
+            feedback_block="",
+            current_date=date.today().isoformat(),
+        )
+        fixed_without_context = (
+            ingest._required_generate_context_tokens(
+                empty_prompt,
+                ingest.UPDATE_SYSTEM_PROMPT,
+                num_predict=8_192,
+            )
+            - 3 * 8_192
+        )
+        full_context = "x" * (266_501 - fixed_without_context)
+        full_prompt = ingest._build_page_generation_prompt(
+            context=full_context,
+            raw_content=raw,
+            op_type="update",
+            filename=op["filename"],
+            title=op["title"],
+            summary=op["summary"],
+            feedback_block="",
+            current_date=date.today().isoformat(),
+        )
+        assert (
+            ingest._required_generate_context_tokens(
+                full_prompt,
+                ingest.UPDATE_SYSTEM_PROMPT,
+                num_predict=8_192,
+            )
+            == 291_077
+        )
+
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: IngestConfig(
+                num_ctx=32_768,
+                max_num_ctx=262_144,
+                num_predict=8_192,
+                max_related_context_bytes=8_192,
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_build_focused_context",
+            lambda *_args, **_kwargs: full_context,
+        )
+        calls: list[tuple[str, dict]] = []
+
+        def fake_generate(prompt: str, **kwargs) -> str:
+            calls.append((prompt, kwargs))
+            return (
+                "=== UPDATE PAGE: "
+                "career/interview-narrative-product-value-vs-politics.md ===\n"
+                "## New evidence\ngrounded append\n"
+                "=== END PAGE ==="
+            )
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+        diagnostics: dict = {}
+
+        result = ingest._generate_one(op, raw, diagnostics=diagnostics)
+
+        assert result is not None
+        assert len(calls) == 1
+        compact_prompt, kwargs = calls[0]
+        assert raw in compact_prompt
+        assert full_context not in compact_prompt
+        assert "Complete deterministic H1/H2 section manifest (TSV):" in compact_prompt
+        assert (
+            "# Product value\nproduct value and performance evidence\n"
+            in compact_prompt
+        )
+        assert "Omitted section bytes are still present on disk" in kwargs["system"]
+        assert kwargs["num_predict"] == 8_192
+        assert diagnostics["original_required_num_ctx"] == 291_077
+        assert diagnostics["required_num_ctx"] <= 262_144
+        assert diagnostics["context_strategy"] == "append_only_outline_sections"
+        assert (
+            diagnostics["context_page_sha256"]
+            == hashlib.sha256(page_text.encode("utf-8")).hexdigest()
+        )
+        assert (
+            result["_compact_update_preimage_sha256"]
+            == diagnostics["context_page_sha256"]
+        )
+        assert page_path.read_text(encoding="utf-8") == page_text
+
+    def test_compaction_unavailable_preserves_adaptive_full_context_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        op = {
+            "type": "update",
+            "filename": "memory/adaptive-fallback.md",
+            "title": "Adaptive fallback",
+            "summary": "Preserve the full prompt",
+        }
+        raw = "raw-full-fallback"
+        empty_prompt = ingest._build_page_generation_prompt(
+            context="",
+            raw_content=raw,
+            op_type="update",
+            filename=op["filename"],
+            title=op["title"],
+            summary=op["summary"],
+            feedback_block="",
+            current_date=date.today().isoformat(),
+        )
+        fixed_without_context = (
+            ingest._required_generate_context_tokens(
+                empty_prompt,
+                ingest.UPDATE_SYSTEM_PROMPT,
+                num_predict=8_192,
+            )
+            - 3 * 8_192
+        )
+        full_context = "f" * ((268_078 - 3 * 8_192) - fixed_without_context)
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: IngestConfig(
+                num_ctx=32_768,
+                max_num_ctx=262_144,
+                num_predict=8_192,
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_build_focused_context",
+            lambda *_args, **_kwargs: full_context,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_build_compact_update_context",
+            lambda *_args, **_kwargs: None,
+        )
+        calls: list[tuple[str, dict]] = []
+
+        def fake_generate(prompt: str, **kwargs) -> str:
+            calls.append((prompt, kwargs))
+            return (
+                "=== UPDATE PAGE: memory/adaptive-fallback.md ===\n"
+                "## Update\nbody\n=== END PAGE ==="
+            )
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+
+        result = ingest._generate_one(op, raw)
+
+        assert result is not None
+        assert len(calls) == 1
+        assert full_context in calls[0][0]
+        assert calls[0][1]["num_predict"] == 6_214
+        assert "_compact_update_preimage_sha256" not in result
+
+    def test_prepare_rejects_stale_compact_preimage(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        original = (
+            "---\r\ntitle: Existing\r\nupdated: 2026-01-01\r\n"
+            "tags: [d/tools-config, t/reference, s/2026]\r\n---\r\n"
+            "# Existing\r\nbody\r\n"
+        )
+        page_path = _seed_page(
+            isolated_wiki,
+            "memory/stale-compact.md",
+            "placeholder",
+        )
+        page_path.write_bytes(original.encode("utf-8"))
+        operation = {
+            "type": "update",
+            "filename": "memory/stale-compact.md",
+            "content": "## Grounded append\nnew body",
+            "_compact_update_preimage_sha256": hashlib.sha256(
+                original.encode("utf-8")
+            ).hexdigest(),
+        }
+        changed = original + "concurrent change\r\n"
+        page_path.write_bytes(changed.encode("utf-8"))
+
+        with pytest.raises(
+            IngestApplyError,
+            match="compact update preimage changed before prepare",
+        ):
+            ingest._prepare_operations([operation], read_only=True)
+        assert page_path.read_bytes() == changed.encode("utf-8")
+
+    def test_prepare_accepts_matching_compact_preimage_without_writing(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        original = (
+            "---\ntitle: Existing\nupdated: 2026-01-01\n"
+            "tags: [d/tools-config, t/reference, s/2026]\n---\n# Existing\nbody\n"
+        )
+        page_path = _seed_page(
+            isolated_wiki,
+            "memory/matching-compact.md",
+            original,
+        )
+        operation = {
+            "type": "update",
+            "filename": "memory/matching-compact.md",
+            "content": "## Grounded append\nnew body",
+            "_compact_update_preimage_sha256": hashlib.sha256(
+                original.encode("utf-8")
+            ).hexdigest(),
+        }
+
+        planned, _totals = ingest._prepare_operations([operation], read_only=True)
+
+        assert len(planned) == 1
+        assert planned[0].previous_text == original
+        assert "## Grounded append\nnew body" in planned[0].new_body
+        assert page_path.read_text(encoding="utf-8") == original
+
+    def test_compact_context_that_still_cannot_fit_defers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+        from llm_wiki_mcp.runtime_config import IngestConfig
+
+        huge = "x" * 300_000
+        compact = ingest._CompactUpdateContext(
+            text=huge,
+            page_id="too-large",
+            page_sha256="a" * 64,
+            page_bytes=len(huge),
+            section_count=1,
+            selected_sections=(
+                ingest._MarkdownSection(
+                    start_line=1,
+                    end_line=1,
+                    heading="# Too large",
+                    content=huge,
+                    sha256=hashlib.sha256(huge.encode("utf-8")).hexdigest(),
+                ),
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: IngestConfig(
+                num_ctx=32_768,
+                max_num_ctx=262_144,
+                num_predict=8_192,
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_build_focused_context",
+            lambda *_args, **_kwargs: huge,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_build_compact_update_context",
+            lambda *_args, **_kwargs: compact,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_generate_with_progress",
+            lambda *_args, **_kwargs: pytest.fail("transport must not run"),
+        )
+
+        with pytest.raises(RuntimeError, match="context_window_exceeded"):
+            ingest._generate_one(
+                {
+                    "type": "update",
+                    "filename": "memory/too-large.md",
+                    "title": "Too large",
+                    "summary": "Still too large",
+                },
+                "raw remains complete",
+            )
 
 
 class TestIngestContextAdmission:

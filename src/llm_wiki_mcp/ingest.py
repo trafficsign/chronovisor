@@ -1,6 +1,7 @@
 """Ingest engine - structures raw data into wiki pages (two-stage pipeline)."""
 
 import ast
+import base64
 import hashlib
 import json
 import re
@@ -46,6 +47,7 @@ from llm_wiki_mcp.triage_plan import (
     collapse_exact_duplicate_operations,
     distinct_target_collisions,
 )
+from llm_wiki_mcp.search_types import tokenize
 
 
 # ---------------------------------------------------------------------------
@@ -1387,6 +1389,320 @@ _MAX_PAGE_GENERATION_REPAIR_TURNS = 2
 _MAX_PAGE_GENERATION_RESPONSES = 1 + _MAX_PAGE_GENERATION_REPAIR_TURNS
 _MAX_PAGE_REPAIR_FEEDBACK_BYTES = 2_400
 _PAGE_GENERATION_CONTEXT_SAFETY_TOKENS = 256
+_MIN_ADAPTIVE_PAGE_NUM_PREDICT = 2_048
+_MAX_COMPACT_UPDATE_OUTLINE_BYTES = 32 * 1_024
+
+
+def _read_exact_utf8(path: Path) -> str:
+    """Decode the exact on-disk UTF-8 bytes without newline translation."""
+
+    return path.read_bytes().decode("utf-8")
+
+
+def _read_optional_exact_utf8(path: Path) -> str | None:
+    """Return exact UTF-8 text when ``path`` exists, otherwise ``None``."""
+
+    return _read_exact_utf8(path) if path.exists() else None
+
+
+@dataclass(frozen=True)
+class _MarkdownSection:
+    """One byte-complete Markdown section from an existing page."""
+
+    start_line: int
+    end_line: int
+    heading: str | None
+    content: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _CompactUpdateContext:
+    """Read-only, hash-bound context for an append-only oversized update."""
+
+    text: str
+    page_id: str
+    page_sha256: str
+    page_bytes: int
+    section_count: int
+    selected_sections: tuple[_MarkdownSection, ...]
+
+
+@dataclass(frozen=True)
+class _PageGenerationBudget:
+    num_ctx: int
+    num_predict: int
+    required_num_ctx: int
+
+
+_MARKDOWN_SECTION_HEADING_RE = re.compile(
+    r"^ {0,3}(?P<marks>#{1,2})[\t ]+(?P<title>.*?)(?:[\t ]+#+)?[\t ]*(?:\n)?$"
+)
+_MARKDOWN_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})")
+
+
+def _markdown_sections(text: str) -> tuple[_MarkdownSection, ...]:
+    """Split Markdown at H1/H2 boundaries outside fenced code blocks.
+
+    Sections are a lossless partition of ``text``: concatenating their
+    ``content`` fields reproduces the exact page bytes.  A pre-heading region
+    (normally frontmatter) is represented as a section with ``heading=None``.
+    Lower-level headings remain inside their enclosing H2 section so selection
+    never detaches a subsection from its top-level semantic unit.
+    """
+
+    if not text:
+        return ()
+    lines = text.splitlines(keepends=True)
+    heading_rows: list[tuple[int, str]] = []
+    fence_char: str | None = None
+    fence_width = 0
+    for index, line in enumerate(lines):
+        fence_match = _MARKDOWN_FENCE_RE.match(line)
+        if fence_match is not None:
+            marker = fence_match.group("marker")
+            if fence_char is None:
+                fence_char = marker[0]
+                fence_width = len(marker)
+            elif (
+                marker[0] == fence_char
+                and len(marker) >= fence_width
+                and re.fullmatch(
+                    r"[\t ]*(?:\r?\n)?",
+                    line[fence_match.end() :],
+                )
+                is not None
+            ):
+                fence_char = None
+                fence_width = 0
+            continue
+        if fence_char is not None:
+            continue
+        heading_match = _MARKDOWN_SECTION_HEADING_RE.match(line)
+        if heading_match is not None:
+            heading_rows.append(
+                (
+                    index,
+                    f"{heading_match.group('marks')} "
+                    f"{heading_match.group('title').strip()}",
+                )
+            )
+
+    boundaries = [index for index, _heading in heading_rows]
+    if not boundaries or boundaries[0] != 0:
+        boundaries.insert(0, 0)
+    boundaries.append(len(lines))
+    headings_by_index = dict(heading_rows)
+    sections: list[_MarkdownSection] = []
+    for start, end in zip(boundaries[:-1], boundaries[1:], strict=True):
+        content = "".join(lines[start:end])
+        if not content:
+            continue
+        sections.append(
+            _MarkdownSection(
+                start_line=start + 1,
+                end_line=end,
+                heading=headings_by_index.get(start),
+                content=content,
+                sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            )
+        )
+    return tuple(sections)
+
+
+def _semantic_relevance_text(raw_content: str) -> str:
+    """Prefer semantic child record text over its transport metadata."""
+
+    try:
+        decoded = json.loads(raw_content)
+    except json.JSONDecodeError:
+        return raw_content
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("records"), list):
+        return raw_content
+    texts = [
+        row.get("text")
+        for row in decoded["records"]
+        if isinstance(row, dict) and isinstance(row.get("text"), str)
+    ]
+    return "\n".join(texts) if texts else raw_content
+
+
+def _section_relevance_score(
+    section: _MarkdownSection,
+    *,
+    explicit_tokens: set[str],
+    raw_tokens: set[str],
+) -> int:
+    section_tokens = set(tokenize(section.content))
+    explicit_hits = len(section_tokens & explicit_tokens)
+    overlap = len(section_tokens & raw_tokens)
+    heading_overlap = (
+        len(set(tokenize(section.heading or "")) & raw_tokens) if section.heading else 0
+    )
+    return explicit_hits * 1_000 + heading_overlap * 25 + overlap
+
+
+def _render_compact_update_context(
+    *,
+    page_id: str,
+    page_text: str,
+    sections: tuple[_MarkdownSection, ...],
+    selected: tuple[_MarkdownSection, ...],
+) -> str:
+    page_bytes = len(page_text.encode("utf-8"))
+    page_sha256 = hashlib.sha256(page_text.encode("utf-8")).hexdigest()
+    outline_rows = []
+    for section in sections:
+        # A padding-free base64url digest is the complete 256-bit SHA-256,
+        # merely encoded in 43 rather than 64 bytes.  TSV avoids repeating
+        # field labels for every section while retaining every heading and
+        # exact line/byte range in the bounded manifest.
+        digest_b64url = base64.urlsafe_b64encode(bytes.fromhex(section.sha256))
+        digest_b64url_text = digest_b64url.rstrip(b"=").decode("ascii")
+        heading_json = json.dumps(
+            section.heading or "[preamble]",
+            ensure_ascii=False,
+        )
+        outline_rows.append(
+            f"{section.start_line}-{section.end_line}\t"
+            f"{len(section.content.encode('utf-8'))}\t"
+            f"{digest_b64url_text}\t{heading_json}"
+        )
+    selected_rows = [
+        (
+            f"--- BEGIN COMPLETE SECTION lines {section.start_line}-{section.end_line} "
+            f"sha256={section.sha256} ---\n"
+            f"{section.content}"
+            f"--- END COMPLETE SECTION lines {section.start_line}-{section.end_line} "
+            f"sha256={section.sha256} ---"
+        )
+        for section in selected
+    ]
+    return "\n".join(
+        [
+            f"--- Compact append-only context for [[{page_id}]] ---",
+            "The stored page is not rewritten or truncated by this context view.",
+            f"page_bytes: {page_bytes}",
+            f"page_sha256: {page_sha256}",
+            f"section_count: {len(sections)}",
+            f"selected_section_count: {len(selected)}",
+            "Complete deterministic H1/H2 section manifest (TSV):",
+            "lines\tbytes\tsha256_b64url\theading_json",
+            *outline_rows,
+            "",
+            "Selected complete sections (never partial byte ranges):",
+            *(selected_rows or ["(none fit the fixed compact-context envelope)"]),
+            "--- End compact append-only context ---\n",
+        ]
+    )
+
+
+def _build_compact_update_context(
+    op: dict,
+    raw_content: str,
+    *,
+    max_selected_bytes: int,
+    max_outline_bytes: int = _MAX_COMPACT_UPDATE_OUTLINE_BYTES,
+) -> _CompactUpdateContext | None:
+    """Build a read-only outline plus whole relevant Markdown sections.
+
+    This path is valid only for append-only updates.  It never writes the
+    stored page, never slices a selected section, and represents every omitted
+    section by a stable line range, byte count, and SHA-256 in the outline.
+    """
+
+    if op.get("type") != "update" or max_selected_bytes < 1 or max_outline_bytes < 1:
+        return None
+    filename = str(op.get("filename") or "")
+    page_id = filename.replace(".md", "").split("/")[-1]
+    existing_path = find_page(page_id)
+    if existing_path is None:
+        return None
+    page_text = _read_exact_utf8(existing_path)
+    sections = _markdown_sections(page_text)
+    if not sections or "".join(section.content for section in sections) != page_text:
+        return None
+
+    explicit_values = [
+        op.get("title"),
+        op.get("summary"),
+        *(op.get("keywords") or []),
+    ]
+    explicit_tokens = set(
+        tokenize(
+            "\n".join(
+                value.strip()
+                for value in explicit_values
+                if isinstance(value, str) and value.strip()
+            )
+        )
+    )
+    raw_tokens = set(tokenize(_semantic_relevance_text(raw_content)))
+    candidates = [section for section in sections if section.heading is not None]
+    ranked = sorted(
+        (
+            (
+                section,
+                _section_relevance_score(
+                    section,
+                    explicit_tokens=explicit_tokens,
+                    raw_tokens=raw_tokens,
+                ),
+            )
+            for section in candidates
+        ),
+        key=lambda item: (-item[1], -item[0].start_line),
+    )
+    outline_only = _render_compact_update_context(
+        page_id=page_id,
+        page_text=page_text,
+        sections=sections,
+        selected=(),
+    )
+    if len(outline_only.encode("utf-8")) > max_outline_bytes:
+        # Never truncate the outline manifest. A pathological heading count
+        # remains an operational defer rather than an unbound context view.
+        return None
+
+    if not ranked or ranked[0][1] <= 0:
+        return None
+    highest_relevance_section = ranked[0][0]
+    if len(highest_relevance_section.content.encode("utf-8")) > max_selected_bytes:
+        # Skipping the strongest match and filling the view with weaker small
+        # sections would make the projection look admissible while hiding the
+        # very context needed to avoid a duplicate or contradictory append.
+        return None
+
+    selected: list[_MarkdownSection] = []
+    selected_bytes = 0
+    for section, relevance_score in ranked:
+        if relevance_score <= 0:
+            continue
+        section_bytes = len(section.content.encode("utf-8"))
+        if section_bytes > max_selected_bytes - selected_bytes:
+            continue
+        selected.append(section)
+        selected_bytes += section_bytes
+
+    selected_tuple = tuple(sorted(selected, key=lambda section: section.start_line))
+    if not selected_tuple:
+        # An outline alone cannot protect against semantic duplication. Keep
+        # the raw deferred until at least one complete section can be shown.
+        return None
+    rendered = _render_compact_update_context(
+        page_id=page_id,
+        page_text=page_text,
+        sections=sections,
+        selected=selected_tuple,
+    )
+    return _CompactUpdateContext(
+        text=rendered,
+        page_id=page_id,
+        page_sha256=hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        page_bytes=len(page_text.encode("utf-8")),
+        section_count=len(sections),
+        selected_sections=selected_tuple,
+    )
 
 
 def _required_generate_context_tokens(
@@ -1415,6 +1731,85 @@ def _required_generate_context_tokens(
         + repair_history
         + num_predict
         + _PAGE_GENERATION_CONTEXT_SAFETY_TOKENS
+    )
+
+
+def _select_page_generation_budget(
+    prompt: str,
+    system: str | None,
+    *,
+    configured_num_predict: int,
+    num_ctx: int,
+    max_num_ctx: int,
+) -> _PageGenerationBudget:
+    """Select a lossless context bucket and one output budget for all turns.
+
+    Every byte already selected for the prompt, plus every possible repair
+    turn, remains in the transcript. Oversized append-only updates may first
+    replace the full-page view with a separately hash-bound outline and whole
+    sections; this function never performs that projection itself. When the
+    configured output reservation alone pushes the resulting three-response
+    envelope over the model's hard context ceiling, reduce only
+    ``num_predict`` to the largest integer reservation that fits. Never adapt
+    below the fixed 2K floor (or below an explicitly configured smaller
+    reservation); callers defer instead.
+    """
+
+    if configured_num_predict < 1:
+        raise ValueError("configured_num_predict must be positive")
+
+    configured_required = _required_generate_context_tokens(
+        prompt,
+        system,
+        num_predict=configured_num_predict,
+    )
+    selected_num_predict = configured_num_predict
+    if configured_required > max_num_ctx:
+        # The requirement is linear in one identical reservation for the
+        # initial response and both possible repair responses.  Everything
+        # else is immutable source/system/history overhead and must not be
+        # truncated to make the request fit.
+        fixed_context = (
+            configured_required
+            - _MAX_PAGE_GENERATION_RESPONSES * configured_num_predict
+        )
+        largest_safe_num_predict = (
+            max_num_ctx - fixed_context
+        ) // _MAX_PAGE_GENERATION_RESPONSES
+        adaptive_floor = min(
+            configured_num_predict,
+            _MIN_ADAPTIVE_PAGE_NUM_PREDICT,
+        )
+        if largest_safe_num_predict < adaptive_floor:
+            minimum_required = _required_generate_context_tokens(
+                prompt,
+                system,
+                num_predict=adaptive_floor,
+            )
+            raise IngestContextCapacityError(
+                "complete page-repair transcript requires context "
+                f"{minimum_required} at minimum num_predict {adaptive_floor}, "
+                f"exceeding configured max_num_ctx {max_num_ctx}"
+            )
+        selected_num_predict = min(
+            configured_num_predict,
+            largest_safe_num_predict,
+        )
+
+    required_num_ctx = _required_generate_context_tokens(
+        prompt,
+        system,
+        num_predict=selected_num_predict,
+    )
+    selected_num_ctx = _select_ingest_context(
+        required_num_ctx,
+        num_ctx=num_ctx,
+        max_num_ctx=max_num_ctx,
+    )
+    return _PageGenerationBudget(
+        num_ctx=selected_num_ctx,
+        num_predict=selected_num_predict,
+        required_num_ctx=required_num_ctx,
     )
 
 
@@ -1718,6 +2113,40 @@ line `=== END PAGE ===`. Preserve only facts grounded in the original source.
     return prompt
 
 
+def _build_page_generation_prompt(
+    *,
+    context: str,
+    raw_content: str,
+    op_type: str,
+    filename: str,
+    title: str,
+    summary: str,
+    feedback_block: str,
+    current_date: str,
+) -> str:
+    """Render the exact prompt shared by full and compact update contexts."""
+
+    return f"""{context}
+
+---
+Raw session data (source material):
+---
+{raw_content}
+---
+
+Task: {op_type.upper()} page "{filename}"
+Title: {title}
+Summary: {summary}
+{feedback_block}
+
+Current date: {current_date}
+For CREATE, use this exact date for the `updated` frontmatter field.
+Do not add or infer any other date unless it is explicit in the raw evidence.
+For UPDATE, do not create a dated heading unless that date is explicit in the raw evidence.
+
+Generate the page content based on the raw data and context above."""
+
+
 def _generate_one(
     op: dict,
     raw_content: str,
@@ -1764,48 +2193,108 @@ details, future plans, causal explanations, preferences, or outcomes that are
 not explicit in the raw evidence.
 """
 
-    prompt = f"""{context}
+    prompt = _build_page_generation_prompt(
+        context=context,
+        raw_content=raw_content,
+        op_type=op_type,
+        filename=filename,
+        title=title,
+        summary=summary,
+        feedback_block=feedback_block,
+        current_date=current_date,
+    )
 
----
-Raw session data (source material):
----
-{raw_content}
----
-
-Task: {op_type.upper()} page "{filename}"
-Title: {title}
-Summary: {summary}
-{feedback_block}
-
-Current date: {current_date}
-For CREATE, use this exact date for the `updated` frontmatter field.
-Do not add or infer any other date unless it is explicit in the raw evidence.
-For UPDATE, do not create a dated heading unless that date is explicit in the raw evidence.
-
-Generate the page content based on the raw data and context above."""
-
-    system_prompt = (
+    full_system_prompt = (
         UPDATE_SYSTEM_PROMPT if op_type == "update" else GENERATE_SYSTEM_PROMPT
     )
-    required_num_ctx = _required_generate_context_tokens(
-        prompt,
-        system_prompt,
+    system_prompt = full_system_prompt
+    full_prompt = prompt
+    attempts_made = 0
+    generation_budget: _PageGenerationBudget | None = None
+    capacity_error: IngestContextCapacityError | None = None
+    compact_context: _CompactUpdateContext | None = None
+    original_required_num_ctx = _required_generate_context_tokens(
+        full_prompt,
+        full_system_prompt,
         num_predict=config.num_predict,
     )
-    attempts_made = 0
-    try:
-        selected_num_ctx = _select_ingest_context(
-            required_num_ctx,
-            num_ctx=config.num_ctx,
-            max_num_ctx=config.max_num_ctx,
+    if original_required_num_ctx > config.max_num_ctx and op_type == "update":
+        compact_context = _build_compact_update_context(
+            op,
+            raw_content,
+            max_selected_bytes=config.max_related_context_bytes,
         )
-    except IngestContextCapacityError as exc:
+        if compact_context is not None:
+            context = compact_context.text
+            prompt = _build_page_generation_prompt(
+                context=context,
+                raw_content=raw_content,
+                op_type=op_type,
+                filename=filename,
+                title=title,
+                summary=summary,
+                feedback_block=feedback_block,
+                current_date=current_date,
+            )
+            system_prompt = (
+                UPDATE_SYSTEM_PROMPT
+                + "\n\nOversized append-only context rule:\n"
+                + "- The complete stored page remains byte-identical on disk.\n"
+                + "- The prompt contains a hash-bound outline and only selected "
+                + "complete Markdown sections.\n"
+                + "- Omitted section bytes are still present on disk; output only "
+                + "a new append body and never claim that omitted content is absent.\n"
+                + "- Never rewrite, summarize, or replace the stored preimage.\n"
+            )
+            try:
+                generation_budget = _select_page_generation_budget(
+                    prompt,
+                    system_prompt,
+                    configured_num_predict=config.num_predict,
+                    num_ctx=config.num_ctx,
+                    max_num_ctx=config.max_num_ctx,
+                )
+            except IngestContextCapacityError as compact_exc:
+                capacity_error = compact_exc
+            else:
+                capacity_error = None
+                _safe_log(
+                    "ingest | compacted oversized append-only update context for "
+                    f"{compact_context.page_id}: page={compact_context.page_bytes}B "
+                    f"sections={len(compact_context.selected_sections)}/"
+                    f"{compact_context.section_count} required="
+                    f"{generation_budget.required_num_ctx}"
+                )
+
+    # A compact outline is preferred over sacrificing output budget or holding
+    # the model at its hard context ceiling. If compaction is unavailable or
+    # itself cannot fit, preserve the prior adaptive full-context behavior.
+    if generation_budget is None:
+        compact_context = None
+        prompt = full_prompt
+        system_prompt = full_system_prompt
+        try:
+            generation_budget = _select_page_generation_budget(
+                prompt,
+                system_prompt,
+                configured_num_predict=config.num_predict,
+                num_ctx=config.num_ctx,
+                max_num_ctx=config.max_num_ctx,
+            )
+        except IngestContextCapacityError as exc:
+            capacity_error = exc
+
+    if generation_budget is None:
+        exc = capacity_error or IngestContextCapacityError(
+            "page generation context admission failed without a typed reason"
+        )
         if diagnostics is not None:
             diagnostics.update(
                 {
                     "failure_class": "context_window_exceeded",
                     "reason": str(exc),
                     "attempts": 0,
+                    "original_required_num_ctx": original_required_num_ctx,
                 }
             )
         if progress_callback is not None:
@@ -1818,6 +2307,37 @@ Generate the page content based on the raw data and context above."""
                 }
             )
         raise RuntimeError(f"ingest generation context_window_exceeded: {exc}") from exc
+
+    selected_num_ctx = generation_budget.num_ctx
+    selected_num_predict = generation_budget.num_predict
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "num_ctx": selected_num_ctx,
+                "num_predict": selected_num_predict,
+                "required_num_ctx": generation_budget.required_num_ctx,
+                "original_required_num_ctx": original_required_num_ctx,
+            }
+        )
+        if compact_context is not None:
+            diagnostics.update(
+                {
+                    "context_strategy": "append_only_outline_sections",
+                    "context_page_id": compact_context.page_id,
+                    "context_page_sha256": compact_context.page_sha256,
+                    "context_page_bytes": compact_context.page_bytes,
+                    "context_section_count": compact_context.section_count,
+                    "context_selected_sections": [
+                        {
+                            "start_line": section.start_line,
+                            "end_line": section.end_line,
+                            "sha256": section.sha256,
+                            "bytes": len(section.content.encode("utf-8")),
+                        }
+                        for section in compact_context.selected_sections
+                    ],
+                }
+            )
 
     try:
         live_transport = _generate_with_progress is _DEFAULT_GENERATE_WITH_PROGRESS
@@ -1844,7 +2364,7 @@ Generate the page content based on the raw data and context above."""
             optional = {
                 "model": config.model,
                 "num_ctx": selected_num_ctx,
-                "num_predict": config.num_predict,
+                "num_predict": selected_num_predict,
                 "keep_alive": config.keep_alive,
                 "read_timeout_ms": config.read_timeout_ms,
                 "temperature": config.temperature,
@@ -1964,6 +2484,12 @@ Generate the page content based on the raw data and context above."""
                         "filename": filename,
                         "content": validation.body,
                     }
+                    if compact_context is not None:
+                        # Private host binding: preparation must observe the
+                        # exact page snapshot used to build the compact view.
+                        result["_compact_update_preimage_sha256"] = (
+                            compact_context.page_sha256
+                        )
                     if raw_keywords is not None:
                         result["raw_keywords"] = list(raw_keywords)
                     return result
@@ -2797,7 +3323,23 @@ def _prepare_operations(
                     f"update target not found for page_id {page_id!r}"
                 )
             page_id = existing_path.stem
-            previous = existing_path.read_text()
+            previous = _read_exact_utf8(existing_path)
+            compact_preimage_sha256 = op.get("_compact_update_preimage_sha256")
+            if compact_preimage_sha256 is not None:
+                if (
+                    not isinstance(compact_preimage_sha256, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", compact_preimage_sha256) is None
+                ):
+                    raise IngestApplyError(
+                        f"compact update preimage binding is malformed for {page_id}"
+                    )
+                observed_preimage_sha256 = hashlib.sha256(
+                    previous.encode("utf-8")
+                ).hexdigest()
+                if observed_preimage_sha256 != compact_preimage_sha256:
+                    raise IngestApplyError(
+                        f"compact update preimage changed before prepare: {page_id}"
+                    )
             # Preserve the on-disk text for rollback BEFORE we mutate
             # ``previous`` with a frontmatter patch — the rollback path
             # restores the file as it was before this batch ran, not as
@@ -2959,7 +3501,7 @@ def _apply_prepared_operations(
                         f"content correction constraints changed before ingest apply: "
                         f"{entry.page_id}"
                     )
-                current = entry.path.read_text() if entry.path.exists() else None
+                current = _read_optional_exact_utf8(entry.path)
                 if current == entry.new_body:
                     # Power-loss recovery: this exact reviewed postimage was
                     # already installed, so finish the batch idempotently.
@@ -3007,20 +3549,14 @@ def _apply_prepared_operations(
             for entry in reversed(written):
                 try:
                     if entry.op_type == "create":
-                        if (
-                            entry.path.exists()
-                            and entry.path.read_text() == entry.new_body
-                        ):
+                        if _read_optional_exact_utf8(entry.path) == entry.new_body:
                             entry.path.unlink()
                         elif entry.path.exists():
                             rollback_errors.append(
                                 f"{entry.page_id}: skipped (modified by another writer)"
                             )
                     else:
-                        if (
-                            entry.path.exists()
-                            and entry.path.read_text() == entry.new_body
-                        ):
+                        if _read_optional_exact_utf8(entry.path) == entry.new_body:
                             atomic_write(entry.path, entry.previous_text or "")
                         elif entry.path.exists():
                             rollback_errors.append(
@@ -3351,7 +3887,7 @@ def rollback_ingest_proposal_artifact(
     from llm_wiki_mcp.page_mutation import wiki_mutation_lock
 
     def read_optional(item: PreparedIngestOperation) -> str | None:
-        return item.path.read_text(encoding="utf-8") if item.path.exists() else None
+        return _read_optional_exact_utf8(item.path)
 
     rolled_back: list[PreparedIngestOperation] = []
     already_rolled_back: list[str] = []
@@ -3469,9 +4005,7 @@ def _prepared_plan_is_recoverable(planned: list[PreparedIngestOperation]) -> boo
 
     for item in planned:
         try:
-            current = (
-                item.path.read_text(encoding="utf-8") if item.path.exists() else None
-            )
+            current = _read_optional_exact_utf8(item.path)
         except (OSError, UnicodeDecodeError):
             return False
         if current not in {item.previous_text, item.new_body}:
@@ -3709,9 +4243,7 @@ def _prepared_plan_is_fully_applied(
         return False
     for item in planned:
         try:
-            current = (
-                item.path.read_text(encoding="utf-8") if item.path.exists() else None
-            )
+            current = _read_optional_exact_utf8(item.path)
         except (OSError, UnicodeDecodeError):
             return False
         if current != item.new_body:
