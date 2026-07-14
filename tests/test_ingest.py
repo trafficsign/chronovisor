@@ -5015,6 +5015,55 @@ class TestOrchestrator:
             or "pending" in second["reason"].lower()
         )
 
+    def test_run_pending_ingest_can_limit_pilot_to_one_semantic_unit(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_wiki_mcp import ingest as ingest_mod, orchestrator
+
+        raw_paths = [isolated_wiki / "raw" / f"r{i}.md" for i in range(3)]
+        for path in raw_paths:
+            path.write_text(path.stem, encoding="utf-8")
+        observed: list[str] = []
+
+        def fake_run_ingest(
+            content,
+            job_id,
+            on_complete=None,
+            on_finally=None,
+            *,
+            metadata=None,
+        ):
+            del job_id, metadata
+            observed.append(content)
+            if on_complete:
+                on_complete()
+            if on_finally:
+                on_finally(failed=False, triage_failed=False)
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+
+        result = orchestrator.run_pending_ingest(force=True, max_units=1)
+
+        assert observed == ["r0"]
+        assert result["files_processed"] == ["r0.md"]
+        assert [path.name for path in orchestrator.get_pending_raw_files()] == [
+            "r1.md",
+            "r2.md",
+        ]
+
+    @pytest.mark.parametrize("max_units", [0, 11])
+    def test_run_pending_ingest_rejects_out_of_range_max_units(
+        self,
+        isolated_wiki: Path,
+        max_units: int,
+    ) -> None:
+        from llm_wiki_mcp import orchestrator
+
+        del isolated_wiki
+        with pytest.raises(ValueError, match="max_units must be between 1 and 10"):
+            orchestrator.run_pending_ingest(force=True, max_units=max_units)
+
     def test_legacy_triage_counter_cannot_quarantine_unattempted_raws(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

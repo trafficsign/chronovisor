@@ -15,6 +15,7 @@ from llm_wiki_mcp import orchestrator, runtime_status
 from llm_wiki_mcp.wiki import WIKI_ROOT, init_wiki
 
 DEFAULT_MAX_BATCHES = 24
+DEFAULT_MAX_UNITS = orchestrator.MAX_INGEST_BATCH_UNITS
 DEFAULT_SLEEP_SECONDS = 1.0
 DEFAULT_IDLE_SLEEP_SECONDS = 60.0
 
@@ -53,12 +54,19 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
 def drain(
     *,
     max_batches: int = DEFAULT_MAX_BATCHES,
+    max_units: int = DEFAULT_MAX_UNITS,
     sleep_seconds: float = DEFAULT_SLEEP_SECONDS,
     log_file: Path | None = None,
 ) -> dict[str, Any]:
     """Run forced ingest batches until the queue drains or progress stops."""
     if max_batches < 0:
         raise ValueError("max_batches must be >= 0")
+    if not isinstance(max_units, int) or isinstance(max_units, bool):
+        raise ValueError("max_units must be an integer between 1 and 10")
+    if not 1 <= max_units <= orchestrator.MAX_INGEST_BATCH_UNITS:
+        raise ValueError(
+            f"max_units must be between 1 and {orchestrator.MAX_INGEST_BATCH_UNITS}"
+        )
     if sleep_seconds < 0:
         raise ValueError("sleep_seconds must be >= 0")
 
@@ -89,7 +97,10 @@ def drain(
             stop_reason = "no pending raws"
             break
 
-        result = orchestrator.run_pending_ingest(force=True)
+        result = orchestrator.run_pending_ingest(
+            force=True,
+            max_units=max_units,
+        )
         processed = len(result.get("files_processed", []))
         total_processed += processed
         try:
@@ -153,6 +164,7 @@ def drain(
 def watch(
     *,
     max_batches: int = DEFAULT_MAX_BATCHES,
+    max_units: int = DEFAULT_MAX_UNITS,
     sleep_seconds: float = DEFAULT_SLEEP_SECONDS,
     idle_sleep_seconds: float = DEFAULT_IDLE_SLEEP_SECONDS,
     log_file: Path | None = None,
@@ -165,22 +177,31 @@ def watch(
         try:
             result = drain(
                 max_batches=max_batches,
+                max_units=max_units,
                 sleep_seconds=sleep_seconds,
                 log_file=log_file,
             )
             print(json.dumps(result, ensure_ascii=False), flush=True)
         except Exception as exc:
-            print(json.dumps({
-                "status": "error",
-                "error": str(exc),
-                "timestamp": datetime.now().isoformat(),
-            }, ensure_ascii=False), flush=True)
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "error": str(exc),
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
         if idle_sleep_seconds:
             time.sleep(idle_sleep_seconds)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Drain LLM Wiki pending raw ingest backlog.")
+    parser = argparse.ArgumentParser(
+        description="Drain LLM Wiki pending raw ingest backlog."
+    )
     parser.add_argument(
         "--max-batches",
         type=int,
@@ -188,9 +209,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum orchestrator batches to run in this process.",
     )
     parser.add_argument(
+        "--max-units",
+        type=int,
+        default=_env_int("LLM_WIKI_INGEST_DRAIN_MAX_UNITS", DEFAULT_MAX_UNITS),
+        help="Semantic work units per orchestrator batch (1-10).",
+    )
+    parser.add_argument(
         "--sleep-seconds",
         type=float,
-        default=_env_float("LLM_WIKI_INGEST_DRAIN_SLEEP_SECONDS", DEFAULT_SLEEP_SECONDS),
+        default=_env_float(
+            "LLM_WIKI_INGEST_DRAIN_SLEEP_SECONDS", DEFAULT_SLEEP_SECONDS
+        ),
         help="Delay between successful batches.",
     )
     parser.add_argument("--log-file", type=Path)
@@ -202,7 +231,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--idle-sleep-seconds",
         type=float,
-        default=_env_float("LLM_WIKI_INGEST_DRAIN_IDLE_SLEEP_SECONDS", DEFAULT_IDLE_SLEEP_SECONDS),
+        default=_env_float(
+            "LLM_WIKI_INGEST_DRAIN_IDLE_SLEEP_SECONDS", DEFAULT_IDLE_SLEEP_SECONDS
+        ),
         help="Delay between drain cycles in --watch mode.",
     )
     return parser
@@ -214,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.watch:
         watch(
             max_batches=args.max_batches,
+            max_units=args.max_units,
             sleep_seconds=args.sleep_seconds,
             idle_sleep_seconds=args.idle_sleep_seconds,
             log_file=args.log_file,
@@ -222,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = drain(
             max_batches=args.max_batches,
+            max_units=args.max_units,
             sleep_seconds=args.sleep_seconds,
             log_file=args.log_file,
         )

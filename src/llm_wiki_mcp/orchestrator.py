@@ -23,6 +23,7 @@ from llm_wiki_mcp.link_fix import atomic_write
 
 # Config
 INGEST_THRESHOLD = 5  # Trigger ingest after N raw files
+MAX_INGEST_BATCH_UNITS = 10  # Hard safety ceiling for semantic units per batch
 LINT_INTERVAL_HOURS = 24  # Run lint every N hours
 
 # State file
@@ -703,7 +704,11 @@ def _prepare_pending_raw_units(
 
 
 @_serialize_ingest_across_processes
-def run_pending_ingest(force: bool = False) -> dict:
+def run_pending_ingest(
+    force: bool = False,
+    *,
+    max_units: int = MAX_INGEST_BATCH_UNITS,
+) -> dict:
     """Run ingest on all pending raw files if threshold is met.
 
     Per-raw synchronous serial execution. Each pending raw is parsed for
@@ -722,12 +727,21 @@ def run_pending_ingest(force: bool = False) -> dict:
         force: When True, bypass the ``INGEST_THRESHOLD`` check and trigger
             immediately as long as at least one raw is pending. Used by
             ``wiki_ingest`` to preserve its historical "ingest now" contract.
+        max_units: Maximum semantic work units to process in this batch. The
+            default preserves the historical batch size of 10; smaller values
+            support controlled pilots without weakening process serialization.
 
     Returns result dict with status and details. On a triggered batch the
     result includes per-raw entries (filename, job_id, succeeded) so
     callers can inspect partial outcomes without re-loading job state.
     """
     with _INGEST_LOCK:
+        if not isinstance(max_units, int) or isinstance(max_units, bool):
+            raise ValueError("max_units must be an integer between 1 and 10")
+        if not 1 <= max_units <= MAX_INGEST_BATCH_UNITS:
+            raise ValueError(
+                f"max_units must be between 1 and {MAX_INGEST_BATCH_UNITS}"
+            )
         try:
             resumed_fragment_quarantines = (
                 _resume_prepared_capture_fragment_quarantines()
@@ -799,8 +813,7 @@ def run_pending_ingest(force: bool = False) -> dict:
 
         # Limit semantic work units, not transport fragments. A complete
         # fragment set is reconstructed and presented to ingest exactly once.
-        MAX_BATCH = 10
-        units = units[:MAX_BATCH]
+        units = units[:max_units]
         filenames = [name for unit in units for name in unit.filenames]
 
         if not units:

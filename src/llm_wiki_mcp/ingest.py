@@ -42,6 +42,10 @@ from llm_wiki_mcp.runtime_config import load_ingest_config
 from llm_wiki_mcp import decision_authority, ollama as ollama_runtime, runtime_status
 from llm_wiki_mcp.decision_lane_prompts import INGEST_PROPOSAL_SCHEMA_VERSION
 from llm_wiki_mcp.entities import patch_entities_frontmatter
+from llm_wiki_mcp.triage_plan import (
+    collapse_exact_duplicate_operations,
+    distinct_target_collisions,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +697,10 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
                 prompt,
                 TRIAGE_PLAN_SCHEMA,
                 system=TRIAGE_SYSTEM_PROMPT,
-                value_validator=_triage_plan_validation_issues,
+                value_validator=lambda value: _triage_plan_validation_issues(
+                    value,
+                    resolve_effective_targets=True,
+                ),
             )
     except IngestContextCapacityError as exc:
         failure = IngestTriageFailure("context_window_exceeded", str(exc))
@@ -757,7 +764,11 @@ _MAX_FILENAME_LEN = 200
 _TRIAGE_PLAN_FIELDS = frozenset({"type", "filename", "title", "keywords", "summary"})
 
 
-def _triage_plan_validation_issues(value: Any) -> list[ValidationIssue]:
+def _triage_plan_validation_issues(
+    value: Any,
+    *,
+    resolve_effective_targets: bool = False,
+) -> list[ValidationIssue]:
     """Return exact semantic-plan violations for same-session repair.
 
     JSON Schema owns the basic container and scalar types.  This host
@@ -892,6 +903,41 @@ def _triage_plan_validation_issues(value: Any) -> list[ValidationIssue]:
                         message=f"create operation requires {description}",
                     )
                 )
+    if issues:
+        return issues
+
+    operations = [entry for entry in value if isinstance(entry, dict)]
+    _collapsed, collisions = distinct_target_collisions(
+        operations,
+        effective_filename=(
+            _effective_triage_target_filename if resolve_effective_targets else None
+        ),
+    )
+    for collision in collisions:
+        issues.append(
+            ValidationIssue(
+                pointer="",
+                keyword="uniqueTarget",
+                expected={
+                    "rule": (
+                        "exactly one operation per case/Unicode-insensitive "
+                        "target page_id"
+                    ),
+                    "repair": (
+                        "return one operation that preserves every distinct fact, "
+                        "summary, and keyword for this target"
+                    ),
+                },
+                received=collision,
+                message=(
+                    "multiple distinct operations in your complete previous JSON "
+                    "response resolve to one target page; use the listed indices and "
+                    "merge every distinct fact, summary, and keyword into one "
+                    "operation in this response. Do not drop an operation or split "
+                    "the same page_id across folders."
+                ),
+            )
+        )
     return issues
 
 
@@ -958,6 +1004,11 @@ def _validate_triage_plan(
         # via find_page() (case-insensitive on macOS APFS) and reject if
         # the target doesn't exist. That way legacy corpus stays updatable.
         cleaned.append(entry)
+    # Repeated byte-equivalent operations carry no additional semantic intent
+    # and are safe to normalize deterministically. Any distinct operation for
+    # the same page_id was rejected above and repaired inside the same local
+    # structured session; it must never be silently dropped here.
+    cleaned = collapse_exact_duplicate_operations(cleaned)
     if coerce_missing_updates:
         return _normalize_triage_plan(cleaned)
     return cleaned
@@ -1188,6 +1239,26 @@ def _find_existing_create_target(op: dict) -> tuple[Path, str, float] | None:
             except (KeyError, TypeError):
                 continue
     return None
+
+
+def _effective_triage_target_filename(op: dict) -> str | None:
+    """Resolve the target filename exactly as search-before-create will.
+
+    This runs inside the triage structured-session validator. It lets the
+    model repair two differently named create proposals that both resolve to
+    one existing page before either proposal spends a generation call.
+    """
+
+    filename = op.get("filename")
+    if not isinstance(filename, str):
+        return None
+    if op.get("type") != "create":
+        return filename
+    match = _find_existing_create_target(op)
+    if match is None:
+        return filename
+    existing_path, _reason, _score = match
+    return _relative_page_filename(existing_path)
 
 
 def _dedupe_create_ops_with_existing(plan: list[dict], raw_content: str) -> list[dict]:

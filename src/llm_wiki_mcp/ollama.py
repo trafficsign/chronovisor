@@ -1508,6 +1508,9 @@ Rules:
 - Use only these five object keys: type, filename, title, keywords, summary
 - Every operation, including updates, MUST include non-empty title, keywords,
   and summary fields
+- Emit exactly one operation per case/Unicode-insensitive target page ID. If
+  several facts belong on one page, preserve all of them in one combined
+  summary and keyword set; never emit multiple operations for that target
 
 Output format (JSON array only):
 [
