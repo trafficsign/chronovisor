@@ -3,11 +3,50 @@ from __future__ import annotations
 import sqlite3
 import json
 
+import pytest
+
 from llm_wiki_mcp import search
 from llm_wiki_mcp import ollama
 from llm_wiki_mcp import index_store as index_store_mod
 from llm_wiki_mcp.runtime_config import EmbeddingConfig
-from llm_wiki_mcp.search import ScoredPage, apply_filters, fuse_results, usage_prior_results
+from llm_wiki_mcp.search import (
+    ScoredPage,
+    apply_filters,
+    fuse_results,
+    usage_prior_results,
+)
+
+
+def test_semantic_search_strict_mode_surfaces_backend_unavailability(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ollama, "is_available", lambda: False)
+
+    assert search.semantic_search("test") == []
+    with pytest.raises(RuntimeError, match="backend is unavailable"):
+        search.semantic_search("test", strict=True)
+
+
+def test_semantic_search_strict_mode_surfaces_embedding_failure(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(
+        ollama,
+        "embed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+    monkeypatch.setattr(search, "_maybe_migrate_legacy_json", lambda: None)
+    monkeypatch.setattr(search, "_embedding_count", lambda: 1)
+    monkeypatch.setattr(
+        search,
+        "load_embedding_config",
+        lambda: EmbeddingConfig(model="test"),
+    )
+
+    assert search.semantic_search("test") == []
+    with pytest.raises(RuntimeError, match="query embedding failed"):
+        search.semantic_search("test", strict=True)
 
 
 def test_read_only_embedding_probe_does_not_create_missing_database(
@@ -27,7 +66,9 @@ def test_bm25_read_only_refresh_persists_dirty_cache_on_next_normal_build(
     tmp_path, monkeypatch
 ) -> None:
     page_path = tmp_path / "page.md"
-    page_path.write_text("---\ntitle: Page\nupdated: 2026-01-01\n---\nsearchable body\n")
+    page_path.write_text(
+        "---\ntitle: Page\nupdated: 2026-01-01\n---\nsearchable body\n"
+    )
     cache_path = tmp_path / ".index" / "bm25.json"
     monkeypatch.setattr(search, "_BM25_CACHE_FILE", cache_path)
     monkeypatch.setattr(search, "searchable_pages", lambda: [page_path])
@@ -178,7 +219,9 @@ def test_fusion_preserves_lifecycle_status_for_filtering() -> None:
     assert apply_filters(results) == []
 
 
-def test_update_embeddings_rebuilds_when_model_profile_changes(tmp_path, monkeypatch) -> None:
+def test_update_embeddings_rebuilds_when_model_profile_changes(
+    tmp_path, monkeypatch
+) -> None:
     wiki_root = tmp_path / "wiki"
     pages_dir = wiki_root / "pages"
     system_dir = wiki_root / "system"
@@ -196,12 +239,16 @@ def test_update_embeddings_rebuilds_when_model_profile_changes(tmp_path, monkeyp
     monkeypatch.setattr(search, "PAGES_DIR", pages_dir)
     monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
-    monkeypatch.setattr(search, "LEGACY_EMBEDDINGS_FILE", wiki_root / ".embeddings.json")
+    monkeypatch.setattr(
+        search, "LEGACY_EMBEDDINGS_FILE", wiki_root / ".embeddings.json"
+    )
     monkeypatch.setattr(search, "all_pages", lambda: [page_path])
     monkeypatch.setattr(search, "_legacy_migration_done", True)
     monkeypatch.setattr(ollama, "is_available", lambda: True)
 
-    profile = {"value": EmbeddingConfig(model="m1", document_prefix="D1:", query_prefix="Q1:")}
+    profile = {
+        "value": EmbeddingConfig(model="m1", document_prefix="D1:", query_prefix="Q1:")
+    }
     calls: list[tuple[str | None, list[str]]] = []
 
     def fake_embed(texts, *, model=None):
@@ -216,7 +263,9 @@ def test_update_embeddings_rebuilds_when_model_profile_changes(tmp_path, monkeyp
     assert calls[-1][1][0].startswith("D1:")
     assert search._embedding_count() == 1
 
-    profile["value"] = EmbeddingConfig(model="m2", document_prefix="D2:", query_prefix="Q2:")
+    profile["value"] = EmbeddingConfig(
+        model="m2", document_prefix="D2:", query_prefix="Q2:"
+    )
     assert search._embedding_count() == 0
     assert search.update_embeddings() == 1
     assert calls[-1][0] == "m2"
@@ -255,7 +304,9 @@ def test_update_embeddings_stores_markdown_chunks(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(search, "PAGES_DIR", pages_dir)
     monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
-    monkeypatch.setattr(search, "LEGACY_EMBEDDINGS_FILE", wiki_root / ".embeddings.json")
+    monkeypatch.setattr(
+        search, "LEGACY_EMBEDDINGS_FILE", wiki_root / ".embeddings.json"
+    )
     monkeypatch.setattr(search, "all_pages", lambda: [page_path])
     monkeypatch.setattr(search, "_legacy_migration_done", True)
     monkeypatch.setattr(ollama, "is_available", lambda: True)
@@ -309,10 +360,14 @@ def test_semantic_search_applies_query_prefix(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         search,
         "load_embedding_config",
-        lambda: EmbeddingConfig(model="ruri", document_prefix="検索文書: ", query_prefix="検索クエリ: "),
+        lambda: EmbeddingConfig(
+            model="ruri", document_prefix="検索文書: ", query_prefix="検索クエリ: "
+        ),
     )
     monkeypatch.setattr(search, "_embedding_count", lambda: 1)
-    monkeypatch.setattr(search, "_iter_all_embeddings", lambda: [("p", [1.0, 0.0], 0.0, 1.0)])
+    monkeypatch.setattr(
+        search, "_iter_all_embeddings", lambda: [("p", [1.0, 0.0], 0.0, 1.0)]
+    )
     monkeypatch.setattr(search, "_iter_all_question_embeddings", lambda: [])
     monkeypatch.setattr(index_store_mod, "get_store", lambda: FakeStore())
 
@@ -365,7 +420,9 @@ def test_semantic_search_aggregates_chunk_hits(tmp_path, monkeypatch) -> None:
     assert results[0].snippet == "late chunk text"
 
 
-def test_semantic_search_skips_chunks_for_confident_page_hits(tmp_path, monkeypatch) -> None:
+def test_semantic_search_skips_chunks_for_confident_page_hits(
+    tmp_path, monkeypatch
+) -> None:
     def fake_embed(texts, *, model=None):
         return [[1.0, 0.0] for _ in texts]
 
@@ -383,7 +440,9 @@ def test_semantic_search_skips_chunks_for_confident_page_hits(tmp_path, monkeypa
             }
 
     def fail_if_scanned():
-        raise AssertionError("chunk embeddings should not be scanned for confident page hits")
+        raise AssertionError(
+            "chunk embeddings should not be scanned for confident page hits"
+        )
 
     monkeypatch.setattr(ollama, "is_available", lambda: True)
     monkeypatch.setattr(ollama, "embed", fake_embed)
@@ -447,10 +506,14 @@ def test_usage_prior_applies_recency_decay_and_cap(tmp_path, monkeypatch) -> Non
     assert results[0].score == 1.2
 
 
-def test_active_fusion_policy_fails_closed_on_partial_or_invalid_weights(tmp_path) -> None:
+def test_active_fusion_policy_fails_closed_on_partial_or_invalid_weights(
+    tmp_path,
+) -> None:
     policy = tmp_path / "search-policy.json"
     policy.write_text(
-        json.dumps({"weights": {"semantic": 0.7, "graph": -1, "unknown": 99, "bm25": "bad"}}),
+        json.dumps(
+            {"weights": {"semantic": 0.7, "graph": -1, "unknown": 99, "bm25": "bad"}}
+        ),
         encoding="utf-8",
     )
 

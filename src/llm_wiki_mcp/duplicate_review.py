@@ -62,7 +62,11 @@ def _temporal_family(page_id: str) -> str | None:
     if not match:
         return None
     family = match.group(1)
-    return family if family in {"memory-reflection", "job-change-status", "current-state"} else None
+    return (
+        family
+        if family in {"memory-reflection", "job-change-status", "current-state"}
+        else None
+    )
 
 
 def _knowledge_metas() -> list[dict]:
@@ -150,6 +154,7 @@ def build_duplicate_review_queue(
     embedding_threshold: float = 0.92,
     include_embeddings: bool = True,
     limit: int = 200,
+    strict: bool = False,
 ) -> list[dict]:
     metas = _knowledge_metas()
     candidates = title_duplicate_candidates(metas, threshold=title_threshold)
@@ -163,11 +168,16 @@ def build_duplicate_review_queue(
                 )
             )
         except Exception:
-            pass
+            if strict:
+                raise
 
     by_pair: dict[tuple[str, str], DuplicateCandidate] = {}
     for candidate in candidates:
-        if not candidate.left or not candidate.right or candidate.left == candidate.right:
+        if (
+            not candidate.left
+            or not candidate.right
+            or candidate.left == candidate.right
+        ):
             continue
         left_family = _temporal_family(candidate.left)
         if left_family and left_family == _temporal_family(candidate.right):
@@ -189,7 +199,9 @@ def write_review_queue(records: list[dict], path: Path = REVIEW_QUEUE) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build LLM Wiki duplicate review queue.")
+    parser = argparse.ArgumentParser(
+        description="Build LLM Wiki duplicate review queue."
+    )
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--title-threshold", type=float, default=0.90)
     parser.add_argument("--embedding-threshold", type=float, default=0.92)

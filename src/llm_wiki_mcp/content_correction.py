@@ -22,13 +22,14 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from llm_wiki_mcp.claims import rebuild_claim_index
 from llm_wiki_mcp.convergence import (
     ConvergenceStore,
     CycleBudget,
     is_human_required_failure,
+    stable_item_key,
 )
 from llm_wiki_mcp.decision_authority import (
     compare_semantic_authority,
@@ -87,6 +88,7 @@ RUNTIME_DIR = WIKI_ROOT / "runtime" / "content-correction"
 PROPOSALS_DIR = RUNTIME_DIR / "proposals"
 CONTENT_FEEDBACK_FILE = WIKI_ROOT / "recall" / "content-feedback.jsonl"
 MAX_CANDIDATE_PAGES = 6
+CORRECTION_SIGNAL_SCAN_CHARS = 512
 MAX_STALE_REVISIONS = 3
 QUARANTINE_RETRY_ENV = "LLM_WIKI_CONTENT_CORRECTION_QUARANTINE_RETRY_SECONDS"
 DEFAULT_QUARANTINE_RETRY_SECONDS = 21_600
@@ -333,7 +335,8 @@ FRONTIER_CLASSIFICATION_SCHEMA: dict[str, Any] = {
 
 _EXPLICIT_CORRECTION_PATTERNS = (
     re.compile(
-        r"(?:それ|これ|その(?:話|記憶|内容)|今の|前の).{0,24}(?:違(?:う|くね|って)|近くね|間違|誤(?:り|って)|正しくない)"
+        r"(?:それ(?!に)|これ|その(?:話|記憶|内容)|今の|前の).{0,24}"
+        r"(?:違(?:う|くね|って)|近くね|間違|誤(?:り|って)|正しくない)"
     ),
     re.compile(r"(?:正しくは|訂正(?:すると)?|覚え直して|そんなこと(?:は)?言ってない)"),
     re.compile(
@@ -363,18 +366,11 @@ _EXPLICIT_CORRECTION_PATTERNS = (
 # every "AではなくBで実装して" turn from entering the semantic review lane.
 _RECALL_QUALIFIED_CORRECTION_PATTERNS = (
     re.compile(
-        r"(?:違(?:う|くね)|間違って(?:る|いる)|誤り(?:だ|です)|誤情報|事実と違う)"
+        r"(?:\A|[。！？!?]\s*)"
+        r"(?:違(?:う|くね)|間違って(?:る|いる)|誤り(?:だ|です)|誤情報だ)"
+        r"(?:よ|ね|です|だ)?(?:[、,。！？!?\s]|\Z)"
     ),
-    re.compile(
-        r"(?:\A|## My request for (?:Codex|Claude):\s*)"
-        r"(?:いや|いえ)"
-        r"(?:[、,\s]+(?!(?:でも|まあ|一応|やっぱ(?:り)?|ただ|まず|"
-        r"待(?:った|って)?|とりあえず))|"
-        r"(?=(?:それ|そう|違|正しく|実際)))"
-        r"(?:それ|そう|違|正しく|実際|[A-Za-z0-9\u3040-\u30ff\u3400-\u9fff])",
-        re.IGNORECASE,
-    ),
-    re.compile(r".{1,80}(?:じゃなく(?:て)?|ではなく(?:て)?).{1,120}"),
+    re.compile(r"\A.{1,120}(?:じゃなく(?:て)?|ではなく(?:て)?).{1,160}\Z"),
     re.compile(r"(?:そうじゃない|そうではない|そこじゃない|そこではない)"),
     re.compile(r"\bno[,;:\s]+.{1,80}\b(?:not|but|actually|instead)\b", re.IGNORECASE),
     re.compile(r"\bnot\s+.{1,80}\bbut\s+", re.IGNORECASE),
@@ -384,6 +380,38 @@ _RECALL_QUALIFIED_CORRECTION_PATTERNS = (
         r".{0,20}(?:削除して|消して|撤回して|取り消して|忘れて|->|=>|→|forget|retract|remove)",
         re.IGNORECASE,
     ),
+)
+_BARE_DENIAL_RE = re.compile(
+    r"\A(?:いや|いえ)(?:[、,\s]+)(?P<body>.+)\Z",
+    re.IGNORECASE,
+)
+_BARE_DENIAL_DISCOURSE_RE = re.compile(
+    r"\A(?:なんか|なんとなく|(?:"
+    r"でも|まあ|一応|やっぱ(?:り)?|ただ|まず|"
+    r"待(?:った|って)?|とりあえず|別に|むしろ|もし|仮に|"
+    r"それで(?:いい|よい|大丈夫|合ってる|問題ない)|"
+    r"そうで(?:いい|よい|大丈夫|合ってる|問題ない)"
+    r")(?:[、,。！？!?\s]|\Z))",
+    re.IGNORECASE,
+)
+_CURRENT_REQUEST_MARKER_RE = re.compile(
+    r"(?:\A|\n|\\n)## My request for (?:Codex|Claude):"
+    r"(?:[ \t]*(?:\n|\\n))?",
+    re.IGNORECASE,
+)
+_PASTED_SPEAKER_LINE_RE = re.compile(
+    r"^\s*(?:>|[-*]\s*)?(?:user|assistant|human|claude|codex|"
+    r"ユーザー|アシスタント|人間)\s*[:：]",
+    re.IGNORECASE,
+)
+_REPORTED_SUFFIX_RE = re.compile(
+    r"\A[」』\"'`、,\s]*(?:(?:と|って)(?:言|書|返|指摘|聞|思)|"
+    r"という(?:発言|文言|語|言葉|表現))"
+)
+_REPORTED_PREFIX_RE = re.compile(
+    r"(?:発言|文言|語|言葉|表現|会話|ユーザー|user|assistant|曰く)"
+    r"[^。！？!?\n]{0,24}\Z",
+    re.IGNORECASE,
 )
 _REMEMBER_INSTEAD_RE = re.compile(r"\bremember this instead\b", re.IGNORECASE)
 _DIFFERENCE_QUESTION_RE = re.compile(
@@ -433,6 +461,62 @@ def is_non_user_transport_envelope(prompt: str) -> bool:
     return bool(_CLAUDE_TEAMMATE_TRANSPORT_RE.fullmatch(prompt))
 
 
+def _current_user_request(prompt: str) -> str:
+    """Remove deterministic transport and pasted-transcript evidence.
+
+    A Stop hook sees the complete user message, including ambient UI state and
+    pasted conversations.  Correction words inside those quoted records are
+    evidence *about* a conversation, not a new correction instruction.  When
+    the host supplies an explicit request marker, only its final request body
+    is authoritative.  Otherwise, fenced blocks and speaker-labelled quote
+    lines are ignored while ordinary prose remains available.
+    """
+
+    matches = list(_CURRENT_REQUEST_MARKER_RE.finditer(prompt))
+    if matches:
+        prompt = prompt[matches[-1].end() :]
+        # Some host envelopes serialize newlines as the literal two-byte
+        # sequence ``\\n``. Decode only the request body selected by the known
+        # marker; globally decoding arbitrary user text would alter evidence.
+        prompt = prompt.replace("\\r\\n", "\n").replace("\\n", "\n")
+    prompt = re.sub(r"```.*?(?:```|\Z)", " ", prompt, flags=re.DOTALL)
+    kept: list[str] = []
+    for line in prompt.splitlines():
+        stripped = line.strip()
+        if not stripped or _PASTED_SPEAKER_LINE_RE.match(line):
+            continue
+        if stripped.startswith(">"):
+            continue
+        kept.append(line)
+    normalized = re.sub(r"\s+", " ", "\n".join(kept)).strip()
+    return normalized[:CORRECTION_SIGNAL_SCAN_CHARS]
+
+
+def _reported_or_quoted_match(text: str, match: re.Match[str]) -> bool:
+    """Return True when a lexical cue is merely being reported or discussed."""
+
+    return bool(
+        re.search(r"一味\s*違", match.group(0))
+        or _REPORTED_SUFFIX_RE.search(text[match.end() : match.end() + 40])
+        or _REPORTED_PREFIX_RE.search(text[max(0, match.start() - 48) : match.start()])
+    )
+
+
+def _bare_denial_match(text: str) -> re.Match[str] | None:
+    match = _BARE_DENIAL_RE.fullmatch(text)
+    if match is None:
+        return None
+    body = str(match.group("body") or "").strip()
+    if (
+        not body
+        or len(body) > 240
+        or _BARE_DENIAL_DISCOURSE_RE.match(body)
+        or re.search(r"(?:って|と)(?:思った|思って|感じた|言われ)", body)
+    ):
+        return None
+    return match
+
+
 def correction_signal(
     prompt: str,
     *,
@@ -447,7 +531,7 @@ def correction_signal(
 
     if is_non_user_transport_envelope(prompt):
         return None
-    text = re.sub(r"\s+", " ", prompt).strip()
+    text = _current_user_request(prompt)
     if not text:
         return None
     # Comparison questions contain the same surface word as negative
@@ -456,7 +540,7 @@ def correction_signal(
         return None
     for pattern in _EXPLICIT_CORRECTION_PATTERNS:
         match = pattern.search(text)
-        if match:
+        if match and not _reported_or_quoted_match(text, match):
             return {
                 "matched": match.group(0),
                 "confidence": "explicit_candidate",
@@ -470,9 +554,16 @@ def correction_signal(
             "provenance_required": False,
         }
     if recall_provenance:
+        denial = _bare_denial_match(text)
+        if denial is not None:
+            return {
+                "matched": denial.group(0),
+                "confidence": "recall_candidate",
+                "provenance_required": True,
+            }
         for pattern in _RECALL_QUALIFIED_CORRECTION_PATTERNS:
             match = pattern.search(text)
-            if match:
+            if match and not _reported_or_quoted_match(text, match):
                 return {
                     "matched": match.group(0),
                     "confidence": "recall_candidate",
@@ -731,10 +822,84 @@ def build_correction_event(
     }
 
 
+def _correction_event_actionability(
+    event: Mapping[str, Any],
+) -> tuple[bool | None, str]:
+    """Re-evaluate one captured event under the current admission policy."""
+
+    prompt_value = event.get("correction_prompt")
+    if not isinstance(prompt_value, str):
+        return None, "correction_metadata_indeterminate"
+    prompt = prompt_value
+    explicit = correction_signal(prompt)
+    if explicit is not None:
+        return True, "explicit_correction_signal"
+    qualified = correction_signal(prompt, recall_provenance=True)
+    if qualified is None:
+        return False, "correction_signal_no_longer_actionable"
+
+    candidate_values = event.get("candidate_pages")
+    if not isinstance(candidate_values, list):
+        return None, "correction_metadata_indeterminate"
+    candidate_pages = {
+        value for value in candidate_values if isinstance(value, str) and value
+    }
+    if not candidate_pages:
+        return False, "correction_recall_provenance_missing"
+    attribution_value = event.get("attribution")
+    if not isinstance(attribution_value, str):
+        return None, "correction_metadata_indeterminate"
+    attribution = attribution_value.casefold()
+    if attribution in {"high", "medium"}:
+        return True, "attributed_recall_correction"
+
+    # A unique page actually read/pulled for the source turn is equivalent to
+    # medium attribution even when several search-injected candidates make the
+    # aggregate event label ``ambiguous``.  A six-page injected search result
+    # with no actual pull is deliberately insufficient.
+    pulled_values = event.get("pulled_pages", [])
+    if not isinstance(pulled_values, list):
+        return None, "correction_metadata_indeterminate"
+    pulled_pages = {
+        value
+        for value in pulled_values
+        if isinstance(value, str) and value in candidate_pages
+    }
+    if len(pulled_pages) == 1:
+        return True, "single_actual_pull_correction"
+    return False, "correction_recall_attribution_ambiguous"
+
+
+def correction_event_is_actionable(event: Mapping[str, Any]) -> bool:
+    """Public read-only predicate for capture and inventory convergence."""
+
+    actionable, _reason = _correction_event_actionability(event)
+    return actionable is True
+
+
+def correction_item_actionability(
+    item: Mapping[str, Any],
+) -> tuple[bool | None, str]:
+    """Return current/stale/indeterminate state for inventory migration."""
+
+    metadata = item.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None, "correction_metadata_indeterminate"
+    return _correction_event_actionability(metadata)
+
+
+def correction_item_is_actionable(item: Mapping[str, Any]) -> bool:
+    """Return whether an existing convergence item is current under policy."""
+
+    actionable, _reason = correction_item_actionability(item)
+    return actionable is True
+
+
 def enqueue_event(
     event: dict[str, Any],
     *,
     store: ConvergenceStore | None = None,
+    eligible_keys: set[str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     state = store or ConvergenceStore()
@@ -769,6 +934,16 @@ def enqueue_event(
                 existing.get("source_id") == source_id
                 and int(metadata.get("revision") or 0) == 0
             ):
+                existing_key = str(existing.get("key") or "")
+                if eligible_keys is not None and existing_key not in eligible_keys:
+                    return {
+                        "created": False,
+                        "changed": False,
+                        "dry_run": dry_run,
+                        "item": None,
+                        "retired": [],
+                        "blocked_by_allowlist": [existing_key],
+                    }
                 return {
                     "created": False,
                     "changed": False,
@@ -791,6 +966,21 @@ def enqueue_event(
                 "candidate_page_hashes": event.get("candidate_page_hashes", {}),
             }
         )
+    candidate_key = stable_item_key(
+        LANE,
+        source_id,
+        input_data,
+        resolver_version=RESOLVER_VERSION,
+    )
+    if eligible_keys is not None and candidate_key not in eligible_keys:
+        return {
+            "created": False,
+            "changed": False,
+            "dry_run": dry_run,
+            "item": None,
+            "retired": [],
+            "blocked_by_allowlist": [candidate_key],
+        }
     return state.merge_item(
         lane=LANE,
         source_id=source_id,
@@ -798,6 +988,7 @@ def enqueue_event(
         resolver_version=RESOLVER_VERSION,
         metadata=event,
         update_metadata=False,
+        supersede_eligible_keys=eligible_keys,
         dry_run=dry_run,
     )
 
@@ -911,7 +1102,7 @@ def capture_session_corrections(
             signal=signal,
             source_record=source_record,
         )
-        if requires_recall_provenance and not event["candidate_pages"]:
+        if not correction_event_is_actionable(event):
             continue
         merged.append(enqueue_event(event, store=store, dry_run=dry_run))
     latest_line = max((turn.assistant_line for turn in all_turns), default=cursor_line)
@@ -1273,6 +1464,7 @@ def _is_legacy_unfiltered_item(item: dict[str, Any]) -> bool:
 def _retire_legacy_unfiltered_corrections(
     store: ConvergenceStore,
     *,
+    eligible_keys: set[str] | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
     migratable_statuses = {
@@ -1281,12 +1473,13 @@ def _retire_legacy_unfiltered_corrections(
         "pending_frontier",
         "frontier_retry",
         "quarantined",
-        "human_required",
     }
     keys = [
         str(item.get("key") or "")
         for item in store.list_items(lane=LANE, statuses=migratable_statuses)
-        if _is_legacy_unfiltered_item(item) and str(item.get("key") or "")
+        if str(item.get("key") or "")
+        and (eligible_keys is None or str(item.get("key") or "") in eligible_keys)
+        and _is_legacy_unfiltered_item(item)
     ]
     if not keys:
         return {
@@ -1305,7 +1498,63 @@ def _retire_legacy_unfiltered_corrections(
             "reason": "legacy unfiltered Stop capture had no explicit correction signal",
             "migration": "retire_unfiltered_completed_turn_v1",
         },
-        replace_terminal_statuses={"quarantined", "human_required"},
+        # Authentication, keychain, billing, and other external-authority
+        # boundaries remain human-owned even when an old lexical admission
+        # policy would now classify the underlying turn as noise.
+        replace_terminal_statuses={"quarantined"},
+        dry_run=dry_run,
+    )
+
+
+def retire_non_actionable_corrections(
+    *,
+    store: ConvergenceStore | None = None,
+    eligible_keys: set[str] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Terminalize stale false positives without invoking either model lane.
+
+    The helper is intentionally deterministic and allowlist-aware so a durable
+    targeted drain can apply exactly the same predicate used by live capture.
+    Legacy unfiltered items retain their older, separately audited migration.
+    """
+
+    state = store or ConvergenceStore()
+    migratable_statuses = {
+        "pending_local",
+        "local_retry",
+        "pending_frontier",
+        "frontier_retry",
+        "quarantined",
+    }
+    keys: list[str] = []
+    for item in state.list_items(lane=LANE, statuses=migratable_statuses):
+        key = str(item.get("key") or "")
+        if not key or (eligible_keys is not None and key not in eligible_keys):
+            continue
+        if _is_legacy_unfiltered_item(item):
+            continue
+        actionable, _reason = correction_item_actionability(item)
+        if actionable is False:
+            keys.append(key)
+    if not keys:
+        return {
+            "status": "ok",
+            "dry_run": dry_run,
+            "requested": 0,
+            "completed": 0,
+            "skipped": 0,
+            "skipped_reasons": {},
+        }
+    return state.complete_many(
+        keys,
+        "rejected",
+        result={
+            "decision": "none",
+            "reason": "correction_signal_no_longer_actionable",
+            "migration": "retire_non_actionable_correction_v1",
+        },
+        replace_terminal_statuses={"quarantined"},
         dry_run=dry_run,
     )
 
@@ -2595,6 +2844,7 @@ def _requeue_changed_event(
     store: ConvergenceStore,
     owner: str | None,
     error: str,
+    eligible_keys: set[str] | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
     refreshed_event = dict(event)
@@ -2616,7 +2866,12 @@ def _requeue_changed_event(
     refreshed_event["candidate_page_hashes"] = _current_candidate_page_hashes(
         refreshed_event.get("candidate_pages", [])
     )
-    merged = enqueue_event(refreshed_event, store=store, dry_run=dry_run)
+    merged = enqueue_event(
+        refreshed_event,
+        store=store,
+        eligible_keys=eligible_keys,
+        dry_run=dry_run,
+    )
     replacement = merged.get("item") if isinstance(merged, dict) else None
     replacement_key = (
         str(replacement.get("key") or "") if isinstance(replacement, dict) else ""
@@ -2651,6 +2906,7 @@ def _requeue_rejected_patch(
     review: dict[str, Any],
     review_authority: dict[str, Any],
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    eligible_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     """Create a bounded child revision after the frontier rejects only a patch."""
 
@@ -2708,7 +2964,12 @@ def _requeue_rejected_patch(
                     failure_class="review_artifact_invalid",
                     dry_run=dry_run,
                 )
-            merged = enqueue_event(refreshed_event, store=store, dry_run=dry_run)
+            merged = enqueue_event(
+                refreshed_event,
+                store=store,
+                eligible_keys=eligible_keys,
+                dry_run=dry_run,
+            )
             replacement = merged.get("item") if isinstance(merged, dict) else None
             replacement_key = (
                 str(replacement.get("key") or "")
@@ -3582,6 +3843,7 @@ def _process_frontier_item(
     store: ConvergenceStore,
     budget: CycleBudget | None,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    eligible_keys: set[str] | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
     key = str(item["key"])
@@ -3696,6 +3958,7 @@ def _process_frontier_item(
                 store=store,
                 owner=owner,
                 error=triage_artifact_error,
+                eligible_keys=eligible_keys,
                 dry_run=dry_run,
             )
         return _fail_claimed_frontier(
@@ -3913,6 +4176,7 @@ def _process_frontier_item(
             store=store,
             owner=owner,
             error=f"mutation preparation failed: {triage_preparation_error}",
+            eligible_keys=eligible_keys,
             dry_run=dry_run,
         )
     if decision != reviewed_classification or not triage_mutations:
@@ -3971,6 +4235,7 @@ def _process_frontier_item(
             store=store,
             owner=owner,
             error=f"mutation preparation failed: {exc}",
+            eligible_keys=eligible_keys,
             dry_run=dry_run,
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -4188,6 +4453,7 @@ def _process_frontier_item(
             review=review,
             review_authority=review_authority,
             reviewer=reviewer,
+            eligible_keys=eligible_keys,
         )
         result["frontier"] = review
         return result
@@ -4284,6 +4550,7 @@ def _process_frontier_item(
                 store=store,
                 owner=owner,
                 error=str(apply_result.get("reason") or apply_result.get("status")),
+                eligible_keys=eligible_keys,
                 dry_run=dry_run,
             )
             result["apply"] = apply_result
@@ -4374,20 +4641,40 @@ def run_pending_corrections(
     budget: CycleBudget | None = None,
     generate_fn: Callable[..., str] | None = None,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    eligible_keys: set[str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     state = store or ConvergenceStore()
-    retracted_unfiltered_feedback = _retract_legacy_unfiltered_page_ignored_feedback(
-        state,
-        dry_run=dry_run,
-    )
+    if eligible_keys is None:
+        retracted_unfiltered_feedback = (
+            _retract_legacy_unfiltered_page_ignored_feedback(
+                state,
+                dry_run=dry_run,
+            )
+        )
+    else:
+        # Targeted convergence must never reopen or retract a key outside the
+        # durable run manifest. Deterministic retirement remains safe because
+        # both migrations below are restricted to ``eligible_keys``.
+        skipped = {"status": "skipped", "reason": "targeted_allowlist"}
+        retracted_unfiltered_feedback = dict(skipped)
     retired_unfiltered = _retire_legacy_unfiltered_corrections(
         state,
+        eligible_keys=eligible_keys,
         dry_run=dry_run,
     )
-    resumed_quarantined = _resume_due_quarantined_corrections(
-        state,
+    retired_non_actionable = retire_non_actionable_corrections(
+        store=state,
+        eligible_keys=eligible_keys,
         dry_run=dry_run,
+    )
+    resumed_quarantined = (
+        _resume_due_quarantined_corrections(
+            state,
+            dry_run=dry_run,
+        )
+        if eligible_keys is None
+        else dict(skipped)
     )
     pending = [
         item
@@ -4400,7 +4687,9 @@ def run_pending_corrections(
                 "frontier_retry",
             },
         )
-        if not _is_legacy_unfiltered_item(item)
+        if (eligible_keys is None or str(item.get("key") or "") in eligible_keys)
+        and not _is_legacy_unfiltered_item(item)
+        and correction_item_is_actionable(item)
     ]
     results: list[dict[str, Any]] = []
     work_items = 0
@@ -4447,6 +4736,7 @@ def run_pending_corrections(
                         store=state,
                         budget=budget,
                         reviewer=reviewer,
+                        eligible_keys=eligible_keys,
                         dry_run=False,
                     )
                 )
@@ -4456,6 +4746,7 @@ def run_pending_corrections(
                 store=state,
                 budget=budget,
                 reviewer=reviewer,
+                eligible_keys=eligible_keys,
                 dry_run=dry_run,
             )
             results.append(result)
@@ -4469,6 +4760,7 @@ def run_pending_corrections(
         "results": results,
         "retracted_unfiltered_feedback": retracted_unfiltered_feedback,
         "retired_unfiltered": retired_unfiltered,
+        "retired_non_actionable": retired_non_actionable,
         "resumed_quarantined": resumed_quarantined,
         "dry_run": dry_run,
         "budget": budget.snapshot() if budget is not None else None,

@@ -767,7 +767,12 @@ def _apply_prepared_effect(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _recover_pending_effects(state: Any, *, dry_run: bool) -> list[dict[str, Any]]:
+def _recover_pending_effects(
+    state: Any,
+    *,
+    eligible_keys: set[str] | None = None,
+    dry_run: bool,
+) -> list[dict[str, Any]]:
     """Finalize only a byte-exact postimage left by a crashed worker.
 
     Recovery intentionally does not re-run the semantic effect.  A pending
@@ -784,6 +789,8 @@ def _recover_pending_effects(state: Any, *, dry_run: bool) -> list[dict[str, Any
         }:
             continue
         key = str(item.get("key") or "")
+        if eligible_keys is not None and key not in eligible_keys:
+            continue
         payload, artifact_error = _load_effect_artifact(
             item.get("metadata"),
             expected_key=key,
@@ -1031,6 +1038,7 @@ def run_autonomous(
     convergence_store=None,
     budget=None,
     frontier_confidence_threshold: float | None = None,
+    eligible_keys: set[str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Boundedly drain orphan proposals through local + frontier review."""
@@ -1042,7 +1050,11 @@ def run_autonomous(
     )
 
     state = convergence_store or ConvergenceStore()
-    recovered = _recover_pending_effects(state, dry_run=dry_run)
+    recovered = _recover_pending_effects(
+        state,
+        eligible_keys=eligible_keys,
+        dry_run=dry_run,
+    )
     recovered_keys = {str(row.get("key") or "") for row in recovered}
     if store is None:
         from llm_wiki_mcp.index_store import get_store
@@ -1055,17 +1067,33 @@ def run_autonomous(
         max_mutations=2,
     )
     orphans = store.orphans(include_system=False)
-    retired_absent = state.retire_absent_sources(
-        lane="orphan_link",
-        active_source_ids={f"orphan:{page_id}" for page_id in orphans},
-        reason="page_is_no_longer_orphaned",
-        dry_run=dry_run,
-    )
-    retired_stale = state.retire_stale(
-        lane="orphan_link",
-        reason="orphan_candidate_expired",
-        dry_run=dry_run,
-    )
+    if eligible_keys is not None:
+        eligible_sources = {
+            str(item.get("source_id") or "").removeprefix("orphan:")
+            for key in eligible_keys
+            if (item := state.get(key)) is not None
+            and item.get("lane") == DECISION_LANE
+        }
+        orphans = [page_id for page_id in orphans if page_id in eligible_sources]
+    if eligible_keys is None:
+        retired_absent = state.retire_absent_sources(
+            lane="orphan_link",
+            active_source_ids={f"orphan:{page_id}" for page_id in orphans},
+            reason="page_is_no_longer_orphaned",
+            dry_run=dry_run,
+        )
+        retired_stale = state.retire_stale(
+            lane="orphan_link",
+            reason="orphan_candidate_expired",
+            dry_run=dry_run,
+        )
+    else:
+        retired_absent = {
+            "status": "skipped",
+            "reason": "targeted_allowlist",
+            "retired": [],
+        }
+        retired_stale = dict(retired_absent)
     work_limit = max(0, int(orphan_limit))
     # Deprecated compatibility input. Consensus confidence is diagnostic only.
     del frontier_confidence_threshold
@@ -1125,6 +1153,16 @@ def run_autonomous(
             input_data,
             resolver_version=RESOLVER_VERSION,
         )
+        if eligible_keys is not None and key not in eligible_keys:
+            results.append(
+                {
+                    "orphan": orphan_id,
+                    "source": source_id,
+                    "status": "out_of_scope",
+                    "key": key,
+                }
+            )
+            continue
         existing = state.get(key)
         if existing is not None and existing.get("status") in TERMINAL_STATUSES:
             if key in recovered_keys:
@@ -1157,8 +1195,22 @@ def run_autonomous(
                     "candidate_discovery_error": discovery_error,
                 },
                 dry_run=dry_run,
+                supersede_eligible_keys=eligible_keys,
             )
             item = merged["item"]
+            if item is None:
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "source": source_id,
+                        "status": "out_of_scope_source_changed",
+                        "key": key,
+                        "blocked_by_out_of_scope": merged.get(
+                            "blocked_by_out_of_scope", []
+                        ),
+                    }
+                )
+                continue
         else:
             # In particular, retain the locally-approved suggestion while a
             # frontier retry/backoff is pending.  Re-merging observational
@@ -1207,7 +1259,7 @@ def run_autonomous(
                     "candidate_discovery_error" if discovery_error else None
                 ),
             }
-            state.merge_item(
+            proposal_merge = state.merge_item(
                 lane="orphan_link",
                 source_id=f"orphan:{orphan_id}",
                 input_data=input_data,
@@ -1218,7 +1270,20 @@ def run_autonomous(
                     "candidate_discovery_error": discovery_error,
                     "frontier_proposal": frontier_proposal,
                 },
+                supersede_eligible_keys=eligible_keys,
             )
+            if proposal_merge["item"] is None:
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "status": "out_of_scope_source_changed",
+                        "key": key,
+                        "blocked_by_out_of_scope": proposal_merge.get(
+                            "blocked_by_out_of_scope", []
+                        ),
+                    }
+                )
+                continue
             state.escalate(
                 key,
                 reason="deterministic orphan disposition requires frontier final review",
@@ -1296,7 +1361,7 @@ def run_autonomous(
                     "kind": "link",
                     "suggestion": suggestion_payload,
                 }
-            state.merge_item(
+            proposal_merge = state.merge_item(
                 lane="orphan_link",
                 source_id=f"orphan:{orphan_id}",
                 input_data=input_data,
@@ -1308,7 +1373,20 @@ def run_autonomous(
                     "suggestion": suggestion_payload,
                     "frontier_proposal": frontier_proposal,
                 },
+                supersede_eligible_keys=eligible_keys,
             )
+            if proposal_merge["item"] is None:
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "status": "out_of_scope_source_changed",
+                        "key": key,
+                        "blocked_by_out_of_scope": proposal_merge.get(
+                            "blocked_by_out_of_scope", []
+                        ),
+                    }
+                )
+                continue
             state.escalate(
                 key,
                 reason="local suggestion requires frontier final review",
@@ -1616,13 +1694,26 @@ def run_autonomous(
                 "effect_artifact_sha256": artifact_hash,
                 "effect_proposal_fingerprint": proposal_fingerprint,
             }
-            state.merge_item(
+            effect_merge = state.merge_item(
                 lane=DECISION_LANE,
                 source_id=f"orphan:{orphan_id}",
                 input_data=input_data,
                 resolver_version=RESOLVER_VERSION,
                 metadata=durable_metadata,
+                supersede_eligible_keys=eligible_keys,
             )
+            if effect_merge["item"] is None:
+                results.append(
+                    {
+                        "orphan": orphan_id,
+                        "status": "out_of_scope_source_changed",
+                        "key": key,
+                        "blocked_by_out_of_scope": effect_merge.get(
+                            "blocked_by_out_of_scope", []
+                        ),
+                    }
+                )
+                continue
             persisted = state.get(key) or {}
             effect_payload, artifact_error = _load_effect_artifact(
                 persisted.get("metadata"),

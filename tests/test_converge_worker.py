@@ -77,3 +77,35 @@ def test_converge_full_sleep_requires_explicit_opt_in(monkeypatch) -> None:
             "dry_run": False,
         }
     ]
+
+
+def test_converge_can_disable_system_repair_enqueue(monkeypatch) -> None:
+    monkeypatch.setattr(
+        background_jobs,
+        "retry_due",
+        lambda *, limit: {"status": "ok", "limit": limit},
+    )
+    monkeypatch.setattr(
+        session_sweeper,
+        "run_sweeper",
+        lambda *, limit: {"status": "ok", "limit": limit},
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "enqueue_due_system_repairs",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("system repair enqueue must be disabled")
+        ),
+    )
+
+    result = converge_worker.run_converge(
+        session_limit=0,
+        job_limit=8,
+        run_system_repairs=False,
+    )
+
+    assert result["status"] == "ok"
+    assert result["system_repairs"] == {
+        "status": "skipped",
+        "reason": "disabled_by_cli",
+    }

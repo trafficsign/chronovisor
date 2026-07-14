@@ -47,7 +47,9 @@ BudgetKind = Literal["local", "frontier", "mutation", "raw_bytes"]
 
 TERMINAL_STATUSES = frozenset({"applied", "rejected", "quarantined", "human_required"})
 LOCAL_STATUSES = frozenset({"pending_local", "local_retry", "local_running"})
-FRONTIER_STATUSES = frozenset({"pending_frontier", "frontier_retry", "frontier_running"})
+FRONTIER_STATUSES = frozenset(
+    {"pending_frontier", "frontier_retry", "frontier_running"}
+)
 
 # This allowlist is intentionally narrow.  A model saying "ask a human" is
 # not enough to enter human_required; the failure must be an external access
@@ -278,7 +280,8 @@ class CycleBudgetSlice:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             limits = {
-                kind: int(getattr(self, attr)) for kind, attr in self._LIMIT_ATTRS.items()
+                kind: int(getattr(self, attr))
+                for kind, attr in self._LIMIT_ATTRS.items()
             }
             return {
                 "elapsed_seconds": round(self.elapsed_seconds, 3),
@@ -431,7 +434,9 @@ def _parse_iso(value: object) -> datetime | None:
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -474,9 +479,13 @@ class ConvergenceStore:
         try:
             payload = json.loads(self.state_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise ConvergenceStateError(f"cannot read convergence state: {exc}") from exc
+            raise ConvergenceStateError(
+                f"cannot read convergence state: {exc}"
+            ) from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("items"), dict):
-            raise ConvergenceStateError("convergence state must contain an items object")
+            raise ConvergenceStateError(
+                "convergence state must contain an items object"
+            )
         if payload.get("schema_version") != SCHEMA_VERSION:
             raise ConvergenceStateError(
                 f"unsupported convergence schema: {payload.get('schema_version')!r}"
@@ -565,7 +574,9 @@ class ConvergenceStore:
             if allowed is not None and item.get("status") not in allowed:
                 continue
             items.append(copy.deepcopy(item))
-        return sorted(items, key=lambda item: (str(item.get("lane")), str(item.get("key"))))
+        return sorted(
+            items, key=lambda item: (str(item.get("lane")), str(item.get("key")))
+        )
 
     def merge_item(
         self,
@@ -576,6 +587,9 @@ class ConvergenceStore:
         resolver_version: str | int = "1",
         metadata: Mapping[str, Any] | None = None,
         update_metadata: bool = True,
+        supersede_eligible_keys: Iterable[str] | None = None,
+        source_history_eligible_keys: Iterable[str] | None = None,
+        source_history_required_keys: Iterable[str] | None = None,
         now: datetime | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
@@ -586,7 +600,13 @@ class ConvergenceStore:
         evidence bundle is immutable after first capture. Attempts and valid
         terminal states are never reset; legacy ``human_required`` items whose
         failure class is outside the external-authority allowlist are reopened
-        or quarantined without resetting attempt counts.
+        or quarantined without resetting attempt counts.  When
+        ``supersede_eligible_keys`` is supplied, creation fails closed instead
+        of retiring an active same-source key outside that allowlist.  The
+        stricter ``source_history_eligible_keys`` also rejects terminal
+        same-source keys outside its snapshot and performs that check under
+        the same lock as creation. ``source_history_required_keys`` makes
+        deletion or reassignment of a snapshotted key fail closed as well.
         """
 
         current_time = _utc_now(now)
@@ -598,24 +618,70 @@ class ConvergenceStore:
         )
         fingerprint = input_fingerprint(input_data)
         normalized_metadata = _canonicalize(dict(metadata or {}))
+        eligible_superseded = (
+            {str(value) for value in supersede_eligible_keys}
+            if supersede_eligible_keys is not None
+            else None
+        )
+        eligible_source_history = (
+            {str(value) for value in source_history_eligible_keys}
+            if source_history_eligible_keys is not None
+            else None
+        )
+        required_source_history = (
+            {str(value) for value in source_history_required_keys}
+            if source_history_required_keys is not None
+            else None
+        )
 
         def merge(
             state: dict[str, Any],
         ) -> tuple[
-            dict[str, Any],
+            dict[str, Any] | None,
             bool,
             bool,
             bool,
             list[tuple[str, str | None, dict[str, Any]]],
+            list[str],
         ]:
             items = state["items"]
+            observed_source_history = {
+                str(previous_key)
+                for previous_key, previous in items.items()
+                if isinstance(previous, dict)
+                and previous.get("lane") == lane.strip()
+                and previous.get("source_id") == source_id.strip()
+            }
+            missing_history = sorted(
+                (required_source_history or set()) - observed_source_history
+            )
+            blocked = [
+                str(previous_key)
+                for previous_key, previous in items.items()
+                if isinstance(previous, dict)
+                and previous.get("lane") == lane.strip()
+                and previous.get("source_id") == source_id.strip()
+                and (
+                    (
+                        eligible_source_history is not None
+                        and str(previous_key) not in eligible_source_history
+                    )
+                    or (
+                        previous.get("status") not in TERMINAL_STATUSES
+                        and eligible_superseded is not None
+                        and str(previous_key) not in eligible_superseded
+                    )
+                )
+            ]
+            blocked.extend(f"missing:{key}" for key in missing_history)
+            if blocked:
+                return None, False, False, False, [], sorted(set(blocked))
             existing = items.get(key)
             if isinstance(existing, dict):
-                reclassified = (
-                    existing.get("status") == "human_required"
-                    and not is_human_required_failure(
-                        str(existing.get("last_failure_class") or "")
-                    )
+                reclassified = existing.get(
+                    "status"
+                ) == "human_required" and not is_human_required_failure(
+                    str(existing.get("last_failure_class") or "")
                 )
                 if reclassified:
                     attempts = int(existing.get("frontier_attempts") or 0)
@@ -633,12 +699,25 @@ class ConvergenceStore:
                         ),
                         "updated_at": _iso(current_time),
                     }
-                changed = update_metadata and existing.get("metadata") != normalized_metadata
+                changed = (
+                    update_metadata and existing.get("metadata") != normalized_metadata
+                )
                 if changed:
-                    existing = {**existing, "metadata": normalized_metadata, "updated_at": _iso(current_time)}
+                    existing = {
+                        **existing,
+                        "metadata": normalized_metadata,
+                        "updated_at": _iso(current_time),
+                    }
                 if changed or reclassified:
                     items[key] = existing
-                return existing, False, changed or reclassified, reclassified, []
+                return (
+                    existing,
+                    False,
+                    changed or reclassified,
+                    reclassified,
+                    [],
+                    [],
+                )
             retired: list[tuple[str, str | None, dict[str, Any]]] = []
             for previous_key, previous in list(items.items()):
                 if (
@@ -689,11 +768,11 @@ class ConvergenceStore:
                 "updated_at": _iso(current_time),
             }
             items[key] = item
-            return item, True, True, False, retired
+            return item, True, True, False, retired, []
 
         if dry_run:
             state = self._load_unlocked()
-            item, created, changed, reclassified, retired = merge(state)
+            item, created, changed, reclassified, retired, blocked = merge(state)
             return {
                 "created": created,
                 "changed": changed,
@@ -701,11 +780,12 @@ class ConvergenceStore:
                 "dry_run": True,
                 "item": copy.deepcopy(item),
                 "retired": [entry[0] for entry in retired],
+                "blocked_by_out_of_scope": blocked,
             }
 
         with self._exclusive_lock():
             state = self._load_unlocked()
-            item, created, changed, reclassified, retired = merge(state)
+            item, created, changed, reclassified, retired, blocked = merge(state)
             if changed:
                 self._save_unlocked(state)
                 for retired_key, previous_status, retired_item in retired:
@@ -731,7 +811,11 @@ class ConvergenceStore:
                         ),
                         now=current_time,
                         previous_status=(
-                            None if created else "human_required" if reclassified else str(item.get("status"))
+                            None
+                            if created
+                            else "human_required"
+                            if reclassified
+                            else str(item.get("status"))
                         ),
                         item=item,
                     )
@@ -743,6 +827,143 @@ class ConvergenceStore:
                 "dry_run": False,
                 "item": copy.deepcopy(item),
                 "retired": [entry[0] for entry in retired],
+                "blocked_by_out_of_scope": blocked,
+            }
+
+    def merge_items_atomically(
+        self,
+        candidates: Iterable[Mapping[str, Any]],
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Validate and merge distinct source snapshots in one transaction.
+
+        Every candidate is projected against one in-memory state while the
+        store lock is held. If any source-history guard blocks, the projection
+        is discarded, so no earlier candidate or audit event can leak through.
+        Successful batches use one atomic state replacement and one event
+        append batch.
+        """
+
+        rows = [dict(candidate) for candidate in candidates]
+        seen_sources: set[tuple[str, str]] = set()
+        for candidate in rows:
+            marker = (
+                str(candidate.get("lane") or "").strip(),
+                str(candidate.get("source_id") or "").strip(),
+            )
+            if not all(marker) or marker in seen_sources:
+                raise ValueError(
+                    "atomic merge candidates require distinct non-empty lane/source"
+                )
+            seen_sources.add(marker)
+
+        current_time = _utc_now(now)
+        with self._exclusive_lock():
+            state = self._load_unlocked()
+            original_state = copy.deepcopy(state)
+            projection_store = copy.copy(self)
+            projection_store._load_unlocked = lambda: state  # type: ignore[method-assign]
+            projected_results: list[dict[str, Any]] = []
+            blocked_by_key: dict[str, list[str]] = {}
+            for candidate in rows:
+                key = stable_item_key(
+                    str(candidate["lane"]),
+                    str(candidate["source_id"]),
+                    candidate.get("input_data"),
+                    resolver_version=candidate.get("resolver_version", "1"),
+                )
+                result = projection_store.merge_item(
+                    lane=str(candidate["lane"]),
+                    source_id=str(candidate["source_id"]),
+                    input_data=candidate.get("input_data"),
+                    resolver_version=candidate.get("resolver_version", "1"),
+                    metadata=(
+                        candidate.get("metadata")
+                        if isinstance(candidate.get("metadata"), Mapping)
+                        else None
+                    ),
+                    update_metadata=bool(candidate.get("update_metadata", True)),
+                    supersede_eligible_keys=candidate.get("supersede_eligible_keys"),
+                    source_history_eligible_keys=candidate.get(
+                        "source_history_eligible_keys"
+                    ),
+                    source_history_required_keys=candidate.get(
+                        "source_history_required_keys"
+                    ),
+                    now=current_time,
+                    dry_run=True,
+                )
+                blockers = result.get("blocked_by_out_of_scope")
+                if isinstance(blockers, list) and blockers:
+                    blocked_by_key[key] = [str(value) for value in blockers]
+                    return {
+                        "committed": False,
+                        "results": [],
+                        "blocked_by_key": blocked_by_key,
+                    }
+                projected_results.append({**result, "dry_run": False})
+
+            if any(bool(result.get("changed")) for result in projected_results):
+                events: list[dict[str, Any]] = []
+                for result in projected_results:
+                    if not result.get("changed"):
+                        continue
+                    item = result.get("item")
+                    if not isinstance(item, Mapping):
+                        raise ConvergenceStateError(
+                            "atomic merge projected a changed item without state"
+                        )
+                    key = str(item.get("key") or "")
+                    for retired_key in result.get("retired") or []:
+                        previous = original_state["items"].get(str(retired_key))
+                        retired_item = state["items"].get(str(retired_key))
+                        if not isinstance(retired_item, Mapping):
+                            raise ConvergenceStateError(
+                                "atomic merge retired item readback is missing"
+                            )
+                        events.append(
+                            self._event(
+                                key=str(retired_key),
+                                name="candidate_superseded",
+                                now=current_time,
+                                previous_status=(
+                                    str(previous.get("status") or "")
+                                    if isinstance(previous, Mapping)
+                                    else None
+                                ),
+                                item=retired_item,
+                                replacement_key=key,
+                            )
+                        )
+                    reclassified = bool(result.get("reclassified_human_boundary"))
+                    events.append(
+                        self._event(
+                            key=key,
+                            name=(
+                                "candidate_merged"
+                                if result.get("created")
+                                else "human_boundary_reclassified"
+                                if reclassified
+                                else "metadata_updated"
+                            ),
+                            now=current_time,
+                            previous_status=(
+                                None
+                                if result.get("created")
+                                else "human_required"
+                                if reclassified
+                                else str(item.get("status") or "")
+                            ),
+                            item=item,
+                        )
+                    )
+                self._save_unlocked(state)
+                self._append_events_unlocked(events)
+            return {
+                "committed": True,
+                "results": projected_results,
+                "blocked_by_key": {},
             }
 
     def retire_absent_sources(
@@ -750,6 +971,7 @@ class ConvergenceStore:
         *,
         lane: str,
         active_source_ids: Iterable[str],
+        eligible_keys: Iterable[str] | None = None,
         reason: str = "source_no_longer_actionable",
         now: datetime | None = None,
         dry_run: bool = False,
@@ -757,12 +979,16 @@ class ConvergenceStore:
         """Terminalize nonterminal items missing from a complete producer inventory."""
         current_time = _utc_now(now)
         active = {str(source_id) for source_id in active_source_ids}
+        eligible = (
+            {str(key) for key in eligible_keys} if eligible_keys is not None else None
+        )
 
         def retire(state: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
             retired: list[tuple[str, str, dict[str, Any]]] = []
             for key, item in list(state["items"].items()):
                 if (
-                    not isinstance(item, dict)
+                    (eligible is not None and str(key) not in eligible)
+                    or not isinstance(item, dict)
                     or item.get("lane") != lane
                     or item.get("status") in TERMINAL_STATUSES
                     or str(item.get("source_id") or "") in active
@@ -809,6 +1035,7 @@ class ConvergenceStore:
         self,
         *,
         lane: str,
+        eligible_keys: Iterable[str] | None = None,
         max_age_seconds: int = 7 * 24 * 60 * 60,
         reason: str = "stale_source_ttl",
         now: datetime | None = None,
@@ -817,12 +1044,16 @@ class ConvergenceStore:
         """Bound orphaned producer state even when a source inventory is truncated."""
         current_time = _utc_now(now)
         threshold = current_time - timedelta(seconds=max(0, max_age_seconds))
+        eligible = (
+            {str(key) for key in eligible_keys} if eligible_keys is not None else None
+        )
 
         def retire(state: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
             retired: list[tuple[str, str, dict[str, Any]]] = []
             for key, item in list(state["items"].items()):
                 if (
-                    not isinstance(item, dict)
+                    (eligible is not None and str(key) not in eligible)
+                    or not isinstance(item, dict)
                     or item.get("lane") != lane
                     or item.get("status") in TERMINAL_STATUSES
                 ):
@@ -928,7 +1159,11 @@ class ConvergenceStore:
     ) -> None:
         self._clear_lease(item)
         item["next_attempt_at"] = None
-        if stage == "local" and allow_frontier and self.policy.max_frontier_attempts > 0:
+        if (
+            stage == "local"
+            and allow_frontier
+            and self.policy.max_frontier_attempts > 0
+        ):
             item["status"] = "pending_frontier"
         else:
             item["status"] = "quarantined"
@@ -938,15 +1173,21 @@ class ConvergenceStore:
     def reap_expired_leases(
         self,
         *,
+        eligible_keys: Iterable[str] | None = None,
         now: datetime | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Return expired running items to a visible retry state."""
         current_time = _utc_now(now)
+        eligible = (
+            {str(key) for key in eligible_keys} if eligible_keys is not None else None
+        )
 
         def project(state: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
             recovered: list[tuple[str, str, dict[str, Any]]] = []
             for key, item in state["items"].items():
+                if eligible is not None and str(key) not in eligible:
+                    continue
                 if not isinstance(item, dict):
                     continue
                 status = str(item.get("status") or "")
@@ -968,21 +1209,33 @@ class ConvergenceStore:
         if dry_run:
             state = self._load_unlocked()
             recovered = project(state)
-            return {"status": "ok", "recovered": len(recovered), "keys": [row[0] for row in recovered], "dry_run": True}
+            return {
+                "status": "ok",
+                "recovered": len(recovered),
+                "keys": [row[0] for row in recovered],
+                "dry_run": True,
+            }
         with self._exclusive_lock():
             state = self._load_unlocked()
             recovered = project(state)
             if recovered:
                 self._save_unlocked(state)
                 for key, previous, item in recovered:
-                    self._append_event_unlocked(self._event(
-                        key=key,
-                        name="expired_lease_reaped",
-                        now=current_time,
-                        previous_status=previous,
-                        item=item,
-                    ))
-            return {"status": "ok", "recovered": len(recovered), "keys": [row[0] for row in recovered], "dry_run": False}
+                    self._append_event_unlocked(
+                        self._event(
+                            key=key,
+                            name="expired_lease_reaped",
+                            now=current_time,
+                            previous_status=previous,
+                            item=item,
+                        )
+                    )
+            return {
+                "status": "ok",
+                "recovered": len(recovered),
+                "keys": [row[0] for row in recovered],
+                "dry_run": False,
+            }
 
     def claim_attempt(
         self,
@@ -1000,12 +1253,16 @@ class ConvergenceStore:
         if stage not in {"local", "frontier"}:
             raise ValueError(f"unknown stage: {stage!r}")
         current_time = _utc_now(now)
-        lease_for = self.policy.lease_seconds if lease_seconds is None else lease_seconds
+        lease_for = (
+            self.policy.lease_seconds if lease_seconds is None else lease_seconds
+        )
         if lease_for < 0:
             raise ValueError("lease_seconds must be >= 0")
         worker = owner or f"{os.getpid()}:{uuid.uuid4().hex}"
 
-        def project(state: dict[str, Any]) -> tuple[dict[str, Any], bool, str, str | None]:
+        def project(
+            state: dict[str, Any],
+        ) -> tuple[dict[str, Any], bool, str, str | None]:
             item = state["items"].get(key)
             if not isinstance(item, dict):
                 raise KeyError(key)
@@ -1014,7 +1271,9 @@ class ConvergenceStore:
                 return item, False, "terminal", previous_status
             if previous_status not in self._stage_statuses(stage):
                 return item, False, f"not_{stage}_pending", previous_status
-            if previous_status.endswith("_running") and self._lease_active(item, current_time):
+            if previous_status.endswith("_running") and self._lease_active(
+                item, current_time
+            ):
                 return item, False, "leased", previous_status
             due = _parse_iso(item.get("next_attempt_at"))
             if due and due > current_time:
@@ -1206,7 +1465,9 @@ class ConvergenceStore:
                 raise KeyError(key)
             previous_status = str(item.get("status") or "")
             if previous_status in TERMINAL_STATUSES:
-                raise InvalidTransition(f"cannot escalate terminal status {previous_status!r}")
+                raise InvalidTransition(
+                    f"cannot escalate terminal status {previous_status!r}"
+                )
             self._validate_owner(item, owner)
             self._clear_lease(item)
             item["last_error"] = str(reason)[:4000]
@@ -1356,7 +1617,12 @@ class ConvergenceStore:
                 )
             except InvalidTransition as exc:
                 results.append(
-                    {"key": key, "lane": lane, "status": "resume_skipped", "error": str(exc)}
+                    {
+                        "key": key,
+                        "lane": lane,
+                        "status": "resume_skipped",
+                        "error": str(exc),
+                    }
                 )
                 continue
             resumed = transition.get("item") if isinstance(transition, dict) else {}
@@ -1371,7 +1637,9 @@ class ConvergenceStore:
         return {
             "status": "ok",
             "cooldown_seconds": cooldown_seconds,
-            "resumed": len([row for row in results if row.get("status") != "resume_skipped"]),
+            "resumed": len(
+                [row for row in results if row.get("status") != "resume_skipped"]
+            ),
             "results": results,
             "dry_run": dry_run,
         }
@@ -1534,8 +1802,13 @@ class ConvergenceStore:
             if not isinstance(item, dict):
                 raise KeyError(key)
             previous_status = str(item.get("status") or "")
-            if previous_status in TERMINAL_STATUSES and previous_status != "quarantined":
-                raise InvalidTransition(f"cannot quarantine terminal status {previous_status!r}")
+            if (
+                previous_status in TERMINAL_STATUSES
+                and previous_status != "quarantined"
+            ):
+                raise InvalidTransition(
+                    f"cannot quarantine terminal status {previous_status!r}"
+                )
             self._validate_owner(item, owner)
             self._clear_lease(item)
             item["status"] = "quarantined"

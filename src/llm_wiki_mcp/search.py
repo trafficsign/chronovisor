@@ -4,10 +4,11 @@ import json
 import math
 import os
 import re
+import sqlite3
+import struct
 import threading
 from collections import Counter, deque
 from pathlib import Path
-from typing import Any
 
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.runtime_config import (
@@ -16,9 +17,19 @@ from llm_wiki_mcp.runtime_config import (
     load_negative_feedback_config,
 )
 from llm_wiki_mcp.negative_feedback import apply_penalties, penalties_for_query
-from llm_wiki_mcp.pipeline import PipelineDependencies, production_pipeline_config, run_search_pipeline
+from llm_wiki_mcp.pipeline import (
+    PipelineDependencies,
+    production_pipeline_config,
+    run_search_pipeline,
+)
 from llm_wiki_mcp.search_types import ScoredPage, _FRONTMATTER_RE, tokenize
-from llm_wiki_mcp.wiki import WIKI_ROOT, PAGES_DIR, SYSTEM_DIR, all_pages, page_id_from_path
+from llm_wiki_mcp.wiki import (
+    WIKI_ROOT,
+    PAGES_DIR,
+    SYSTEM_DIR,
+    all_pages,
+    page_id_from_path,
+)
 from llm_wiki_mcp.link_fix import atomic_write
 
 
@@ -83,7 +94,10 @@ def _is_active_result(result: ScoredPage) -> bool:
 
 
 def _is_reference_result(result: ScoredPage) -> bool:
-    return _normalize_page_type(result.page_type, folder=result.folder) == _REFERENCE_PAGE_TYPE
+    return (
+        _normalize_page_type(result.page_type, folder=result.folder)
+        == _REFERENCE_PAGE_TYPE
+    )
 
 
 def _folder_from_meta(meta: dict) -> str:
@@ -255,8 +269,12 @@ class BM25Index:
                 changed = True
                 continue
             fm, _body = parse_frontmatter(content)
-            title = fm.get("title", pid) if isinstance(fm.get("title", pid), str) else pid
-            updated = fm.get("updated", "") if isinstance(fm.get("updated", ""), str) else ""
+            title = (
+                fm.get("title", pid) if isinstance(fm.get("title", pid), str) else pid
+            )
+            updated = (
+                fm.get("updated", "") if isinstance(fm.get("updated", ""), str) else ""
+            )
             status = _normalize_lifecycle_status(fm.get("status"))
             superseded_by = (
                 fm.get("superseded_by", "")
@@ -346,7 +364,9 @@ class BM25Index:
 
             results = []
             for pid, doc in self._cache.items():
-                page_type = _normalize_page_type(doc.get("page_type"), folder=doc.get("folder", ""))
+                page_type = _normalize_page_type(
+                    doc.get("page_type"), folder=doc.get("folder", "")
+                )
                 if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
                     continue
                 tf_map = doc["tf_map"]
@@ -362,19 +382,23 @@ class BM25Index:
                     score += idf * tf_norm
 
                 if score > 0:
-                    results.append(ScoredPage(
-                        page_id=pid,
-                        title=doc["title"],
-                        folder=doc["folder"],
-                        updated=doc["updated"],
-                        score=score,
-                        status=_normalize_lifecycle_status(doc.get("status")),
-                        superseded_by=doc.get("superseded_by", "")
-                        if isinstance(doc.get("superseded_by", ""), str)
-                        else "",
-                        page_type=page_type,
-                        sensitivity=_normalize_sensitivity(doc.get("sensitivity"), folder=doc.get("folder", "")),
-                    ))
+                    results.append(
+                        ScoredPage(
+                            page_id=pid,
+                            title=doc["title"],
+                            folder=doc["folder"],
+                            updated=doc["updated"],
+                            score=score,
+                            status=_normalize_lifecycle_status(doc.get("status")),
+                            superseded_by=doc.get("superseded_by", "")
+                            if isinstance(doc.get("superseded_by", ""), str)
+                            else "",
+                            page_type=page_type,
+                            sensitivity=_normalize_sensitivity(
+                                doc.get("sensitivity"), folder=doc.get("folder", "")
+                            ),
+                        )
+                    )
 
             results.sort(key=lambda x: x.score, reverse=True)
             return results[:top_n]
@@ -417,9 +441,6 @@ def get_bm25() -> BM25Index:
 #
 # Migration: a one-shot import from the legacy ~/.wiki/.embeddings.json runs
 # on first connect when the SQLite file does not yet exist.
-
-import sqlite3
-import struct
 
 EMBED_MODEL = DEFAULT_EMBEDDING_MODEL
 
@@ -516,8 +537,12 @@ def _connect_embeddings() -> sqlite3.Connection:
         """
     )
     _ensure_column(conn, "embeddings", "model", "model TEXT NOT NULL DEFAULT ''")
-    _ensure_column(conn, "embeddings", "text_prefix", "text_prefix TEXT NOT NULL DEFAULT ''")
-    _ensure_column(conn, "question_embeddings", "model", "model TEXT NOT NULL DEFAULT ''")
+    _ensure_column(
+        conn, "embeddings", "text_prefix", "text_prefix TEXT NOT NULL DEFAULT ''"
+    )
+    _ensure_column(
+        conn, "question_embeddings", "model", "model TEXT NOT NULL DEFAULT ''"
+    )
     _ensure_column(
         conn,
         "question_embeddings",
@@ -525,7 +550,9 @@ def _connect_embeddings() -> sqlite3.Connection:
         "text_prefix TEXT NOT NULL DEFAULT ''",
     )
     _ensure_column(conn, "chunk_embeddings", "model", "model TEXT NOT NULL DEFAULT ''")
-    _ensure_column(conn, "chunk_embeddings", "text_prefix", "text_prefix TEXT NOT NULL DEFAULT ''")
+    _ensure_column(
+        conn, "chunk_embeddings", "text_prefix", "text_prefix TEXT NOT NULL DEFAULT ''"
+    )
     return conn
 
 
@@ -573,7 +600,9 @@ def _maybe_migrate_legacy_json() -> None:
                     continue
                 mtime = float(data.get("mtime", 0.0))
                 norm = _vec_norm(vec)
-                rows.append((pid, _pack_vector(vec), mtime, norm, len(vec), model, text_prefix))
+                rows.append(
+                    (pid, _pack_vector(vec), mtime, norm, len(vec), model, text_prefix)
+                )
             if rows:
                 conn.executemany(
                     """
@@ -620,7 +649,15 @@ def _store_embeddings_batch(
     if not rows:
         return
     packed = [
-        (pid, _pack_vector(vec), float(mtime), _vec_norm(vec), len(vec), model, text_prefix)
+        (
+            pid,
+            _pack_vector(vec),
+            float(mtime),
+            _vec_norm(vec),
+            len(vec),
+            model,
+            text_prefix,
+        )
         for pid, vec, mtime in rows
     ]
     with _EMBED_DB_LOCK:
@@ -764,7 +801,9 @@ def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
     return out
 
 
-def _iter_all_chunk_embeddings() -> "list[tuple[str, str, int, str, list[float], float, float]]":
+def _iter_all_chunk_embeddings() -> (
+    "list[tuple[str, str, int, str, list[float], float, float]]"
+):
     """Snapshot chunk rows as (key, page_id, idx, text, vector, mtime, norm)."""
     _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
@@ -782,11 +821,23 @@ def _iter_all_chunk_embeddings() -> "list[tuple[str, str, int, str, list[float],
         conn.close()
     out = []
     for key, pid, idx, text, blob, mtime, norm, dim in rows:
-        out.append((key, pid, int(idx), text, _unpack_vector(blob, int(dim)), float(mtime), float(norm)))
+        out.append(
+            (
+                key,
+                pid,
+                int(idx),
+                text,
+                _unpack_vector(blob, int(dim)),
+                float(mtime),
+                float(norm),
+            )
+        )
     return out
 
 
-def _iter_all_question_embeddings() -> "list[tuple[str, str, int, list[float], float, float]]":
+def _iter_all_question_embeddings() -> (
+    "list[tuple[str, str, int, list[float], float, float]]"
+):
     """Snapshot all recall-question rows as (key, page_id, idx, vector, mtime, norm)."""
     _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
@@ -804,7 +855,16 @@ def _iter_all_question_embeddings() -> "list[tuple[str, str, int, list[float], f
         conn.close()
     out = []
     for key, pid, idx, blob, mtime, norm, dim in rows:
-        out.append((key, pid, int(idx), _unpack_vector(blob, int(dim)), float(mtime), float(norm)))
+        out.append(
+            (
+                key,
+                pid,
+                int(idx),
+                _unpack_vector(blob, int(dim)),
+                float(mtime),
+                float(norm),
+            )
+        )
     return out
 
 
@@ -870,9 +930,13 @@ def _markdown_chunks(content: str, title: str) -> list[str]:
     if summary.strip():
         context_lines.append(f"Summary: {summary.strip()}")
     if entities:
-        context_lines.append("Entities: " + ", ".join(str(item) for item in entities[:8]))
+        context_lines.append(
+            "Entities: " + ", ".join(str(item) for item in entities[:8])
+        )
     if page_type or updated:
-        context_lines.append(f"Metadata: type={page_type or 'knowledge'} updated={updated or 'unknown'}")
+        context_lines.append(
+            f"Metadata: type={page_type or 'knowledge'} updated={updated or 'unknown'}"
+        )
     context = "\n".join(context_lines)
 
     def flush() -> None:
@@ -881,13 +945,19 @@ def _markdown_chunks(content: str, title: str) -> list[str]:
         buffer = []
         if not text:
             return
-        prefix = f"{context}\nHeading: {heading}" if heading and heading != title else context
+        prefix = (
+            f"{context}\nHeading: {heading}"
+            if heading and heading != title
+            else context
+        )
         while text:
             piece = text[:MAX_CHUNK_CHARS].strip()
             if len(text) > MAX_CHUNK_CHARS and " " in piece:
-                piece = piece.rsplit(" ", 1)[0].strip() or text[:MAX_CHUNK_CHARS].strip()
+                piece = (
+                    piece.rsplit(" ", 1)[0].strip() or text[:MAX_CHUNK_CHARS].strip()
+                )
             chunks.append(f"{prefix}\n\n{piece}")
-            text = text[len(piece):].strip()
+            text = text[len(piece) :].strip()
             if len(chunks) >= MAX_CHUNKS_PER_PAGE:
                 return
 
@@ -938,7 +1008,9 @@ def _should_scan_chunks(page_scores: list[float]) -> bool:
     return top1 < CHUNK_SEARCH_MIN_TOP_SCORE or (top1 - top2) < CHUNK_SEARCH_MIN_MARGIN
 
 
-def update_embeddings(page_ids: list[str] | None = None, *, strict: bool = False) -> int:
+def update_embeddings(
+    page_ids: list[str] | None = None, *, strict: bool = False
+) -> int:
     """Update embeddings for pages. Returns count of updated pages.
 
     Writes are scoped to the rows that actually changed (or the rows
@@ -1002,7 +1074,9 @@ def update_embeddings(page_ids: list[str] | None = None, *, strict: bool = False
         title = fm_match.group(1).strip() if fm_match else pid
         questions = _recall_questions_from_content(content)
         recall_text = "\n".join(f"Q: {q}" for q in questions)
-        embed_text = f"{title}\n\n{recall_text}\n\n{_FRONTMATTER_RE.sub('', content)[:2000]}"
+        embed_text = (
+            f"{title}\n\n{recall_text}\n\n{_FRONTMATTER_RE.sub('', content)[:2000]}"
+        )
         pages_to_process.append(("page", pid, -1, embed_text, mtime))
         for idx, question in enumerate(questions):
             pages_to_process.append(("question", pid, idx, question, mtime))
@@ -1012,13 +1086,17 @@ def update_embeddings(page_ids: list[str] | None = None, *, strict: bool = False
     updated_count = 0
     if pages_to_process:
         _delete_chunk_embeddings(
-            {pid for kind, pid, _idx, _text, _mtime in pages_to_process if kind == "page"},
+            {
+                pid
+                for kind, pid, _idx, _text, _mtime in pages_to_process
+                if kind == "page"
+            },
             model=model,
             text_prefix=document_prefix,
         )
         batch_size = 32
         for i in range(0, len(pages_to_process), batch_size):
-            batch = pages_to_process[i:i + batch_size]
+            batch = pages_to_process[i : i + batch_size]
             texts = [_apply_prefix(document_prefix, t[3]) for t in batch]
             try:
                 vectors = embed(texts, model=model)
@@ -1062,6 +1140,7 @@ def semantic_search(
     top_n: int = 20,
     *,
     include_reference: bool = False,
+    strict: bool = False,
 ) -> list[ScoredPage]:
     """Search using embedding similarity.
 
@@ -1073,21 +1152,29 @@ def semantic_search(
     from llm_wiki_mcp.index_store import get_store
 
     if not is_available():
+        if strict:
+            raise RuntimeError("semantic search backend is unavailable")
         return []
 
     _maybe_migrate_legacy_json()
 
     if _embedding_count() == 0:
+        if strict:
+            raise RuntimeError("semantic search index has no embeddings")
         return []
 
     model, _document_prefix, query_prefix = _embedding_profile()
     try:
         q_vec = embed([_apply_prefix(query_prefix, query)], model=model)[0]
-    except Exception:
+    except Exception as exc:
+        if strict:
+            raise RuntimeError("semantic search query embedding failed") from exc
         return []
 
     q_norm = _vec_norm(q_vec)
     if q_norm == 0:
+        if strict:
+            raise RuntimeError("semantic search query embedding has zero norm")
         return []
 
     store = get_store()
@@ -1249,7 +1336,9 @@ def load_active_fusion_weights(path: Path | None = None) -> dict[str, float]:
         if not math.isfinite(numeric) or numeric < 0:
             return dict(DEFAULT_FUSION_WEIGHTS)
         weights[key] = numeric
-    if not any(weights[channel] > 0 for channel in ("bm25", "semantic", "graph", "usage_prior")):
+    if not any(
+        weights[channel] > 0 for channel in ("bm25", "semantic", "graph", "usage_prior")
+    ):
         return dict(DEFAULT_FUSION_WEIGHTS)
     for bounded in (
         "semantic_min_top_score",
@@ -1272,7 +1361,9 @@ def _semantic_reliability_multiplier(
     min_margin = max(0.0, float(weights.get("semantic_min_margin", 0.0)))
     low_weight = max(0.0, float(weights.get("semantic_low_confidence_weight", 1.0)))
     top1 = max(0.0, float(semantic_results[0].score))
-    top2 = max(0.0, float(semantic_results[1].score)) if len(semantic_results) > 1 else 0.0
+    top2 = (
+        max(0.0, float(semantic_results[1].score)) if len(semantic_results) > 1 else 0.0
+    )
     if top1 < min_top or (top1 - top2) < min_margin:
         return low_weight
     return 1.0
@@ -1305,7 +1396,9 @@ def fuse_results(
         for rank, page in enumerate(results):
             score = weight / (k + rank)
             if channel == "bm25" and top_raw > 0:
-                score += weight * bm25_score_bonus * (max(0.0, float(page.score)) / top_raw)
+                score += (
+                    weight * bm25_score_bonus * (max(0.0, float(page.score)) / top_raw)
+                )
                 score += weight * max(0.0, bm25_rank_bonus - (bm25_rank_decay * rank))
             scores[page.page_id] = scores.get(page.page_id, 0) + score
             if page.page_id not in meta:
@@ -1324,26 +1417,36 @@ def fuse_results(
             for page_id in list(scores):
                 prior = retention_score(page_id)
                 if prior > 0:
-                    scores[page_id] = scores.get(page_id, 0.0) + (retention_weight * prior)
+                    scores[page_id] = scores.get(page_id, 0.0) + (
+                        retention_weight * prior
+                    )
         except Exception:
             pass
 
     fused = []
     for pid, score in scores.items():
         p = meta[pid]
-        fused.append(ScoredPage(
-            page_id=p.page_id, title=p.title, folder=p.folder,
-            updated=p.updated, score=score,
-            status=p.status, superseded_by=p.superseded_by,
-            page_type=p.page_type,
-            sensitivity=p.sensitivity,
-        ))
+        fused.append(
+            ScoredPage(
+                page_id=p.page_id,
+                title=p.title,
+                folder=p.folder,
+                updated=p.updated,
+                score=score,
+                status=p.status,
+                superseded_by=p.superseded_by,
+                page_type=p.page_type,
+                sensitivity=p.sensitivity,
+            )
+        )
 
     fused.sort(key=lambda x: x.score, reverse=True)
     return fused
 
 
-def graph_expand_results(results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50) -> list[ScoredPage]:
+def graph_expand_results(
+    results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50
+) -> list[ScoredPage]:
     if decay <= 0 or not results:
         return []
     from llm_wiki_mcp.index_store import get_store
@@ -1353,7 +1456,12 @@ def graph_expand_results(results: list[ScoredPage], *, decay: float = 0.5, limit
     seen = {result.page_id for result in results}
     expanded: dict[str, ScoredPage] = {}
     for result in results[:10]:
-        linked: list[tuple[str, float]] = [(page_id, 1.0) for page_id in (store.outlinks(result.page_id) + store.backlinks(result.page_id))]
+        linked: list[tuple[str, float]] = [
+            (page_id, 1.0)
+            for page_id in (
+                store.outlinks(result.page_id) + store.backlinks(result.page_id)
+            )
+        ]
         try:
             from llm_wiki_mcp.cofire import neighbors as cofire_neighbors
 
@@ -1422,8 +1530,10 @@ def usage_prior_results(
             continue
         if not isinstance(record, dict) or record.get("kind") != "injection_used":
             continue
-        weight = decay ** age
-        for page_id in record.get("expected_pages", []) or record.get("injected_pages", []):
+        weight = decay**age
+        for page_id in record.get("expected_pages", []) or record.get(
+            "injected_pages", []
+        ):
             if isinstance(page_id, str) and page_id in candidate_ids:
                 scores[page_id] = min(cap, scores[page_id] + weight)
     if not scores:
@@ -1469,13 +1579,21 @@ def apply_filters(
     if folder:
         filtered = [r for r in filtered if r.folder.startswith(folder)]
     if updated_after:
-        filtered = [r for r in filtered if r.updated >= updated_after and r.updated != "unknown"]
+        filtered = [
+            r for r in filtered if r.updated >= updated_after and r.updated != "unknown"
+        ]
     if updated_before:
-        filtered = [r for r in filtered if r.updated <= updated_before and r.updated != "unknown"]
+        filtered = [
+            r
+            for r in filtered
+            if r.updated <= updated_before and r.updated != "unknown"
+        ]
     return filtered
 
 
-def apply_sort(results: list[ScoredPage], sort_by: str = "relevance") -> list[ScoredPage]:
+def apply_sort(
+    results: list[ScoredPage], sort_by: str = "relevance"
+) -> list[ScoredPage]:
     """Sort results."""
     if sort_by == "date":
         return sorted(results, key=lambda x: x.updated, reverse=True)
@@ -1487,6 +1605,7 @@ def apply_sort(results: list[ScoredPage], sort_by: str = "relevance") -> list[Sc
 # ---------------------------------------------------------------------------
 # Public search API
 # ---------------------------------------------------------------------------
+
 
 def _pipeline_dependencies() -> PipelineDependencies:
     return PipelineDependencies(

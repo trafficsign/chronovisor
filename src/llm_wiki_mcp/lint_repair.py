@@ -1263,6 +1263,7 @@ def run_lint_repair(
     dry_run: bool = False,
     local_reviewer: StructuredReviewer | None = None,
     frontier_reviewer: StructuredReviewer | None = None,
+    eligible_keys: set[str] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Drain bounded *actionable* work from ``lint-repair-queue.jsonl``.
@@ -1293,6 +1294,7 @@ def run_lint_repair(
         "human_required": 0,
         "deferred": 0,
         "terminal_skipped": 0,
+        "out_of_scope": 0,
     }
 
     for row in rows:
@@ -1313,6 +1315,9 @@ def run_lint_repair(
             input_data,
             resolver_version=REPAIR_RESOLVER_VERSION,
         )
+        if eligible_keys is not None and key not in eligible_keys:
+            counts["out_of_scope"] += 1
+            continue
         existing = convergence.get(key)
         if existing is not None and existing.get("status") in TERMINAL_STATUSES:
             rows_scanned += 1
@@ -1337,8 +1342,24 @@ def run_lint_repair(
             metadata=row,
             now=now,
             dry_run=dry_run,
+            supersede_eligible_keys=eligible_keys,
         )
         item = merged["item"]
+        if item is None:
+            rows_scanned += 1
+            counts["out_of_scope"] += 1
+            results.append(
+                {
+                    "key": key,
+                    "page": page_id,
+                    "issue_type": issue_type,
+                    "status": "out_of_scope_source_changed",
+                    "blocked_by_out_of_scope": merged.get(
+                        "blocked_by_out_of_scope", []
+                    ),
+                }
+            )
+            continue
         key = str(item["key"])
         rows_scanned += 1
 

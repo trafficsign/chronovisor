@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp import runtime_status, wiki
-from llm_wiki_mcp.recall_runtime import RECALL_DIR, RECALL_FEEDBACK_FILE, RECALL_LOG_FILE
+from llm_wiki_mcp.recall_runtime import (
+    RECALL_DIR,
+    RECALL_FEEDBACK_FILE,
+    RECALL_LOG_FILE,
+)
 from llm_wiki_mcp.runtime_config import (
     config_summary,
     load_hook_policy,
@@ -94,13 +98,15 @@ def _hook_entries(data: dict[str, Any], event: str) -> list[dict[str, Any]]:
             continue
         for hook_i, hook in enumerate(group.get("hooks", [])):
             if isinstance(hook, dict):
-                entries.append({
-                    "event": event,
-                    "group": group_i,
-                    "index": hook_i,
-                    "command": hook.get("command", ""),
-                    "timeout": hook.get("timeout"),
-                })
+                entries.append(
+                    {
+                        "event": event,
+                        "group": group_i,
+                        "index": hook_i,
+                        "command": hook.get("command", ""),
+                        "timeout": hook.get("timeout"),
+                    }
+                )
     return entries
 
 
@@ -216,15 +222,16 @@ def _find_codex_state_index(data: dict[str, Any], event: str, command: str) -> s
     raise ValueError(f"installed hook not found for {event}: {command}")
 
 
-def install_codex_hooks(command_prefix: str | None = None, *, dry_run: bool = False) -> dict[str, Any]:
+def install_codex_hooks(
+    command_prefix: str | None = None, *, dry_run: bool = False
+) -> dict[str, Any]:
     prefix = command_prefix or default_hook_command_prefix()
     data = read_json(CODEX_HOOKS_FILE)
     if not data:
         data = {"hooks": {}}
-    stale_state_indexes = (
-        _llm_wiki_codex_state_indexes(data, "UserPromptSubmit")
-        | _llm_wiki_codex_state_indexes(data, "Stop")
-    )
+    stale_state_indexes = _llm_wiki_codex_state_indexes(
+        data, "UserPromptSubmit"
+    ) | _llm_wiki_codex_state_indexes(data, "Stop")
 
     user_command = (
         "CODEX_HOME=/Users/trafficsign/.config/codex "
@@ -240,7 +247,9 @@ def install_codex_hooks(command_prefix: str | None = None, *, dry_run: bool = Fa
     _replace_event_llm_wiki_hooks(data, "Stop", [stop_hook])
 
     hashes = {
-        _find_codex_state_index(data, "UserPromptSubmit", user_command): _canonical_hook_hash(
+        _find_codex_state_index(
+            data, "UserPromptSubmit", user_command
+        ): _canonical_hook_hash(
             "user_prompt_submit",
             user_hook,
         ),
@@ -252,7 +261,9 @@ def install_codex_hooks(command_prefix: str | None = None, *, dry_run: bool = Fa
     stale_state_indexes -= set(hashes)
     if not dry_run:
         write_json(CODEX_HOOKS_FILE, data)
-        update_codex_trust_state(CODEX_CONFIG_FILE, hashes, remove_indexes=stale_state_indexes)
+        update_codex_trust_state(
+            CODEX_CONFIG_FILE, hashes, remove_indexes=stale_state_indexes
+        )
     return {
         "host": "codex",
         "hooks_file": str(CODEX_HOOKS_FILE),
@@ -263,7 +274,9 @@ def install_codex_hooks(command_prefix: str | None = None, *, dry_run: bool = Fa
     }
 
 
-def install_claude_code_hooks(command_prefix: str | None = None, *, dry_run: bool = False) -> dict[str, Any]:
+def install_claude_code_hooks(
+    command_prefix: str | None = None, *, dry_run: bool = False
+) -> dict[str, Any]:
     prefix = command_prefix or default_hook_command_prefix()
     data = read_json(CLAUDE_SETTINGS_FILE)
     if not data:
@@ -291,7 +304,7 @@ def install_claude_code_hooks(command_prefix: str | None = None, *, dry_run: boo
 
 
 def _state_key(event_and_index: str) -> str:
-    return f'/Users/trafficsign/.config/codex/hooks.json:{event_and_index}'
+    return f"/Users/trafficsign/.config/codex/hooks.json:{event_and_index}"
 
 
 def _section_header(key: str) -> str:
@@ -300,7 +313,7 @@ def _section_header(key: str) -> str:
 
 def _render_state_section(key: str, trusted_hash: str) -> list[str]:
     return [
-        f'{_section_header(key)}\n',
+        f"{_section_header(key)}\n",
         "enabled = true\n",
         f'trusted_hash = "{trusted_hash}"\n',
         "\n",
@@ -319,8 +332,7 @@ def update_codex_trust_state(
         lines = ["[hooks.state]\n", "\n"]
 
     desired = {
-        _state_key(index): trusted_hash
-        for index, trusted_hash in hashes.items()
+        _state_key(index): trusted_hash for index, trusted_hash in hashes.items()
     }
     remove = {_state_key(index) for index in (remove_indexes or set())}
     seen: set[str] = set()
@@ -359,7 +371,9 @@ def update_codex_trust_state(
     config_file.write_text("".join(out), encoding="utf-8")
 
 
-def install_hooks(host: str, command_prefix: str | None = None, *, dry_run: bool = False) -> dict[str, Any]:
+def install_hooks(
+    host: str, command_prefix: str | None = None, *, dry_run: bool = False
+) -> dict[str, Any]:
     if host == "codex":
         return install_codex_hooks(command_prefix, dry_run=dry_run)
     if host == "claude-code":
@@ -438,7 +452,11 @@ def doctor() -> dict[str, Any]:
         checks.append({"name": name, "ok": ok, "detail": detail})
 
     check("wiki.root", Path(status["wiki"]["root"]).exists(), status["wiki"]["root"])
-    check("wiki.raw", status["wiki"]["raw_files"] > 0, f"{status['wiki']['raw_files']} raw files")
+    check(
+        "wiki.raw",
+        status["wiki"]["raw_files"] > 0,
+        f"{status['wiki']['raw_files']} raw files",
+    )
     check("wiki.pages", status["wiki"]["pages"] > 0, f"{status['wiki']['pages']} pages")
     check("config", status["config"]["exists"], status["config"]["path"])
     check(
@@ -494,7 +512,9 @@ def print_plain_status(data: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Operate and inspect LLM Wiki.")
     sub = parser.add_subparsers(dest="command", required=True)
-    status_parser = sub.add_parser("status", help="Show content, recall, and runtime status.")
+    status_parser = sub.add_parser(
+        "status", help="Show content, recall, and runtime status."
+    )
     status_parser.add_argument("--json", action="store_true")
     runtime_identity_parser = sub.add_parser(
         "runtime-identity",
@@ -507,19 +527,31 @@ def main(argv: list[str] | None = None) -> int:
     hooks_sub = hooks_parser.add_subparsers(dest="hooks_command", required=True)
     hooks_inspect = hooks_sub.add_parser("inspect", help="List configured host hooks.")
     hooks_inspect.add_argument("--json", action="store_true")
-    hooks_install = hooks_sub.add_parser("install", help="Install direct host hook entries.")
-    hooks_install.add_argument("--host", choices=("codex", "claude-code", "all"), required=True)
-    hooks_install.add_argument("--command-prefix", help="Override the llm-wiki-hook command prefix.")
+    hooks_install = hooks_sub.add_parser(
+        "install", help="Install direct host hook entries."
+    )
+    hooks_install.add_argument(
+        "--host", choices=("codex", "claude-code", "all"), required=True
+    )
+    hooks_install.add_argument(
+        "--command-prefix", help="Override the llm-wiki-hook command prefix."
+    )
     hooks_install.add_argument("--dry-run", action="store_true")
     hooks_install.add_argument("--json", action="store_true")
     health_parser = sub.add_parser("health", help="Show knowledge health KPIs.")
     health_parser.add_argument("--json", action="store_true")
-    snapshot_parser = sub.add_parser("wiki-snapshot", help="Commit ~/.wiki into its own git history.")
+    snapshot_parser = sub.add_parser(
+        "wiki-snapshot", help="Commit ~/.wiki into its own git history."
+    )
     snapshot_parser.add_argument("reason", nargs="?", default="manual")
     snapshot_parser.add_argument("--allow-empty", action="store_true")
     snapshot_parser.add_argument("--json", action="store_true")
-    entities_parser = sub.add_parser("entities", help="Maintain entity registry and frontmatter.")
-    entities_sub = entities_parser.add_subparsers(dest="entities_command", required=True)
+    entities_parser = sub.add_parser(
+        "entities", help="Maintain entity registry and frontmatter."
+    )
+    entities_sub = entities_parser.add_subparsers(
+        dest="entities_command", required=True
+    )
     entities_init = entities_sub.add_parser("init")
     entities_init.add_argument("--json", action="store_true")
     entities_backfill = entities_sub.add_parser("backfill")
@@ -528,12 +560,39 @@ def main(argv: list[str] | None = None) -> int:
     entities_backfill.add_argument("--dry-run", action="store_true")
     entities_backfill.add_argument("--include-reference", action="store_true")
     entities_backfill.add_argument("--json", action="store_true")
-    raw_replay_parser = sub.add_parser("raw-replay", help="Plan or run retroactive raw re-ingestion.")
+    raw_replay_parser = sub.add_parser(
+        "raw-replay", help="Plan or run retroactive raw re-ingestion."
+    )
     raw_replay_parser.add_argument("--since", default="")
     raw_replay_parser.add_argument("--limit", type=int, default=0)
     raw_replay_parser.add_argument("--run", action="store_true")
     raw_replay_parser.add_argument("--json", action="store_true")
-    memory_eval_parser = sub.add_parser("memory-integrity", help="Evaluate raw-to-memory capture integrity.")
+    convergence_drain_parser = sub.add_parser(
+        "convergence-drain",
+        help="Drain only a durable snapshot of existing convergence keys.",
+    )
+    convergence_drain_sub = convergence_drain_parser.add_subparsers(
+        dest="convergence_drain_command",
+        required=True,
+    )
+    convergence_drain_plan = convergence_drain_sub.add_parser("plan")
+    convergence_drain_plan.add_argument("--json", action="store_true")
+    convergence_drain_start = convergence_drain_sub.add_parser("start")
+    convergence_drain_start.add_argument(
+        "--max-elapsed-seconds", type=float, default=1_800.0
+    )
+    convergence_drain_start.add_argument("--dry-run", action="store_true")
+    convergence_drain_start.add_argument("--json", action="store_true")
+    convergence_drain_resume = convergence_drain_sub.add_parser("resume")
+    convergence_drain_resume.add_argument("--run-id", required=True)
+    convergence_drain_resume.add_argument("--dry-run", action="store_true")
+    convergence_drain_resume.add_argument("--json", action="store_true")
+    convergence_drain_status = convergence_drain_sub.add_parser("status")
+    convergence_drain_status.add_argument("--run-id", required=True)
+    convergence_drain_status.add_argument("--json", action="store_true")
+    memory_eval_parser = sub.add_parser(
+        "memory-integrity", help="Evaluate raw-to-memory capture integrity."
+    )
     memory_eval_parser.add_argument("--since", default="")
     memory_eval_parser.add_argument("--limit", type=int, default=100)
     memory_eval_parser.add_argument("--no-write", action="store_true")
@@ -543,7 +602,9 @@ def main(argv: list[str] | None = None) -> int:
     cofire_parser.add_argument("--min-count", type=int, default=2)
     cofire_parser.add_argument("--no-write", action="store_true")
     cofire_parser.add_argument("--json", action="store_true")
-    prefetch_parser = sub.add_parser("prefetch", help="Build speculative recall prefetch cache.")
+    prefetch_parser = sub.add_parser(
+        "prefetch", help="Build speculative recall prefetch cache."
+    )
     prefetch_parser.add_argument("--limit", type=int, default=5000)
     prefetch_parser.add_argument("--no-write", action="store_true")
     prefetch_parser.add_argument("--json", action="store_true")
@@ -565,16 +626,22 @@ def main(argv: list[str] | None = None) -> int:
     claims_search.add_argument("query")
     claims_search.add_argument("--limit", type=int, default=10)
     claims_search.add_argument("--json", action="store_true")
-    golden_parser = sub.add_parser("golden-expand", help="Expand search golden set from recall_questions.")
+    golden_parser = sub.add_parser(
+        "golden-expand", help="Expand search golden set from recall_questions."
+    )
     golden_parser.add_argument("--limit", type=int, default=0)
     golden_parser.add_argument("--include-reference", action="store_true")
     golden_parser.add_argument("--no-write", action="store_true")
     golden_parser.add_argument("--json", action="store_true")
-    retention_parser = sub.add_parser("retention", help="Build retention/time-prior scores.")
+    retention_parser = sub.add_parser(
+        "retention", help="Build retention/time-prior scores."
+    )
     retention_parser.add_argument("--limit", type=int, default=5000)
     retention_parser.add_argument("--no-write", action="store_true")
     retention_parser.add_argument("--json", action="store_true")
-    reflect_parser = sub.add_parser("reflect", help="Generate a memory reflection page.")
+    reflect_parser = sub.add_parser(
+        "reflect", help="Generate a memory reflection page."
+    )
     reflect_parser.add_argument("--no-write", action="store_true")
     reflect_parser.add_argument("--json", action="store_true")
     hubs_parser = sub.add_parser("hubs", help="Generate auto-maintained hub pages.")
@@ -582,9 +649,15 @@ def main(argv: list[str] | None = None) -> int:
     hubs_parser.add_argument("--max-hubs", type=int, default=20)
     hubs_parser.add_argument("--no-write", action="store_true")
     hubs_parser.add_argument("--json", action="store_true")
-    distill_parser = sub.add_parser("distill", help="Export wiki QA pairs for distillation.")
-    autonomy_parser = sub.add_parser("autonomy", help="Run/install autonomous operation loops.")
-    autonomy_sub = autonomy_parser.add_subparsers(dest="autonomy_command", required=True)
+    distill_parser = sub.add_parser(
+        "distill", help="Export wiki QA pairs for distillation."
+    )
+    autonomy_parser = sub.add_parser(
+        "autonomy", help="Run/install autonomous operation loops."
+    )
+    autonomy_sub = autonomy_parser.add_subparsers(
+        dest="autonomy_command", required=True
+    )
     autonomy_status = autonomy_sub.add_parser("status")
     autonomy_status.add_argument("--json", action="store_true")
     autonomy_watchdog = autonomy_sub.add_parser("watchdog")
@@ -600,52 +673,90 @@ def main(argv: list[str] | None = None) -> int:
     distill_parser.add_argument("--include-reference", action="store_true")
     distill_parser.add_argument("--no-write", action="store_true")
     distill_parser.add_argument("--json", action="store_true")
-    oracle_parser = sub.add_parser("oracle", help="Return cited wiki oracle evidence bundle.")
+    oracle_parser = sub.add_parser(
+        "oracle", help="Return cited wiki oracle evidence bundle."
+    )
     oracle_parser.add_argument("query")
     oracle_parser.add_argument("--top-n", type=int, default=8)
     oracle_parser.add_argument("--claim-limit", type=int, default=12)
     oracle_parser.add_argument("--no-index-build", action="store_true")
     oracle_parser.add_argument("--json", action="store_true")
-    recall_eval_parser = sub.add_parser("recall-eval", help="Replay-evaluate recall decisions.")
+    recall_eval_parser = sub.add_parser(
+        "recall-eval", help="Replay-evaluate recall decisions."
+    )
     recall_eval_parser.add_argument("--config")
     recall_eval_parser.add_argument("--log-file", default=str(RECALL_LOG_FILE))
-    recall_eval_parser.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))
+    recall_eval_parser.add_argument(
+        "--feedback-file", default=str(RECALL_FEEDBACK_FILE)
+    )
     recall_eval_parser.add_argument("--save-baseline", action="store_true")
     recall_eval_parser.add_argument("--config-override", action="append", default=[])
     recall_eval_parser.add_argument("--json", action="store_true")
-    recall_improve_parser = sub.add_parser("recall-improve", help="Run self-improving recall policy loop.")
-    recall_improve_sub = recall_improve_parser.add_subparsers(dest="recall_improve_command", required=True)
-    recall_improve_run = recall_improve_sub.add_parser("run", help="Propose, replay-evaluate, and adopt a policy patch.")
+    recall_improve_parser = sub.add_parser(
+        "recall-improve", help="Run self-improving recall policy loop."
+    )
+    recall_improve_sub = recall_improve_parser.add_subparsers(
+        dest="recall_improve_command", required=True
+    )
+    recall_improve_run = recall_improve_sub.add_parser(
+        "run", help="Propose, replay-evaluate, and adopt a policy patch."
+    )
     recall_improve_run.add_argument("--config")
     recall_improve_run.add_argument("--log-file", default=str(RECALL_LOG_FILE))
-    recall_improve_run.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))
-    recall_improve_run.add_argument("--models", help="Comma-separated Ollama proposer models.")
-    recall_improve_run.add_argument("--no-apply", dest="apply", action="store_false", default=True)
-    recall_improve_run.add_argument("--no-heuristic", dest="include_heuristic", action="store_false", default=True)
+    recall_improve_run.add_argument(
+        "--feedback-file", default=str(RECALL_FEEDBACK_FILE)
+    )
+    recall_improve_run.add_argument(
+        "--models", help="Comma-separated Ollama proposer models."
+    )
+    recall_improve_run.add_argument(
+        "--no-apply", dest="apply", action="store_false", default=True
+    )
+    recall_improve_run.add_argument(
+        "--no-heuristic", dest="include_heuristic", action="store_false", default=True
+    )
     recall_improve_run.add_argument("--min-improvement", type=float, default=0.05)
     recall_improve_run.add_argument("--max-examples", type=int, default=120)
-    recall_improve_run.add_argument("--frontier", choices=["always", "auto", "off"], default="auto")
+    recall_improve_run.add_argument(
+        "--frontier", choices=["always", "auto", "off"], default="auto"
+    )
     recall_improve_run.add_argument("--frontier-timeout", type=int)
     recall_improve_run.add_argument("--json", action="store_true")
-    recall_improve_due = recall_improve_sub.add_parser("run-due", help="Run only when schedule/feedback gates are due.")
+    recall_improve_due = recall_improve_sub.add_parser(
+        "run-due", help="Run only when schedule/feedback gates are due."
+    )
     recall_improve_due.add_argument("--config")
     recall_improve_due.add_argument("--log-file", default=str(RECALL_LOG_FILE))
-    recall_improve_due.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))
-    recall_improve_due.add_argument("--models", help="Comma-separated Ollama proposer models.")
-    recall_improve_due.add_argument("--no-apply", dest="apply", action="store_false", default=True)
-    recall_improve_due.add_argument("--no-heuristic", dest="include_heuristic", action="store_false", default=True)
+    recall_improve_due.add_argument(
+        "--feedback-file", default=str(RECALL_FEEDBACK_FILE)
+    )
+    recall_improve_due.add_argument(
+        "--models", help="Comma-separated Ollama proposer models."
+    )
+    recall_improve_due.add_argument(
+        "--no-apply", dest="apply", action="store_false", default=True
+    )
+    recall_improve_due.add_argument(
+        "--no-heuristic", dest="include_heuristic", action="store_false", default=True
+    )
     recall_improve_due.add_argument("--min-improvement", type=float, default=0.05)
     recall_improve_due.add_argument("--max-examples", type=int, default=80)
     recall_improve_due.add_argument("--min-interval-hours", type=float, default=24.0)
     recall_improve_due.add_argument("--min-new-feedback", type=int, default=5)
     recall_improve_due.add_argument("--min-total-feedback", type=int, default=3)
-    recall_improve_due.add_argument("--frontier", choices=["always", "auto", "off"], default="auto")
+    recall_improve_due.add_argument(
+        "--frontier", choices=["always", "auto", "off"], default="auto"
+    )
     recall_improve_due.add_argument("--frontier-timeout", type=int)
     recall_improve_due.add_argument("--dry-run", action="store_true")
     recall_improve_due.add_argument("--json", action="store_true")
-    recall_improve_status = recall_improve_sub.add_parser("status", help="Show active recall improvement policy.")
+    recall_improve_status = recall_improve_sub.add_parser(
+        "status", help="Show active recall improvement policy."
+    )
     recall_improve_status.add_argument("--json", action="store_true")
-    recall_improve_rollback = recall_improve_sub.add_parser("rollback", help="Rollback accepted recall policy.")
+    recall_improve_rollback = recall_improve_sub.add_parser(
+        "rollback", help="Rollback accepted recall policy."
+    )
     recall_improve_rollback.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
@@ -680,10 +791,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         else:
-            for host, section in (("codex", data["codex"]), ("claude-code", data["claude_code"])):
+            for host, section in (
+                ("codex", data["codex"]),
+                ("claude-code", data["claude_code"]),
+            ):
                 print(f"== {host} ==")
                 for entry in section["entries"]:
-                    print(f"{entry['event']}:{entry['group']}:{entry['index']}\t{entry['command']}")
+                    print(
+                        f"{entry['event']}:{entry['group']}:{entry['index']}\t{entry['command']}"
+                    )
         return 0
     if args.command == "hooks" and args.hooks_command == "install":
         data = install_hooks(args.host, args.command_prefix, dry_run=args.dry_run)
@@ -711,7 +827,9 @@ def main(argv: list[str] | None = None) -> int:
             derived = data.get("derived", {})
             queues = data["queues"]
             print(f"summary_coverage\t{coverage['summary_coverage']:.3f}")
-            print(f"recall_question_coverage\t{coverage['recall_question_coverage']:.3f}")
+            print(
+                f"recall_question_coverage\t{coverage['recall_question_coverage']:.3f}"
+            )
             print(f"claim_coverage\t{capture['claim_coverage']}")
             print(f"memory_integrity_capture\t{memory_integrity.get('capture_rate')}")
             print(f"cofire_edges\t{cofire.get('edges', 0)}")
@@ -748,7 +866,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         else:
-            print("\t".join(f"{key}={value}" for key, value in data.items() if key != "pages"))
+            print(
+                "\t".join(
+                    f"{key}={value}" for key, value in data.items() if key != "pages"
+                )
+            )
         return 0
     if args.command == "raw-replay":
         from llm_wiki_mcp import raw_replay
@@ -761,12 +883,50 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         else:
-            print("\t".join(f"{key}={value}" for key, value in data.items() if key != "runs"))
+            print(
+                "\t".join(
+                    f"{key}={value}" for key, value in data.items() if key != "runs"
+                )
+            )
         return 0
+    if args.command == "convergence-drain":
+        from llm_wiki_mcp import convergence_drain
+
+        if args.convergence_drain_command == "plan":
+            data = convergence_drain.plan()
+        elif args.convergence_drain_command == "start":
+            data = convergence_drain.start(
+                max_elapsed_seconds=max(0.0, args.max_elapsed_seconds),
+                dry_run=args.dry_run,
+            )
+        elif args.convergence_drain_command == "resume":
+            data = convergence_drain.resume(
+                run_id=args.run_id,
+                dry_run=args.dry_run,
+            )
+        else:
+            data = convergence_drain.status(run_id=args.run_id)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            for key in (
+                "status",
+                "run_id",
+                "target_keys",
+                "target_active",
+                "target_terminal",
+                "next_retry_at",
+                "manifest_path",
+            ):
+                if key in data:
+                    print(f"{key}\t{data[key]}")
+        return 1 if data.get("status") in {"failed", "failed_frontier_activity"} else 0
     if args.command == "memory-integrity":
         from llm_wiki_mcp.memory_integrity import run_eval
 
-        data = run_eval(since=args.since, limit=max(0, args.limit), write=not args.no_write)
+        data = run_eval(
+            since=args.since, limit=max(0, args.limit), write=not args.no_write
+        )
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         else:
@@ -794,7 +954,11 @@ def main(argv: list[str] | None = None) -> int:
         from llm_wiki_mcp.prefetch import build_prefetch_cache
 
         data = build_prefetch_cache(limit=max(1, args.limit), write=not args.no_write)
-        public = {key: value for key, value in data.items() if key not in {"buckets", "tokens"}}
+        public = {
+            key: value
+            for key, value in data.items()
+            if key not in {"buckets", "tokens"}
+        }
         public["bucket_count"] = len(data.get("buckets", {}))
         public["token_count"] = len(data.get("tokens", {}))
         if args.json:
@@ -819,7 +983,11 @@ def main(argv: list[str] | None = None) -> int:
             print(render_summary(data))
         return 0
     if args.command == "claims":
-        from llm_wiki_mcp.claims import rebuild_claim_index, sanitize_claim_ledger, search_claims
+        from llm_wiki_mcp.claims import (
+            rebuild_claim_index,
+            sanitize_claim_ledger,
+            search_claims,
+        )
 
         if args.claims_command == "rebuild":
             data = rebuild_claim_index(limit=max(0, args.limit))
@@ -1003,7 +1171,9 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"status\t{data.get('status')}")
                 if data.get("result"):
-                    print(f"run\t{data['result'].get('run_id')}\t{data['result'].get('status')}")
+                    print(
+                        f"run\t{data['result'].get('run_id')}\t{data['result'].get('status')}"
+                    )
             return 0
         if args.recall_improve_command == "status":
             data = recall_improvement.improvement_snapshot()
@@ -1014,7 +1184,9 @@ def main(argv: list[str] | None = None) -> int:
                 latest = data.get("latest") or {}
                 print(f"status\t{data.get('status')}")
                 print(f"active\t{active.get('run_id') or '--'}")
-                print(f"latest\t{latest.get('run_id') or '--'}\t{latest.get('status') or '--'}")
+                print(
+                    f"latest\t{latest.get('run_id') or '--'}\t{latest.get('status') or '--'}"
+                )
             return 0
         if args.recall_improve_command == "rollback":
             data = recall_improvement.rollback_policy()

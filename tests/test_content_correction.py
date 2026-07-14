@@ -461,7 +461,8 @@ def test_exact_readback_failure_rolls_back_owned_page_bytes(
 
 def test_correction_signal_is_not_difference_question() -> None:
     assert content_correction.correction_signal("それ違くね。正しくはP24U")
-    assert content_correction.correction_signal("それ近くね、と言われた")
+    assert content_correction.correction_signal("それ近くね。正しくはP24U")
+    assert content_correction.correction_signal("それ近くね、と言われた") is None
     assert content_correction.correction_signal("that's wrong; it was 32GB")
     assert content_correction.correction_signal("違いはそこじゃない。正しくはP24U")
     assert content_correction.correction_signal("その記憶を修正して。正しくは32GB")
@@ -506,6 +507,11 @@ def test_correction_signal_is_not_difference_question() -> None:
         "いや、まずは意見を聞きたい。",
         "いや、待った。まだ実装しないで。",
         "いや、9Bに落とすんじゃなくて、35B版も確かにあるじゃん。",
+        "いや、なんかネット情報によると別の値らしい。",
+        "いや、それでいい。",
+        "まあ、それにシーメンスのやつは違って、別の方式だよ。",
+        "このモデルは従来品とは一味違う。",
+        "自分が間違ってると思ったら修正する。",
         "PythonじゃなくてRustで実装して。",
         "AではなくBを使う計画にして。",
         "メモリが足りないんだったら、全部固定じゃなくてサイズで並列数を決めればいい。",
@@ -524,12 +530,89 @@ def test_correction_signal_rejects_ordinary_work_and_discourse(
 @pytest.mark.parametrize(
     "prompt",
     [
+        "いや、なんかネット情報によると別の値らしい。",
+        "いや、それでいい。",
+        "まあ、それにシーメンスのやつは違って、別の方式だよ。",
+        "このモデルは従来品とは一味違う。",
+        "自分が間違ってると思ったら修正する。",
+        (
+            "いや、毎回ずっと説明してくるんだけど、これは相手の条件だって"
+            "言われてて、結局こっちで決めるに決まってるだろって思った。"
+        ),
+        (
+            "考えれば検討できる話で、必要な条件も分かっている。"
+            + ("長い背景説明。" * 30)
+            + "無理やりやってくれって言ってるわけじゃなくて、余裕があれば頼んでいる。"
+        ),
+    ],
+)
+def test_recall_qualified_signal_rejects_discourse_false_positives(
+    prompt: str,
+) -> None:
+    assert content_correction.correction_signal(prompt) is None
+    assert content_correction.correction_signal(prompt, recall_provenance=True) is None
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
         "その記憶を修正してくれ。正しくは32GB。",
         "Wikiページの内容を修正してください。古い値は16GBです。",
     ],
 )
 def test_correction_signal_keeps_explicit_user_corrections(prompt: str) -> None:
     assert content_correction.correction_signal(prompt) is not None
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        """以下は貼り付けた会話です。
+User: それ違う。正しくは32GB。
+Assistant: 訂正します。
+この会話を要約して。""",
+        """```text
+ユーザー: それ違う。正しくは32GB。
+アシスタント: 訂正します。
+```
+このログを分類して。""",
+        """参考ログです。
+```
+`foo`
+それ違う。正しくはbar。
+```
+このログを分析して。""",
+        "「それ違う」と言われた時の処理を説明して。",
+    ],
+)
+def test_correction_signal_ignores_pasted_or_reported_conversation(
+    prompt: str,
+) -> None:
+    assert content_correction.correction_signal(prompt) is None
+    assert content_correction.correction_signal(prompt, recall_provenance=True) is None
+
+
+def test_correction_signal_handles_escaped_request_marker_and_bounds_scan() -> None:
+    direct = (
+        "# In app browser:\\n- Current URL: http://127.0.0.1:8765/\\n\\n"
+        "## My request for Codex:\\nそれ違う。正しくは32GB。"
+    )
+    pasted_late = (
+        "# In app browser:\\n- Current URL: http://127.0.0.1:8765/\\n\\n"
+        "## My request for Codex:\\nこの長い貼付ログを分類して。"
+        + ("x" * 600)
+        + "\\nそれ違う。正しくは32GB。"
+    )
+
+    assert content_correction.correction_signal(direct) is not None
+    assert content_correction.correction_signal(pasted_late) is None
+    assert (
+        content_correction.correction_signal(
+            pasted_late,
+            recall_provenance=True,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -960,6 +1043,244 @@ def test_capture_bare_denial_requires_real_recall_candidate(
         assert result["items"][0]["item"]["metadata"]["candidate_pages"] == ["memory"]
 
 
+def test_bare_denial_rejects_ambiguous_injected_pages_but_accepts_actual_pull() -> None:
+    event = _event()
+    event["correction_prompt"] = "いや、32GBだよ。"
+    event["candidate_pages"] = [f"memory-{index}" for index in range(6)]
+    event["injected_pages"] = list(event["candidate_pages"])
+    event["pulled_pages"] = []
+    event["attribution"] = "ambiguous"
+
+    assert content_correction.correction_event_is_actionable(event) is False
+    item = {"metadata": event}
+    assert content_correction.correction_item_is_actionable(item) is False
+
+    event["pulled_pages"] = ["memory-3"]
+    assert content_correction.correction_event_is_actionable(event) is True
+    assert content_correction.correction_item_is_actionable(item) is True
+
+
+def test_explicit_correction_remains_actionable_with_ambiguous_attribution() -> None:
+    event = _event()
+    event["candidate_pages"] = [f"memory-{index}" for index in range(6)]
+    event["injected_pages"] = list(event["candidate_pages"])
+    event["pulled_pages"] = []
+    event["attribution"] = "ambiguous"
+
+    assert content_correction.correction_event_is_actionable(event) is True
+
+
+def test_non_actionable_migration_is_dry_run_safe_readable_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    noise = _event()
+    noise["correction_turn_ref"] = {
+        "turn_id": "ordinary-discourse",
+        "prompt_hash": "ordinary-discourse",
+    }
+    noise["correction_prompt"] = "いや、なんかネット情報によると違うらしい。"
+    noise["candidate_pages"] = [f"memory-{index}" for index in range(6)]
+    noise["injected_pages"] = list(noise["candidate_pages"])
+    noise["pulled_pages"] = []
+    noise["attribution"] = "ambiguous"
+    noise_item = content_correction.enqueue_event(noise, store=store)["item"]
+
+    valid = _event()
+    valid["correction_turn_ref"] = {
+        "turn_id": "explicit-correction",
+        "prompt_hash": "explicit-correction",
+    }
+    valid_item = content_correction.enqueue_event(valid, store=store)["item"]
+    before_state = store.state_file.read_bytes()
+    before_events = store.events_file.read_bytes()
+
+    dry_run = content_correction.retire_non_actionable_corrections(
+        store=store,
+        dry_run=True,
+    )
+
+    assert dry_run["completed"] == 1
+    assert store.state_file.read_bytes() == before_state
+    assert store.events_file.read_bytes() == before_events
+
+    first = content_correction.run_pending_corrections(
+        max_items=0,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: pytest.fail(
+            "non-actionable migration must not call a model"
+        ),
+        reviewer=lambda *_args, **_kwargs: pytest.fail(
+            "non-actionable migration must not call a reviewer"
+        ),
+    )
+    repeated = content_correction.run_pending_corrections(
+        max_items=0,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: pytest.fail(
+            "idempotent migration must not call a model"
+        ),
+        reviewer=lambda *_args, **_kwargs: pytest.fail(
+            "idempotent migration must not call a reviewer"
+        ),
+    )
+
+    assert first["retired_non_actionable"]["completed"] == 1
+    assert repeated["retired_non_actionable"]["completed"] == 0
+    readback = store.get(noise_item["key"])
+    assert readback["status"] == "rejected"
+    assert readback["result"] == {
+        "decision": "none",
+        "migration": "retire_non_actionable_correction_v1",
+        "reason": "correction_signal_no_longer_actionable",
+    }
+    assert store.get(valid_item["key"])["status"] == "pending_local"
+
+
+def test_non_actionable_migration_honors_targeted_allowlist(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    keys: list[str] = []
+    for index in range(2):
+        event = _event()
+        event["correction_turn_ref"] = {
+            "turn_id": f"ordinary-{index}",
+            "prompt_hash": f"ordinary-{index}",
+        }
+        event["correction_prompt"] = "いや、それでいい。"
+        event["candidate_pages"] = [f"memory-{value}" for value in range(6)]
+        event["attribution"] = "ambiguous"
+        keys.append(content_correction.enqueue_event(event, store=store)["item"]["key"])
+
+    result = content_correction.retire_non_actionable_corrections(
+        store=store,
+        eligible_keys={keys[0]},
+    )
+
+    assert result["requested"] == 1
+    assert result["completed"] == 1
+    assert store.get(keys[0])["status"] == "rejected"
+    assert store.get(keys[1])["status"] == "pending_local"
+
+
+def test_non_actionable_migration_preserves_human_boundary_and_malformed_item(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    noise = _event()
+    noise["correction_prompt"] = "いや、それでいい。"
+    human = content_correction.enqueue_event(noise, store=store)["item"]
+    claimed = store.claim_attempt(human["key"], "local", owner="worker")
+    store.fail_attempt(
+        human["key"],
+        "local",
+        owner=claimed["owner"],
+        error="keychain access denied",
+        failure_class="keychain_permission_required",
+    )
+
+    malformed = _event()
+    malformed["correction_turn_ref"] = {
+        "turn_id": "malformed",
+        "prompt_hash": "malformed",
+    }
+    malformed.pop("correction_prompt")
+    malformed_item = content_correction.enqueue_event(malformed, store=store)["item"]
+
+    assert content_correction.correction_item_actionability(malformed_item) == (
+        None,
+        "correction_metadata_indeterminate",
+    )
+    result = content_correction.retire_non_actionable_corrections(store=store)
+
+    assert result["completed"] == 0
+    assert store.get(human["key"])["status"] == "human_required"
+    assert store.get(malformed_item["key"])["status"] == "pending_local"
+
+
+def test_targeted_migration_checks_membership_before_actionability(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    keys: list[str] = []
+    for index in range(2):
+        event = _event()
+        event["correction_turn_ref"] = {
+            "turn_id": f"scope-{index}",
+            "prompt_hash": f"scope-{index}",
+        }
+        keys.append(content_correction.enqueue_event(event, store=store)["item"]["key"])
+
+    def scoped(item: dict) -> tuple[bool | None, str]:
+        if item["key"] == keys[1]:
+            raise AssertionError("out-of-scope item must not be evaluated")
+        return False, "correction_signal_no_longer_actionable"
+
+    monkeypatch.setattr(content_correction, "correction_item_actionability", scoped)
+    result = content_correction.retire_non_actionable_corrections(
+        store=store,
+        eligible_keys={keys[0]},
+    )
+
+    assert result["completed"] == 1
+    assert store.get(keys[0])["status"] == "rejected"
+    assert store.get(keys[1])["status"] == "pending_local"
+
+
+def test_targeted_allowlist_prevents_stale_child_creation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    event = _event()
+    root = content_correction.enqueue_event(event, store=store)["item"]
+    refreshed = dict(event)
+    refreshed["revision"] = 1
+    refreshed["parent_key"] = root["key"]
+    refreshed["candidate_page_hashes"] = {"memory": "changed"}
+
+    blocked_existing = content_correction.enqueue_event(
+        event,
+        store=store,
+        eligible_keys=set(),
+    )
+    blocked = content_correction.enqueue_event(
+        refreshed,
+        store=store,
+        eligible_keys={root["key"]},
+    )
+
+    assert blocked_existing["item"] is None
+    assert blocked_existing["blocked_by_allowlist"] == [root["key"]]
+    assert blocked["item"] is None
+    assert blocked["blocked_by_allowlist"]
+    assert [item["key"] for item in store.list_items(lane=content_correction.LANE)] == [
+        root["key"]
+    ]
+    assert store.get(root["key"])["status"] == "pending_local"
+
+
+def test_targeted_runner_passes_allowlist_to_frontier_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    item = content_correction.enqueue_event(_event(), store=store)["item"]
+    claimed = store.claim_attempt(item["key"], "local", owner="worker")
+    store.escalate(item["key"], reason="test", owner=claimed["owner"])
+    calls: list[set[str] | None] = []
+
+    def observe(_item, *, eligible_keys=None, **_kwargs):
+        calls.append(eligible_keys)
+        return {"key": item["key"], "status": "backoff"}
+
+    monkeypatch.setattr(content_correction, "_process_frontier_item", observe)
+
+    content_correction.run_pending_corrections(
+        store=store,
+        eligible_keys={item["key"]},
+    )
+
+    assert calls == [{item["key"]}]
+
+
 def test_run_pending_bulk_retires_legacy_unfiltered_noise_without_models(
     monkeypatch,
     tmp_path: Path,
@@ -1011,6 +1332,43 @@ def test_run_pending_bulk_retires_legacy_unfiltered_noise_without_models(
         item = store.get(key)
         assert item["status"] == "rejected"
         assert item["result"]["migration"] == "retire_unfiltered_completed_turn_v1"
+
+
+def test_legacy_unfiltered_migration_preserves_human_authority_boundary(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    event = _event()
+    event["correction_turn_ref"] = {
+        "turn_id": "legacy-human-boundary",
+        "prompt_hash": "legacy-human-boundary",
+    }
+    event["correction_prompt"] = "What about the storage option?"
+    event["signal"] = {
+        "matched": content_correction.LEGACY_UNFILTERED_SIGNAL,
+        "confidence": "frontier_screen",
+    }
+    item = content_correction.enqueue_event(event, store=store)["item"]
+    claimed = store.claim_attempt(item["key"], "local", owner="worker")
+    store.fail_attempt(
+        item["key"],
+        "local",
+        owner=claimed["owner"],
+        error="keychain access denied",
+        failure_class="keychain_permission_required",
+    )
+
+    result = content_correction.run_pending_corrections(
+        max_items=0,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: pytest.fail("model must not run"),
+        reviewer=lambda *_args, **_kwargs: pytest.fail("reviewer must not run"),
+    )
+
+    assert result["retired_unfiltered"]["completed"] == 0
+    readback = store.get(item["key"])
+    assert readback["status"] == "human_required"
+    assert readback["last_failure_class"] == "keychain_permission_required"
 
 
 def test_legacy_applied_feedback_retraction_is_exact_dry_run_safe_and_idempotent(

@@ -29,6 +29,7 @@ from llm_wiki_mcp.convergence import (
     ConvergenceStore,
     CycleBudget,
     is_human_required_result,
+    stable_item_key,
 )
 from llm_wiki_mcp.decision_authority import (
     compare_semantic_authority,
@@ -1481,6 +1482,7 @@ def resolve_deferred_duplicates_with_frontier(
     now: datetime | None = None,
     dry_run: bool = False,
     write: bool = True,
+    eligible_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     """Boundedly converge deterministic duplicate deferrals via a frontier judge."""
     state = convergence_store or ConvergenceStore()
@@ -1491,11 +1493,15 @@ def resolve_deferred_duplicates_with_frontier(
         max_elapsed_seconds=900,
     )
     decision_at = (now or datetime.now().astimezone()).isoformat(timespec="seconds")
-    retired_stale = state.retire_stale(
-        lane=DUPLICATE_FRONTIER_LANE,
-        reason="duplicate_candidate_expired",
-        now=now,
-        dry_run=dry_run,
+    retired_stale = (
+        state.retire_stale(
+            lane=DUPLICATE_FRONTIER_LANE,
+            reason="duplicate_candidate_expired",
+            now=now,
+            dry_run=dry_run,
+        )
+        if eligible_keys is None
+        else {"status": "skipped", "reason": "targeted_allowlist", "retired": []}
     )
     frontier_remaining = int(cycle_budget.snapshot()["remaining"]["frontier"])
     seen_keys: set[str] = set()
@@ -1516,11 +1522,30 @@ def resolve_deferred_duplicates_with_frontier(
             continue
         left_snapshot = _duplicate_page_snapshot(candidate["left"])
         right_snapshot = _duplicate_page_snapshot(candidate["right"])
+        input_data = {
+            "pair": [candidate["left"], candidate["right"]],
+            "content_hashes": {
+                candidate["left"]: left_snapshot["content_hash"],
+                candidate["right"]: right_snapshot["content_hash"],
+            },
+        }
+        candidate_key = stable_item_key(
+            DUPLICATE_FRONTIER_LANE,
+            f"{candidate['left']}<->{candidate['right']}",
+            input_data,
+            resolver_version=DUPLICATE_FRONTIER_RESOLVER_VERSION,
+        )
+        if eligible_keys is not None and candidate_key not in eligible_keys:
+            continue
         existing = _existing_duplicate_resolution(left_snapshot, right_snapshot)
         if existing is not None:
             approval_key = existing.get("approval_key")
             recovered = None
-            if isinstance(approval_key, str) and approval_key:
+            if (
+                isinstance(approval_key, str)
+                and approval_key
+                and (eligible_keys is None or approval_key in eligible_keys)
+            ):
                 recovered = _finalize_frontier_receipt(
                     state,
                     lane=DUPLICATE_FRONTIER_LANE,
@@ -1547,13 +1572,6 @@ def resolve_deferred_duplicates_with_frontier(
                 }
             )
             continue
-        input_data = {
-            "pair": [candidate["left"], candidate["right"]],
-            "content_hashes": {
-                candidate["left"]: left_snapshot["content_hash"],
-                candidate["right"]: right_snapshot["content_hash"],
-            },
-        }
         merged = state.merge_item(
             lane=DUPLICATE_FRONTIER_LANE,
             source_id=f"{candidate['left']}<->{candidate['right']}",
@@ -1567,8 +1585,20 @@ def resolve_deferred_duplicates_with_frontier(
             },
             now=now,
             dry_run=dry_run,
+            supersede_eligible_keys=eligible_keys,
         )
         item = merged["item"]
+        if item is None:
+            results.append(
+                {
+                    "status": "out_of_scope_source_changed",
+                    "key": candidate_key,
+                    "blocked_by_out_of_scope": merged.get(
+                        "blocked_by_out_of_scope", []
+                    ),
+                }
+            )
+            continue
         key = str(item["key"])
         if key in seen_keys:
             results.append({"status": "duplicate_in_cycle", "key": key})
@@ -2079,6 +2109,7 @@ def apply_retention_archives(
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     timeout: int | None = None,
     now: datetime | None = None,
+    eligible_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     """Frontier-review retention proposals before reversible soft archival."""
 
@@ -2097,11 +2128,15 @@ def apply_retention_archives(
     )
     dry_run = not apply
     decision_at = (now or datetime.now().astimezone()).isoformat(timespec="seconds")
-    retired_stale = state.retire_stale(
-        lane=RETENTION_FRONTIER_LANE,
-        reason="retention_candidate_expired",
-        now=now,
-        dry_run=dry_run,
+    retired_stale = (
+        state.retire_stale(
+            lane=RETENTION_FRONTIER_LANE,
+            reason="retention_candidate_expired",
+            now=now,
+            dry_run=dry_run,
+        )
+        if eligible_keys is None
+        else {"status": "skipped", "reason": "targeted_allowlist", "retired": []}
     )
     decisions: list[dict[str, Any]] = []
     applied = 0
@@ -2124,8 +2159,17 @@ def apply_retention_archives(
         if snapshot.get("status") != "ok":
             decision["reason"] = "archive_page_snapshot_unavailable"
             decisions.append(decision)
-            if write and not dry_run:
+            if write and not dry_run and eligible_keys is None:
                 _append_jsonl(DECISIONS_FILE, decision)
+            continue
+        input_data = {"page_id": page_id, "content_hash": snapshot["content_hash"]}
+        candidate_key = stable_item_key(
+            RETENTION_FRONTIER_LANE,
+            page_id,
+            input_data,
+            resolver_version=RETENTION_FRONTIER_RESOLVER_VERSION,
+        )
+        if eligible_keys is not None and candidate_key not in eligible_keys:
             continue
         snapshot_meta = (
             snapshot.get("meta") if isinstance(snapshot.get("meta"), dict) else {}
@@ -2133,7 +2177,11 @@ def apply_retention_archives(
         if snapshot_meta.get("status") == "archived":
             approval_key = snapshot_meta.get("frontier_approval_key")
             recovered = None
-            if isinstance(approval_key, str) and approval_key:
+            if (
+                isinstance(approval_key, str)
+                and approval_key
+                and (eligible_keys is None or approval_key in eligible_keys)
+            ):
                 recovered = _finalize_frontier_receipt(
                     state,
                     lane=RETENTION_FRONTIER_LANE,
@@ -2167,7 +2215,6 @@ def apply_retention_archives(
         if actionable_seen >= max(0, limit):
             break
         actionable_seen += 1
-        input_data = {"page_id": page_id, "content_hash": snapshot["content_hash"]}
         merged = state.merge_item(
             lane=RETENTION_FRONTIER_LANE,
             source_id=page_id,
@@ -2180,8 +2227,20 @@ def apply_retention_archives(
             },
             now=now,
             dry_run=dry_run,
+            supersede_eligible_keys=eligible_keys,
         )
         item = merged["item"]
+        if item is None:
+            decision.update(
+                {
+                    "reason": "out_of_scope_source_changed",
+                    "blocked_by_out_of_scope": merged.get(
+                        "blocked_by_out_of_scope", []
+                    ),
+                }
+            )
+            decisions.append(decision)
+            continue
         key = str(item["key"])
         decision["key"] = key
         if key in seen_keys:

@@ -7,14 +7,24 @@ import json
 from typing import Any
 
 
-def run_converge(*, session_limit: int = 4, job_limit: int = 8, run_sleep: bool = False) -> dict[str, Any]:
+def run_converge(
+    *,
+    session_limit: int = 4,
+    job_limit: int = 8,
+    run_sleep: bool = False,
+    run_system_repairs: bool = True,
+) -> dict[str, Any]:
     from llm_wiki_mcp.background_jobs import retry_due
     from llm_wiki_mcp.self_heal import enqueue_due_system_repairs
     from llm_wiki_mcp.session_sweeper import run_sweeper
 
     payload: dict[str, Any] = {
         "status": "ok",
-        "system_repairs": enqueue_due_system_repairs(limit=min(2, job_limit)),
+        "system_repairs": (
+            enqueue_due_system_repairs(limit=min(2, job_limit))
+            if run_system_repairs
+            else {"status": "skipped", "reason": "disabled_by_cli"}
+        ),
         "background_jobs": retry_due(limit=job_limit),
         "session_sweeper": run_sweeper(limit=session_limit),
     }
@@ -53,12 +63,25 @@ def main(argv: list[str] | None = None) -> int:
         help=argparse.SUPPRESS,
     )
     parser.set_defaults(run_sleep=False)
+    parser.add_argument(
+        "--no-system-repairs",
+        dest="run_system_repairs",
+        action="store_false",
+        help="Do not enqueue exceptional system-code repair work.",
+    )
+    parser.set_defaults(run_system_repairs=True)
     args = parser.parse_args(argv)
-    print(json.dumps(run_converge(
-        session_limit=max(0, args.session_limit),
-        job_limit=max(0, args.job_limit),
-        run_sleep=args.run_sleep,
-    ), ensure_ascii=False))
+    print(
+        json.dumps(
+            run_converge(
+                session_limit=max(0, args.session_limit),
+                job_limit=max(0, args.job_limit),
+                run_sleep=args.run_sleep,
+                run_system_repairs=args.run_system_repairs,
+            ),
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
