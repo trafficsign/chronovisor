@@ -70,12 +70,12 @@ adaptive_residency = true
 residency_policy_version = 2
 memory_reserve_gib = 16
 max_resident_models = 3
-# This is the post-adoption production shape. The v55 artifact is sealed by
+# This is the post-adoption production shape. The v56 artifact is sealed by
 # artifact schema 12, evaluator policy 20, decision-semantics policy 11,
 # quorum-safety policy 1, action-signature policy 5, effective-request-
 # fingerprint policy 4, structured-generation policy 1, lane-contract registry
 # policy 9 (artifact identity
-# only), lane prompt policy 7 for 17 lanes, 8 for raw replay, 13 for ingest, and
+# only), lane prompt policy 7 for 17 lanes, 8 for raw replay, 14 for ingest, and
 # lane-contract case policy 20 (source deterministic_lane_contract_v20).
 # Evaluator policy 20 seals deterministic seed 0 as well as hash-bound ingest
 # repair option selection and host-only byte materialization into the artifact
@@ -86,7 +86,7 @@ max_resident_models = 3
 # engine/model-drifted artifacts make enabled semantic lanes quarantine before
 # inference. Set this to "" and keep the 19 model-backed lanes in shadow only
 # while compiling and evaluating a replacement candidate.
-adoption_artifact = "~/.wiki/runtime/model-lab/local-eval/adoption-v55-evaluator20.json"
+adoption_artifact = "~/.wiki/runtime/model-lab/local-eval/adoption-v56-evaluator20.json"
 
 [decision_policies]
 # Deterministic/non-model lanes and the guarded repair-only lane are live

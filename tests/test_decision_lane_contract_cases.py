@@ -368,7 +368,7 @@ def test_lane_contract_case_source_version_tracks_the_resealed_cases() -> None:
     assert LANE_CONTRACT_CASE_VERSION == 20
     assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v20"
     assert set(LANE_PROMPT_POLICY_VERSIONS) == set(model_backed_lane_names())
-    assert LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] == 13
+    assert LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] == 14
     assert LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] == 8
     assert {
         version
@@ -1659,6 +1659,57 @@ def test_single_near_max_raw_create_fits_router_input_cap() -> None:
     assert len(prompt.encode("utf-8")) > len(model_prompt.encode("utf-8")) * 2
 
 
+def test_multi_operation_incident_compacts_model_projection_under_router_cap() -> None:
+    """Six complete changes must fit without weakening the fixed 93KB cap."""
+
+    raw = " ".join(f"rawfact{index:05d}" for index in range(1_400))
+    operation_sizes = (5_274, 3_706, 4_363, 5_227, 7_109, 18_701)
+    operations: list[dict[str, object]] = []
+    for index, target_bytes in enumerate(operation_sizes):
+        repeated = (f"fact-{index} " * (target_bytes // 7 + 1))[:target_bytes]
+        operations.append(
+            {
+                "type": "create",
+                "filename": f"memory/incident-page-{index}.md",
+                "content": (
+                    f"---\ntitle: Incident page {index}\n"
+                    "tags: [d/configuration, t/reference, s/evergreen]\n"
+                    f"---\n{repeated}"
+                ),
+            }
+        )
+    proposal = _complete_create_ingest_proposal(
+        raw=raw,
+        operations=operations,
+        triage_plan=[],
+    )
+
+    prompt, _model_prompt, preflight = _ingest_model_preflight(proposal)
+    config = DecisionRouterConfig()
+    schema = production_decision_schemas()["ingest_reconciliation"]
+    required_context, selected_context = decision_request_context(
+        config,
+        prompt,
+        schema,
+        None,
+        "ingest_reconciliation",
+    )
+
+    assert preflight.ok is True
+    assert config.max_input_chars * 3 // 4 < preflight.input_bytes < 93_000
+    assert required_context <= selected_context == 114_688
+    for marker in (INGEST_REPAIR_MODEL_BLOCK, INGEST_REVIEW_MODEL_BLOCK):
+        encoded = prompt.split(f"<{marker}>\n", 1)[1].split(f"\n</{marker}>", 1)[0]
+        assert encoded == json.dumps(
+            json.loads(encoded),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+            default=str,
+        )
+
+
 def test_ingest_prompt_orders_quarantine_retry_and_safe_apply() -> None:
     prompts = [
         case.prompt
@@ -1668,21 +1719,18 @@ def test_ingest_prompt_orders_quarantine_retry_and_safe_apply() -> None:
 
     assert prompts
     assert all(
-        "Apply this decision table in order; stop at the first matching step:"
-        in prompt
+        "Apply this decision table in order; stop at the first matching step:" in prompt
         for prompt in prompts
     )
     assert all(
         "Only if step 1 is false: if readable, internally consistent evidence has a\n"
         "   failed local operation another local attempt could resolve, choose retry\n"
-        "   with retry_required."
-        in prompt
+        "   with retry_required." in prompt
         for prompt in prompts
     )
     assert all(
         "A coherent report that incompatible states are both current still matches\n"
-        "   step 1 when no provenance resolves which state is authoritative."
-        in prompt
+        "   step 1 when no provenance resolves which state is authoritative." in prompt
         for prompt in prompts
     )
     assert all(
@@ -1857,8 +1905,8 @@ def test_lane_overlay_excludes_the_infeasible_16k_bucket() -> None:
         for case in decision_lane_contract_case_specs()
     )
     assert buckets == {
-        32_768: 96,
-        65_536: 2,
+        32_768: 97,
+        65_536: 1,
         98_304: 1,
         114_688: 1,
     }

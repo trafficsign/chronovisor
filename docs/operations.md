@@ -76,8 +76,8 @@ weights, rewrite settings, or context style.
 # Make one immutable candidate config first. Its [decision_router] section
 # must contain the intended production values and adoption_artifact = "".
 CANDIDATE_CONFIG="$HOME/.wiki/runtime/model-lab/decision-router-candidate.toml"
-CORPUS="$HOME/.wiki/runtime/model-lab/adoption-corpus-v55.jsonl"
-ARTIFACT="$HOME/.wiki/runtime/model-lab/local-eval/adoption-v55-evaluator20.json"
+CORPUS="$HOME/.wiki/runtime/model-lab/adoption-corpus-v56.jsonl"
+ARTIFACT="$HOME/.wiki/runtime/model-lab/local-eval/adoption-v56-evaluator20.json"
 chmod 600 "$CANDIDATE_CONFIG"
 
 # Preflight the deterministic selection without replacing the durable corpus.
@@ -128,7 +128,7 @@ request-fingerprint policy, or candidate config changes; do not overwrite a
 corpus after an evaluation has started. The same immutable candidate config
 must be supplied to both the compiler and every fresh or resumed evaluator
 invocation. A config change is a new evaluation identity, never a resumable
-continuation. The current v54 identity uses artifact schema 12, evaluator
+continuation. The current v56 identity uses artifact schema 12, evaluator
 policy 20, decision-semantics policy 11, quorum-safety policy 1, action-
 signature policy 5, effective-request-fingerprint policy 4, structured-
 generation policy 1, lane-contract registry policy 9, lane-contract case policy
@@ -140,7 +140,7 @@ artifact identity.
 Registry policy 9 is aggregate artifact/run identity only and is not
 rendered into model requests. The model-visible prompt-contract version is
 lane-scoped: 17 lanes remain at version 7, `ingest_reconciliation` is at version
-13, and `raw_replay_reconciliation` is at version 8. Unchanged lane prompt
+14, and `raw_replay_reconciliation` is at version 8. Unchanged lane prompt
 bytes remain stable, but effective-request fingerprint policy 4 intentionally
 reseals every lane identity and the aggregate canonical case manifest.
 
@@ -150,14 +150,14 @@ versioned corpus, and run a fresh evaluator artifact. The changed per-lane hash
 updates the aggregate manifest and artifact identity automatically; do not put
 the registry version into every model request, because that would invalidate
 all 19 lanes. Increment the registry policy itself only when the registry or
-artifact identity contract changes. The fixed v55 baseline contains 100
+artifact identity contract changes. The fixed v56 baseline contains 100
 canonical cases spanning all 19 model-backed lanes and all four executable
 context buckets. Legacy replay rows are included only when their independent
 provenance, contract identity, expected effect, and action signature all match
 the current policy. During compilation only, non-deterministic historical rows
 with stale lane or request identity are counted and excluded; deterministic
 contract fixtures, the frozen corpus, evaluation, and runtime loading remain
-strict. The v55 corpus admits no stale historical rows.
+strict. The v56 corpus admits no stale historical rows.
 
 Canonical fixtures must be reachable through the same deterministic preflight
 as production. Entity-backfill missing, malformed, truncated, or alias-
@@ -295,7 +295,7 @@ Increasing the resident count also requires spare capacity of at least 2 GiB or
 10% of the proposed resident set, whichever is larger, so small memory changes
 do not flap repeatedly between two and three runners.
 
-After the v55/evaluator-policy-20 artifact reports `adopted=true`, nominate it in
+After the v56/evaluator-policy-20 artifact reports `adopted=true`, nominate it in
 `decision_router.adoption_artifact`, revalidate it through a fresh runtime, and
 promote all 19 model-backed semantic lanes from `shadow` to `enabled`. Together
 with the five deterministic/guarded lanes, the post-adoption production state
