@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -35,7 +36,7 @@ STATIC_DIR = Path(__file__).with_name("dashboard_static")
 LOG_LINE_RE = re.compile(r"^- \[(?P<time>[^\]]+)\] (?P<message>.*)$")
 RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
 SEMANTIC_PROJECTION_CHILD_RE = re.compile(
-    r"^semantic-[0-9a-f]{64}-child-[0-9]{8}-[0-9a-f]{64}\.md$"
+    r"^semantic-(?P<projection>[0-9a-f]{64})-child-[0-9]{8}-[0-9a-f]{64}\.md$"
 )
 LOG_PAGE_CHANGE_RE = re.compile(
     r"^- \[(?P<time>[^\]]+)\] ingest \| (?P<kind>created|updated) (?P<page>.+)$"
@@ -688,6 +689,135 @@ def _semantic_deferred_raw_names(raw_paths: list[Path]) -> list[str]:
     )
 
 
+def _projection_parent_name(
+    raw_dir: Path,
+    source_parent: dict[str, Any],
+) -> str | None:
+    """Resolve one manifest parent without trusting its path-like fields."""
+
+    receipt = source_parent.get("receipt")
+    if not isinstance(receipt, dict):
+        return None
+    host = receipt.get("host")
+    session_key = receipt.get("session_key")
+    after_line = receipt.get("after_line")
+    until_line = receipt.get("until_line")
+    idempotency_key = receipt.get("idempotency_key")
+    expected_sha256 = source_parent.get("raw_sha256")
+    if (
+        host not in {"codex", "claude-code"}
+        or not isinstance(session_key, str)
+        or re.fullmatch(r"[0-9a-f]{24}", session_key) is None
+        or isinstance(after_line, bool)
+        or not isinstance(after_line, int)
+        or after_line < 0
+        or isinstance(until_line, bool)
+        or not isinstance(until_line, int)
+        or until_line <= after_line
+        or not isinstance(idempotency_key, str)
+        or re.fullmatch(r"[0-9a-f]{64}", str(expected_sha256)) is None
+    ):
+        return None
+    expected_idempotency_key = f"{host}-{session_key}-from{after_line}-to{until_line}"
+    if idempotency_key != expected_idempotency_key:
+        return None
+    parent_name = f"save-{expected_idempotency_key}.md"
+    parent_path = raw_dir / parent_name
+    if parent_path.is_symlink():
+        return None
+    try:
+        observed_sha256 = hashlib.sha256(parent_path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    return parent_name if observed_sha256 == expected_sha256 else None
+
+
+def _projection_parent_raw_names_by_child(
+    raw_dir: Path,
+    child_names: set[str],
+) -> dict[str, set[str]]:
+    """Resolve projection children to verified lossless saved raws."""
+
+    from llm_wiki_mcp.raw_semantic_projection import verify_projection_bundle
+
+    children_by_projection: dict[str, set[str]] = {}
+    for child_name in child_names:
+        match = SEMANTIC_PROJECTION_CHILD_RE.fullmatch(child_name)
+        if match is not None:
+            children_by_projection.setdefault(match.group("projection"), set()).add(
+                child_name
+            )
+    parents_by_child: dict[str, set[str]] = {}
+    for projection_id, requested_children in children_by_projection.items():
+        manifest_path = raw_dir / f"semantic-{projection_id}.manifest.json"
+        try:
+            manifest = verify_projection_bundle(manifest_path)
+        except Exception:
+            continue
+        manifest_children = manifest.get("children")
+        if not isinstance(manifest_children, list):
+            continue
+        matched_children = requested_children.intersection(
+            str(row.get("filename"))
+            for row in manifest_children
+            if isinstance(row, dict) and isinstance(row.get("filename"), str)
+        )
+        if not matched_children:
+            continue
+        source = manifest.get("source")
+        source_parents = source.get("parents") if isinstance(source, dict) else None
+        if not isinstance(source_parents, list):
+            continue
+        parent_names: set[str] = set()
+        for source_parent in source_parents:
+            if not isinstance(source_parent, dict):
+                continue
+            parent_name = _projection_parent_name(raw_dir, source_parent)
+            if parent_name is not None:
+                parent_names.add(parent_name)
+        for child_name in matched_children:
+            if parent_names:
+                parents_by_child[child_name] = set(parent_names)
+    return parents_by_child
+
+
+def _projection_save_states(
+    raw_dir: Path,
+    raw_files: dict[str, dict[str, Any]],
+    raw_paths: list[Path],
+    processed_raw_names: set[str],
+) -> tuple[set[str], set[str]]:
+    """Return active semantic-deferred and unresolved-pending saved raws."""
+
+    deferred_statuses = _operational_deferred_raw_statuses(raw_paths)
+    semantic_deferred_raws = {
+        name
+        for name, reason in deferred_statuses.items()
+        if reason == "semantic_no_quorum"
+    }
+    saved_names = set(raw_files)
+    child_names = {
+        path.name
+        for path in raw_paths
+        if SEMANTIC_PROJECTION_CHILD_RE.fullmatch(path.name) is not None
+    }
+    unresolved_children = child_names - processed_raw_names
+    relevant_children = unresolved_children | (semantic_deferred_raws & child_names)
+    parents_by_child = _projection_parent_raw_names_by_child(
+        raw_dir,
+        relevant_children,
+    )
+    semantic_deferred_saves = semantic_deferred_raws & saved_names
+    pending_saves: set[str] = set()
+    for child_name, parent_names in parents_by_child.items():
+        if child_name in semantic_deferred_raws:
+            semantic_deferred_saves.update(parent_names & saved_names)
+        else:
+            pending_saves.update(parent_names & saved_names)
+    pending_saves -= semantic_deferred_saves
+    return semantic_deferred_saves, pending_saves
+
+
 def _save_history_snapshot(
     days: int = 371, today: date | None = None
 ) -> dict[str, Any]:
@@ -703,8 +833,9 @@ def _save_history_snapshot(
     raw_dir = WIKI_ROOT / "raw"
     raw_files: dict[str, dict[str, Any]] = {}
     raw_status: dict[str, str] = {}
+    raw_paths = sorted(raw_dir.glob("*.md")) if raw_dir.exists() else []
     if raw_dir.exists():
-        for path in raw_dir.glob("*.md"):
+        for path in raw_paths:
             # Projection children are generated processing artifacts.  The
             # original lossless parent is already counted as the save, so
             # including children would double-count bytes and invent a
@@ -875,15 +1006,21 @@ def _save_history_snapshot(
     # state wins over an older failed attempt for the same immutable raw.
     orchestrator_state = _read_json_file(WIKI_ROOT / ".orchestrator_state.json") or {}
     processed_raw_files = orchestrator_state.get("processed_raw_files")
+    processed_raw_names = (
+        {filename for filename in processed_raw_files if isinstance(filename, str)}
+        if isinstance(processed_raw_files, list)
+        else set()
+    )
     if isinstance(processed_raw_files, list):
         for filename in processed_raw_files:
             if isinstance(filename, str) and filename in raw_files:
                 raw_status[filename] = "processed"
 
-    semantic_deferred = set(
-        _semantic_deferred_raw_names(
-            [raw_dir / filename for filename in sorted(raw_files)]
-        )
+    semantic_deferred, projection_pending = _projection_save_states(
+        raw_dir,
+        raw_files,
+        raw_paths,
+        processed_raw_names,
     )
 
     try:
@@ -932,6 +1069,9 @@ def _save_history_snapshot(
         if filename in semantic_deferred:
             row["deferred_bytes"] += raw_bytes
             status = "deferred"
+        elif filename in projection_pending:
+            row["pending_bytes"] += raw_bytes
+            status = "pending"
         elif status == "processed":
             row["processed_bytes"] += raw_bytes
         elif status == "failed":

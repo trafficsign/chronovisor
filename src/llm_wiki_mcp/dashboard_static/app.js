@@ -1932,19 +1932,45 @@ function render(snapshot) {
   drawBatchChart(els.batchChart, metrics, status);
 }
 
-async function refresh() {
+let refreshInFlight = null;
+const SNAPSHOT_TIMEOUT_MS = 180000;
+
+function refresh() {
+  if (refreshInFlight !== null) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), SNAPSHOT_TIMEOUT_MS);
+    try {
+      const response = await fetch("/api/snapshot", {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      render(await response.json());
+    } catch (error) {
+      setState("error");
+      els.stateText.textContent = "disconnected";
+      els.eventFeed.textContent = "";
+      const message = document.createElement("div");
+      message.className = "event-message";
+      message.textContent = `Dashboard fetch failed: ${error.message}`;
+      els.eventFeed.appendChild(message);
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  })().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+async function refreshLoop() {
   try {
-    const response = await fetch("/api/snapshot", { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    render(await response.json());
-  } catch (error) {
-    setState("error");
-    els.stateText.textContent = "disconnected";
-    els.eventFeed.textContent = "";
-    const message = document.createElement("div");
-    message.className = "event-message";
-    message.textContent = `Dashboard fetch failed: ${error.message}`;
-    els.eventFeed.appendChild(message);
+    await refresh();
+  } catch {
+    // refresh() reports normal fetch failures; keep polling after unexpected ones.
+  } finally {
+    window.setTimeout(refreshLoop, 1000);
   }
 }
 
@@ -1965,6 +1991,5 @@ els.knowledgeModeButtons.forEach((button) => {
 els.pendingChart.addEventListener("mousemove", handleSaveLoadHover);
 els.pendingChart.addEventListener("mouseleave", hideSaveLoadTooltip);
 
-refresh();
-setInterval(refresh, 1000);
+void refreshLoop();
 window.addEventListener("resize", refresh);

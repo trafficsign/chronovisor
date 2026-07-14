@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import date
+import os
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -107,6 +109,147 @@ def test_save_load_segments_semantic_defer_returns_to_pending_after_release(
         names["deferred"]: "pending",
         names["failed"]: "failed",
     }
+
+
+def test_save_load_attributes_held_projection_child_to_saved_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import dashboard, raw_semantic_projection
+
+    wiki_root = tmp_path / "wiki"
+    raw_dir = wiki_root / "raw"
+    raw_dir.mkdir(parents=True)
+    session_key = "c" * 24
+    idempotency_key = f"claude-code-{session_key}-from1-to2"
+    parent_name = f"save-{idempotency_key}.md"
+    parent_bytes = b"lossless saved transcript"
+    projection_id = "a" * 64
+    child_name = f"semantic-{projection_id}-child-00000001-{'b' * 64}.md"
+    processed_child_name = f"semantic-{projection_id}-child-00000002-{'d' * 64}.md"
+    parent_path = raw_dir / parent_name
+    parent_path.write_bytes(parent_bytes)
+    saved_at = datetime(2026, 7, 14, 12, 0, 0).timestamp()
+    os.utime(parent_path, (saved_at, saved_at))
+    (raw_dir / child_name).write_text("derived semantic child", encoding="utf-8")
+    (raw_dir / processed_child_name).write_text(
+        "already processed semantic child", encoding="utf-8"
+    )
+    (raw_dir / f"semantic-{projection_id}.manifest.json").write_text(
+        "placeholder", encoding="utf-8"
+    )
+    (wiki_root / ".orchestrator_state.json").write_text(
+        json.dumps({"processed_raw_files": [parent_name, processed_child_name]}),
+        encoding="utf-8",
+    )
+    manifest = {
+        "children": [
+            {"filename": child_name},
+            {"filename": processed_child_name},
+        ],
+        "source": {
+            "parents": [
+                {
+                    "raw_sha256": hashlib.sha256(parent_bytes).hexdigest(),
+                    "receipt": {
+                        "host": "claude-code",
+                        "session_key": session_key,
+                        "after_line": 1,
+                        "until_line": 2,
+                        "idempotency_key": idempotency_key,
+                    },
+                }
+            ]
+        },
+    }
+    active_deferred = {child_name: "semantic_no_quorum"}
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "_operational_deferred_raw_statuses",
+        lambda _paths: dict(active_deferred),
+    )
+    monkeypatch.setattr(
+        raw_semantic_projection,
+        "verify_projection_bundle",
+        lambda _path: manifest,
+    )
+
+    history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 14))
+
+    assert history["totals"]["raw_bytes"] == len(parent_bytes)
+    assert history["totals"]["processed_bytes"] == 0
+    assert history["totals"]["pending_bytes"] == 0
+    assert history["totals"]["deferred_bytes"] == len(parent_bytes)
+    assert history["totals"]["failed_bytes"] == 0
+    assert history["days"][0]["raw_segments"] == [
+        {
+            "name": parent_name,
+            "bytes": len(parent_bytes),
+            "status": "deferred",
+            "source": "claude-code",
+        }
+    ]
+
+    active_deferred.clear()
+    released = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 14))
+
+    assert released["totals"]["processed_bytes"] == 0
+    assert released["totals"]["pending_bytes"] == len(parent_bytes)
+    assert released["totals"]["deferred_bytes"] == 0
+    assert released["days"][0]["raw_segments"][0]["status"] == "pending"
+
+    (wiki_root / ".orchestrator_state.json").write_text(
+        json.dumps(
+            {
+                "processed_raw_files": [
+                    parent_name,
+                    child_name,
+                    processed_child_name,
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    processed = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 14))
+
+    assert processed["totals"]["processed_bytes"] == len(parent_bytes)
+    assert processed["totals"]["pending_bytes"] == 0
+    assert processed["totals"]["deferred_bytes"] == 0
+    assert processed["days"][0]["raw_segments"][0]["status"] == "processed"
+
+
+def test_projection_parent_resolution_rejects_unbound_receipt_and_symlink(
+    tmp_path: Path,
+) -> None:
+    from llm_wiki_mcp import dashboard
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    session_key = "a" * 24
+    parent_bytes = b"source"
+    source_parent = {
+        "raw_sha256": hashlib.sha256(parent_bytes).hexdigest(),
+        "receipt": {
+            "host": "codex",
+            "session_key": session_key,
+            "after_line": 3,
+            "until_line": 4,
+            "idempotency_key": f"codex-{session_key}-from3-to4",
+        },
+    }
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(parent_bytes)
+    parent_path = raw_dir / f"save-codex-{session_key}-from3-to4.md"
+    parent_path.symlink_to(outside)
+
+    assert dashboard._projection_parent_name(raw_dir, source_parent) is None
+
+    parent_path.unlink()
+    parent_path.write_bytes(parent_bytes)
+    source_parent["receipt"]["idempotency_key"] = "../outside"
+    assert dashboard._projection_parent_name(raw_dir, source_parent) is None
 
 
 def test_snapshot_separates_semantic_and_operational_holds_once(
@@ -403,3 +546,13 @@ def test_dashboard_static_contract_exposes_deferred_without_pending_dashes() -> 
     assert 'dashed: segment.status === "deferred"' not in js
     assert "row.files_deferred" in js
     assert "countParts.push(`${row.deferred} defer`)" in js
+    assert "let refreshInFlight = null" in js
+    assert "if (refreshInFlight !== null) return refreshInFlight" in js
+    assert "window.setTimeout(refreshLoop, 1000)" in js
+    assert "setInterval(refresh" not in js
+    assert "const SNAPSHOT_TIMEOUT_MS = 180000" in js
+    assert "const controller = new AbortController()" in js
+    assert "signal: controller.signal" in js
+    assert "controller.abort()" in js
+    assert "window.clearTimeout(timeoutId)" in js
+    assert "finally {\n    window.setTimeout(refreshLoop, 1000)" in js
