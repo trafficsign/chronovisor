@@ -383,6 +383,9 @@ def test_generate_one_repairs_missing_end_marker_in_same_logical_session(
     assert "code: missing_end_marker" in prompts[1]
     assert "must contain exactly one" in prompts[1]
     assert "final non-whitespace line" in prompts[1]
+    if op_type == "update":
+        assert "return only the new append body inside the wrapper" in prompts[1]
+        assert "do not repeat, summarize, or rewrite" in prompts[1]
     assert diagnostics["attempts"] == 2
     assert diagnostics["repair_turns"] == 1
 
@@ -11101,18 +11104,6 @@ class TestIngestContextAdmission:
                 ),
                 "stream_incomplete",
             ),
-            (
-                ollama.GenerateResponse(
-                    content=(
-                        "=== NEW PAGE: memory/new.md ===\n"
-                        "---\ntitle: New\nupdated: 2026-01-01\n---\nbody\n"
-                        "=== END PAGE ==="
-                    ),
-                    done=True,
-                    done_reason="length",
-                ),
-                "output_truncated",
-            ),
         ],
     )
     def test_stage_two_rejects_incomplete_completion_before_page_parse(
@@ -11148,6 +11139,220 @@ class TestIngestContextAdmission:
             )
 
         assert calls == 1
+
+    def test_stage_two_replaces_output_truncation_from_original_evidence(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        partial = "PARTIAL_COMPLETION_MUST_NOT_BECOME_HISTORY"
+        target = _seed_page(
+            isolated_wiki,
+            "memory/new.md",
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nexisting\n",
+        )
+        preimage = target.read_bytes()
+        valid = "=== UPDATE PAGE: memory/new.md ===\n## Added\n\nbody\n=== END PAGE ==="
+        responses = iter(
+            [
+                ingest.ollama_runtime.GenerateResponse(
+                    content=partial,
+                    done=True,
+                    done_reason="length",
+                    prompt_eval_count=100,
+                    eval_count=8192,
+                ),
+                ingest.ollama_runtime.GenerateResponse(
+                    content=valid,
+                    done=True,
+                    done_reason="stop",
+                    prompt_eval_count=200,
+                    eval_count=100,
+                ),
+            ]
+        )
+        calls: list[tuple[str, dict]] = []
+        progress: list[dict] = []
+
+        def fake_generate(prompt: str, **kwargs):
+            calls.append((prompt, kwargs))
+            return next(responses)
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+        diagnostics: dict = {}
+
+        result = ingest._generate_one(
+            {
+                "type": "update",
+                "filename": "memory/new.md",
+                "title": "New",
+            },
+            "ORIGINAL_GROUNDED_EVIDENCE",
+            diagnostics=diagnostics,
+            progress_callback=progress.append,
+        )
+
+        assert result is not None
+        assert result["content"].endswith("body")
+        assert len(calls) == 2
+        assert "ORIGINAL_GROUNDED_EVIDENCE" in calls[1][0]
+        assert "reached the transport output limit and was discarded" in calls[1][0]
+        assert "return only the new append body inside the wrapper" in calls[1][0]
+        assert "do not repeat, summarize, or rewrite" in calls[1][0]
+        assert partial not in calls[1][0]
+        assert f"at most {calls[0][1]['num_predict'] // 2} output tokens" in calls[1][0]
+        assert diagnostics["attempts"] == 2
+        assert diagnostics["repair_turns"] == 1
+        assert diagnostics["output_truncation_retries"] == 1
+        assert [event["event"] for event in progress] == ["repair"]
+        assert target.read_bytes() == preimage
+
+    def test_stage_two_resets_validator_history_when_repair_truncates(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        target = _seed_page(
+            isolated_wiki,
+            "memory/new.md",
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nexisting\n",
+        )
+        preimage = target.read_bytes()
+        invalid = (
+            "=== UPDATE PAGE: memory/new.md ===\n"
+            "## Added\n\ninvalid first response\n"
+            "=== END PAGE ===\nUNEXPECTED_TRAILING_TEXT"
+        )
+        partial = "TRUNCATED_VALIDATOR_REPAIR_MUST_BE_DISCARDED"
+        valid = "=== UPDATE PAGE: memory/new.md ===\n## Added\n\nbody\n=== END PAGE ==="
+        responses = iter(
+            [
+                ingest.ollama_runtime.GenerateResponse(
+                    content=invalid,
+                    done=True,
+                    done_reason="stop",
+                    prompt_eval_count=200,
+                    eval_count=100,
+                ),
+                ingest.ollama_runtime.GenerateResponse(
+                    content=partial,
+                    done=True,
+                    done_reason="length",
+                    prompt_eval_count=200,
+                    eval_count=8192,
+                ),
+                ingest.ollama_runtime.GenerateResponse(
+                    content=valid,
+                    done=True,
+                    done_reason="stop",
+                    prompt_eval_count=200,
+                    eval_count=100,
+                ),
+            ]
+        )
+        prompts: list[str] = []
+        progress: list[dict] = []
+
+        def fake_generate(prompt: str, **_kwargs):
+            prompts.append(prompt)
+            return next(responses)
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+        diagnostics: dict = {}
+
+        result = ingest._generate_one(
+            {
+                "type": "update",
+                "filename": "memory/new.md",
+                "title": "New",
+            },
+            "ORIGINAL_GROUNDED_EVIDENCE",
+            diagnostics=diagnostics,
+            progress_callback=progress.append,
+        )
+
+        assert result is not None
+        assert len(prompts) == 3
+        assert invalid in prompts[1]
+        assert "code: missing_end_marker" in prompts[1]
+        assert "ORIGINAL_GROUNDED_EVIDENCE" in prompts[2]
+        assert "reached the transport output limit and was discarded" in prompts[2]
+        assert invalid not in prompts[2]
+        assert partial not in prompts[2]
+        assert "Validator errors:" not in prompts[2]
+        assert diagnostics["attempts"] == 3
+        assert diagnostics["repair_turns"] == 2
+        assert diagnostics["output_truncation_retries"] == 1
+        assert [event["event"] for event in progress] == ["repair", "repair"]
+        planned, _totals = ingest._prepare_operations([result], read_only=True)
+        [prepared] = planned
+        assert prepared.previous_text == preimage.decode("utf-8")
+        from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+
+        _meta, prepared_body = parse_frontmatter(prepared.new_body)
+        assert prepared_body == "existing\n\n## Added\n\nbody\n"
+        assert target.read_bytes() == preimage
+
+    def test_stage_two_bounds_repeated_output_truncation(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        responses = iter(
+            [
+                ingest.ollama_runtime.GenerateResponse(
+                    content=f"PARTIAL_{index}",
+                    done=True,
+                    done_reason="length",
+                    prompt_eval_count=100,
+                    eval_count=8192,
+                )
+                for index in range(3)
+            ]
+        )
+        prompts: list[str] = []
+        progress: list[dict] = []
+
+        def fake_generate(prompt: str, **_kwargs):
+            prompts.append(prompt)
+            return next(responses)
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
+        diagnostics: dict = {}
+
+        with pytest.raises(
+            RuntimeError,
+            match="ingest generation output_truncated:",
+        ):
+            ingest._generate_one(
+                {
+                    "type": "create",
+                    "filename": "memory/new.md",
+                    "title": "New",
+                },
+                "ORIGINAL_GROUNDED_EVIDENCE",
+                diagnostics=diagnostics,
+                progress_callback=progress.append,
+            )
+
+        assert len(prompts) == 3
+        assert "PARTIAL_0" not in prompts[1]
+        assert "PARTIAL_1" not in prompts[2]
+        assert all("ORIGINAL_GROUNDED_EVIDENCE" in prompt for prompt in prompts)
+        assert diagnostics["attempts"] == 3
+        assert diagnostics["failure_class"] == "output_truncated"
+        assert diagnostics["output_truncation_retries"] == 2
+        assert [event["event"] for event in progress] == [
+            "repair",
+            "repair",
+            "error",
+        ]
 
     def test_related_budget_never_truncates_current_update_target(
         self,

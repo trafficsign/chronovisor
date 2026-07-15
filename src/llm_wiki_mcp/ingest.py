@@ -2134,6 +2134,12 @@ def _page_generation_repair_prompt(
     expected_wrapper = "NEW" if op_type == "create" else "UPDATE"
     failure_class = validation.failure_class or "invalid_page_block"
     reason = validation.reason or "the page block failed deterministic validation"
+    scope_rule = (
+        "For UPDATE, return only the new append body inside the wrapper; do not "
+        "repeat, summarize, or rewrite the existing stored page."
+        if op_type == "update"
+        else "For CREATE, return the complete new page body inside the wrapper."
+    )
     prompt = f"""Your previous response was rejected by the deterministic page validator.
 
 Validator errors:
@@ -2143,11 +2149,50 @@ Validator errors:
 Return a complete replacement response for `{filename}`. Do not describe the
 fix and do not return a patch. Start with exactly
 `=== {expected_wrapper} PAGE: {filename} ===` and finish with the exact final
-line `=== END PAGE ===`. Preserve only facts grounded in the original source.
+line `=== END PAGE ===`. {scope_rule} Preserve only facts grounded in the
+original source.
 """
     if len(prompt.encode("utf-8")) > _MAX_PAGE_REPAIR_FEEDBACK_BYTES:
         raise RuntimeError(
             "ingest generation feedback_too_large: page validator feedback "
+            "exceeded the fixed repair cap"
+        )
+    return prompt
+
+
+def _page_generation_truncation_retry_prompt(
+    *,
+    op_type: str,
+    filename: str,
+    max_output_tokens: int,
+) -> str:
+    """Request a shorter complete replacement without trusting partial text.
+
+    An Ollama ``done_reason=length`` completion has no attested terminal
+    boundary, so it must never become assistant history.  The retry sees the
+    original grounded prompt again plus this bounded instruction and produces
+    a complete replacement from scratch.
+    """
+
+    expected_wrapper = "NEW" if op_type == "create" else "UPDATE"
+    scope_rule = (
+        "For UPDATE, return only the new append body inside the wrapper; do not "
+        "repeat, summarize, or rewrite the existing stored page."
+        if op_type == "update"
+        else "For CREATE, return the complete new page body inside the wrapper."
+    )
+    prompt = f"""Your previous response reached the transport output limit and was discarded.
+
+Return a shorter, complete replacement response for `{filename}` from the
+original source. Use at most {max_output_tokens} output tokens. Do not continue
+the discarded response, describe the fix, or return a patch. Start with exactly
+`=== {expected_wrapper} PAGE: {filename} ===` and finish with the exact final
+line `=== END PAGE ===`. {scope_rule} Preserve only facts grounded in the
+original source.
+"""
+    if len(prompt.encode("utf-8")) > _MAX_PAGE_REPAIR_FEEDBACK_BYTES:
+        raise RuntimeError(
+            "ingest generation feedback_too_large: output truncation feedback "
             "exceeded the fixed repair cap"
         )
     return prompt
@@ -2416,6 +2461,7 @@ not explicit in the raw evidence.
                 generate_kwargs["return_metadata"] = True
             messages = [{"role": "user", "content": prompt}]
             seen_output_hashes: set[str] = set()
+            output_truncation_retries = 0
             for attempt_index in range(_MAX_PAGE_GENERATION_RESPONSES):
                 attempts_made = attempt_index + 1
                 output = _generate_with_progress(
@@ -2436,6 +2482,61 @@ not explicit in the raw evidence.
                                     "attempts": attempt_index + 1,
                                 }
                             )
+                        if (
+                            failure_class == "output_truncated"
+                            and attempt_index < _MAX_PAGE_GENERATION_RESPONSES - 1
+                        ):
+                            # Never feed the partial response back as assistant
+                            # history. Re-anchor on the original evidence and
+                            # ask for a successively shorter complete
+                            # replacement within this bounded ingest call.
+                            output_truncation_retries += 1
+                            target_tokens = min(
+                                selected_num_predict,
+                                max(
+                                    512,
+                                    selected_num_predict
+                                    // (2**output_truncation_retries),
+                                ),
+                            )
+                            retry_prompt = _page_generation_truncation_retry_prompt(
+                                op_type=op_type,
+                                filename=filename,
+                                max_output_tokens=target_tokens,
+                            )
+                            messages = [
+                                {"role": "user", "content": prompt},
+                                {"role": "user", "content": retry_prompt},
+                            ]
+                            if diagnostics is not None:
+                                diagnostics.update(
+                                    {
+                                        "output_truncation_retries": (
+                                            output_truncation_retries
+                                        ),
+                                        "replacement_token_target": target_tokens,
+                                        "truncated_output_sha256": hashlib.sha256(
+                                            output.content.encode("utf-8")
+                                        ).hexdigest(),
+                                    }
+                                )
+                            _safe_log(
+                                "ingest | targeted generate replacement "
+                                f"{output_truncation_retries}/"
+                                f"{_MAX_PAGE_GENERATION_REPAIR_TURNS} for "
+                                f"{filename}: output_truncated, target<="
+                                f"{target_tokens} tokens"
+                            )
+                            if progress_callback is not None:
+                                progress_callback(
+                                    {
+                                        "event": "repair",
+                                        "active": True,
+                                        "repair_turn": attempt_index + 1,
+                                        "failure_class": failure_class,
+                                    }
+                                )
+                            continue
                         if progress_callback is not None:
                             progress_callback(
                                 {
@@ -2446,8 +2547,8 @@ not explicit in the raw evidence.
                                 }
                             )
                         # A partial completion is not valid conversational
-                        # history.  Never ask the model to repair text whose
-                        # terminal boundary is unknown.
+                        # history. Bounded replacements above never include
+                        # it; every other incomplete transport fails closed.
                         raise RuntimeError(
                             f"ingest generation {failure_class}: {failure_reason}"
                         )
