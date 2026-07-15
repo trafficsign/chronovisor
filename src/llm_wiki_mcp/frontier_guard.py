@@ -52,6 +52,7 @@ _PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
 
 _FINGERPRINT_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,512}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9_.:@/-]{1,128}$")
 _HUMAN_BOUNDARY_TOKENS = frozenset(
     {
         "auth",
@@ -99,6 +100,54 @@ _TRUSTED_OPERATIONAL_CONTRACT = (
     "ingest.operational_runtime",
     "system_operational_failure",
 )
+_TRUSTED_NOTE_KEYS = {
+    "trusted_watchdog": frozenset(
+        {
+            "producer",
+            "incident_key",
+            "privacy",
+        }
+    ),
+    "trusted_operational_failure_supervisor": frozenset(
+        {
+            "producer",
+            "incident_key",
+            "source_failure_class",
+            "source_fingerprint",
+            "source_incident_epoch",
+            "deterministic_reproduction_verified",
+            "deterministic_reproduction_evidence",
+            "deterministic_reproduction_sha256",
+        }
+    ),
+}
+_FORBIDDEN_SEMANTIC_PAYLOAD_KEYS = frozenset(
+    {
+        "raw",
+        "raw_content",
+        "raw_text",
+        "prompt",
+        "conversation",
+        "user_memory",
+        "golden",
+        "golden_case",
+        "golden_cases",
+        "semantic_case",
+        "semantic_cases",
+        "semantic_payload",
+        "quality_drift_payload",
+    }
+)
+
+
+def _mapping_keys(value: object) -> Iterator[str]:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            yield str(key).strip().casefold().replace("-", "_")
+            yield from _mapping_keys(nested)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for nested in value:
+            yield from _mapping_keys(nested)
 
 
 class FrontierGuardError(RuntimeError):
@@ -263,8 +312,8 @@ class RepairIncidentEvidence:
             errors.append(
                 "evidence must come from an allowlisted trusted system-incident producer"
             )
-        if not self.incident_key or not _FINGERPRINT_RE.fullmatch(self.incident_key):
-            errors.append("trusted evidence requires a stable printable incident_key")
+        if not self.incident_key or not _OPAQUE_ID_RE.fullmatch(self.incident_key):
+            errors.append("trusted evidence requires an opaque incident_key")
         contract = (producer, self.component, self.failure_class)
         source_failure = (
             self.notes.get("source_failure_class")
@@ -359,7 +408,8 @@ class RepairIncidentEvidence:
         elif any(
             len(argument) > 4096
             or any(
-                ord(character) < 32 or ord(character) == 127 for character in argument
+                ord(character) < 32 or ord(character) == 127
+                for character in argument
             )
             for argument in self.reproduction_command
         ):
@@ -376,6 +426,57 @@ class RepairIncidentEvidence:
             json.dumps(self.notes, ensure_ascii=False, sort_keys=True)
         except (TypeError, ValueError):
             errors.append("notes must be JSON serializable")
+        if _FORBIDDEN_SEMANTIC_PAYLOAD_KEYS & set(_mapping_keys(self.notes)):
+            errors.append(
+                "frontier code repair evidence must not contain raw, golden, prompt, or semantic payloads"
+            )
+        allowed_note_keys = _TRUSTED_NOTE_KEYS.get(str(producer), frozenset())
+        unexpected_note_keys = set(self.notes) - allowed_note_keys
+        if unexpected_note_keys:
+            errors.append(
+                "frontier code repair notes contain non-allowlisted fields: "
+                + ", ".join(sorted(str(key) for key in unexpected_note_keys))
+            )
+        for key, value in self.notes.items():
+            if isinstance(value, Mapping) or (
+                isinstance(value, Sequence)
+                and not isinstance(value, (str, bytes))
+            ):
+                errors.append(
+                    f"frontier code repair note {key} must be a bounded scalar"
+                )
+                continue
+            if isinstance(value, str) and (
+                len(value) > 512
+                or any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in value
+                )
+            ):
+                errors.append(
+                    f"frontier code repair note {key} must be printable and <=512 chars"
+                )
+        if producer == "trusted_watchdog" and self.notes.get("privacy") not in {
+            None,
+            "no_raw_exception_or_stack",
+        }:
+            errors.append("trusted watchdog privacy receipt is invalid")
+        if producer == "trusted_operational_failure_supervisor":
+            for key in (
+                "deterministic_reproduction_evidence",
+                "deterministic_reproduction_sha256",
+            ):
+                value = self.notes.get(key)
+                if value is not None and (
+                    not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None
+                ):
+                    errors.append(f"operational note {key} must be SHA-256")
+            source_class = self.notes.get("source_failure_class")
+            if source_class is not None and (
+                not isinstance(source_class, str)
+                or _OPAQUE_ID_RE.fullmatch(source_class) is None
+            ):
+                errors.append("operational source_failure_class must be opaque")
         if errors:
             raise EvidenceValidationError(errors)
 

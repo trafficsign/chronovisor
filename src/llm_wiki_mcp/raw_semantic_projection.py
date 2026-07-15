@@ -953,6 +953,23 @@ def project_parent_raw(
     )
 
 
+def verify_projection_child(raw_path: Path) -> ProjectionChildArtifact:
+    """Verify one child against its canonical filename and durable manifest."""
+
+    source_bytes = raw_path.read_bytes()
+    projected = _projected_child_passthrough(raw_path, source_bytes)
+    if (
+        projected is None
+        or projected.kind != "passthrough"
+        or len(projected.children) != 1
+        or projected.children[0].path != raw_path
+    ):
+        raise RawSemanticProjectionError(
+            "path is not a verified deterministic semantic projection child"
+        )
+    return projected.children[0]
+
+
 def project_reassembled_raws(
     raw_paths: Sequence[Path],
     record_bytes: bytes,
@@ -1574,5 +1591,6 @@ __all__ = [
     "project_parent_raw",
     "project_reassembled_raws",
     "projection_bundle_state_for_parent",
+    "verify_projection_child",
     "verify_projection_bundle",
 ]

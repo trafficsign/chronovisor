@@ -55,6 +55,8 @@ llm-wiki-page-normalize = "llm_wiki_mcp.page_normalize:main"
 llm-wiki-metadata-backfill = "llm_wiki_mcp.metadata_backfill:main"
 llm-wiki-distill = "llm_wiki_mcp.distill:main"
 llm-wiki-oracle = "llm_wiki_mcp.oracle:main"
+llm-wiki-burn-monitor = "llm_wiki_mcp.burn_monitor:main"
+llm-wiki-repair-runbook = "llm_wiki_mcp.repair_runbook:main"
 
 [build-system]
 requires = ["hatchling"]

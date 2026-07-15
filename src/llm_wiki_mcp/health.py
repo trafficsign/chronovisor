@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -194,6 +195,36 @@ def read_back_kpi() -> dict[str, Any]:
             failures += len(failed_rows)
         latest = row
     passed = max(0, checked - failures)
+    ledger_path = WIKI_ROOT / "runtime" / "ingest-read-back-repair.json"
+    try:
+        from llm_wiki_mcp.durable_state import canonical_bytes
+        from llm_wiki_mcp.read_back_integrity import verify_prior_prefix
+
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        observed = ledger.get("view_sha256") if isinstance(ledger, dict) else None
+        unsigned = (
+            {key: value for key, value in ledger.items() if key != "view_sha256"}
+            if isinstance(ledger, dict)
+            else {}
+        )
+        expected = hashlib.sha256(canonical_bytes(unsigned)).hexdigest()
+        cursor = ledger.get("source_cursor") if isinstance(ledger, dict) else None
+        source_path = WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl"
+        ledger_integrity = {
+            "status": (
+                "ok"
+                if observed == expected and verify_prior_prefix(source_path, cursor)
+                else "invalid"
+            ),
+            "schema_version": ledger.get("schema_version")
+            if isinstance(ledger, dict)
+            else None,
+            "source_cursor": cursor,
+        }
+    except FileNotFoundError:
+        ledger_integrity = {"status": "missing"}
+    except Exception as exc:
+        ledger_integrity = {"status": "invalid", "error": str(exc)}
     return {
         "checked": checked,
         "passed": passed,
@@ -201,6 +232,65 @@ def read_back_kpi() -> dict[str, Any]:
         "pass_rate": (passed / checked) if checked else None,
         "latest": latest,
         "cohort": cohort,
+        "derived_view_integrity": ledger_integrity,
+    }
+
+
+def autonomy_hardening_kpi() -> dict[str, Any]:
+    from llm_wiki_mcp.deadman import inspect_heartbeat
+    from llm_wiki_mcp.durable_state import DurableStateError, read_sealed_json
+    from llm_wiki_mcp.managed_hold import ManagedHoldStore
+    from llm_wiki_mcp.provisional_recall import snapshot as provisional_snapshot
+    from llm_wiki_mcp.quality_guard import quality_snapshot
+
+    runtime = WIKI_ROOT / "runtime"
+    autonomy = WIKI_ROOT / "autonomy"
+    managed = ManagedHoldStore(runtime / "managed-holds" / "state.json")
+    try:
+        managed_snapshot = managed.snapshot()
+    except Exception as exc:
+        managed_snapshot = {"status": "invalid", "error": str(exc)}
+    try:
+        provisional = provisional_snapshot(wiki_root=WIKI_ROOT)
+    except Exception as exc:
+        provisional = {"status": "invalid", "error": str(exc)}
+    try:
+        quality = quality_snapshot(runtime / "quality")
+    except Exception as exc:
+        quality = {"status": "invalid", "error": str(exc)}
+    try:
+        deadman_threshold = read_sealed_json(
+            autonomy / "observer-threshold-state.json"
+        )
+    except DurableStateError:
+        deadman_threshold = {"status": "unavailable"}
+    artifacts = runtime / "decision-artifacts"
+    try:
+        artifact_count = sum(1 for _path in artifacts.glob("[0-9a-f][0-9a-f]/*.json"))
+    except OSError:
+        artifact_count = 0
+    return {
+        "decision_artifacts": {
+            "count": artifact_count,
+            "replay_definition": "sealed_execution_fingerprint",
+        },
+        "deadman": {
+            "main": inspect_heartbeat(
+                autonomy / "watchdog-heartbeat.json",
+                expected_role="main_watchdog",
+                max_age_seconds=20 * 60,
+            ),
+            "observer": inspect_heartbeat(
+                autonomy / "observer-heartbeat.json",
+                expected_role="independent_observer",
+                max_age_seconds=10 * 60,
+            ),
+            "threshold": deadman_threshold,
+        },
+        "quality": quality,
+        "managed_holds": managed_snapshot,
+        "provisional_recall": provisional,
+        "frontier_semantic_audit_allowed": False,
     }
 
 
@@ -496,6 +586,7 @@ def health_snapshot() -> dict[str, Any]:
         "prefetch": prefetch_kpi(),
         "derived": derived_memory_kpi(),
         "read_back": read_back_kpi(),
+        "autonomy_hardening": autonomy_hardening_kpi(),
         "recall_feedback": recall_feedback_kpi(),
         "convergence": convergence_kpi(),
         "capture_pipeline": capture_pipeline_kpi(),

@@ -79,6 +79,12 @@ const els = {
   healthGoldenSet: document.getElementById("health-golden-set"),
   healthRetention: document.getElementById("health-retention"),
   healthDistill: document.getElementById("health-distill"),
+  healthReplay: document.getElementById("health-replay"),
+  healthDeadman: document.getElementById("health-deadman"),
+  healthQuality: document.getElementById("health-quality"),
+  healthHolds: document.getElementById("health-holds"),
+  healthProvisional: document.getElementById("health-provisional"),
+  healthLedger: document.getElementById("health-ledger"),
   modelCaption: document.getElementById("model-caption"),
   modelInstalled: document.getElementById("model-installed"),
   modelLoaded: document.getElementById("model-loaded"),
@@ -1511,6 +1517,13 @@ function renderHealth(health) {
   const readBack = data.read_back || {};
   const queues = data.queues || {};
   const convergence = data.convergence || {};
+  const hardening = data.autonomy_hardening || {};
+  const deadman = hardening.deadman || {};
+  const quality = hardening.quality || {};
+  const holds = hardening.managed_holds || {};
+  const provisional = hardening.provisional_recall || {};
+  const artifacts = hardening.decision_artifacts || {};
+  const ledger = readBack.derived_view_integrity || {};
   const sensitivity = coverage.sensitivity || {};
   const rawFiles = intValue(capture.raw_files);
   const claimed = intValue(capture.claimed_raw_files);
@@ -1539,6 +1552,16 @@ function renderHealth(health) {
   els.healthGoldenSet.textContent = intValue(derived.golden || queues.search_golden).toLocaleString();
   els.healthRetention.textContent = intValue(derived.retention_pages || cofire.edges).toLocaleString();
   els.healthDistill.textContent = intValue(derived.distill_rows).toLocaleString();
+  els.healthReplay.textContent = intValue(artifacts.count).toLocaleString();
+  els.healthDeadman.textContent = deadman.main?.status === "ok" && deadman.observer?.status === "ok"
+    ? "2/2"
+    : `${[deadman.main, deadman.observer].filter((row) => row?.status === "ok").length}/2`;
+  els.healthQuality.textContent = intValue(quality.frozen)
+    ? `${intValue(quality.frozen)} frozen`
+    : (quality.probe?.status === "ok" ? "ok" : fmt(quality.probe?.status || "--"));
+  els.healthHolds.textContent = intValue(holds.total).toLocaleString();
+  els.healthProvisional.textContent = intValue(provisional.entries).toLocaleString();
+  els.healthLedger.textContent = fmt(ledger.status || "--");
 }
 
 const MODEL_ROLE_LABELS = {

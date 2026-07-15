@@ -407,6 +407,24 @@ def wiki_search(
             "tags": store.tags(r.page_id),
         })
 
+    # Fail-closed semantic holds remain visible only through a separate,
+    # projection-only namespace. They never compete as normal wiki pages and
+    # can never be used as mutation authority.
+    provisional_hits: list[dict] = []
+    if (
+        sort_by == "relevance"
+        and not folder
+        and not updated_after
+        and not updated_before
+        and not tag_filter
+    ):
+        try:
+            from llm_wiki_mcp.provisional_recall import search_provisional
+
+            provisional_hits = search_provisional(query, wiki_root=WIKI_ROOT)
+        except Exception:
+            provisional_hits = []
+
     # Expand via links — outlinks and link metadata both come from the
     # IndexStore, so no extra disk reads are needed in this pass.
     # When a tag filter is active, expanded hits inherit the same tag
@@ -468,6 +486,9 @@ def wiki_search(
             "query": query,
             "direct_pages": [hit["page_id"] for hit in direct_hits],
             "expanded_pages": [hit["page_id"] for hit in expanded_hits],
+            "provisional_ids": [
+                hit["provisional_id"] for hit in provisional_hits
+            ],
         }
     )
 
@@ -478,6 +499,7 @@ def wiki_search(
         "filters_applied": filters_applied,
         "reranker": reranker_meta,
         "direct_hits": direct_hits,
+        "provisional_hits": provisional_hits,
         "expanded_hits": expanded_hits,
         "edges": edges,
     }, ensure_ascii=False)

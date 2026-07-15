@@ -2494,6 +2494,13 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
         WIKI_ROOT / "runtime" / "model-lab" / "state.json",
         WIKI_ROOT / "runtime" / "model-lab" / "history.jsonl",
         WIKI_ROOT / "runtime" / "model-lab" / "replay.jsonl",
+        WIKI_ROOT / "runtime" / "decision-artifacts",
+        WIKI_ROOT / "runtime" / "managed-holds" / "state.json",
+        WIKI_ROOT / "runtime" / "provisional-recall" / "index.json",
+        WIKI_ROOT / "runtime" / "quality" / "probe-latest.json",
+        WIKI_ROOT / "autonomy" / "watchdog-heartbeat.json",
+        WIKI_ROOT / "autonomy" / "observer-heartbeat.json",
+        WIKI_ROOT / "autonomy" / "observer-threshold-state.json",
         WIKI_ROOT / "review" / "raw-replay-queue.jsonl",
         WIKI_ROOT / "runtime" / "raw-replay-history.jsonl",
         WIKI_ROOT / "runtime" / "raw-replay-completions.jsonl",
@@ -2518,9 +2525,15 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
         (WIKI_ROOT / "runtime" / "failures" / "packets" / "*.json", 24),
         (WIKI_ROOT / "runtime" / "eval" / "*.json", 16),
         (WIKI_ROOT / "runtime" / "recall-improvement" / "runs" / "*.json", 16),
+        (WIKI_ROOT / "runtime" / "quality" / "lanes" / "*.json", 32),
         (WIKI_ROOT / "logs" / "ingest-drain-*.jsonl", 14),
     ):
         tracked.extend(sorted(pattern.parent.glob(pattern.name))[-limit:])
+    tracked.extend(
+        sorted(
+            (WIKI_ROOT / "runtime" / "decision-artifacts").glob("*/*.json")
+        )[-32:]
+    )
     identities: list[tuple[Any, ...]] = []
     for path in dict.fromkeys(tracked):
         try:

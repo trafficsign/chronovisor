@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,6 +19,7 @@ from typing import Any, Callable, Mapping
 from llm_wiki_mcp import recall_hints, wiki
 from llm_wiki_mcp.convergence import HUMAN_REQUIRED_FAILURE_CLASSES
 from llm_wiki_mcp import decision_authority
+from llm_wiki_mcp.durable_state import atomic_write_bytes, canonical_bytes
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.page_mutation import decision_authority_lock, wiki_mutation_lock
 from llm_wiki_mcp.runtime_config import runtime_repo_root
@@ -33,11 +32,15 @@ from llm_wiki_mcp.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
+from llm_wiki_mcp.read_back_integrity import (
+    scan_jsonl_prefix,
+    verify_prior_prefix,
+)
 
 
 FAILURE_FILE = wiki.WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl"
 LEDGER_FILE = wiki.WIKI_ROOT / "runtime" / "ingest-read-back-repair.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TERMINAL_STATUSES = frozenset({"applied", "rejected", "quarantined", "human_required"})
 DEFAULT_QUARANTINE_COOLDOWN_SECONDS = 6 * 60 * 60
 PROJECT_ROOT = runtime_repo_root()
@@ -119,19 +122,8 @@ def failure_key(failure: dict[str, Any]) -> str:
 
 
 def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
-    try:
-        lines = path.read_text(encoding="utf-8").split("\n")
-    except OSError:
-        return [], 0
-    rows: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows, len(lines)
+    scan = scan_jsonl_prefix(path)
+    return list(scan.records), scan.complete_lines
 
 
 def _flatten_failures(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -169,46 +161,38 @@ def _empty_ledger() -> dict[str, Any]:
 def _load_ledger(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return _empty_ledger()
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("read-back derived view is unreadable") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("entries"), dict):
-        return _empty_ledger()
+        raise RuntimeError("read-back derived view is malformed")
+    if payload.get("schema_version") == SCHEMA_VERSION:
+        if "view_sha256" not in payload:
+            # Pre-v2 ledgers were sometimes stamped with the running schema
+            # constant by callers but contained only the durable entry map.
+            # They have no derived-source cursor to authenticate, so accept
+            # that exact legacy shape once and seal it on the next write.  A
+            # cursor-bearing v2 view without its seal remains fail-closed.
+            legacy_keys = {"schema_version", "entries"}
+            if set(payload) - legacy_keys:
+                raise RuntimeError("read-back derived view seal is missing")
+            return payload
+        observed = payload.get("view_sha256")
+        unsigned = {key: value for key, value in payload.items() if key != "view_sha256"}
+        expected = hashlib.sha256(canonical_bytes(unsigned)).hexdigest()
+        if observed != expected:
+            raise RuntimeError("read-back derived view seal mismatch")
     return payload
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            tmp = Path(handle.name)
-            handle.write(
-                json.dumps(
-                    payload, ensure_ascii=False, indent=2, sort_keys=True, default=str
-                )
-                + "\n"
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if tmp is not None:
-            try:
-                tmp.unlink()
-            except FileNotFoundError:
-                pass
+    unsigned = {key: value for key, value in payload.items() if key != "view_sha256"}
+    sealed = {
+        **unsigned,
+        "view_sha256": hashlib.sha256(canonical_bytes(unsigned)).hexdigest(),
+    }
+    atomic_write_bytes(path, canonical_bytes(sealed), backup=True)
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -802,18 +786,64 @@ def run_read_back_repair(
     """
     now_utc = _as_utc(now)
     hints_path = hints_file or recall_hints.QUERY_HINTS_FILE
-    rows, source_lines = _read_jsonl(failure_file)
+    source_scan = scan_jsonl_prefix(failure_file)
+    rows = list(source_scan.records)
+    source_lines = source_scan.complete_lines
+    source_cursor = source_scan.cursor(source_file=failure_file)
+    if not source_scan.valid:
+        return {
+            "status": "source_integrity_error",
+            "dry_run": dry_run,
+            "failure_file": str(failure_file),
+            "ledger_file": str(ledger_file),
+            "source_cursor": source_cursor,
+            "source_lines": source_lines,
+            "source_records": len(rows),
+            "processed": 0,
+            "actions": [],
+        }
     observed = _flatten_failures(rows)
-    original_ledger = _load_ledger(ledger_file)
+    try:
+        original_ledger = _load_ledger(ledger_file)
+    except RuntimeError as exc:
+        return {
+            "status": "ledger_integrity_error",
+            "dry_run": dry_run,
+            "failure_file": str(failure_file),
+            "ledger_file": str(ledger_file),
+            "source_cursor": source_cursor,
+            "error": str(exc),
+            "processed": 0,
+            "actions": [],
+        }
+    prior_cursor = original_ledger.get("source_cursor")
+    if isinstance(prior_cursor, dict) and not verify_prior_prefix(
+        failure_file,
+        prior_cursor,
+    ):
+        return {
+            "status": "source_history_rewritten",
+            "dry_run": dry_run,
+            "failure_file": str(failure_file),
+            "ledger_file": str(ledger_file),
+            "source_cursor": source_cursor,
+            "processed": 0,
+            "actions": [],
+        }
     entries = _merge_entries(original_ledger, observed)
     last_persisted_sha256: str | None = None
 
     def persist_ledger() -> None:
         nonlocal last_persisted_sha256
+        if not verify_prior_prefix(failure_file, source_cursor):
+            raise RuntimeError(
+                "canonical read-back source changed before derived view publication"
+            )
         payload = {
             "schema_version": SCHEMA_VERSION,
             "updated_at": now_utc.isoformat(timespec="seconds"),
             "source_file": str(failure_file),
+            "source_cursor": source_cursor,
             "entries": entries,
         }
         digest = hashlib.sha256(
@@ -1422,7 +1452,13 @@ def run_read_back_repair(
         if isinstance(entry, dict)
         and str(entry.get("status") or "") in TERMINAL_STATUSES
     )
-    if not dry_run and (budget is None or mutation_consumed or resumed_quarantined):
+    source_projection_changed = prior_cursor != source_cursor
+    if not dry_run and (
+        (source_projection_changed and budget is None)
+        or budget is None
+        or mutation_consumed
+        or resumed_quarantined
+    ):
         persist_ledger()
 
     return {
@@ -1432,6 +1468,7 @@ def run_read_back_repair(
         "ledger_file": str(ledger_file),
         "source_lines": source_lines,
         "source_records": len(rows),
+        "source_cursor": source_cursor,
         "observed_failures": sum(
             int(row.get("occurrences") or 0) for row in observed.values()
         ),

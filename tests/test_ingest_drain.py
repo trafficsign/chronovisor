@@ -11,12 +11,16 @@ from llm_wiki_mcp import ingest_drain
 
 
 @pytest.fixture(autouse=True)
-def _disable_runtime_status_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+def _disable_runtime_status_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setattr(
         ingest_drain.runtime_status,
         "reset_stale_runtime_status",
         lambda: False,
     )
+    monkeypatch.setattr(ingest_drain, "WIKI_ROOT", tmp_path / "wiki")
 
 
 def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:

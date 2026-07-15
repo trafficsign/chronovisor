@@ -35,7 +35,14 @@ def evidence(
         ),
         "local_repair_attempts": 2,
         "local_repair_evidence": ("a" * 64, "b" * 64),
-        "reproduction_command": ("pytest", "tests/test_ingest.py", "-k", name),
+        "reproduction_command": (
+            "uv",
+            "run",
+            "pytest",
+            "-q",
+            f"tests/test_ingest.py::test_{name}",
+        ),
+        "failing_test": f"tests/test_ingest.py::test_{name}",
         "notes": {"producer": "trusted_watchdog", "incident_key": f"incident-{name}"},
     }
     values.update(overrides)
@@ -106,6 +113,26 @@ def test_operational_evidence_requires_supervisor_verified_receipt() -> None:
                 "incident_key": "operational-schema",
                 "source_failure_class": "ingest.runtime_schema_invalid",
             },
+        )
+
+
+@pytest.mark.parametrize(
+    "extra_notes",
+    [
+        {"detail": "the user's memory text"},
+        {"diagnostic": {"detail": "the user's memory text"}},
+    ],
+)
+def test_trusted_producer_notes_are_a_complete_scalar_allowlist(
+    extra_notes: dict[str, object],
+) -> None:
+    with pytest.raises(EvidenceValidationError, match="non-allowlisted"):
+        evidence(
+            notes={
+                "producer": "trusted_watchdog",
+                "incident_key": "incident-alias",
+                **extra_notes,
+            }
         )
 
 

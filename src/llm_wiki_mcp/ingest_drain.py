@@ -73,6 +73,12 @@ def drain(
     init_wiki()
     orchestrator.reset_stale_lock()
     runtime_status.reset_stale_runtime_status()
+    try:
+        from llm_wiki_mcp.managed_hold import sync_ingest_semantic_holds
+
+        managed_holds = sync_ingest_semantic_holds(wiki_root=WIKI_ROOT)
+    except Exception as exc:
+        managed_holds = {"status": "error", "error": str(exc)}
 
     started = time.time()
     log_path = log_file or _default_log_file()
@@ -89,6 +95,7 @@ def drain(
             "batches_run": 0,
             "files_processed": 0,
             "elapsed_seconds": 0.0,
+            "managed_holds": managed_holds,
         }
 
     for batch_index in range(1, max_batches + 1):
@@ -122,6 +129,11 @@ def drain(
             "result": result,
             "self_heal": self_heal_result,
         }
+        try:
+            managed_holds = sync_ingest_semantic_holds(wiki_root=WIKI_ROOT)
+        except Exception as exc:
+            managed_holds = {"status": "error", "error": str(exc)}
+        record["managed_holds"] = managed_holds
         batches.append(record)
         _append_jsonl(log_path, record)
 
@@ -158,6 +170,7 @@ def drain(
         "stop_reason": stop_reason,
         "elapsed_seconds": round(time.time() - started, 2),
         "log_file": str(log_path),
+        "managed_holds": managed_holds,
     }
 
 

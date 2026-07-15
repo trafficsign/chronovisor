@@ -58,6 +58,8 @@ DECISIONS_FILE = AUTONOMY_DIR / "decisions.jsonl"
 LATEST_FILE = AUTONOMY_DIR / "latest.json"
 WATCHDOG_FILE = AUTONOMY_DIR / "watchdog-latest.json"
 WATCHDOG_HISTORY = AUTONOMY_DIR / "watchdog-history.jsonl"
+WATCHDOG_HEARTBEAT_FILE = AUTONOMY_DIR / "watchdog-heartbeat.json"
+OBSERVER_HEARTBEAT_FILE = AUTONOMY_DIR / "observer-heartbeat.json"
 DIGEST_FILE = AUTONOMY_DIR / "digest-latest.md"
 QUARANTINE_FILE = AUTONOMY_DIR / "quarantine.json"
 PROJECT_ROOT = runtime_repo_root()
@@ -65,6 +67,7 @@ PROJECT_ROOT = runtime_repo_root()
 SLEEP_LABEL = "com.trafficsign.llm-wiki-sleep"
 CONVERGE_LABEL = "com.trafficsign.llm-wiki-converge"
 WATCHDOG_LABEL = "com.trafficsign.llm-wiki-watchdog"
+DEADMAN_LABEL = "com.trafficsign.llm-wiki-deadman-observer"
 LAUNCH_AGENT_DIR = Path.home() / "Library" / "LaunchAgents"
 WRAPPER_DIR = WIKI_ROOT / "bin"
 DUPLICATE_FRONTIER_LANE = "autonomy_duplicate_resolution"
@@ -3260,6 +3263,34 @@ def watchdog_snapshot(
 ) -> dict[str, Any]:
     from llm_wiki_mcp.health import health_snapshot
     from llm_wiki_mcp.sleep_cycle import HISTORY_FILE
+    from llm_wiki_mcp.deadman import inspect_heartbeat, write_heartbeat
+
+    quality_probe: dict[str, Any] = {"status": "read_only_skipped"}
+    if write:
+        try:
+            from llm_wiki_mcp.quality_guard import run_quality_probe
+            from llm_wiki_mcp.runtime_config import load_decision_router_config
+
+            adoption_artifact = load_decision_router_config().adoption_artifact.strip()
+            if adoption_artifact:
+                quality_probe = run_quality_probe(
+                    root=WIKI_ROOT / "runtime" / "quality",
+                    adoption_artifact=Path(adoption_artifact).expanduser(),
+                )
+                quality_probe = {
+                    "status": "ok",
+                    "artifact_sha256": quality_probe.get("artifact_sha256"),
+                    "frozen_lanes": quality_probe.get("frozen_lanes"),
+                    "frontier_calls": 0,
+                }
+            else:
+                quality_probe = {"status": "not_configured", "frontier_calls": 0}
+        except Exception as exc:
+            quality_probe = {
+                "status": "error",
+                "error_type": exc.__class__.__name__,
+                "frontier_calls": 0,
+            }
 
     component_alert: dict[str, Any] | None = None
     try:
@@ -3305,8 +3336,31 @@ def watchdog_snapshot(
         }
     latest_sleep = _latest_jsonl(HISTORY_FILE)
     alerts: list[dict[str, Any]] = []
+    observer = inspect_heartbeat(
+        OBSERVER_HEARTBEAT_FILE,
+        expected_role="independent_observer",
+        max_age_seconds=10 * 60,
+    )
+    observer_alert = (
+        {
+            "type": "deadman_observer_unhealthy",
+            "status": observer.get("status"),
+            "age_seconds": observer.get("age_seconds"),
+            "sequence": observer.get("sequence"),
+        }
+        if observer.get("status") != "ok"
+        else None
+    )
     if component_alert is not None:
         alerts.append(component_alert)
+    if quality_probe.get("status") == "error":
+        alerts.append(
+            {
+                "type": "quality_probe_error",
+                "error_type": quality_probe.get("error_type"),
+                "frontier_allowed": False,
+            }
+        )
     capture = _capture_rate(health)
     if capture is not None and capture < min_capture_rate:
         alerts.append(
@@ -3420,6 +3474,29 @@ def watchdog_snapshot(
             }
         )
 
+    read_back = health.get("read_back") if isinstance(health.get("read_back"), dict) else {}
+    read_back_integrity = (
+        read_back.get("derived_view_integrity")
+        if isinstance(read_back.get("derived_view_integrity"), dict)
+        else {}
+    )
+    if read_back_integrity.get("status") == "invalid":
+        alerts.append({"type": "read_back_derived_view_invalid"})
+    hardening = (
+        health.get("autonomy_hardening")
+        if isinstance(health.get("autonomy_hardening"), dict)
+        else {}
+    )
+    quality = hardening.get("quality") if isinstance(hardening.get("quality"), dict) else {}
+    if int(quality.get("frozen") or 0) > 0:
+        alerts.append(
+            {
+                "type": "quality_lanes_frozen",
+                "value": int(quality.get("frozen") or 0),
+                "frontier_allowed": False,
+            }
+        )
+
     if before_health:
         before_capture = _capture_rate(before_health)
         if (
@@ -3435,14 +3512,31 @@ def watchdog_snapshot(
                 }
             )
 
+    # A read-only watchdog preview must not report deployment state from the
+    # caller's test/sandbox namespace. The installed writer is the authority
+    # that cross-checks the independent observer.
+    if write and observer_alert is not None:
+        alerts.append(observer_alert)
     payload = {
         "status": "alert" if alerts else "ok",
         "ts": _now(),
         "alerts": alerts,
         "health": health,
         "latest_sleep": _sleep_run_summary(latest_sleep),
+        "deadman": {
+            "threshold_schema_version": 1,
+            "observer": observer,
+        },
+        "quality_probe": quality_probe,
     }
     if write:
+        heartbeat = write_heartbeat(
+            WATCHDOG_HEARTBEAT_FILE,
+            role="main_watchdog",
+            reported_status=str(payload["status"]),
+            peer=observer,
+        )
+        payload["deadman"]["main_sequence"] = heartbeat["sequence"]
         _write_json(WATCHDOG_FILE, payload)
         _write_watchdog_history(payload)
     if notify and alerts:
@@ -3649,9 +3743,11 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
     sleep_path = LAUNCH_AGENT_DIR / f"{SLEEP_LABEL}.plist"
     converge_path = LAUNCH_AGENT_DIR / f"{CONVERGE_LABEL}.plist"
     watchdog_path = LAUNCH_AGENT_DIR / f"{WATCHDOG_LABEL}.plist"
+    deadman_path = LAUNCH_AGENT_DIR / f"{DEADMAN_LABEL}.plist"
     sleep_wrapper = WRAPPER_DIR / "llm-wiki-sleep"
     converge_wrapper = WRAPPER_DIR / "llm-wiki-converge"
     watchdog_wrapper = WRAPPER_DIR / "llm-wiki-watchdog"
+    deadman_script = WRAPPER_DIR / "llm-wiki-deadman-observer.py"
     sleep_command = [
         *uvx_runtime_command("llm-wiki", executable=uvx, refresh=True),
         "sleep",
@@ -3677,6 +3773,14 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "8",
         "--no-sleep",
     ]
+    deadman_command = [
+        "/usr/bin/python3",
+        str(deadman_script),
+        "--wiki-root",
+        str(WIKI_ROOT),
+        "--max-main-age-seconds",
+        "1200",
+    ]
     sleep_plist = _plist(
         SLEEP_LABEL,
         [str(sleep_wrapper)],
@@ -3698,6 +3802,14 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         stderr=logs / "converge.launchd.err.log",
         start_interval=1800,
     )
+    deadman_plist = _plist(
+        DEADMAN_LABEL,
+        deadman_command,
+        stdout=logs / "deadman-observer.launchd.out.log",
+        stderr=logs / "deadman-observer.launchd.err.log",
+        start_interval=300,
+    )
+    deadman_plist["RunAtLoad"] = True
     payload: dict[str, Any] = {
         "status": "ok",
         "dry_run": dry_run,
@@ -3721,6 +3833,12 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
                 "program": watchdog_plist["ProgramArguments"],
                 "stdout": watchdog_plist["StandardOutPath"],
             },
+            {
+                "label": DEADMAN_LABEL,
+                "path": str(deadman_path),
+                "program": deadman_plist["ProgramArguments"],
+                "stdout": deadman_plist["StandardOutPath"],
+            },
         ],
         "wrappers": [
             {"path": str(sleep_wrapper), "command": sleep_command},
@@ -3733,13 +3851,18 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         _write_wrapper(sleep_wrapper, sleep_command)
         _write_wrapper(converge_wrapper, converge_command)
         _write_wrapper(watchdog_wrapper, watchdog_command)
+        observer_source = Path(__file__).with_name("deadman_observer.py")
+        deadman_script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(observer_source, deadman_script)
+        deadman_script.chmod(0o755)
         _write_plist(sleep_path, sleep_plist)
         _write_plist(converge_path, converge_plist)
         _write_plist(watchdog_path, watchdog_plist)
+        _write_plist(deadman_path, deadman_plist)
     if load and not dry_run:
         uid = os.getuid()
         loads = []
-        for path in (sleep_path, converge_path, watchdog_path):
+        for path in (sleep_path, converge_path, watchdog_path, deadman_path):
             subprocess.run(
                 ["launchctl", "bootout", f"gui/{uid}", str(path)],
                 text=True,
@@ -3773,6 +3896,7 @@ def status() -> dict[str, Any]:
             "sleep": str(LAUNCH_AGENT_DIR / f"{SLEEP_LABEL}.plist"),
             "converge": str(LAUNCH_AGENT_DIR / f"{CONVERGE_LABEL}.plist"),
             "watchdog": str(LAUNCH_AGENT_DIR / f"{WATCHDOG_LABEL}.plist"),
+            "deadman": str(LAUNCH_AGENT_DIR / f"{DEADMAN_LABEL}.plist"),
         },
     }
 

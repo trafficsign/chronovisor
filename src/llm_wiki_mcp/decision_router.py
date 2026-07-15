@@ -44,6 +44,12 @@ from llm_wiki_mcp.decision_schema_manifest import (
     default_decision_value,
     production_decision_schemas,
 )
+from llm_wiki_mcp.decision_artifact import (
+    DecisionArtifactError,
+    DecisionArtifactStore,
+    default_store_root,
+    execution_fingerprint,
+)
 from llm_wiki_mcp.local_structured import (
     ChatTransport,
     LocalConsensusAuditStore,
@@ -2072,6 +2078,8 @@ class DecisionRouter:
         live_resource_control: bool | None = None,
         reuse_larger_context: bool = True,
         decision_lane: str | None = None,
+        artifact_replay: bool | None = None,
+        decision_artifact_root: Path | None = None,
     ) -> None:
         if not isinstance(audit_role, str) or not AUDIT_ROLE_RE.fullmatch(audit_role):
             raise ValueError("audit_role must be a safe identifier of at most 80 chars")
@@ -2118,6 +2126,206 @@ class DecisionRouter:
         # a decision that was already reached safely.
         self.observe_runtime = self.live_resource_control or model_observer is not None
         self.model_unloader = model_unloader or ollama.unload_named_model
+        self.artifact_replay = bool(
+            artifact_replay
+            if artifact_replay is not None
+            else transport is None and require_adopted
+        )
+        if decision_artifact_root is None:
+            from llm_wiki_mcp import wiki
+
+            wiki_root = wiki.WIKI_ROOT.expanduser().resolve(strict=False)
+            # A caller that explicitly places its audit stream outside the
+            # canonical wiki is operating in a separate sandbox (notably the
+            # test/evaluation harness).  Keep its replay CAS in that sandbox
+            # so synthetic votes can never publish into, or replay from, the
+            # live semantic authority namespace.  Production audit roots are
+            # descendants of WIKI_ROOT and continue to share one CAS.
+            resolved_audit = (
+                audit_root.expanduser().resolve(strict=False)
+                if audit_root is not None
+                else None
+            )
+            if resolved_audit is not None and not resolved_audit.is_relative_to(
+                wiki_root
+            ):
+                decision_artifact_root = (
+                    resolved_audit.parent / "decision-artifacts"
+                )
+            else:
+                decision_artifact_root = default_store_root(wiki_root)
+        self.decision_artifact_store = DecisionArtifactStore(
+            decision_artifact_root
+        )
+
+    def _artifact_identity(
+        self,
+        *,
+        prompt: str,
+        identity_prompt: str,
+        schema: Mapping[str, Any],
+        system: str | None,
+        decision_lane: str | None,
+        agreement_key: AgreementKey | None,
+    ) -> tuple[str, dict[str, Any], int] | None:
+        """Return the exact replay identity without probing model residency."""
+
+        # An arbitrary caller-supplied callable can close over mutable state;
+        # there is no honest stable fingerprint for it.  Keep those uncommon
+        # calls on the ordinary model path instead of replaying under a false
+        # identity.
+        if (
+            not self.artifact_replay
+            or decision_lane is None
+            or agreement_key is not None
+        ):
+            return None
+        from llm_wiki_mcp.decision_authority import current_semantic_authority
+
+        authority, authority_error = current_semantic_authority(decision_lane)
+        if authority_error is not None or authority is None:
+            raise DecisionArtifactError(
+                authority_error or "canonical decision authority is unavailable"
+            )
+        effective_system = decision_system_with_policy(schema, system)
+        _required, context_tier = self._request_context(
+            prompt,
+            schema,
+            effective_system,
+        )
+        router_policy = self.policy.audit_record()
+        model_runtime = {
+            "primary_model": self.config.primary_model,
+            "challenger_model": self.config.challenger_model,
+            "tie_break_model": self.config.tie_break_model,
+            "num_predict": self.config.num_predict,
+            "max_input_chars": self.config.max_input_chars,
+            "max_output_chars": self.config.max_output_chars,
+            "max_feedback_chars": self.config.max_feedback_chars,
+            "read_timeout_ms": self.config.read_timeout_ms,
+            "quorum": self.config.quorum,
+        }
+        return (
+            *execution_fingerprint(
+                request_sha256=structured_request_sha256(
+                    identity_prompt,
+                    schema,
+                    effective_system,
+                ),
+                lane=decision_lane,
+                context_tier=context_tier,
+                authority=authority,
+                router_policy=router_policy,
+                generation_policy_sha256=structured_generation_policy_sha256(),
+                model_runtime=model_runtime,
+            ),
+            context_tier,
+        )
+
+    def _replay_artifact(
+        self,
+        artifact: Mapping[str, Any],
+        *,
+        schema: Mapping[str, Any],
+        context_tier: int,
+    ) -> DecisionRouterResult:
+        value = artifact.get("decision")
+        signature = canonical_agreement_signature(value, schema=schema)
+        signature_sha256 = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+        if artifact.get("agreement_sha256") != signature_sha256:
+            raise DecisionArtifactError(
+                "canonical decision agreement digest no longer matches schema"
+            )
+        proof_rows = artifact.get("quorum_proof")
+        if not isinstance(proof_rows, list):
+            raise DecisionArtifactError("canonical decision quorum proof is missing")
+        expected_models = {
+            "primary": self.config.primary_model,
+            "challenger": self.config.challenger_model,
+            "tie_break": self.config.tie_break_model,
+        }
+        votes: list[DecisionVote] = []
+        for row in proof_rows:
+            if not isinstance(row, Mapping):
+                continue
+            if row.get("signature_sha256") != signature_sha256:
+                continue
+            model = row.get("model")
+            role = row.get("role")
+            if not isinstance(model, str) or not isinstance(role, str):
+                continue
+            if expected_models.get(role) != model:
+                raise DecisionArtifactError(
+                    "canonical decision proof voter differs from current policy"
+                )
+            votes.append(
+                DecisionVote(
+                    role=role,
+                    model=model,
+                    result=LocalStructuredResult(ok=True, model=model, value=value),
+                    requested_num_ctx=context_tier,
+                    signature=signature,
+                    signature_sha256=signature_sha256,
+                    runtime_observation_status="artifact_replay",
+                )
+            )
+        if (
+            len(votes) < self.config.quorum
+            or len({vote.role for vote in votes}) < self.config.quorum
+            or len({vote.model for vote in votes}) < self.config.quorum
+        ):
+            raise DecisionArtifactError(
+                "canonical decision quorum proof does not satisfy current policy"
+            )
+        return DecisionRouterResult(
+            status="agreed",
+            value=value,
+            agreement_sha256=signature_sha256,
+            votes=tuple(votes),
+            num_ctx=context_tier,
+            residency={
+                "source": "canonical_artifact_replay",
+                "execution_fingerprint": artifact.get("execution_fingerprint"),
+                "model_invocations": 0,
+                "num_ctx": context_tier,
+            },
+        )
+
+    def _publish_artifact(
+        self,
+        result: DecisionRouterResult,
+        *,
+        fingerprint: str,
+        identity: Mapping[str, Any],
+        context_tier: int,
+        decision_lane: str,
+    ) -> None:
+        proof = [
+            {
+                "role": vote.role,
+                "model": vote.model,
+                "signature_sha256": vote.signature_sha256,
+            }
+            for vote in result.votes
+            if vote.valid and vote.signature_sha256 == result.agreement_sha256
+        ]
+        if len(proof) < self.config.quorum:
+            raise DecisionArtifactError(
+                "agreed result cannot be sealed without a two-vote proof"
+            )
+        self.decision_artifact_store.publish(
+            fingerprint=fingerprint,
+            identity=identity,
+            decision=result.value,
+            agreement_sha256=str(result.agreement_sha256),
+            quorum_proof=proof,
+            provenance={
+                "decision_lane": decision_lane,
+                "context_tier": context_tier,
+                "router_policy": self.policy.audit_record(),
+                "structured_generation_policy": structured_generation_policy(),
+            },
+        )
 
     def _adoption_requirement_error(self) -> str | None:
         if not self.require_adopted or self.policy.source == "adopted_artifact":
@@ -3362,26 +3570,104 @@ class DecisionRouter:
                 ingest_repair_contract=ingest_repair_contract,
                 replay_prompt=replay_prompt,
             )
-        if self.live_resource_control:
-            with ollama.model_resource_lease(exclusive=True):
-                return self._decide_locked(
-                    prompt,
-                    schema,
-                    system=system,
-                    agreement_key=agreement_key,
-                    decision_lane=effective_lane,
-                    ingest_repair_contract=ingest_repair_contract,
-                    replay_prompt=replay_prompt,
+        if self.artifact_replay and effective_lane is not None:
+            from llm_wiki_mcp import wiki
+            from llm_wiki_mcp.quality_guard import lane_is_frozen
+
+            if lane_is_frozen(
+                wiki.WIKI_ROOT / "runtime" / "quality",
+                effective_lane,
+            ):
+                return self._quarantined(
+                    (),
+                    "quality_lane_frozen_for_local_rollback_and_shadow_replay",
+                    failure_class="quality_lane_frozen",
                 )
-        return self._decide_locked(
-            prompt,
-            schema,
-            system=system,
-            agreement_key=agreement_key,
-            decision_lane=effective_lane,
-            ingest_repair_contract=ingest_repair_contract,
-            replay_prompt=replay_prompt,
-        )
+        artifact_identity: tuple[str, dict[str, Any], int] | None = None
+        try:
+            artifact_identity = self._artifact_identity(
+                prompt=prompt,
+                identity_prompt=replay_prompt,
+                schema=schema,
+                system=system,
+                decision_lane=effective_lane,
+                agreement_key=agreement_key,
+            )
+            if artifact_identity is not None:
+                fingerprint, _identity, context_tier = artifact_identity
+                cached = self.decision_artifact_store.load(fingerprint)
+                if cached is not None:
+                    replayed = self._replay_artifact(
+                        cached,
+                        schema=schema,
+                        context_tier=context_tier,
+                    )
+                    try:
+                        self.audit_store.append(
+                            {
+                                "kind": "decision_artifact_replay",
+                                "request_sha256": structured_request_sha256(
+                                    replay_prompt,
+                                    schema,
+                                    decision_system_with_policy(schema, system),
+                                ),
+                                "role": self.audit_role,
+                                "decision_lane": effective_lane,
+                                "execution_fingerprint": fingerprint,
+                                "model_invocations": 0,
+                                "status": "agreed",
+                            }
+                        )
+                    except Exception:
+                        pass
+                    return replayed
+        except DecisionArtifactError as exc:
+            return self._quarantined(
+                (),
+                f"canonical_decision_artifact_invalid:{exc}",
+                failure_class="decision_artifact_invalid",
+            )
+
+        def execute() -> DecisionRouterResult:
+            if self.live_resource_control:
+                with ollama.model_resource_lease(exclusive=True):
+                    return self._decide_locked(
+                        prompt,
+                        schema,
+                        system=system,
+                        agreement_key=agreement_key,
+                        decision_lane=effective_lane,
+                        ingest_repair_contract=ingest_repair_contract,
+                        replay_prompt=replay_prompt,
+                    )
+            return self._decide_locked(
+                prompt,
+                schema,
+                system=system,
+                agreement_key=agreement_key,
+                decision_lane=effective_lane,
+                ingest_repair_contract=ingest_repair_contract,
+                replay_prompt=replay_prompt,
+            )
+
+        result = execute()
+        if result.ok and artifact_identity is not None and effective_lane is not None:
+            fingerprint, identity, context_tier = artifact_identity
+            try:
+                self._publish_artifact(
+                    result,
+                    fingerprint=fingerprint,
+                    identity=identity,
+                    context_tier=context_tier,
+                    decision_lane=effective_lane,
+                )
+            except DecisionArtifactError as exc:
+                return self._quarantined(
+                    result.votes,
+                    f"canonical_decision_artifact_publish_failed:{exc}",
+                    failure_class="decision_artifact_invalid",
+                )
+        return result
 
     def _decide_locked(
         self,
