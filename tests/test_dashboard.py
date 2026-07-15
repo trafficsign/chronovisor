@@ -271,6 +271,110 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert not (active_dir / "stale.json").exists()
 
 
+def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_decision_trace_models",
+        lambda: {
+            "primary": "primary:model",
+            "challenger": "challenger:model",
+            "tie_break": "tie:model",
+        },
+    )
+    request = "a" * 64
+    trace = dashboard._decision_trace_snapshot(
+        [
+            {
+                "request_sha256": request,
+                "role": "ingest_review:challenger",
+                "model": "challenger:model",
+                "phase": "validate",
+                "attempt": 1,
+                "elapsed_seconds": 42,
+                "updated_at": "2026-07-15T12:00:00Z",
+            }
+        ],
+        [
+            {
+                "kind": "session",
+                "timestamp": "2026-07-15T11:59:00Z",
+                "request_sha256": request,
+                "role": "ingest_review:primary",
+                "model": "primary:model",
+                "ok": True,
+                "first_pass_valid": True,
+                "repair_turns": 0,
+            }
+        ],
+        None,
+    )
+
+    assert trace["state"] == "active"
+    assert trace["task_role"] == "ingest_review"
+    assert trace["lanes"][0]["state"] == "done"
+    assert trace["lanes"][1]["state"] == "active"
+    assert trace["lanes"][1]["steps"][4]["status"] == "active"
+    assert trace["lanes"][2]["state"] == "pending"
+    assert [step["label"] for step in trace["overall"]] == [
+        "Packet",
+        "Dispatch",
+        "Generate",
+        "Validate",
+        "Quorum",
+        "Artifact",
+        "Decision",
+    ]
+    assert trace["overall"][2]["status"] == "done"
+    assert trace["overall"][3]["status"] == "active"
+    assert trace["overall"][4]["status"] == "pending"
+
+
+def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_decision_trace_models",
+        lambda: {
+            "primary": "primary:model",
+            "challenger": "challenger:model",
+            "tie_break": "tie:model",
+        },
+    )
+    request = "b" * 64
+    decision = {
+        "kind": "decision",
+        "timestamp": "2026-07-15T12:00:02Z",
+        "request_sha256": request,
+        "role": "ingest_review",
+        "status": "agreed",
+        "pair_agreement": True,
+        "tie_break_used": False,
+        "valid_votes": 2,
+        "models": ["primary:model", "challenger:model"],
+    }
+    sessions = [
+        {
+            "kind": "session",
+            "timestamp": f"2026-07-15T12:00:0{index}Z",
+            "request_sha256": request,
+            "role": f"ingest_review:{role}",
+            "model": f"{role}:model",
+            "ok": True,
+            "first_pass_valid": True,
+            "repair_turns": 0,
+        }
+        for index, role in enumerate(("primary", "challenger"))
+    ]
+    trace = dashboard._decision_trace_snapshot([], [*sessions, decision], decision)
+
+    assert trace["state"] == "agreed"
+    assert trace["summary"] == "2/2 pair agreement"
+    assert trace["lanes"][0]["state"] == "done"
+    assert trace["lanes"][1]["state"] == "done"
+    assert trace["lanes"][2]["state"] == "skipped"
+    assert trace["overall"][4]["status"] == "done"
+    assert trace["overall"][5]["status"] == "done"
+
+
 def test_local_consensus_snapshot_removes_reused_pid_marker(
     tmp_path: Path,
     monkeypatch,
@@ -529,7 +633,15 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'id="local-consensus"' in page
     assert 'id="frontier-repair"' in page
     assert "Frontier Repair" in page
-    assert "grid-template-columns: repeat(6, minmax(0, 1fr));" in style
+    assert 'id="decision-trace-panel"' in page
+    assert 'data-decision-lane="primary"' in page
+    assert 'data-decision-lane="challenger"' in page
+    assert 'data-decision-lane="tie_break"' in page
+    assert 'id="lan-share-button"' in page
+    assert "grid-template-columns: repeat(7, minmax(0, 1fr));" in style
+    assert "grid-template-columns: repeat(6, minmax(50px, 1fr));" in style
+    assert "height: var(--panel-height);" in style
+    assert ".decision-trace-panel" in style
 
 
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:
@@ -712,6 +824,59 @@ def test_snapshot_handler_returns_json_error_instead_of_empty_socket(
         "status": "error",
         "error_class": "RuntimeError",
         "error": "snapshot exploded",
+    }
+
+
+def test_dashboard_lan_token_is_private_and_reused(tmp_path: Path) -> None:
+    token_path = tmp_path / "runtime" / "dashboard-access-token"
+
+    first = dashboard._load_or_create_dashboard_token(token_path)
+    second = dashboard._load_or_create_dashboard_token(token_path)
+
+    assert first == second
+    assert dashboard.DASHBOARD_TOKEN_RE.fullmatch(first)
+    assert token_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_dashboard_private_client_scope_rejects_public_addresses() -> None:
+    assert dashboard._private_client_scope("127.0.0.1") == "loopback"
+    assert dashboard._private_client_scope("192.168.1.22") == "private"
+    assert dashboard._private_client_scope("10.1.2.3") == "private"
+    assert dashboard._private_client_scope("8.8.8.8") == "public"
+    assert dashboard._private_client_scope("not-an-ip") == "invalid"
+
+
+def test_dashboard_lan_link_bootstraps_cookie_and_removes_query_token(
+    monkeypatch,
+) -> None:
+    token = "a" * 43
+    monkeypatch.setattr(dashboard, "_dashboard_lan_hosts", lambda: ["wiki.local"])
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    server.lan_access_enabled = True
+    server.lan_access_token = token
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        with dashboard.httpx.Client(follow_redirects=False, timeout=2) as client:
+            bootstrap = client.get(
+                f"http://{host}:{port}/?access_token={token}&view=trace"
+            )
+            page = client.get(f"http://{host}:{port}/")
+            access = client.get(f"http://{host}:{port}/api/lan-access")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert bootstrap.status_code == 303
+    assert bootstrap.headers["location"] == "/?view=trace"
+    assert "HttpOnly" in bootstrap.headers["set-cookie"]
+    assert page.status_code == 200
+    assert access.json() == {
+        "enabled": True,
+        "urls": [f"http://wiki.local:{port}/?access_token={token}"],
+        "trusted_lan_only": True,
     }
 
 

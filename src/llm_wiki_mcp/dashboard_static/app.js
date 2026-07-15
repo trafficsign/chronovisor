@@ -9,11 +9,20 @@ const els = {
   batchSub: document.getElementById("batch-sub"),
   ollama: document.getElementById("ollama-value"),
   ollamaSub: document.getElementById("ollama-sub"),
+  lanShareButton: document.getElementById("lan-share-button"),
   workOverview: document.getElementById("work-overview"),
   workSummary: document.getElementById("work-summary"),
   workUpdated: document.getElementById("work-updated"),
   workDetail: document.getElementById("work-detail"),
-  workSteps: document.querySelectorAll("[data-work-step]"),
+  decisionElapsed: document.getElementById("decision-elapsed"),
+  decisionContext: document.getElementById("decision-context"),
+  decisionBadge: document.getElementById("decision-badge"),
+  decisionModelCalls: document.getElementById("decision-model-calls"),
+  decisionQuorum: document.getElementById("decision-quorum"),
+  decisionMutation: document.getElementById("decision-mutation"),
+  decisionTraceCaption: document.getElementById("decision-trace-caption"),
+  decisionOverallSteps: document.getElementById("decision-overall-steps"),
+  decisionLanes: document.querySelectorAll("[data-decision-lane]"),
   currentRaw: document.getElementById("current-raw"),
   currentOp: document.getElementById("current-op"),
   llmSignal: document.getElementById("llm-signal"),
@@ -130,7 +139,6 @@ const llmSignalHistory = {
   rates: Array(32).fill(0),
 };
 
-const WORK_STAGE_ORDER = ["raw", "triage", "generate", "review", "apply", "index"];
 const WORK_STAGE_ALIASES = {
   idle: "idle",
   queued: "raw",
@@ -320,14 +328,7 @@ function inferWorkStage(status, llm) {
   return WORK_STAGE_ALIASES[rawStage] || (status.current_raw ? "raw" : "idle");
 }
 
-function setWorkStage(stage, stateKind) {
-  const activeIndex = WORK_STAGE_ORDER.indexOf(stage);
-  els.workSteps.forEach((step) => {
-    const key = step.dataset.workStep;
-    const index = WORK_STAGE_ORDER.indexOf(key);
-    step.classList.toggle("active", index === activeIndex);
-    step.classList.toggle("done", activeIndex >= 0 && index >= 0 && index < activeIndex);
-  });
+function setWorkState(stateKind) {
   els.workOverview.classList.remove("idle", "running", "complete", "warning", "stalled");
   els.workOverview.classList.add(stateKind);
 }
@@ -400,7 +401,127 @@ function renderWorkStatus(status) {
   els.workSummary.textContent = summary;
   els.workUpdated.textContent = updated;
   els.workDetail.textContent = detail;
-  setWorkStage(stage, stateKind);
+  setWorkState(stateKind);
+}
+
+function renderDecisionTrace(consensus) {
+  const trace = consensus?.decision_trace || {};
+  const traceState = String(trace.state || "idle");
+  const request = String(trace.request_sha256 || "");
+  const active = trace.active === true;
+  els.decisionTraceCaption.textContent = request ? `Job ${request.slice(0, 8)}` : "Job --";
+  els.decisionElapsed.textContent = trace.started_at
+    ? `経過 ${compactDuration(Math.max(0, (Date.now() - parseMs(trace.started_at)) / 1000))}`
+    : "経過 --";
+  const contextTokens = Number(trace.context_tokens || 0);
+  els.decisionContext.textContent = contextTokens
+    ? `Context ${Math.round(contextTokens / 1024)}K`
+    : "Context --";
+
+  els.decisionOverallSteps.innerHTML = "";
+  const overall = Array.isArray(trace.overall) ? trace.overall : [];
+  overall.forEach((step) => {
+    const item = document.createElement("span");
+    item.className = `decision-step ${fmt(step.status, "pending")}`;
+    item.dataset.decisionOverallStep = fmt(step.key, "step");
+    const label = document.createElement("span");
+    label.textContent = fmt(step.label, "Step");
+    item.appendChild(label);
+    els.decisionOverallSteps.appendChild(item);
+  });
+
+  const activeOverallIndex = overall.findIndex((step) => step.status === "active");
+  const doneOverallCount = overall.filter((step) => step.status === "done").length;
+  const overallPosition = activeOverallIndex >= 0 ? activeOverallIndex + 1 : doneOverallCount;
+  const overallStage =
+    (activeOverallIndex >= 0 ? overall[activeOverallIndex]?.label : null) ||
+    [...overall].reverse().find((step) => step.status === "done")?.label ||
+    "Waiting";
+
+  const lanes = new Map(
+    (Array.isArray(trace.lanes) ? trace.lanes : []).map((lane) => [lane.key, lane])
+  );
+  els.decisionLanes.forEach((element) => {
+    const lane = lanes.get(element.dataset.decisionLane) || {};
+    const laneState = fmt(lane.state, "pending");
+    element.classList.remove("active", "done", "error", "skipped", "pending");
+    element.classList.add(laneState);
+    const role = element.querySelector(".decision-role strong");
+    const model = element.querySelector(".decision-model");
+    const steps = element.querySelector(".decision-lane-steps");
+    const result = element.querySelector(".decision-lane-result");
+    role.textContent = fmt(lane.label, element.dataset.decisionLane);
+    model.textContent = fmt(lane.model, "not configured");
+    steps.innerHTML = "";
+    (Array.isArray(lane.steps) ? lane.steps : []).forEach((step) => {
+      const item = document.createElement("span");
+      item.className = `decision-lane-step ${fmt(step.status, "pending")}`;
+      const label = document.createElement("span");
+      label.textContent = fmt(step.label, "Step");
+      item.appendChild(label);
+      steps.appendChild(item);
+    });
+    const resultLabel =
+      laneState === "pending"
+        ? "WAITING"
+        : laneState === "skipped"
+          ? element.dataset.decisionLane === "tie_break"
+            ? "STANDBY"
+            : "NOT NEEDED"
+          : laneState === "error"
+            ? "INVALID"
+            : laneState === "done"
+              ? "VALID"
+              : fmt(lane.result, laneState).toUpperCase();
+    result.querySelector("strong").textContent = resultLabel;
+    result.querySelector("span").textContent = fmt(lane.detail, "Not started");
+  });
+
+  if (request) {
+    const stateKind = active
+      ? "running"
+      : traceState === "agreed" || traceState === "ready"
+        ? "complete"
+        : traceState === "quarantined"
+          ? "warning"
+          : "idle";
+    const modelCalls = (Array.isArray(trace.lanes) ? trace.lanes : []).filter((lane) =>
+      ["active", "done", "error"].includes(lane.state)
+    ).length;
+    const validVotes = (Array.isArray(trace.lanes) ? trace.lanes : []).filter(
+      (lane) => lane.state === "done"
+    ).length;
+    const tieBreakUsed = (Array.isArray(trace.lanes) ? trace.lanes : []).some(
+      (lane) => lane.key === "tie_break" && ["active", "done", "error"].includes(lane.state)
+    );
+    const quorumTarget = tieBreakUsed ? 3 : 2;
+    const badge =
+      traceState === "agreed"
+        ? "APPROVED"
+        : traceState === "quarantined"
+          ? "HELD"
+          : trace.artifact_replay
+            ? "REPLAYED"
+            : active
+              ? tieBreakUsed
+                ? "RESOLVING"
+                : "WAITING"
+              : "READY";
+    els.workSummary.textContent = `${overallStage} · ${Math.min(overallPosition, 7)} / 7`;
+    els.workDetail.textContent = fmt(trace.summary, "Local decision");
+    els.workUpdated.textContent = `${fmt(trace.task_role, "routine")} · request ${request.slice(0, 16)}`;
+    els.decisionBadge.textContent = badge;
+    els.decisionModelCalls.textContent = String(trace.artifact_replay ? 0 : modelCalls);
+    els.decisionQuorum.textContent = `${Math.min(validVotes, quorumTarget)} / ${quorumTarget}`;
+    els.decisionMutation.textContent =
+      traceState === "agreed" || traceState === "ready" ? "Ready" : traceState === "quarantined" ? "Held" : "Locked";
+    setWorkState(stateKind);
+  } else {
+    els.decisionBadge.textContent = "WAITING";
+    els.decisionModelCalls.textContent = "0";
+    els.decisionQuorum.textContent = "0 / 2";
+    els.decisionMutation.textContent = "Locked";
+  }
 }
 
 function llmSignalKey(llm) {
@@ -1938,6 +2059,7 @@ function render(snapshot) {
   els.currentRaw.textContent = status.current_raw ? shortName(status.current_raw) : "waiting";
   els.currentOp.textContent = status.current_op ? fmt(status.current_op) : fmt(status.stage || "idle");
   renderWorkStatus(status);
+  renderDecisionTrace(status.local_consensus || {});
   renderLlm(status.llm, status);
   const consensus = status.local_consensus || {};
   const consensusSummary = consensus.summary || {};
@@ -2050,6 +2172,39 @@ els.knowledgeModeButtons.forEach((button) => {
 
 els.pendingChart.addEventListener("mousemove", handleSaveLoadHover);
 els.pendingChart.addEventListener("mouseleave", hideSaveLoadTooltip);
+
+async function copyLanLink() {
+  const original = "LAN link";
+  try {
+    const response = await fetch("/api/lan-access", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const access = await response.json();
+    const url = Array.isArray(access.urls) ? access.urls[0] : null;
+    if (!access.enabled || !url) throw new Error("LAN access disabled");
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      const input = document.createElement("textarea");
+      input.value = url;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      input.remove();
+    }
+    els.lanShareButton.textContent = "Copied";
+  } catch {
+    els.lanShareButton.textContent = "LAN unavailable";
+  } finally {
+    window.setTimeout(() => {
+      els.lanShareButton.textContent = original;
+    }, 1800);
+  }
+}
+
+els.lanShareButton.addEventListener("click", copyLanLink);
 
 void refreshLoop();
 window.addEventListener("resize", refresh);

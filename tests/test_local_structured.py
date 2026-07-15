@@ -88,6 +88,30 @@ def _session(transport: QueueTransport, **overrides: Any) -> LocalStructuredSess
     return LocalStructuredSession(model="local:test", transport=transport, **options)
 
 
+def test_activity_marker_tracks_redacted_structured_phase(tmp_path: Path) -> None:
+    store = LocalConsensusAuditStore(tmp_path / "audit")
+
+    with store.activity(
+        request_sha256="a" * 64,
+        role="ingest_review:challenger",
+        model="ornith:test",
+    ) as update:
+        marker_path = next(store.active_dir.glob("*.json"))
+        initial = json.loads(marker_path.read_text(encoding="utf-8"))
+        update("repair", 1)
+        repaired = json.loads(marker_path.read_text(encoding="utf-8"))
+
+        assert initial["phase"] == "trigger"
+        assert initial["attempt"] == 0
+        assert repaired["phase"] == "repair"
+        assert repaired["attempt"] == 1
+        assert repaired["request_sha256"] == "a" * 64
+        assert "prompt" not in repaired
+        assert "raw_output" not in repaired
+
+    assert list(store.active_dir.glob("*.json")) == []
+
+
 def test_first_pass_valid_uses_fixed_non_thinking_request() -> None:
     transport = QueueTransport('{"decision":"apply","summary":"ok"}')
 
@@ -162,9 +186,14 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
             "request_sha256",
             "role",
             "model",
+            "phase",
+            "attempt",
             "started_at",
+            "updated_at",
             "pid",
         }
+        assert marker["phase"] == "generate"
+        assert marker["attempt"] == 0
         return '{"decision":"apply","summary":"ok"}'
 
     result = LocalStructuredSession(

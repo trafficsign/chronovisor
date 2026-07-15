@@ -4,18 +4,24 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
+import ipaddress
 import json
 import math
+import os
 import re
+import secrets
+import socket
 import subprocess
 import threading
 import time
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 import httpx
 
@@ -33,6 +39,9 @@ from llm_wiki_mcp.runtime_config import (
 from llm_wiki_mcp.wiki import LOG_FILE, WIKI_ROOT, init_wiki
 
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
+DASHBOARD_ACCESS_COOKIE = "llm_wiki_dashboard_access"
+DASHBOARD_ACCESS_QUERY = "access_token"
+DASHBOARD_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 LOG_LINE_RE = re.compile(r"^- \[(?P<time>[^\]]+)\] (?P<message>.*)$")
 RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
 SEMANTIC_PROJECTION_CHILD_RE = re.compile(
@@ -93,6 +102,12 @@ _SNAPSHOT_CACHE: dict[str, Any] = {
 }
 
 
+def _send_security_headers(handler: BaseHTTPRequestHandler) -> None:
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Referrer-Policy", "no-referrer")
+    handler.send_header("X-Frame-Options", "DENY")
+
+
 def _json_response(
     handler: BaseHTTPRequestHandler, data: Any, status: int = 200
 ) -> None:
@@ -100,6 +115,7 @@ def _json_response(
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
+    _send_security_headers(handler)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -119,6 +135,14 @@ def _file_response(handler: BaseHTTPRequestHandler, path: Path) -> None:
     handler.send_response(HTTPStatus.OK)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Cache-Control", "no-store")
+    _send_security_headers(handler)
+    if path.suffix == ".html":
+        handler.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'none'",
+        )
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -1397,6 +1421,347 @@ def _empty_local_consensus_summary() -> dict[str, Any]:
     }
 
 
+_DECISION_TRACE_ROLES = ("primary", "challenger", "tie_break")
+_DECISION_TRACE_PHASES = ("trigger", "load", "context", "generate", "validate", "vote")
+
+
+def _decision_trace_role(value: object) -> tuple[str, str, bool]:
+    role = str(value or "structured")
+    if role in _DECISION_TRACE_ROLES:
+        return "routine", role, True
+    for lane in _DECISION_TRACE_ROLES:
+        suffix = f":{lane}"
+        if role.endswith(suffix):
+            return role[: -len(suffix)] or "routine", lane, True
+    return role, "primary", False
+
+
+def _decision_trace_models() -> dict[str, str]:
+    try:
+        config = _resolved_decision_router_config()
+        return {
+            "primary": str(config.primary_model),
+            "challenger": str(config.challenger_model),
+            "tie_break": str(config.tie_break_model),
+        }
+    except Exception:
+        return {role: "not configured" for role in _DECISION_TRACE_ROLES}
+
+
+def _decision_trace_context_tokens() -> int | None:
+    try:
+        return int(_resolved_decision_router_config().num_ctx)
+    except Exception:
+        return None
+
+
+def _decision_trace_steps(
+    state: str,
+    *,
+    phase: str | None = None,
+) -> list[dict[str, str]]:
+    phase = "generate" if phase == "repair" else str(phase or "trigger")
+    current_index = (
+        _DECISION_TRACE_PHASES.index(phase) if phase in _DECISION_TRACE_PHASES else 0
+    )
+    labels = {
+        "trigger": "Trigger",
+        "load": "Load",
+        "context": "Context",
+        "generate": "Generate",
+        "validate": "Validate",
+        "vote": "Vote",
+    }
+    steps: list[dict[str, str]] = []
+    for index, key in enumerate(_DECISION_TRACE_PHASES):
+        if state == "done":
+            status = "done"
+        elif state == "error":
+            status = "done" if index < 4 else "error" if index == 4 else "skipped"
+        elif state == "skipped":
+            status = "skipped"
+        elif state == "active":
+            status = (
+                "done"
+                if index < current_index
+                else "active"
+                if index == current_index
+                else "pending"
+            )
+        else:
+            status = "pending"
+        steps.append({"key": key, "label": labels[key], "status": status})
+    return steps
+
+
+def _decision_trace_snapshot(
+    activities: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    latest_decision: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Project redacted consensus telemetry into a stable three-lane trace."""
+
+    active_request = str(
+        (activities[-1] if activities else {}).get("request_sha256") or ""
+    )
+    decision_request = str((latest_decision or {}).get("request_sha256") or "")
+    latest_session = next(
+        (row for row in reversed(history) if row.get("kind") == "session"),
+        None,
+    )
+    request_sha256 = (
+        active_request
+        or decision_request
+        or str((latest_session or {}).get("request_sha256") or "")
+    )
+    related = [row for row in history if row.get("request_sha256") == request_sha256]
+    decision = next(
+        (
+            row
+            for row in reversed(related)
+            if row.get("kind") in {"decision", "decision_artifact_replay"}
+        ),
+        None,
+    )
+    active_rows = [
+        row for row in activities if row.get("request_sha256") == request_sha256
+    ]
+    session_rows = [row for row in related if row.get("kind") == "session"]
+
+    task_role = "idle"
+    if active_rows:
+        task_role = _decision_trace_role(active_rows[-1].get("role"))[0]
+    elif decision:
+        task_role = str(
+            decision.get("role") or decision.get("decision_lane") or "routine"
+        )
+    elif latest_session:
+        task_role = _decision_trace_role(latest_session.get("role"))[0]
+
+    quorum_flow = bool(
+        decision
+        or any(_decision_trace_role(row.get("role"))[2] for row in active_rows)
+        or any(_decision_trace_role(row.get("role"))[2] for row in session_rows)
+    )
+    models = _decision_trace_models()
+    decision_models = decision.get("models") if isinstance(decision, dict) else None
+    if isinstance(decision_models, list):
+        for lane, model in zip(_DECISION_TRACE_ROLES, decision_models, strict=False):
+            if isinstance(model, str) and model:
+                models[lane] = model
+
+    active_by_lane: dict[str, dict[str, Any]] = {}
+    for row in active_rows:
+        _base, lane, _explicit = _decision_trace_role(row.get("role"))
+        active_by_lane[lane] = row
+        if isinstance(row.get("model"), str) and row.get("model"):
+            models[lane] = str(row["model"])
+    session_by_lane: dict[str, dict[str, Any]] = {}
+    for row in session_rows:
+        _base, lane, _explicit = _decision_trace_role(row.get("role"))
+        session_by_lane[lane] = row
+        if isinstance(row.get("model"), str) and row.get("model"):
+            models[lane] = str(row["model"])
+
+    artifact_replay = bool(
+        decision and decision.get("kind") == "decision_artifact_replay"
+    )
+    lanes: list[dict[str, Any]] = []
+    lane_labels = {
+        "primary": "Primary",
+        "challenger": "Challenger",
+        "tie_break": "Tie-break",
+    }
+    for index, lane in enumerate(_DECISION_TRACE_ROLES):
+        active = active_by_lane.get(lane)
+        session = session_by_lane.get(lane)
+        state = "pending"
+        result = "Waiting"
+        detail = "Not started"
+        phase: str | None = None
+        if artifact_replay:
+            if lane == "tie_break":
+                state, result, detail = (
+                    "skipped",
+                    "Not required",
+                    "Sealed quorum proof replayed",
+                )
+            else:
+                state, result, detail = "done", "Proof replay", "0 live model calls"
+        elif active is not None:
+            state = "active"
+            phase = str(active.get("phase") or "generate")
+            attempt = int(active.get("attempt") or 0)
+            result = "JSON repair" if phase == "repair" else phase.title()
+            detail = f"attempt {attempt + 1} · {int(float(active.get('elapsed_seconds') or 0))}s elapsed"
+        elif session is not None:
+            if bool(session.get("ok")):
+                state = "done"
+                repairs = int(session.get("repair_turns") or 0)
+                result = "Valid after repair" if repairs else "Valid first pass"
+                detail = f"{repairs} repair turn{'s' if repairs != 1 else ''}"
+            else:
+                state = "error"
+                result = "Invalid vote"
+                detail = str(session.get("failure_class") or "validation failed")
+        elif not quorum_flow and lane != "primary":
+            state, result, detail = (
+                "skipped",
+                "Not required",
+                "Single-model structured task",
+            )
+        elif (
+            decision is not None
+            and lane == "tie_break"
+            and not decision.get("tie_break_used")
+        ):
+            state, result, detail = (
+                "skipped",
+                "Not required",
+                "Primary pair resolved quorum",
+            )
+        elif decision is not None and index < int(decision.get("valid_votes") or 0):
+            state, result, detail = (
+                "done",
+                "Valid vote",
+                "Recovered from decision audit",
+            )
+        lanes.append(
+            {
+                "key": lane,
+                "label": lane_labels[lane],
+                "model": models[lane],
+                "state": state,
+                "result": result,
+                "detail": detail,
+                "phase": phase,
+                "steps": _decision_trace_steps(state, phase=phase),
+            }
+        )
+
+    decision_status = str((decision or {}).get("status") or "")
+    if active_rows:
+        trace_state = "active"
+        active_lane = next(
+            (lane for lane in lanes if lane["state"] == "active"), lanes[0]
+        )
+        summary = f"{active_lane['label']} · {active_lane['result']}"
+    elif decision_status == "agreed":
+        trace_state = "agreed"
+        if artifact_replay:
+            summary = "Canonical artifact replay · 0 model calls"
+        elif decision and decision.get("pair_agreement"):
+            summary = "2/2 pair agreement"
+        elif decision and decision.get("tie_break_used"):
+            summary = "2/3 quorum after tie-break"
+        else:
+            summary = "Local quorum agreed"
+    elif decision_status == "quarantined":
+        trace_state = "quarantined"
+        summary = "No safe quorum · quarantined"
+    elif session_rows:
+        trace_state = "ready"
+        summary = "Structured result ready"
+    else:
+        trace_state = "idle"
+        summary = "No local decision yet"
+
+    active_phases = {
+        "generate"
+        if row.get("phase") == "repair"
+        else str(row.get("phase") or "trigger")
+        for row in active_rows
+    }
+    generating = bool(active_phases & {"trigger", "load", "context", "generate"})
+    validating = bool(active_phases) and not generating and "validate" in active_phases
+    voting = bool(active_phases) and not generating and not validating
+    completed = decision_status in {"agreed", "quarantined"} or (
+        not quorum_flow and bool(session_rows)
+    )
+    quorum_status = (
+        "done"
+        if decision_status == "agreed" or (not quorum_flow and bool(session_rows))
+        else "error"
+        if decision_status == "quarantined"
+        else "active"
+        if voting or (bool(session_rows) and not active_rows)
+        else "pending"
+    )
+    overall = [
+        {
+            "key": "packet",
+            "label": "Packet",
+            "status": "done" if request_sha256 else "pending",
+        },
+        {
+            "key": "dispatch",
+            "label": "Dispatch",
+            "status": "done" if active_rows or session_rows or decision else "pending",
+        },
+        {
+            "key": "generate",
+            "label": "Generate",
+            "status": "active"
+            if generating
+            else "done"
+            if session_rows or completed
+            else "pending",
+        },
+        {
+            "key": "validate",
+            "label": "Validate",
+            "status": "active"
+            if validating
+            else "done"
+            if not generating and (session_rows or completed)
+            else "pending",
+        },
+        {"key": "quorum", "label": "Quorum", "status": quorum_status},
+        {
+            "key": "artifact",
+            "label": "Artifact",
+            "status": "done"
+            if decision_status == "agreed"
+            or artifact_replay
+            or (not quorum_flow and session_rows)
+            else "skipped"
+            if decision_status == "quarantined"
+            else "pending",
+        },
+        {
+            "key": "decision",
+            "label": "Decision",
+            "status": "done"
+            if decision_status == "agreed" or (not quorum_flow and session_rows)
+            else "error"
+            if decision_status == "quarantined"
+            else "active"
+            if voting and not quorum_flow
+            else "pending",
+        },
+    ]
+    updated_at = (
+        (active_rows[-1] if active_rows else {}).get("updated_at")
+        or (active_rows[-1] if active_rows else {}).get("started_at")
+        or (decision or {}).get("timestamp")
+        or (session_rows[-1] if session_rows else {}).get("timestamp")
+    )
+    return {
+        "state": trace_state,
+        "active": bool(active_rows),
+        "request_sha256": request_sha256 or None,
+        "task_role": task_role,
+        "summary": summary,
+        "started_at": (active_rows[0] if active_rows else {}).get("started_at"),
+        "updated_at": updated_at,
+        "context_tokens": _decision_trace_context_tokens(),
+        "quorum_flow": quorum_flow,
+        "artifact_replay": artifact_replay,
+        "overall": overall,
+        "lanes": lanes,
+    }
+
+
 def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
     """Return live local review truth plus a redacted bounded audit tail."""
 
@@ -1424,7 +1789,10 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
                 "request_sha256": row.get("request_sha256"),
                 "role": row.get("role"),
                 "model": row.get("model"),
+                "phase": row.get("phase"),
+                "attempt": row.get("attempt"),
                 "started_at": row.get("started_at"),
+                "updated_at": row.get("updated_at"),
                 "pid": pid,
                 "elapsed_seconds": age_seconds,
             }
@@ -1474,13 +1842,37 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
                         "repaired_votes",
                         "repair_turns",
                         "models",
+                        "decision_lane",
+                        "pair_safe_resolution_without_tie",
+                        "signature_majority_resolution",
+                        "safe_policy_resolution",
+                    )
+                }
+            )
+        elif kind == "decision_artifact_replay":
+            history.append(
+                {
+                    key: row.get(key)
+                    for key in (
+                        "kind",
+                        "timestamp",
+                        "request_sha256",
+                        "role",
+                        "decision_lane",
+                        "status",
+                        "model_invocations",
                     )
                 }
             )
     latest_decision = next(
-        (row for row in reversed(history) if row.get("kind") == "decision"),
+        (
+            row
+            for row in reversed(history)
+            if row.get("kind") in {"decision", "decision_artifact_replay"}
+        ),
         None,
     )
+    decision_trace = _decision_trace_snapshot(activities, history, latest_decision)
     return {
         "active": bool(activities),
         "count": len(activities),
@@ -1488,6 +1880,7 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
         "latest": activities[-1] if activities else None,
         "summary": summary,
         "latest_decision": latest_decision,
+        "decision_trace": decision_trace,
         "history": history,
     }
 
@@ -2530,9 +2923,7 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
     ):
         tracked.extend(sorted(pattern.parent.glob(pattern.name))[-limit:])
     tracked.extend(
-        sorted(
-            (WIKI_ROOT / "runtime" / "decision-artifacts").glob("*/*.json")
-        )[-32:]
+        sorted((WIKI_ROOT / "runtime" / "decision-artifacts").glob("*/*.json"))[-32:]
     )
     identities: list[tuple[Any, ...]] = []
     for path in dict.fromkeys(tracked):
@@ -2615,15 +3006,195 @@ def _cached_snapshot() -> dict[str, Any]:
         return snapshot
 
 
+def _load_or_create_dashboard_token(path: Path) -> str:
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        existing = ""
+    if existing:
+        if DASHBOARD_TOKEN_RE.fullmatch(existing) is None:
+            raise RuntimeError(f"dashboard access token is malformed: {path}")
+        os.chmod(path, 0o600)
+        return existing
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        existing = path.read_text(encoding="utf-8").strip()
+        if DASHBOARD_TOKEN_RE.fullmatch(existing) is None:
+            raise RuntimeError(f"dashboard access token is malformed: {path}")
+        os.chmod(path, 0o600)
+        return existing
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return token
+
+
+def _normalized_client_ip(
+    value: object,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        address = ipaddress.ip_address(str(value))
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        return address.ipv4_mapped
+    return address
+
+
+def _private_client_scope(value: object) -> str:
+    address = _normalized_client_ip(value)
+    if address is None:
+        return "invalid"
+    if address.is_loopback:
+        return "loopback"
+    if address.is_private or address.is_link_local:
+        return "private"
+    return "public"
+
+
+def _dashboard_lan_hosts() -> list[str]:
+    local_name = re.sub(
+        r"[^A-Za-z0-9-]", "-", socket.gethostname().split(".")[0]
+    ).strip("-")
+    hosts = [f"{local_name}.local"] if local_name else []
+    for interface in ("en0", "en1"):
+        try:
+            result = subprocess.run(
+                ["/usr/sbin/ipconfig", "getifaddr", interface],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        candidate = result.stdout.strip()
+        if _private_client_scope(candidate) == "private" and candidate not in hosts:
+            hosts.append(candidate)
+    return hosts
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "LLMWikiDashboard/0.1"
+
+    def _access_token(self) -> str:
+        return str(getattr(self.server, "lan_access_token", "") or "")
+
+    def _is_loopback(self) -> bool:
+        return _private_client_scope(self.client_address[0]) == "loopback"
+
+    def _cookie_authorized(self, token: str) -> bool:
+        try:
+            cookies = SimpleCookie()
+            cookies.load(self.headers.get("Cookie", ""))
+            supplied = cookies.get(DASHBOARD_ACCESS_COOKIE)
+        except Exception:
+            return False
+        return bool(supplied and hmac.compare_digest(supplied.value, token))
+
+    def _redirect_after_token(self, parsed: Any, token: str) -> None:
+        clean_query = urlencode(
+            [
+                (key, value)
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                if key != DASHBOARD_ACCESS_QUERY
+            ]
+        )
+        location = parsed.path or "/"
+        if clean_query:
+            location += f"?{clean_query}"
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.send_header(
+            "Set-Cookie",
+            f"{DASHBOARD_ACCESS_COOKIE}={token}; Path=/; Max-Age=2592000; "
+            "HttpOnly; SameSite=Strict",
+        )
+        self.send_header("Cache-Control", "no-store")
+        _send_security_headers(self)
+        self.end_headers()
+
+    def _deny_remote(self, status: HTTPStatus, message: str) -> None:
+        body = (
+            "<!doctype html><meta charset='utf-8'><title>Dashboard access</title>"
+            f"<p>{message}</p>"
+        ).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        _send_security_headers(self)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _authorize(self, parsed: Any) -> bool:
+        scope = _private_client_scope(self.client_address[0])
+        token = self._access_token()
+        lan_enabled = bool(getattr(self.server, "lan_access_enabled", False))
+        supplied = dict(parse_qsl(parsed.query, keep_blank_values=True)).get(
+            DASHBOARD_ACCESS_QUERY,
+            "",
+        )
+        if lan_enabled and token and supplied and hmac.compare_digest(supplied, token):
+            self._redirect_after_token(parsed, token)
+            return False
+        if scope == "loopback":
+            return True
+        if not lan_enabled:
+            self._deny_remote(HTTPStatus.FORBIDDEN, "LAN access is disabled.")
+            return False
+        if scope != "private":
+            self._deny_remote(
+                HTTPStatus.FORBIDDEN, "Only private-network clients are allowed."
+            )
+            return False
+        if not token or not self._cookie_authorized(token):
+            self._deny_remote(
+                HTTPStatus.UNAUTHORIZED,
+                "Open the dashboard on the Mac and copy its one-time LAN link.",
+            )
+            return False
+        return True
+
+    def _lan_access_response(self) -> None:
+        if not self._is_loopback():
+            _json_response(self, {"enabled": False}, status=HTTPStatus.FORBIDDEN)
+            return
+        enabled = bool(getattr(self.server, "lan_access_enabled", False))
+        token = self._access_token()
+        port = int(self.server.server_address[1])
+        urls = (
+            [
+                f"http://{host}:{port}/?{DASHBOARD_ACCESS_QUERY}={token}"
+                for host in _dashboard_lan_hosts()
+            ]
+            if enabled and token
+            else []
+        )
+        _json_response(
+            self,
+            {
+                "enabled": enabled,
+                "urls": urls,
+                "trusted_lan_only": True,
+            },
+        )
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = parsed.path
+        if not self._authorize(parsed):
+            return
         try:
             if path == "/":
                 _file_response(self, STATIC_DIR / "index.html")
+            elif path == "/api/lan-access":
+                self._lan_access_response()
             elif path == "/api/snapshot":
                 _json_response(self, _cached_snapshot())
             elif path == "/api/status":
@@ -2701,10 +3272,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return
 
 
-def serve(host: str, port: int) -> None:
+def serve(
+    host: str,
+    port: int,
+    *,
+    lan: bool = False,
+    access_token_file: Path | None = None,
+) -> None:
     init_wiki()
+    token_path = access_token_file or WIKI_ROOT / "runtime" / "dashboard-access-token"
+    token = _load_or_create_dashboard_token(token_path) if lan else ""
     server = ThreadingHTTPServer((host, port), DashboardHandler)
+    server.lan_access_enabled = lan  # type: ignore[attr-defined]
+    server.lan_access_token = token  # type: ignore[attr-defined]
     print(f"LLM Wiki dashboard: http://{host}:{port}")
+    if lan:
+        print(f"LAN access enabled with token file: {token_path}")
     server.serve_forever()
 
 
@@ -2712,12 +3295,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the LLM Wiki local dashboard.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--lan",
+        action="store_true",
+        help="Bind for trusted private-network access and require a generated token.",
+    )
+    parser.add_argument("--access-token-file", type=Path)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    serve(args.host, args.port)
+    host = "0.0.0.0" if args.lan and args.host == "127.0.0.1" else args.host
+    serve(
+        host,
+        args.port,
+        lan=args.lan,
+        access_token_file=args.access_token_file,
+    )
     return 0
 
 

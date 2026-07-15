@@ -13,9 +13,12 @@
         <p class="eyebrow">Local memory pipeline</p>
         <h1>LLM Wiki Observatory</h1>
       </div>
-      <div class="status-pill" id="state-pill">
-        <span class="pulse"></span>
-        <span id="state-text">connecting</span>
+      <div class="topbar-actions">
+        <button class="lan-share-button" id="lan-share-button" type="button">LAN link</button>
+        <div class="status-pill" id="state-pill">
+          <span class="pulse"></span>
+          <span id="state-text">connecting</span>
+        </div>
       </div>
     </header>
 
@@ -289,6 +292,89 @@
         <div class="model-grid" id="model-lab-grid"></div>
       </article>
 
+      <article class="panel panel-wide decision-trace-panel" id="decision-trace-panel">
+        <div class="decision-trace-toolbar">
+          <div class="decision-trace-heading">
+            <span class="work-dot" aria-hidden="true"></span>
+            <div>
+              <h2>Decision Trace</h2>
+              <p id="work-summary">Waiting · 0 / 7</p>
+            </div>
+          </div>
+          <div class="decision-trace-meta" aria-label="Current decision metadata">
+            <span id="decision-elapsed">経過 --</span>
+            <span id="decision-context">Context --</span>
+            <span id="decision-trace-caption">Job --</span>
+          </div>
+        </div>
+
+        <div class="decision-overall-steps" id="decision-overall-steps" aria-label="Decision milestones"></div>
+
+        <div class="decision-table-head" aria-hidden="true">
+          <span>MODEL</span>
+          <span>Trigger</span>
+          <span>Load</span>
+          <span>Context</span>
+          <span>Generate</span>
+          <span>Validate</span>
+          <span>Vote</span>
+          <span>RESULT</span>
+        </div>
+        <div class="decision-lanes" id="decision-lanes" aria-label="Local model lanes" aria-live="polite">
+          <section class="decision-lane" data-decision-lane="primary">
+            <div class="decision-role"><strong>Primary</strong><span class="decision-model">--</span></div>
+            <div class="decision-lane-steps" aria-label="Primary milestones"></div>
+            <div class="decision-lane-result"><strong>WAITING</strong><span>Not started</span></div>
+          </section>
+          <section class="decision-lane" data-decision-lane="challenger">
+            <div class="decision-role"><strong>Challenger</strong><span class="decision-model">--</span></div>
+            <div class="decision-lane-steps" aria-label="Challenger milestones"></div>
+            <div class="decision-lane-result"><strong>WAITING</strong><span>Not started</span></div>
+          </section>
+          <section class="decision-lane" data-decision-lane="tie_break">
+            <div class="decision-role"><strong>Tie-break</strong><span class="decision-model">--</span></div>
+            <div class="decision-lane-steps" aria-label="Tie-break milestones"></div>
+            <div class="decision-lane-result"><strong>STANDBY</strong><span>Triggered only on disagreement</span></div>
+          </section>
+        </div>
+
+        <div class="decision-summary work-overview" id="work-overview" aria-live="polite">
+          <div class="decision-summary-copy">
+            <span class="decision-badge" id="decision-badge">WAITING</span>
+            <strong id="work-detail">Waiting for a local decision.</strong>
+            <span id="work-updated">Mutation stays locked until validation and quorum complete.</span>
+          </div>
+          <div class="decision-facts">
+            <div><span>MODEL CALLS</span><strong id="decision-model-calls">0</strong></div>
+            <div><span>QUORUM</span><strong id="decision-quorum">0 / 2</strong></div>
+            <div><span>MUTATION</span><strong id="decision-mutation">Locked</strong></div>
+          </div>
+        </div>
+
+        <div class="trace-legacy-data" aria-hidden="true">
+          <div class="llm-signal trace-runtime-signal" id="llm-signal">
+            <div class="llm-signal-top">
+              <span class="signal-badge" id="llm-badge">
+                <span class="signal-dot"></span>
+                <strong id="llm-state">idle</strong>
+              </span>
+              <span class="signal-age" id="llm-age">--</span>
+            </div>
+            <div class="signal-target" id="llm-target">No active ingest call</div>
+            <div class="signal-stats" id="llm-stats">Waiting for ingest work</div>
+            <div class="signal-sparkline" id="llm-sparkline" aria-hidden="true"></div>
+          </div>
+          <dl class="trace-meta-grid">
+            <div><dt>Raw</dt><dd id="current-raw">--</dd></div>
+            <div><dt>Operation</dt><dd id="current-op">--</dd></div>
+            <div><dt>Local Consensus</dt><dd id="local-consensus">idle</dd></div>
+            <div><dt>Frontier Repair</dt><dd id="frontier-repair">idle</dd></div>
+            <div><dt>Job</dt><dd id="current-job">--</dd></div>
+            <div><dt>Last Success</dt><dd id="last-success">--</dd></div>
+          </dl>
+        </div>
+      </article>
+
       <article class="panel">
         <div class="panel-head">
           <div>
@@ -322,60 +408,6 @@
             <strong id="batch-duration">--</strong>
           </div>
         </div>
-      </article>
-
-      <article class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>Current Work</h2>
-            <p>Active ingest step, local consensus, exceptional repair, and latest completed raw.</p>
-          </div>
-        </div>
-        <div class="work-overview" id="work-overview">
-          <div class="work-status-line">
-            <span class="work-dot" aria-hidden="true"></span>
-            <strong id="work-summary">Waiting for work</strong>
-            <span id="work-updated">--</span>
-          </div>
-          <p id="work-detail">No active raw is being processed.</p>
-          <div class="work-steps" aria-label="Current work stage">
-            <span data-work-step="raw">Raw</span>
-            <span data-work-step="triage">Triage</span>
-            <span data-work-step="generate">Generate</span>
-            <span data-work-step="review">Review</span>
-            <span data-work-step="apply">Apply</span>
-            <span data-work-step="index">Index</span>
-          </div>
-        </div>
-        <dl class="work-list">
-          <dt>Raw</dt>
-          <dd id="current-raw">--</dd>
-          <dt>Op</dt>
-          <dd id="current-op">--</dd>
-          <dt>LLM</dt>
-          <dd>
-            <div class="llm-signal" id="llm-signal">
-              <div class="llm-signal-top">
-                <span class="signal-badge" id="llm-badge">
-                  <span class="signal-dot"></span>
-                  <strong id="llm-state">idle</strong>
-                </span>
-                <span class="signal-age" id="llm-age">--</span>
-              </div>
-              <div class="signal-target" id="llm-target">--</div>
-              <div class="signal-stats" id="llm-stats">--</div>
-              <div class="signal-sparkline" id="llm-sparkline" aria-hidden="true"></div>
-            </div>
-          </dd>
-          <dt>Local Consensus</dt>
-          <dd id="local-consensus">idle</dd>
-          <dt>Frontier Repair</dt>
-          <dd id="frontier-repair">idle</dd>
-          <dt>Job</dt>
-          <dd id="current-job">--</dd>
-          <dt>Last Success</dt>
-          <dd id="last-success">--</dd>
-        </dl>
       </article>
 
       <article class="panel self-heal-panel" id="self-heal-panel">
@@ -478,7 +510,7 @@
         <div class="self-heal-feed" id="recall-lab-feed"></div>
       </article>
 
-      <article class="panel panel-large panel-wide">
+      <article class="panel panel-large panel-wide events-panel">
         <div class="panel-head">
           <div>
             <h2>Recent Events</h2>

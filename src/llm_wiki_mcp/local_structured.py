@@ -32,6 +32,9 @@ MAX_RESPONSES = 1 + MAX_REPAIR_TURNS
 MAX_AUDIT_RECORDS = 512
 CONTEXT_SAFETY_TOKENS = 256
 SAFE_ACTIVITY_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+LOCAL_ACTIVITY_PHASES = frozenset(
+    {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
+)
 STRUCTURED_GENERATION_POLICY_VERSION = 1
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
@@ -889,34 +892,58 @@ class LocalConsensusAuditStore:
         request_sha256: str,
         role: str,
         model: str,
-    ) -> Iterator[None]:
-        """Publish a marker only while the structured session is executing."""
+    ) -> Iterator[Callable[[str, int | None], None]]:
+        """Publish a redacted, phase-aware marker while a session executes."""
 
         path: Path | None = None
+        record: dict[str, Any] = {}
+
+        def update(phase: str, attempt: int | None = None) -> None:
+            if path is None or phase not in LOCAL_ACTIVITY_PHASES:
+                return
+            if attempt is not None and (
+                isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0
+            ):
+                return
+            try:
+                record["phase"] = phase
+                record["updated_at"] = _utc_timestamp()
+                if attempt is not None:
+                    record["attempt"] = attempt
+                self._atomic_write(
+                    path,
+                    json.dumps(
+                        record,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                )
+            except Exception:
+                # Progress telemetry must never affect the local decision.
+                return
+
         try:
             activity_id = f"{os.getpid()}-{uuid4().hex}"
             path = self.active_dir / f"{activity_id}.json"
             # Deliberately no prompt, schema, system message, or raw response.
-            self._atomic_write(
-                path,
-                json.dumps(
-                    {
-                        "request_sha256": request_sha256,
-                        "role": role,
-                        "model": model,
-                        "started_at": _utc_timestamp(),
-                        "pid": os.getpid(),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
-            )
+            started_at = _utc_timestamp()
+            record = {
+                "request_sha256": request_sha256,
+                "role": role,
+                "model": model,
+                "phase": "trigger",
+                "attempt": 0,
+                "started_at": started_at,
+                "updated_at": started_at,
+                "pid": os.getpid(),
+            }
+            update("trigger", 0)
         except Exception:
             path = None
         try:
-            yield
+            yield update
         finally:
             if path is not None:
                 try:
@@ -1727,7 +1754,10 @@ class LocalStructuredSession:
         system: str | None = None,
         value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
         num_ctx: int | None = None,
+        activity_update: Callable[[str, int | None], None] | None = None,
     ) -> LocalStructuredResult:
+        if activity_update is not None:
+            activity_update("context", 0)
         effective_num_ctx = self.num_ctx if num_ctx is None else num_ctx
         preflight_failure, schema_copy, messages = self._prepare_initial_request(
             prompt,
@@ -1785,6 +1815,8 @@ class LocalStructuredSession:
                 temperature=STRUCTURED_GENERATION_TEMPERATURE,
                 seed=STRUCTURED_GENERATION_SEED,
             )
+            if activity_update is not None:
+                activity_update("generate" if index == 0 else "repair", index)
             try:
                 transport_output = self.transport(request)
             except ollama.OutputTooLargeError as exc:
@@ -1801,6 +1833,8 @@ class LocalStructuredSession:
                     f"{type(exc).__name__}: {str(exc)[:500]}",
                     attempts,
                 )
+            if activity_update is not None:
+                activity_update("validate", index)
             if isinstance(
                 transport_output, (ollama.ChatResponse, ollama.GenerateResponse)
             ):
@@ -2032,10 +2066,11 @@ class LocalStructuredSession:
             request_sha256=request_sha256,
             role=self.role,
             model=self.model,
-        ):
+        ) as activity_update:
             run_kwargs = {
                 "system": system,
                 "value_validator": value_validator,
+                "activity_update": activity_update,
             }
             if not self._uses_default_transport:
                 result = self._run_impl(prompt, schema, **run_kwargs)
@@ -2058,6 +2093,7 @@ class LocalStructuredSession:
                 if preflight_failure is not None:
                     result = preflight_failure
                 else:
+                    activity_update("load", 0)
                     try:
                         resource_request = _default_transport_resource_request(
                             model=self.model,
@@ -2093,16 +2129,17 @@ class LocalStructuredSession:
                                 exc.failure_class,
                                 str(exc),
                             )
-        try:
-            self.audit_store.record_session(
-                request_sha256=request_sha256,
-                role=self.role,
-                model=self.model,
-                result=result,
-            )
-        except Exception:
-            # Observability must never turn a valid local decision into a failure.
-            pass
+            activity_update("vote", max(0, len(result.attempts) - 1))
+            try:
+                self.audit_store.record_session(
+                    request_sha256=request_sha256,
+                    role=self.role,
+                    model=self.model,
+                    result=result,
+                )
+            except Exception:
+                # Observability must never turn a valid local decision into a failure.
+                pass
         return result
 
 
