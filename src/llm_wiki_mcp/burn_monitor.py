@@ -817,6 +817,12 @@ def dashboard_snapshot(base_url: str, *, all_endpoints: bool) -> dict[str, Any]:
         )
         if endpoint == "/api/snapshot":
             snapshot_payload = response.get("payload")
+            # The aggregate snapshot already contains both components.  Light
+            # preflight/final-idle probes intentionally fetch only this one
+            # endpoint, so project health and save history from the same
+            # response instead of reporting them as missing.
+            save_history_payload = snapshot_payload
+            health_payload = snapshot_payload
         elif endpoint == "/api/save-history":
             save_history_payload = response.get("payload")
         elif endpoint == "/api/health":

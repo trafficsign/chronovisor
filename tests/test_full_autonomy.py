@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from llm_wiki_mcp import (
+    burn_monitor,
     decision_authority,
     decision_router,
     durable_state,
@@ -59,6 +60,73 @@ SCHEMA = {
         "reason": {"type": "string"},
     },
 }
+
+
+def test_light_dashboard_probe_projects_aggregate_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aggregate = {
+        "runtime": {
+            "commit_id": "commit",
+            "expected_commit": "commit",
+            "drift": False,
+            "module_path": "/archive/runtime_config.py",
+        },
+        "status": {
+            "state": "idle",
+            "pending": 0,
+            "raw_outstanding": 0,
+            "batch": {"active": False},
+            "llm": {"active": False},
+            "local_consensus": {"active": False},
+            "frontier_repair": {"active": False},
+            "frontier_review": {"active": False},
+            "semantic_deferred": {"count": 0},
+            "operational_deferred": {"count": 0},
+        },
+        "save_history": {
+            "totals": {"pending_bytes": 0},
+            "days": [],
+        },
+        "health": {
+            "autonomy_hardening": {
+                "decision_artifacts": {
+                    "count": 0,
+                    "replay_definition": "sealed_execution_fingerprint",
+                },
+                "deadman": {
+                    "main": {"status": "ok"},
+                    "observer": {"status": "ok"},
+                },
+                "quality": {"frozen": 0, "probe": {"status": "ok"}},
+                "managed_holds": {"total": 0},
+                "provisional_recall": {
+                    "entries": 0,
+                    "mutation_evidence_allowed": False,
+                },
+                "frontier_semantic_audit_allowed": False,
+            },
+            "read_back": {"derived_view_integrity": {"status": "ok"}},
+        },
+    }
+    monkeypatch.setattr(
+        burn_monitor,
+        "http_get",
+        lambda _url, *, parse_json: {
+            "ok": True,
+            "status": 200,
+            "payload": aggregate,
+        },
+    )
+
+    snapshot = burn_monitor.dashboard_snapshot(
+        "http://127.0.0.1:8765", all_endpoints=False
+    )
+
+    assert snapshot["snapshot"]["valid"] is True
+    assert snapshot["save_history"]["valid"] is True
+    assert snapshot["hardening"]["valid"] is True
+    assert snapshot["idle_violations"] == []
 
 
 def _config() -> DecisionRouterConfig:
