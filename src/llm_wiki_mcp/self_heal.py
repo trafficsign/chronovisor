@@ -59,6 +59,15 @@ SELF_HEAL_STATUSES = {
     "repair_deferred",
 }
 
+# A local semantic decision may quarantine an operational source packet while
+# a code fix is being prepared.  That terminal scheduler state must not be
+# re-enqueued by ``pending_packets()``, but the explicit verified-repair CAS is
+# still allowed to release it.  True semantic defers remain excluded by the
+# stronger class/terminal guards in the release boundary.
+_VERIFIED_LOCAL_REPAIR_RELEASABLE_STATUSES = frozenset(
+    {*SELF_HEAL_STATUSES, "local_quarantined"}
+)
+
 RUNNING_STATUSES = {
     "local_repairing",
     "frontier_running",
@@ -66,7 +75,20 @@ RUNNING_STATUSES = {
 
 PACKET_CANCELLATION_SCHEMA_VERSION = 1
 PACKET_CANCELLATION_STATUS = "superseded_semantic_defer"
+VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS = "superseded_verified_local_repair"
+_PACKET_CANCELLATION_STATUSES = frozenset(
+    {PACKET_CANCELLATION_STATUS, VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS}
+)
 _PACKET_SUCCESS_STATUSES = frozenset({"local_repair_applied", "frontier_approved"})
+_SYSTEM_INCIDENT_PRESTART_STATUSES = frozenset(
+    {
+        "pending_frontier",
+        "frontier_retry",
+        "frontier_preflight_failed",
+        "pending_frontier_review",
+        "repair_deferred",
+    }
+)
 _FULL_GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _RAW_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _EXPECTED_GITHUB_REPOSITORY = "trafficsign/llm-wiki-mcp"
@@ -232,7 +254,7 @@ def _read_packet_cancellation(
     if (
         not isinstance(cancellation, dict)
         or cancellation.get("schema_version") != PACKET_CANCELLATION_SCHEMA_VERSION
-        or cancellation.get("status") != PACKET_CANCELLATION_STATUS
+        or cancellation.get("status") not in _PACKET_CANCELLATION_STATUSES
         or cancellation.get("packet_path") != resolved_packet
         or not isinstance(cancellation.get("requested_at"), str)
         or not str(cancellation.get("requested_at") or "").strip()
@@ -252,6 +274,7 @@ def request_packet_cancellation(
     *,
     reason: str,
     superseded_by_packet: Path,
+    cancellation_status: str = PACKET_CANCELLATION_STATUS,
 ) -> dict[str, Any]:
     """Publish a lock-free cancellation observed by an in-flight worker.
 
@@ -263,6 +286,8 @@ def request_packet_cancellation(
 
     resolved = packet_path.expanduser().resolve(strict=False)
     superseded_by = superseded_by_packet.expanduser().resolve(strict=False)
+    if cancellation_status not in _PACKET_CANCELLATION_STATUSES:
+        raise ValueError("packet cancellation status is not allowlisted")
     try:
         loaded_packet = _read_json(resolved)
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
@@ -284,7 +309,7 @@ def request_packet_cancellation(
     )
     cancellation = {
         "schema_version": PACKET_CANCELLATION_SCHEMA_VERSION,
-        "status": PACKET_CANCELLATION_STATUS,
+        "status": cancellation_status,
         "packet_path": str(resolved),
         "packet_name": resolved.name,
         "failure_id": packet.get("failure_id"),
@@ -313,9 +338,12 @@ def _apply_packet_cancellation(
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
         current = dict(packet)
     cancelled_at = datetime.now().isoformat()
+    cancellation_status = str(cancellation.get("status") or "")
+    if cancellation_status not in _PACKET_CANCELLATION_STATUSES:
+        raise ValueError("packet cancellation status is not allowlisted")
     current.update(
         {
-            "status": PACKET_CANCELLATION_STATUS,
+            "status": cancellation_status,
             "self_heal_queued": False,
             "next_attempt_at": None,
             "lease_owner": None,
@@ -333,7 +361,7 @@ def _apply_packet_cancellation(
     return {
         "packet": str(packet_path),
         "failure_id": current.get("failure_id"),
-        "status": PACKET_CANCELLATION_STATUS,
+        "status": cancellation_status,
         "reason": cancellation.get("reason"),
         "superseded_by_packet": cancellation.get("superseded_by_packet"),
         "cancelled": True,
@@ -845,6 +873,205 @@ def _normalize_expected_raw_manifest(
     return dict(sorted(manifest.items()))
 
 
+def _inspect_linked_operational_incident(
+    source_packet_path: Path,
+    source_packet: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one source-to-system-incident edge and its execution state."""
+
+    linked_fields = (
+        "system_incident_packet_path",
+        "system_incident_fingerprint",
+        "system_incident_status",
+    )
+    if not any(field in source_packet for field in linked_fields):
+        return {"accepted": True, "linked": False}
+    linked_value = source_packet.get("system_incident_packet_path")
+    if linked_value is None:
+        return {"accepted": False, "reason": "linked_system_incident_path_invalid"}
+    if not isinstance(linked_value, str) or not linked_value.strip():
+        return {"accepted": False, "reason": "linked_system_incident_path_invalid"}
+    requested = Path(linked_value).expanduser()
+    try:
+        if requested.is_symlink():
+            raise ValueError("linked_system_incident_symlink")
+        incident_path = requested.resolve(strict=True)
+        packet_root = _packet_dir().expanduser().resolve(strict=True)
+    except (OSError, ValueError):
+        return {"accepted": False, "reason": "linked_system_incident_unavailable"}
+    if (
+        incident_path == source_packet_path
+        or incident_path.parent != packet_root
+        or incident_path.suffix != ".json"
+        or not incident_path.name.startswith("system-operational-")
+    ):
+        return {"accepted": False, "reason": "linked_system_incident_path_invalid"}
+
+    try:
+        from llm_wiki_mcp.system_incident_supervisor import (
+            TRUSTED_OPERATIONAL_FAILURE_CLASS,
+            TRUSTED_OPERATIONAL_JOB_ID,
+            validate_operational_incident_packet,
+        )
+
+        validate_operational_incident_packet(incident_path)
+        incident = _read_json(incident_path)
+    except Exception:
+        return {"accepted": False, "reason": "linked_system_incident_binding_invalid"}
+    linked_fingerprint = source_packet.get("system_incident_fingerprint")
+    source_paths = incident.get("source_packet_paths")
+    if (
+        incident.get("incident_kind") != "system_code_repair"
+        or incident.get("job_id") != TRUSTED_OPERATIONAL_JOB_ID
+        or incident.get("failure_class") != TRUSTED_OPERATIONAL_FAILURE_CLASS
+        or not isinstance(linked_fingerprint, str)
+        or not linked_fingerprint
+        or incident.get("fingerprint") != linked_fingerprint
+        or incident.get("source_failure_class") != source_packet.get("failure_class")
+        or incident.get("source_fingerprint") != source_packet.get("fingerprint")
+        or not isinstance(source_paths, list)
+        or str(source_packet_path) not in source_paths
+    ):
+        return {"accepted": False, "reason": "linked_system_incident_binding_invalid"}
+
+    status = str(incident.get("status") or "")
+    try:
+        frontier_attempts = int(incident.get("frontier_attempts") or 0)
+    except (TypeError, ValueError):
+        return {"accepted": False, "reason": "linked_system_incident_binding_invalid"}
+    frontier_result = incident.get("frontier_result")
+    execution_started = bool(
+        isinstance(frontier_result, Mapping)
+        and frontier_result.get("execution_started") is True
+    )
+    base = {
+        "linked": True,
+        "incident_path": str(incident_path),
+        "incident_fingerprint": incident.get("fingerprint"),
+        "observed_status": status,
+        "frontier_attempts": frontier_attempts,
+        "execution_started": execution_started,
+    }
+    if status == VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS:
+        cancellation = _read_packet_cancellation(incident_path, incident)
+        if (
+            cancellation is None
+            or cancellation.get("status") != VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS
+            or cancellation.get("superseded_by_packet") != str(source_packet_path)
+        ):
+            return {
+                "accepted": False,
+                "reason": "linked_system_incident_cancellation_invalid",
+                **base,
+            }
+        return {"accepted": True, "state": "superseded", **base}
+    if status == "frontier_running" or frontier_attempts > 0 or execution_started:
+        return {
+            "accepted": False,
+            "reason": "linked_system_incident_already_started",
+            **base,
+        }
+    if status not in _SYSTEM_INCIDENT_PRESTART_STATUSES:
+        return {
+            "accepted": False,
+            "reason": "linked_system_incident_terminal",
+            **base,
+        }
+    return {"accepted": True, "state": "prestart", **base}
+
+
+def _prepare_linked_incident_for_verified_release(
+    source_packet_path: Path,
+    source_packet: Mapping[str, Any],
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Durably close an unstarted incident before releasing its source raws."""
+
+    inspected = _inspect_linked_operational_incident(
+        source_packet_path,
+        source_packet,
+    )
+    if not inspected.get("accepted") or not inspected.get("linked"):
+        return inspected
+    if dry_run:
+        return {
+            **inspected,
+            "would_supersede": inspected.get("state") == "prestart",
+            "would_cancel_background_job": True,
+        }
+
+    incident_path = Path(str(inspected["incident_path"]))
+    with _packet_lock(incident_path) as acquired:
+        if not acquired:
+            return {
+                "accepted": False,
+                "reason": "linked_system_incident_busy",
+                **{
+                    key: value
+                    for key, value in inspected.items()
+                    if key not in {"accepted", "reason"}
+                },
+            }
+        inspected = _inspect_linked_operational_incident(
+            source_packet_path,
+            source_packet,
+        )
+        if not inspected.get("accepted"):
+            return inspected
+        if inspected.get("state") == "prestart":
+            incident = _read_json(incident_path)
+            cancellation = request_packet_cancellation(
+                incident_path,
+                reason="verified local repair superseded unstarted system incident",
+                superseded_by_packet=source_packet_path,
+                cancellation_status=VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS,
+            )
+            if not cancellation.get("accepted"):
+                return {
+                    "accepted": False,
+                    "reason": "linked_system_incident_cancellation_refused",
+                    **{
+                        key: value
+                        for key, value in inspected.items()
+                        if key not in {"accepted", "reason"}
+                    },
+                }
+            _apply_packet_cancellation(incident_path, incident, cancellation)
+            inspected = _inspect_linked_operational_incident(
+                source_packet_path,
+                source_packet,
+            )
+            if not inspected.get("accepted") or inspected.get("state") != "superseded":
+                return {
+                    "accepted": False,
+                    "reason": "linked_system_incident_cancellation_not_durable",
+                    "incident_path": str(incident_path),
+                }
+
+        try:
+            from llm_wiki_mcp.background_jobs import cancel_matching_jobs
+
+            background = cancel_matching_jobs(
+                name="system-code-repair",
+                module="llm_wiki_mcp.self_heal",
+                args=["--packet", str(incident_path), "--enable-frontier-repair"],
+                reason="verified local repair superseded system incident",
+            )
+        except Exception as exc:
+            return {
+                "accepted": False,
+                "reason": "linked_system_incident_job_cancel_failed",
+                "incident_path": str(incident_path),
+                "error_type": exc.__class__.__name__,
+            }
+    return {
+        **inspected,
+        "superseded": True,
+        "background_job_cancellation": background,
+    }
+
+
 def _release_operational_failure_after_local_repair_unlocked(
     packet_path: Path,
     *,
@@ -917,6 +1144,19 @@ def _release_operational_failure_after_local_repair_unlocked(
             and existing_receipt.get("verification_result") == (verification or None)
         )
         if receipt_matches:
+            linked_incident = _prepare_linked_incident_for_verified_release(
+                packet_path,
+                packet,
+                dry_run=dry_run,
+            )
+            if not linked_incident.get("accepted"):
+                return refuse(
+                    str(
+                        linked_incident.get("reason")
+                        or "linked_system_incident_refused"
+                    ),
+                    linked_system_incident=linked_incident,
+                )
             return {
                 "packet": str(packet_path),
                 "failure_id": packet.get("failure_id"),
@@ -925,6 +1165,7 @@ def _release_operational_failure_after_local_repair_unlocked(
                 "accepted": True,
                 "cached": True,
                 "verified_local_repair": existing_receipt,
+                "linked_system_incident": linked_incident,
             }
         return refuse("completed_packet_repair_evidence_mismatch")
 
@@ -936,7 +1177,7 @@ def _release_operational_failure_after_local_repair_unlocked(
         )
     if status in RUNNING_STATUSES:
         return refuse("packet_already_running")
-    if status not in SELF_HEAL_STATUSES:
+    if status not in _VERIFIED_LOCAL_REPAIR_RELEASABLE_STATUSES:
         return refuse("packet_status_not_releasable")
 
     if not affected_group:
@@ -1047,6 +1288,20 @@ def _release_operational_failure_after_local_repair_unlocked(
         "verification_result": verification or None,
     }
 
+    linked_incident = _prepare_linked_incident_for_verified_release(
+        packet_path,
+        packet,
+        dry_run=dry_run,
+    )
+    if not linked_incident.get("accepted"):
+        return refuse(
+            str(linked_incident.get("reason") or "linked_system_incident_refused"),
+            linked_system_incident=linked_incident,
+        )
+    evidence["linked_system_incident"] = (
+        linked_incident if linked_incident.get("linked") else None
+    )
+
     if dry_run:
         return {
             "packet": str(packet_path),
@@ -1056,19 +1311,43 @@ def _release_operational_failure_after_local_repair_unlocked(
             "accepted": True,
             "cached": False,
             "verified_local_repair": evidence,
+            "linked_system_incident": linked_incident,
         }
 
     applied_at = datetime.now().isoformat()
     evidence["recorded_at"] = applied_at
+    packet_updates: dict[str, Any] = {
+        "status": "local_repair_applied",
+        "self_heal_queued": False,
+        "next_attempt_at": None,
+        "frontier_status": "not_required",
+        "verified_local_repair": evidence,
+        "verified_local_repair_applied_at": applied_at,
+    }
+    active_semantic_hold = packet.get("semantic_hold")
+    if status == "local_quarantined":
+        packet_updates.update(
+            {
+                "terminal_reason": None,
+                "quarantined_at": None,
+            }
+        )
+    if active_semantic_hold is not None:
+        packet_updates.update(
+            {
+                "semantic_hold": None,
+                "semantic_hold_history": _semantic_hold_history_with(
+                    packet,
+                    active_semantic_hold,
+                ),
+                "invalidated_semantic_hold": active_semantic_hold,
+                "semantic_hold_invalidated_at": applied_at,
+            }
+        )
     _update_packet(
         packet_path,
         packet,
-        status="local_repair_applied",
-        self_heal_queued=False,
-        next_attempt_at=None,
-        frontier_status="not_required",
-        verified_local_repair=evidence,
-        verified_local_repair_applied_at=applied_at,
+        **packet_updates,
     )
     return {
         "packet": str(packet_path),
@@ -1077,6 +1356,7 @@ def _release_operational_failure_after_local_repair_unlocked(
         "accepted": True,
         "cached": False,
         "verified_local_repair": evidence,
+        "linked_system_incident": linked_incident,
     }
 
 
@@ -2293,7 +2573,7 @@ def _handle_packet_unlocked(
             "packet": str(packet_path),
             "failure_id": packet.get("failure_id"),
             "status": "dry_run",
-            "projected_status": PACKET_CANCELLATION_STATUS,
+            "projected_status": cancellation.get("status"),
             "reason": cancellation.get("reason"),
             "superseded_by_packet": cancellation.get("superseded_by_packet"),
             "would_cancel": True,
@@ -3447,6 +3727,16 @@ def enqueue_system_code_repair(packet_path: Path) -> dict[str, Any]:
 
     resolved = packet_path.expanduser().resolve(strict=False)
     packet = _read_json(resolved)
+    cancellation = _read_packet_cancellation(resolved, packet)
+    if cancellation is not None:
+        return {
+            "job_id": None,
+            "status": cancellation.get("status"),
+            "enqueued": False,
+            "coalesced": False,
+            "cancelled": True,
+            "cancellation_reason": cancellation.get("reason"),
+        }
     _repair_incident_evidence(packet)
     payload = packet.get("repair_evidence")
     if (

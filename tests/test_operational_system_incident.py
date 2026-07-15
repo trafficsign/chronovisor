@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -81,12 +82,13 @@ def _attach_verified_reproduction(
     source_path: Path,
     *,
     failing_test: str = "tests/test_ingest.py::test_schema_contract",
+    name: str = "failure",
 ) -> Path:
     source = json.loads(source_path.read_text(encoding="utf-8"))
-    artifact = supervisor.root / "reproduction-artifacts" / "failure.json"
+    artifact = supervisor.root / "reproduction-artifacts" / f"{name}.json"
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_bytes(b'{"status":"failed"}\n')
-    receipt = supervisor.root / "reproduction-receipts" / "failure.json"
+    receipt = supervisor.root / "reproduction-receipts" / f"{name}.json"
     _write_json(
         receipt,
         {
@@ -250,6 +252,240 @@ def test_incident_success_releases_sources_but_human_required_does_not(
     assert source["status"] == "frontier_approved"
     assert source["system_incident_packet_path"] == str(incident_path.resolve())
     assert source["quarantined_at"] is None
+
+
+def test_incident_sync_rereads_status_after_source_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import system_incident_supervisor as incident_module
+
+    supervisor, source_path, _state_path, _enqueued = _fixture(
+        tmp_path,
+        raw_files=("one.md", "two.md"),
+    )
+    _attach_verified_reproduction(supervisor, source_path)
+    incident_path = Path(
+        supervisor.observe_operational_failure_packet(source_path)["packet_path"]
+    )
+    original_lock = incident_module._source_packet_lock
+    mutated = False
+
+    @contextmanager
+    def mutate_before_source_lock(lock_root: Path, path: Path):
+        nonlocal mutated
+        if not mutated:
+            incident = json.loads(incident_path.read_text(encoding="utf-8"))
+            incident["status"] = "superseded_verified_local_repair"
+            _write_json(incident_path, incident)
+            mutated = True
+        with original_lock(lock_root, path) as acquired:
+            yield acquired
+
+    monkeypatch.setattr(
+        incident_module,
+        "_source_packet_lock",
+        mutate_before_source_lock,
+    )
+
+    result = supervisor.sync_operational_incident_outcome(incident_path)
+
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    assert result["repair_success"] is False
+    assert result["incident_status"] == "superseded_verified_local_repair"
+    assert source["status"] == "local_quarantined"
+    assert source["system_incident_status"] == "superseded_verified_local_repair"
+
+
+def test_recurrent_failure_uses_new_source_incident_epoch(tmp_path: Path) -> None:
+    supervisor, first_source, state_path, enqueued = _fixture(
+        tmp_path,
+        raw_files=("one.md",),
+    )
+    _attach_verified_reproduction(supervisor, first_source, name="first")
+    first_result = supervisor.observe_operational_failure_packet(first_source)
+    first_incident_path = Path(first_result["packet_path"])
+    first_incident = json.loads(first_incident_path.read_text(encoding="utf-8"))
+    first_incident["status"] = "superseded_verified_local_repair"
+    _write_json(first_incident_path, first_incident)
+
+    second_source = first_source.with_name("operational-source-recurrence.json")
+    second_packet = json.loads(first_source.read_text(encoding="utf-8"))
+    second_packet["failure_id"] = "operational-source-recurrence"
+    second_packet["created_at"] = "2026-07-15T13:00:00+00:00"
+    second_packet.pop("deterministic_reproduction_receipt", None)
+    _write_json(second_source, second_packet)
+    _attach_verified_reproduction(supervisor, second_source, name="second")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["failures"]["one.md"]["packet_path"] = str(second_source)
+    _write_json(state_path, state)
+
+    second_result = supervisor.observe_operational_failure_packet(second_source)
+    second_incident_path = Path(second_result["packet_path"])
+    second_incident = json.loads(second_incident_path.read_text(encoding="utf-8"))
+
+    assert first_result["status"] == "packet_created"
+    assert second_result["status"] == "packet_created"
+    assert second_incident_path != first_incident_path
+    assert second_incident["source_incident_epoch"] != first_incident[
+        "source_incident_epoch"
+    ]
+    assert enqueued == [first_incident_path, second_incident_path]
+
+
+def test_legacy_incident_without_epoch_remains_valid_but_partial_epoch_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import system_incident_supervisor as incident_module
+
+    supervisor, source_path, _state_path, enqueued = _fixture(
+        tmp_path,
+        raw_files=("one.md", "two.md"),
+    )
+    _attach_verified_reproduction(supervisor, source_path)
+    canonical_fingerprint = incident_module.repair_fingerprint
+
+    def legacy_fingerprint(*parts: object) -> str:
+        return canonical_fingerprint(*parts[:3])
+
+    monkeypatch.setattr(
+        incident_module,
+        "repair_fingerprint",
+        legacy_fingerprint,
+    )
+    created = supervisor.observe_operational_failure_packet(source_path)
+    monkeypatch.setattr(
+        incident_module,
+        "repair_fingerprint",
+        canonical_fingerprint,
+    )
+
+    incident_path = Path(created["packet_path"])
+    artifact_path = Path(created["artifact_path"])
+    packet = json.loads(incident_path.read_text(encoding="utf-8"))
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    state = json.loads(supervisor.state_file.read_text(encoding="utf-8"))
+    fingerprint = packet["fingerprint"]
+
+    packet.pop("source_incident_epoch")
+    packet["repair_evidence"]["notes"].pop("source_incident_epoch")
+    artifact.pop("source_incident_epoch")
+    state["incidents"][fingerprint].pop("source_incident_epoch")
+    _write_json(incident_path, packet)
+    _write_json(artifact_path, artifact)
+    _write_json(supervisor.state_file, state)
+
+    validated = supervisor.validate_operational_incident_packet(incident_path)
+    assert validated["fingerprint"] == fingerprint
+
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    source["system_incident_packet_path"] = str(incident_path)
+    source["system_incident_fingerprint"] = fingerprint
+    _write_json(source_path, source)
+    reused = supervisor.observe_operational_failure_packet(source_path)
+    assert reused["status"] == "packet_exists"
+    assert reused["packet_path"] == str(incident_path)
+    assert reused["linked_incident_reused"] is True
+    assert enqueued == [incident_path]
+    assert list(supervisor.packet_dir.glob("system-operational-*.json")) == [
+        incident_path
+    ]
+
+    source["system_incident_fingerprint"] = "f" * 64
+    _write_json(source_path, source)
+    with pytest.raises(
+        IncidentStateError,
+        match="linked operational incident binding invalid",
+    ):
+        supervisor.observe_operational_failure_packet(source_path)
+    assert list(supervisor.packet_dir.glob("system-operational-*.json")) == [
+        incident_path
+    ]
+    source["system_incident_packet_path"] = None
+    source["system_incident_fingerprint"] = None
+    _write_json(source_path, source)
+    with pytest.raises(
+        IncidentStateError,
+        match="linked operational incident edge invalid",
+    ):
+        supervisor.observe_operational_failure_packet(source_path)
+    assert list(supervisor.packet_dir.glob("system-operational-*.json")) == [
+        incident_path
+    ]
+
+    legacy_packet = json.loads(json.dumps(packet))
+    legacy_artifact = json.loads(json.dumps(artifact))
+    legacy_state = json.loads(json.dumps(state))
+    for layer in ("packet", "notes", "state", "artifact"):
+        candidate_packet = json.loads(json.dumps(legacy_packet))
+        candidate_artifact = json.loads(json.dumps(legacy_artifact))
+        candidate_state = json.loads(json.dumps(legacy_state))
+        if layer == "packet":
+            candidate_packet["source_incident_epoch"] = "a" * 64
+        elif layer == "notes":
+            candidate_packet["repair_evidence"]["notes"][
+                "source_incident_epoch"
+            ] = "a" * 64
+        elif layer == "state":
+            candidate_state["incidents"][fingerprint][
+                "source_incident_epoch"
+            ] = "a" * 64
+        else:
+            candidate_artifact["source_incident_epoch"] = "a" * 64
+        _write_json(incident_path, candidate_packet)
+        _write_json(artifact_path, candidate_artifact)
+        _write_json(supervisor.state_file, candidate_state)
+        with pytest.raises(IncidentStateError):
+            supervisor.validate_operational_incident_packet(incident_path)
+
+    null_packet = json.loads(json.dumps(legacy_packet))
+    null_artifact = json.loads(json.dumps(legacy_artifact))
+    null_state = json.loads(json.dumps(legacy_state))
+    null_packet["source_incident_epoch"] = None
+    null_packet["repair_evidence"]["notes"]["source_incident_epoch"] = None
+    null_artifact["source_incident_epoch"] = None
+    null_state["incidents"][fingerprint]["source_incident_epoch"] = None
+    _write_json(incident_path, null_packet)
+    _write_json(artifact_path, null_artifact)
+    _write_json(supervisor.state_file, null_state)
+    with pytest.raises(
+        IncidentStateError,
+        match="incident_packet_contract_mismatch",
+    ):
+        supervisor.validate_operational_incident_packet(incident_path)
+
+
+def test_current_incident_rejects_consistent_epoch_tampering(tmp_path: Path) -> None:
+    supervisor, source_path, _state_path, _enqueued = _fixture(
+        tmp_path,
+        raw_files=("one.md", "two.md"),
+    )
+    _attach_verified_reproduction(supervisor, source_path)
+    created = supervisor.observe_operational_failure_packet(source_path)
+    incident_path = Path(created["packet_path"])
+    artifact_path = Path(created["artifact_path"])
+    packet = json.loads(incident_path.read_text(encoding="utf-8"))
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    state = json.loads(supervisor.state_file.read_text(encoding="utf-8"))
+    fingerprint = packet["fingerprint"]
+    replacement_epoch = "c" * 64
+
+    packet["source_incident_epoch"] = replacement_epoch
+    packet["repair_evidence"]["notes"][
+        "source_incident_epoch"
+    ] = replacement_epoch
+    artifact["source_incident_epoch"] = replacement_epoch
+    state["incidents"][fingerprint]["source_incident_epoch"] = replacement_epoch
+    _write_json(incident_path, packet)
+    _write_json(artifact_path, artifact)
+    _write_json(supervisor.state_file, state)
+
+    with pytest.raises(
+        IncidentStateError,
+        match="incident_packet_contract_mismatch",
+    ):
+        supervisor.validate_operational_incident_packet(incident_path)
 
 
 @pytest.mark.parametrize(
@@ -597,6 +833,15 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
             "env": {},
             "stdin_text": "",
         }
+    ]
+    rescanned = self_heal._promote_due_operational_sources(limit=10)
+    assert len(rescanned) == 1
+    assert rescanned[0]["packet"] == str(packet_path)
+    assert rescanned[0]["status"] == "packet_exists"
+    assert rescanned[0]["linked_incident_reused"] is True
+    assert len(jobs) == 1
+    assert list(incident_path.parent.glob("system-operational-*.json")) == [
+        incident_path
     ]
 
     incident = json.loads(incident_path.read_text(encoding="utf-8"))

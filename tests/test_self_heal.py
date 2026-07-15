@@ -21,6 +21,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         d.mkdir(parents=True, exist_ok=True)
 
     from llm_wiki_mcp import (
+        background_jobs,
         claims,
         index_store,
         ingest,
@@ -67,6 +68,17 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime / "metrics.jsonl")
+    monkeypatch.setattr(background_jobs, "JOB_DIR", runtime / "background-jobs")
+    monkeypatch.setattr(
+        background_jobs,
+        "STATE_FILE",
+        runtime / "background-jobs" / "state.json",
+    )
+    monkeypatch.setattr(
+        background_jobs,
+        "LOCK_FILE",
+        runtime / "background-jobs" / "state.lock",
+    )
     monkeypatch.setattr(state_register, "STATE_PAGE", system / "current-state.md")
     monkeypatch.setattr(
         state_register,
@@ -318,6 +330,49 @@ def _write_operational_packet(wiki_root: Path) -> Path:
     )
     path.write_text(json.dumps(packet), encoding="utf-8")
     return path
+
+
+def _link_operational_system_incident(
+    wiki_root: Path,
+    source_packet_path: Path,
+    *,
+    status: str = "pending_frontier",
+    frontier_attempts: int = 0,
+    execution_started: bool = False,
+) -> Path:
+    source = json.loads(source_packet_path.read_text(encoding="utf-8"))
+    incident_fingerprint = "f" * 64
+    incident_path = (
+        wiki_root
+        / "runtime"
+        / "failures"
+        / "packets"
+        / f"system-operational-{incident_fingerprint[:32]}.json"
+    )
+    incident = {
+        "failure_id": incident_path.stem,
+        "job_id": "trusted-operational-supervisor",
+        "failure_class": "system_operational_failure",
+        "fingerprint": incident_fingerprint,
+        "incident_kind": "system_code_repair",
+        "source_failure_class": source["failure_class"],
+        "source_fingerprint": source["fingerprint"],
+        "source_packet_paths": [str(source_packet_path.resolve())],
+        "frontier_attempts": frontier_attempts,
+        "status": status,
+    }
+    if execution_started:
+        incident["frontier_result"] = {"execution_started": True}
+    incident_path.write_text(json.dumps(incident), encoding="utf-8")
+    source.update(
+        {
+            "system_incident_packet_path": str(incident_path.resolve()),
+            "system_incident_fingerprint": incident_fingerprint,
+            "system_incident_status": "packet_created",
+        }
+    )
+    source_packet_path.write_text(json.dumps(source), encoding="utf-8")
+    return incident_path
 
 
 def _verified_git_state(commit: str) -> dict[str, str]:
@@ -3048,6 +3103,468 @@ def test_verified_local_repair_releases_exact_operational_packet(
     assert (
         failure_supervisor.operational_deferred_raw_files([raw_path, second_raw]) == {}
     )
+
+
+def test_verified_local_repair_releases_operational_local_quarantine(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor, local_repair, self_heal
+
+    packet_path, kwargs = operational_release_case
+    raw_path = isolated_wiki / "raw" / "broken.md"
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    _install_local_no_quorum_router(
+        monkeypatch,
+        cache_root=isolated_wiki / "runtime" / "structured-review-holds",
+    )
+    hold_decision = local_repair.propose_repair(
+        {
+            "failure_id": "strict-hold",
+            "failure_class": "semantic.ambiguous_repair",
+            "fingerprint": "semantic.ambiguous_repair:strict-hold",
+            "error": "two safe repairs remain plausible",
+        },
+        use_qwen=True,
+    )
+    semantic_hold = hold_decision.semantic_hold
+    assert semantic_hold is not None
+    packet.update(
+        {
+            "status": "local_quarantined",
+            "semantic_hold": semantic_hold,
+            "terminal_reason": "semantic_no_quorum",
+            "quarantined_at": "2026-07-15T10:28:08",
+        }
+    )
+    packet_path.write_text(json.dumps(packet), encoding="utf-8")
+    kwargs["expected_status"] = "local_quarantined"
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path, **kwargs
+    )
+
+    updated = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert result["accepted"] is True
+    assert result["status"] == "local_repair_applied"
+    assert updated["status"] == "local_repair_applied"
+    assert updated["semantic_hold"] is None
+    assert updated["invalidated_semantic_hold"] == semantic_hold
+    assert updated["semantic_hold_history"] == [semantic_hold]
+    assert updated["terminal_reason"] is None
+    assert updated["quarantined_at"] is None
+    assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
+    assert packet_path not in self_heal.pending_packets()
+
+
+def test_verified_local_repair_supersedes_unstarted_linked_incident_and_job(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import background_jobs, self_heal, system_incident_supervisor
+
+    packet_path, kwargs = operational_release_case
+    source = json.loads(packet_path.read_text(encoding="utf-8"))
+    source["status"] = "local_quarantined"
+    packet_path.write_text(json.dumps(source), encoding="utf-8")
+    kwargs["expected_status"] = "local_quarantined"
+    incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
+    monkeypatch.setattr(
+        system_incident_supervisor,
+        "validate_operational_incident_packet",
+        lambda path: {"status": "valid", "packet_path": str(path)},
+    )
+    args = ["--packet", str(incident_path), "--enable-frontier-repair"]
+    job = background_jobs.enqueue_job(
+        name="system-code-repair",
+        module="llm_wiki_mcp.self_heal",
+        args=args,
+        env={},
+        stdin_text="",
+    )
+    assert background_jobs._claim(job["job_id"])["status"] == "running"
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+    )
+
+    updated_source = json.loads(packet_path.read_text(encoding="utf-8"))
+    updated_incident = json.loads(incident_path.read_text(encoding="utf-8"))
+    job_state = json.loads(background_jobs.STATE_FILE.read_text(encoding="utf-8"))[
+        "jobs"
+    ][job["job_id"]]
+    assert result["accepted"] is True
+    assert updated_source["status"] == "local_repair_applied"
+    assert updated_incident["status"] == (
+        self_heal.VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS
+    )
+    assert updated_incident["superseded_by_packet"] == str(packet_path.resolve())
+    assert result["linked_system_incident"]["background_job_cancellation"][
+        "cancelled_job_ids"
+    ] == [job["job_id"]]
+    assert job_state["status"] == "cancelled"
+    assert incident_path not in self_heal.pending_packets()
+    stale_enqueue = self_heal.enqueue_system_code_repair(incident_path)
+    assert stale_enqueue["status"] == (
+        self_heal.VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS
+    )
+    assert stale_enqueue["enqueued"] is False
+    assert stale_enqueue["cancelled"] is True
+    refreshed_jobs = json.loads(
+        background_jobs.STATE_FILE.read_text(encoding="utf-8")
+    )["jobs"]
+    assert not any(
+        row.get("status") in background_jobs.ACTIVE_STATUSES
+        for row in refreshed_jobs.values()
+    )
+
+    monkeypatch.setattr(
+        self_heal,
+        "_run_frontier",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a snapshot worker must observe durable incident supersession"
+        ),
+    )
+    dry_snapshot_worker = self_heal.handle_packet(
+        incident_path,
+        use_qwen=False,
+        enable_frontier=True,
+        dry_run=True,
+    )
+    snapshot_worker = self_heal.handle_packet(
+        incident_path,
+        use_qwen=False,
+        enable_frontier=True,
+    )
+    finished = background_jobs._finish(job["job_id"], exit_code=0, output="cached")
+    assert snapshot_worker["status"] == (
+        self_heal.VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS
+    )
+    assert dry_snapshot_worker["projected_status"] == (
+        self_heal.VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS
+    )
+    assert finished["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("path_value", ("missing", None))
+def test_verified_local_repair_rejects_partial_link_metadata(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    path_value: str | None,
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+    incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
+    source = json.loads(packet_path.read_text(encoding="utf-8"))
+    if path_value == "missing":
+        source.pop("system_incident_packet_path")
+    else:
+        source["system_incident_packet_path"] = None
+    packet_path.write_text(json.dumps(source), encoding="utf-8")
+    source_before = packet_path.read_bytes()
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == "linked_system_incident_path_invalid"
+    assert packet_path.read_bytes() == source_before
+    assert json.loads(incident_path.read_text(encoding="utf-8"))["status"] == (
+        "pending_frontier"
+    )
+
+
+def test_verified_local_repair_linked_incident_dry_run_is_read_only(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal, system_incident_supervisor
+
+    packet_path, kwargs = operational_release_case
+    incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
+    monkeypatch.setattr(
+        system_incident_supervisor,
+        "validate_operational_incident_packet",
+        lambda path: {"status": "valid", "packet_path": str(path)},
+    )
+    source_before = packet_path.read_bytes()
+    incident_before = incident_path.read_bytes()
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+        dry_run=True,
+    )
+
+    assert result["accepted"] is True
+    assert result["linked_system_incident"]["would_supersede"] is True
+    assert result["linked_system_incident"]["would_cancel_background_job"] is True
+    assert packet_path.read_bytes() == source_before
+    assert incident_path.read_bytes() == incident_before
+    assert not (
+        isolated_wiki / "runtime" / "failures" / "packet-cancellations"
+    ).exists()
+    assert not (isolated_wiki / "runtime" / "background-jobs").exists()
+
+
+def test_verified_local_repair_resumes_after_linked_incident_cancel_commit(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal, system_incident_supervisor
+
+    packet_path, kwargs = operational_release_case
+    incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
+    monkeypatch.setattr(
+        system_incident_supervisor,
+        "validate_operational_incident_packet",
+        lambda path: {"status": "valid", "packet_path": str(path)},
+    )
+    source_before = packet_path.read_bytes()
+    source = json.loads(source_before)
+
+    prepared = self_heal._prepare_linked_incident_for_verified_release(
+        packet_path.resolve(),
+        source,
+        dry_run=False,
+    )
+
+    assert prepared["accepted"] is True
+    assert packet_path.read_bytes() == source_before
+    assert json.loads(incident_path.read_text(encoding="utf-8"))["status"] == (
+        self_heal.VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS
+    )
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+    )
+    assert result["accepted"] is True
+    assert result["linked_system_incident"]["state"] == "superseded"
+    assert json.loads(packet_path.read_text(encoding="utf-8"))["status"] == (
+        "local_repair_applied"
+    )
+
+
+def test_verified_local_repair_retries_after_background_cancel_failure(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import background_jobs, self_heal, system_incident_supervisor
+
+    packet_path, kwargs = operational_release_case
+    incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
+    monkeypatch.setattr(
+        system_incident_supervisor,
+        "validate_operational_incident_packet",
+        lambda path: {"status": "valid", "packet_path": str(path)},
+    )
+    source_before = packet_path.read_bytes()
+    original_cancel = background_jobs.cancel_matching_jobs
+    monkeypatch.setattr(
+        background_jobs,
+        "cancel_matching_jobs",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("ledger unavailable")),
+    )
+
+    failed = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+    )
+
+    assert failed["accepted"] is False
+    assert failed["reason"] == "linked_system_incident_job_cancel_failed"
+    assert packet_path.read_bytes() == source_before
+    assert json.loads(incident_path.read_text(encoding="utf-8"))["status"] == (
+        self_heal.VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS
+    )
+    monkeypatch.setattr(background_jobs, "cancel_matching_jobs", original_cancel)
+    recovered = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+    )
+    assert recovered["accepted"] is True
+    assert json.loads(packet_path.read_text(encoding="utf-8"))["status"] == (
+        "local_repair_applied"
+    )
+
+
+def test_verified_local_repair_with_real_incident_binding_is_idempotent(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+) -> None:
+    from llm_wiki_mcp import self_heal
+
+    packet_path, kwargs = operational_release_case
+    source = json.loads(packet_path.read_text(encoding="utf-8"))
+    source.update(
+        {
+            "status": "local_quarantined",
+            "local_repair_attempts": 2,
+            "operational_local_repair_evidence": ["a" * 64, "b" * 64],
+        }
+    )
+    kwargs["expected_status"] = "local_quarantined"
+    supervisor_root = isolated_wiki / "runtime" / "system-incidents"
+    artifact = supervisor_root / "reproduction-artifacts" / "failure.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b'{"status":"failed"}\n')
+    receipt = supervisor_root / "reproduction-receipts" / "failure.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "producer": "trusted_system_incident_supervisor",
+                "outcome": "reproducibly_failed",
+                "source_packet_path": str(packet_path.resolve()),
+                "source_failure_class": source["failure_class"],
+                "source_fingerprint": source["fingerprint"],
+                "artifact": str(artifact.resolve()),
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "failing_test": "tests/test_ingest.py::test_schema_contract",
+            }
+        ),
+        encoding="utf-8",
+    )
+    source["deterministic_reproduction_receipt"] = str(receipt.resolve())
+    packet_path.write_text(json.dumps(source), encoding="utf-8")
+
+    promoted = self_heal._promote_operational_source_packet(packet_path, source)
+
+    assert promoted is not None
+    assert promoted["status"] == "packet_created"
+    incident_path = Path(str(promoted["packet_path"]))
+    tree_before_dry_run = {
+        str(path.relative_to(isolated_wiki)): path.read_bytes()
+        for path in isolated_wiki.rglob("*")
+        if path.is_file()
+    }
+    dry_run = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+        dry_run=True,
+    )
+    tree_after_dry_run = {
+        str(path.relative_to(isolated_wiki)): path.read_bytes()
+        for path in isolated_wiki.rglob("*")
+        if path.is_file()
+    }
+    assert dry_run["accepted"] is True
+    assert dry_run["linked_system_incident"]["would_supersede"] is True
+    assert tree_after_dry_run == tree_before_dry_run
+
+    applied = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+    )
+    source_after = packet_path.read_bytes()
+    incident_after = incident_path.read_bytes()
+    background_state_after = (
+        isolated_wiki / "runtime" / "background-jobs" / "state.json"
+    ).read_bytes()
+    cached = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+    )
+
+    assert applied["accepted"] is True
+    assert cached["accepted"] is True
+    assert cached["cached"] is True
+    assert packet_path.read_bytes() == source_after
+    assert incident_path.read_bytes() == incident_after
+    assert (
+        isolated_wiki / "runtime" / "background-jobs" / "state.json"
+    ).read_bytes() == background_state_after
+    stale_enqueue = self_heal.enqueue_system_code_repair(incident_path)
+    assert stale_enqueue["enqueued"] is False
+    assert stale_enqueue["cancelled"] is True
+
+
+@pytest.mark.parametrize(
+    ("status", "frontier_attempts", "execution_started", "reason"),
+    [
+        ("frontier_running", 0, False, "linked_system_incident_already_started"),
+        ("pending_frontier", 1, False, "linked_system_incident_already_started"),
+        ("pending_frontier", 0, True, "linked_system_incident_already_started"),
+        ("frontier_rejected", 0, False, "linked_system_incident_terminal"),
+        ("human_required", 0, False, "linked_system_incident_terminal"),
+    ],
+)
+def test_verified_local_repair_refuses_started_or_terminal_linked_incident(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    frontier_attempts: int,
+    execution_started: bool,
+    reason: str,
+) -> None:
+    from llm_wiki_mcp import self_heal, system_incident_supervisor
+
+    packet_path, kwargs = operational_release_case
+    incident_path = _link_operational_system_incident(
+        isolated_wiki,
+        packet_path,
+        status=status,
+        frontier_attempts=frontier_attempts,
+        execution_started=execution_started,
+    )
+    monkeypatch.setattr(
+        system_incident_supervisor,
+        "validate_operational_incident_packet",
+        lambda path: {"status": "valid", "packet_path": str(path)},
+    )
+    source_before = packet_path.read_bytes()
+    incident_before = incident_path.read_bytes()
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == reason
+    assert packet_path.read_bytes() == source_before
+    assert incident_path.read_bytes() == incident_before
+
+
+def test_verified_local_repair_refuses_busy_linked_incident(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import self_heal, system_incident_supervisor
+
+    packet_path, kwargs = operational_release_case
+    incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
+    monkeypatch.setattr(
+        system_incident_supervisor,
+        "validate_operational_incident_packet",
+        lambda path: {"status": "valid", "packet_path": str(path)},
+    )
+    source_before = packet_path.read_bytes()
+    incident_before = incident_path.read_bytes()
+
+    with self_heal._packet_lock(incident_path) as acquired:
+        assert acquired is True
+        result = self_heal.release_operational_failure_after_local_repair(
+            packet_path,
+            **kwargs,
+        )
+
+    assert result["accepted"] is False
+    assert result["reason"] == "linked_system_incident_busy"
+    assert packet_path.read_bytes() == source_before
+    assert incident_path.read_bytes() == incident_before
 
 
 def test_verified_local_repair_accepts_remaining_partial_group(

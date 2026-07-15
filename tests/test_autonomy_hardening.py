@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from llm_wiki_mcp import background_jobs, codex_save, recall_hints, session_sweeper
 from llm_wiki_mcp.frontmatter import normalize_nested, parse
 from llm_wiki_mcp.jsonl import read_jsonl
@@ -183,6 +185,89 @@ def test_background_job_explicit_quarantine_exit_is_terminal(
 
     assert result["status"] == "quarantined"
     assert result["next_retry_at"] is None
+
+
+@pytest.mark.parametrize("claimed", [False, True], ids=("queued", "running"))
+def test_background_job_exact_cancellation_is_terminal(
+    tmp_path: Path,
+    monkeypatch,
+    claimed: bool,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    args = ["--packet", "/tmp/system-operational-one.json", "--enable-frontier-repair"]
+    job = background_jobs.enqueue_job(
+        name="system-code-repair",
+        module="llm_wiki_mcp.self_heal",
+        args=args,
+        env={},
+        stdin_text="sensitive payload",
+    )
+    if claimed:
+        assert background_jobs._claim(job["job_id"])["status"] == "running"
+
+    cancelled = background_jobs.cancel_matching_jobs(
+        name="system-code-repair",
+        module="llm_wiki_mcp.self_heal",
+        args=args,
+        reason="verified repair",
+        stdin_text="sensitive payload",
+    )
+
+    assert cancelled["cancelled_job_ids"] == [job["job_id"]]
+    assert background_jobs._claim(job["job_id"]) is None
+    stored = json.loads((tmp_path / "state.json").read_text())["jobs"][job["job_id"]]
+    assert stored["status"] == "cancelled"
+    assert stored["cancellation_reason"] == "verified repair"
+    assert stored["stdin"] == ""
+    if claimed:
+        finished = background_jobs._finish(job["job_id"], exit_code=0, output="cached")
+        assert finished["status"] == "cancelled"
+    stale_enqueue = background_jobs.enqueue_job(
+        name="system-code-repair",
+        module="llm_wiki_mcp.self_heal",
+        args=args,
+        env={},
+        stdin_text="sensitive payload",
+    )
+    assert stale_enqueue["status"] == "cancelled"
+    assert stale_enqueue["enqueued"] is False
+    assert stale_enqueue["cancelled"] is True
+
+
+def test_background_job_cancellation_tombstone_blocks_cancel_before_enqueue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    args = ["--packet", "/tmp/system-operational-one.json", "--enable-frontier-repair"]
+
+    cancelled = background_jobs.cancel_matching_jobs(
+        name="system-code-repair",
+        module="llm_wiki_mcp.self_heal",
+        args=args,
+        reason="verified repair",
+    )
+    stale_enqueue = background_jobs.enqueue_job(
+        name="system-code-repair",
+        module="llm_wiki_mcp.self_heal",
+        args=args,
+        env={},
+        stdin_text="",
+    )
+
+    assert cancelled["matched"] == 0
+    assert cancelled["cancelled"] == 0
+    assert cancelled["tombstoned"] is True
+    assert stale_enqueue["status"] == "cancelled"
+    assert stale_enqueue["enqueued"] is False
+    assert stale_enqueue["cancelled"] is True
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["jobs"] == {}
+    assert list(state["cancellation_tombstones"]) == [cancelled["dedupe_key"]]
 
 
 def test_capture_jobs_coalesce_by_session_and_keep_latest_payload(

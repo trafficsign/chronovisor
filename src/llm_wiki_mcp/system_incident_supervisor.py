@@ -722,6 +722,36 @@ class SystemIncidentSupervisor:
         ):
             return "incident_packet_contract_mismatch"
 
+        source_failure_class = packet.get("source_failure_class")
+        source_fingerprint = packet.get("source_fingerprint")
+        source_incident_epoch = packet.get("source_incident_epoch")
+        legacy_epoch_binding = (
+            "source_incident_epoch" not in packet
+            and "source_incident_epoch" not in notes
+            and "source_incident_epoch" not in incident
+            and fingerprint
+            == repair_fingerprint(
+                TRUSTED_OPERATIONAL_COMPONENT,
+                source_failure_class,
+                source_fingerprint,
+            )
+        )
+        current_epoch_binding = (
+            isinstance(source_incident_epoch, str)
+            and _SHA256_RE.fullmatch(source_incident_epoch) is not None
+            and notes.get("source_incident_epoch") == source_incident_epoch
+            and incident.get("source_incident_epoch") == source_incident_epoch
+            and fingerprint
+            == repair_fingerprint(
+                TRUSTED_OPERATIONAL_COMPONENT,
+                source_failure_class,
+                source_fingerprint,
+                source_incident_epoch,
+            )
+        )
+        if not legacy_epoch_binding and not current_epoch_binding:
+            return "incident_packet_contract_mismatch"
+
         source_paths = packet.get("source_packet_paths")
         raw_files = packet.get("raw_files")
         logical_groups = packet.get("logical_raw_groups")
@@ -762,6 +792,8 @@ class SystemIncidentSupervisor:
             return "incident_artifact_unreadable"
         if not isinstance(artifact, Mapping):
             return "incident_artifact_invalid"
+        if legacy_epoch_binding and "source_incident_epoch" in artifact:
+            return "incident_artifact_binding_mismatch"
 
         reproduction = evidence.get("reproduction")
         reproduction_artifact = (
@@ -772,6 +804,7 @@ class SystemIncidentSupervisor:
             "failure_class": TRUSTED_OPERATIONAL_FAILURE_CLASS,
             "source_failure_class": packet.get("source_failure_class"),
             "source_fingerprint": packet.get("source_fingerprint"),
+            "source_incident_epoch": packet.get("source_incident_epoch"),
             "packet_path": str(expected_packet_path),
             "artifact_path": str(artifact_path),
             "source_packet_paths": source_paths,
@@ -792,6 +825,7 @@ class SystemIncidentSupervisor:
             "failure_class": TRUSTED_OPERATIONAL_FAILURE_CLASS,
             "source_failure_class": packet.get("source_failure_class"),
             "source_fingerprint": packet.get("source_fingerprint"),
+            "source_incident_epoch": packet.get("source_incident_epoch"),
             "source_packet_paths": source_paths,
             "raw_files": raw_files,
             "logical_raw_groups": logical_groups,
@@ -1119,18 +1153,79 @@ class SystemIncidentSupervisor:
             }
 
         now = _utc_now(self.clock())
-        fingerprint = repair_fingerprint(
-            TRUSTED_OPERATIONAL_COMPONENT,
-            source_failure_class,
-            source_fingerprint,
-        )
-        packet_path = self.packet_dir / f"system-operational-{fingerprint[:32]}.json"
-        artifact_path = self.artifact_dir / f"{fingerprint}.json"
+        has_linked_path = "system_incident_packet_path" in source
+        has_linked_fingerprint = "system_incident_fingerprint" in source
+        linked_path_value = source.get("system_incident_packet_path")
+        linked_fingerprint = source.get("system_incident_fingerprint")
+        linked_incident_reused = False
+        if not has_linked_path and not has_linked_fingerprint:
+            source_incident_epoch: str | None = _hash_text(
+                json.dumps(
+                    {
+                        "source_packet_path": str(source_path),
+                        "failure_id": source.get("failure_id"),
+                        "created_at": source.get("created_at"),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            fingerprint = repair_fingerprint(
+                TRUSTED_OPERATIONAL_COMPONENT,
+                source_failure_class,
+                source_fingerprint,
+                source_incident_epoch,
+            )
+            packet_path = (
+                self.packet_dir / f"system-operational-{fingerprint[:32]}.json"
+            )
+            artifact_path = self.artifact_dir / f"{fingerprint}.json"
+        else:
+            if (
+                not isinstance(linked_path_value, str)
+                or not linked_path_value.strip()
+                or not isinstance(linked_fingerprint, str)
+                or not linked_fingerprint
+            ):
+                raise IncidentStateError("linked operational incident edge invalid")
+            requested_path = Path(linked_path_value).expanduser()
+            try:
+                if not requested_path.is_absolute() or requested_path.is_symlink():
+                    raise OSError("linked operational incident path is unsafe")
+                packet_path = requested_path.resolve(strict=True)
+                packet_root = self.packet_dir.expanduser().resolve(strict=True)
+            except OSError as exc:
+                raise IncidentStateError(
+                    "linked operational incident path invalid"
+                ) from exc
+            if (
+                packet_path.parent != packet_root
+                or packet_path.suffix != ".json"
+                or not packet_path.name.startswith("system-operational-")
+            ):
+                raise IncidentStateError("linked operational incident path invalid")
+            linked_packet = _load_packet(packet_path)
+            linked_sources = linked_packet.get("source_packet_paths")
+            artifact_path = _resolved_path(linked_packet.get("reproduction_artifact"))
+            if (
+                linked_packet.get("fingerprint") != linked_fingerprint
+                or linked_packet.get("source_failure_class") != source_failure_class
+                or linked_packet.get("source_fingerprint") != source_fingerprint
+                or not isinstance(linked_sources, list)
+                or str(source_path) not in linked_sources
+                or artifact_path is None
+            ):
+                raise IncidentStateError("linked operational incident binding invalid")
+            fingerprint = linked_fingerprint
+            source_incident_epoch = linked_packet.get("source_incident_epoch")
+            linked_incident_reused = True
         apply_kwargs = {
             "fingerprint": fingerprint,
             "source_packet_path": source_path,
             "source_failure_class": source_failure_class,
             "source_fingerprint": source_fingerprint,
+            "source_incident_epoch": source_incident_epoch,
             "raw_files": raw_files,
             "input_groups": input_groups,
             "local_evidence": local_evidence,
@@ -1138,6 +1233,7 @@ class SystemIncidentSupervisor:
             "packet_path": packet_path,
             "artifact_path": artifact_path,
             "now": now,
+            "require_existing_packet": linked_incident_reused,
         }
 
         if dry_run:
@@ -1150,6 +1246,7 @@ class SystemIncidentSupervisor:
             result["status"] = "dry_run"
             result["projected_status"] = result.pop("observation_status")
             result.pop("should_enqueue", None)
+            result["linked_incident_reused"] = linked_incident_reused
             result["dry_run"] = True
             return result
 
@@ -1161,6 +1258,7 @@ class SystemIncidentSupervisor:
                 **apply_kwargs,
             )
             _write_json_atomic(self.state_file, state)
+        result["linked_incident_reused"] = linked_incident_reused
 
         if result.pop("should_enqueue", False):
             try:
@@ -1205,6 +1303,7 @@ class SystemIncidentSupervisor:
         source_packet_path: Path,
         source_failure_class: str,
         source_fingerprint: str,
+        source_incident_epoch: str | None,
         raw_files: Sequence[str],
         input_groups: Sequence[Sequence[str]],
         local_evidence: Sequence[str],
@@ -1213,16 +1312,20 @@ class SystemIncidentSupervisor:
         artifact_path: Path,
         now: datetime,
         persist: bool,
+        require_existing_packet: bool,
     ) -> dict[str, Any]:
         incidents = state["incidents"]
         incident = incidents.get(fingerprint)
         if not isinstance(incident, dict):
+            if require_existing_packet:
+                raise IncidentStateError("linked operational incident state missing")
             incident = {
                 "component": TRUSTED_OPERATIONAL_COMPONENT,
                 "fingerprint": fingerprint,
                 "failure_class": TRUSTED_OPERATIONAL_FAILURE_CLASS,
                 "source_failure_class": source_failure_class,
                 "source_fingerprint": source_fingerprint,
+                "source_incident_epoch": source_incident_epoch,
                 "first_seen_at": _timestamp(now),
                 "packet_path": None,
                 "enqueue_job_id": None,
@@ -1234,8 +1337,11 @@ class SystemIncidentSupervisor:
         if (
             incident.get("source_failure_class") != source_failure_class
             or incident.get("source_fingerprint") != source_fingerprint
+            or incident.get("source_incident_epoch") != source_incident_epoch
         ):
             raise IncidentStateError("operational incident fingerprint collision")
+        if require_existing_packet and not packet_path.exists():
+            raise IncidentStateError("linked operational incident packet missing")
         if packet_path.exists():
             existing = _load_packet(packet_path)
             binding_error = self._operational_binding_error(
@@ -1257,6 +1363,7 @@ class SystemIncidentSupervisor:
                 "fingerprint": fingerprint,
                 "source_fingerprint": source_fingerprint,
                 "source_failure_class": source_failure_class,
+                "source_incident_epoch": source_incident_epoch,
                 "source_packet_path": str(source_packet_path),
                 "raw_files": list(existing.get("raw_files") or ()),
                 "logical_raw_groups": list(existing.get("logical_raw_groups") or ()),
@@ -1267,6 +1374,8 @@ class SystemIncidentSupervisor:
                 "artifact_path": existing.get("reproduction_artifact"),
                 "should_enqueue": should_enqueue,
             }
+        if not isinstance(source_incident_epoch, str):
+            raise IncidentStateError("operational incident epoch missing")
 
         source_paths = {
             str(value)
@@ -1338,6 +1447,7 @@ class SystemIncidentSupervisor:
                 "incident_key": packet_path.stem,
                 "source_failure_class": source_failure_class,
                 "source_fingerprint": source_fingerprint,
+                "source_incident_epoch": source_incident_epoch,
                 "deterministic_reproduction_verified": deterministic_verified,
                 "deterministic_reproduction_evidence": (
                     deterministic.get("evidence_sha256")
@@ -1395,6 +1505,7 @@ class SystemIncidentSupervisor:
             "fingerprint": fingerprint,
             "source_fingerprint": source_fingerprint,
             "source_failure_class": source_failure_class,
+            "source_incident_epoch": source_incident_epoch,
             "source_packet_path": str(source_packet_path),
             "raw_files": list(incident["raw_files"]),
             "logical_raw_groups": [list(group) for group in logical_groups],
@@ -1427,6 +1538,8 @@ class SystemIncidentSupervisor:
             or incident.get("fingerprint") != evidence.get("fingerprint")
             or incident.get("source_failure_class") != notes.get("source_failure_class")
             or incident.get("source_fingerprint") != notes.get("source_fingerprint")
+            or incident.get("source_incident_epoch")
+            != notes.get("source_incident_epoch")
         ):
             return {"status": "excluded", "reason": "not_operational_incident"}
         try:
@@ -1484,17 +1597,30 @@ class SystemIncidentSupervisor:
                     continue
                 try:
                     source = _load_packet(source_path)
+                    current_incident = _load_packet(incident_path)
                 except IncidentStateError:
                     invalid += 1
                     continue
                 if (
                     source.get("fingerprint") != source_fingerprint
                     or source.get("failure_class") != source_failure_class
+                    or current_incident.get("fingerprint")
+                    != incident.get("fingerprint")
+                    or current_incident.get("source_fingerprint")
+                    != source_fingerprint
+                    or current_incident.get("source_failure_class")
+                    != source_failure_class
+                    or current_incident.get("source_incident_epoch")
+                    != incident.get("source_incident_epoch")
                 ):
                     invalid += 1
                     continue
+                incident_status = str(current_incident.get("status") or "")
+                success = incident_status in _OPERATIONAL_SUCCESS_STATUSES
                 source["system_incident_packet_path"] = str(incident_path)
-                source["system_incident_fingerprint"] = incident.get("fingerprint")
+                source["system_incident_fingerprint"] = current_incident.get(
+                    "fingerprint"
+                )
                 source["system_incident_status"] = incident_status
                 source["system_incident_synced_at"] = _timestamp(_utc_now(self.clock()))
                 if success:
@@ -1734,6 +1860,7 @@ class SystemIncidentSupervisor:
             },
             "source_failure_class": evidence.notes.get("source_failure_class"),
             "source_fingerprint": evidence.notes.get("source_fingerprint"),
+            "source_incident_epoch": evidence.notes.get("source_incident_epoch"),
             "source_packet_paths": list(source_packet_paths),
             "frontier_attempts": 0,
             "reproduction_artifact": str(artifact_path),
@@ -1758,6 +1885,7 @@ class SystemIncidentSupervisor:
             "failure_class": evidence.failure_class,
             "source_failure_class": evidence.notes.get("source_failure_class"),
             "source_fingerprint": evidence.notes.get("source_fingerprint"),
+            "source_incident_epoch": evidence.notes.get("source_incident_epoch"),
             "source_packet_paths": list(source_packet_paths),
             "raw_files": list(raw_files),
             "logical_raw_groups": [list(group) for group in logical_raw_groups],

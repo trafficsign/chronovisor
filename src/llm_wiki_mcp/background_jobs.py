@@ -24,6 +24,7 @@ STATE_FILE = JOB_DIR / "state.json"
 LOCK_FILE = JOB_DIR / "state.lock"
 MAX_ATTEMPTS = 5
 MAX_TERMINAL_JOBS = 500
+MAX_CANCELLATION_TOMBSTONES = 500
 RETRYABLE_EXIT_CODE = 75
 QUARANTINE_EXIT_CODE = 78
 ACTIVE_STATUSES = frozenset({"queued", "running", "retry_wait"})
@@ -229,6 +230,22 @@ def enqueue_job(
         dedupe = f"unscoped-{uuid.uuid4().hex}"
     with _lock():
         state = _load()
+        tombstones = state.get("cancellation_tombstones")
+        tombstone = tombstones.get(dedupe) if isinstance(tombstones, dict) else None
+        if isinstance(tombstone, dict):
+            return {
+                "job_id": tombstone.get("last_job_id"),
+                "name": name,
+                "module": module,
+                "args": list(args),
+                "dedupe_key": dedupe,
+                "status": "cancelled",
+                "enqueued": False,
+                "coalesced": False,
+                "cancelled": True,
+                "cancellation_reason": tombstone.get("reason"),
+                "cancelled_at": tombstone.get("cancelled_at"),
+            }
         for existing in state["jobs"].values():
             if not isinstance(existing, dict):
                 continue
@@ -269,6 +286,92 @@ def enqueue_job(
         _prune_terminal(state)
         _save(state)
         return {**job, "enqueued": True, "coalesced": False}
+
+
+def cancel_matching_jobs(
+    *,
+    name: str,
+    module: str,
+    args: list[str],
+    reason: str,
+    stdin_text: str = "",
+) -> dict[str, Any]:
+    """Cancel exact active ledger entries without terminating their process.
+
+    Callers must first make the underlying work item durably non-executable.
+    A worker may already have been claimed between packet and ledger commits;
+    preserving ``cancelled`` in :func:`_finish` then prevents that harmless
+    cached/no-op worker from resurrecting the queue entry.
+    """
+
+    normalized_args = [str(value) for value in args]
+    normalized_reason = str(reason).strip() or "superseded"
+    dedupe = _dedupe_key(name, module, normalized_args, stdin_text)
+    cancelled: list[str] = []
+    prior_statuses: dict[str, str] = {}
+    matched_job_ids: list[str] = []
+    with _lock():
+        state = _load()
+        for job_id, job in state["jobs"].items():
+            if not isinstance(job, dict) or job.get("dedupe_key") != dedupe:
+                continue
+            matched_job_ids.append(str(job_id))
+            status = str(job.get("status") or "")
+            prior_statuses[str(job_id)] = status
+            if status not in ACTIVE_STATUSES:
+                continue
+            job["status"] = "cancelled"
+            job["cancelled_at"] = _iso()
+            job["cancellation_reason"] = normalized_reason
+            job["next_retry_at"] = None
+            job["updated_at"] = _iso()
+            job["stdin"] = ""
+            job.pop("rerun_requested", None)
+            cancelled.append(str(job_id))
+        tombstones = state.setdefault("cancellation_tombstones", {})
+        if not isinstance(tombstones, dict):
+            tombstones = {}
+            state["cancellation_tombstones"] = tombstones
+        prior_tombstone = tombstones.get(dedupe)
+        prior_tombstone = (
+            prior_tombstone if isinstance(prior_tombstone, dict) else {}
+        )
+        tombstone = {
+            "name": name,
+            "module": module,
+            "args": normalized_args,
+            "cancelled_at": prior_tombstone.get("cancelled_at") or _iso(),
+            "reason": normalized_reason,
+            "last_job_id": (
+                cancelled[-1]
+                if cancelled
+                else prior_tombstone.get("last_job_id")
+                or (matched_job_ids[-1] if matched_job_ids else None)
+            ),
+        }
+        tombstone_changed = prior_tombstone != tombstone
+        tombstones[dedupe] = tombstone
+        ordered_tombstones = sorted(
+            tombstones.items(),
+            key=lambda item: str(item[1].get("cancelled_at") or "")
+            if isinstance(item[1], dict)
+            else "",
+            reverse=True,
+        )
+        for stale_key, _value in ordered_tombstones[MAX_CANCELLATION_TOMBSTONES:]:
+            tombstones.pop(stale_key, None)
+        pruned = _prune_terminal(state)
+        if cancelled or pruned or tombstone_changed:
+            _save(state)
+    return {
+        "status": "ok",
+        "matched": len(prior_statuses),
+        "cancelled": len(cancelled),
+        "cancelled_job_ids": cancelled,
+        "prior_statuses": prior_statuses,
+        "dedupe_key": dedupe,
+        "tombstoned": True,
+    }
 
 
 def _claim(job_id: str) -> dict[str, Any] | None:
@@ -312,7 +415,10 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
             raise KeyError(job_id)
         attempts = int(job.get("attempts") or 0)
         rerun_requested = bool(job.pop("rerun_requested", False))
-        if rerun_requested:
+        if job.get("status") == "cancelled":
+            job["next_retry_at"] = None
+            job["stdin"] = ""
+        elif rerun_requested:
             job["status"] = "queued"
             job["attempts"] = 0
             job["next_retry_at"] = None
