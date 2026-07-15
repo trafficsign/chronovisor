@@ -3747,7 +3747,8 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
     sleep_wrapper = WRAPPER_DIR / "llm-wiki-sleep"
     converge_wrapper = WRAPPER_DIR / "llm-wiki-converge"
     watchdog_wrapper = WRAPPER_DIR / "llm-wiki-watchdog"
-    deadman_script = WRAPPER_DIR / "llm-wiki-deadman-observer.py"
+    deadman_script = WRAPPER_DIR / "llm-wiki-deadman-observer"
+    legacy_deadman_script = WRAPPER_DIR / "llm-wiki-deadman-observer.py"
     sleep_command = [
         *uvx_runtime_command("llm-wiki", executable=uvx, refresh=True),
         "sleep",
@@ -3774,7 +3775,6 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "--no-sleep",
     ]
     deadman_command = [
-        "/usr/bin/python3",
         str(deadman_script),
         "--wiki-root",
         str(WIKI_ROOT),
@@ -3855,6 +3855,7 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         deadman_script.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(observer_source, deadman_script)
         deadman_script.chmod(0o755)
+        legacy_deadman_script.unlink(missing_ok=True)
         _write_plist(sleep_path, sleep_plist)
         _write_plist(converge_path, converge_plist)
         _write_plist(watchdog_path, watchdog_plist)

@@ -2341,6 +2341,11 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     programs = {item["label"]: item["program"] for item in payload["plists"]}
     assert Path(programs[autonomy.SLEEP_LABEL][0]).name == "llm-wiki-sleep"
     assert Path(programs[autonomy.WATCHDOG_LABEL][0]).name == "llm-wiki-watchdog"
+    assert (
+        Path(programs[autonomy.DEADMAN_LABEL][0]).name
+        == "llm-wiki-deadman-observer"
+    )
+    assert "/usr/bin/python3" not in programs[autonomy.DEADMAN_LABEL]
     watchdog_plist = next(
         item for item in payload["plists"] if item["label"] == autonomy.WATCHDOG_LABEL
     )

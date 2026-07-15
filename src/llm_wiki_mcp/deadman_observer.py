@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Package-independent observer for the LLM Wiki autonomy watchdog.
 
 This file intentionally imports only the Python standard library.  The
