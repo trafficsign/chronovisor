@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -412,3 +413,36 @@ def test_background_job_terminal_history_is_pruned(tmp_path: Path, monkeypatch) 
     stored = json.loads((tmp_path / "state.json").read_text())
     assert len(stored["jobs"]) == 2
     assert stored["pruned_terminal_total"] == 2
+
+
+def test_background_job_snapshot_separates_recent_quarantines(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(hours=2)).isoformat(timespec="seconds")
+    old = (now - timedelta(days=5)).isoformat(timespec="seconds")
+    state = {
+        "schema_version": 1,
+        "jobs": {
+            "old": {"status": "quarantined", "updated_at": old},
+            "recent": {"status": "quarantined", "updated_at": recent},
+            "done": {"status": "completed", "updated_at": recent},
+            "queued": {"status": "queued", "created_at": recent},
+        },
+    }
+    (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    result = background_jobs.snapshot()
+
+    assert result["by_status"] == {
+        "quarantined": 2,
+        "completed": 1,
+        "queued": 1,
+    }
+    assert result["quarantined_24h"] == 1
+    assert result["latest_quarantined_at"] == recent
+    assert result["oldest_pending_at"] == recent

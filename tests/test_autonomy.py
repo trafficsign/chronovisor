@@ -2088,7 +2088,8 @@ def test_page_status_patch_rejects_stale_snapshot(monkeypatch, tmp_path: Path) -
     assert meta["status"] == "active"
 
 
-def test_watchdog_alerts_when_sleep_never_ran(monkeypatch) -> None:
+def test_watchdog_alerts_when_sleep_never_ran(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(autonomy, "WATCHDOG_FILE", tmp_path / "watchdog.json")
     monkeypatch.setattr(
         "llm_wiki_mcp.health.health_snapshot",
         lambda: {
@@ -2212,6 +2213,116 @@ def test_watchdog_still_alerts_on_operational_background_quarantine(
 
     assert payload["status"] == "alert"
     assert payload["alerts"] == [{"type": "background_jobs_quarantined", "value": 2}]
+
+
+def test_watchdog_ignores_retained_old_background_quarantine(monkeypatch) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    monkeypatch.setattr(
+        "llm_wiki_mcp.health.health_snapshot",
+        lambda: {
+            "memory_integrity": {"capture_rate": 0.95},
+            "queues": {"duplicate_candidates": 0, "lint_repair": 0},
+            "convergence": {
+                "quarantined": 0,
+                "expired_running": 0,
+                "oldest_actionable_age_hours": 0,
+            },
+            "capture_pipeline": {
+                "background_jobs": {
+                    "by_status": {"quarantined": 67},
+                    "quarantined_24h": 0,
+                    "latest_quarantined_at": "2026-07-11T04:10:26+00:00",
+                },
+                "session_sweeper": {"status": "ok"},
+            },
+            "runtime": {"commit_id": "abc123", "drift": False},
+        },
+    )
+    monkeypatch.setattr(
+        autonomy,
+        "_latest_jsonl",
+        lambda _path: {"status": "ok", "started_at": now},
+    )
+
+    payload = autonomy.watchdog_snapshot(write=False)
+
+    assert payload["status"] == "ok"
+    assert payload["alerts"] == []
+
+
+def test_watchdog_notification_suppresses_small_drift_until_reminder() -> None:
+    previous = {
+        "last_sent_at": NOW.isoformat(),
+        "last_notified_alerts": [{"type": "lint_backlog_high", "value": 700}],
+    }
+
+    unchanged = autonomy._watchdog_notification_plan(
+        [{"type": "lint_backlog_high", "value": 701}],
+        previous,
+        now=NOW + timedelta(hours=1),
+    )
+    increased = autonomy._watchdog_notification_plan(
+        [{"type": "lint_backlog_high", "value": 1100}],
+        previous,
+        now=NOW + timedelta(hours=1),
+    )
+    reminder = autonomy._watchdog_notification_plan(
+        [{"type": "lint_backlog_high", "value": 701}],
+        previous,
+        now=NOW + timedelta(hours=6),
+    )
+
+    assert unchanged == {"send": False, "reason": "unchanged"}
+    assert increased == {"send": True, "reason": "severity_increased"}
+    assert reminder == {"send": True, "reason": "reminder"}
+
+
+def test_watchdog_notification_sends_once_and_reports_recovery(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+    test_now = datetime.now()
+    monkeypatch.setattr(autonomy, "_now", lambda: test_now.isoformat())
+    monkeypatch.setattr(
+        autonomy,
+        "_send_notification",
+        lambda title, body: calls.append((title, body)) or {"sent": True},
+    )
+    alerts = [{"type": "lint_backlog_high", "value": 700}]
+
+    first = autonomy._watchdog_notification_state(alerts, {}, enabled=True)
+    second = autonomy._watchdog_notification_state(alerts, first, enabled=True)
+    recovered = autonomy._watchdog_notification_state([], first, enabled=True)
+    healthy_again = autonomy._watchdog_notification_state([], recovered, enabled=True)
+
+    assert first["status"] == "sent"
+    assert first["reason"] == "new_alerts"
+    assert second["status"] == "suppressed"
+    assert second["reason"] == "unchanged"
+    assert recovered["status"] == "sent"
+    assert recovered["reason"] == "recovered"
+    assert healthy_again["status"] == "suppressed"
+    assert len(calls) == 2
+    assert calls[1][1] == "Autonomy recovered"
+
+
+def test_watchdog_read_only_never_sends_notification(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "llm_wiki_mcp.health.health_snapshot",
+        lambda: {
+            "memory_integrity": {"capture_rate": 0.95},
+            "queues": {"duplicate_candidates": 0, "lint_repair": 0},
+        },
+    )
+    monkeypatch.setattr(autonomy, "_latest_jsonl", lambda _path: {})
+    monkeypatch.setattr(
+        autonomy,
+        "_send_notification",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("notification sent")),
+    )
+
+    payload = autonomy.watchdog_snapshot(write=False, notify=True)
+
+    assert payload["status"] == "alert"
+    assert "notification" not in payload
 
 
 def test_watchdog_history_is_compact_and_bounded_to_1000_lines(

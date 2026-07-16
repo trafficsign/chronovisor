@@ -60,6 +60,7 @@ WATCHDOG_FILE = AUTONOMY_DIR / "watchdog-latest.json"
 WATCHDOG_HISTORY = AUTONOMY_DIR / "watchdog-history.jsonl"
 WATCHDOG_HEARTBEAT_FILE = AUTONOMY_DIR / "watchdog-heartbeat.json"
 OBSERVER_HEARTBEAT_FILE = AUTONOMY_DIR / "observer-heartbeat.json"
+WATCHDOG_NOTIFICATION_REMINDER_HOURS = 6.0
 DIGEST_FILE = AUTONOMY_DIR / "digest-latest.md"
 QUARANTINE_FILE = AUTONOMY_DIR / "quarantine.json"
 PROJECT_ROOT = runtime_repo_root()
@@ -3208,6 +3209,215 @@ def _sleep_run_summary(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_watchdog_alerts(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Persist only bounded scalar alert state needed for notification decisions."""
+
+    compact: list[dict[str, Any]] = []
+    for alert in alerts[:32]:
+        row: dict[str, Any] = {}
+        for key, value in alert.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                row[str(key)[:100]] = value[:500] if isinstance(value, str) else value
+        if row.get("type"):
+            compact.append(row)
+    return compact
+
+
+def _watchdog_alert_types(alerts: list[dict[str, Any]]) -> list[str]:
+    return sorted(
+        {
+            str(alert.get("type") or "unknown")[:200]
+            for alert in alerts
+            if isinstance(alert, dict)
+        }
+    )
+
+
+def _threshold_bucket(value: object, thresholds: tuple[float, ...]) -> int:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0
+    return sum(number >= threshold for threshold in thresholds)
+
+
+def _watchdog_alert_severity(alert: dict[str, Any]) -> int:
+    """Return a coarse severity rank so small counter drift stays quiet."""
+
+    alert_type = str(alert.get("type") or "")
+    if alert_type == "lint_backlog_high":
+        return _threshold_bucket(alert.get("value"), (250, 500, 1000, 2000))
+    if alert_type == "background_jobs_quarantined":
+        return _threshold_bucket(alert.get("value"), (1, 5, 10, 25, 50))
+    if alert_type == "convergence_slo_missed":
+        age = _threshold_bucket(alert.get("oldest_age_hours"), (24, 72, 168))
+        actionable = _threshold_bucket(alert.get("actionable"), (1, 5, 10, 25, 50))
+        return age * 10 + actionable
+    if alert_type in {"capture_rate_low", "capture_rate_regression"}:
+        value = alert.get("value", alert.get("after"))
+        try:
+            rate = float(value)
+        except (TypeError, ValueError):
+            return 1
+        return sum(rate <= threshold for threshold in (0.8, 0.6, 0.4, 0.2))
+    for key in ("value", "pending", "actionable", "age_seconds"):
+        if key in alert:
+            return _threshold_bucket(
+                alert.get(key),
+                (1, 5, 10, 25, 50, 100, 250, 500, 1000),
+            )
+    return 1
+
+
+def _watchdog_alert_identity(alert: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Return identity fields whose change should notify without waiting."""
+
+    keys_by_type = {
+        "component_error": (
+            "component",
+            "exception_type",
+            "diagnostic_hash",
+            "fingerprint",
+            "incident_status",
+        ),
+        "runtime_commit_drift": ("runtime_commit", "expected_commit"),
+        "runtime_commit_unknown": ("archive_path",),
+        "sleep_status_not_ok": ("status",),
+        "deadman_observer_unhealthy": ("status",),
+        "quality_probe_error": ("error_type",),
+    }
+    alert_type = str(alert.get("type") or "")
+    return tuple(
+        (key, str(alert.get(key)))
+        for key in keys_by_type.get(alert_type, ())
+        if key in alert
+    )
+
+
+def _watchdog_alert_map(
+    alerts: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(alert.get("type") or "unknown"): alert
+        for alert in alerts
+        if isinstance(alert, dict)
+    }
+
+
+def _watchdog_notification_plan(
+    alerts: list[dict[str, Any]],
+    previous_notification: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    reminder_hours: float = WATCHDOG_NOTIFICATION_REMINDER_HOURS,
+) -> dict[str, Any]:
+    """Decide whether the current watchdog transition deserves a notification."""
+
+    current = _compact_watchdog_alerts(alerts)
+    previous_raw = previous_notification.get("last_notified_alerts")
+    previous = (
+        _compact_watchdog_alerts(previous_raw) if isinstance(previous_raw, list) else []
+    )
+    has_baseline = isinstance(previous_raw, list)
+    current_types = _watchdog_alert_types(current)
+    previous_types = _watchdog_alert_types(previous)
+
+    if not has_baseline:
+        return {
+            "send": bool(current),
+            "reason": "new_alerts" if current else "unchanged",
+        }
+    if not current:
+        return {
+            "send": bool(previous),
+            "reason": "recovered" if previous else "unchanged",
+        }
+    if current_types != previous_types:
+        return {"send": True, "reason": "alert_set_changed"}
+
+    current_map = _watchdog_alert_map(current)
+    previous_map = _watchdog_alert_map(previous)
+    if any(
+        _watchdog_alert_identity(current_map[alert_type])
+        != _watchdog_alert_identity(previous_map[alert_type])
+        for alert_type in current_types
+    ):
+        return {"send": True, "reason": "alert_identity_changed"}
+    if any(
+        _watchdog_alert_severity(current_map[alert_type])
+        > _watchdog_alert_severity(previous_map[alert_type])
+        for alert_type in current_types
+    ):
+        return {"send": True, "reason": "severity_increased"}
+
+    last_sent = _parse_dt(previous_notification.get("last_sent_at"))
+    current_time = now or datetime.now(last_sent.tzinfo if last_sent else None)
+    if last_sent is not None:
+        if current_time.tzinfo is None and last_sent.tzinfo is not None:
+            current_time = current_time.replace(tzinfo=last_sent.tzinfo)
+        elif current_time.tzinfo is not None and last_sent.tzinfo is None:
+            last_sent = last_sent.replace(tzinfo=current_time.tzinfo)
+    if last_sent is not None and current_time - last_sent >= timedelta(
+        hours=max(0.0, reminder_hours)
+    ):
+        return {"send": True, "reason": "reminder"}
+    return {"send": False, "reason": "unchanged"}
+
+
+def _watchdog_notification_body(alerts: list[dict[str, Any]], reason: str) -> str:
+    if reason == "recovered":
+        return "Autonomy recovered"
+    alert_types = _watchdog_alert_types(alerts)
+    visible = ", ".join(alert_types[:3])
+    if len(alert_types) > 3:
+        visible = f"{visible} +{len(alert_types) - 3}"
+    prefix = "Reminder" if reason == "reminder" else "Alert"
+    return f"{prefix}: {visible or 'unknown'}"
+
+
+def _watchdog_notification_state(
+    alerts: list[dict[str, Any]],
+    previous_notification: dict[str, Any],
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Send a transition notification and return durable notification state."""
+
+    current = _compact_watchdog_alerts(alerts)
+    state = {
+        "status": "disabled" if not enabled else "suppressed",
+        "reason": "notifications_disabled" if not enabled else "unchanged",
+        "reminder_hours": WATCHDOG_NOTIFICATION_REMINDER_HOURS,
+        "active_alert_types": _watchdog_alert_types(current),
+        "last_sent_at": previous_notification.get("last_sent_at"),
+        "last_notified_alerts": previous_notification.get("last_notified_alerts"),
+    }
+    if not enabled:
+        return state
+
+    plan = _watchdog_notification_plan(current, previous_notification)
+    state["reason"] = plan["reason"]
+    if not plan["send"]:
+        return state
+
+    delivery = _send_notification(
+        "LLM Wiki watchdog",
+        _watchdog_notification_body(current, str(plan["reason"])),
+    )
+    state["delivery"] = delivery
+    if delivery.get("sent") is True:
+        state.update(
+            {
+                "status": "sent",
+                "last_sent_at": _now(),
+                "last_notified_alerts": current,
+            }
+        )
+    else:
+        state["status"] = "failed"
+    return state
+
+
 def _write_watchdog_history(
     payload: dict[str, Any],
     *,
@@ -3434,13 +3644,26 @@ def watchdog_snapshot(
         if isinstance(background.get("by_status"), dict)
         else {}
     )
-    if int(background_status.get("quarantined") or 0) > 0:
-        alerts.append(
-            {
-                "type": "background_jobs_quarantined",
-                "value": background_status.get("quarantined"),
-            }
-        )
+    retained_quarantined = int(background_status.get("quarantined") or 0)
+    recent_quarantined_raw = background.get("quarantined_24h")
+    recent_quarantined = (
+        retained_quarantined
+        if recent_quarantined_raw is None
+        else int(recent_quarantined_raw or 0)
+    )
+    if recent_quarantined > 0:
+        alert = {
+            "type": "background_jobs_quarantined",
+            "value": recent_quarantined,
+        }
+        if recent_quarantined_raw is not None:
+            alert.update(
+                {
+                    "retained_total": retained_quarantined,
+                    "window_hours": 24,
+                }
+            )
+        alerts.append(alert)
     if int(background_status.get("retry_wait") or 0) > 0:
         alerts.append(
             {
@@ -3517,6 +3740,12 @@ def watchdog_snapshot(
     # that cross-checks the independent observer.
     if write and observer_alert is not None:
         alerts.append(observer_alert)
+    previous_watchdog = _read_json(WATCHDOG_FILE) if write else {}
+    previous_notification = (
+        previous_watchdog.get("notification")
+        if isinstance(previous_watchdog.get("notification"), dict)
+        else {}
+    )
     payload = {
         "status": "alert" if alerts else "ok",
         "ts": _now(),
@@ -3537,10 +3766,13 @@ def watchdog_snapshot(
             peer=observer,
         )
         payload["deadman"]["main_sequence"] = heartbeat["sequence"]
+        payload["notification"] = _watchdog_notification_state(
+            alerts,
+            previous_notification,
+            enabled=notify,
+        )
         _write_json(WATCHDOG_FILE, payload)
         _write_watchdog_history(payload)
-    if notify and alerts:
-        _send_notification("LLM Wiki watchdog", f"{len(alerts)} autonomy alert(s)")
     return payload
 
 

@@ -27,6 +27,7 @@ MAX_TERMINAL_JOBS = 500
 MAX_CANCELLATION_TOMBSTONES = 500
 RETRYABLE_EXIT_CODE = 75
 QUARANTINE_EXIT_CODE = 78
+RECENT_QUARANTINE_HOURS = 24
 ACTIVE_STATUSES = frozenset({"queued", "running", "retry_wait"})
 TERMINAL_STATUSES = frozenset({"completed", "quarantined", "failed", "cancelled"})
 _SESSION_ID_KEYS = frozenset(
@@ -499,6 +500,9 @@ def snapshot() -> dict[str, Any]:
         jobs = _load()["jobs"]
     counts: dict[str, int] = {}
     oldest_pending: str | None = None
+    quarantined_24h = 0
+    latest_quarantined_at: str | None = None
+    quarantine_cutoff = _now() - timedelta(hours=RECENT_QUARANTINE_HOURS)
     for job in jobs.values():
         if not isinstance(job, dict):
             continue
@@ -508,7 +512,34 @@ def snapshot() -> dict[str, Any]:
             created = str(job.get("created_at") or "")
             if created and (oldest_pending is None or created < oldest_pending):
                 oldest_pending = created
-    return {"status": "ok", "items": len(jobs), "by_status": counts, "oldest_pending_at": oldest_pending}
+        if status == "quarantined":
+            timestamp = str(
+                job.get("updated_at")
+                or job.get("finished_at")
+                or job.get("created_at")
+                or ""
+            )
+            if timestamp and (
+                latest_quarantined_at is None or timestamp > latest_quarantined_at
+            ):
+                latest_quarantined_at = timestamp
+            try:
+                quarantined_at = datetime.fromisoformat(timestamp)
+            except ValueError:
+                quarantined_at = None
+            if quarantined_at is not None:
+                if quarantined_at.tzinfo is None:
+                    quarantined_at = quarantined_at.replace(tzinfo=timezone.utc)
+                if quarantined_at >= quarantine_cutoff:
+                    quarantined_24h += 1
+    return {
+        "status": "ok",
+        "items": len(jobs),
+        "by_status": counts,
+        "oldest_pending_at": oldest_pending,
+        "quarantined_24h": quarantined_24h,
+        "latest_quarantined_at": latest_quarantined_at,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
