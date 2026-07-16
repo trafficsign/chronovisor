@@ -375,6 +375,44 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
     assert trace["overall"][5]["status"] == "done"
 
 
+def test_decision_trace_explains_semantic_quality_and_resource_holds() -> None:
+    semantic = dashboard._decision_trace_outcome(
+        {
+            "quarantine_reason": "local_models_did_not_reach_two_vote_quorum",
+            "failure_class": "local_consensus_failed",
+        },
+        trace_state="quarantined",
+        task_role="ingest_reconciliation",
+    )
+    quality = dashboard._decision_trace_outcome(
+        {"quarantine_reason": "fewer_than_two_valid_local_votes"},
+        trace_state="quarantined",
+        task_role="ingest_reconciliation",
+    )
+    resource = dashboard._decision_trace_outcome(
+        {
+            "quarantine_reason": "decision_runner_does_not_fit_reserved_memory",
+            "failure_class": "local_resource_quarantined",
+        },
+        trace_state="quarantined",
+        task_role="ingest_reconciliation",
+    )
+
+    assert semantic == {
+        "kind": "semantic_hold",
+        "reason": "Valid models disagreed",
+        "data": "Raw retained",
+        "next": "Recheck after model or policy change",
+        "code": "local_models_did_not_reach_two_vote_quorum",
+    }
+    assert quality["kind"] == "quality_hold"
+    assert quality["reason"] == "Too few valid model votes"
+    assert quality["data"] == "Raw retained"
+    assert resource["kind"] == "operational_hold"
+    assert resource["reason"] == "Model memory could not be verified"
+    assert resource["next"] == "Retry when capacity recovers"
+
+
 def test_local_consensus_snapshot_removes_reused_pid_marker(
     tmp_path: Path,
     monkeypatch,
@@ -637,10 +675,15 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'data-decision-lane="primary"' in page
     assert 'data-decision-lane="challenger"' in page
     assert 'data-decision-lane="tie_break"' in page
+    assert 'id="decision-outcome-reason"' in page
+    assert 'id="decision-outcome-data"' in page
+    assert 'id="decision-outcome-next"' in page
     assert 'id="lan-share-button"' in page
     assert "grid-template-columns: repeat(7, minmax(0, 1fr));" in style
     assert "grid-template-columns: repeat(6, minmax(50px, 1fr));" in style
     assert "height: var(--panel-height);" in style
+    assert "#model-lab-panel" in style
+    assert ".decision-outcome-facts" in style
     assert ".decision-trace-panel" in style
 
 

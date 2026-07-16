@@ -20,6 +20,9 @@ const els = {
   decisionModelCalls: document.getElementById("decision-model-calls"),
   decisionQuorum: document.getElementById("decision-quorum"),
   decisionMutation: document.getElementById("decision-mutation"),
+  decisionOutcomeReason: document.getElementById("decision-outcome-reason"),
+  decisionOutcomeData: document.getElementById("decision-outcome-data"),
+  decisionOutcomeNext: document.getElementById("decision-outcome-next"),
   decisionTraceCaption: document.getElementById("decision-trace-caption"),
   decisionOverallSteps: document.getElementById("decision-overall-steps"),
   decisionLanes: document.querySelectorAll("[data-decision-lane]"),
@@ -406,6 +409,7 @@ function renderWorkStatus(status) {
 
 function renderDecisionTrace(consensus) {
   const trace = consensus?.decision_trace || {};
+  const outcome = trace.outcome || {};
   const traceState = String(trace.state || "idle");
   const request = String(trace.request_sha256 || "");
   const active = trace.active === true;
@@ -510,6 +514,11 @@ function renderDecisionTrace(consensus) {
     els.workSummary.textContent = `${overallStage} · ${Math.min(overallPosition, 7)} / 7`;
     els.workDetail.textContent = fmt(trace.summary, "Local decision");
     els.workUpdated.textContent = `${fmt(trace.task_role, "routine")} · request ${request.slice(0, 16)}`;
+    els.workOverview.dataset.outcomeKind = fmt(outcome.kind, "idle");
+    els.workOverview.title = outcome.code ? `Reason code: ${outcome.code}` : "";
+    els.decisionOutcomeReason.textContent = fmt(outcome.reason, "Local decision");
+    els.decisionOutcomeData.textContent = fmt(outcome.data, "Input retained");
+    els.decisionOutcomeNext.textContent = fmt(outcome.next, "Wait for completion");
     els.decisionBadge.textContent = badge;
     els.decisionModelCalls.textContent = String(trace.artifact_replay ? 0 : modelCalls);
     els.decisionQuorum.textContent = `${Math.min(validVotes, quorumTarget)} / ${quorumTarget}`;
@@ -521,6 +530,11 @@ function renderDecisionTrace(consensus) {
     els.decisionModelCalls.textContent = "0";
     els.decisionQuorum.textContent = "0 / 2";
     els.decisionMutation.textContent = "Locked";
+    els.workOverview.dataset.outcomeKind = "idle";
+    els.workOverview.title = "";
+    els.decisionOutcomeReason.textContent = "Waiting for local work";
+    els.decisionOutcomeData.textContent = "No active decision";
+    els.decisionOutcomeNext.textContent = "Starts automatically";
   }
 }
 
@@ -1162,6 +1176,8 @@ function renderSelfHeal(selfHeal) {
   els.selfHealDetail.textContent = latest
     ? [latest.raw_file, latest.detail].filter(Boolean).join(" · ")
     : "--";
+  els.selfHealLatest.title = els.selfHealLatest.textContent;
+  els.selfHealDetail.title = els.selfHealDetail.textContent;
 
   els.selfHealLastCheck.textContent = lastChecked.timestamp ? ageLabel(lastChecked.timestamp) : "--";
   els.selfHealLastStatus.textContent = lastChecked.timestamp
@@ -1196,6 +1212,7 @@ function renderSelfHeal(selfHeal) {
     failure.failure_class || frontier.error || null,
   ].filter(Boolean);
   els.selfHealFrontierDetail.textContent = frontierDetails.join(" · ") || "guard state";
+  els.selfHealFrontierDetail.title = els.selfHealFrontierDetail.textContent;
 
   const countItems = [
     ["resolved", counts.resolved || 0],
@@ -1393,6 +1410,7 @@ function renderSaveDetail(day) {
   [...(day.raw_samples || []).slice(0, 3), ...(day.page_samples || []).slice(0, 3)].forEach((sample) => {
     const item = document.createElement("li");
     item.textContent = sample;
+    item.title = sample;
     samples.appendChild(item);
   });
   if (!samples.childElementCount) {
@@ -1421,6 +1439,7 @@ function renderSaveFeed(recent) {
     const body = document.createElement("span");
     const pages = intValue(day.pages_created) + intValue(day.pages_updated);
     body.textContent = `${intValue(day.raw_saved)} saved · ${intValue(day.processed)} processed · ${pages} pages`;
+    body.title = body.textContent;
     row.append(date, body);
     row.addEventListener("click", () => {
       selectedSaveDate = day.date;
@@ -1750,6 +1769,7 @@ function renderModelStatus(modelStatus) {
       const name = document.createElement("strong");
       name.className = "model-name";
       name.textContent = fmt(row.name);
+      name.title = fmt(row.name);
       main.append(state, name);
 
       const roleWrap = document.createElement("div");
@@ -1775,6 +1795,7 @@ function renderModelStatus(modelStatus) {
       const meta = document.createElement("div");
       meta.className = "model-meta";
       meta.textContent = metaPieces.join(" · ") || "configured outside local Ollama";
+      meta.title = meta.textContent;
 
       item.append(main, roleWrap, meta);
       els.modelGrid.appendChild(item);
@@ -1786,7 +1807,11 @@ function renderModelLab(lab) {
   const roles = policy.roles || {};
   const candidates = Array.isArray(lab.candidates) ? lab.candidates : [];
   const canaries = policy.canaries || {};
-  if (els.modelLabCaption) els.modelLabCaption.textContent = lab.status === "ok" ? `updated ${fmt(policy.updated_at, "now")}` : fmt(lab.status, "unavailable");
+  if (els.modelLabCaption) {
+    els.modelLabCaption.textContent =
+      lab.status === "ok" ? `updated ${timeLabel(policy.updated_at)}` : fmt(lab.status, "unavailable");
+    els.modelLabCaption.title = policy.updated_at ? `Updated ${policy.updated_at}` : "";
+  }
   if (els.modelLabRoles) els.modelLabRoles.textContent = Object.keys(roles).length;
   if (els.modelLabReplays) els.modelLabReplays.textContent = fmt(lab.replay_cases, 0);
   if (els.modelLabCandidates) els.modelLabCandidates.textContent = candidates.length;
@@ -1801,9 +1826,11 @@ function renderModelLab(lab) {
     const name = document.createElement("strong");
     name.className = "model-name";
     name.textContent = role.replaceAll("_", " ");
+    name.title = name.textContent;
     const meta = document.createElement("span");
     meta.className = "model-meta";
     meta.textContent = `${fmt(selected.model, "--")} · ${fmt(selected.effort, "--")}`;
+    meta.title = meta.textContent;
     main.append(name, meta);
     const state = document.createElement("span");
     state.className = "model-state";

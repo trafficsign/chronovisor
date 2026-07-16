@@ -1507,6 +1507,116 @@ def _decision_trace_steps(
     return steps
 
 
+def _decision_trace_outcome(
+    decision: dict[str, Any] | None,
+    *,
+    trace_state: str,
+    task_role: str,
+) -> dict[str, str]:
+    """Explain a redacted decision without exposing prompts or vote payloads."""
+
+    source_state = (
+        "Raw retained" if task_role.startswith("ingest") else "Input retained"
+    )
+    if trace_state == "agreed":
+        return {
+            "kind": "approved",
+            "reason": "Safe local quorum reached",
+            "data": "Decision artifact sealed",
+            "next": "Mutation may proceed",
+            "code": "local_quorum_agreed",
+        }
+    if trace_state == "ready":
+        return {
+            "kind": "ready",
+            "reason": "Structured result validated",
+            "data": source_state,
+            "next": "Ready for the caller",
+            "code": "structured_result_ready",
+        }
+    if trace_state == "active":
+        return {
+            "kind": "active",
+            "reason": "Local decision in progress",
+            "data": source_state,
+            "next": "Mutation stays locked",
+            "code": "local_decision_active",
+        }
+    if trace_state != "quarantined":
+        return {
+            "kind": "idle",
+            "reason": "Waiting for local work",
+            "data": "No active decision",
+            "next": "Starts automatically",
+            "code": "local_decision_idle",
+        }
+
+    reason = str((decision or {}).get("quarantine_reason") or "")
+    failure_class = str((decision or {}).get("failure_class") or "")
+    semantic_reasons = {
+        "local_models_did_not_reach_two_vote_quorum": "Valid models disagreed",
+        "mutating_local_majority_vetoed_by_conservative_vote": (
+            "Conservative vote blocked mutation"
+        ),
+    }
+    quality_reasons = {
+        "fewer_than_two_valid_local_votes": "Too few valid model votes",
+        "primary_and_challenger_invalid": "Primary pair returned invalid votes",
+    }
+    if reason in semantic_reasons:
+        return {
+            "kind": "semantic_hold",
+            "reason": semantic_reasons[reason],
+            "data": source_state,
+            "next": "Recheck after model or policy change",
+            "code": reason,
+        }
+    if reason in quality_reasons:
+        return {
+            "kind": "quality_hold",
+            "reason": quality_reasons[reason],
+            "data": source_state,
+            "next": "Retry after model or runtime change",
+            "code": reason,
+        }
+
+    resource_failure = failure_class == "local_resource_quarantined" or any(
+        marker in reason
+        for marker in (
+            "runner_does_not_fit",
+            "runner_no_longer_fits",
+            "verify_initial_runner_eviction",
+            "verify_primary_runner_eviction",
+            "verify_challenger_runner_eviction",
+            "verify_pair_runner_eviction",
+            "verify_tie_break_runner_eviction",
+        )
+    )
+    if resource_failure:
+        return {
+            "kind": "operational_hold",
+            "reason": "Model memory could not be verified",
+            "data": source_state,
+            "next": "Retry when capacity recovers",
+            "code": reason or failure_class or "local_resource_quarantined",
+        }
+    if failure_class == "context_window_exceeded" or "context" in reason:
+        return {
+            "kind": "operational_hold",
+            "reason": "Request exceeds context capacity",
+            "data": source_state,
+            "next": "Retry with a compatible context plan",
+            "code": reason or failure_class,
+        }
+    return {
+        "kind": "operational_hold",
+        "reason": "Local decision could not finish safely",
+        "data": source_state,
+        "next": "Retry after runtime conditions change",
+        "code": reason or failure_class or "local_decision_quarantined",
+    }
+
+
 def _decision_trace_snapshot(
     activities: list[dict[str, Any]],
     history: list[dict[str, Any]],
@@ -1759,6 +1869,11 @@ def _decision_trace_snapshot(
         or (decision or {}).get("timestamp")
         or (session_rows[-1] if session_rows else {}).get("timestamp")
     )
+    outcome = _decision_trace_outcome(
+        decision,
+        trace_state=trace_state,
+        task_role=task_role,
+    )
     return {
         "state": trace_state,
         "active": bool(active_rows),
@@ -1770,6 +1885,7 @@ def _decision_trace_snapshot(
         "context_tokens": _decision_trace_context_tokens(),
         "quorum_flow": quorum_flow,
         "artifact_replay": artifact_replay,
+        "outcome": outcome,
         "overall": overall,
         "lanes": lanes,
     }
