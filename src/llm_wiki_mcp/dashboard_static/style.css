@@ -71,7 +71,6 @@ body::before {
 }
 
 .lan-share-button {
-  width: 112px;
   min-height: 40px;
   overflow: hidden;
   padding: 0 12px;
@@ -86,6 +85,10 @@ body::before {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.lan-share-button {
+  width: 124px;
 }
 
 .eyebrow {

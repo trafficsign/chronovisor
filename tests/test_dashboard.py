@@ -837,6 +837,30 @@ def test_dashboard_lan_token_is_private_and_reused(tmp_path: Path) -> None:
     assert dashboard.DASHBOARD_TOKEN_RE.fullmatch(first)
     assert token_path.stat().st_mode & 0o777 == 0o600
 
+    rotated = dashboard._rotate_dashboard_token(token_path)
+
+    assert rotated != first
+    assert dashboard._load_or_create_dashboard_token(token_path) == rotated
+    assert token_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_dashboard_credentials_are_hashed_private_and_verifiable(
+    tmp_path: Path,
+) -> None:
+    credentials_path = tmp_path / "runtime" / "dashboard-credentials.json"
+    password = "test-password-never-store-verbatim"
+
+    dashboard._write_dashboard_credentials(credentials_path, "admin", password)
+    credentials = dashboard._load_dashboard_credentials(credentials_path)
+
+    assert password not in credentials_path.read_text(encoding="utf-8")
+    assert credentials_path.stat().st_mode & 0o777 == 0o600
+    assert dashboard._dashboard_credentials_match(credentials, "admin", password)
+    assert not dashboard._dashboard_credentials_match(
+        credentials, "admin", "wrong-password"
+    )
+    assert not dashboard._dashboard_credentials_match(credentials, "other", password)
+
 
 def test_dashboard_private_client_scope_rejects_public_addresses() -> None:
     assert dashboard._private_client_scope("127.0.0.1") == "loopback"
@@ -890,12 +914,106 @@ def test_dashboard_lan_link_bootstraps_cookie_and_removes_query_token(
     assert bootstrap.status_code == 303
     assert bootstrap.headers["location"] == "/?view=trace"
     assert "HttpOnly" in bootstrap.headers["set-cookie"]
+    assert "Max-Age=31536000" in bootstrap.headers["set-cookie"]
     assert page.status_code == 200
     assert access.json() == {
         "enabled": True,
         "urls": [f"http://wiki.local:{port}/?access_token={token}"],
         "trusted_lan_only": True,
     }
+
+
+def test_dashboard_private_lan_uses_basic_auth_and_keeps_recovery_token(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    token = "b" * 43
+    credentials_path = tmp_path / "dashboard-credentials.json"
+    dashboard._write_dashboard_credentials(credentials_path, "admin", "correct-pass")
+    credentials = dashboard._load_dashboard_credentials(credentials_path)
+    monkeypatch.setattr(dashboard, "_private_client_scope", lambda _value: "private")
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    server.lan_access_enabled = True
+    server.lan_access_token = token
+    server.dashboard_credentials = credentials
+    server.login_attempt_lock = threading.Lock()
+    server.login_attempts = {}
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        with dashboard.httpx.Client(follow_redirects=False, timeout=2) as client:
+            challenge = client.get(f"http://{host}:{port}/?view=trace")
+            rejected = client.get(
+                f"http://{host}:{port}/",
+                auth=("admin", "wrong-pass"),
+            )
+            accepted = client.get(
+                f"http://{host}:{port}/",
+                auth=("admin", "correct-pass"),
+            )
+        with dashboard.httpx.Client(follow_redirects=False, timeout=2) as recovery:
+            bootstrap = recovery.get(
+                f"http://{host}:{port}/?access_token={token}&view=trace"
+            )
+            recovered = recovery.get(f"http://{host}:{port}/")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert challenge.status_code == 401
+    assert challenge.headers["www-authenticate"] == (
+        'Basic realm="LLM Wiki Dashboard", charset="UTF-8"'
+    )
+    assert rejected.status_code == 401
+    assert accepted.status_code == 200
+    assert bootstrap.status_code == 303
+    assert bootstrap.headers["location"] == "/?view=trace"
+    assert recovered.status_code == 200
+
+
+def test_dashboard_basic_auth_rate_limits_repeated_failures(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    credentials_path = tmp_path / "dashboard-credentials.json"
+    dashboard._write_dashboard_credentials(credentials_path, "admin", "correct-pass")
+    monkeypatch.setattr(dashboard, "_private_client_scope", lambda _value: "private")
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    server.lan_access_enabled = True
+    server.lan_access_token = "c" * 43
+    server.dashboard_credentials = dashboard._load_dashboard_credentials(
+        credentials_path
+    )
+    server.login_attempt_lock = threading.Lock()
+    server.login_attempts = {}
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        with dashboard.httpx.Client(follow_redirects=False, timeout=2) as client:
+            challenge = client.get(f"http://{host}:{port}/")
+            responses = [
+                client.get(
+                    f"http://{host}:{port}/",
+                    auth=("admin", "wrong"),
+                )
+                for _ in range(dashboard.DASHBOARD_LOGIN_ATTEMPT_LIMIT)
+            ]
+            blocked = client.get(
+                f"http://{host}:{port}/",
+                auth=("admin", "correct-pass"),
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert challenge.status_code == 401
+    assert all(response.status_code == 401 for response in responses[:-1])
+    assert responses[-1].status_code == 429
+    assert blocked.status_code == 429
 
 
 def test_cached_snapshot_reuses_idle_result_until_a_source_changes(

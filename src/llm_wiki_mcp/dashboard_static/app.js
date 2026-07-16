@@ -2174,7 +2174,7 @@ els.pendingChart.addEventListener("mousemove", handleSaveLoadHover);
 els.pendingChart.addEventListener("mouseleave", hideSaveLoadTooltip);
 
 async function copyLanLink() {
-  const original = "LAN link";
+  const original = "Recovery link";
   try {
     const response = await fetch("/api/lan-access", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2196,7 +2196,7 @@ async function copyLanLink() {
     }
     els.lanShareButton.textContent = "Copied";
   } catch {
-    els.lanShareButton.textContent = "LAN unavailable";
+    els.lanShareButton.textContent = "Unavailable";
   } finally {
     window.setTimeout(() => {
       els.lanShareButton.textContent = original;
