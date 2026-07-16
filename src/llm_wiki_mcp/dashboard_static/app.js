@@ -161,6 +161,14 @@ const WORK_STAGE_ALIASES = {
   done: "index",
 };
 
+const STAGE_METRIC_LABELS = {
+  "local-consensus-review": "Local review",
+  "local-regenerate": "Local retry",
+  "frontier-review": "Frontier review",
+  "frontier-regenerate": "Frontier retry",
+  authorization: "Authorize",
+};
+
 let saveHistoryMode = "daily";
 let latestSaveHistory = null;
 let selectedSaveDate = null;
@@ -188,6 +196,15 @@ function shortName(value) {
   const text = fmt(value);
   if (text.length <= 64) return text;
   return `${text.slice(0, 30)}...${text.slice(-28)}`;
+}
+
+function stageMetricLabel(value) {
+  const raw = fmt(value, "idle").trim();
+  const normalized = raw.toLowerCase();
+  if (STAGE_METRIC_LABELS[normalized]) return STAGE_METRIC_LABELS[normalized];
+  const readable = raw.replace(/[-_]+/g, " ");
+  if (readable.length <= 18) return readable;
+  return `${readable.slice(0, 17).trimEnd()}…`;
 }
 
 function timeLabel(value) {
@@ -2073,7 +2090,9 @@ function render(snapshot) {
   els.pendingSub.textContent = semanticDeferred
     ? `${semanticDeferred} semantic held · updated ${timeLabel(status.updated_at)}`
     : `updated ${timeLabel(status.updated_at)}`;
-  els.stage.textContent = fmt(status.stage);
+  const stageValue = fmt(status.stage, "idle");
+  els.stage.textContent = stageMetricLabel(stageValue);
+  els.stage.title = stageValue;
   els.raw.textContent = shortName(status.current_raw || "no active raw");
   els.batch.textContent = batch.total ? `${batch.index || 0}/${batch.total}` : "--";
   els.batchSub.textContent = batch.total

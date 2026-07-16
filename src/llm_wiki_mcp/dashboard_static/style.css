@@ -201,6 +201,14 @@ h2 {
   font-variant-numeric: tabular-nums;
 }
 
+#stage-value {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: clamp(26px, 3vw, 40px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .metric-card small {
   display: -webkit-box;
   min-height: 38px;

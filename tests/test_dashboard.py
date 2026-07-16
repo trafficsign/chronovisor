@@ -665,6 +665,10 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "Frontier reviewing" not in app
     assert "Local consensus reviewing" in app
     assert "Local model evaluation" in app
+    assert '"local-consensus-review": "Local review"' in app
+    assert "function stageMetricLabel(value)" in app
+    assert "els.stage.textContent = stageMetricLabel(stageValue);" in app
+    assert "els.stage.title = stageValue;" in app
     assert "correction uncertainty" in app
     assert "batch.active === true ? 1 : 0" in app
     assert "batch.total ? 1 : 0" not in app
@@ -687,6 +691,9 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "height: 500px;" in style
     assert "height: 764px;" in style
     assert "height: 1084px;" in style
+    assert "#stage-value" in style
+    assert "text-overflow: ellipsis;" in style
+    assert "white-space: nowrap;" in style
     assert ".decision-outcome-facts" in style
     assert ".decision-trace-panel" in style
 
