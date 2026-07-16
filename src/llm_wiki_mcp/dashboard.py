@@ -3061,7 +3061,9 @@ def _dashboard_lan_hosts() -> list[str]:
     local_name = re.sub(
         r"[^A-Za-z0-9-]", "-", socket.gethostname().split(".")[0]
     ).strip("-")
-    hosts = [f"{local_name}.local"] if local_name else []
+    mdns_hosts = [f"{local_name}.local"] if local_name else []
+    private_hosts: list[str] = []
+    link_local_hosts: list[str] = []
     for interface in ("en0", "en1"):
         try:
             result = subprocess.run(
@@ -3074,9 +3076,17 @@ def _dashboard_lan_hosts() -> list[str]:
         except (OSError, subprocess.SubprocessError):
             continue
         candidate = result.stdout.strip()
-        if _private_client_scope(candidate) == "private" and candidate not in hosts:
-            hosts.append(candidate)
-    return hosts
+        address = _normalized_client_ip(candidate)
+        if address is None or _private_client_scope(candidate) != "private":
+            continue
+        target = link_local_hosts if address.is_link_local else private_hosts
+        if candidate not in target:
+            target.append(candidate)
+
+    # The share button copies the first URL. Prefer the directly routable LAN
+    # address because mDNS is not available on every phone/PC and a link-local
+    # address is usually the inactive interface on a multi-homed Mac.
+    return [*private_hosts, *mdns_hosts, *link_local_hosts]
 
 
 class DashboardHandler(BaseHTTPRequestHandler):

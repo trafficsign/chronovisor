@@ -846,6 +846,24 @@ def test_dashboard_private_client_scope_rejects_public_addresses() -> None:
     assert dashboard._private_client_scope("not-an-ip") == "invalid"
 
 
+def test_dashboard_lan_hosts_prefers_routable_ip_over_mdns_and_link_local(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(dashboard.socket, "gethostname", lambda: "MacStudio.local")
+
+    def fake_run(args, **_kwargs):
+        addresses = {"en0": "169.254.240.103\n", "en1": "192.168.100.5\n"}
+        return SimpleNamespace(stdout=addresses[str(args[-1])])
+
+    monkeypatch.setattr(dashboard.subprocess, "run", fake_run)
+
+    assert dashboard._dashboard_lan_hosts() == [
+        "192.168.100.5",
+        "MacStudio.local",
+        "169.254.240.103",
+    ]
+
+
 def test_dashboard_lan_link_bootstraps_cookie_and_removes_query_token(
     monkeypatch,
 ) -> None:
