@@ -1349,14 +1349,14 @@ function saveTooltip(day, value) {
     : saveHistoryMode === "cumulative"
       ? `${value} saved cumulative`
       : `${intValue(day.raw_saved)} saved`;
-  const pages = intValue(day.pages_created) + intValue(day.pages_updated);
+  const pageChanges = intValue(day.pages_created) + intValue(day.pages_updated);
   return [
     day.date,
     metric,
     `${intValue(day.processed)} processed`,
     `${intValue(day.deferred)} deferred`,
     `${intValue(day.failed)} failed`,
-    `${pages} page changes`,
+    `${pageChanges} page changes`,
     `sources: ${formatSources(day.sources)}`,
   ].join(" · ");
 }
@@ -1454,8 +1454,8 @@ function renderSaveFeed(recent) {
     const date = document.createElement("time");
     date.textContent = day.date.slice(5);
     const body = document.createElement("span");
-    const pages = intValue(day.pages_created) + intValue(day.pages_updated);
-    body.textContent = `${intValue(day.raw_saved)} saved · ${intValue(day.processed)} processed · ${pages} pages`;
+    const pageChanges = intValue(day.pages_created) + intValue(day.pages_updated);
+    body.textContent = `${intValue(day.raw_saved)} saved · ${intValue(day.processed)} processed · ${pageChanges} changes`;
     body.title = body.textContent;
     row.append(date, body);
     row.addEventListener("click", () => {
@@ -1471,11 +1471,11 @@ function renderSaveHistory(saveHistory) {
   latestSaveHistory = data;
   const days = Array.isArray(data.days) ? data.days : [];
   const totals = data.totals || {};
-  const pages = intValue(totals.pages_created) + intValue(totals.pages_updated);
+  const pageChanges = intValue(totals.pages_created) + intValue(totals.pages_updated);
 
   els.saveTotal.textContent = intValue(totals.raw_saved).toLocaleString();
   els.saveProcessed.textContent = intValue(totals.processed).toLocaleString();
-  els.savePages.textContent = pages.toLocaleString();
+  els.savePages.textContent = pageChanges.toLocaleString();
   els.saveFailed.textContent = intValue(totals.failed).toLocaleString();
   els.saveModeButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.saveMode === saveHistoryMode);

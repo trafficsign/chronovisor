@@ -683,6 +683,9 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'id="decision-outcome-data"' in page
     assert 'id="decision-outcome-next"' in page
     assert 'id="lan-share-button"' in page
+    assert "<span>Page changes</span>" in page
+    assert "${pageChanges} changes" in app
+    assert "${pages} pages" not in app
     assert "grid-template-columns: repeat(7, minmax(0, 1fr));" in style
     assert "grid-template-columns: repeat(6, minmax(50px, 1fr));" in style
     assert "height: var(--panel-height);" in style
