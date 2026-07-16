@@ -555,7 +555,7 @@ canvas {
 }
 
 .model-panel {
-  height: 420px;
+  height: 500px;
 }
 
 #model-lab-panel {
@@ -574,6 +574,11 @@ canvas {
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
+}
+
+#model-panel .model-grid {
+  overflow: hidden;
+  padding-right: 0;
 }
 
 .model-row {
@@ -2067,7 +2072,7 @@ canvas {
   }
 
   .model-panel {
-    height: 600px;
+    height: 764px;
   }
 
   .decision-trace-panel {
@@ -2101,6 +2106,10 @@ canvas {
 
   .panel-head > span {
     width: 120px;
+  }
+
+  #model-panel {
+    height: 1084px;
   }
 
   .decision-trace-panel {
