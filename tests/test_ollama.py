@@ -79,9 +79,11 @@ class _PostResponse:
 class _PostClient:
     def __init__(self) -> None:
         self.payload = None
+        self.timeout = None
 
     def post(self, _path: str, *, json: dict, timeout: object) -> _PostResponse:
         self.payload = json
+        self.timeout = timeout
         return _PostResponse()
 
 
@@ -527,6 +529,19 @@ def test_embed_uses_explicit_model(monkeypatch) -> None:
 
     assert ollama.embed(["hello"], model="bge-m3") == [[1.0, 2.0]]
     assert client.payload["model"] == "bge-m3"
+
+
+def test_embed_uses_remaining_recall_timeout(monkeypatch) -> None:
+    client = _PostClient()
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    assert ollama.embed(
+        ["hello"], model="bge-m3", read_timeout_ms=750
+    ) == [[1.0, 2.0]]
+
+    assert isinstance(client.timeout, httpx.Timeout)
+    assert client.timeout.read == 0.75
+    assert client.timeout.connect == 0.75
 
 
 def test_resource_lease_blocks_exclusive_across_threads(tmp_path, monkeypatch) -> None:

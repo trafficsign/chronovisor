@@ -98,16 +98,53 @@ def _hook_entries(data: dict[str, Any], event: str) -> list[dict[str, Any]]:
             continue
         for hook_i, hook in enumerate(group.get("hooks", [])):
             if isinstance(hook, dict):
-                entries.append(
-                    {
-                        "event": event,
-                        "group": group_i,
-                        "index": hook_i,
-                        "command": hook.get("command", ""),
-                        "timeout": hook.get("timeout"),
-                    }
-                )
+                entry = {
+                    "event": event,
+                    "group": group_i,
+                    "index": hook_i,
+                    "command": hook.get("command", ""),
+                    "timeout": hook.get("timeout"),
+                }
+                entry.update(_hook_compatibility(str(entry["command"])))
+                entries.append(entry)
     return entries
+
+
+def _hook_compatibility(command: str) -> dict[str, Any]:
+    noop_removal_after = "2026-10-01"
+    no_op_markers = (
+        "codex_recall_audit_hook.sh",
+        "claude_code_recall_audit_hook.sh",
+        "--only audit",
+        "--only improve",
+    )
+    legacy_markers = (
+        "codex_recall_hook.sh",
+        "codex_wiki_save_hook.sh",
+        "claude_code_recall_hook.sh",
+        "claude_code_wiki_save_hook.sh",
+        "llm-wiki-recall",
+        "llm-wiki-codex-save",
+        "llm-wiki-claude-code-save",
+    )
+    if any(marker in command for marker in no_op_markers):
+        return {
+            "compatibility": "deprecated_noop",
+            "deprecated": True,
+            "warning": "This legacy audit/improve wrapper is a compatibility no-op.",
+            "replacement": "llm-wiki-hook --event Stop; audit is queued after durable save receipt",
+            "removal_after": noop_removal_after,
+        }
+    if "llm-wiki-hook" not in command and any(
+        marker in command for marker in legacy_markers
+    ):
+        return {
+            "compatibility": "legacy_wrapper",
+            "deprecated": True,
+            "warning": "Legacy wrapper; migrate with `llm-wiki hooks install`.",
+            "replacement": "direct llm-wiki-hook entry",
+        }
+    return {"compatibility": "current", "deprecated": False}
 
 
 def _canonical_hook_hash(event_name: str, hook: dict[str, Any]) -> str:
@@ -405,6 +442,20 @@ def inspect_hooks() -> dict[str, Any]:
     claude: list[dict[str, Any]] = []
     for event in ("UserPromptSubmit", "Stop", "SessionStart", "PostToolUse"):
         claude.extend(_hook_entries(claude_data, event))
+    warnings = [
+        {
+            "host": host,
+            "event": entry.get("event"),
+            "command": entry.get("command"),
+            "compatibility": entry.get("compatibility"),
+            "warning": entry.get("warning"),
+            "replacement": entry.get("replacement"),
+            "removal_after": entry.get("removal_after"),
+        }
+        for host, entries in (("codex", codex), ("claude-code", claude))
+        for entry in entries
+        if entry.get("deprecated")
+    ]
     return {
         "codex": {
             "hooks_file": str(CODEX_HOOKS_FILE),
@@ -416,6 +467,7 @@ def inspect_hooks() -> dict[str, Any]:
             "entries": claude,
         },
         "hook_policy": load_hook_policy().__dict__,
+        "warnings": warnings,
     }
 
 
@@ -798,8 +850,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"== {host} ==")
                 for entry in section["entries"]:
                     print(
-                        f"{entry['event']}:{entry['group']}:{entry['index']}\t{entry['command']}"
+                        f"{entry['event']}:{entry['group']}:{entry['index']}\t"
+                        f"{entry['compatibility']}\t{entry['command']}"
                     )
+            for warning in data["warnings"]:
+                print(
+                    f"warning\t{warning['host']}\t{warning['warning']}\t"
+                    f"replacement={warning['replacement']}\t"
+                    f"removal_after={warning.get('removal_after') or 'unscheduled'}"
+                )
         return 0
     if args.command == "hooks" and args.hooks_command == "install":
         data = install_hooks(args.host, args.command_prefix, dry_run=args.dry_run)

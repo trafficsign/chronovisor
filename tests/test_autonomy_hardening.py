@@ -162,6 +162,175 @@ def test_background_job_failure_is_durable_and_retryable(tmp_path: Path, monkeyp
     assert "temporary failure" in stored["output_tail"]
 
 
+def test_successful_save_enqueues_audit_after_receipt_in_same_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    stdin_text = '{"session_id":"session-1","turn":2}'
+    save = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text=stdin_text,
+        on_success=[
+            {
+                "name": "recall-audit-candidate",
+                "module": "llm_wiki_mcp.recall_auditor",
+                "args": ["--host", "codex", "--hook"],
+                "env": {},
+                "when_output_status": "saved",
+            }
+        ],
+    )
+    assert background_jobs._claim(save["job_id"])["status"] == "running"
+
+    completed = background_jobs._finish(
+        save["job_id"], exit_code=0, output='log line\n{"status":"saved"}'
+    )
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert completed["status"] == "completed"
+    assert len(completed["followup_job_ids"]) == 1
+    followup = state["jobs"][completed["followup_job_ids"][0]]
+    assert followup["status"] == "queued"
+    assert followup["name"] == "recall-audit-candidate"
+    assert followup["stdin"] == stdin_text
+    assert followup["parent_job_id"] == save["job_id"]
+
+    background_jobs._finish(
+        save["job_id"], exit_code=0, output='{"status":"saved"}'
+    )
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert len(state["jobs"]) == 2
+
+
+def test_failed_save_does_not_enqueue_audit_candidate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    save = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text='{"session_id":"session-1"}',
+        on_success=[
+            {
+                "name": "recall-audit-candidate",
+                "module": "llm_wiki_mcp.recall_auditor",
+                "args": ["--host", "codex", "--hook"],
+                "env": {},
+                "when_output_status": "saved",
+            }
+        ],
+    )
+    background_jobs._claim(save["job_id"])
+
+    result = background_jobs._finish(save["job_id"], exit_code=1, output="failed")
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "retry_wait"
+    assert len(state["jobs"]) == 1
+
+
+def test_successful_save_without_new_receipt_does_not_enqueue_audit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    save = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text='{"session_id":"session-1"}',
+        on_success=[
+            {
+                "name": "recall-audit-candidate",
+                "module": "llm_wiki_mcp.recall_auditor",
+                "args": ["--host", "codex", "--hook"],
+                "env": {},
+                "when_output_status": "saved",
+            }
+        ],
+    )
+    background_jobs._claim(save["job_id"])
+
+    result = background_jobs._finish(
+        save["job_id"],
+        exit_code=0,
+        output='{"status":"skipped","reason":"no new transcript records"}',
+    )
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "completed"
+    assert "followup_job_ids" not in result
+    assert len(state["jobs"]) == 1
+
+
+def test_coalesced_save_carries_receipt_until_latest_pass_finishes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    first_payload = '{"session_id":"session-1","turn":1}'
+    latest_payload = '{"session_id":"session-1","turn":2}'
+    followup = [
+        {
+            "name": "recall-audit-candidate",
+            "module": "llm_wiki_mcp.recall_auditor",
+            "args": ["--host", "codex", "--hook"],
+            "env": {},
+            "when_output_status": "saved",
+        }
+    ]
+    save = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text=first_payload,
+        on_success=followup,
+    )
+    background_jobs._claim(save["job_id"])
+    coalesced = background_jobs.enqueue_job(
+        name="codex-save",
+        module="llm_wiki_mcp.codex_save",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text=latest_payload,
+        on_success=followup,
+    )
+    assert coalesced["rerun_requested"] is True
+
+    rerun = background_jobs._finish(
+        save["job_id"], exit_code=0, output='{"status":"saved"}'
+    )
+    assert rerun["status"] == "queued"
+    assert "followup_job_ids" not in rerun
+    background_jobs._claim(save["job_id"])
+
+    completed = background_jobs._finish(
+        save["job_id"],
+        exit_code=0,
+        output='{"status":"skipped","reason":"no new transcript records"}',
+    )
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert completed["status"] == "completed"
+    assert len(completed["followup_job_ids"]) == 1
+    audit = state["jobs"][completed["followup_job_ids"][0]]
+    assert audit["stdin"] == latest_payload
+
+
 def test_background_job_explicit_quarantine_exit_is_terminal(
     tmp_path: Path,
     monkeypatch,

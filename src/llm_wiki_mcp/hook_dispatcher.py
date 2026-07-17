@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
-from dataclasses import dataclass, field
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +34,45 @@ USER_PROMPT_EVENTS = {"user-prompt-submit", "userpromptsubmit", "prompt-submit"}
 STOP_EVENTS = {"stop"}
 
 
+class RecallWallClockTimeout(BaseException):
+    """Hard-stop a synchronous Recall hook without being swallowed downstream."""
+
+
+@contextmanager
+def recall_wall_clock_deadline(timeout_ms: int):
+    """Apply a process-local hard deadline when running on the main Unix thread."""
+
+    if (
+        timeout_ms <= 0
+        or threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "setitimer")
+    ):
+        yield
+        return
+
+    def timeout_handler(_signum: int, _frame: Any) -> None:
+        raise RecallWallClockTimeout(f"recall exceeded {timeout_ms}ms")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout_ms / 1000.0)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            elapsed = time.monotonic() - started
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(0.0, previous_timer[0] - elapsed),
+                previous_timer[1],
+            )
+
+
 @dataclass(frozen=True)
 class BackgroundTask:
     name: str
@@ -37,6 +80,7 @@ class BackgroundTask:
     args: list[str]
     env: dict[str, str] = field(default_factory=dict)
     log_prefix: str = "hook"
+    on_success: list[dict[str, Any]] = field(default_factory=list)
 
 
 def normalize_host(value: str) -> str:
@@ -155,11 +199,87 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         request.session_id = args.session_id
 
     policy = recall_runtime.load_policy(active_config_file(args.config))
-    result = recall_runtime.run_recall(request, policy, perform_search=not args.no_search)
+    from llm_wiki_mcp import recall_breaker
+
+    breaker_was_open = recall_breaker.is_open()
+    effective_policy = (
+        replace(
+            policy,
+            semantic=False,
+            judge_mode="off",
+            rewrite_enabled=False,
+        )
+        if breaker_was_open
+        else policy
+    )
+    try:
+        with recall_wall_clock_deadline(policy.total_timeout_ms):
+            result = recall_runtime.run_recall(
+                request,
+                effective_policy,
+                perform_search=not args.no_search,
+            )
+    except RecallWallClockTimeout as exc:
+        recall_breaker.record_failure(
+            str(exc),
+            threshold=policy.circuit_breaker_failures,
+            cooldown_seconds=policy.circuit_breaker_cooldown_seconds,
+        )
+        _record_recall_fail_open(request, policy, status="timeout", error=str(exc))
+        _print_host_noop(host)
+        return 0
+    except Exception as exc:
+        error = f"{exc.__class__.__name__}: {exc}"
+        recall_breaker.record_failure(
+            error,
+            threshold=policy.circuit_breaker_failures,
+            cooldown_seconds=policy.circuit_breaker_cooldown_seconds,
+        )
+        _record_recall_fail_open(request, policy, status="error", error=error)
+        _print_host_noop(host)
+        return 0
+
+    if result.status == "timeout":
+        recall_breaker.record_failure(
+            result.error or "recall soft deadline exhausted",
+            threshold=policy.circuit_breaker_failures,
+            cooldown_seconds=policy.circuit_breaker_cooldown_seconds,
+        )
+    elif not breaker_was_open:
+        recall_breaker.record_success()
+    if breaker_was_open:
+        result.reasons.append("circuit breaker open; expensive recall stages disabled")
     output = recall_runtime.render_output(result, args.format or host_output_format(host))
     if output:
         print(output)
     return 0
+
+
+def _record_recall_fail_open(
+    request: recall_runtime.RecallRequest,
+    policy: recall_runtime.RecallPolicy,
+    *,
+    status: str,
+    error: str,
+) -> None:
+    if not policy.log_decisions:
+        return
+    try:
+        recall_runtime.append_recall_log(
+            request,
+            recall_runtime.RecallResult(
+                status=status,
+                decision="none",
+                confidence=0.0,
+                queries=[],
+                reasons=["synchronous recall failed open"],
+                matched_terms={},
+                latency_ms=policy.total_timeout_ms if status == "timeout" else 0,
+                error=error,
+            ),
+        )
+    except Exception:
+        pass
 
 
 def log_file(prefix: str) -> Path:
@@ -178,6 +298,7 @@ def spawn_task(task: BackgroundTask, stdin_text: str) -> dict[str, Any]:
         args=task.args,
         env=task.env,
         stdin_text=stdin_text,
+        on_success=task.on_success,
     )
     return {
         "job_id": job["job_id"],
@@ -200,6 +321,15 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                     args=["--hook", "--save"],
                     env={"CODEX_WIKI_SAVE_ENABLED": "1"},
                     log_prefix="codex-save",
+                    on_success=[
+                        {
+                            "name": "recall-audit-candidate",
+                            "module": "llm_wiki_mcp.recall_auditor",
+                            "args": ["--host", "codex", "--hook"],
+                            "env": {},
+                            "when_output_status": "saved",
+                        }
+                    ],
                 )
             )
         elif host == "claude-code":
@@ -210,6 +340,15 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                     args=["--hook", "--save"],
                     env={"CLAUDE_CODE_WIKI_SAVE_ENABLED": "1"},
                     log_prefix="claude-code-save",
+                    on_success=[
+                        {
+                            "name": "recall-audit-candidate",
+                            "module": "llm_wiki_mcp.recall_auditor",
+                            "args": ["--host", "claude-code", "--hook"],
+                            "env": {},
+                            "when_output_status": "saved",
+                        }
+                    ],
                 )
             )
     run_correction_capture = args.only in {None, "correction"}
@@ -242,14 +381,35 @@ def run_stop(args: argparse.Namespace, stdin_text: str) -> int:
             print("{}")
         return 0
     tasks = stop_tasks(host, args)
+    compatibility_noop = args.only in {"audit", "improve"}
     spawned: list[dict[str, Any]] = []
     for task in tasks:
         if args.dry_run:
-            spawned.append({"name": task.name, "module": task.module, "args": task.args, "dry_run": True})
+            dry_run_task: dict[str, Any] = {
+                "name": task.name,
+                "module": task.module,
+                "args": task.args,
+                "dry_run": True,
+            }
+            if task.on_success:
+                dry_run_task["on_success"] = task.on_success
+            spawned.append(dry_run_task)
         else:
             spawned.append({"name": task.name, **spawn_task(task, stdin_text)})
     if args.format == "json":
-        print(json.dumps({"status": "ok", "tasks": spawned}, ensure_ascii=False))
+        payload: dict[str, Any] = {
+            "status": "compatibility_noop" if compatibility_noop else "ok",
+            "tasks": spawned,
+        }
+        if compatibility_noop:
+            payload.update(
+                {
+                    "deprecated": True,
+                    "reason": f"legacy --only {args.only} selection is a no-op",
+                    "replacement": "recall audit candidates are enqueued after a durable save receipt",
+                }
+            )
+        print(json.dumps(payload, ensure_ascii=False))
     else:
         print("{}")
     return 0
@@ -284,9 +444,22 @@ def main(argv: list[str] | None = None) -> int:
         args.host = host
         args.event = event
         stdin_text = sys.stdin.read() if args.hook else ""
-        init_wiki()
+        try:
+            init_wiki()
+        except Exception:
+            if event == "user-prompt-submit":
+                _print_host_noop(host)
+                return 0
+            raise
         if event == "user-prompt-submit":
-            return run_user_prompt(args, stdin_text)
+            try:
+                return run_user_prompt(args, stdin_text)
+            except Exception:
+                # UserPromptSubmit is a host availability boundary. Even
+                # policy/breaker/render failures outside run_recall must not
+                # reject the user's prompt.
+                _print_host_noop(host)
+                return 0
         if event == "stop":
             return run_stop(args, stdin_text)
     except Exception as exc:

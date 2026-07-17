@@ -9,7 +9,26 @@ llm-wiki-hook --host codex --event UserPromptSubmit --hook
 llm-wiki-hook --host claude-code --event UserPromptSubmit --hook
 ```
 
-This runs the recall gate synchronously and prints host-native hook output.
+This runs the recall gate synchronously and prints host-native hook output. The
+entire path has one wall-clock deadline (`recall.total_timeout_ms`, 4000 ms by
+default), not a separate unbounded timeout per stage. The remaining budget is
+propagated to query rewrite, semantic embedding, search, and the evidence
+judge. A process-level timer is the final boundary around the complete hook.
+
+Recall is strictly fail-open for the host. Config errors, unavailable local
+models, search failures, and either soft or hard deadline exhaustion produce no
+injected context, exit successfully, and let the user prompt continue. After
+two consecutive failed Recall runs, the default circuit breaker disables
+rewrite, semantic search, and the local judge for 60 seconds while BM25 remains
+available. A successful normal run resets the breaker.
+
+Always-on state and automatic Recall have independent budgets. Both are
+rendered as explicitly untrusted JSON data, with memory content quoted as JSON
+strings rather than executable-looking prose. Delimiter-like text inside a
+page is neutralized. The combined
+context is assembled from whole blocks only; a block that does not fit is
+omitted rather than cut into ambiguous partial syntax. See
+[Recall Orchestration](recall-orchestration.md) for the full contract.
 
 ## Stop
 
@@ -24,15 +43,34 @@ capture job for the same session. It immediately prints `{}` and never starts
 a detached process, model, ingest, mutation, frontier review, audit, or recall
 improvement inside the hook process.
 
+Repeated Stop events coalesce only while an equivalent capture job is active
+and the payload contains the same stable session ID or transcript path. A Stop
+payload without stable identity is never coalesced with another session. If a
+Stop arrives while the worker is running, the job is marked for one more pass;
+after completion a new Stop may enqueue again. Duplicate bytes are still
+prevented by the save cursor and durable receipts, not by assuming the host
+fires Stop exactly once.
+
 The save worker deterministically captures every uncaptured transcript delta
 after an exact per-session cursor. A delayed append or a previously failed job
 is picked up on the next run. Oversized deltas are split into lossless bounded
 raw chunks, and the cursor advances only with the corresponding durable
 receipt. The normal save path does not ask a model whether a turn is worth
-saving and does not call any local or frontier model. The correction capture
-worker only appends turns with a deterministic explicit-correction signal;
-ordinary follow-ups advance the durable cursor without entering the queue.
+saving and does not call any local or frontier model. Only after the save job
+records a successful durable receipt does the same background-state transaction
+enqueue one Recall audit candidate. The audit is therefore downstream of
+durable capture and never runs inside Stop.
+
+The correction capture worker appends turns with either a deterministic
+explicit-correction signal or a narrow bare denial/contrast signal backed by
+exact preceding-turn Recall provenance and a real candidate page. Ordinary
+follow-ups advance the durable cursor without entering the semantic queue.
 Classification and resolution happen later in the bounded local sleep worker.
+Detection quality is measured with a versioned golden/holdout corpus:
+
+```sh
+llm-wiki-content-correction-eval
+```
 
 Semantic work is handled later by bounded convergence workers. When a routine
 lane needs a structured decision it uses local consensus: Ornith 35B primary,
@@ -60,8 +98,10 @@ These scripts remain for existing host settings:
 Wrappers may still call the dispatcher with `--only save`, `--only audit`,
 `--only correction`, or `--only improve`. The save selection enqueues raw
 capture, and the correction selection enqueues only the dedicated
-`--capture-only` worker. Audit and improve remain compatibility no-ops. No
-selection starts semantic review in the Stop process.
+`--capture-only` worker. Audit and improve are deprecated compatibility no-ops;
+their replacement is the save receipt's asynchronous audit candidate and the
+bounded convergence worker. These no-op selections are scheduled for removal
+after 2026-10-01. No selection starts semantic review in the Stop process.
 
 ## Install
 
@@ -89,5 +129,6 @@ llm-wiki hooks inspect
 llm-wiki hooks inspect --json
 ```
 
-This lists detected Codex and Claude Code hook entries and computes Codex-style
-canonical hook hashes for inspection.
+This lists detected Codex and Claude Code hook entries, labels current,
+legacy-wrapper, and deprecated-no-op commands, emits migration warnings for the
+last category, and computes Codex-style canonical hook hashes for inspection.

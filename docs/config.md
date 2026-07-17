@@ -11,8 +11,9 @@ recall = true
 
 [hooks.stop]
 save = true
-# Stop only enqueues deterministic capture jobs. Semantic work is drained by
-# local convergence after the hook process exits.
+# Stop only enqueues deterministic capture jobs. After a successful durable
+# save receipt, the worker queues an asynchronous Recall audit candidate.
+# Semantic work is drained by local convergence after the hook process exits.
 audit = false
 content_correction = true
 recall_improve = false
@@ -185,9 +186,17 @@ keep_alive = "24h"
 warmup_timeout_ms = 15000
 
 [recall.budgets]
+# L2 automatic Recall budget.
 max_context_chars = 600
+# L1 always-on state budget.
+max_state_context_chars = 600
+# Whole-block merge ceiling. Values below L1 + L2 + delimiters are normalized
+# upward so neither layer silently steals the other's configured budget.
+max_total_context_chars = 1202
 max_pages = 3
 max_queries = 3
+# One wall-clock budget shared by rewrite, embedding, search, and judge.
+total_timeout_ms = 4000
 
 [recall]
 gate_mode = "evidence"
@@ -195,6 +204,10 @@ context_style = "cards"
 semantic = true
 judge_mode = "auto"
 session_ttl_seconds = 604800
+
+[recall.circuit_breaker]
+failures = 2
+cooldown_seconds = 60
 
 [recall.rewrite]
 enabled = true
@@ -299,8 +312,11 @@ unless they belong to the guarded code-repair settings listed above. Routine
 `run_structured_review()` calls always use `[decision_router]`.
 
 The compatibility wrappers preserve old command-line and environment parsing,
-but they do not weaken the save-only Stop invariant. Direct
-`llm-wiki-hook --event Stop` deployments should enable only `hooks.stop.save`.
+but they do not weaken the capture-only Stop invariant. `--only audit` and
+`--only improve` are deprecated no-ops; `llm-wiki hooks inspect` labels them and
+emits a migration warning. They are scheduled for removal after 2026-10-01.
+Direct `llm-wiki-hook --event Stop` deployments may enable save and
+deterministic correction capture, but never semantic work.
 
 ## Optional Reranker
 
@@ -315,5 +331,7 @@ explicit search-eval reranker experiments.
 
 The completed recall path defaults to `gate_mode = "evidence"`,
 `context_style = "cards"`, `semantic = true`, rewrite enabled, and calibration
-enabled. BM25 still runs without Ollama; semantic and rewrite fail open when the
-local model is unavailable.
+enabled. The complete synchronous path has a 4000 ms wall-clock deadline and
+fails open with no injected context. BM25 still runs without Ollama; after two
+consecutive failures the breaker temporarily disables rewrite, semantic search,
+and judge while keeping BM25 available.

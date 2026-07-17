@@ -715,8 +715,11 @@ def pull_event_key(record: dict[str, Any]) -> str:
         for key in (
             "ts",
             "session_id",
+            "decision_id",
             "type",
+            "stage",
             "page_id",
+            "page_ids",
             "query",
             "direct_pages",
             "expanded_pages",
@@ -813,9 +816,10 @@ def matching_pull_events(
     consumed_file: Path = DEFAULT_PULL_CONSUMED_FILE,
     feedback_file: Path | None = None,
 ) -> list[dict[str, Any]]:
-    # Pull events are global telemetry. Without both an exact session identity
-    # and a recall timestamp there is no safe way to assign them to this turn.
-    if not turn.session_id:
+    # Pull events are global telemetry. Exact decision binding is preferred;
+    # legacy rows require a stable session identity and the timestamp window.
+    recall_decision_id = str((recall_snapshot or {}).get("decision_id") or "")
+    if not turn.session_id and not recall_decision_id:
         return []
     recall_ts = str((recall_snapshot or {}).get("ts") or "")
     recall_time = _normalized_time(recall_ts)
@@ -837,7 +841,14 @@ def matching_pull_events(
             continue
         if not isinstance(record, dict):
             continue
-        if turn.session_id and record.get("session_id") != turn.session_id:
+        record_decision_id = str(record.get("decision_id") or "")
+        record_session_id = str(record.get("session_id") or "")
+        if record_decision_id:
+            if not recall_decision_id or record_decision_id != recall_decision_id:
+                continue
+            if record_session_id and turn.session_id and record_session_id != turn.session_id:
+                continue
+        elif not turn.session_id or record_session_id != turn.session_id:
             continue
         event_key = pull_event_key(record)
         if event_key in consumed:
@@ -850,14 +861,16 @@ def matching_pull_events(
             continue
         if turn_end is not None and event_time is not None and event_time >= turn_end:
             continue
-        pages: list[str] = []
-        if record.get("type") == "read" and isinstance(record.get("page_id"), str):
-            pages = [record["page_id"]]
-        elif record.get("type") == "search":
-            for key in ("direct_pages", "expanded_pages"):
-                values = record.get(key)
-                if isinstance(values, list):
-                    pages.extend(page for page in values if isinstance(page, str))
+        # returned/read are exploration telemetry, not positive labels. Only
+        # an explicit used event may teach the missed-candidate lane.
+        if record.get("type") != "used":
+            continue
+        values = record.get("page_ids")
+        pages = (
+            [page for page in values if isinstance(page, str)]
+            if isinstance(values, list)
+            else []
+        )
         missed_pages = [page for page in pages if page and page not in injected]
         if missed_pages:
             event = dict(record)
@@ -905,7 +918,7 @@ def record_pull_missed_candidates(
             continue
         record = append_feedback(
             "missed_candidate",
-            note="Agent pulled related wiki context after recall did not inject it.",
+            note="Agent reported wiki context as materially used after recall did not inject it.",
             prompt=turn.prompt,
             host=host,
             expected_pages=[page for page in pages if isinstance(page, str)][:5],

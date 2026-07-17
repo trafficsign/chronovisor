@@ -1474,13 +1474,28 @@ def embedding_model() -> str:
     return load_embedding_config().model
 
 
-def embed(texts: list[str], *, model: str | None = None) -> list[list[float]]:
+def embed(
+    texts: list[str],
+    *,
+    model: str | None = None,
+    read_timeout_ms: int | None = None,
+) -> list[list[float]]:
     """Get embedding vectors via Ollama /api/embed."""
+    timeout_seconds = (
+        max(0.2, read_timeout_ms / 1000.0)
+        if isinstance(read_timeout_ms, int)
+        else 120.0
+    )
     with model_resource_lease(exclusive=False):
         resp = _client().post(
             "/api/embed",
             json={"model": model or embedding_model(), "input": texts},
-            timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
+            timeout=httpx.Timeout(
+                connect=min(10.0, timeout_seconds),
+                read=timeout_seconds,
+                write=min(10.0, timeout_seconds),
+                pool=min(10.0, timeout_seconds),
+            ),
         )
         resp.raise_for_status()
         return resp.json()["embeddings"]

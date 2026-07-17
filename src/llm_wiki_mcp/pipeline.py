@@ -30,6 +30,7 @@ class PipelineConfig:
     sort_results: bool = True
     truncate_results: bool = True
     include_reference: bool = False
+    semantic_timeout_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ def production_pipeline_config(
     semantic: bool = True,
     fusion_weights: dict[str, float] | None = None,
     include_reference: bool = False,
+    semantic_timeout_ms: int | None = None,
 ) -> PipelineConfig:
     return PipelineConfig(
         top_n=top_n,
@@ -87,6 +89,7 @@ def production_pipeline_config(
         graph_strategy="production",
         usage_strategy="production",
         include_reference=include_reference,
+        semantic_timeout_ms=semantic_timeout_ms,
     )
 
 
@@ -299,6 +302,7 @@ def run_search_pipeline(
                 query,
                 top_n=fetch_n,
                 include_reference=config.include_reference,
+                timeout_ms=config.semantic_timeout_ms,
             )
         except TypeError:
             sem_results = deps.semantic_search(query, top_n=fetch_n)

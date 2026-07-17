@@ -414,7 +414,7 @@ def test_pull_events_are_after_decision_and_exact_once(tmp_path, monkeypatch) ->
     consumed = tmp_path / "consumed.jsonl"
     rows = [
         {"ts": "2026-07-10T10:00:00", "session_id": "s1", "type": "read", "page_id": "old"},
-        {"ts": "2026-07-10T10:02:00", "session_id": "s1", "type": "search", "query": "q", "direct_pages": ["new"]},
+        {"ts": "2026-07-10T10:02:00", "session_id": "s1", "decision_id": "d1", "type": "used", "page_ids": ["new"]},
     ]
     pull_log.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
     monkeypatch.setattr(recall_auditor, "RECALL_PULL_LOG_FILE", pull_log)
@@ -434,9 +434,9 @@ def test_record_pull_candidate_marks_event_consumed_after_feedback(tmp_path, mon
     event = {
         "ts": "2026-07-10T10:02:00",
         "session_id": "s1",
-        "type": "search",
-        "query": "q",
-        "direct_pages": ["new"],
+        "decision_id": "d1",
+        "type": "used",
+        "page_ids": ["new"],
         "missed_pages": ["new"],
     }
     event["event_key"] = recall_auditor.pull_event_key(event)
@@ -462,14 +462,14 @@ def test_pull_event_matching_is_bounded_to_exact_session_turn(tmp_path, monkeypa
         {
             "ts": "2026-07-10T12:02:00+02:00",
             "session_id": "s1",
-            "type": "search",
-            "query": "inside",
-            "direct_pages": ["inside-page"],
+            "decision_id": "d1",
+            "type": "used",
+            "page_ids": ["inside-page"],
         },
-        {"ts": "2026-07-10T10:02:10Z", "session_id": "", "type": "read", "page_id": "blank"},
-        {"ts": "2026-07-10T10:02:20Z", "session_id": "s2", "type": "read", "page_id": "other"},
-        {"ts": "2026-07-10T10:04:00Z", "session_id": "s1", "type": "read", "page_id": "next-turn"},
-        {"ts": "malformed", "session_id": "s1", "type": "read", "page_id": "malformed"},
+        {"ts": "2026-07-10T10:02:10Z", "session_id": "", "decision_id": "other", "type": "used", "page_ids": ["blank"]},
+        {"ts": "2026-07-10T10:02:20Z", "session_id": "s2", "decision_id": "d1", "type": "used", "page_ids": ["other"]},
+        {"ts": "2026-07-10T10:04:00Z", "session_id": "s1", "decision_id": "d2", "type": "used", "page_ids": ["next-turn"]},
+        {"ts": "malformed", "session_id": "s1", "decision_id": "d1", "type": "used", "page_ids": ["malformed"]},
     ]
     pull_log.write_text("".join(json.dumps(row) + "\n" for row in pull_rows), encoding="utf-8")
     recall_log.write_text(
@@ -514,8 +514,9 @@ def test_feedback_commit_suppresses_pull_duplicate_and_heals_consumed_index(
     event = {
         "ts": "2026-07-10T10:02:00Z",
         "session_id": "s1",
-        "type": "read",
-        "page_id": "target",
+        "decision_id": "d1",
+        "type": "used",
+        "page_ids": ["target"],
         "missed_pages": ["target"],
     }
     event["event_key"] = recall_auditor.pull_event_key(event)

@@ -6,7 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import background_jobs, hook_dispatcher, recall_runtime
+from llm_wiki_mcp import (
+    background_jobs,
+    hook_dispatcher,
+    recall_breaker,
+    recall_runtime,
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_recall_breaker(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(recall_breaker, "BREAKER_FILE", tmp_path / "breaker.json")
 
 
 def _isolate_background_jobs(monkeypatch, tmp_path: Path) -> None:
@@ -48,6 +58,118 @@ def test_user_prompt_dispatches_to_recall_runtime(monkeypatch, capsys) -> None:
     assert seen["perform_search"] is True
 
 
+def test_user_prompt_unexpected_failure_is_exit_zero_fail_open(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(log_decisions=False),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_recall",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember","thread_id":"t1"}'))
+
+    assert (
+        hook_dispatcher.main(
+            ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == "{}"
+    assert recall_breaker.snapshot()["failures"] == 1
+
+
+def test_user_prompt_open_breaker_uses_bm25_only_policy(monkeypatch, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(_request, policy, *, perform_search: bool):
+        seen.update(
+            semantic=policy.semantic,
+            judge_mode=policy.judge_mode,
+            rewrite_enabled=policy.rewrite_enabled,
+            perform_search=perform_search,
+        )
+        return recall_runtime.RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[],
+            matched_terms={},
+        )
+
+    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(recall_breaker, "is_open", lambda: True)
+    monkeypatch.setattr(recall_runtime, "run_recall", fake_run)
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(log_decisions=False),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember"}'))
+
+    assert (
+        hook_dispatcher.main(
+            ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == "{}"
+    assert seen == {
+        "semantic": False,
+        "judge_mode": "off",
+        "rewrite_enabled": False,
+        "perform_search": True,
+    }
+
+
+def test_user_prompt_policy_failure_is_still_exit_zero_fail_open(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: (_ for _ in ()).throw(PermissionError("config unavailable")),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember"}'))
+
+    assert (
+        hook_dispatcher.main(
+            ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == "{}"
+
+
+def test_user_prompt_init_failure_is_still_exit_zero_fail_open(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        hook_dispatcher,
+        "init_wiki",
+        lambda: (_ for _ in ()).throw(PermissionError("wiki unavailable")),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember"}'))
+
+    assert (
+        hook_dispatcher.main(
+            ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == "{}"
+
+
 def test_stop_dispatch_only_save_for_legacy_wrapper(monkeypatch, tmp_path, capsys) -> None:
     config = tmp_path / "config.toml"
     config.write_text("[hooks.stop]\nsave = true\naudit = true\n", encoding="utf-8")
@@ -78,6 +200,15 @@ def test_stop_dispatch_only_save_for_legacy_wrapper(monkeypatch, tmp_path, capsy
     assert save["module"] == "llm_wiki_mcp.codex_save"
     assert save["args"] == ["--hook", "--save"]
     assert "--trigger-ingest" not in save["args"]
+    assert save["on_success"] == [
+        {
+            "name": "recall-audit-candidate",
+            "module": "llm_wiki_mcp.recall_auditor",
+            "args": ["--host", "codex", "--hook"],
+            "env": {},
+            "when_output_status": "saved",
+        }
+    ]
 
 
 def test_stop_dispatch_full_entrypoint_enqueues_only_capture_work(
@@ -156,6 +287,8 @@ def test_stop_dispatch_only_improve_is_disabled(monkeypatch, tmp_path, capsys) -
     output = json.loads(capsys.readouterr().out)
 
     assert output["tasks"] == []
+    assert output["status"] == "compatibility_noop"
+    assert output["deprecated"] is True
 
 
 def test_stop_dispatch_only_content_correction_uses_capture_only_worker(

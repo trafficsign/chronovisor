@@ -6,12 +6,14 @@ wiki store.
 ```text
 UserPromptSubmit
   -> llm-wiki-hook
+  -> inject bounded always-on state as untrusted JSON
   -> strip non-user blocks and trivial prompts
   -> load recall/sessions/<session_id>.json
   -> build queries, rewriting ambiguous references when needed
   -> BM25 + semantic + graph-expanded search
   -> evidence gate (features -> none/cards/read)
-  -> optional thin RECALL_CONTEXT cards
+  -> optional bounded RECALL_CONTEXT as untrusted JSON
+  -> fail open at one total deadline; breaker preserves BM25 degradation
 
 Stop
   -> llm-wiki-hook
@@ -21,7 +23,8 @@ Stop
 
 Capture workers
   -> save appends lossless bounded raw/ chunks with an exact cursor and receipt
-  -> correction capture queues only explicit correction signals
+  -> successful save receipt atomically queues one Recall audit candidate
+  -> correction capture queues explicit or provenance-qualified signals
   -> ordinary follow-ups advance the correction cursor without queue work
   -> neither capture path performs semantic inference
 
@@ -53,7 +56,8 @@ Exceptional system repair
   mistakes are disabled by digest-bound retraction rows, never by deletion or
   broad prompt/page matching.
 - `recall/sessions/`: lightweight recent query/topic/page state for an active host session.
-- `recall/pull-log.jsonl`: wiki.search/wiki.read calls used as implicit pull feedback.
+- `recall/pull-log.jsonl`: returned/read/injected/used decision-trace events;
+  only explicit `used` events are positive Recall feedback.
 - `recall/content-feedback.jsonl`: immutable audit records for applied content corrections.
 - `recall/calibration.json`: validated evidence-gate weights.
 - `runtime/`: status, events, and metrics for observability.
@@ -70,8 +74,12 @@ Exceptional system repair
 ## Runtime Roles
 
 - **MCP server**: exposes wiki tools to hosts.
-- **Recall gate**: fast evidence-based search gate. BM25 is always attempted;
-  semantic, graph expansion, rewrite, and calibrated weights fail open.
+- **Recall gate**: fast evidence-based search gate with separate L1 state and
+  L2 page-card budgets. The complete hook shares one deadline and an outer hard
+  timer. BM25 is always attempted; semantic, graph expansion, rewrite, and
+  calibrated weights fail open. Repeated failure opens a cooldown breaker that
+  keeps only the cheap BM25 path active. Injected material is untrusted JSON,
+  not an instruction channel.
 - **Save harness**: host-specific transcript parser plus a deterministic,
   lossless delta writer. It uses durable cursors/receipts, chunks oversized
   deltas, and performs no LLM inference.
@@ -106,9 +114,11 @@ Exceptional system repair
   validates a different adopted-artifact SHA; a changed but invalid nomination
   fails closed. Runtime, transport, capacity, and other operational failures
   remain in the separate repair queue.
-- **Content correction**: binds explicit user corrections to the preceding
-  complete turn by exact prompt hash, host, session, and timestamped recall
-  provenance. Stop only schedules its capture-only worker; the sleep/local
+- **Content correction**: binds explicit user corrections, plus narrowly
+  qualified bare denial/contrast signals, to the preceding complete turn by
+  exact prompt hash, host, session, and timestamped Recall provenance. Bare
+  signals require a real provenance candidate. Stop only schedules its
+  capture-only worker; the sleep/local
   convergence worker later resolves the queued item. Page error, outdated
   claim, wrong retrieval, assistant misquote,
   ambiguity, no attributable page, and no correction are resolved by the local
@@ -130,8 +140,10 @@ Exceptional system repair
   postconditions satisfied. Refresh or read-back failure stays in bounded retry.
   Raw captures marked `raw_status: retracted` remain as audit evidence but are
   excluded from normal ingest and replay.
-- **Auditor**: heavy asynchronous judge that looks for missed recall and whether
-  injected pages were used.
+- **Auditor**: heavy asynchronous judge that looks for missed Recall. It is
+  queued only after a successful durable save receipt. Search `returned` and
+  page `read` events are telemetry, not positive supervision; only an explicit
+  `wiki_recall_used` event says a page influenced the answer.
 - **Auto-apply**: applies additive actions only (`query_hint`, `alias`, `page_tag`).
 - **Calibration**: pure-Python logistic calibration on recall-log features and
   feedback labels, applied only after a time-ordered holdout and local consensus.
@@ -198,10 +210,14 @@ then `apply_rerank_stage()` only when the optional reranker is enabled for
 relevance-sorted queries. The synchronous recall hook keeps using the faster
 fused search path and does not call the reranker.
 
+The five Recall layers, their budgets, and decision-trace semantics are defined
+in [Recall Orchestration](recall-orchestration.md).
+
 ## Host Boundary
 
 Codex and Claude Code enter through `llm-wiki-hook`. Legacy scripts remain as
 wrappers so existing hook settings continue to work while new deployments use
-the single dispatcher directly. The Stop dispatcher schedules save capture
-only; asynchronous semantic work belongs to convergence workers rather than the
-host's session boundary.
+the single dispatcher directly. The Stop dispatcher schedules deterministic
+save/correction capture only; successful save completion can enqueue an audit
+candidate, but asynchronous semantic work belongs to convergence workers rather
+than the host's session boundary.

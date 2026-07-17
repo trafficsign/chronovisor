@@ -774,6 +774,7 @@ def normalize_recall_config(data: dict[str, Any]) -> dict[str, Any]:
         "gate",
         "policy",
         "rewrite",
+        "circuit_breaker",
         "fusion",
         "calibration",
     ):

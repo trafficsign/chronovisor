@@ -1141,6 +1141,7 @@ def semantic_search(
     *,
     include_reference: bool = False,
     strict: bool = False,
+    timeout_ms: int | None = None,
 ) -> list[ScoredPage]:
     """Search using embedding similarity.
 
@@ -1165,7 +1166,16 @@ def semantic_search(
 
     model, _document_prefix, query_prefix = _embedding_profile()
     try:
-        q_vec = embed([_apply_prefix(query_prefix, query)], model=model)[0]
+        try:
+            q_vec = embed(
+                [_apply_prefix(query_prefix, query)],
+                model=model,
+                read_timeout_ms=timeout_ms,
+            )[0]
+        except TypeError:
+            # Preserve injected/legacy embedding callables that predate the
+            # bounded timeout keyword.
+            q_vec = embed([_apply_prefix(query_prefix, query)], model=model)[0]
     except Exception as exc:
         if strict:
             raise RuntimeError("semantic search query embedding failed") from exc
@@ -1631,6 +1641,7 @@ def search(
     sort_by: str = "relevance",
     semantic: bool = True,
     fusion_weights: dict[str, float] | None = None,
+    semantic_timeout_ms: int | None = None,
 ) -> tuple[list[ScoredPage], str]:
     """Run search and return (results, search_mode)."""
     weights = (
@@ -1649,6 +1660,7 @@ def search(
             semantic=semantic,
             fusion_weights=weights,
             include_reference=folder is not None,
+            semantic_timeout_ms=semantic_timeout_ms,
         ),
         deps=_pipeline_dependencies(),
     )

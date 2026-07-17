@@ -72,6 +72,47 @@ def test_hooks_inspect_json_handles_missing_host_files(tmp_path, monkeypatch, ca
     assert output["codex"]["entries"] == []
     assert output["claude_code"]["entries"] == []
     assert output["hook_policy"]["stop_audit"] is True
+    assert output["warnings"] == []
+
+
+def test_hooks_inspect_marks_legacy_audit_wrapper_as_noop(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    patch_wiki(tmp_path, monkeypatch)
+    hooks = tmp_path / "hooks.json"
+    hooks.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "scripts/codex_recall_audit_hook.sh",
+                                    "timeout": 5000,
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "CODEX_HOOKS_FILE", hooks)
+    monkeypatch.setattr(cli, "CLAUDE_SETTINGS_FILE", tmp_path / "missing.json")
+
+    assert cli.main(["hooks", "inspect", "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    entry = output["codex"]["entries"][0]
+    assert entry["compatibility"] == "deprecated_noop"
+    assert entry["deprecated"] is True
+    assert entry["removal_after"] == "2026-10-01"
+    assert output["warnings"][0]["replacement"].startswith("llm-wiki-hook")
 
 
 def test_recall_improve_run_due_cli_forwards_scheduler_args(tmp_path, monkeypatch, capsys) -> None:

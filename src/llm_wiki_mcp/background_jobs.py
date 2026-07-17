@@ -220,6 +220,7 @@ def enqueue_job(
     args: list[str],
     env: dict[str, str],
     stdin_text: str,
+    on_success: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     session_identity = (
         _capture_session_identity(stdin_text) if _is_capture_job(name) else None
@@ -254,6 +255,8 @@ def enqueue_job(
                 continue
             existing["stdin"] = stdin_text
             existing["env"] = dict(env)
+            if on_success is not None:
+                existing["on_success"] = list(on_success)
             existing["updated_at"] = _iso()
             existing["coalesced_count"] = int(existing.get("coalesced_count") or 0) + 1
             if existing.get("status") == "running":
@@ -282,6 +285,7 @@ def enqueue_job(
             "next_retry_at": None,
             "exit_code": None,
             "output_tail": "",
+            "on_success": list(on_success or []),
         }
         state["jobs"][job_id] = job
         _prune_terminal(state)
@@ -408,6 +412,101 @@ def _claim(job_id: str) -> dict[str, Any] | None:
         return dict(job)
 
 
+def _enqueue_followups_locked(
+    state: dict[str, Any],
+    *,
+    parent_job_id: str,
+    parent: dict[str, Any],
+    output_statuses: set[str],
+) -> list[str]:
+    specs = parent.get("on_success")
+    if not isinstance(specs, list):
+        return []
+    stdin_text = str(parent.get("stdin") or "")
+    enqueued: list[str] = []
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        required_status = spec.get("when_output_status")
+        if (
+            isinstance(required_status, str)
+            and required_status not in output_statuses
+        ):
+            continue
+        name = str(spec.get("name") or "").strip()
+        module = str(spec.get("module") or "").strip()
+        args = [str(value) for value in spec.get("args", [])]
+        env_value = spec.get("env")
+        env = (
+            {str(key): str(value) for key, value in env_value.items()}
+            if isinstance(env_value, dict)
+            else {}
+        )
+        if not name or not module:
+            continue
+        dedupe = _dedupe_key(name, module, args, stdin_text)
+        existing_job_id = ""
+        for candidate_id, candidate in state["jobs"].items():
+            if not isinstance(candidate, dict):
+                continue
+            if (
+                candidate.get("dedupe_key") == dedupe
+                and candidate.get("status") in ACTIVE_STATUSES
+            ):
+                candidate["stdin"] = stdin_text
+                candidate["env"] = env
+                candidate["updated_at"] = _iso()
+                candidate["coalesced_count"] = int(
+                    candidate.get("coalesced_count") or 0
+                ) + 1
+                if candidate.get("status") == "running":
+                    candidate["rerun_requested"] = True
+                else:
+                    candidate["status"] = "queued"
+                    candidate["attempts"] = 0
+                    candidate["next_retry_at"] = None
+                existing_job_id = str(candidate_id)
+                break
+        if existing_job_id:
+            enqueued.append(existing_job_id)
+            continue
+        followup_id = uuid.uuid4().hex
+        state["jobs"][followup_id] = {
+            "job_id": followup_id,
+            "name": name,
+            "module": module,
+            "args": args,
+            "env": env,
+            "stdin": stdin_text,
+            "dedupe_key": dedupe,
+            "lane_key": name,
+            "status": "queued",
+            "attempts": 0,
+            "created_at": _iso(),
+            "updated_at": _iso(),
+            "next_retry_at": None,
+            "exit_code": None,
+            "output_tail": "",
+            "on_success": [],
+            "parent_job_id": parent_job_id,
+        }
+        enqueued.append(followup_id)
+    return enqueued
+
+
+def _last_json_status(output: str) -> str | None:
+    """Return the last object status emitted by a background command."""
+
+    for line in reversed(output.splitlines()):
+        try:
+            payload = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("status"), str):
+            return payload["status"]
+    return None
+
+
 def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
     with _lock():
         state = _load()
@@ -420,6 +519,11 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
             job["next_retry_at"] = None
             job["stdin"] = ""
         elif rerun_requested:
+            rerun_status = _last_json_status(output) if exit_code == 0 else None
+            if rerun_status:
+                deferred = job.setdefault("deferred_success_statuses", [])
+                if isinstance(deferred, list) and rerun_status not in deferred:
+                    deferred.append(rerun_status)
             job["status"] = "queued"
             job["attempts"] = 0
             job["next_retry_at"] = None
@@ -429,6 +533,29 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
         elif exit_code == 0:
             job["status"] = "completed"
             job["next_retry_at"] = None
+            output_statuses = {
+                status
+                for status in [
+                    _last_json_status(output),
+                    *(
+                        job.get("deferred_success_statuses", [])
+                        if isinstance(job.get("deferred_success_statuses"), list)
+                        else []
+                    ),
+                ]
+                if isinstance(status, str) and status
+            }
+            if not job.get("followups_enqueued_at"):
+                followup_ids = _enqueue_followups_locked(
+                    state,
+                    parent_job_id=job_id,
+                    parent=job,
+                    output_statuses=output_statuses,
+                )
+                if followup_ids:
+                    job["followup_job_ids"] = followup_ids
+                    job["followups_enqueued_at"] = _iso()
+            job.pop("deferred_success_statuses", None)
             job["stdin"] = ""
         elif attempts >= MAX_ATTEMPTS:
             job["status"] = "quarantined"

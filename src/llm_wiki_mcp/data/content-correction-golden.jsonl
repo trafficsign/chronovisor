@@ -1,0 +1,16 @@
+{"id":"explicit-ja-value","prompt":"それ違う。正しくは32GBです。","expected":true,"recall_provenance":false,"category":"positive_explicit","split":"golden"}
+{"id":"explicit-en-value","prompt":"That's wrong; it was 32GB.","expected":true,"recall_provenance":false,"category":"positive_explicit","split":"golden"}
+{"id":"explicit-memory-repair","prompt":"その記憶を修正して。正しくはP24U。","expected":true,"recall_provenance":false,"category":"positive_explicit","split":"holdout"}
+{"id":"explicit-remember-instead","prompt":"remember this instead: 32GB","expected":true,"recall_provenance":false,"category":"positive_explicit","split":"holdout"}
+{"id":"provenance-ja-denial","prompt":"いや、俺が受けているのは三菱重工だよ。","expected":true,"recall_provenance":true,"category":"positive_provenance","split":"golden"}
+{"id":"provenance-en-contrast","prompt":"No, not G32P but P24U","expected":true,"recall_provenance":true,"category":"positive_provenance","split":"holdout"}
+{"id":"no-provenance-ja-denial","prompt":"いや、俺が受けているのは三菱重工だよ。","expected":false,"recall_provenance":false,"category":"metamorphic","split":"golden"}
+{"id":"no-provenance-en-contrast","prompt":"No, not G32P but P24U","expected":false,"recall_provenance":false,"category":"metamorphic","split":"holdout"}
+{"id":"difference-question","prompt":"AとBの違いは何？","expected":false,"recall_provenance":true,"category":"hard_negative","split":"golden"}
+{"id":"correct-answer-question","prompt":"正しくは何ですか？","expected":false,"recall_provenance":true,"category":"hard_negative","split":"holdout"}
+{"id":"ordinary-implementation","prompt":"PythonじゃなくてRustで実装して。","expected":false,"recall_provenance":false,"category":"hard_negative","split":"golden"}
+{"id":"ordinary-plan","prompt":"AではなくBを使う計画にして。","expected":false,"recall_provenance":false,"category":"hard_negative","split":"holdout"}
+{"id":"discourse-denial","prompt":"いや、それでいい。","expected":false,"recall_provenance":true,"category":"hard_negative","split":"golden"}
+{"id":"reported-correction","prompt":"「それ違う」と言われた時の処理を説明して。","expected":false,"recall_provenance":true,"category":"hard_negative","split":"holdout"}
+{"id":"pasted-dialogue","prompt":"以下は貼り付けた会話です。\nUser: それ違う。正しくは32GB。\nAssistant: 訂正します。\nこの会話を要約して。","expected":false,"recall_provenance":true,"category":"hard_negative","split":"golden"}
+{"id":"explicit-wiki-page","prompt":"Wikiページの内容を修正してください。古い値は16GBです。","expected":true,"recall_provenance":false,"category":"positive_explicit","split":"holdout"}

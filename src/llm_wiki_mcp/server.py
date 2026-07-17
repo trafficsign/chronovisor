@@ -76,7 +76,11 @@ def _page_metadata(path: Path) -> dict:
 
 
 @mcp.tool()
-def wiki_read(page: str, session_id: str | None = None) -> str:
+def wiki_read(
+    page: str,
+    session_id: str | None = None,
+    decision_id: str | None = None,
+) -> str:
     """Read a wiki page with outlinks and backlinks.
 
     Searches pages/ first, then system/ for system files.
@@ -84,6 +88,7 @@ def wiki_read(page: str, session_id: str | None = None) -> str:
     Args:
         page: Page ID (filename without .md extension)
         session_id: Optional session id for recall pull feedback.
+        decision_id: Optional automatic-Recall decision id for turn tracing.
     """
     store = get_store()
     store.refresh()
@@ -98,7 +103,15 @@ def wiki_read(page: str, session_id: str | None = None) -> str:
     content = path.read_text()
     outlinks = store.outlinks(page) or _extract_wiki_links(content)
     backlinks = store.backlinks(page)
-    _append_pull_log({"type": "read", "session_id": session_id or "", "page_id": page})
+    _append_pull_log(
+        {
+            "type": "read",
+            "stage": "read",
+            "session_id": session_id or "",
+            "decision_id": decision_id or "",
+            "page_id": page,
+        }
+    )
 
     return json.dumps({
         "page_id": page,
@@ -322,6 +335,7 @@ def wiki_search(
     tags: list[str] | None = None,
     tag_match: str = "all",
     session_id: str | None = None,
+    decision_id: str | None = None,
 ) -> str:
     """Search wiki pages with BM25 + semantic search and link expansion.
 
@@ -342,6 +356,7 @@ def wiki_search(
             present; ``"any"`` matches if at least one tag overlaps. Ignored
             when ``tags`` is empty / None.
         session_id: Optional session id for recall pull feedback.
+        decision_id: Optional automatic-Recall decision id for turn tracing.
     """
     from llm_wiki_mcp.search import search as run_search
     from llm_wiki_mcp.reranker import rerank_results
@@ -482,10 +497,15 @@ def wiki_search(
     _append_pull_log(
         {
             "type": "search",
+            "stage": "returned",
             "session_id": session_id or "",
+            "decision_id": decision_id or "",
             "query": query,
             "direct_pages": [hit["page_id"] for hit in direct_hits],
             "expanded_pages": [hit["page_id"] for hit in expanded_hits],
+            "returned_pages": [
+                hit["page_id"] for hit in [*direct_hits, *expanded_hits]
+            ],
             "provisional_ids": [
                 hit["provisional_id"] for hit in provisional_hits
             ],
@@ -503,6 +523,51 @@ def wiki_search(
         "expanded_hits": expanded_hits,
         "edges": edges,
     }, ensure_ascii=False)
+
+
+@mcp.tool()
+def wiki_recall_used(
+    decision_id: str,
+    page_ids: list[str],
+    session_id: str | None = None,
+    note: str = "",
+) -> str:
+    """Record which recalled pages materially affected the answer.
+
+    This is the only pull-trace event that is positive learning evidence.
+    Search results and page reads remain exploration telemetry.
+    """
+
+    decision_id = decision_id.strip()
+    if not decision_id:
+        return json.dumps({"status": "error", "error": "decision_id is required"})
+    pages = list(
+        dict.fromkeys(
+            page.strip()
+            for page in page_ids
+            if isinstance(page, str) and page.strip()
+        )
+    )[:20]
+    if not pages:
+        return json.dumps({"status": "error", "error": "page_ids is required"})
+    _append_pull_log(
+        {
+            "type": "used",
+            "stage": "used",
+            "session_id": session_id or "",
+            "decision_id": decision_id,
+            "page_ids": pages,
+            "note": note[:500],
+        }
+    )
+    return json.dumps(
+        {
+            "status": "recorded",
+            "decision_id": decision_id,
+            "page_ids": pages,
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
