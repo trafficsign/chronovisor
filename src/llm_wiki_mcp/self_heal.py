@@ -2555,6 +2555,20 @@ def _frontier_final_status(frontier_result: dict[str, Any]) -> str:
     return "frontier_rejected"
 
 
+def _read_back_packet_retirement_kind(packet: dict[str, Any]) -> str | None:
+    """Classify non-actionable read-back incidents in strict retirement order."""
+
+    if _is_transient_read_back_packet(packet):
+        return "transient"
+    if _is_empty_query_read_back_packet(packet):
+        return "empty_query"
+    if _is_exhausted_query_hint_read_back_packet(packet):
+        return "exhausted_query_hint"
+    if _is_unverifiable_query_hint_read_back_packet(packet):
+        return "unverifiable_query_hint"
+    return None
+
+
 def _handle_packet_unlocked(
     packet_path: Path,
     *,
@@ -2628,26 +2642,15 @@ def _handle_packet_unlocked(
                 "reason": "operational_incident_evidence_invalid",
                 "frontier_eligibility_error": validation_error,
             }
-    if _is_transient_read_back_packet(packet):
-        return _retire_transient_read_back_packet(
-            packet_path,
-            packet,
-            dry_run=dry_run,
-        )
-    if _is_empty_query_read_back_packet(packet):
-        return _retire_empty_query_read_back_packet(
-            packet_path,
-            packet,
-            dry_run=dry_run,
-        )
-    if _is_exhausted_query_hint_read_back_packet(packet):
-        return _retire_exhausted_query_hint_read_back_packet(
-            packet_path,
-            packet,
-            dry_run=dry_run,
-        )
-    if _is_unverifiable_query_hint_read_back_packet(packet):
-        return _retire_unverifiable_query_hint_read_back_packet(
+    read_back_retirement_kind = _read_back_packet_retirement_kind(packet)
+    if read_back_retirement_kind is not None:
+        retirement_handlers = {
+            "transient": _retire_transient_read_back_packet,
+            "empty_query": _retire_empty_query_read_back_packet,
+            "exhausted_query_hint": _retire_exhausted_query_hint_read_back_packet,
+            "unverifiable_query_hint": _retire_unverifiable_query_hint_read_back_packet,
+        }
+        return retirement_handlers[read_back_retirement_kind](
             packet_path,
             packet,
             dry_run=dry_run,

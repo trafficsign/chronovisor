@@ -67,3 +67,22 @@ def test_orchestrator_unit_keyword_and_event_decisions_are_deterministic() -> No
         "warn",
         "not processed",
     )
+
+
+def test_self_heal_read_back_retirement_classification_is_ordered() -> None:
+    import json
+
+    from llm_wiki_mcp.self_heal import _read_back_packet_retirement_kind
+
+    transient = {
+        "failure_class": "read_back.repeated_miss",
+        "error": "request timed out",
+        "raw_preview": json.dumps({"failure": {"reason": "unknown"}}),
+    }
+    empty = {
+        "failure_class": "read_back.repeated_miss",
+        "raw_preview": json.dumps({"failure": {"reason": "empty-query"}}),
+    }
+    assert _read_back_packet_retirement_kind(transient) == "transient"
+    assert _read_back_packet_retirement_kind(empty) == "empty_query"
+    assert _read_back_packet_retirement_kind({"failure_class": "other"}) is None
