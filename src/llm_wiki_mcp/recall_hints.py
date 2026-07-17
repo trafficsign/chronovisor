@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import json
-import fcntl
 import os
 import re
 import tempfile
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from llm_wiki_mcp import wiki
+from llm_wiki_mcp.durable_state import sidecar_exclusive_lock as _hint_lock
 
 
 QUERY_HINTS_FILE = wiki.WIKI_ROOT / "recall" / "query-hints.json"
@@ -76,18 +75,6 @@ def query_tokens(text: str) -> set[str]:
 
 def _hint_path(path: Path | None = None) -> Path:
     return path or QUERY_HINTS_FILE
-
-
-@contextmanager
-def _hint_lock(path: Path) -> Iterator[None]:
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def load_query_hints(path: Path | None = None) -> list[dict[str, Any]]:

@@ -17,6 +17,7 @@ from llm_wiki_mcp.link_fix import extract_targets as _extract_targets
 from llm_wiki_mcp.index_store import get_store
 from llm_wiki_mcp.frontmatter import parse as _frontmatter_parse, patch as _frontmatter_patch
 from llm_wiki_mcp.save_transaction import parse_save_transaction_receipt
+from llm_wiki_mcp.durable_state import fsync_directory as _fsync_directory
 
 mcp = FastMCP(
     "llm-wiki",
@@ -762,15 +763,6 @@ def _allocate_raw_path(prefix: str = "", topic_slug: str = "") -> Path:
 def _link_raw_no_replace(staging: Path, target: Path) -> None:
     """Atomically publish ``staging`` at ``target`` without replacement."""
     os.link(staging, target)
-
-
-def _fsync_directory(path: Path) -> None:
-    """Make a newly linked directory entry durable before reporting success."""
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def _publish_raw(content: str, *, prefix: str = "", topic_slug: str = "") -> Path:

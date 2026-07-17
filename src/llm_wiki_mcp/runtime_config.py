@@ -750,53 +750,6 @@ def load_negative_feedback_config(
     )
 
 
-def normalize_recall_config(data: dict[str, Any]) -> dict[str, Any]:
-    """Return a config shape accepted by ``recall_runtime._apply_config``.
-
-    Legacy ``recall.toml`` already uses top-level sections like ``[gate]`` and
-    ``[thresholds]``.  New ``config.toml`` nests those under ``[recall.*]``.
-    """
-    if not isinstance(data, dict):
-        return {}
-    out: dict[str, Any] = dict(data)
-    recall = data.get("recall")
-    if not isinstance(recall, dict):
-        return out
-
-    if isinstance(recall.get("enabled"), bool):
-        out["enabled"] = recall["enabled"]
-    if isinstance(recall.get("model"), str):
-        out["model"] = recall["model"]
-
-    for section in (
-        "thresholds",
-        "budgets",
-        "gate",
-        "policy",
-        "rewrite",
-        "circuit_breaker",
-        "fusion",
-        "calibration",
-    ):
-        if isinstance(recall.get(section), dict):
-            out[section] = recall[section]
-
-    recall_options: dict[str, Any] = {}
-    for key in (
-        "semantic",
-        "judge_mode",
-        "gate_mode",
-        "context_style",
-        "max_context_chars",
-        "session_ttl_seconds",
-    ):
-        if key in recall:
-            recall_options[key] = recall[key]
-    if recall_options:
-        out["recall"] = recall_options
-    return out
-
-
 def normalize_audit_config(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}

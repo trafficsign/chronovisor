@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from llm_wiki_mcp import wiki
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_bytes_strict as _canonical_bytes,
+)
 from llm_wiki_mcp.link_fix import atomic_write
 
 
@@ -35,16 +38,6 @@ class RawCompletionReceiptPublishError(RawCompletionAckError):
 
 class RawCompletionStatePending(RawCompletionAckError):
     """The receipt is durable, but processed-state acknowledgement is pending."""
-
-
-def _canonical_bytes(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
 
 
 def _sha256(value: bytes) -> str:

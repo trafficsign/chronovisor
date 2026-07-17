@@ -183,6 +183,9 @@ def _cache_test_router_class(
 
 @pytest.fixture(autouse=True)
 def isolate_frontier_activity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Other modules exercise context admission under patched contract inputs.
+    # Keep this file independent from that process-global derived cache.
+    decision_router._minimum_model_backed_context_tokens.cache_clear()
     monkeypatch.setattr(
         frontier_review,
         "FRONTIER_ACTIVITY_DIR",

@@ -1,10 +1,38 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
+import pytest
+
 from llm_wiki_mcp import cli, runtime_config, runtime_status, wiki
 from llm_wiki_mcp import recall_runtime
+
+
+def _registered_command_paths(
+    parser: argparse.ArgumentParser, prefix: tuple[str, ...] = ()
+) -> list[tuple[str, ...]]:
+    paths: list[tuple[str, ...]] = []
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for name, child in action.choices.items():
+            path = (*prefix, name)
+            paths.append(path)
+            paths.extend(_registered_command_paths(child, path))
+    return paths
+
+
+def test_every_registered_command_has_working_help(capsys) -> None:
+    paths = _registered_command_paths(cli.build_parser())
+
+    assert paths
+    for path in paths:
+        with pytest.raises(SystemExit) as raised:
+            cli.main([*path, "--help"])
+        assert raised.value.code == 0
+        assert "usage:" in capsys.readouterr().out
 
 
 def patch_wiki(tmp_path: Path, monkeypatch) -> None:

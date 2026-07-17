@@ -12,7 +12,6 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date
 from difflib import SequenceMatcher
-from inspect import Parameter, signature
 from pathlib import Path
 from typing import Any, Callable
 
@@ -42,7 +41,84 @@ from llm_wiki_mcp.local_structured import (
 )
 from llm_wiki_mcp.runtime_config import load_ingest_config
 from llm_wiki_mcp import decision_authority, ollama as ollama_runtime, runtime_status
-from llm_wiki_mcp.decision_lane_prompts import INGEST_PROPOSAL_SCHEMA_VERSION
+from llm_wiki_mcp.ingest_schemas import (
+    INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+    INGEST_FRONTIER_DECISION_SCHEMA,
+    INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION as _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION,
+    INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION,
+    INGEST_REVIEW_LIMIT_FIELDS as _INGEST_REVIEW_LIMIT_FIELDS,
+    INGEST_REVIEW_SHARD_POLICY_VERSION,
+    INGEST_REVIEW_SHARD_ROW_FIELDS as _INGEST_REVIEW_SHARD_ROW_FIELDS,
+    INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+    MAX_INGEST_REVIEW_SHARDS as _MAX_INGEST_REVIEW_SHARDS,
+    RECALL_METADATA_SCHEMA,
+    TRIAGE_CATALOG_TOP_N as _TRIAGE_CATALOG_TOP_N,
+    TRIAGE_MAX_FEEDBACK_BYTES as _TRIAGE_MAX_FEEDBACK_BYTES,
+    TRIAGE_MAX_OPERATIONS as _TRIAGE_MAX_OPERATIONS,
+    TRIAGE_MAX_OUTPUT_BYTES as _TRIAGE_MAX_OUTPUT_BYTES,
+    TRIAGE_NUM_PREDICT as _TRIAGE_NUM_PREDICT,
+    TRIAGE_PLAN_SCHEMA,
+    TRIAGE_PLAN_VALIDATION_SCHEMA as _TRIAGE_PLAN_VALIDATION_SCHEMA,
+)
+from llm_wiki_mcp.ingest_transport import (
+    generate_with_progress as _generate_with_progress_core,
+    llm_progress_callback as _llm_progress_callback_core,
+    structured_chat_transport as _structured_chat_transport_core,
+    structured_generate_transport as _structured_generate_transport_core,
+    supports_keyword as _supports_keyword,
+)
+from llm_wiki_mcp.ingest_review_plan import (
+    IngestReviewBudgetExhausted,
+    IngestReviewShard as _IngestReviewShard,
+    IngestReviewShardCapacityError,
+    IngestReviewShardPlan as _IngestReviewShardPlan,
+    IngestReviewShardPlanState as _IngestReviewShardPlanState,
+    build_ingest_review_shard_plan as _build_ingest_review_shard_plan_core,
+    build_ingest_review_shard_proposal as _build_ingest_review_shard_proposal_core,
+    measure_ingest_review_request as _measure_ingest_review_request_core,
+    validate_ingest_shard_source_rows as _validate_ingest_shard_source_rows_core,
+)
+from llm_wiki_mcp.ingest_review import (
+    normalize_ingest_frontier_review as _normalize_ingest_frontier_review_core,
+    run_ingest_frontier_review as _run_ingest_frontier_review_core,
+)
+from llm_wiki_mcp.ingest_review_authority import (
+    current_ingest_review_authority as _current_ingest_review_authority_core,
+    ingest_review_authority_error as _ingest_review_authority_error_core,
+    ingest_review_authority_shape_error as _ingest_review_authority_shape_error_core,
+    ingest_review_shard_proof_error as _ingest_review_shard_proof_error_core,
+)
+from llm_wiki_mcp.ingest_review_store import (
+    continuation_marker_path as _continuation_marker_path_core,
+    ingest_artifact_paths as _ingest_artifact_paths_core,
+    load_ingest_proposal as _load_ingest_proposal_core,
+    load_ingest_review as _load_ingest_review_core,
+    load_ingest_review_artifact as _load_ingest_review_artifact_core,
+    repair_transition_path as _repair_transition_path_core,
+    review_stall_path as _review_stall_path_core,
+    sealed_ingest_review_artifact as _sealed_ingest_review_artifact_core,
+    write_and_readback_ingest_review_artifact as _write_and_readback_ingest_review_artifact_core,
+    write_ingest_artifact as _write_ingest_artifact_core,
+)
+from llm_wiki_mcp.ingest_review_recovery import (
+    consume_ingest_review_continuation_marker as _consume_ingest_review_continuation_marker_core,
+    load_ingest_review_continuation_marker as _load_ingest_review_continuation_marker_core,
+    matching_ingest_review_stall_error as _matching_ingest_review_stall_error_core,
+    persist_ingest_review_continuation_marker as _persist_ingest_review_continuation_marker_core,
+    persist_ingest_review_stall as _persist_ingest_review_stall_core,
+    seal_ingest_review_repair_transition as _seal_ingest_review_repair_transition_core,
+)
+from llm_wiki_mcp.ingest_review_execution import (
+    IngestShardedReviewDeps,
+    ingest_review_shard_aggregate as _ingest_review_shard_aggregate_core,
+    ingest_review_shard_failure as _ingest_review_shard_failure_core,
+    ingest_review_shard_manifest_artifact_payload as _ingest_review_shard_manifest_artifact_payload_core,
+    ingest_review_shard_manifest_path as _ingest_review_shard_manifest_path_core,
+    ingest_review_shard_review_identity as _ingest_review_shard_review_identity_core,
+    persist_ingest_review_shard_manifest as _persist_ingest_review_shard_manifest_core,
+    run_ingest_sharded_review as _run_ingest_sharded_review_core,
+    stored_ingest_review_shard_manifest_error as _stored_ingest_review_shard_manifest_error_core,
+)
 from llm_wiki_mcp.entities import patch_entities_frontmatter
 from llm_wiki_mcp.triage_plan import (
     collapse_exact_duplicate_operations,
@@ -159,14 +235,6 @@ def _extract_json_array(output: str) -> list[dict] | None:
     return None
 
 
-def _supports_keyword(fn: Callable[..., Any], name: str) -> bool:
-    try:
-        params = signature(fn).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(p.kind == Parameter.VAR_KEYWORD or p.name == name for p in params)
-
-
 def _generate_with_progress(
     prompt: str,
     *,
@@ -182,36 +250,21 @@ def _generate_with_progress(
     seed: int | None = None,
     return_metadata: bool = False,
 ) -> str | ollama_runtime.GenerateResponse:
-    kwargs: dict[str, Any] = {}
-    if progress_callback is not None and _supports_keyword(
-        generate, "progress_callback"
-    ):
-        kwargs["progress_callback"] = progress_callback
-    if format is not None and _supports_keyword(generate, "format"):
-        kwargs["format"] = format
-    optional = {
-        "model": model,
-        "num_ctx": num_ctx,
-        "num_predict": num_predict,
-        "keep_alive": keep_alive,
-        "read_timeout_ms": read_timeout_ms,
-        "temperature": temperature,
-        "seed": seed,
-        "return_metadata": return_metadata,
-    }
-    for name, value in optional.items():
-        if (
-            value is not None
-            and (name != "return_metadata" or value is True)
-            and _supports_keyword(generate, name)
-        ):
-            kwargs[name] = value
-    try:
-        return generate(prompt, system=system, **kwargs)
-    except Exception as e:
-        if progress_callback is not None:
-            progress_callback({"event": "error", "active": False, "error": str(e)})
-        raise
+    return _generate_with_progress_core(
+        generate,
+        prompt,
+        system=system,
+        progress_callback=progress_callback,
+        format=format,
+        model=model,
+        num_ctx=num_ctx,
+        num_predict=num_predict,
+        keep_alive=keep_alive,
+        read_timeout_ms=read_timeout_ms,
+        temperature=temperature,
+        seed=seed,
+        return_metadata=return_metadata,
+    )
 
 
 _DEFAULT_GENERATE_WITH_PROGRESS = _generate_with_progress
@@ -222,36 +275,9 @@ def _structured_generate_transport(
 ) -> ChatTransport:
     """Adapt the legacy generate fixture/progress seam to chat-style history."""
 
-    def transport(
-        request: ChatRequest,
-    ) -> str | ollama_runtime.ChatResponse | ollama_runtime.GenerateResponse:
-        system = request.messages[0]["content"] if request.messages else ""
-        transcript = "\n\n".join(
-            f"<{message['role'].upper()}>\n{message['content']}"
-            for message in request.messages[1:]
-        )
-        kwargs: dict[str, Any] = {"system": system}
-        optional = {
-            "progress_callback": progress_callback,
-            "model": request.model,
-            "num_ctx": request.num_ctx,
-            "num_predict": request.num_predict,
-            "keep_alive": request.keep_alive,
-            "read_timeout_ms": request.read_timeout_ms,
-            "temperature": request.temperature,
-            "seed": request.seed,
-            "return_metadata": True,
-        }
-        for name, value in optional.items():
-            if value is not None and _supports_keyword(_generate_with_progress, name):
-                kwargs[name] = value
-        # Existing tests and callers can still replace the historical helper
-        # with a narrower fixture. Production receives Ollama's JSON schema.
-        if _supports_keyword(_generate_with_progress, "format"):
-            kwargs["format"] = request.schema
-        return _generate_with_progress(transcript, **kwargs)
-
-    return transport
+    return _structured_generate_transport_core(
+        _generate_with_progress, progress_callback
+    )
 
 
 def _structured_chat_transport() -> ChatTransport:
@@ -265,24 +291,7 @@ def _structured_chat_transport() -> ChatTransport:
     ``LocalStructuredSession`` repairs against.
     """
 
-    def transport(
-        request: ChatRequest,
-    ) -> str | ollama_runtime.ChatResponse:
-        return ollama_runtime.chat(
-            [dict(message) for message in request.messages],
-            model=request.model,
-            format=request.schema,
-            num_ctx=request.num_ctx,
-            num_predict=request.num_predict,
-            keep_alive=request.keep_alive,
-            read_timeout_ms=request.read_timeout_ms,
-            max_output_chars=request.max_output_chars,
-            temperature=request.temperature,
-            seed=request.seed,
-            return_metadata=True,
-        )
-
-    return transport
+    return _structured_chat_transport_core(ollama_runtime.chat)
 
 
 def _triage_with_progress(
@@ -332,122 +341,14 @@ def _llm_progress_callback(
     source_raw: str | None,
     op_progress: dict[str, int] | None = None,
 ) -> Callable[[dict[str, Any]], None]:
-    started = time.time()
-    started_at = runtime_status.now_iso()
-
-    def emit(update: dict[str, Any]) -> None:
-        elapsed = update.get("elapsed_seconds")
-        if not isinstance(elapsed, (int, float)):
-            elapsed = round(max(0.001, time.time() - started), 2)
-        generated_chars = update.get("generated_chars", update.get("chars", 0))
-        chunks = update.get("chunks", 0)
-        status_payload: dict[str, Any] = {
-            "active": bool(
-                update.get("active", update.get("event") not in {"done", "error"})
-            ),
-            "event": update.get("event", "chunk"),
-            "phase": phase,
-            "target": target,
-            "job_id": job_id,
-            "raw": source_raw,
-            "started_at": started_at,
-            "updated_at": runtime_status.now_iso(),
-            "generated_chars": generated_chars,
-            "chunks": chunks,
-            "elapsed_seconds": elapsed,
-        }
-        if op_progress is not None:
-            status_payload["op_progress"] = dict(op_progress)
-        for key in (
-            "chars_per_second",
-            "prompt_eval_count",
-            "eval_count",
-            "total_duration",
-            "eval_duration",
-            "error",
-        ):
-            if key in update:
-                status_payload[key] = update[key]
-        runtime_status.safe_write_status(llm=status_payload)
-
-    emit(
-        {
-            "event": "start",
-            "active": True,
-            "generated_chars": 0,
-            "chunks": 0,
-            "elapsed_seconds": 0,
-        }
+    return _llm_progress_callback_core(
+        runtime_status,
+        phase=phase,
+        target=target,
+        job_id=job_id,
+        source_raw=source_raw,
+        op_progress=op_progress,
     )
-    return emit
-
-
-_TRIAGE_CATALOG_TOP_N = 100
-_TRIAGE_MAX_OPERATIONS = 8
-_TRIAGE_MAX_OUTPUT_BYTES = 8_000
-_TRIAGE_MAX_FEEDBACK_BYTES = 4_000
-_TRIAGE_NUM_PREDICT = 4_096
-
-# Canonical post-response contract.  This is deliberately separate from the
-# grammar schema below: llama.cpp expands nested numeric repetition bounds and
-# rejects their product before inference on Ollama 0.31.1.
-_TRIAGE_PLAN_VALIDATION_SCHEMA: dict[str, Any] = {
-    "type": "array",
-    "maxItems": _TRIAGE_MAX_OPERATIONS,
-    "items": {
-        "type": "object",
-        "additionalProperties": False,
-        # Direct callers may still validate legacy update operations that do
-        # not carry display metadata. The production wire schema below is
-        # stricter and always requires all five fields.
-        "required": ["type", "filename"],
-        "properties": {
-            "type": {"type": "string", "enum": ["create", "update"]},
-            "filename": {"type": "string", "minLength": 1, "maxLength": 200},
-            "title": {"type": "string", "minLength": 1, "maxLength": 300},
-            "keywords": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 32,
-                "items": {"type": "string", "minLength": 1, "maxLength": 200},
-            },
-            "summary": {"type": "string", "minLength": 1, "maxLength": 2_000},
-        },
-    },
-}
-
-TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        # Only these five fields cross the semantic-plan boundary.  Unknown
-        # model keys are not diagnostics: accepting them can hide a malformed
-        # known key (for example ``"keywords: ["``) while the real field is
-        # absent.  The structured session returns this exact schema violation
-        # to the model on the next bounded repair turn.
-        "additionalProperties": False,
-        # A uniform five-field wire contract avoids conditional grammar while
-        # still making every response usable by the generation stage. Numeric
-        # bounds remain host-side because nested repetition bounds are rejected
-        # by llama.cpp before inference on the deployed Ollama version.
-        "required": ["type", "filename", "title", "keywords", "summary"],
-        "properties": {
-            "type": {"type": "string", "enum": ["create", "update"]},
-            # Do not encode numeric repetition bounds in the grammar sent to
-            # Ollama.  llama.cpp expands nested maxItems/maxLength products
-            # and rejects this otherwise-small schema before inference.  The
-            # same limits are enforced by _triage_plan_validation_issues on
-            # every response and returned as targeted repair feedback.
-            "filename": {"type": "string"},
-            "title": {"type": "string"},
-            "keywords": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "summary": {"type": "string"},
-        },
-    },
-}
 
 
 _INGEST_CONTEXT_BUCKETS = (32_768, 65_536, 131_072, 262_144)
@@ -587,172 +488,15 @@ def _triage(
     transport: ChatTransport | None = None,
     raise_on_failure: bool = False,
 ) -> list[dict] | None:
-    """Stage 1: Analyze raw content and return a plan, or None on parse failure.
+    from llm_wiki_mcp.ingest_triage import triage
 
-    Distinguishing ``None`` (parser/model failure) from ``[]`` (model said
-    "nothing wiki-worthy") matters for the caller: failures should leave
-    raw files un-marked so the next tick retries them, while a legitimate
-    empty plan should mark the raws processed to avoid forever-retry.
-    """
-    existing_folders = sorted(
-        {p.parent.name for p in all_pages() if p.parent != PAGES_DIR}
+    return triage(
+        content,
+        progress_callback=progress_callback,
+        frontier_feedback=frontier_feedback,
+        transport=transport,
+        raise_on_failure=raise_on_failure,
     )
-    catalog_lines = [
-        f"Existing folders: {', '.join(f'{f}/' for f in existing_folders)}",
-        "",
-    ]
-
-    catalog_lines.append("Existing wiki pages (page_id — title):")
-    try:
-        from llm_wiki_mcp.search import search as wiki_search
-
-        query_text = content[:2000]
-        results, _ = wiki_search(query_text, top_n=_TRIAGE_CATALOG_TOP_N, semantic=True)
-        for r in results:
-            catalog_lines.append(f"  [[{r.page_id}]] — {r.title}")
-        _safe_log(
-            f"ingest | triage catalog filtered to {len(results)} pages (of {len(list(all_pages()))} total)"
-        )
-    except Exception:
-        for path in all_pages():
-            content_text = path.read_text()
-            fm_match = re.search(r"title:\s*(.+)", content_text)
-            title = fm_match.group(1).strip() if fm_match else path.stem
-            catalog_lines.append(f"  [[{page_id_from_path(path)}]] — {title}")
-
-    catalog = "\n".join(catalog_lines)
-
-    feedback_block = ""
-    if frontier_feedback:
-        feedback_block = f"""
-
----
-Previous local consensus review (authoritative correction instructions):
----
-{frontier_feedback}
----
-Regenerate the plan from the raw evidence. Remove unsupported claims, keep
-only durable facts explicitly grounded in the raw, and use the smallest
-complete create/update set that resolves the review.
-"""
-
-    prompt = f"""{catalog}
-
----
-Raw session data to triage:
----
-{content}
----
-{feedback_block}
-
-Analyze the raw data above. Output a JSON array of page operations (create/update)."""
-
-    config = load_ingest_config()
-    triage_num_predict = min(config.num_predict, _TRIAGE_NUM_PREDICT)
-    required_num_ctx = required_structured_context_tokens(
-        prompt,
-        TRIAGE_PLAN_SCHEMA,
-        system=TRIAGE_SYSTEM_PROMPT,
-        num_predict=triage_num_predict,
-        max_output_chars=_TRIAGE_MAX_OUTPUT_BYTES,
-        max_feedback_chars=_TRIAGE_MAX_FEEDBACK_BYTES,
-    )
-    try:
-        selected_num_ctx = _select_ingest_context(
-            required_num_ctx,
-            num_ctx=config.num_ctx,
-            max_num_ctx=config.max_num_ctx,
-        )
-        live_transport = (
-            transport is None
-            and _generate_with_progress is _DEFAULT_GENERATE_WITH_PROGRESS
-        )
-        lease = (
-            ollama_runtime.model_resource_lease(exclusive=True)
-            if live_transport
-            else nullcontext()
-        )
-        with lease:
-            if live_transport:
-                selected_num_ctx = _admit_ingest_context(config, selected_num_ctx)
-            session_transport = transport
-            if session_transport is None:
-                session_transport = (
-                    _structured_chat_transport()
-                    if live_transport
-                    else _structured_generate_transport(progress_callback)
-                )
-            result = LocalStructuredSession(
-                model=config.model,
-                transport=session_transport,
-                role="ingest_triage",
-                num_ctx=selected_num_ctx,
-                num_predict=triage_num_predict,
-                keep_alive=config.keep_alive,
-                read_timeout_ms=config.read_timeout_ms,
-                # Context preflight below remains the authoritative bound. This
-                # independent byte cap prevents an input larger than the exact
-                # admitted runner from reaching Ollama.
-                max_input_chars=selected_num_ctx,
-                max_output_chars=_TRIAGE_MAX_OUTPUT_BYTES,
-                max_feedback_chars=_TRIAGE_MAX_FEEDBACK_BYTES,
-            ).run(
-                prompt,
-                TRIAGE_PLAN_SCHEMA,
-                system=TRIAGE_SYSTEM_PROMPT,
-                value_validator=lambda value: _triage_plan_validation_issues(
-                    value,
-                    resolve_effective_targets=True,
-                ),
-            )
-    except IngestContextCapacityError as exc:
-        failure = IngestTriageFailure("context_window_exceeded", str(exc))
-        _emit_triage_failure(progress_callback, failure)
-        if raise_on_failure:
-            raise failure from exc
-        return None
-    except IngestTriageFailure as failure:
-        _emit_triage_failure(progress_callback, failure)
-        if raise_on_failure:
-            raise
-        return None
-    if not result.ok:
-        failure = IngestTriageFailure(
-            result.failure_class or "unknown",
-            result.failure_reason or "structured triage failed",
-        )
-        _safe_log(
-            "ingest | triage structured session failed "
-            f"({failure.failure_class}: {failure.reason[:160]})"
-        )
-        _emit_triage_failure(progress_callback, failure)
-        if raise_on_failure:
-            raise failure
-        return None
-    raw_plan = result.value
-    if not isinstance(raw_plan, list):
-        _safe_log("ingest | triage structured session returned a non-array")
-        failure = IngestTriageFailure(
-            "value_validation_error", "triage returned non-array"
-        )
-        _emit_triage_failure(progress_callback, failure)
-        if raise_on_failure:
-            raise failure
-        return None
-    validated = _validate_triage_plan(raw_plan, coerce_missing_updates=True)
-    if validated is None:
-        _safe_log(f"ingest | triage schema invalid (preview: {str(raw_plan)[:120]!r})")
-        failure = IngestTriageFailure(
-            "value_validation_error",
-            "triage post-validation diverged from the structured-session validator",
-        )
-        _emit_triage_failure(progress_callback, failure)
-        if raise_on_failure:
-            raise failure
-        return None
-    if progress_callback is not None:
-        progress_callback({"event": "done", "active": False})
-    return validated
 
 
 # Filename hardening: kebab-case ASCII, optional single folder segment,
@@ -2241,495 +1985,16 @@ def _generate_one(
     frontier_feedback: str | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict | None:
-    """Stage 2: generate one page; return an operation dict ready for apply.
+    from llm_wiki_mcp.ingest_generation import generate_one
 
-    ``raw_keywords`` is a side-channel list lifted from the source raw's
-    frontmatter (not from triage). It rides on the returned operation dict
-    so the apply layer can patch it onto the page frontmatter without an
-    extra LLM round-trip. ``None`` means "no metadata propagation" — the
-    field is omitted from the output, distinguishing it from an explicit
-    empty list which would survive as ``[]``.
-    """
-    config = load_ingest_config()
-    context_kwargs: dict[str, Any] = {}
-    if _supports_keyword(_build_focused_context, "max_bytes"):
-        context_kwargs["max_bytes"] = config.max_related_context_bytes
-    context = _build_focused_context(op, raw_content, **context_kwargs)
-
-    op_type = op.get("type", "create").lower()
-    if op_type not in ("create", "update"):
-        op_type = "create"
-    filename = op.get("filename", "unknown.md")
-    summary = op.get("summary", "")
-    title = op.get("title", "")
-    current_date = date.today().isoformat()
-
-    feedback_block = ""
-    if frontier_feedback:
-        feedback_block = f"""
-
----
-Previous local consensus review (authoritative correction instructions):
----
-{frontier_feedback}
----
-Rewrite this operation as the smallest grounded change. Do not infer missing
-details, future plans, causal explanations, preferences, or outcomes that are
-not explicit in the raw evidence.
-"""
-
-    prompt = _build_page_generation_prompt(
-        context=context,
-        raw_content=raw_content,
-        op_type=op_type,
-        filename=filename,
-        title=title,
-        summary=summary,
-        feedback_block=feedback_block,
-        current_date=current_date,
+    return generate_one(
+        op,
+        raw_content,
+        raw_keywords=raw_keywords,
+        progress_callback=progress_callback,
+        frontier_feedback=frontier_feedback,
+        diagnostics=diagnostics,
     )
-
-    full_system_prompt = (
-        UPDATE_SYSTEM_PROMPT if op_type == "update" else GENERATE_SYSTEM_PROMPT
-    )
-    system_prompt = full_system_prompt
-    full_prompt = prompt
-    attempts_made = 0
-    generation_budget: _PageGenerationBudget | None = None
-    capacity_error: IngestContextCapacityError | None = None
-    compact_context: _CompactUpdateContext | None = None
-    original_required_num_ctx = _required_generate_context_tokens(
-        full_prompt,
-        full_system_prompt,
-        num_predict=config.num_predict,
-    )
-    if original_required_num_ctx > config.max_num_ctx and op_type == "update":
-        compact_context = _build_compact_update_context(
-            op,
-            raw_content,
-            max_selected_bytes=config.max_related_context_bytes,
-        )
-        if compact_context is not None:
-            context = compact_context.text
-            prompt = _build_page_generation_prompt(
-                context=context,
-                raw_content=raw_content,
-                op_type=op_type,
-                filename=filename,
-                title=title,
-                summary=summary,
-                feedback_block=feedback_block,
-                current_date=current_date,
-            )
-            system_prompt = (
-                UPDATE_SYSTEM_PROMPT
-                + "\n\nOversized append-only context rule:\n"
-                + "- The complete stored page remains byte-identical on disk.\n"
-                + "- The prompt contains a hash-bound outline and only selected "
-                + "complete Markdown sections.\n"
-                + "- Omitted section bytes are still present on disk; output only "
-                + "a new append body and never claim that omitted content is absent.\n"
-                + "- Never rewrite, summarize, or replace the stored preimage.\n"
-            )
-            try:
-                generation_budget = _select_page_generation_budget(
-                    prompt,
-                    system_prompt,
-                    configured_num_predict=config.num_predict,
-                    num_ctx=config.num_ctx,
-                    max_num_ctx=config.max_num_ctx,
-                )
-            except IngestContextCapacityError as compact_exc:
-                capacity_error = compact_exc
-            else:
-                capacity_error = None
-                _safe_log(
-                    "ingest | compacted oversized append-only update context for "
-                    f"{compact_context.page_id}: page={compact_context.page_bytes}B "
-                    f"sections={len(compact_context.selected_sections)}/"
-                    f"{compact_context.section_count} required="
-                    f"{generation_budget.required_num_ctx}"
-                )
-
-    # A compact outline is preferred over sacrificing output budget or holding
-    # the model at its hard context ceiling. If compaction is unavailable or
-    # itself cannot fit, preserve the prior adaptive full-context behavior.
-    if generation_budget is None:
-        compact_context = None
-        prompt = full_prompt
-        system_prompt = full_system_prompt
-        try:
-            generation_budget = _select_page_generation_budget(
-                prompt,
-                system_prompt,
-                configured_num_predict=config.num_predict,
-                num_ctx=config.num_ctx,
-                max_num_ctx=config.max_num_ctx,
-            )
-        except IngestContextCapacityError as exc:
-            capacity_error = exc
-
-    if generation_budget is None:
-        exc = capacity_error or IngestContextCapacityError(
-            "page generation context admission failed without a typed reason"
-        )
-        if diagnostics is not None:
-            diagnostics.update(
-                {
-                    "failure_class": "context_window_exceeded",
-                    "reason": str(exc),
-                    "attempts": 0,
-                    "original_required_num_ctx": original_required_num_ctx,
-                }
-            )
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "event": "error",
-                    "active": False,
-                    "failure_class": "context_window_exceeded",
-                    "error": str(exc),
-                }
-            )
-        raise RuntimeError(f"ingest generation context_window_exceeded: {exc}") from exc
-
-    selected_num_ctx = generation_budget.num_ctx
-    selected_num_predict = generation_budget.num_predict
-    if diagnostics is not None:
-        diagnostics.update(
-            {
-                "num_ctx": selected_num_ctx,
-                "num_predict": selected_num_predict,
-                "required_num_ctx": generation_budget.required_num_ctx,
-                "original_required_num_ctx": original_required_num_ctx,
-            }
-        )
-        if compact_context is not None:
-            diagnostics.update(
-                {
-                    "context_strategy": "append_only_outline_sections",
-                    "context_page_id": compact_context.page_id,
-                    "context_page_sha256": compact_context.page_sha256,
-                    "context_page_bytes": compact_context.page_bytes,
-                    "context_section_count": compact_context.section_count,
-                    "context_selected_sections": [
-                        {
-                            "start_line": section.start_line,
-                            "end_line": section.end_line,
-                            "sha256": section.sha256,
-                            "bytes": len(section.content.encode("utf-8")),
-                        }
-                        for section in compact_context.selected_sections
-                    ],
-                }
-            )
-
-    try:
-        live_transport = _generate_with_progress is _DEFAULT_GENERATE_WITH_PROGRESS
-        lease = (
-            ollama_runtime.model_resource_lease(exclusive=True)
-            if live_transport
-            else nullcontext()
-        )
-        with lease:
-            if live_transport:
-                try:
-                    selected_num_ctx = _admit_ingest_context(
-                        config,
-                        selected_num_ctx,
-                    )
-                except IngestTriageFailure as exc:
-                    raise RuntimeError(
-                        "ingest generation capacity_unavailable: " + exc.reason
-                    ) from exc
-            generate_kwargs: dict[str, Any] = {
-                "system": system_prompt,
-                "progress_callback": progress_callback,
-            }
-            optional = {
-                "model": config.model,
-                "num_ctx": selected_num_ctx,
-                "num_predict": selected_num_predict,
-                "keep_alive": config.keep_alive,
-                "read_timeout_ms": config.read_timeout_ms,
-                "temperature": config.temperature,
-            }
-            for name, value in optional.items():
-                if _supports_keyword(_generate_with_progress, name):
-                    generate_kwargs[name] = value
-            if _supports_keyword(_generate_with_progress, "return_metadata"):
-                generate_kwargs["return_metadata"] = True
-            messages = [{"role": "user", "content": prompt}]
-            seen_output_hashes: set[str] = set()
-            output_truncation_retries = 0
-            for attempt_index in range(_MAX_PAGE_GENERATION_RESPONSES):
-                attempts_made = attempt_index + 1
-                output = _generate_with_progress(
-                    _page_generation_transcript(messages),
-                    **generate_kwargs,
-                )
-                response_metadata: ollama_runtime.GenerateResponse | None = None
-                if isinstance(output, ollama_runtime.GenerateResponse):
-                    response_metadata = output
-                    completion_failure = _generation_completion_failure(output)
-                    if completion_failure is not None:
-                        failure_class, failure_reason = completion_failure
-                        if diagnostics is not None:
-                            diagnostics.update(
-                                {
-                                    "failure_class": failure_class,
-                                    "reason": failure_reason,
-                                    "attempts": attempt_index + 1,
-                                }
-                            )
-                        if (
-                            failure_class == "output_truncated"
-                            and attempt_index < _MAX_PAGE_GENERATION_RESPONSES - 1
-                        ):
-                            # Never feed the partial response back as assistant
-                            # history. Re-anchor on the original evidence and
-                            # ask for a successively shorter complete
-                            # replacement within this bounded ingest call.
-                            output_truncation_retries += 1
-                            target_tokens = min(
-                                selected_num_predict,
-                                max(
-                                    512,
-                                    selected_num_predict
-                                    // (2**output_truncation_retries),
-                                ),
-                            )
-                            retry_prompt = _page_generation_truncation_retry_prompt(
-                                op_type=op_type,
-                                filename=filename,
-                                max_output_tokens=target_tokens,
-                            )
-                            messages = [
-                                {"role": "user", "content": prompt},
-                                {"role": "user", "content": retry_prompt},
-                            ]
-                            if diagnostics is not None:
-                                diagnostics.update(
-                                    {
-                                        "output_truncation_retries": (
-                                            output_truncation_retries
-                                        ),
-                                        "replacement_token_target": target_tokens,
-                                        "truncated_output_sha256": hashlib.sha256(
-                                            output.content.encode("utf-8")
-                                        ).hexdigest(),
-                                    }
-                                )
-                            _safe_log(
-                                "ingest | targeted generate replacement "
-                                f"{output_truncation_retries}/"
-                                f"{_MAX_PAGE_GENERATION_REPAIR_TURNS} for "
-                                f"{filename}: output_truncated, target<="
-                                f"{target_tokens} tokens"
-                            )
-                            if progress_callback is not None:
-                                progress_callback(
-                                    {
-                                        "event": "repair",
-                                        "active": True,
-                                        "repair_turn": attempt_index + 1,
-                                        "failure_class": failure_class,
-                                    }
-                                )
-                            continue
-                        if progress_callback is not None:
-                            progress_callback(
-                                {
-                                    "event": "error",
-                                    "active": False,
-                                    "failure_class": failure_class,
-                                    "error": failure_reason,
-                                }
-                            )
-                        # A partial completion is not valid conversational
-                        # history. Bounded replacements above never include
-                        # it; every other incomplete transport fails closed.
-                        raise RuntimeError(
-                            f"ingest generation {failure_class}: {failure_reason}"
-                        )
-                    if (
-                        output.prompt_eval_count is not None
-                        and output.prompt_eval_count
-                        >= selected_num_ctx - _PAGE_GENERATION_CONTEXT_SAFETY_TOKENS
-                    ) or (
-                        output.prompt_eval_count is not None
-                        and output.eval_count is not None
-                        and output.prompt_eval_count + output.eval_count
-                        > selected_num_ctx
-                    ):
-                        failure_reason = (
-                            "Ollama context accounting reached or crossed the "
-                            "admitted page-generation context"
-                        )
-                        if diagnostics is not None:
-                            diagnostics.update(
-                                {
-                                    "failure_class": "context_truncation_suspected",
-                                    "reason": failure_reason,
-                                    "attempts": attempt_index + 1,
-                                }
-                            )
-                        raise RuntimeError(
-                            "ingest generation context_truncation_suspected: "
-                            + failure_reason
-                        )
-                    output = output.content
-                if not isinstance(output, str):
-                    if diagnostics is not None:
-                        diagnostics.update(
-                            {
-                                "failure_class": "completion_incomplete",
-                                "reason": "transport returned non-string content",
-                                "attempts": attempt_index + 1,
-                            }
-                        )
-                    raise RuntimeError(
-                        "ingest generation completion_incomplete: "
-                        "transport returned non-string content"
-                    )
-
-                validation = _validate_generated_page_output(output, op_type=op_type)
-                if response_metadata is not None:
-                    boundary_repair = _repair_transport_attested_page_boundary(
-                        output,
-                        response_metadata,
-                        op_type=op_type,
-                    )
-                    if boundary_repair is not None:
-                        output, validation = boundary_repair
-                        if diagnostics is not None:
-                            diagnostics["transport_boundary_repaired"] = True
-                        _safe_log(
-                            "ingest | restored transport-attested end marker for "
-                            f"{filename}"
-                        )
-                output_sha256 = hashlib.sha256(output.encode("utf-8")).hexdigest()
-                if validation.body is not None:
-                    if diagnostics is not None:
-                        diagnostics.update(
-                            {
-                                "failure_class": None,
-                                "reason": None,
-                                "attempts": attempt_index + 1,
-                                "repair_turns": attempt_index,
-                                "output_sha256": output_sha256,
-                            }
-                        )
-                    result: dict = {
-                        "type": op_type,
-                        "filename": filename,
-                        "content": validation.body,
-                    }
-                    if compact_context is not None:
-                        # Private host binding: preparation must observe the
-                        # exact page snapshot used to build the compact view.
-                        result["_compact_update_preimage_sha256"] = (
-                            compact_context.page_sha256
-                        )
-                    if raw_keywords is not None:
-                        result["raw_keywords"] = list(raw_keywords)
-                    return result
-
-                _safe_log(
-                    "ingest | generate validation failed for "
-                    f"{filename} ({op_type}, {validation.failure_class}, "
-                    f"attempt {attempt_index + 1}/{_MAX_PAGE_GENERATION_RESPONSES})"
-                )
-                if output_sha256 in seen_output_hashes:
-                    if diagnostics is not None:
-                        diagnostics.update(
-                            {
-                                "failure_class": "repeated_output",
-                                "reason": (
-                                    "model repeated the same invalid page output "
-                                    f"({validation.failure_class})"
-                                ),
-                                "attempts": attempt_index + 1,
-                                "repair_turns": attempt_index,
-                                "output_sha256": output_sha256,
-                            }
-                        )
-                    _safe_log(
-                        f"ingest | generate repair stopped for {filename}: "
-                        "same invalid output hash repeated"
-                    )
-                    return None
-                seen_output_hashes.add(output_sha256)
-                if attempt_index == _MAX_PAGE_GENERATION_RESPONSES - 1:
-                    if diagnostics is not None:
-                        diagnostics.update(
-                            {
-                                "failure_class": "repair_exhausted",
-                                "reason": validation.reason,
-                                "attempts": attempt_index + 1,
-                                "repair_turns": attempt_index,
-                                "output_sha256": output_sha256,
-                            }
-                        )
-                    return None
-
-                repair_prompt = _page_generation_repair_prompt(
-                    validation,
-                    op_type=op_type,
-                    filename=filename,
-                )
-                messages.append({"role": "assistant", "content": output})
-                messages.append({"role": "user", "content": repair_prompt})
-                _safe_log(
-                    f"ingest | targeted generate repair {attempt_index + 1}/"
-                    f"{_MAX_PAGE_GENERATION_REPAIR_TURNS} for {filename}: "
-                    f"{validation.failure_class}"
-                )
-                if progress_callback is not None:
-                    progress_callback(
-                        {
-                            "event": "repair",
-                            "active": True,
-                            "repair_turn": attempt_index + 1,
-                            "failure_class": validation.failure_class,
-                        }
-                    )
-    except RuntimeError as e:
-        if str(e).startswith(
-            (
-                "ingest generation capacity_unavailable:",
-                "ingest generation context_window_exceeded:",
-                "ingest generation context_truncation_suspected:",
-                "ingest generation completion_incomplete:",
-                "ingest generation stream_incomplete:",
-                "ingest generation output_truncated:",
-                "ingest generation feedback_too_large:",
-            )
-        ):
-            _safe_log(f"ingest | generate preflight failed for {filename}: {e}")
-            raise
-        _safe_log(f"ingest | generate failed for {filename}: {e}")
-        if diagnostics is not None:
-            diagnostics.update(
-                {
-                    "failure_class": "transport_error",
-                    "reason": f"{type(e).__name__}: {str(e)[:500]}",
-                    "attempts": attempts_made,
-                }
-            )
-        return None
-    except Exception as e:
-        _safe_log(f"ingest | generate failed for {filename}: {e}")
-        if diagnostics is not None:
-            diagnostics.update(
-                {
-                    "failure_class": "transport_error",
-                    "reason": f"{type(e).__name__}: {str(e)[:500]}",
-                    "attempts": attempts_made,
-                }
-            )
-        return None
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2976,6 +2241,16 @@ def _find_page_casefold(page_id: str) -> Path | None:
     """find_page with macOS-case-insensitive + NFC-normalized semantics."""
     direct = find_page(page_id)
     if direct is not None:
+        # ``Path.rglob('foo.md')`` can return a query-spelled path on a
+        # case-insensitive filesystem even when the directory entry is
+        # actually ``Foo.md``.  Preserve the filesystem spelling because the
+        # page_id is a durable identity surfaced in ingest results and logs.
+        try:
+            for candidate in direct.parent.iterdir():
+                if candidate.is_file() and candidate.samefile(direct):
+                    return candidate
+        except OSError:
+            pass
         return direct
     target = _normalize_for_collision(page_id)
     for p in PAGES_DIR.rglob("*.md"):
@@ -3124,23 +2399,6 @@ def _fallback_recall_metadata(title: str, body: str, page_id: str) -> dict[str, 
         "summary": summary,
         "recall_questions": list(dict.fromkeys(q for q in questions if q)),
     }
-
-
-RECALL_METADATA_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "recall_questions"],
-    "properties": {
-        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
-        "recall_questions": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 5,
-            "uniqueItems": True,
-            "items": {"type": "string", "minLength": 1, "maxLength": 300},
-        },
-    },
-}
 
 
 def _generate_recall_metadata(
@@ -3293,340 +2551,9 @@ def _prepare_operations(
     *,
     read_only: bool = False,
 ) -> tuple[list[PreparedIngestOperation], dict[str, int]]:
-    """Resolve local proposals into exact page preimages and postimages.
+    from llm_wiki_mcp.ingest_prepare import prepare_operations
 
-    This stage is read-only with respect to Wiki pages.  Ollama triage and
-    generation are proposals only; the returned byte-exact plan is what the
-    frontier model reviews before :func:`_apply_prepared_operations` may run.
-
-    Fail-closed: any unrecoverable problem raises :class:`IngestApplyError`.
-    The caller marks the job FAILED without invoking ``on_complete``.
-
-    Phase 4 propagation: any op that carries a non-empty ``raw_keywords``
-    list (from the source raw's frontmatter, riding on metadata since
-    Phase 3) gets that list patched onto the page frontmatter inside the
-    prepare phase — never inside the write phase, so a partial-write
-    rollback restores either the pre-batch text or nothing at all, never
-    a half-patched frontmatter.
-
-    Plan-4 tag processing: ``create`` op bodies whose generated frontmatter
-    already includes a ``tags:`` list (per ``GENERATE_SYSTEM_PROMPT``) get
-    each tag form-validated, dedup'd against the existing corpus's tag
-    pool (cosine similarity >= 0.80 → reuse), and audited via
-    ``tag-changelog.md``. ``update`` ops never touch ``tags`` because
-    ``UPDATE_SYSTEM_PROMPT`` forbids the LLM from emitting frontmatter.
-    """
-    from llm_wiki_mcp.frontmatter import (
-        parse as _frontmatter_parse,
-        patch as _frontmatter_patch,
-    )
-
-    # Build the universe of valid link targets: every existing page plus every
-    # page about to be created in this batch (so siblings can cross-reference).
-    # Fail closed — stale or missing index would silently unwrap every link.
-    try:
-        if read_only:
-            # ``IndexStore.refresh`` may persist derived cache files.  A dry
-            # run must leave even runtime/index artifacts untouched, so scan
-            # and parse the small corpus directly instead.
-            from llm_wiki_mcp import wiki as _wiki
-
-            page_paths = list(PAGES_DIR.rglob("*.md"))
-            system_paths = list(_wiki.SYSTEM_DIR.rglob("*.md"))
-            allowed_ids = {path.stem for path in [*page_paths, *system_paths]}
-            reserved_system_ids = {
-                _normalize_for_collision(path.stem) for path in system_paths
-            }
-            tag_values: set[str] = set()
-            for path in page_paths:
-                meta, _body = _frontmatter_parse(path.read_text(encoding="utf-8"))
-                tags = meta.get("tags")
-                if isinstance(tags, list):
-                    tag_values.update(tag for tag in tags if isinstance(tag, str))
-            existing_tags_snapshot = sorted(tag_values)
-        else:
-            from llm_wiki_mcp.index_store import get_store
-
-            store = get_store()
-            store.refresh()
-            allowed_ids = store.all_page_ids(include_system=True)
-            reserved_system_ids = {
-                _normalize_for_collision(page_id)
-                for page_id in (
-                    store.all_page_ids(include_system=True)
-                    - store.all_page_ids(include_system=False)
-                )
-            }
-            # Snapshot the tag pool once for the whole batch so dedupe doesn't
-            # re-walk the index on every op. Same-batch siblings can't see
-            # each other's newly-coined tags here, but that's fine: dedup is
-            # only meaningful against the *committed* corpus, and within-batch
-            # divergence will be reconciled the next time wiki_check runs.
-            existing_tags_snapshot = store.all_tags(include_system=False)
-    except Exception as e:
-        raise IngestApplyError(f"index_store unavailable: {e}") from e
-
-    # Keep the final mutation boundary fail-closed even when an installed core
-    # system page is temporarily absent from the index snapshot.
-    reserved_system_ids.update(_reserved_system_page_collision_keys())
-
-    # ---- Prepare phase -----------------------------------------------------
-    # Resolve every filename, validate every op, build the final write plan.
-    # Nothing here touches disk except for read-only stat/read calls.
-
-    planned: list[PreparedIngestOperation] = []
-    seen_norm_ids: set[str] = set()
-    seen_paths: set[Path] = set()
-
-    for op in operations:
-        op_type = op.get("type")
-        if op_type not in ("create", "update"):
-            raise IngestApplyError(f"unknown op type: {op_type!r}")
-
-        full_path = _safe_resolve_page_path(op["filename"])
-        page_id = full_path.stem
-
-        # Detect intra-batch dups using the same case/Unicode-insensitive key
-        # we use against the existing corpus, so two ops whose ids differ
-        # only in case or NFC/NFD form are caught before any write.
-        norm_key = _normalize_for_collision(page_id)
-        if norm_key in reserved_system_ids:
-            raise IngestApplyError(
-                f"reserved system page_id cannot be mutated by ingest: {page_id!r}"
-            )
-        if norm_key in seen_norm_ids:
-            raise IngestApplyError(
-                f"duplicate page_id within batch (case/Unicode-insensitive): "
-                f"{page_id!r}"
-            )
-        if full_path in seen_paths:
-            raise IngestApplyError(f"duplicate target path within batch: {full_path}")
-        seen_norm_ids.add(norm_key)
-        seen_paths.add(full_path)
-
-        allowed_ids.add(page_id)
-
-    totals = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
-
-    for source_operation_index, op in enumerate(operations):
-        source_operation_type = op["type"]
-        source_filename = op["filename"]
-        op_type = source_operation_type
-        full_path = _safe_resolve_page_path(op["filename"])
-        page_id = full_path.stem
-
-        body, stats = _reconcile_links(op["content"], allowed_ids)
-        for k in totals:
-            totals[k] += stats[k]
-
-        # Phase 4: lift the raw_keywords side channel off the op. Empty
-        # lists are treated as "no propagation" — writing ``raw_keywords:
-        # []`` to a page would create a zero-information diff against the
-        # existing frontmatter. The propagate flag distinguishes "list[str]
-        # with content" from anything else.
-        op_raw_keywords = op.get("raw_keywords")
-        propagate_raw_keywords = (
-            isinstance(op_raw_keywords, list)
-            and all(isinstance(v, str) for v in op_raw_keywords)
-            and len(op_raw_keywords) > 0
-        )
-
-        if op_type == "create":
-            existing = _find_page_resilient(page_id, emit_logs=not read_only)
-            if existing is not None:
-                if not read_only:
-                    _safe_log(
-                        f"ingest | create op for existing page_id {page_id!r} "
-                        f"converted to update (existing: {existing}, target: {full_path})"
-                    )
-                op_type = "update"
-                full_path = existing
-                page_id = existing.stem
-                body = _strip_all_frontmatter(body).strip()
-                if not body:
-                    raise IngestApplyError(
-                        f"create collision for page_id {page_id!r} produced no update body"
-                    )
-
-        if op_type == "create":
-            # Tag processing happens BEFORE raw_keywords patch so the
-            # final frontmatter goes through one consistent serialization
-            # path. Soft-fail: a missing or malformed ``tags`` list just
-            # passes the body through unchanged — wiki_check's autonomous
-            # lint/repair lane will surface and resolve absent tags.
-            body = _process_tags_in_body(
-                body,
-                existing_tags_snapshot,
-                _frontmatter_parse,
-                _frontmatter_patch,
-                record_changes=False,
-            )
-            if propagate_raw_keywords:
-                # generate output already carries a frontmatter block
-                # (enforced by ``_extract_page_body`` for create), so
-                # ``patch`` will splice raw_keywords into it without
-                # synthesizing a new block.
-                body = _frontmatter_patch(body, {"raw_keywords": op_raw_keywords})
-            # The model is not a clock. Even when the prompt supplies today's
-            # date, enforce it deterministically so a plausible-looking guess
-            # can never become page metadata.
-            body = _frontmatter_patch(
-                body,
-                {"updated": date.today().isoformat()},
-            )
-            created_meta, _created_body = _frontmatter_parse(body)
-            created_tags = created_meta.get("tags")
-            new_tags = tuple(
-                tag
-                for tag in (created_tags if isinstance(created_tags, list) else [])
-                if isinstance(tag, str) and tag not in set(existing_tags_snapshot)
-            )
-            planned.append(
-                PreparedIngestOperation(
-                    op_type="create",
-                    path=full_path,
-                    page_id=page_id,
-                    new_body=body.rstrip() + "\n",
-                    previous_text=None,
-                    new_tags=new_tags,
-                    source_operation_index=source_operation_index,
-                    source_operation_type=source_operation_type,
-                    source_filename=source_filename,
-                )
-            )
-
-        else:  # update
-            existing_path = (
-                full_path
-                if full_path.exists()
-                else _find_page_resilient(page_id, emit_logs=not read_only)
-            )
-            if existing_path is None or not existing_path.exists():
-                raise IngestApplyError(
-                    f"update target not found for page_id {page_id!r}"
-                )
-            page_id = existing_path.stem
-            previous = _read_exact_utf8(existing_path)
-            compact_preimage_sha256 = op.get("_compact_update_preimage_sha256")
-            if compact_preimage_sha256 is not None:
-                if (
-                    not isinstance(compact_preimage_sha256, str)
-                    or re.fullmatch(r"[0-9a-f]{64}", compact_preimage_sha256) is None
-                ):
-                    raise IngestApplyError(
-                        f"compact update preimage binding is malformed for {page_id}"
-                    )
-                observed_preimage_sha256 = hashlib.sha256(
-                    previous.encode("utf-8")
-                ).hexdigest()
-                if observed_preimage_sha256 != compact_preimage_sha256:
-                    raise IngestApplyError(
-                        f"compact update preimage changed before prepare: {page_id}"
-                    )
-            # Preserve the on-disk text for rollback BEFORE we mutate
-            # ``previous`` with a frontmatter patch — the rollback path
-            # restores the file as it was before this batch ran, not as
-            # it was after the patch.
-            previous_text_for_rollback = previous
-
-            # raw_keywords union with the existing page's value, preserving
-            # insertion order so the diff stays deterministic. If the
-            # existing field is missing or malformed (legacy data, manual
-            # edit), treat it as empty rather than raising — the apply
-            # phase shouldn't reject otherwise-valid updates because of
-            # frontmatter rot somewhere upstream.
-            if propagate_raw_keywords:
-                existing_meta, _existing_body = _frontmatter_parse(previous)
-                existing_kw_raw = existing_meta.get("raw_keywords")
-                if isinstance(existing_kw_raw, list) and all(
-                    isinstance(v, str) for v in existing_kw_raw
-                ):
-                    existing_kw = existing_kw_raw
-                else:
-                    existing_kw = []
-                union_kw = list(dict.fromkeys(existing_kw + op_raw_keywords))
-                previous = _frontmatter_patch(previous, {"raw_keywords": union_kw})
-
-            today = date.today().isoformat()
-            stamped = re.sub(
-                r"updated:\s*.+",
-                f"updated: {today}",
-                previous,
-                count=1,
-            )
-            new_body = stamped.rstrip() + "\n\n" + body + "\n"
-            planned.append(
-                PreparedIngestOperation(
-                    op_type="update",
-                    path=existing_path,
-                    page_id=page_id,
-                    new_body=new_body,
-                    previous_text=previous_text_for_rollback,
-                    source_operation_index=source_operation_index,
-                    source_operation_type=source_operation_type,
-                    source_filename=source_filename,
-                )
-            )
-
-    # Apply every currently active correction tombstone to the exact proposal
-    # *before* frontier review, including creates under a brand-new slug.
-    # The lock-time pass below then acts only as a staleness detector.
-    constrained_plans: list[PreparedIngestOperation] = []
-    from llm_wiki_mcp.page_mutation import (
-        PageMutationError,
-        enforce_correction_constraints,
-    )
-
-    for entry in planned:
-        try:
-            constrained_body, enforced = enforce_correction_constraints(
-                entry.page_id,
-                entry.previous_text or "",
-                entry.new_body,
-            )
-            # Recall metadata is derived only after active correction
-            # tombstones have canonicalized the page.  If a stale claim was
-            # rewritten, replace summary/questions deterministically from the
-            # corrected body so an LLM paraphrase cannot resurrect it.  Dry
-            # runs also stay byte-read-only by avoiding model audit artifacts.
-            constrained_body = _ensure_page_metadata_frontmatter(
-                constrained_body,
-                entry.page_id,
-                _frontmatter_parse,
-                _frontmatter_patch,
-                allow_local_model=not read_only and not enforced,
-                force_deterministic_rebuild=bool(enforced),
-            )
-            constrained_body, metadata_enforced = enforce_correction_constraints(
-                entry.page_id,
-                entry.previous_text or "",
-                constrained_body,
-            )
-        except PageMutationError as exc:
-            raise IngestApplyError(
-                f"content correction constraint failed for {entry.page_id}: {exc}"
-            ) from exc
-        all_enforced = [*enforced, *metadata_enforced]
-        if all_enforced and not read_only:
-            _safe_log(
-                f"ingest | enforced {len(all_enforced)} global content correction(s) "
-                f"for {entry.page_id}"
-            )
-        constrained_plans.append(
-            PreparedIngestOperation(
-                op_type=entry.op_type,
-                path=entry.path,
-                page_id=entry.page_id,
-                new_body=constrained_body,
-                previous_text=entry.previous_text,
-                new_tags=entry.new_tags,
-                source_operation_index=entry.source_operation_index,
-                source_operation_type=entry.source_operation_type,
-                source_filename=entry.source_filename,
-            )
-        )
-
-    return constrained_plans, totals
+    return prepare_operations(operations, read_only=read_only)
 
 
 def _apply_prepared_operations(
@@ -3635,161 +2562,13 @@ def _apply_prepared_operations(
     link_totals: dict[str, int] | None = None,
     recovery_only: bool = False,
 ) -> tuple[list[str], list[str]]:
-    """Apply an already frontier-approved exact plan with lock-time CAS.
+    from llm_wiki_mcp.ingest_apply import apply_prepared_operations
 
-    Current bytes must be either the reviewed preimage or the reviewed
-    postimage.  Accepting the latter makes a durable approved proposal
-    recoverable after a power loss between a page replace and job completion.
-    Any third state is a race and fails closed for autonomous retry.
-    """
-
-    from llm_wiki_mcp.link_fix import atomic_write
-
-    written: list[PreparedIngestOperation] = []
-    created: list[str] = []
-    updated: list[str] = []
-    from llm_wiki_mcp.page_mutation import (
-        PageMutationError,
-        enforce_correction_constraints,
-        wiki_mutation_lock,
+    return apply_prepared_operations(
+        planned,
+        link_totals=link_totals,
+        recovery_only=recovery_only,
     )
-
-    # The same lock is used by the autonomous correction lane. This prevents
-    # Stop-hook ingest and correction from both passing their read checks and
-    # then replacing the same page with different snapshots.
-    with wiki_mutation_lock():
-        try:
-            for entry in planned:
-                if (
-                    _normalize_for_collision(entry.page_id)
-                    in _reserved_system_page_collision_keys()
-                ):
-                    raise IngestApplyError(
-                        "reserved system page_id cannot be mutated by ingest: "
-                        f"{entry.page_id!r}"
-                    )
-                # Re-evaluate global correction tombstones while holding the
-                # same mutation lock as the correction lane. Preparation may
-                # predate a correction on another page, and a stale replay may
-                # choose an entirely new slug, so path-local CAS alone is not
-                # sufficient here.
-                try:
-                    constrained_body, enforced = enforce_correction_constraints(
-                        entry.page_id,
-                        entry.previous_text or "",
-                        entry.new_body,
-                    )
-                except PageMutationError as exc:
-                    raise IngestApplyError(
-                        f"content correction constraint failed for {entry.page_id}: {exc}"
-                    ) from exc
-                # The frontier approved ``entry.new_body`` exactly.  A newly
-                # activated correction constraint is valid evidence that the
-                # proposal became stale, but it cannot silently rewrite the
-                # approved postimage.  Retry preparation + review instead.
-                if constrained_body != entry.new_body:
-                    raise IngestApplyError(
-                        f"content correction constraints changed before ingest apply: "
-                        f"{entry.page_id}"
-                    )
-                current = _read_optional_exact_utf8(entry.path)
-                if current == entry.new_body:
-                    # Power-loss recovery: this exact reviewed postimage was
-                    # already installed, so finish the batch idempotently.
-                    (created if entry.op_type == "create" else updated).append(
-                        entry.page_id
-                    )
-                    continue
-                if recovery_only:
-                    raise IngestApplyError(
-                        "reviewed postimage no longer present during recovery: "
-                        f"{entry.page_id}"
-                    )
-                if entry.op_type == "create":
-                    entry.path.parent.mkdir(parents=True, exist_ok=True)
-                    if current is not None:
-                        raise IngestApplyError(
-                            f"page appeared before ingest create: {entry.page_id}"
-                        )
-                    atomic_write(entry.path, entry.new_body)
-                    # Append BEFORE logging so a log failure could never drop
-                    # an entry from the rollback set. _safe_log additionally
-                    # ensures a logging exception (which atomic_write success
-                    # already proves is irrelevant to data) never triggers
-                    # rollback of a write that succeeded.
-                    written.append(entry)
-                    created.append(entry.page_id)
-                    _safe_log(f"ingest | created {entry.page_id}")
-                else:
-                    # The prepare phase captured this exact preimage. Refuse
-                    # to overwrite a correction or other cooperating writer
-                    # that committed while the model was preparing the batch.
-                    if current != (entry.previous_text or ""):
-                        raise IngestApplyError(
-                            f"page changed before ingest apply: {entry.page_id}"
-                        )
-                    atomic_write(entry.path, entry.new_body)
-                    written.append(entry)
-                    updated.append(entry.page_id)
-                    _safe_log(f"ingest | updated {entry.page_id}")
-        except Exception as write_err:
-            # Best-effort rollback. Each revert is gated by a CAS check: only
-            # restore if the file still contains exactly what we wrote. If
-            # another writer has modified it since, leave their change intact.
-            rollback_errors: list[str] = []
-            for entry in reversed(written):
-                try:
-                    if entry.op_type == "create":
-                        if _read_optional_exact_utf8(entry.path) == entry.new_body:
-                            entry.path.unlink()
-                        elif entry.path.exists():
-                            rollback_errors.append(
-                                f"{entry.page_id}: skipped (modified by another writer)"
-                            )
-                    else:
-                        if _read_optional_exact_utf8(entry.path) == entry.new_body:
-                            atomic_write(entry.path, entry.previous_text or "")
-                        elif entry.path.exists():
-                            rollback_errors.append(
-                                f"{entry.page_id}: skipped (modified by another writer)"
-                            )
-                except Exception as rb_err:
-                    rollback_errors.append(f"{entry.page_id}: {rb_err}")
-            if rollback_errors:
-                partial_summary = "; ".join(rollback_errors)
-                _safe_log(
-                    "ingest | rollback partial (other writers or IO failures): "
-                    + partial_summary
-                )
-                raise IngestApplyError(
-                    f"apply write failed: {write_err}; partial rollback: "
-                    f"{partial_summary}"
-                ) from write_err
-            _safe_log(
-                f"ingest | rolled back {len(written)} writes after error: {write_err}"
-            )
-            raise IngestApplyError(f"apply write failed: {write_err}") from write_err
-
-    # Tag changelog entries are derived audit data.  They are emitted only
-    # after the exact semantic page batch has frontier approval and commits.
-    if created:
-        from llm_wiki_mcp.tags import record_new_tag
-
-        created_ids = set(created)
-        for entry in planned:
-            if entry.op_type != "create" or entry.page_id not in created_ids:
-                continue
-            for tag in entry.new_tags:
-                record_new_tag(tag, reason="ingest auto-gen")
-
-    totals = link_totals or {"resolved": 0, "rewritten": 0, "unwrapped": 0}
-    if any(totals.values()):
-        _safe_log(
-            f"ingest | link reconcile: resolved={totals['resolved']} "
-            f"rewritten={totals['rewritten']} unwrapped={totals['unwrapped']}"
-        )
-
-    return created, updated
 
 
 def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
@@ -3804,125 +2583,6 @@ def _apply_operations(operations: list[dict]) -> tuple[list[str], list[str]]:
     return _apply_prepared_operations(planned, link_totals=totals)
 
 
-INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION = INGEST_PROPOSAL_SCHEMA_VERSION
-_INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION = 1
-INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION = 2
-INGEST_REVIEW_SHARD_POLICY_VERSION = 1
-INGEST_REVIEW_SHARD_SCHEMA_VERSION = 1
-_MAX_INGEST_REVIEW_SHARDS = 32
-_INGEST_REVIEW_LIMIT_FIELDS = frozenset(
-    {
-        "num_ctx",
-        "min_num_ctx",
-        "num_predict",
-        "max_input_chars",
-        "max_output_chars",
-        "max_feedback_chars",
-    }
-)
-_INGEST_REVIEW_SHARD_ROW_FIELDS = frozenset(
-    {
-        "shard_index",
-        "original_operation_indices",
-        "proposal_sha256",
-        "effective_request_sha256",
-        "effective_input_chars",
-        "effective_input_bytes",
-        "required_num_ctx",
-        "selected_num_ctx",
-    }
-)
-INGEST_FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "decision",
-        "summary",
-        "failed_operations_disposition",
-        "tests_run",
-        "risk",
-        "notes",
-    ],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": [
-                "apply_available",
-                "confirmed_noop",
-                "retry",
-                "quarantined",
-            ],
-        },
-        "summary": {"type": "string"},
-        "failed_operations_disposition": {
-            "type": "string",
-            "enum": ["none", "confirmed_unnecessary", "retry_required"],
-        },
-        "tests_run": {"type": "array", "items": {"type": "string"}},
-        "risk": {"type": ["string", "null"]},
-        "notes": {"type": ["string", "null"]},
-        "repair_option_id": {
-            "type": "string",
-            "pattern": "^rp_[0-9a-f]{32}$",
-        },
-        "invalid_tags": {
-            "type": "array",
-            "items": {"type": "string", "pattern": "^[dts]/[a-z0-9][a-z0-9-]*$"},
-        },
-        "replacement_operations": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["filename", "content"],
-                "properties": {
-                    "filename": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-            },
-        },
-    },
-}
-
-
-class IngestReviewShardCapacityError(RuntimeError):
-    """The exact proposal cannot be reviewed within bounded local contexts."""
-
-    def __init__(self, failure_class: str, reason: str) -> None:
-        self.failure_class = failure_class
-        self.reason = reason
-        super().__init__(reason)
-
-
-class IngestReviewBudgetExhausted(RuntimeError):
-    """A local-consensus call was blocked before inference by its raw budget."""
-
-
-@dataclass(frozen=True)
-class _IngestReviewShard:
-    """One deterministic, read-only review unit of a full ingest proposal."""
-
-    original_operation_indices: tuple[int, ...]
-    proposal: dict[str, Any]
-    prompt: str
-    proposal_sha256: str
-    effective_request_sha256: str
-    effective_input_chars: int
-    effective_input_bytes: int
-    required_num_ctx: int
-    selected_num_ctx: int
-
-
-@dataclass(frozen=True)
-class _IngestReviewShardPlan:
-    """A complete deterministic partition of one oversized proposal."""
-
-    full_proposal_sha256: str
-    manifest: dict[str, Any]
-    manifest_sha256: str
-    shards: tuple[_IngestReviewShard, ...]
-
-
 @dataclass(frozen=True)
 class _IngestReviewShardContinuation:
     """Strict pre-triage resume state for a partially approved shard plan."""
@@ -3931,28 +2591,6 @@ class _IngestReviewShardContinuation:
     planned: tuple[PreparedIngestOperation, ...]
     plan: _IngestReviewShardPlan
     approved_shards: int
-
-
-@dataclass(frozen=True)
-class _IngestReviewShardPlanState:
-    """Read-only classification of every durable verdict in one shard plan."""
-
-    statuses: tuple[str, ...]
-    reviews: tuple[dict[str, Any] | None, ...]
-    authorities: tuple[dict[str, Any] | None, ...]
-    invalid_reason: str | None = None
-
-    @property
-    def current_approved_indices(self) -> tuple[int, ...]:
-        return tuple(
-            index
-            for index, status in enumerate(self.statuses)
-            if status == "current_approved"
-        )
-
-    @property
-    def approved_shards(self) -> int:
-        return len(self.current_approved_indices)
 
 
 def _ingest_review_router_config() -> Any:
@@ -3979,128 +2617,19 @@ def _measure_ingest_review_request(
     original_operation_indices: tuple[int, ...],
     config: Any,
 ) -> _IngestReviewShard:
-    """Measure the exact effective request the decision router will execute."""
+    """Compatibility seam for the extracted deterministic request planner."""
 
-    from llm_wiki_mcp.decision_lane_prompts import (
-        build_ingest_reconciliation_prompt,
-    )
-    from llm_wiki_mcp.decision_router import (
-        decision_effective_request,
-        decision_request_context,
-        decision_request_fingerprint_sha256,
-    )
-    from llm_wiki_mcp.local_structured import preflight_structured_request
-
-    prompt = build_ingest_reconciliation_prompt(proposal)
-    effective_prompt, effective_system = decision_effective_request(
-        prompt=prompt,
-        schema=INGEST_FRONTIER_DECISION_SCHEMA,
-        system=None,
-        decision_lane="ingest_reconciliation",
-    )
-    preflight = preflight_structured_request(
-        effective_prompt,
-        INGEST_FRONTIER_DECISION_SCHEMA,
-        system=effective_system,
-        max_input_chars=config.max_input_chars,
-    )
-    required_num_ctx, selected_num_ctx = decision_request_context(
-        config,
-        prompt,
-        INGEST_FRONTIER_DECISION_SCHEMA,
-        None,
-        "ingest_reconciliation",
-    )
-    if not preflight.ok:
-        raise IngestReviewShardCapacityError(
-            preflight.failure_class or "input_invalid",
-            preflight.failure_reason or "structured review preflight failed",
-        )
-    if required_num_ctx > config.num_ctx:
-        raise IngestReviewShardCapacityError(
-            "context_window_exceeded",
-            "structured ingest review requires context "
-            f"{required_num_ctx}>{config.num_ctx}",
-        )
-    effective_input_chars = sum(
-        len(message["content"]) for message in preflight.messages
-    )
-    return _IngestReviewShard(
+    return _measure_ingest_review_request_core(
+        proposal,
         original_operation_indices=original_operation_indices,
-        proposal=proposal,
-        prompt=prompt,
-        proposal_sha256=_canonical_json_sha256(proposal),
-        effective_request_sha256=decision_request_fingerprint_sha256(
-            prompt=prompt,
-            schema=INGEST_FRONTIER_DECISION_SCHEMA,
-            system=None,
-            decision_lane="ingest_reconciliation",
-        ),
-        effective_input_chars=effective_input_chars,
-        effective_input_bytes=preflight.input_bytes,
-        required_num_ctx=required_num_ctx,
-        selected_num_ctx=selected_num_ctx,
+        config=config,
     )
 
 
 def _validate_ingest_shard_source_rows(
     proposal: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return exact one-to-one source rows or fail closed before partitioning."""
-
-    prepared = proposal.get("prepared_operations")
-    generated = proposal.get("local_generated_operations")
-    triage = proposal.get("triage_plan")
-    if not isinstance(prepared, list) or not isinstance(generated, list):
-        raise IngestReviewShardCapacityError(
-            "input_invalid", "oversized proposal operation arrays are invalid"
-        )
-    if proposal.get("failed_operation_specs"):
-        raise IngestReviewShardCapacityError(
-            "input_too_large",
-            "oversized proposals with failed_operation_specs cannot be sharded safely",
-        )
-    if len(prepared) != len(generated) or not prepared:
-        raise IngestReviewShardCapacityError(
-            "input_too_large",
-            "oversized proposal lacks a complete one-to-one operation set",
-        )
-    by_source: dict[int, dict[str, Any]] = {}
-    for row in prepared:
-        source_index = (
-            row.get("source_operation_index") if isinstance(row, dict) else None
-        )
-        if (
-            not isinstance(source_index, int)
-            or isinstance(source_index, bool)
-            or source_index in by_source
-            or not 0 <= source_index < len(generated)
-        ):
-            raise IngestReviewShardCapacityError(
-                "input_invalid",
-                "oversized proposal source-operation provenance is incomplete",
-            )
-        generated_row = generated[source_index]
-        if (
-            not isinstance(generated_row, dict)
-            or row.get("source_operation_type") != generated_row.get("type")
-            or row.get("source_filename") != generated_row.get("filename")
-        ):
-            raise IngestReviewShardCapacityError(
-                "input_invalid",
-                "oversized proposal source-operation binding is invalid",
-            )
-        by_source[source_index] = row
-    if set(by_source) != set(range(len(generated))):
-        raise IngestReviewShardCapacityError(
-            "input_invalid", "oversized proposal operation coverage is incomplete"
-        )
-    if not isinstance(triage, list) or (triage and len(triage) != len(generated)):
-        raise IngestReviewShardCapacityError(
-            "input_invalid", "oversized proposal triage coverage is incomplete"
-        )
-    ordered_prepared = [by_source[index] for index in range(len(generated))]
-    return ordered_prepared, generated, triage
+    return _validate_ingest_shard_source_rows_core(proposal)
 
 
 def _build_ingest_review_shard_proposal(
@@ -4111,38 +2640,13 @@ def _build_ingest_review_shard_proposal(
     shard_index: int,
     full_proposal_sha256: str,
 ) -> dict[str, Any]:
-    """Rebase one exact operation subset while retaining the full raw evidence."""
-
-    prepared, generated, triage = _validate_ingest_shard_source_rows(proposal)
-    shard = copy.deepcopy(proposal)
-    shard_prepared: list[dict[str, Any]] = []
-    shard_generated: list[dict[str, Any]] = []
-    shard_triage: list[dict[str, Any]] = []
-    for local_index, original_index in enumerate(group):
-        prepared_row = copy.deepcopy(prepared[original_index])
-        prepared_row["source_operation_index"] = local_index
-        shard_prepared.append(prepared_row)
-        shard_generated.append(copy.deepcopy(generated[original_index]))
-        if triage:
-            shard_triage.append(copy.deepcopy(triage[original_index]))
-    shard["prepared_operations"] = shard_prepared
-    shard["local_generated_operations"] = shard_generated
-    shard["triage_plan"] = shard_triage
-    audit = shard.get("audit_decision")
-    audit = copy.deepcopy(audit) if isinstance(audit, dict) else {}
-    audit["review_shard_contract"] = {
-        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
-        "policy_version": INGEST_REVIEW_SHARD_POLICY_VERSION,
-        "full_proposal_sha256": full_proposal_sha256,
-        "full_operation_count": len(generated),
-        "shard_index": shard_index,
-        "original_operation_indices": list(group),
-        "complete_nonoverlap_operation_index_shards": [
-            list(indices) for indices in groups
-        ],
-    }
-    shard["audit_decision"] = audit
-    return shard
+    return _build_ingest_review_shard_proposal_core(
+        proposal,
+        group=group,
+        groups=groups,
+        shard_index=shard_index,
+        full_proposal_sha256=full_proposal_sha256,
+    )
 
 
 def _build_ingest_review_shard_plan(
@@ -4151,133 +2655,12 @@ def _build_ingest_review_shard_plan(
     config: Any | None = None,
     force_review_unit: bool = False,
 ) -> _IngestReviewShardPlan | None:
-    """Return ``None`` for the unchanged standard path, else an exact partition."""
+    """Resolve the live config seam, then run the extracted pure planner."""
 
-    config = config or _ingest_review_router_config()
-    prepared_raw = proposal.get("prepared_operations")
-    full_indices = tuple(
-        range(len(prepared_raw)) if isinstance(prepared_raw, list) else range(0)
-    )
-    full_failure_class: str | None = None
-    try:
-        _measure_ingest_review_request(
-            proposal,
-            original_operation_indices=full_indices,
-            config=config,
-        )
-        if not force_review_unit:
-            return None
-    except IngestReviewShardCapacityError as full_error:
-        if full_error.failure_class not in {
-            "input_too_large",
-            "context_window_exceeded",
-        }:
-            raise
-        full_failure_class = full_error.failure_class
-    prepared, _generated, _triage = _validate_ingest_shard_source_rows(proposal)
-    full_indices = tuple(range(len(prepared)))
-    if proposal.get("failed_operation_specs"):
-        raise IngestReviewShardCapacityError(
-            full_failure_class or "input_too_large",
-            "oversized proposals with failed_operation_specs cannot be sharded safely",
-        )
-
-    full_proposal_sha256 = _canonical_json_sha256(proposal)
-    groups: tuple[tuple[int, ...], ...] = (full_indices,)
-    while True:
-        measured: list[_IngestReviewShard] = []
-        split_index: int | None = None
-        split_error: IngestReviewShardCapacityError | None = None
-        for shard_index, group in enumerate(groups):
-            shard_proposal = _build_ingest_review_shard_proposal(
-                proposal,
-                group=group,
-                groups=groups,
-                shard_index=shard_index,
-                full_proposal_sha256=full_proposal_sha256,
-            )
-            try:
-                measured.append(
-                    _measure_ingest_review_request(
-                        shard_proposal,
-                        original_operation_indices=group,
-                        config=config,
-                    )
-                )
-            except IngestReviewShardCapacityError as exc:
-                if exc.failure_class not in {
-                    "input_too_large",
-                    "context_window_exceeded",
-                }:
-                    raise
-                split_index = shard_index
-                split_error = exc
-                break
-        if split_index is None:
-            shards = tuple(measured)
-            break
-        group = groups[split_index]
-        if len(group) == 1:
-            assert split_error is not None
-            raise IngestReviewShardCapacityError(
-                split_error.failure_class,
-                "one prepared ingest operation exceeds the bounded review capacity: "
-                + split_error.reason,
-            )
-        if len(groups) >= _MAX_INGEST_REVIEW_SHARDS:
-            raise IngestReviewShardCapacityError(
-                split_error.failure_class
-                if split_error
-                else (full_failure_class or "input_too_large"),
-                f"ingest review requires more than {_MAX_INGEST_REVIEW_SHARDS} shards",
-            )
-        midpoint = len(group) // 2
-        groups = (
-            *groups[:split_index],
-            group[:midpoint],
-            group[midpoint:],
-            *groups[split_index + 1 :],
-        )
-
-    flattened = [index for group in groups for index in group]
-    if flattened != list(full_indices) or len(flattened) != len(set(flattened)):
-        raise IngestReviewShardCapacityError(
-            "input_invalid", "ingest review shard partition is not exact"
-        )
-    manifest = {
-        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
-        "policy_version": INGEST_REVIEW_SHARD_POLICY_VERSION,
-        "kind": "ingest_review_shard_manifest",
-        "source_key": proposal.get("source_key"),
-        "full_proposal_sha256": full_proposal_sha256,
-        "full_operation_count": len(full_indices),
-        "review_limits": {
-            "num_ctx": config.num_ctx,
-            "min_num_ctx": config.min_num_ctx,
-            "num_predict": config.num_predict,
-            "max_input_chars": config.max_input_chars,
-            "max_output_chars": config.max_output_chars,
-            "max_feedback_chars": config.max_feedback_chars,
-        },
-        "shards": [
-            {
-                "shard_index": shard_index,
-                "original_operation_indices": list(shard.original_operation_indices),
-                "proposal_sha256": shard.proposal_sha256,
-                "effective_request_sha256": shard.effective_request_sha256,
-                "effective_input_chars": shard.effective_input_chars,
-                "effective_input_bytes": shard.effective_input_bytes,
-                "required_num_ctx": shard.required_num_ctx,
-                "selected_num_ctx": shard.selected_num_ctx,
-            }
-            for shard_index, shard in enumerate(shards)
-        ],
-    }
-    return _IngestReviewShardPlan(
-        full_proposal_sha256=full_proposal_sha256,
-        manifest=manifest,
-        manifest_sha256=_canonical_json_sha256(manifest),
-        shards=shards,
+    return _build_ingest_review_shard_plan_core(
+        proposal,
+        config=config or _ingest_review_router_config(),
+        force_review_unit=force_review_unit,
     )
 
 
@@ -4297,21 +2680,15 @@ def _ingest_source_key(raw_content: str, raw_keywords: list[str] | None) -> str:
 
 
 def _ingest_artifact_paths(source_key: str) -> tuple[Path, Path]:
-    root = PAGES_DIR.parent / "runtime" / "ingest-frontier"
-    return (
-        root / f"{source_key}.proposal.json",
-        root / f"{source_key}.review.json",
-    )
+    return _ingest_artifact_paths_core(PAGES_DIR, source_key)
 
 
 def _ingest_review_continuation_marker_path(source_key: str) -> Path:
-    root = _ingest_artifact_paths(source_key)[0].parent
-    return root / f"{source_key}.continuation.json"
+    return _continuation_marker_path_core(PAGES_DIR, source_key)
 
 
 def _ingest_review_repair_transition_path(source_key: str) -> Path:
-    root = _ingest_artifact_paths(source_key)[0].parent
-    return root / f"{source_key}.repair-transition.json"
+    return _repair_transition_path_core(PAGES_DIR, source_key)
 
 
 def _seal_ingest_review_repair_transition(
@@ -4320,63 +2697,12 @@ def _seal_ingest_review_repair_transition(
     previous_full_proposal_sha256: str,
     repaired_operations_sha256: str,
 ) -> str | None:
-    """Allow one idempotent exact repair transition per source raw."""
-
-    if (
-        re.fullmatch(r"[0-9a-f]{64}", previous_full_proposal_sha256) is None
-        or re.fullmatch(r"[0-9a-f]{64}", repaired_operations_sha256) is None
-    ):
-        return "exact repair transition identity is invalid"
-
-    identity = {
-        "source_key": source_key,
-        "previous_full_proposal_sha256": previous_full_proposal_sha256,
-        "repaired_operations_sha256": repaired_operations_sha256,
-    }
-    payload = {
-        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
-        "kind": "ingest_review_exact_repair_transition",
-        **identity,
-        "identity_sha256": _canonical_json_sha256(identity),
-    }
-    path = _ingest_review_repair_transition_path(source_key)
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            return f"exact repair transition is unreadable: {type(exc).__name__}: {exc}"
-        if existing == payload:
-            return None
-        if not isinstance(existing, dict):
-            return "exact repair transition binding is invalid"
-        existing_identity = {
-            key: existing.get(key)
-            for key in (
-                "source_key",
-                "previous_full_proposal_sha256",
-                "repaired_operations_sha256",
-            )
-        }
-        if (
-            set(existing) != set(payload)
-            or existing.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
-            or existing.get("kind") != "ingest_review_exact_repair_transition"
-            or existing.get("identity_sha256")
-            != _canonical_json_sha256(existing_identity)
-        ):
-            return "exact repair transition binding is invalid"
-        return "exact repair transition limit exceeded"
-    try:
-        _write_ingest_artifact(path, payload)
-        readback = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return (
-            "exact repair transition write/readback failed: "
-            f"{type(exc).__name__}: {exc}"
-        )
-    if readback != payload:
-        return "exact repair transition readback verification failed"
-    return None
+    return _seal_ingest_review_repair_transition_core(
+        _ingest_review_repair_transition_path(source_key),
+        source_key=source_key,
+        previous_full_proposal_sha256=previous_full_proposal_sha256,
+        repaired_operations_sha256=repaired_operations_sha256,
+    )
 
 
 def _persist_ingest_review_continuation_marker(
@@ -4388,50 +2714,15 @@ def _persist_ingest_review_continuation_marker(
     previous_authority: dict[str, Any] | str,
     current_authority: dict[str, Any],
 ) -> str | None:
-    """Seal the one exceptional zero-approval resume permission."""
-
-    if reason not in {
-        "exact_repair_reseed",
-        "authority_epoch_reseed",
-        "router_config_reseed",
-    }:
-        return "ingest review continuation marker reason is invalid"
-    if re.fullmatch(r"[0-9a-f]{64}", previous_full_proposal_sha256) is None or (
-        reason == "exact_repair_reseed"
-        and previous_full_proposal_sha256 == plan.full_proposal_sha256
-    ):
-        return "ingest review continuation marker transition is invalid"
-    if isinstance(previous_authority, str):
-        if re.fullmatch(r"[0-9a-f]{64}", previous_authority) is None:
-            return "ingest review continuation previous authority is invalid"
-        previous_authority_sha256 = previous_authority
-    else:
-        previous_authority_sha256 = _canonical_json_sha256(previous_authority)
-    transition = {
-        "source_key": source_key,
-        "previous_full_proposal_sha256": previous_full_proposal_sha256,
-        "full_proposal_sha256": plan.full_proposal_sha256,
-        "manifest_sha256": plan.manifest_sha256,
-        "reason": reason,
-        "previous_authority_sha256": previous_authority_sha256,
-        "current_authority_sha256": _canonical_json_sha256(current_authority),
-    }
-    payload = {
-        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
-        "kind": "ingest_review_zero_progress_continuation",
-        **transition,
-        "transition_sha256": _canonical_json_sha256(transition),
-        "state": "available",
-    }
-    path = _ingest_review_continuation_marker_path(source_key)
-    try:
-        _write_ingest_artifact(path, payload)
-        readback = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return f"continuation marker write/readback failed: {type(exc).__name__}: {exc}"
-    if readback != payload:
-        return "continuation marker readback verification failed"
-    return None
+    return _persist_ingest_review_continuation_marker_core(
+        _ingest_review_continuation_marker_path(source_key),
+        source_key=source_key,
+        plan=plan,
+        reason=reason,
+        previous_full_proposal_sha256=previous_full_proposal_sha256,
+        previous_authority=previous_authority,
+        current_authority=current_authority,
+    )
 
 
 def _load_ingest_review_continuation_marker(
@@ -4441,104 +2732,26 @@ def _load_ingest_review_continuation_marker(
     authority: dict[str, Any],
     allow_stale_identity: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    path = _ingest_review_continuation_marker_path(source_key)
-    if not path.exists():
-        return None, None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return None, f"continuation marker is unreadable: {type(exc).__name__}: {exc}"
-    expected_fields = {
-        "schema_version",
-        "kind",
-        "source_key",
-        "previous_full_proposal_sha256",
-        "full_proposal_sha256",
-        "manifest_sha256",
-        "reason",
-        "previous_authority_sha256",
-        "current_authority_sha256",
-        "transition_sha256",
-        "state",
-    }
-    if (
-        not isinstance(payload, dict)
-        or set(payload) != expected_fields
-        or payload.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
-        or payload.get("kind") != "ingest_review_zero_progress_continuation"
-        or payload.get("source_key") != source_key
-        or not isinstance(payload.get("previous_full_proposal_sha256"), str)
-        or re.fullmatch(
-            r"[0-9a-f]{64}",
-            str(payload.get("previous_full_proposal_sha256")),
-        )
-        is None
-        or payload.get("reason")
-        not in {
-            "exact_repair_reseed",
-            "authority_epoch_reseed",
-            "router_config_reseed",
-        }
-        or payload.get("state") not in {"available", "claimed"}
-    ):
-        return None, "continuation marker schema is invalid"
-    transition = {
-        key: payload.get(key)
-        for key in (
-            "source_key",
-            "previous_full_proposal_sha256",
-            "full_proposal_sha256",
-            "manifest_sha256",
-            "reason",
-            "previous_authority_sha256",
-            "current_authority_sha256",
-        )
-    }
-    if (
-        not isinstance(payload.get("previous_authority_sha256"), str)
-        or not isinstance(payload.get("current_authority_sha256"), str)
-        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("previous_authority_sha256")))
-        is None
-        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("current_authority_sha256")))
-        is None
-        or payload.get("transition_sha256") != _canonical_json_sha256(transition)
-        or (
-            payload.get("reason") == "exact_repair_reseed"
-            and payload.get("previous_full_proposal_sha256")
-            == plan.full_proposal_sha256
-        )
-    ):
-        return None, "continuation marker transition binding is invalid"
-    if payload.get("full_proposal_sha256") != plan.full_proposal_sha256:
-        return None, None
-    if not allow_stale_identity and (
-        payload.get("current_authority_sha256") != _canonical_json_sha256(authority)
-        or payload.get("manifest_sha256") != plan.manifest_sha256
-    ):
-        return None, None
-    return payload, None
+    return _load_ingest_review_continuation_marker_core(
+        _ingest_review_continuation_marker_path(source_key),
+        source_key=source_key,
+        plan=plan,
+        authority=authority,
+        allow_stale_identity=allow_stale_identity,
+    )
 
 
 def _consume_ingest_review_continuation_marker(
     source_key: str,
     marker: dict[str, Any],
 ) -> str | None:
-    consumed = dict(marker)
-    consumed["state"] = "claimed"
-    try:
-        path = _ingest_review_continuation_marker_path(source_key)
-        _write_ingest_artifact(path, consumed)
-        readback = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return f"continuation marker consume failed: {type(exc).__name__}: {exc}"
-    if readback != consumed:
-        return "continuation marker consume readback verification failed"
-    return None
+    return _consume_ingest_review_continuation_marker_core(
+        _ingest_review_continuation_marker_path(source_key), marker
+    )
 
 
 def _ingest_review_stall_path(source_key: str) -> Path:
-    root = _ingest_artifact_paths(source_key)[0].parent
-    return root / f"{source_key}.stalled.json"
+    return _review_stall_path_core(PAGES_DIR, source_key)
 
 
 def _persist_ingest_review_stall(
@@ -4548,30 +2761,13 @@ def _persist_ingest_review_stall(
     authority: dict[str, Any],
     approved_indices: tuple[int, ...],
 ) -> str | None:
-    """Tombstone one same-plan, same-authority no-progress review epoch."""
-
-    identity = {
-        "source_key": source_key,
-        "full_proposal_sha256": plan.full_proposal_sha256,
-        "manifest_sha256": plan.manifest_sha256,
-        "authority_sha256": _canonical_json_sha256(authority),
-        "approved_indices": list(approved_indices),
-    }
-    payload = {
-        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
-        "kind": "ingest_review_no_progress_stall",
-        **identity,
-        "identity_sha256": _canonical_json_sha256(identity),
-    }
-    try:
-        path = _ingest_review_stall_path(source_key)
-        _write_ingest_artifact(path, payload)
-        readback = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return f"review stall write/readback failed: {type(exc).__name__}: {exc}"
-    if readback != payload:
-        return "review stall readback verification failed"
-    return None
+    return _persist_ingest_review_stall_core(
+        _ingest_review_stall_path(source_key),
+        source_key=source_key,
+        plan=plan,
+        authority=authority,
+        approved_indices=approved_indices,
+    )
 
 
 def _matching_ingest_review_stall_error(
@@ -4581,73 +2777,17 @@ def _matching_ingest_review_stall_error(
     authority: dict[str, Any],
     approved_indices: tuple[int, ...],
 ) -> str | None:
-    path = _ingest_review_stall_path(source_key)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return f"review stall is unreadable: {type(exc).__name__}: {exc}"
-    identity = {
-        "source_key": payload.get("source_key") if isinstance(payload, dict) else None,
-        "full_proposal_sha256": (
-            payload.get("full_proposal_sha256") if isinstance(payload, dict) else None
-        ),
-        "manifest_sha256": (
-            payload.get("manifest_sha256") if isinstance(payload, dict) else None
-        ),
-        "authority_sha256": (
-            payload.get("authority_sha256") if isinstance(payload, dict) else None
-        ),
-        "approved_indices": (
-            payload.get("approved_indices") if isinstance(payload, dict) else None
-        ),
-    }
-    if (
-        not isinstance(payload, dict)
-        or set(payload)
-        != {
-            "schema_version",
-            "kind",
-            "source_key",
-            "full_proposal_sha256",
-            "manifest_sha256",
-            "authority_sha256",
-            "approved_indices",
-            "identity_sha256",
-        }
-        or payload.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
-        or payload.get("kind") != "ingest_review_no_progress_stall"
-        or payload.get("identity_sha256") != _canonical_json_sha256(identity)
-    ):
-        return "review stall binding is invalid"
-    expected_identity = {
-        "source_key": source_key,
-        "full_proposal_sha256": plan.full_proposal_sha256,
-        "manifest_sha256": plan.manifest_sha256,
-        "authority_sha256": _canonical_json_sha256(authority),
-        "approved_indices": list(approved_indices),
-    }
-    if identity == expected_identity:
-        return "same ingest review plan and authority previously made no progress"
-    return None
+    return _matching_ingest_review_stall_error_core(
+        _ingest_review_stall_path(source_key),
+        source_key=source_key,
+        plan=plan,
+        authority=authority,
+        approved_indices=approved_indices,
+    )
 
 
 def _write_ingest_artifact(path: Path, payload: dict[str, Any]) -> None:
-    from llm_wiki_mcp.link_fix import atomic_write
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(
-        path,
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-            default=str,
-        )
-        + "\n",
-    )
+    _write_ingest_artifact_core(path, payload)
 
 
 def _prepared_from_review_payload(
@@ -5000,40 +3140,14 @@ def _load_ingest_proposal(
     source_key: str,
     raw_content: str,
 ) -> tuple[dict[str, Any], list[PreparedIngestOperation]] | None:
-    from llm_wiki_mcp.decision_lane_prompts import (
-        validate_ingest_proposal_envelope,
+    return _load_ingest_proposal_core(
+        path,
+        source_key=source_key,
+        raw_content=raw_content,
+        decode_prepared=_prepared_from_review_payload,
+        targets_reserved_system_page=_prepared_plan_targets_reserved_system_page,
+        plan_is_recoverable=_prepared_plan_is_recoverable,
     )
-
-    try:
-        artifact = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(artifact, dict):
-        return None
-    proposal = artifact.get("proposal")
-    if not isinstance(proposal, dict):
-        return None
-    proposal_sha256 = _canonical_json_sha256(proposal)
-    if (
-        artifact.get("schema_version") != INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
-        or artifact.get("kind") != "ingest_frontier_proposal_artifact"
-        or artifact.get("source_key") != source_key
-        or artifact.get("proposal_sha256") != proposal_sha256
-        or not validate_ingest_proposal_envelope(proposal)
-        or proposal.get("source_key") != source_key
-        or proposal.get("raw_content") != raw_content
-        or proposal.get("raw_sha256")
-        != hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
-    ):
-        return None
-    prepared = _prepared_from_review_payload(proposal.get("prepared_operations"))
-    if (
-        prepared is None
-        or _prepared_plan_targets_reserved_system_page(prepared)
-        or not _prepared_plan_is_recoverable(prepared)
-    ):
-        return None
-    return proposal, prepared
 
 
 def _load_ingest_review_artifact(
@@ -5043,38 +3157,14 @@ def _load_ingest_review_artifact(
     proposal_sha256: str,
     require_integrity: bool = False,
 ) -> dict[str, Any] | None:
-    try:
-        artifact = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(artifact, dict):
-        return None
-    artifact_sha256 = artifact.get("artifact_sha256")
-    if artifact_sha256 is not None:
-        unsigned_artifact = dict(artifact)
-        unsigned_artifact.pop("artifact_sha256", None)
-        if not isinstance(
-            artifact_sha256, str
-        ) or artifact_sha256 != _canonical_json_sha256(unsigned_artifact):
-            return None
-    elif require_integrity:
-        return None
-    review = artifact.get("review")
-    authority = artifact.get("authority")
-    if (
-        artifact.get("schema_version") != INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION
-        or artifact.get("kind") != "ingest_frontier_review_artifact"
-        or artifact.get("source_key") != source_key
-        or artifact.get("proposal_sha256") != proposal_sha256
-        or not isinstance(authority, dict)
-        or _ingest_review_authority_shape_error(authority) is not None
-        or not isinstance(review, dict)
-        or _ingest_review_authority_error(review, authority) is not None
-        or review.get("decision")
-        not in {"apply_available", "confirmed_noop", "approved", "rejected"}
-    ):
-        return None
-    return artifact
+    return _load_ingest_review_artifact_core(
+        path,
+        source_key=source_key,
+        proposal_sha256=proposal_sha256,
+        authority_shape_error=_ingest_review_authority_shape_error,
+        authority_error=_ingest_review_authority_error,
+        require_integrity=require_integrity,
+    )
 
 
 def _load_ingest_review(
@@ -5091,15 +3181,13 @@ def _load_ingest_review(
     a new semantic mutation.
     """
 
-    artifact = _load_ingest_review_artifact(
+    return _load_ingest_review_core(
         path,
         source_key=source_key,
         proposal_sha256=proposal_sha256,
+        authority_shape_error=_ingest_review_authority_shape_error,
+        authority_error=_ingest_review_authority_error,
     )
-    if artifact is None:
-        return None
-    review = artifact.get("review")
-    return review if isinstance(review, dict) else None
 
 
 def _sealed_ingest_review_artifact(
@@ -5112,20 +3200,13 @@ def _sealed_ingest_review_artifact(
 ) -> dict[str, Any]:
     """Build the common authority-sealed terminal ingest artifact."""
 
-    sealed = decision_authority.seal_semantic_artifact(
-        {
-            "schema_version": INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION,
-            "kind": "ingest_frontier_review_artifact",
-            "source_key": source_key,
-            "proposal_sha256": proposal_sha256,
-            "review": review,
-        },
+    return _sealed_ingest_review_artifact_core(
+        source_key=source_key,
+        proposal_sha256=proposal_sha256,
+        review=review,
         authority=authority,
-        lane="ingest_reconciliation",
+        integrity=integrity,
     )
-    if integrity:
-        sealed["artifact_sha256"] = _canonical_json_sha256(sealed)
-    return sealed
 
 
 def _write_and_readback_ingest_review_artifact(
@@ -5171,203 +3252,27 @@ def _current_ingest_review_authority(
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve the exact enabled local authority allowed to affect ingest."""
 
-    reviewer_module = getattr(_run_ingest_frontier_review, "__module__", None)
-    return decision_authority.current_semantic_authority(
-        "ingest_reconciliation",
-        injected_reviewer=(reviewer is not None or reviewer_module != __name__),
-    )
+    return _current_ingest_review_authority_core(injected_reviewer=reviewer is not None)
 
 
 def _ingest_review_authority_error(
     review: dict[str, Any],
     authority: dict[str, Any],
 ) -> str | None:
-    """Cross-check the verdict and trusted local quorum with its authority."""
-
-    shard_proof = review.get("review_shard_proof")
-    if shard_proof is not None:
-        return _ingest_review_shard_proof_error(review, authority)
-
-    # Explicit dependency injection is the only boundary that is allowed to
-    # bypass the production router proof.  Production ingest must use the same
-    # central verifier as every other durable semantic lane so a copied policy
-    # audit without its exact two-model quorum can never authorize a write.
-    if authority.get("source") == "injected_reviewer_boundary":
-        return None
-    return decision_authority.semantic_verdict_authority_error(
-        review,
-        authority,
-        lane="ingest_reconciliation",
-    )
+    return _ingest_review_authority_error_core(review, authority)
 
 
 def _ingest_review_shard_proof_error(
     review: dict[str, Any],
     authority: dict[str, Any],
 ) -> str | None:
-    """Validate every quorum proof in one host-aggregated shard verdict."""
-
-    if set(review) != {
-        "decision",
-        "summary",
-        "failed_operations_disposition",
-        "tests_run",
-        "risk",
-        "notes",
-        "review_shard_proof",
-    }:
-        return "ingest shard aggregate review schema is invalid"
-    if (
-        review.get("decision") != "apply_available"
-        or review.get("failed_operations_disposition") != "none"
-        or not isinstance(review.get("summary"), str)
-        or not str(review.get("summary")).strip()
-        or not isinstance(review.get("tests_run"), list)
-    ):
-        return "ingest shard aggregate disposition is invalid"
-    proof = review.get("review_shard_proof")
-    if not isinstance(proof, dict) or set(proof) != {
-        "schema_version",
-        "policy_version",
-        "full_proposal_sha256",
-        "manifest",
-        "manifest_sha256",
-        "shard_reviews",
-    }:
-        return "ingest shard aggregate proof schema is invalid"
-    manifest = proof.get("manifest")
-    manifest_sha256 = proof.get("manifest_sha256")
-    if (
-        proof.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
-        or proof.get("policy_version") != INGEST_REVIEW_SHARD_POLICY_VERSION
-        or not isinstance(manifest, dict)
-        or not isinstance(manifest_sha256, str)
-        or _canonical_json_sha256(manifest) != manifest_sha256
-        or proof.get("full_proposal_sha256") != manifest.get("full_proposal_sha256")
-    ):
-        return "ingest shard aggregate manifest binding is invalid"
-    manifest_rows = manifest.get("shards")
-    shard_reviews = proof.get("shard_reviews")
-    operation_count = manifest.get("full_operation_count")
-    review_limits = manifest.get("review_limits")
-    if (
-        set(manifest)
-        != {
-            "schema_version",
-            "policy_version",
-            "kind",
-            "source_key",
-            "full_proposal_sha256",
-            "full_operation_count",
-            "review_limits",
-            "shards",
-        }
-        or manifest.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
-        or manifest.get("policy_version") != INGEST_REVIEW_SHARD_POLICY_VERSION
-        or manifest.get("kind") != "ingest_review_shard_manifest"
-        or not isinstance(manifest.get("source_key"), str)
-        or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("source_key")))
-        or not isinstance(manifest.get("full_proposal_sha256"), str)
-        or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("full_proposal_sha256")))
-        or not isinstance(operation_count, int)
-        or isinstance(operation_count, bool)
-        or operation_count < 1
-        or not isinstance(review_limits, dict)
-        or set(review_limits) != _INGEST_REVIEW_LIMIT_FIELDS
-        or not all(
-            isinstance(value, int) and not isinstance(value, bool) and value > 0
-            for value in review_limits.values()
-        )
-        or review_limits.get("min_num_ctx", 0) > review_limits.get("num_ctx", 0)
-        or not isinstance(manifest_rows, list)
-        or not manifest_rows
-        or not isinstance(shard_reviews, list)
-        or len(shard_reviews) != len(manifest_rows)
-    ):
-        return "ingest shard aggregate manifest is invalid"
-    flattened: list[int] = []
-    for expected_index, (manifest_row, review_row) in enumerate(
-        zip(manifest_rows, shard_reviews, strict=True)
-    ):
-        if (
-            not isinstance(manifest_row, dict)
-            or set(manifest_row) != _INGEST_REVIEW_SHARD_ROW_FIELDS
-            or manifest_row.get("shard_index") != expected_index
-            or not isinstance(manifest_row.get("proposal_sha256"), str)
-            or not re.fullmatch(
-                r"[0-9a-f]{64}", str(manifest_row.get("proposal_sha256"))
-            )
-            or not isinstance(manifest_row.get("effective_request_sha256"), str)
-            or not re.fullmatch(
-                r"[0-9a-f]{64}",
-                str(manifest_row.get("effective_request_sha256")),
-            )
-            or not isinstance(manifest_row.get("original_operation_indices"), list)
-            or not manifest_row.get("original_operation_indices")
-            or not all(
-                isinstance(manifest_row.get(field), int)
-                and not isinstance(manifest_row.get(field), bool)
-                and manifest_row.get(field) > 0
-                for field in (
-                    "effective_input_chars",
-                    "effective_input_bytes",
-                    "required_num_ctx",
-                    "selected_num_ctx",
-                )
-            )
-            or manifest_row.get("effective_input_bytes")
-            > review_limits.get("max_input_chars", 0)
-            or manifest_row.get("required_num_ctx")
-            > manifest_row.get("selected_num_ctx")
-            or manifest_row.get("selected_num_ctx") > review_limits.get("num_ctx", 0)
-            or manifest_row.get("selected_num_ctx")
-            < review_limits.get("min_num_ctx", 0)
-            or not isinstance(review_row, dict)
-            or set(review_row) != {"shard_index", "proposal_sha256", "review"}
-            or review_row.get("shard_index") != expected_index
-            or review_row.get("proposal_sha256") != manifest_row.get("proposal_sha256")
-            or not isinstance(review_row.get("review"), dict)
-        ):
-            return "ingest shard aggregate review binding is invalid"
-        indices = manifest_row["original_operation_indices"]
-        if not all(
-            isinstance(index, int) and not isinstance(index, bool) and index >= 0
-            for index in indices
-        ):
-            return "ingest shard aggregate operation indices are invalid"
-        flattened.extend(indices)
-        shard_review = review_row["review"]
-        if (
-            shard_review.get("decision") != "apply_available"
-            or shard_review.get("failed_operations_disposition") != "none"
-            or any(
-                shard_review.get(field)
-                for field in ("invalid_tags", "replacement_operations")
-            )
-        ):
-            return "ingest shard aggregate contains a non-approval"
-        if authority.get("source") != "injected_reviewer_boundary":
-            proof_error = decision_authority.semantic_verdict_authority_error(
-                shard_review,
-                authority,
-                lane="ingest_reconciliation",
-            )
-            if proof_error is not None:
-                return proof_error
-    if flattened != list(range(operation_count)) or len(flattened) != len(
-        set(flattened)
-    ):
-        return "ingest shard aggregate coverage is not exact and non-overlapping"
-    return None
+    return _ingest_review_shard_proof_error_core(review, authority)
 
 
 def _ingest_review_authority_shape_error(authority: dict[str, Any]) -> str | None:
     """Reject authority envelopes that cannot identify a review epoch."""
 
-    return decision_authority.semantic_authority_shape_error(
-        authority,
-        lane="ingest_reconciliation",
-    )
+    return _ingest_review_authority_shape_error_core(authority)
 
 
 def _prepared_plan_is_fully_applied(
@@ -5394,116 +3299,16 @@ def _load_strict_ingest_proposal_for_recovery(
     raw_content: str,
     raw_keywords: list[str] | None,
 ) -> tuple[dict[str, Any], list[PreparedIngestOperation]]:
-    """Load one versioned terminal proposal without consulting model output.
-
-    The ordinary retry path may replace an incomplete proposal after another
-    bounded local attempt.  Pre-triage completion recovery is more privileged:
-    it can retire a raw without asking a model again, so every artifact field
-    that binds the raw and exact page postimages must already be intact.
-    """
-
-    try:
-        artifact = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise IngestApplyError(
-            "pre-triage terminal proposal artifact is unreadable: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-    expected_top_level = {
-        "schema_version",
-        "kind",
-        "source_key",
-        "proposal_sha256",
-        "proposal",
-    }
-    if not isinstance(artifact, dict) or set(artifact) != expected_top_level:
-        raise IngestApplyError(
-            "pre-triage terminal proposal artifact schema is invalid"
-        )
-    proposal = artifact.get("proposal")
-    proposal_sha256 = (
-        _canonical_json_sha256(proposal) if isinstance(proposal, dict) else None
+    from llm_wiki_mcp.ingest_recovery_runtime import (
+        load_strict_ingest_proposal_for_recovery,
     )
-    artifact_version = artifact.get("schema_version")
-    expected_raw_sha256 = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
-    if (
-        not isinstance(artifact_version, int)
-        or isinstance(artifact_version, bool)
-        or artifact_version
-        not in {
-            _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION,
-            INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
-        }
-        or artifact.get("kind") != "ingest_frontier_proposal_artifact"
-        or artifact.get("source_key") != source_key
-        or artifact.get("proposal_sha256") != proposal_sha256
-        or not isinstance(proposal, dict)
-        or proposal.get("schema_version") != artifact_version
-        or proposal.get("kind") != "ingest_semantic_mutation_proposal"
-        or proposal.get("source_key") != source_key
-        or proposal.get("raw_content") != raw_content
-        or proposal.get("raw_sha256") != expected_raw_sha256
-        or proposal.get("raw_keywords") != list(raw_keywords or [])
-    ):
-        raise IngestApplyError(
-            "pre-triage terminal proposal artifact binding is invalid"
-        )
-    required_proposal_fields = {
-        "schema_version",
-        "kind",
-        "source_key",
-        "source_raw",
-        "raw_content",
-        "raw_sha256",
-        "raw_keywords",
-        "local_disposition",
-        "triage_plan",
-        "failed_operation_specs",
-        "local_generated_operations",
-        "prepared_operations",
-        "link_reconciliation",
-    }
-    if not required_proposal_fields <= set(proposal) or set(proposal) - (
-        required_proposal_fields | {"audit_decision"}
-    ):
-        raise IngestApplyError("pre-triage terminal proposal payload schema is invalid")
-    if (
-        proposal.get("source_raw") is not None
-        and not isinstance(proposal.get("source_raw"), str)
-    ) or not isinstance(proposal.get("local_disposition"), str):
-        raise IngestApplyError("pre-triage terminal proposal metadata is invalid")
-    for field in (
-        "triage_plan",
-        "failed_operation_specs",
-        "local_generated_operations",
-        "prepared_operations",
-    ):
-        if not isinstance(proposal.get(field), list):
-            raise IngestApplyError(f"pre-triage terminal proposal {field} is invalid")
-    if not isinstance(proposal.get("link_reconciliation"), dict) or (
-        "audit_decision" in proposal
-        and not isinstance(proposal.get("audit_decision"), dict)
-    ):
-        raise IngestApplyError("pre-triage terminal proposal audit metadata is invalid")
-    planned = _prepared_from_review_payload(
-        proposal.get("prepared_operations"),
-        require_source_provenance=(
-            artifact_version >= INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION
-        ),
+
+    return load_strict_ingest_proposal_for_recovery(
+        path,
+        source_key=source_key,
+        raw_content=raw_content,
+        raw_keywords=raw_keywords,
     )
-    if planned is None:
-        raise IngestApplyError(
-            "pre-triage terminal proposal page postimages are invalid"
-        )
-    target_paths = [str(item.path.resolve(strict=False)) for item in planned]
-    page_ids = [item.page_id for item in planned]
-    if len(target_paths) != len(set(target_paths)) or len(page_ids) != len(
-        set(page_ids)
-    ):
-        raise IngestApplyError(
-            "pre-triage terminal proposal has duplicate page targets"
-        )
-    return proposal, planned
 
 
 def _load_pretriage_terminal_recovery(
@@ -5512,189 +3317,15 @@ def _load_pretriage_terminal_recovery(
     *,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    """Return a model-free terminal recovery only when its proof is complete.
-
-    A proposal without a current terminal review remains ordinary retry work.
-    Legacy review artifacts are likewise left to the normal local-consensus
-    path.  A malformed *current* artifact fails closed instead of being
-    overwritten and silently treated as new work.
-    """
-
-    source_key = _ingest_source_key(raw_content, raw_keywords)
-    proposal_path, review_path = _ingest_artifact_paths(source_key)
-    if not proposal_path.exists():
-        if review_path.exists():
-            raise IngestApplyError(
-                "pre-triage terminal review exists without its proposal artifact"
-            )
-        return None
-
-    try:
-        proposal_candidate = json.loads(proposal_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise IngestApplyError(
-            "pre-triage terminal proposal artifact is unreadable: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-    if not isinstance(proposal_candidate, dict):
-        raise IngestApplyError(
-            "pre-triage terminal proposal artifact schema is invalid"
-        )
-    proposal_version = proposal_candidate.get("schema_version")
-    if not review_path.exists():
-        if proposal_version == _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION:
-            # A v1 proposal without a durable authority seal never authorized
-            # an effect.  Its rows predate source-operation provenance, so the
-            # ordinary path may safely replace it with a complete v2 proposal.
-            return None
-        _load_strict_ingest_proposal_for_recovery(
-            proposal_path,
-            source_key=source_key,
-            raw_content=raw_content,
-            raw_keywords=raw_keywords,
-        )
-        return None
-    try:
-        review_candidate = json.loads(review_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise IngestApplyError(
-            "pre-triage terminal review artifact is unreadable: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-    if not isinstance(review_candidate, dict):
-        raise IngestApplyError("pre-triage terminal review artifact is not an object")
-    review_version = review_candidate.get("schema_version")
-    if (
-        isinstance(review_version, int)
-        and not isinstance(review_version, bool)
-        and review_version < INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION
-    ):
-        # Historical frontier-shaped verdicts have no local authority seal.
-        # They are neither trusted nor treated as corruption; the normal local
-        # path will replace them after a fresh adopted-consensus decision.
-        if proposal_version == _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION:
-            return None
-        _load_strict_ingest_proposal_for_recovery(
-            proposal_path,
-            source_key=source_key,
-            raw_content=raw_content,
-            raw_keywords=raw_keywords,
-        )
-        return None
-    proposal, planned = _load_strict_ingest_proposal_for_recovery(
-        proposal_path,
-        source_key=source_key,
-        raw_content=raw_content,
-        raw_keywords=raw_keywords,
+    from llm_wiki_mcp.ingest_recovery_runtime import (
+        load_pretriage_terminal_recovery,
     )
-    if _prepared_plan_targets_reserved_system_page(planned):
-        # This proposal was created before normal ingest learned to repair
-        # reserved targets in-session.  It is never a valid terminal proof;
-        # leave its raw pending and let the ordinary path overwrite it after a
-        # fresh, bounded triage repair.
-        return None
-    expected_review_fields = {
-        "schema_version",
-        "kind",
-        "source_key",
-        "proposal_sha256",
-        "review",
-        "authority",
-    }
-    if set(review_candidate) != expected_review_fields:
-        raise IngestApplyError("pre-triage terminal review artifact schema is invalid")
-    proposal_sha256 = _canonical_json_sha256(proposal)
-    review_artifact = _load_ingest_review_artifact(
-        review_path,
-        source_key=source_key,
-        proposal_sha256=proposal_sha256,
-    )
-    if review_artifact is None or review_artifact != review_candidate:
-        raise IngestApplyError("pre-triage terminal review artifact binding is invalid")
-    review = review_artifact.get("review")
-    authority = review_artifact.get("authority")
-    if not isinstance(review, dict) or not isinstance(authority, dict):
-        raise IngestApplyError("pre-triage terminal review proof is missing")
-    normalized_review = _normalize_ingest_frontier_review(review, proposal=proposal)
-    if normalized_review != review:
-        raise IngestApplyError(
-            "pre-triage terminal review is not canonical for its proposal"
-        )
-    authority_shape_error = _ingest_review_authority_shape_error(authority)
-    authority_proof_error = _ingest_review_authority_error(review, authority)
-    if authority_shape_error is not None or authority_proof_error is not None:
-        raise IngestApplyError(
-            "pre-triage terminal review authority is invalid: "
-            + (authority_shape_error or authority_proof_error or "unknown error")
-        )
-    decision = review.get("decision")
-    fully_applied = (
-        decision == "apply_available"
-        and bool(planned)
-        and _prepared_plan_is_fully_applied(planned)
-    )
-    if "review_shard_proof" in review:
-        shard_reuse_error = (
-            _historical_ingest_sharded_review_recovery_error(
-                review,
-                proposal,
-                authority,
-            )
-            if fully_applied
-            else _ingest_sharded_review_reuse_error(
-                review,
-                proposal,
-                authority,
-            )
-        )
-        if shard_reuse_error is not None:
-            raise IngestApplyError(
-                "pre-triage terminal shard review binding is invalid: "
-                + shard_reuse_error
-            )
-    if decision not in {"apply_available", "confirmed_noop"}:
-        return None
-    if decision == "apply_available":
-        if not fully_applied:
-            return None
-    else:
-        current_authority, current_authority_error = _current_ingest_review_authority(
-            reviewer=reviewer
-        )
-        if current_authority_error is not None or (
-            decision_authority.compare_semantic_authority(
-                authority,
-                current_authority,
-                lane="ingest_reconciliation",
-            )
-            is not None
-        ):
-            return None
 
-    created = [item.page_id for item in planned if item.op_type == "create"]
-    updated = [item.page_id for item in planned if item.op_type == "update"]
-    audit = proposal.get("audit_decision")
-    failed_specs = proposal.get("failed_operation_specs")
-    return {
-        "status": decision,
-        "source_key": source_key,
-        "proposal_sha256": proposal_sha256,
-        "review": review,
-        "authority": authority,
-        "created": created,
-        "updated": updated,
-        "audit": dict(audit) if isinstance(audit, dict) else {},
-        "failed_operation_specs": (
-            list(failed_specs) if isinstance(failed_specs, list) else []
-        ),
-        "recovered_artifact": True,
-        "reused_review": True,
-        "recovery_basis": (
-            "exact_postimages_already_applied"
-            if decision == "apply_available"
-            else "durable_confirmed_noop"
-        ),
-    }
+    return load_pretriage_terminal_recovery(
+        raw_content,
+        raw_keywords,
+        reviewer=reviewer,
+    )
 
 
 def _normalize_ingest_frontier_review(
@@ -5702,124 +3333,7 @@ def _normalize_ingest_frontier_review(
     *,
     proposal: dict[str, Any],
 ) -> dict[str, Any]:
-    """Normalize the final disposition and fail closed on silent data loss."""
-
-    if not isinstance(value, dict):
-        return {
-            "decision": "retry",
-            "summary": "local consensus reviewer returned a non-object payload",
-            "failed_operations_disposition": "retry_required",
-        }
-    from llm_wiki_mcp.decision_schema_manifest import (
-        canonical_ingest_repair_arrays,
-    )
-
-    value = canonical_ingest_repair_arrays(value)
-    raw_decision = value.get("decision")
-    decision = {
-        # Compatibility with the older generic frontier schema.  Legacy
-        # approval is safe only for a complete proposal; partial generation
-        # requires the new explicit failed-operation disposition below.
-        "approved": "apply_available",
-        "rejected": "retry",
-        "needs_retry": "retry",
-    }.get(str(raw_decision), raw_decision)
-    summary = value.get("summary")
-    if decision not in {
-        "apply_available",
-        "confirmed_noop",
-        "retry",
-        "quarantined",
-    }:
-        return {
-            **value,
-            "decision": "retry",
-            "summary": "local consensus reviewer returned an invalid decision",
-            "failed_operations_disposition": "retry_required",
-        }
-    if not isinstance(summary, str) or not summary.strip():
-        return {
-            **value,
-            "decision": "retry",
-            "summary": "local consensus reviewer omitted its decision summary",
-            "failed_operations_disposition": "retry_required",
-        }
-    repair_requested = any(
-        isinstance(value.get(field), list) and bool(value.get(field))
-        for field in ("invalid_tags", "replacement_operations")
-    )
-    if decision in {"apply_available", "confirmed_noop"} and repair_requested:
-        # Repair arrays describe a new postimage which has not yet passed the
-        # semantic gate.  They are therefore non-terminal instructions even if
-        # a model accidentally combines them with an approval/no-op verdict.
-        decision = "retry"
-        summary = (
-            "repair instructions require a fresh review before terminal "
-            f"disposition: {summary.strip()}"
-        )
-    if decision == "apply_available" and value.get("frontier_failure"):
-        return {
-            **value,
-            "decision": "retry",
-            "summary": "local consensus verdict carried a failure payload",
-            "failed_operations_disposition": "retry_required",
-        }
-
-    prepared = proposal.get("prepared_operations")
-    has_available_operations = isinstance(prepared, list) and bool(prepared)
-    failed_specs = proposal.get("failed_operation_specs")
-    has_failed_operations = isinstance(failed_specs, list) and bool(failed_specs)
-    disposition = value.get("failed_operations_disposition")
-    if repair_requested:
-        disposition = "retry_required"
-    elif not has_failed_operations and disposition is None:
-        disposition = "none"
-
-    if disposition not in {"none", "confirmed_unnecessary", "retry_required"}:
-        return {
-            **value,
-            "decision": "retry",
-            "summary": (
-                "local consensus must explicitly disposition locally failed operations"
-                if has_failed_operations
-                else "local consensus returned an invalid failed-operation disposition"
-            ),
-            "failed_operations_disposition": "retry_required",
-        }
-    if has_failed_operations and decision in {"apply_available", "confirmed_noop"}:
-        if disposition != "confirmed_unnecessary":
-            return {
-                **value,
-                "decision": "retry",
-                "summary": (
-                    "partial local generation remains replayable until local consensus "
-                    "explicitly confirms failed operations are unnecessary"
-                ),
-                "failed_operations_disposition": "retry_required",
-            }
-    if not has_failed_operations and not repair_requested:
-        # The disposition field only matters when local generation left
-        # replayable failed ops behind. Frontier models may still emit a
-        # non-`none` enum because the schema requires the field; treat that
-        # as redundant noise instead of bouncing an otherwise-complete plan.
-        disposition = "none"
-    if decision == "apply_available" and not has_available_operations:
-        return {
-            **value,
-            "decision": "retry",
-            "summary": (
-                "local consensus requested apply_available with no prepared operation"
-            ),
-            "failed_operations_disposition": (
-                "retry_required" if has_failed_operations else "none"
-            ),
-        }
-    return {
-        **value,
-        "decision": decision,
-        "summary": summary.strip(),
-        "failed_operations_disposition": disposition,
-    }
+    return _normalize_ingest_frontier_review_core(value, proposal=proposal)
 
 
 def _run_ingest_frontier_review(
@@ -5827,38 +3341,23 @@ def _run_ingest_frontier_review(
     *,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if reviewer is not None:
-        return _normalize_ingest_frontier_review(
-            reviewer(proposal),
-            proposal=proposal,
-        )
-
     from llm_wiki_mcp.decision_lane_prompts import (
         build_ingest_reconciliation_prompt,
     )
-    from llm_wiki_mcp.frontier_review import run_structured_review
 
-    prompt = build_ingest_reconciliation_prompt(proposal)
-    result = run_structured_review(
-        prompt,
-        INGEST_FRONTIER_DECISION_SCHEMA,
+    return _run_ingest_frontier_review_core(
+        proposal,
+        reviewer=reviewer,
         repo_root=Path(__file__).resolve().parents[2],
-        execute_patch=False,
-        decision_lane="ingest_reconciliation",
+        decision_schema=INGEST_FRONTIER_DECISION_SCHEMA,
+        prompt_builder=build_ingest_reconciliation_prompt,
     )
-    return _normalize_ingest_frontier_review(result, proposal=proposal)
 
 
 def _ingest_review_shard_manifest_path(plan: _IngestReviewShardPlan) -> Path:
-    root = _ingest_artifact_paths("unused")[0].parent
-    identity = _canonical_json_sha256(
-        {
-            "kind": "ingest_review_shard_manifest_artifact",
-            "full_proposal_sha256": plan.full_proposal_sha256,
-            "manifest_sha256": plan.manifest_sha256,
-        }
+    return _ingest_review_shard_manifest_path_core(
+        _ingest_artifact_paths("unused")[0].parent, plan
     )
-    return root / f"review-shard-manifest-{identity}.json"
 
 
 def _ingest_review_shard_review_identity(
@@ -5867,38 +3366,19 @@ def _ingest_review_shard_review_identity(
     shard_index: int,
     shard: _IngestReviewShard,
 ) -> tuple[str, Path]:
-    identity = _canonical_json_sha256(
-        {
-            "kind": "ingest_review_shard_verdict",
-            "full_proposal_sha256": plan.full_proposal_sha256,
-            "manifest_sha256": plan.manifest_sha256,
-            "shard_index": shard_index,
-            "shard_proposal_sha256": shard.proposal_sha256,
-        }
+    return _ingest_review_shard_review_identity_core(
+        _ingest_artifact_paths("unused")[0].parent,
+        plan,
+        shard_index=shard_index,
+        shard=shard,
     )
-    root = _ingest_artifact_paths("unused")[0].parent
-    return identity, root / f"review-shard-{identity}.review.json"
 
 
 def _ingest_review_shard_failure(
     failure_class: str,
     summary: str,
 ) -> dict[str, Any]:
-    return {
-        "decision": "retry",
-        "summary": summary,
-        "failed_operations_disposition": "retry_required",
-        "tests_run": [],
-        "risk": "No page mutation was authorized.",
-        "notes": None,
-        "frontier_failure": {
-            "failure_class": failure_class,
-            "rescue_status": "local_quarantined",
-            "summary": summary,
-            "human_required": False,
-            "notify_user": False,
-        },
-    }
+    return _ingest_review_shard_failure_core(failure_class, summary)
 
 
 def _persist_ingest_review_shard_manifest(
@@ -5906,26 +3386,9 @@ def _persist_ingest_review_shard_manifest(
     *,
     source_key: str,
 ) -> str | None:
-    path = _ingest_review_shard_manifest_path(plan)
-    payload = _ingest_review_shard_manifest_artifact_payload(
-        plan,
-        source_key=source_key,
+    return _persist_ingest_review_shard_manifest_core(
+        _ingest_review_shard_manifest_path(plan), plan, source_key=source_key
     )
-    if path.exists():
-        return _stored_ingest_review_shard_manifest_error(
-            plan,
-            source_key=source_key,
-        )
-    try:
-        _write_ingest_artifact(path, payload)
-        readback = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return (
-            f"review shard manifest write/readback failed: {type(exc).__name__}: {exc}"
-        )
-    if readback != payload:
-        return "review shard manifest readback verification failed"
-    return None
 
 
 def _ingest_review_shard_manifest_artifact_payload(
@@ -5933,16 +3396,9 @@ def _ingest_review_shard_manifest_artifact_payload(
     *,
     source_key: str,
 ) -> dict[str, Any]:
-    """Return the exact durable envelope for one deterministic shard plan."""
-
-    return {
-        "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
-        "kind": "ingest_review_shard_manifest_artifact",
-        "source_key": source_key,
-        "full_proposal_sha256": plan.full_proposal_sha256,
-        "manifest_sha256": plan.manifest_sha256,
-        "manifest": plan.manifest,
-    }
+    return _ingest_review_shard_manifest_artifact_payload_core(
+        plan, source_key=source_key
+    )
 
 
 def _stored_ingest_review_shard_manifest_error(
@@ -5950,64 +3406,16 @@ def _stored_ingest_review_shard_manifest_error(
     *,
     source_key: str,
 ) -> str | None:
-    """Read-only exact validation for a manifest that must already be durable."""
-
-    path = _ingest_review_shard_manifest_path(plan)
-    if not path.exists():
-        return "review shard manifest is missing"
-    try:
-        current = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return f"review shard manifest is unreadable: {type(exc).__name__}: {exc}"
-    expected = _ingest_review_shard_manifest_artifact_payload(
-        plan,
-        source_key=source_key,
+    return _stored_ingest_review_shard_manifest_error_core(
+        _ingest_review_shard_manifest_path(plan), plan, source_key=source_key
     )
-    if current != expected:
-        return "review shard manifest changed or failed exact recomputation"
-    return None
 
 
 def _ingest_review_shard_aggregate(
     plan: _IngestReviewShardPlan,
     shard_reviews: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    tests_run = list(
-        dict.fromkeys(
-            test
-            for review in shard_reviews
-            for test in review.get("tests_run", [])
-            if isinstance(test, str)
-        )
-    )
-    return {
-        "decision": "apply_available",
-        "summary": (
-            f"All {len(shard_reviews)} exact review shards received independent "
-            "local-consensus approval."
-        ),
-        "failed_operations_disposition": "none",
-        "tests_run": tests_run,
-        "risk": None,
-        "notes": None,
-        "review_shard_proof": {
-            "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
-            "policy_version": INGEST_REVIEW_SHARD_POLICY_VERSION,
-            "full_proposal_sha256": plan.full_proposal_sha256,
-            "manifest": plan.manifest,
-            "manifest_sha256": plan.manifest_sha256,
-            "shard_reviews": [
-                {
-                    "shard_index": shard_index,
-                    "proposal_sha256": shard.proposal_sha256,
-                    "review": review,
-                }
-                for shard_index, (shard, review) in enumerate(
-                    zip(plan.shards, shard_reviews, strict=True)
-                )
-            ],
-        },
-    }
+    return _ingest_review_shard_aggregate_core(plan, shard_reviews)
 
 
 def _run_ingest_sharded_review(
@@ -6018,136 +3426,26 @@ def _run_ingest_sharded_review(
     authority: dict[str, Any],
     frontier_budget: "_FrontierCallBudget | None" = None,
 ) -> dict[str, Any]:
-    """Review exact shards and aggregate only a complete all-approval proof."""
+    from llm_wiki_mcp.page_mutation import decision_authority_lock
 
-    manifest_error = _persist_ingest_review_shard_manifest(
+    return _run_ingest_sharded_review_core(
         plan,
         source_key=source_key,
-    )
-    if manifest_error is not None:
-        return _ingest_review_shard_failure(
-            "ingest_review_shard_manifest_invalid", manifest_error
-        )
-    shard_state = _inspect_ingest_review_shard_plan_state(
-        plan,
-        source_key=source_key,
+        reviewer=reviewer,
         authority=authority,
+        frontier_budget=frontier_budget,
+        deps=IngestShardedReviewDeps(
+            persist_manifest=_persist_ingest_review_shard_manifest,
+            inspect_plan_state=_inspect_ingest_review_shard_plan_state,
+            review_identity=_ingest_review_shard_review_identity,
+            run_frontier_review=_run_ingest_frontier_review,
+            normalize_review=_normalize_ingest_frontier_review,
+            current_authority=_current_ingest_review_authority,
+            authority_error=_ingest_review_authority_error,
+            write_and_readback=_write_and_readback_ingest_review_artifact,
+            authority_lock=decision_authority_lock,
+        ),
     )
-    if shard_state.invalid_reason is not None:
-        return _ingest_review_shard_failure(
-            "ingest_review_shard_artifact_invalid",
-            shard_state.invalid_reason,
-        )
-
-    shard_reviews: list[dict[str, Any]] = []
-    for shard_index, shard in enumerate(plan.shards):
-        shard_source_key, shard_review_path = _ingest_review_shard_review_identity(
-            plan,
-            shard_index=shard_index,
-            shard=shard,
-        )
-        current_review = shard_state.reviews[shard_index]
-        if isinstance(current_review, dict):
-            review = current_review
-        else:
-            if frontier_budget is not None and not frontier_budget.consume():
-                raise IngestReviewBudgetExhausted
-            try:
-                review = _run_ingest_frontier_review(
-                    shard.proposal,
-                    reviewer=reviewer,
-                )
-            except Exception as exc:
-                return _ingest_review_shard_failure(
-                    "local_consensus_failed",
-                    "local consensus reviewer failed for ingest review shard "
-                    f"{shard_index}: {type(exc).__name__}: {exc}",
-                )
-            review = _normalize_ingest_frontier_review(
-                review,
-                proposal=shard.proposal,
-            )
-            if review.get("decision") == "apply_available":
-                from llm_wiki_mcp.page_mutation import decision_authority_lock
-
-                with decision_authority_lock():
-                    current_authority, current_error = _current_ingest_review_authority(
-                        reviewer=reviewer
-                    )
-                    compare_error = (
-                        current_error
-                        or decision_authority.compare_semantic_authority(
-                            authority,
-                            current_authority,
-                            lane="ingest_reconciliation",
-                        )
-                    )
-                    if compare_error is not None:
-                        return _ingest_review_shard_failure(
-                            "local_decision_authority_changed", compare_error
-                        )
-                    if proof_error := _ingest_review_authority_error(
-                        review,
-                        authority,
-                    ):
-                        return _ingest_review_shard_failure(
-                            "local_consensus_proof_invalid", proof_error
-                        )
-                    _readback, artifact_error = (
-                        _write_and_readback_ingest_review_artifact(
-                            shard_review_path,
-                            source_key=shard_source_key,
-                            proposal_sha256=shard.proposal_sha256,
-                            review=review,
-                            authority=authority,
-                            integrity=True,
-                        )
-                    )
-                if artifact_error is not None:
-                    return _ingest_review_shard_failure(
-                        "ingest_review_shard_artifact_invalid", artifact_error
-                    )
-        shard_reviews.append(review)
-
-    repair_reviews = [
-        review
-        for review in shard_reviews
-        if any(
-            isinstance(review.get(field), list) and bool(review.get(field))
-            for field in ("invalid_tags", "replacement_operations")
-        )
-    ]
-    non_approvals = [
-        review
-        for review in shard_reviews
-        if review.get("decision") != "apply_available"
-    ]
-    if not non_approvals:
-        return _ingest_review_shard_aggregate(plan, shard_reviews)
-    if len(repair_reviews) == 1 and non_approvals == repair_reviews:
-        # The existing exact filename-scoped repair path materializes this
-        # one shard's host-bound arrays and reviews the rebuilt full proposal.
-        return repair_reviews[0]
-    if repair_reviews:
-        return _ingest_review_shard_failure(
-            (
-                "ingest_review_multiple_repairs_unsupported"
-                if len(repair_reviews) > 1
-                else "ingest_review_mixed_repair_unsupported"
-            ),
-            (
-                "multiple ingest review shards requested repairs; no mutation was authorized"
-                if len(repair_reviews) > 1
-                else "one ingest review shard requested repair while another did not approve; "
-                "no mutation was authorized"
-            ),
-        )
-    if any(review.get("decision") == "confirmed_noop" for review in non_approvals):
-        return _ingest_review_shard_failure(
-            "ingest_review_shard_nonapproval",
-            "confirmed_noop on one operation shard cannot discard the complete raw",
-        )
-    return non_approvals[0]
 
 
 def _ingest_sharded_review_reuse_error(
@@ -6296,88 +3594,14 @@ def _inspect_ingest_review_shard_plan_state(
     source_key: str,
     authority: dict[str, Any],
 ) -> _IngestReviewShardPlanState:
-    """Classify every durable shard against one exact current authority.
+    from llm_wiki_mcp.ingest_recovery_runtime import (
+        inspect_ingest_review_shard_plan_state,
+    )
 
-    A well-formed verdict from an older authority epoch is retained as audit
-    evidence but contributes no approval to the current epoch.  Invalid,
-    non-terminal, or integrity-mismatched artifacts remain fail-closed.
-    """
-
-    manifest_error = _stored_ingest_review_shard_manifest_error(
+    return inspect_ingest_review_shard_plan_state(
         plan,
         source_key=source_key,
-    )
-    if manifest_error is not None:
-        return _IngestReviewShardPlanState(
-            statuses=(),
-            reviews=(),
-            authorities=(),
-            invalid_reason=manifest_error,
-        )
-    statuses: list[str] = []
-    reviews: list[dict[str, Any] | None] = []
-    authorities: list[dict[str, Any] | None] = []
-    for shard_index, shard in enumerate(plan.shards):
-        shard_source_key, shard_review_path = _ingest_review_shard_review_identity(
-            plan,
-            shard_index=shard_index,
-            shard=shard,
-        )
-        if not shard_review_path.exists():
-            statuses.append("missing")
-            reviews.append(None)
-            authorities.append(None)
-            continue
-        shard_artifact = _load_ingest_review_artifact(
-            shard_review_path,
-            source_key=shard_source_key,
-            proposal_sha256=shard.proposal_sha256,
-            require_integrity=True,
-        )
-        shard_review = (
-            shard_artifact.get("review") if isinstance(shard_artifact, dict) else None
-        )
-        artifact_authority = (
-            shard_artifact.get("authority")
-            if isinstance(shard_artifact, dict)
-            else None
-        )
-        if (
-            shard_artifact is None
-            or not isinstance(artifact_authority, dict)
-            or not isinstance(shard_review, dict)
-            or _normalize_ingest_frontier_review(
-                shard_review,
-                proposal=shard.proposal,
-            )
-            != shard_review
-            or shard_review.get("decision") != "apply_available"
-            or _ingest_review_authority_error(
-                shard_review,
-                artifact_authority,
-            )
-            is not None
-        ):
-            return _IngestReviewShardPlanState(
-                statuses=tuple(statuses + ["invalid"]),
-                reviews=tuple(reviews + [None]),
-                authorities=tuple(authorities + [None]),
-                invalid_reason=(
-                    f"review shard {shard_index} durable verdict is invalid"
-                ),
-            )
-        if artifact_authority == authority:
-            statuses.append("current_approved")
-            reviews.append(shard_review)
-            authorities.append(artifact_authority)
-        else:
-            statuses.append("stale_valid")
-            reviews.append(None)
-            authorities.append(artifact_authority)
-    return _IngestReviewShardPlanState(
-        statuses=tuple(statuses),
-        reviews=tuple(reviews),
-        authorities=tuple(authorities),
+        authority=authority,
     )
 
 
@@ -6387,269 +3611,14 @@ def _load_pretriage_ingest_shard_continuation(
     *,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
 ) -> _IngestReviewShardContinuation | None:
-    """Load durable partial shard progress without rerunning semantic generation.
+    from llm_wiki_mcp.ingest_recovery_runtime import (
+        load_pretriage_ingest_shard_continuation,
+    )
 
-    A continuation is intentionally narrower than terminal recovery: the full
-    proposal is still unapplied and no parent verdict exists yet.  Durable
-    approvals from the current authority are reused; self-consistent approvals
-    from an older epoch are treated as unapproved and reviewed again.
-    """
-
-    source_key = _ingest_source_key(raw_content, raw_keywords)
-    proposal_path, review_path = _ingest_artifact_paths(source_key)
-    if not proposal_path.exists():
-        return None
-    proposal, planned = _load_strict_ingest_proposal_for_recovery(
-        proposal_path,
-        source_key=source_key,
-        raw_content=raw_content,
-        raw_keywords=raw_keywords,
-    )
-    if (
-        proposal.get("schema_version")
-        == _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION
-    ):
-        # Schema-v1 proposals predate source-operation provenance and therefore
-        # cannot be projected into a current review shard.  Once their complete
-        # envelope has passed the strict raw/source/digest checks above, an
-        # *unapproved* v1 proposal (including one with only a legacy unsealed
-        # review) has authorized no effect and may be replaced by the ordinary
-        # v2 generation path.  The stable source-key path makes this a one-way
-        # transition: after the v2 artifact is durably written, this legacy
-        # branch cannot be selected again.
-        #
-        # Do not use that migration escape hatch when any continuation-family
-        # evidence exists.  Such state would mean the artifact is not merely an
-        # old unreviewed proposal; overwriting it could discard a partial proof.
-        direct_continuation_paths = tuple(
-            path
-            for path in (
-                _ingest_review_continuation_marker_path(source_key),
-                _ingest_review_repair_transition_path(source_key),
-                _ingest_review_stall_path(source_key),
-            )
-            if path.exists()
-        )
-        if direct_continuation_paths or _has_sharded_ingest_review_artifact_family(
-            review_path,
-            proposal=proposal,
-            source_key=source_key,
-        ):
-            raise IngestApplyError(
-                "pre-triage legacy proposal has partial continuation evidence; "
-                "refusing regeneration"
-            )
-        return None
-    if review_path.exists():
-        return None
-    if _prepared_plan_targets_reserved_system_page(planned):
-        return None
-    if proposal.get("failed_operation_specs"):
-        # Partial generation is intentionally regenerated from the saved
-        # triage plan; it cannot be converted into an exact shard continuation.
-        return None
-    authority, authority_error = _current_ingest_review_authority(reviewer=reviewer)
-    authority_shape_error = (
-        _ingest_review_authority_shape_error(authority)
-        if authority is not None
-        else None
-    )
-    if authority_error is not None or authority is None or authority_shape_error:
-        raise IngestApplyError(
-            "pre-triage shard continuation authority is unavailable: "
-            + (authority_error or authority_shape_error or "authority is missing")
-        )
-
-    try:
-        plan = _build_ingest_review_shard_plan(
-            proposal,
-            force_review_unit=True,
-        )
-    except (IngestReviewShardCapacityError, TypeError, ValueError) as exc:
-        raise IngestApplyError(
-            f"pre-triage shard continuation recomputation failed: {exc}"
-        ) from exc
-    assert plan is not None
-    manifest_path = _ingest_review_shard_manifest_path(plan)
-    prior_authority: dict[str, Any] | None = None
-    prior_verified_progress = False
-    if not manifest_path.exists():
-        prior_plan_found = False
-        proposal_sha256 = _canonical_json_sha256(proposal)
-        for prior_path in sorted(
-            proposal_path.parent.glob("review-shard-manifest-*.json")
-        ):
-            try:
-                prior_artifact = json.loads(prior_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if (
-                not isinstance(prior_artifact, dict)
-                or prior_artifact.get("source_key") != source_key
-                or prior_artifact.get("full_proposal_sha256") != proposal_sha256
-            ):
-                continue
-            prior_manifest = prior_artifact.get("manifest")
-            try:
-                prior_plan = _ingest_review_shard_plan_from_sealed_manifest(
-                    proposal,
-                    prior_manifest,
-                )
-            except (IngestReviewShardCapacityError, TypeError, ValueError) as exc:
-                raise IngestApplyError(
-                    "pre-triage shard continuation prior manifest is invalid: "
-                    + str(exc)
-                ) from exc
-            if prior_path != _ingest_review_shard_manifest_path(prior_plan):
-                raise IngestApplyError(
-                    "pre-triage shard continuation prior manifest filename is invalid"
-                )
-            prior_state = _inspect_ingest_review_shard_plan_state(
-                prior_plan,
-                source_key=source_key,
-                authority=authority,
-            )
-            if prior_state.invalid_reason is not None:
-                raise IngestApplyError(
-                    "pre-triage shard continuation prior proof is invalid: "
-                    + prior_state.invalid_reason
-                )
-            prior_authority = next(
-                (
-                    candidate
-                    for candidate in prior_state.authorities
-                    if isinstance(candidate, dict) and candidate != authority
-                ),
-                prior_authority,
-            )
-            prior_verified_progress = prior_verified_progress or bool(
-                prior_state.current_approved_indices
-                or "stale_valid" in prior_state.statuses
-            )
-            prior_plan_found = True
-        if not prior_plan_found:
-            # A standard proposal with only a semantic retry is not a bounded
-            # continuation.  Let the ordinary convergence loop regenerate it.
-            return None
-        manifest_error = _persist_ingest_review_shard_manifest(
-            plan,
-            source_key=source_key,
-        )
-        if manifest_error is not None:
-            raise IngestApplyError(
-                "pre-triage shard continuation manifest reseed failed: "
-                + manifest_error
-            )
-    shard_state = _inspect_ingest_review_shard_plan_state(
-        plan,
-        source_key=source_key,
-        authority=authority,
-    )
-    if shard_state.invalid_reason is not None:
-        raise IngestApplyError(
-            "pre-triage shard continuation durable approval is invalid: "
-            + shard_state.invalid_reason
-        )
-    prior_authority = next(
-        (
-            candidate
-            for candidate in shard_state.authorities
-            if isinstance(candidate, dict) and candidate != authority
-        ),
-        prior_authority,
-    )
-    if stall_error := _matching_ingest_review_stall_error(
-        source_key=source_key,
-        plan=plan,
-        authority=authority,
-        approved_indices=shard_state.current_approved_indices,
-    ):
-        raise IngestApplyError(
-            "pre-triage shard continuation is stalled: " + stall_error
-        )
-    if shard_state.approved_shards == 0:
-        marker, marker_error = _load_ingest_review_continuation_marker(
-            source_key=source_key,
-            plan=plan,
-            authority=authority,
-        )
-        if marker_error is not None:
-            raise IngestApplyError(
-                "pre-triage zero-approval continuation marker is invalid: "
-                + marker_error
-            )
-        stale_marker: dict[str, Any] | None = None
-        if marker is None:
-            stale_marker, stale_marker_error = _load_ingest_review_continuation_marker(
-                source_key=source_key,
-                plan=plan,
-                authority=authority,
-                allow_stale_identity=True,
-            )
-            if stale_marker_error is not None:
-                raise IngestApplyError(
-                    "pre-triage stale continuation marker is invalid: "
-                    + stale_marker_error
-                )
-        if marker is None and (
-            prior_authority is not None
-            or prior_verified_progress
-            or stale_marker is not None
-        ):
-            stale_authority_sha256 = (
-                str(stale_marker.get("current_authority_sha256"))
-                if isinstance(stale_marker, dict)
-                else None
-            )
-            marker_reason = (
-                "authority_epoch_reseed"
-                if prior_authority is not None
-                or (
-                    stale_authority_sha256 is not None
-                    and stale_authority_sha256 != _canonical_json_sha256(authority)
-                )
-                else "router_config_reseed"
-            )
-            marker_write_error = _persist_ingest_review_continuation_marker(
-                source_key=source_key,
-                plan=plan,
-                reason=marker_reason,
-                previous_full_proposal_sha256=plan.full_proposal_sha256,
-                previous_authority=(
-                    prior_authority or stale_authority_sha256 or authority
-                ),
-                current_authority=authority,
-            )
-            if marker_write_error is not None:
-                raise IngestApplyError(
-                    "pre-triage authority reseed marker failed: " + marker_write_error
-                )
-            marker, marker_error = _load_ingest_review_continuation_marker(
-                source_key=source_key,
-                plan=plan,
-                authority=authority,
-            )
-            if marker_error is not None or marker is None:
-                raise IngestApplyError(
-                    "pre-triage authority reseed marker readback failed: "
-                    + (marker_error or "marker is missing")
-                )
-        if marker is None:
-            return None
-        if marker.get("state") == "available":
-            if consume_error := _consume_ingest_review_continuation_marker(
-                source_key,
-                marker,
-            ):
-                raise IngestApplyError(
-                    "pre-triage zero-approval continuation marker was not claimed: "
-                    + consume_error
-                )
-    return _IngestReviewShardContinuation(
-        proposal=proposal,
-        planned=tuple(planned),
-        plan=plan,
-        approved_shards=shard_state.approved_shards,
+    return load_pretriage_ingest_shard_continuation(
+        raw_content,
+        raw_keywords,
+        reviewer=reviewer,
     )
 
 
@@ -6779,775 +3748,26 @@ def _review_and_apply_ingest_operations(
     continuation_reseed_from_sha256: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Authorize by risk policy, durably bind the verdict, and CAS apply."""
+    from llm_wiki_mcp.ingest_review_apply import (
+        review_and_apply_ingest_operations,
+    )
 
-    source_key = _ingest_source_key(raw_content, raw_keywords)
-    proposal_path, review_path = _ingest_artifact_paths(source_key)
-    audit_state_path = proposal_path.parent / "audit-state.json"
-    recovered = _load_ingest_proposal(
-        proposal_path,
-        source_key=source_key,
+    return review_and_apply_ingest_operations(
+        operations,
         raw_content=raw_content,
+        raw_keywords=raw_keywords,
+        source_raw=source_raw,
+        triage_plan=triage_plan,
+        failed_operation_specs=failed_operation_specs,
+        local_disposition=local_disposition,
+        reviewer=reviewer,
+        force_frontier_review=force_frontier_review,
+        frontier_budget=frontier_budget,
+        shard_continuation=shard_continuation,
+        allow_empty_shard_continuation=allow_empty_shard_continuation,
+        continuation_reseed_from_sha256=continuation_reseed_from_sha256,
+        dry_run=dry_run,
     )
-    # Only a terminal verdict can pin a previous local proposal.  A durable
-    # proposal without such a verdict represents retryable local/frontier
-    # work; rebuild it from this attempt so a transient generation failure
-    # cannot suppress a later complete plan forever.
-    if recovered is not None:
-        recovered_proposal, _recovered_planned = recovered
-        recovered_sha256 = _canonical_json_sha256(recovered_proposal)
-        recovered_review = _load_ingest_review(
-            review_path,
-            source_key=source_key,
-            proposal_sha256=recovered_sha256,
-        )
-        if recovered_review is None:
-            if shard_continuation is not None:
-                if (
-                    recovered_proposal != shard_continuation.proposal
-                    or tuple(_recovered_planned) != shard_continuation.planned
-                    or recovered_sha256 != shard_continuation.plan.full_proposal_sha256
-                    or _stored_ingest_review_shard_manifest_error(
-                        shard_continuation.plan,
-                        source_key=source_key,
-                    )
-                    is not None
-                ):
-                    raise IngestApplyError(
-                        "pre-triage shard continuation changed before review"
-                    )
-            else:
-                if review_path.exists() and _has_sharded_ingest_review_artifact_family(
-                    review_path,
-                    proposal=recovered_proposal,
-                    source_key=source_key,
-                ):
-                    return _invalid_sharded_review_result(
-                        source_key=source_key,
-                        proposal=recovered_proposal,
-                        recovered_artifact=True,
-                    )
-                recovered = None
-        elif shard_continuation is not None:
-            raise IngestApplyError(
-                "pre-triage shard continuation unexpectedly has a parent review"
-            )
-    elif shard_continuation is not None:
-        raise IngestApplyError("pre-triage shard continuation proposal is missing")
-    if recovered is None:
-        planned, totals = _prepare_operations(operations, read_only=dry_run)
-        proposal = _build_ingest_frontier_proposal(
-            raw_content=raw_content,
-            raw_keywords=raw_keywords,
-            source_raw=source_raw,
-            operations=operations,
-            planned=planned,
-            link_totals=totals,
-            triage_plan=triage_plan,
-            failed_operation_specs=failed_operation_specs,
-            local_disposition=local_disposition,
-        )
-        from llm_wiki_mcp.ingest_audit import decide_ingest_audit
-
-        audit_decision = decide_ingest_audit(
-            source_key=source_key,
-            raw_content=raw_content,
-            operations=operations,
-            failed_operation_specs=list(failed_operation_specs or []),
-            local_disposition=local_disposition,
-            state_path=audit_state_path,
-            force=force_frontier_review,
-            explicit_reviewer=reviewer is not None,
-        ).to_dict()
-        proposal["audit_decision"] = audit_decision
-        recovered_artifact = False
-    else:
-        proposal, planned = recovered
-        audit_raw = proposal.get("audit_decision")
-        audit_decision = (
-            dict(audit_raw)
-            if isinstance(audit_raw, dict)
-            else {
-                "required": True,
-                "mode": "legacy-frontier",
-                "reasons": ["legacy reviewed artifact"],
-            }
-        )
-        totals_raw = proposal.get("link_reconciliation")
-        totals = (
-            {
-                key: int(totals_raw.get(key, 0))
-                for key in ("resolved", "rewritten", "unwrapped")
-            }
-            if isinstance(totals_raw, dict)
-            else {"resolved": 0, "rewritten": 0, "unwrapped": 0}
-        )
-        recovered_artifact = True
-
-    proposal_sha256 = _canonical_json_sha256(proposal)
-    if dry_run:
-        return {
-            "status": "dry_run",
-            "source_key": source_key,
-            "proposal_sha256": proposal_sha256,
-            "proposal": proposal,
-            "audit": audit_decision,
-            "created": [],
-            "updated": [],
-            "artifact_written": False,
-        }
-
-    if not recovered_artifact:
-        try:
-            _write_ingest_artifact(
-                proposal_path,
-                {
-                    "schema_version": INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
-                    "kind": "ingest_frontier_proposal_artifact",
-                    "source_key": source_key,
-                    "proposal_sha256": proposal_sha256,
-                    "proposal": proposal,
-                },
-            )
-        except OSError as exc:
-            return {
-                "status": "needs_retry",
-                "source_key": source_key,
-                "proposal_sha256": proposal_sha256,
-                "summary": f"review proposal artifact write failed: {exc}",
-                "created": [],
-                "updated": [],
-                "audit": audit_decision,
-            }
-
-    review_artifact = _load_ingest_review_artifact(
-        review_path,
-        source_key=source_key,
-        proposal_sha256=proposal_sha256,
-    )
-    if (
-        review_artifact is None
-        and review_path.exists()
-        and _has_sharded_ingest_review_artifact_family(
-            review_path,
-            proposal=proposal,
-            source_key=source_key,
-        )
-    ):
-        return _invalid_sharded_review_result(
-            source_key=source_key,
-            proposal=proposal,
-            recovered_artifact=recovered_artifact,
-        )
-    artifact_review = (
-        review_artifact.get("review") if isinstance(review_artifact, dict) else None
-    )
-    artifact_review = artifact_review if isinstance(artifact_review, dict) else None
-    artifact_authority = (
-        review_artifact.get("authority") if isinstance(review_artifact, dict) else None
-    )
-    artifact_authority = (
-        artifact_authority if isinstance(artifact_authority, dict) else None
-    )
-    exact_postimages_already_applied = (
-        artifact_review is not None
-        and artifact_review.get("decision") == "apply_available"
-        and bool(planned)
-        and _prepared_plan_is_fully_applied(planned)
-    )
-    if (
-        artifact_review is not None
-        and artifact_authority is not None
-        and "review_shard_proof" in artifact_review
-    ):
-        shard_reuse_error = (
-            _historical_ingest_sharded_review_recovery_error(
-                artifact_review,
-                proposal,
-                artifact_authority,
-            )
-            if exact_postimages_already_applied
-            else _ingest_sharded_review_reuse_error(
-                artifact_review,
-                proposal,
-                artifact_authority,
-            )
-        )
-        if shard_reuse_error is not None:
-            return {
-                "status": "needs_retry",
-                "source_key": source_key,
-                "proposal_sha256": proposal_sha256,
-                "review": _ingest_review_shard_failure(
-                    "ingest_review_shard_reuse_invalid",
-                    shard_reuse_error,
-                ),
-                "summary": shard_reuse_error,
-                "recovered_artifact": recovered_artifact,
-                "reused_review": False,
-                "created": [],
-                "updated": [],
-                "audit": audit_decision,
-            }
-
-    # A process may die after the reviewed postimages are durable but before
-    # the surrounding raw/job state is committed.  Exact postimage equality
-    # proves this recovery performs no new semantic page write, so it remains
-    # safe even if the adopted authority has since changed.  Partial batches,
-    # confirmed-noop decisions, and legacy/malformed review artifacts never
-    # receive this exception.
-    if (
-        artifact_review is not None
-        and artifact_review.get("decision") == "apply_available"
-        and artifact_authority is not None
-        and _ingest_review_authority_shape_error(artifact_authority) is None
-        and _ingest_review_authority_error(artifact_review, artifact_authority) is None
-        and exact_postimages_already_applied
-    ):
-        created, updated = _apply_prepared_operations(
-            planned,
-            link_totals=totals,
-            recovery_only=True,
-        )
-        return {
-            "status": "apply_available",
-            "source_key": source_key,
-            "proposal_sha256": proposal_sha256,
-            "review": artifact_review,
-            "recovered_artifact": recovered_artifact,
-            "reused_review": True,
-            "recovery_basis": "exact_postimages_already_applied",
-            "created": created,
-            "updated": updated,
-            "audit": audit_decision,
-        }
-
-    review_authority, authority_error = _current_ingest_review_authority(
-        reviewer=reviewer
-    )
-    authority_shape_error = (
-        _ingest_review_authority_shape_error(review_authority)
-        if review_authority is not None
-        else None
-    )
-    if (
-        authority_error is not None
-        or review_authority is None
-        or authority_shape_error is not None
-    ):
-        return {
-            "status": "needs_retry",
-            "source_key": source_key,
-            "proposal_sha256": proposal_sha256,
-            "summary": authority_error
-            or authority_shape_error
-            or "ingest review authority is missing",
-            "recovered_artifact": recovered_artifact,
-            "reused_review": False,
-            "created": [],
-            "updated": [],
-            "audit": audit_decision,
-        }
-
-    stale_review_reason: str | None = None
-    if artifact_review is not None:
-        if artifact_authority != review_authority:
-            stale_review_reason = "ingest review authority changed before effect"
-        else:
-            stale_review_reason = _ingest_review_authority_error(
-                artifact_review, review_authority
-            )
-    review = artifact_review if stale_review_reason is None else None
-    reused_review = review is not None
-    frontier_used = False
-    if review is None:
-        # Triage and generation are semantic model output.  Deterministic
-        # schema/path/link validation proves that a proposal is well-formed;
-        # it cannot prove that its claims are grounded in the raw.  Therefore
-        # even an audit sampler's "low-risk" result must never authorize a
-        # write or discard by itself.  Every semantic ingest disposition goes
-        # through the lane-scoped local consensus gate, which fails closed
-        # while shadowed or before an adoption artifact exists.
-        frontier_used = True
-        runtime_status.safe_write_status(stage="local-consensus-review")
-        shard_plan: _IngestReviewShardPlan | None = None
-        shard_baseline_indices: tuple[int, ...] = ()
-        try:
-            shard_plan = (
-                shard_continuation.plan
-                if shard_continuation is not None
-                else _build_ingest_review_shard_plan(proposal)
-            )
-            if (
-                shard_plan is not None
-                and _ingest_review_shard_manifest_path(shard_plan).exists()
-            ):
-                baseline_state = _inspect_ingest_review_shard_plan_state(
-                    shard_plan,
-                    source_key=source_key,
-                    authority=review_authority,
-                )
-                if baseline_state.invalid_reason is None:
-                    shard_baseline_indices = baseline_state.current_approved_indices
-            if shard_plan is None:
-                if frontier_budget is not None and not frontier_budget.consume():
-                    raise IngestReviewBudgetExhausted
-                review = _run_ingest_frontier_review(proposal, reviewer=reviewer)
-            else:
-                review = _run_ingest_sharded_review(
-                    shard_plan,
-                    source_key=source_key,
-                    reviewer=reviewer,
-                    authority=review_authority,
-                    frontier_budget=frontier_budget,
-                )
-        except IngestReviewBudgetExhausted:
-            used = frontier_budget.used if frontier_budget is not None else 0
-            limit = frontier_budget.limit if frontier_budget is not None else 0
-            current_authority, current_authority_error = (
-                _current_ingest_review_authority(reviewer=reviewer)
-            )
-            current_authority_shape_error = (
-                _ingest_review_authority_shape_error(current_authority)
-                if isinstance(current_authority, dict)
-                else "current ingest review authority is missing"
-            )
-            if current_authority_error is not None or current_authority_shape_error:
-                stale_summary = (
-                    "ingest review authority changed before shard continuation "
-                    "or became unavailable: "
-                    + (current_authority_error or current_authority_shape_error)
-                )
-                return {
-                    "status": "needs_retry",
-                    "source_key": source_key,
-                    "proposal_sha256": proposal_sha256,
-                    "summary": stale_summary,
-                    "review": _ingest_review_shard_failure(
-                        "local_decision_authority_changed",
-                        stale_summary,
-                    ),
-                    "recovered_artifact": recovered_artifact,
-                    "reused_review": False,
-                    "created": [],
-                    "updated": [],
-                    "audit": audit_decision,
-                }
-            assert isinstance(current_authority, dict)
-            authority_epoch_changed = (
-                decision_authority.compare_semantic_authority(
-                    review_authority,
-                    current_authority,
-                    lane="ingest_reconciliation",
-                )
-                is not None
-            )
-            continuation_plan = shard_plan
-            if authority_epoch_changed or (
-                continuation_plan is None and allow_empty_shard_continuation
-            ):
-                try:
-                    continuation_plan = _build_ingest_review_shard_plan(
-                        proposal,
-                        force_review_unit=True,
-                    )
-                except (IngestReviewShardCapacityError, TypeError, ValueError) as exc:
-                    invalid_summary = (
-                        "ingest review continuation reseed failed: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                    return {
-                        "status": "needs_retry",
-                        "source_key": source_key,
-                        "proposal_sha256": proposal_sha256,
-                        "summary": invalid_summary,
-                        "review": _ingest_review_shard_failure(
-                            "ingest_review_shard_manifest_invalid",
-                            invalid_summary,
-                        ),
-                        "recovered_artifact": recovered_artifact,
-                        "reused_review": False,
-                        "created": [],
-                        "updated": [],
-                        "audit": audit_decision,
-                    }
-            approved_shards = 0
-            continuation_error: str | None = None
-            shard_state: _IngestReviewShardPlanState | None = None
-            if continuation_plan is not None:
-                manifest_path = _ingest_review_shard_manifest_path(continuation_plan)
-                if not manifest_path.exists():
-                    continuation_error = _persist_ingest_review_shard_manifest(
-                        continuation_plan,
-                        source_key=source_key,
-                    )
-                if continuation_error is None:
-                    shard_state = _inspect_ingest_review_shard_plan_state(
-                        continuation_plan,
-                        source_key=source_key,
-                        authority=current_authority,
-                    )
-                    continuation_error = shard_state.invalid_reason
-                    approved_shards = shard_state.approved_shards
-            if continuation_error is not None:
-                invalid_summary = (
-                    "ingest review continuation proof is invalid: " + continuation_error
-                )
-                return {
-                    "status": "needs_retry",
-                    "source_key": source_key,
-                    "proposal_sha256": proposal_sha256,
-                    "summary": invalid_summary,
-                    "review": _ingest_review_shard_failure(
-                        "ingest_review_shard_artifact_invalid",
-                        invalid_summary,
-                    ),
-                    "recovered_artifact": recovered_artifact,
-                    "reused_review": False,
-                    "created": [],
-                    "updated": [],
-                    "audit": audit_decision,
-                }
-            current_approved_indices = (
-                shard_state.current_approved_indices if shard_state is not None else ()
-            )
-            made_progress = set(shard_baseline_indices) < set(current_approved_indices)
-            exact_repair_reseeded = (
-                allow_empty_shard_continuation
-                and continuation_plan is not None
-                and approved_shards == 0
-            )
-            continuation_allowed = (
-                continuation_plan is not None
-                and approved_shards < len(continuation_plan.shards)
-                and (made_progress or authority_epoch_changed or exact_repair_reseeded)
-            )
-            if (
-                continuation_plan is not None
-                and shard_state is not None
-                and not continuation_allowed
-                and not authority_epoch_changed
-                and not exact_repair_reseeded
-            ):
-                stall_write_error = _persist_ingest_review_stall(
-                    source_key=source_key,
-                    plan=continuation_plan,
-                    authority=current_authority,
-                    approved_indices=shard_state.current_approved_indices,
-                )
-                if stall_write_error is not None:
-                    invalid_summary = (
-                        "ingest review no-progress tombstone failed: "
-                        + stall_write_error
-                    )
-                    return {
-                        "status": "needs_retry",
-                        "source_key": source_key,
-                        "proposal_sha256": proposal_sha256,
-                        "summary": invalid_summary,
-                        "review": _ingest_review_shard_failure(
-                            "ingest_review_shard_artifact_invalid",
-                            invalid_summary,
-                        ),
-                        "recovered_artifact": recovered_artifact,
-                        "reused_review": False,
-                        "created": [],
-                        "updated": [],
-                        "audit": audit_decision,
-                    }
-            if (
-                continuation_allowed
-                and continuation_plan is not None
-                and approved_shards == 0
-            ):
-                marker_reason = (
-                    "authority_epoch_reseed"
-                    if authority_epoch_changed
-                    else "exact_repair_reseed"
-                )
-                previous_sha256 = (
-                    proposal_sha256
-                    if authority_epoch_changed
-                    else str(continuation_reseed_from_sha256 or "")
-                )
-                marker_error = _persist_ingest_review_continuation_marker(
-                    source_key=source_key,
-                    plan=continuation_plan,
-                    reason=marker_reason,
-                    previous_full_proposal_sha256=previous_sha256,
-                    previous_authority=review_authority,
-                    current_authority=current_authority,
-                )
-                if marker_error is not None:
-                    invalid_summary = (
-                        "ingest review continuation marker failed: " + marker_error
-                    )
-                    return {
-                        "status": "needs_retry",
-                        "source_key": source_key,
-                        "proposal_sha256": proposal_sha256,
-                        "summary": invalid_summary,
-                        "review": _ingest_review_shard_failure(
-                            "ingest_review_shard_artifact_invalid",
-                            invalid_summary,
-                        ),
-                        "recovered_artifact": recovered_artifact,
-                        "reused_review": False,
-                        "created": [],
-                        "updated": [],
-                        "audit": audit_decision,
-                    }
-            continuation = (
-                {
-                    "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
-                    "kind": "ingest_review_shard_continuation",
-                    "full_proposal_sha256": continuation_plan.full_proposal_sha256,
-                    "manifest_sha256": continuation_plan.manifest_sha256,
-                    "approved_shards": approved_shards,
-                    "total_shards": len(continuation_plan.shards),
-                    "remaining_shards": (
-                        len(continuation_plan.shards) - approved_shards
-                    ),
-                    "review_calls_used": used,
-                    "review_call_limit": limit,
-                }
-                if continuation_allowed and continuation_plan is not None
-                else None
-            )
-            budget_status = (
-                "shard_continuation_pending"
-                if continuation is not None
-                else "frontier_budget_exhausted"
-            )
-            runtime_status.safe_append_metric(
-                "ingest_authorization",
-                source_key=source_key,
-                mode=str(audit_decision.get("mode") or "unknown"),
-                frontier_used=used > 0,
-                required=True,
-                sample_rate=audit_decision.get("sample_rate"),
-                caught_issue_rate=audit_decision.get("caught_issue_rate"),
-                decision=budget_status,
-            )
-            result = {
-                "status": budget_status,
-                "source_key": source_key,
-                "proposal_sha256": proposal_sha256,
-                "summary": f"structured review budget exhausted ({used}/{limit})",
-                "review": {
-                    "decision": "retry",
-                    "summary": (
-                        "structured review budget exhausted; keep the raw "
-                        "pending for local consensus"
-                    ),
-                },
-                "recovered_artifact": recovered_artifact,
-                "reused_review": False,
-                "created": [],
-                "updated": [],
-                "audit": audit_decision,
-            }
-            if continuation is not None:
-                result["shard_continuation"] = continuation
-            return result
-        except IngestReviewShardCapacityError as exc:
-            review = _ingest_review_shard_failure(exc.failure_class, exc.reason)
-        except Exception as exc:
-            review = {
-                "decision": "needs_retry",
-                "summary": f"local consensus reviewer failed: {exc.__class__.__name__}: {exc}",
-            }
-
-    review = _normalize_ingest_frontier_review(review, proposal=proposal)
-    decision = str(review.get("decision") or "retry")
-    if decision in {"apply_available", "confirmed_noop"} and not reused_review:
-        # A verdict is not durable until its own embedded audit and the live
-        # adoption/policy epoch agree.  Re-resolving after the model call
-        # catches authority replacement while consensus was in flight.
-        current_authority, current_authority_error = _current_ingest_review_authority(
-            reviewer=reviewer
-        )
-        if current_authority_error is not None or current_authority != review_authority:
-            return {
-                "status": "needs_retry",
-                "source_key": source_key,
-                "proposal_sha256": proposal_sha256,
-                "review": review,
-                "summary": current_authority_error
-                or "ingest review authority changed during review",
-                "recovered_artifact": recovered_artifact,
-                "reused_review": False,
-                "created": [],
-                "updated": [],
-                "audit": audit_decision,
-            }
-        if policy_error := _ingest_review_authority_error(review, review_authority):
-            return {
-                "status": "needs_retry",
-                "source_key": source_key,
-                "proposal_sha256": proposal_sha256,
-                "review": review,
-                "summary": policy_error,
-                "recovered_artifact": recovered_artifact,
-                "reused_review": False,
-                "created": [],
-                "updated": [],
-                "audit": audit_decision,
-            }
-    runtime_status.safe_append_metric(
-        "ingest_authorization",
-        source_key=source_key,
-        mode=str(audit_decision.get("mode") or "unknown"),
-        frontier_used=frontier_used,
-        required=audit_decision.get("required") is True,
-        sample_rate=audit_decision.get("sample_rate"),
-        caught_issue_rate=audit_decision.get("caught_issue_rate"),
-        decision=decision,
-    )
-    _safe_log(
-        f"ingest | authorization: {audit_decision.get('mode', 'unknown')} -> {decision}"
-    )
-    if frontier_used:
-        try:
-            from llm_wiki_mcp.ingest_audit import record_frontier_audit_outcome
-
-            record_frontier_audit_outcome(
-                state_path=audit_state_path,
-                source_key=source_key,
-                approved=decision in {"apply_available", "confirmed_noop"},
-                mode=str(audit_decision.get("mode") or "mandatory"),
-                reasons=[
-                    str(reason)
-                    for reason in audit_decision.get("reasons", [])
-                    if isinstance(reason, str)
-                ],
-            )
-        except Exception:
-            pass
-    if decision not in {"apply_available", "confirmed_noop"}:
-        return {
-            "status": "needs_retry" if decision == "retry" else decision,
-            "source_key": source_key,
-            "proposal_sha256": proposal_sha256,
-            "review": review,
-            "recovered_artifact": recovered_artifact,
-            "reused_review": reused_review,
-            "created": [],
-            "updated": [],
-            "audit": audit_decision,
-        }
-
-    # Adoption artifact writers hold this same lease.  Keep authority stable
-    # across the final semantic effect: either the exact page CAS batch or the
-    # confirmed-noop disposition that permits the caller to retire the raw.
-    from llm_wiki_mcp.page_mutation import decision_authority_lock
-
-    with decision_authority_lock():
-        current_authority, current_authority_error = _current_ingest_review_authority(
-            reviewer=reviewer
-        )
-        authority_compare_error = (
-            decision_authority.compare_semantic_authority(
-                review_authority,
-                current_authority,
-                lane="ingest_reconciliation",
-            )
-            if current_authority_error is None
-            else current_authority_error
-        )
-        if authority_compare_error is not None:
-            return {
-                "status": "needs_retry",
-                "source_key": source_key,
-                "proposal_sha256": proposal_sha256,
-                "review": review,
-                "summary": authority_compare_error,
-                "recovered_artifact": recovered_artifact,
-                "reused_review": reused_review,
-                "created": [],
-                "updated": [],
-                "audit": audit_decision,
-            }
-        if proof_error := _ingest_review_authority_error(review, review_authority):
-            return {
-                "status": "needs_retry",
-                "source_key": source_key,
-                "proposal_sha256": proposal_sha256,
-                "review": review,
-                "summary": proof_error,
-                "recovered_artifact": recovered_artifact,
-                "reused_review": reused_review,
-                "created": [],
-                "updated": [],
-                "audit": audit_decision,
-            }
-        if reused_review:
-            # Re-read inside the authority lease to close the gap between the
-            # earlier reuse check and the final effect.
-            durable_artifact = _load_ingest_review_artifact(
-                review_path,
-                source_key=source_key,
-                proposal_sha256=proposal_sha256,
-            )
-            if (
-                durable_artifact is None
-                or durable_artifact.get("authority") != review_authority
-                or durable_artifact.get("review") != review
-            ):
-                return {
-                    "status": "needs_retry",
-                    "source_key": source_key,
-                    "proposal_sha256": proposal_sha256,
-                    "review": review,
-                    "summary": "frontier review artifact changed before effect",
-                    "recovered_artifact": recovered_artifact,
-                    "reused_review": True,
-                    "created": [],
-                    "updated": [],
-                    "audit": audit_decision,
-                }
-        else:
-            _readback, artifact_error = _write_and_readback_ingest_review_artifact(
-                review_path,
-                source_key=source_key,
-                proposal_sha256=proposal_sha256,
-                review=review,
-                authority=review_authority,
-            )
-            if artifact_error is not None:
-                return {
-                    "status": "needs_retry",
-                    "source_key": source_key,
-                    "proposal_sha256": proposal_sha256,
-                    "review": review,
-                    "summary": artifact_error,
-                    "recovered_artifact": recovered_artifact,
-                    "reused_review": False,
-                    "created": [],
-                    "updated": [],
-                    "audit": audit_decision,
-                }
-        if decision == "confirmed_noop":
-            created, updated = [], []
-        else:
-            created, updated = _apply_prepared_operations(planned, link_totals=totals)
-    return {
-        "status": decision,
-        "source_key": source_key,
-        "proposal_sha256": proposal_sha256,
-        "review": review,
-        "authority": review_authority,
-        "recovered_artifact": recovered_artifact,
-        "reused_review": reused_review,
-        "created": created,
-        "updated": updated,
-        "audit": audit_decision,
-        **(
-            {"stale_review_replaced": stale_review_reason}
-            if stale_review_reason is not None
-            else {}
-        ),
-    }
 
 
 def _rebuild_index() -> None:
@@ -7642,92 +3862,12 @@ def _read_back_query(meta: dict, page_id: str) -> str:
     return page_id
 
 
-def _verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> dict:
-    if not page_ids:
-        return {"checked": 0, "passed": 0, "failed": []}
-    try:
-        from llm_wiki_mcp.index_store import get_store
-        from llm_wiki_mcp.search import search
+def _verify_changed_pages_read_back(
+    page_ids: list[str], *, top_n: int = 10
+) -> dict:
+    from llm_wiki_mcp.ingest_readback import verify_changed_pages_read_back
 
-        store = get_store()
-        store.refresh()
-    except Exception as e:
-        _safe_log(f"ingest | read-back unavailable: {e}")
-        return {"checked": 0, "passed": 0, "failed": [{"error": str(e)}]}
-
-    checked = 0
-    passed = 0
-    failed: list[dict] = []
-    for page_id in page_ids:
-        meta = store.meta(page_id)
-        if meta is None:
-            failed.append({"page_id": page_id, "reason": "missing-meta"})
-            continue
-        query = _read_back_query(meta, page_id)
-        if not query:
-            failed.append({"page_id": page_id, "reason": "empty-query"})
-            continue
-        checked += 1
-        try:
-            results, mode = search(query, top_n=top_n, semantic=True)
-        except Exception as e:
-            failed.append(
-                {"page_id": page_id, "reason": "search-error", "error": str(e)}
-            )
-            continue
-        rank = next(
-            (
-                idx + 1
-                for idx, result in enumerate(results)
-                if result.page_id == page_id
-            ),
-            None,
-        )
-        if rank is None:
-            failed.append(
-                {
-                    "page_id": page_id,
-                    "reason": "not-in-top-results",
-                    "query": query[:180],
-                    "mode": mode,
-                    "top": [result.page_id for result in results[:5]],
-                }
-            )
-        else:
-            passed += 1
-
-    record = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "schema_version": 2,
-        "cohort": "all_ingest_runs",
-        "checked": checked,
-        "passed": passed,
-        "failed": failed,
-    }
-    try:
-        run_path = _read_back_run_log()
-        run_path.parent.mkdir(parents=True, exist_ok=True)
-        with run_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-    if failed:
-        try:
-            log_path = _read_back_failure_log()
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
-        _safe_log(
-            f"ingest | read-back: {len(failed)} failed of {checked} checked",
-            level="warn",
-            outcome_kind="read_back_warning",
-        )
-    elif checked:
-        _safe_log(f"ingest | read-back: {checked} checked ok")
-
-    return {"checked": checked, "passed": passed, "failed": failed}
+    return verify_changed_pages_read_back(page_ids, top_n=top_n)
 
 
 def _refresh_ingest_derived_artifacts(
@@ -7785,88 +3925,19 @@ def _complete_pretriage_terminal_recovery(
     on_complete: Callable[[], Any] | None,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Finish a proven prior effect and publish its raw ACK under locks."""
-
-    changed_pages = list(recovery.get("created") or []) + list(
-        recovery.get("updated") or []
+    from llm_wiki_mcp.ingest_recovery_runtime import (
+        complete_pretriage_terminal_recovery,
     )
 
-    from llm_wiki_mcp.page_mutation import (
-        decision_authority_lock,
-        wiki_mutation_lock,
+    return complete_pretriage_terminal_recovery(
+        recovery,
+        raw_content=raw_content,
+        raw_keywords=raw_keywords,
+        source_raw=source_raw,
+        job_id=job_id,
+        on_complete=on_complete,
+        reviewer=reviewer,
     )
-
-    # Match the normal effect lock order.  The authority lease prevents a
-    # terminal review artifact from being replaced while the page lease keeps
-    # exact postimages stable through job completion and ACK publication.
-    with decision_authority_lock():
-        page_lease = (
-            wiki_mutation_lock()
-            if recovery.get("status") == "apply_available"
-            else nullcontext()
-        )
-        with page_lease:
-            verified = _load_pretriage_terminal_recovery(
-                raw_content,
-                raw_keywords,
-                reviewer=reviewer,
-            )
-            if verified is None or verified != recovery:
-                raise IngestApplyError(
-                    "pre-triage terminal recovery proof changed before raw retirement"
-                )
-            # Derived refresh is intentionally inside the same proof/effect
-            # locks. A stale or concurrently replaced terminal artifact must
-            # fail before even rebuildable claims/index side effects occur.
-            read_back_result = _refresh_ingest_derived_artifacts(
-                changed_pages,
-                source_raw=source_raw,
-            )
-            final_verified = _load_pretriage_terminal_recovery(
-                raw_content,
-                raw_keywords,
-                reviewer=reviewer,
-            )
-            if final_verified is None or final_verified != recovery:
-                raise IngestApplyError(
-                    "pre-triage terminal recovery proof changed during derived refresh"
-                )
-            job_result: dict[str, Any] = {
-                "frontier": {
-                    "status": recovery.get("status"),
-                    "proposal_sha256": recovery.get("proposal_sha256"),
-                    "source_key": recovery.get("source_key"),
-                    "review": recovery.get("review"),
-                    "recovered_artifact": True,
-                    "reused_review": True,
-                },
-                "audit": recovery.get("audit"),
-                "pretriage_recovery": {
-                    "basis": recovery.get("recovery_basis"),
-                    "model_calls": 0,
-                },
-            }
-            failed_specs = list(recovery.get("failed_operation_specs") or [])
-            if failed_specs:
-                job_result.update({"partial": True, "failed_ops": failed_specs})
-            if read_back_result.get("failed"):
-                job_result["read_back"] = read_back_result
-            job_store.update(
-                job_id,
-                status=JobStatus.COMPLETED,
-                processor="durable-ingest-recovery",
-                stage="pre-triage-recovery",
-                completed_at=_now(),
-                pages_created=list(recovery.get("created") or []),
-                pages_updated=list(recovery.get("updated") or []),
-                result=job_result,
-            )
-            if on_complete:
-                # For orchestrated raws this publishes the content-bound ACK
-                # before the processed-state transition.  Any callback error
-                # escapes and the outer job boundary records FAILED.
-                on_complete()
-    return job_result
 
 
 # ---------------------------------------------------------------------------
@@ -8401,6 +4472,25 @@ def _all_generation_failure_error(
     )
 
 
+def _normalize_ingest_source_metadata(
+    metadata: object,
+) -> tuple[list[str] | None, str | None]:
+    """Return the two supported raw side channels without fabricating values."""
+
+    if not isinstance(metadata, dict):
+        return None, None
+    keywords = metadata.get("raw_keywords")
+    raw_keywords = (
+        list(keywords)
+        if isinstance(keywords, list)
+        and all(isinstance(value, str) for value in keywords)
+        else None
+    )
+    source = metadata.get("source_raw")
+    source_raw = source if isinstance(source, str) else None
+    return raw_keywords, source_raw
+
+
 def run_ingest(
     content: str,
     job_id: str,
@@ -8443,16 +4533,8 @@ def run_ingest(
     # update from the same session), and the source-of-truth keywords
     # belong to all of them. Anything that isn't a list[str] is treated
     # as "no metadata" so we don't fabricate values.
-    raw_keywords_for_ops: list[str] | None = None
-    source_raw: str | None = None
+    raw_keywords_for_ops, source_raw = _normalize_ingest_source_metadata(metadata)
     initial_review_authority: dict[str, Any] | None = None
-    if metadata is not None:
-        candidate = metadata.get("raw_keywords")
-        if isinstance(candidate, list) and all(isinstance(v, str) for v in candidate):
-            raw_keywords_for_ops = list(candidate)
-        source_candidate = metadata.get("source_raw")
-        if isinstance(source_candidate, str):
-            source_raw = source_candidate
 
     try:
         terminal_recovery = _load_pretriage_terminal_recovery(
@@ -8509,25 +4591,24 @@ def run_ingest(
         # authority.  Resolve that proof before spending any triage or page-
         # generation tokens.  Tests and explicit dependency injection retain
         # their isolated reviewer boundary.
-        if getattr(_review_and_apply_ingest_operations, "__module__", None) == __name__:
-            review_authority, review_authority_error = _current_ingest_review_authority(
-                reviewer=frontier_reviewer
+        review_authority, review_authority_error = _current_ingest_review_authority(
+            reviewer=frontier_reviewer
+        )
+        review_authority_shape_error = (
+            _ingest_review_authority_shape_error(review_authority)
+            if review_authority is not None
+            else None
+        )
+        review_authority_problem = (
+            review_authority_error
+            or review_authority_shape_error
+            or (None if review_authority is not None else "authority is missing")
+        )
+        if review_authority_problem is not None:
+            raise IngestApplyError(
+                "local consensus authority unavailable: " + review_authority_problem
             )
-            review_authority_shape_error = (
-                _ingest_review_authority_shape_error(review_authority)
-                if review_authority is not None
-                else None
-            )
-            review_authority_problem = (
-                review_authority_error
-                or review_authority_shape_error
-                or (None if review_authority is not None else "authority is missing")
-            )
-            if review_authority_problem is not None:
-                raise IngestApplyError(
-                    "local consensus authority unavailable: " + review_authority_problem
-                )
-            initial_review_authority = review_authority
+        initial_review_authority = review_authority
 
         shard_continuation = _load_pretriage_ingest_shard_continuation(
             content,

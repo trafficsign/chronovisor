@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
+from llm_wiki_mcp.canonical_json import canonical_json_line_bytes_strict
+
 
 SEAL_FIELD = "seal_sha256"
 DEFAULT_MIN_FREE_BYTES = 16 * 1024 * 1024
@@ -37,16 +39,7 @@ class StateSealError(DurableStateError):
 
 
 def canonical_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
+    return canonical_json_line_bytes_strict(value)
 
 
 def canonical_sha256(value: Any) -> str:
@@ -84,7 +77,28 @@ def file_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
         os.close(descriptor)
 
 
-def _fsync_directory(path: Path) -> None:
+@contextmanager
+def exclusive_text_file_lock(path: Path) -> Iterator[None]:
+    """Lock an appendable UTF-8 sidecar using blocking exclusive ``flock``."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def sidecar_exclusive_lock(path: Path):
+    """Lock ``<path>.lock`` with :func:`exclusive_text_file_lock`."""
+
+    return exclusive_text_file_lock(path.with_suffix(path.suffix + ".lock"))
+
+
+def fsync_directory(path: Path) -> None:
+    """Durably publish directory-entry changes under ``path``."""
+
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -138,7 +152,7 @@ def atomic_write_bytes(
             os.replace(backup_tmp, backup_path)
         os.replace(temporary, path)
         temporary = None
-        _fsync_directory(path.parent)
+        fsync_directory(path.parent)
         if path.read_bytes() != raw:
             raise DurableStateError(f"durable read-back mismatch: {path}")
     finally:

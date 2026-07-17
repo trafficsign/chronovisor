@@ -20,6 +20,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_stringifying as _canonical_json_sha256,
+)
+
 from llm_wiki_mcp import decision_authority
 from llm_wiki_mcp.convergence import is_human_required_result
 from llm_wiki_mcp.feedback_ledger import active_feedback_rows
@@ -118,21 +122,8 @@ def _stable_bucket(text: str) -> int:
     return int(hashlib.sha1(text.encode("utf-8")).hexdigest()[:8], 16) % 100
 
 
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
+def _json_default(value: Any) -> str:
     return str(value)
-
-
-def _canonical_json_sha256(payload: Any) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=_json_default,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _is_sha256(value: object) -> bool:

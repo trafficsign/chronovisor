@@ -14,12 +14,15 @@ cycle.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Any
+
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_strict as _sha256_json,
+    canonical_json_strict as _canonical_json,
+)
 
 
 # Registry/artifact identity.  This is deliberately not rendered into every
@@ -332,20 +335,6 @@ _REQUIRED_EFFECTS: dict[str, tuple[str, ...]] = {
         "policy_mutation:search_self_tune",
     ),
 }
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _sha256_json(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def model_backed_lane_names() -> tuple[str, ...]:

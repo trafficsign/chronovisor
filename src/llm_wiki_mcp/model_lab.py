@@ -10,8 +10,8 @@ import os
 import re
 import tempfile
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from llm_wiki_mcp.decision_schema_manifest import (
     decision_signature_value,
     default_decision_value,
 )
+from llm_wiki_mcp.durable_state import exclusive_text_file_lock
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
 LAB_DIR = WIKI_ROOT / "runtime" / "model-lab"
@@ -46,15 +47,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-@contextmanager
-def _lock():
-    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with LOCK_FILE.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+_lock = partial(exclusive_text_file_lock, LOCK_FILE)
 
 
 def _read_json(path: Path, default: Any) -> Any:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -11,11 +10,12 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.durable_state import exclusive_text_file_lock
 from llm_wiki_mcp.frontier_review import redact_sensitive_text
 from llm_wiki_mcp.wiki import WIKI_ROOT
 
@@ -52,15 +52,7 @@ def _iso(value: datetime | None = None) -> str:
     return (value or _now()).isoformat(timespec="seconds")
 
 
-@contextmanager
-def _lock():
-    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with LOCK_FILE.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+_lock = partial(exclusive_text_file_lock, LOCK_FILE)
 
 
 def _load() -> dict[str, Any]:

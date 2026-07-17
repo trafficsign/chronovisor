@@ -23,6 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_bytes_stringifying as _canonical_bytes,
+)
+
 from llm_wiki_mcp import wiki
 from llm_wiki_mcp.convergence import (
     FRONTIER_STATUSES,
@@ -98,16 +102,6 @@ def _now() -> datetime:
 
 def _iso(value: datetime | None = None) -> str:
     return (value or _now()).astimezone(timezone.utc).isoformat(timespec="seconds")
-
-
-def _canonical_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
 
 
 def _sha256_value(value: Any) -> str:
