@@ -171,7 +171,9 @@ class RecallPolicy:
     enabled: bool = True
     search_threshold: float = 0.35
     read_threshold: float = 0.65
-    max_context_chars: int = 800
+    # Keep the contract-fixture fallback stable. Deployments that opt into a
+    # larger recall envelope must set this explicitly in [recall.budgets].
+    max_context_chars: int = 600
     max_state_context_chars: int = 1600
     max_total_context_chars: int = 2402
     max_pages: int = 3
@@ -1566,9 +1568,13 @@ def _render_recall_payload(payload: dict[str, Any], max_chars: int) -> str:
     if len(context) > max_chars:
         for item in items:
             if isinstance(item, dict):
-                item.pop("updated", None)
                 item.pop("score", None)
                 item.pop("evidence", None)
+        context = render(payload)
+    if len(context) > max_chars:
+        for item in items:
+            if isinstance(item, dict):
+                item.pop("updated", None)
                 item.pop("sensitivity", None)
         context = render(payload)
     if len(context) > max_chars:
