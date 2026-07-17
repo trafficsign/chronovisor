@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from llm_wiki_mcp import decision_authority, runtime_status
@@ -69,6 +70,40 @@ from llm_wiki_mcp.ingest import (  # noqa: E402
     IngestApplyError,
     _IngestReviewShardContinuation,
 )
+
+
+@dataclass(frozen=True)
+class IngestReviewArtifactState:
+    """Pure structural projection of one optional durable review artifact."""
+
+    review: dict[str, Any] | None
+    authority: dict[str, Any] | None
+    exact_postimages_already_applied: bool
+
+
+def inspect_ingest_review_artifact(
+    artifact: object,
+    *,
+    has_planned_operations: bool,
+    planned_postimages_fully_applied: bool,
+) -> IngestReviewArtifactState:
+    """Project artifact fields without consulting live authority or the filesystem."""
+
+    review_raw = artifact.get("review") if isinstance(artifact, dict) else None
+    authority_raw = artifact.get("authority") if isinstance(artifact, dict) else None
+    review = review_raw if isinstance(review_raw, dict) else None
+    authority = authority_raw if isinstance(authority_raw, dict) else None
+    exact = (
+        review is not None
+        and review.get("decision") == "apply_available"
+        and has_planned_operations
+        and planned_postimages_fully_applied
+    )
+    return IngestReviewArtifactState(
+        review=review,
+        authority=authority,
+        exact_postimages_already_applied=exact,
+    )
 
 
 def review_and_apply_ingest_operations(
@@ -248,21 +283,17 @@ def review_and_apply_ingest_operations(
             proposal=proposal,
             recovered_artifact=recovered_artifact,
         )
-    artifact_review = (
-        review_artifact.get("review") if isinstance(review_artifact, dict) else None
+    artifact_state = inspect_ingest_review_artifact(
+        review_artifact,
+        has_planned_operations=bool(planned),
+        planned_postimages_fully_applied=(
+            _prepared_plan_is_fully_applied(planned) if planned else False
+        ),
     )
-    artifact_review = artifact_review if isinstance(artifact_review, dict) else None
-    artifact_authority = (
-        review_artifact.get("authority") if isinstance(review_artifact, dict) else None
-    )
-    artifact_authority = (
-        artifact_authority if isinstance(artifact_authority, dict) else None
-    )
+    artifact_review = artifact_state.review
+    artifact_authority = artifact_state.authority
     exact_postimages_already_applied = (
-        artifact_review is not None
-        and artifact_review.get("decision") == "apply_available"
-        and bool(planned)
-        and _prepared_plan_is_fully_applied(planned)
+        artifact_state.exact_postimages_already_applied
     )
     if (
         artifact_review is not None
@@ -857,4 +888,3 @@ def review_and_apply_ingest_operations(
             else {}
         ),
     }
-
