@@ -4467,6 +4467,25 @@ def _all_generation_failure_error(
     )
 
 
+def _normalize_ingest_source_metadata(
+    metadata: object,
+) -> tuple[list[str] | None, str | None]:
+    """Return the two supported raw side channels without fabricating values."""
+
+    if not isinstance(metadata, dict):
+        return None, None
+    keywords = metadata.get("raw_keywords")
+    raw_keywords = (
+        list(keywords)
+        if isinstance(keywords, list)
+        and all(isinstance(value, str) for value in keywords)
+        else None
+    )
+    source = metadata.get("source_raw")
+    source_raw = source if isinstance(source, str) else None
+    return raw_keywords, source_raw
+
+
 def run_ingest(
     content: str,
     job_id: str,
@@ -4509,16 +4528,8 @@ def run_ingest(
     # update from the same session), and the source-of-truth keywords
     # belong to all of them. Anything that isn't a list[str] is treated
     # as "no metadata" so we don't fabricate values.
-    raw_keywords_for_ops: list[str] | None = None
-    source_raw: str | None = None
+    raw_keywords_for_ops, source_raw = _normalize_ingest_source_metadata(metadata)
     initial_review_authority: dict[str, Any] | None = None
-    if metadata is not None:
-        candidate = metadata.get("raw_keywords")
-        if isinstance(candidate, list) and all(isinstance(v, str) for v in candidate):
-            raw_keywords_for_ops = list(candidate)
-        source_candidate = metadata.get("source_raw")
-        if isinstance(source_candidate, str):
-            source_raw = source_candidate
 
     try:
         terminal_recovery = _load_pretriage_terminal_recovery(
