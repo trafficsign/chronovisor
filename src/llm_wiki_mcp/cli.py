@@ -563,7 +563,9 @@ def print_plain_status(data: dict[str, Any]) -> None:
     print(f"runtime: {runtime.get('state', 'unknown')} stage={runtime.get('stage')}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the complete stable CLI command tree without executing a handler."""
+
     parser = argparse.ArgumentParser(description="Operate and inspect LLM Wiki.")
     sub = parser.add_subparsers(dest="command", required=True)
     status_parser = sub.add_parser(
@@ -813,7 +815,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     recall_improve_rollback.add_argument("--json", action="store_true")
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def dispatch(args: argparse.Namespace) -> int:
+    """Dispatch one already-parsed command while preserving its exit contract."""
+
     if args.command == "status":
         data = build_status()
         if args.json:
@@ -1260,6 +1267,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return 0
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return dispatch(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

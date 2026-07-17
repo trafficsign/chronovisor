@@ -21,12 +21,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.agent_save_base import (
+    content_has_capture_payload as _content_has_capture_payload,
+    extract_json_object,
+    iter_jsonl,
+    last_saved_at,
+    load_state,
+    read_hook_payload,
+    sanitize_keywords,
+    save_raw,
+    saved_line_for,
+    should_process,
+    trim_middle,
+    update_state,
+    validate_raw_keyword,
+    write_state,
+)
 from llm_wiki_mcp.decision_policy import resolve_decision_policy
 from llm_wiki_mcp.evidence_grounding import (
     ProtectedLiteralGroundingError,
     validate_protected_literals,
 )
-from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.save_transaction import (
     SaveTransaction,
     attach_save_transaction_marker,
@@ -49,7 +64,6 @@ HOOK_ENABLE_ENV = "CLAUDE_CODE_WIKI_SAVE_ENABLED"
 TURN_INTERVAL = 10
 COOLDOWN_SECONDS = 900
 FILE_CHANGE_TOOLS = frozenset({"Edit", "Write"})
-_RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")
 
 MEMORY_WRITER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -149,17 +163,6 @@ def find_session_file(
 # JSONL parsing
 # ---------------------------------------------------------------------------
 
-def iter_jsonl(path: Path):
-    with path.open() as f:
-        for line_no, line in enumerate(f, start=1):
-            try:
-                parsed = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                yield line_no, parsed
-
-
 def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSlice:
     records: list[TranscriptRecord] = []
     scanned_until_line = 0
@@ -250,16 +253,6 @@ def sanitize_message_content(content: Any) -> Any:
             continue
         sanitized.append(part)
     return sanitized
-
-
-def _content_has_capture_payload(content: Any) -> bool:
-    if content is None:
-        return False
-    if isinstance(content, str):
-        return bool(content.strip())
-    if isinstance(content, list):
-        return bool(content)
-    return True
 
 
 def _claude_record_role(item_type: str, content: Any, text: str) -> str:
@@ -354,20 +347,6 @@ def serialize_transcript_records(records: list[TranscriptRecord]) -> str:
             row["event"] = record.event
         payload.append(row)
     return json.dumps(payload, ensure_ascii=False, indent=2)
-
-
-def trim_middle(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    if max_chars < 1_000:
-        return text[-max_chars:]
-    head_len = max_chars // 5
-    tail_len = max_chars - head_len
-    return (
-        text[:head_len]
-        + "\n\n[... transcript trimmed for memory-writer budget ...]\n\n"
-        + text[-tail_len:]
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -567,105 +546,9 @@ def run_grounded_memory_writer(
     raise last_error
 
 
-def extract_json_object(output: str) -> Any:
-    text = output.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].startswith("```"):
-            text = "\n".join(lines[1:-1]).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-    try:
-        return json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return None
-
-
-def sanitize_keywords(values: list[Any], *, limit: int = 20) -> tuple[list[str], list[str]]:
-    accepted: list[str] = []
-    rejected: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if not isinstance(value, str):
-            rejected.append(repr(value))
-            continue
-        keyword = value.strip()
-        if not validate_raw_keyword(keyword):
-            rejected.append(value)
-            continue
-        key = keyword.casefold()
-        if key in seen:
-            continue
-        accepted.append(keyword)
-        seen.add(key)
-        if len(accepted) >= limit:
-            break
-    return accepted, rejected
-
-
-def validate_raw_keyword(keyword: str) -> bool:
-    if not keyword:
-        return False
-    for ch in keyword:
-        if ch in _RAW_KEYWORD_FORBIDDEN_CHARS:
-            return False
-        if ord(ch) < 0x20:
-            return False
-    return True
-
-
 # ---------------------------------------------------------------------------
 # State management
 # ---------------------------------------------------------------------------
-
-def load_state(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"version": 1, "files": {}}
-    try:
-        parsed = json.loads(path.read_text())
-    except json.JSONDecodeError:
-        return {"version": 1, "files": {}}
-    if not isinstance(parsed, dict):
-        return {"version": 1, "files": {}}
-    parsed.setdefault("version", 1)
-    parsed.setdefault("files", {})
-    if not isinstance(parsed["files"], dict):
-        parsed["files"] = {}
-    return parsed
-
-
-def saved_line_for(state: dict[str, Any], session_file: Path) -> int:
-    entry = state.get("files", {}).get(str(session_file))
-    if not isinstance(entry, dict):
-        return 0
-    value = entry.get("last_saved_line", 0)
-    return value if isinstance(value, int) and value > 0 else 0
-
-
-def last_saved_at(state: dict[str, Any], session_file: Path) -> datetime | None:
-    entry = state.get("files", {}).get(str(session_file))
-    if not isinstance(entry, dict):
-        return None
-    ts = entry.get("last_saved_at")
-    if not isinstance(ts, str):
-        return None
-    try:
-        return datetime.fromisoformat(ts)
-    except (ValueError, TypeError):
-        return None
-
-
-def should_process(transcript_slice: TranscriptSlice, state: dict[str, Any]) -> tuple[bool, str]:
-    if not transcript_slice.records:
-        return False, "no_messages"
-    return True, "file_changes" if transcript_slice.has_file_changes else "session_tail"
-
 
 def bounded_transcript_slice(
     transcript_slice: TranscriptSlice,
@@ -853,37 +736,6 @@ def _capture_oversized_record(
     }
 
 
-def update_state(
-    state: dict[str, Any],
-    *,
-    session_file: Path,
-    transcript_slice: TranscriptSlice,
-    status: str,
-) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat()
-    files = state.setdefault("files", {})
-    entry: dict[str, Any] = {
-        "last_saved_line": transcript_slice.scanned_until_line,
-        "session_id": transcript_slice.session_id,
-        "cwd": transcript_slice.cwd,
-        "status": status,
-        "updated_at": now,
-    }
-    if status == "saved":
-        entry["last_saved_at"] = now
-    else:
-        prev = files.get(str(session_file))
-        if isinstance(prev, dict) and "last_saved_at" in prev:
-            entry["last_saved_at"] = prev["last_saved_at"]
-    files[str(session_file)] = entry
-    return state
-
-
-def write_state(path: Path, state: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
-
-
 # ---------------------------------------------------------------------------
 # Raw content building & saving
 # ---------------------------------------------------------------------------
@@ -922,40 +774,9 @@ def build_raw_content(
     return attach_save_transaction_marker(transaction, "\n".join(header))
 
 
-def save_raw(
-    content: str,
-    *,
-    session_id: str,
-    keywords: list[str],
-    trigger_ingest: bool,
-    idempotency_key: str,
-) -> dict[str, Any]:
-    from llm_wiki_mcp.server import wiki_save_raw
-
-    result = wiki_save_raw(
-        content=content,
-        session_id=session_id,
-        keywords=keywords,
-        trigger_ingest=trigger_ingest,
-        idempotency_key=idempotency_key,
-    )
-    parsed = json.loads(result)
-    return parsed if isinstance(parsed, dict) else {"result": parsed}
-
-
 # ---------------------------------------------------------------------------
 # Hook payload helpers
 # ---------------------------------------------------------------------------
-
-def read_hook_payload(stdin_text: str | None) -> dict[str, Any]:
-    if not stdin_text:
-        return {}
-    try:
-        parsed = json.loads(stdin_text)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
 
 def hook_hints(payload: dict[str, Any]) -> dict[str, str]:
     hints: dict[str, str] = {}

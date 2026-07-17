@@ -389,6 +389,19 @@ def _ollama_engine_identity() -> str:
 
     response = _client().get("/api/version", timeout=3)
     response.raise_for_status()
+
+
+def _post_json(
+    endpoint: str,
+    *,
+    payload: Mapping[str, Any],
+    timeout: httpx.Timeout,
+) -> Any:
+    """POST one non-streaming Ollama request with the shared error contract."""
+
+    response = _client().post(endpoint, json=dict(payload), timeout=timeout)
+    _raise_for_status_with_detail(response)
+    return response.json()
     body = response.json()
     version = body.get("version") if isinstance(body, Mapping) else None
     if not isinstance(version, str) or not version.strip():
@@ -1275,13 +1288,7 @@ def _generate_unlocked(
             streamed=True,
         )
 
-    resp = _client().post(
-        "/api/generate",
-        json=payload,
-        timeout=timeout,
-    )
-    _raise_for_status_with_detail(resp)
-    body = resp.json()
+    body = _post_json("/api/generate", payload=payload, timeout=timeout)
     if not isinstance(body, dict) or not isinstance(body.get("response"), str):
         raise RuntimeError("Ollama generate response is missing response content")
     content = str(body["response"])
@@ -1394,9 +1401,7 @@ def _chat_unlocked(
         write=10.0,
         pool=10.0,
     )
-    resp = _client().post("/api/chat", json=payload, timeout=timeout)
-    _raise_for_status_with_detail(resp)
-    body = resp.json()
+    body = _post_json("/api/chat", payload=payload, timeout=timeout)
     message = body.get("message") if isinstance(body, dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):

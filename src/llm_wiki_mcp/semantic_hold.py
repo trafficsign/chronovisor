@@ -33,6 +33,13 @@ from llm_wiki_mcp.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_provenance_error,
 )
+from llm_wiki_mcp.semantic_epoch import (
+    STRUCTURED_REVIEW_HOLD_EPOCH_VERSION,
+    build_structured_review_epoch,
+    is_sha256 as _is_sha256,
+    opaque_text_sha256 as _opaque_text_sha256,
+    structured_review_epoch_error,
+)
 
 LOCAL_SEMANTIC_NO_QUORUM = "local_semantic_no_quorum"
 SEMANTIC_NO_QUORUM_HOLD_KIND = "local_semantic_no_quorum_hold"
@@ -40,10 +47,8 @@ SCHEMA_VERSION = 1
 
 STRUCTURED_REVIEW_HOLD_CACHE_SCHEMA_VERSION = 1
 STRUCTURED_REVIEW_HOLD_CACHE_KIND = "structured_review_semantic_no_quorum_cache"
-STRUCTURED_REVIEW_HOLD_EPOCH_VERSION = 2
 STRUCTURED_REVIEW_HOLD_RESOLVER_VERSION = 1
 
-_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _SEMANTIC_REASONS = frozenset(
     {
         "local_models_did_not_reach_two_vote_quorum",
@@ -78,10 +83,6 @@ STRUCTURED_REVIEW_HOLD_RESOLVER_SHA256 = canonical_sha256(
         "requires_adopted_lane_router_provenance": True,
     }
 )
-
-
-def _is_sha256(value: object) -> bool:
-    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
 
 
 def _file_observation(path: Path) -> dict[str, Any]:
@@ -704,11 +705,6 @@ def persisted_semantic_no_quorum_hold(
     return copy.deepcopy(dict(candidate))
 
 
-def _opaque_text_sha256(value: str | None) -> str:
-    marker = b"none\0" if value is None else b"text\0" + value.encode("utf-8")
-    return hashlib.sha256(marker).hexdigest()
-
-
 def build_structured_review_hold_epoch(
     *,
     lane: str,
@@ -721,29 +717,15 @@ def build_structured_review_hold_epoch(
 ) -> dict[str, Any]:
     """Build the opaque exact input identity for the boundary cache."""
 
-    authority_error = semantic_authority_shape_error(authority, lane=lane)
-    if authority_error is not None:
-        raise ValueError(authority_error)
-    if not isinstance(prompt, str):
-        raise ValueError("structured review prompt must be text")
-    for name, digest in (
-        ("schema", schema_sha256),
-        ("effective request", effective_request_sha256),
-        ("resolver", resolver_sha256),
-    ):
-        if not _is_sha256(digest):
-            raise ValueError(f"structured review {name} digest is invalid")
-    return {
-        "epoch_version": STRUCTURED_REVIEW_HOLD_EPOCH_VERSION,
-        "lane": lane,
-        "authority_sha256": canonical_sha256(authority),
-        "schema_sha256": schema_sha256,
-        "prompt_sha256": _opaque_text_sha256(prompt),
-        "system_sha256": _opaque_text_sha256(system),
-        "system_kind": "none" if system is None else "text",
-        "effective_request_sha256": effective_request_sha256,
-        "resolver_sha256": resolver_sha256,
-    }
+    return build_structured_review_epoch(
+        lane=lane,
+        authority=authority,
+        schema_sha256=schema_sha256,
+        prompt=prompt,
+        system=system,
+        effective_request_sha256=effective_request_sha256,
+        resolver_sha256=resolver_sha256,
+    )
 
 
 def structured_review_hold_epoch_error(
@@ -754,41 +736,7 @@ def structured_review_hold_epoch_error(
 ) -> str | None:
     """Validate an opaque cache epoch without access to request plaintext."""
 
-    if not isinstance(epoch, Mapping):
-        return "structured review hold epoch is missing"
-    if set(epoch) != {
-        "epoch_version",
-        "lane",
-        "authority_sha256",
-        "schema_sha256",
-        "prompt_sha256",
-        "system_sha256",
-        "system_kind",
-        "effective_request_sha256",
-        "resolver_sha256",
-    }:
-        return "structured review hold epoch fields are invalid"
-    authority_error = semantic_authority_shape_error(authority, lane=lane)
-    if authority_error is not None:
-        return authority_error
-    if (
-        epoch.get("epoch_version") != STRUCTURED_REVIEW_HOLD_EPOCH_VERSION
-        or epoch.get("lane") != lane
-        or epoch.get("authority_sha256") != canonical_sha256(authority)
-        or epoch.get("system_kind") not in {"none", "text"}
-    ):
-        return "structured review hold epoch identity is invalid"
-    for field in (
-        "authority_sha256",
-        "schema_sha256",
-        "prompt_sha256",
-        "system_sha256",
-        "effective_request_sha256",
-        "resolver_sha256",
-    ):
-        if not _is_sha256(epoch.get(field)):
-            return f"structured review hold epoch {field} is invalid"
-    return None
+    return structured_review_epoch_error(epoch, lane=lane, authority=authority)
 
 
 _CACHE_FIELDS = frozenset(
