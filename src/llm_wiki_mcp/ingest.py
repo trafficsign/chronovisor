@@ -3341,11 +3341,16 @@ def _run_ingest_frontier_review(
     *,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    from llm_wiki_mcp.decision_lane_prompts import (
+        build_ingest_reconciliation_prompt,
+    )
+
     return _run_ingest_frontier_review_core(
         proposal,
         reviewer=reviewer,
         repo_root=Path(__file__).resolve().parents[2],
         decision_schema=INGEST_FRONTIER_DECISION_SCHEMA,
+        prompt_builder=build_ingest_reconciliation_prompt,
     )
 
 

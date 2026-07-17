@@ -123,16 +123,22 @@ def run_ingest_frontier_review(
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     repo_root: Path,
     decision_schema: dict[str, Any],
+    prompt_builder: Callable[[dict[str, Any]], str] | None = None,
 ) -> dict[str, Any]:
     """Run an injected or production review and normalize its verdict."""
 
     if reviewer is not None:
         return normalize_ingest_frontier_review(reviewer(proposal), proposal=proposal)
 
-    from llm_wiki_mcp.decision_lane_prompts import build_ingest_reconciliation_prompt
     from llm_wiki_mcp.frontier_review import run_structured_review
 
-    prompt = build_ingest_reconciliation_prompt(proposal)
+    if prompt_builder is None:
+        from llm_wiki_mcp.decision_lane_prompts import (
+            build_ingest_reconciliation_prompt,
+        )
+
+        prompt_builder = build_ingest_reconciliation_prompt
+    prompt = prompt_builder(proposal)
     result = run_structured_review(
         prompt,
         decision_schema,
