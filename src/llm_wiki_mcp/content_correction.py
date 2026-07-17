@@ -4303,6 +4303,44 @@ def _recover_exact_applied_correction(
     }
 
 
+def _frontier_item_evidence_inputs(
+    item: dict[str, Any],
+) -> tuple[dict[str, Any], str, list[str]]:
+    """Normalize untrusted queue metadata into one deterministic evidence request."""
+
+    metadata = item.get("metadata")
+    event = metadata if isinstance(metadata, dict) else {}
+    context = " ".join(
+        str(event.get(field) or "")
+        for field in (
+            "source_prompt",
+            "source_assistant_response",
+            "correction_prompt",
+        )
+    )
+    candidate_pages = event.get("candidate_pages")
+    page_ids = (
+        [page for page in candidate_pages if isinstance(page, str)]
+        if isinstance(candidate_pages, list)
+        else []
+    )
+    return event, context, page_ids
+
+
+def _page_evidence_hashes(pages: object) -> dict[str, str]:
+    """Project only complete page-id/digest pairs into provenance bindings."""
+
+    if not isinstance(pages, list):
+        return {}
+    return {
+        str(page["page_id"]): str(page["sha256"])
+        for page in pages
+        if isinstance(page, dict)
+        and isinstance(page.get("page_id"), str)
+        and isinstance(page.get("sha256"), str)
+    }
+
+
 def _process_frontier_item(
     item: dict[str, Any],
     *,
@@ -4338,7 +4376,7 @@ def _process_frontier_item(
         )
     if restored_hold is not None:
         return restored_hold
-    event = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    event, context, page_ids = _frontier_item_evidence_inputs(item)
     proposal = _load_json(_proposal_path(key))
     if proposal is None:
         return _fail_claimed_frontier(
@@ -4349,19 +4387,8 @@ def _process_frontier_item(
             failure_class="proposal_missing",
             dry_run=dry_run,
         )
-    context = " ".join(
-        str(event.get(field) or "")
-        for field in ("source_prompt", "source_assistant_response", "correction_prompt")
-    )
-    page_ids = [
-        page for page in event.get("candidate_pages", []) if isinstance(page, str)
-    ]
     pages = _page_evidence(page_ids, context)
-    page_evidence_hashes = {
-        str(page["page_id"]): str(page["sha256"])
-        for page in pages
-        if isinstance(page.get("page_id"), str) and isinstance(page.get("sha256"), str)
-    }
+    page_evidence_hashes = _page_evidence_hashes(pages)
     decision = str(proposal.get("decision") or "")
     triage_authority, triage_authority_error = (
         _current_content_classification_authority(reviewer=reviewer)
