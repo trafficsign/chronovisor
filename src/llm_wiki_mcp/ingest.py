@@ -5181,10 +5181,9 @@ def _current_ingest_review_authority(
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve the exact enabled local authority allowed to affect ingest."""
 
-    reviewer_module = getattr(_run_ingest_frontier_review, "__module__", None)
     return decision_authority.current_semantic_authority(
         "ingest_reconciliation",
-        injected_reviewer=(reviewer is not None or reviewer_module != __name__),
+        injected_reviewer=reviewer is not None,
     )
 
 
@@ -8519,25 +8518,24 @@ def run_ingest(
         # authority.  Resolve that proof before spending any triage or page-
         # generation tokens.  Tests and explicit dependency injection retain
         # their isolated reviewer boundary.
-        if getattr(_review_and_apply_ingest_operations, "__module__", None) == __name__:
-            review_authority, review_authority_error = _current_ingest_review_authority(
-                reviewer=frontier_reviewer
+        review_authority, review_authority_error = _current_ingest_review_authority(
+            reviewer=frontier_reviewer
+        )
+        review_authority_shape_error = (
+            _ingest_review_authority_shape_error(review_authority)
+            if review_authority is not None
+            else None
+        )
+        review_authority_problem = (
+            review_authority_error
+            or review_authority_shape_error
+            or (None if review_authority is not None else "authority is missing")
+        )
+        if review_authority_problem is not None:
+            raise IngestApplyError(
+                "local consensus authority unavailable: " + review_authority_problem
             )
-            review_authority_shape_error = (
-                _ingest_review_authority_shape_error(review_authority)
-                if review_authority is not None
-                else None
-            )
-            review_authority_problem = (
-                review_authority_error
-                or review_authority_shape_error
-                or (None if review_authority is not None else "authority is missing")
-            )
-            if review_authority_problem is not None:
-                raise IngestApplyError(
-                    "local consensus authority unavailable: " + review_authority_problem
-                )
-            initial_review_authority = review_authority
+        initial_review_authority = review_authority
 
         shard_continuation = _load_pretriage_ingest_shard_continuation(
             content,

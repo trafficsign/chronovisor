@@ -10,11 +10,13 @@ import fcntl
 import hashlib
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
+from typing import Any
 
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, LOG_FILE
 from llm_wiki_mcp.ollama import is_available
@@ -755,6 +757,7 @@ def run_pending_ingest(
     force: bool = False,
     *,
     max_units: int = MAX_INGEST_BATCH_UNITS,
+    frontier_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict:
     """Run ingest on all pending raw files if threshold is met.
 
@@ -777,6 +780,8 @@ def run_pending_ingest(
         max_units: Maximum semantic work units to process in this batch. The
             default preserves the historical batch size of 10; smaller values
             support controlled pilots without weakening process serialization.
+        frontier_reviewer: Explicit test/evaluation reviewer injection. The
+            production path leaves this unset and resolves adopted authority.
 
     Returns result dict with status and details. On a triggered batch the
     result includes per-raw entries (filename, job_id, succeeded) so
@@ -1251,14 +1256,19 @@ def run_pending_ingest(
 
                 if not projection_failed and not raw_success_flag[0]:
                     try:
-                        run_ingest(
-                            raw_text,
-                            job.job_id,
-                            on_complete=_on_complete,
-                            metadata={
+                        ingest_kwargs: dict[str, Any] = {
+                            "on_complete": _on_complete,
+                            "metadata": {
                                 "raw_keywords": raw_keywords,
                                 "source_raw": fname,
                             },
+                        }
+                        if frontier_reviewer is not None:
+                            ingest_kwargs["frontier_reviewer"] = frontier_reviewer
+                        run_ingest(
+                            raw_text,
+                            job.job_id,
+                            **ingest_kwargs,
                         )
                     except Exception as e:
                         # ``run_ingest`` already routes its own exceptions

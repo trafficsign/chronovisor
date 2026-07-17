@@ -1449,7 +1449,7 @@ class TestIngestFrontierGate:
         def production_review_stub(*_args, **_kwargs):
             raise AssertionError("authority resolution must not invoke review")
 
-        production_review_stub.__module__ = ingest.__name__
+        production_review_stub.__module__ = "tests.foreign_review_adapter"
         monkeypatch.setattr(
             ingest, "_run_ingest_frontier_review", production_review_stub
         )
@@ -1512,6 +1512,7 @@ class TestIngestFrontierGate:
             "error": None,
         }
         assert authority["router"] == router_audit
+        assert authority["source"] == "adopted_local_consensus"
         assert ingest._ingest_review_authority_shape_error(authority) is None
 
     @pytest.mark.parametrize("authority_state", ["stable", "drifted", "missing"])
@@ -3266,17 +3267,24 @@ class TestIngestFrontierGate:
             >= 0.10
         )
         captured: list[dict] = []
+        authority = self._production_authority("a")
+
+        def production_reviewer(proposal, **_kwargs):
+            captured.append(proposal)
+            return self._authority_review(
+                authority,
+                summary="local consensus accepted grounded proposal",
+            )
+
         monkeypatch.setattr(
             ingest,
             "_run_ingest_frontier_review",
-            lambda proposal, **_kwargs: (
-                captured.append(proposal)
-                or {
-                    "decision": "apply_available",
-                    "summary": "local consensus accepted grounded proposal",
-                    "failed_operations_disposition": "none",
-                }
-            ),
+            production_reviewer,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (authority, None),
         )
 
         result = ingest._review_and_apply_ingest_operations(
@@ -3294,14 +3302,24 @@ class TestIngestFrontierGate:
     ) -> None:
         from llm_wiki_mcp import ingest
 
-        monkeypatch.setattr(
-            ingest,
-            "_run_ingest_frontier_review",
-            lambda _proposal, **_kwargs: {
+        authority = self._production_authority("a")
+
+        def production_reviewer(_proposal, **_kwargs):
+            return {
                 "decision": "retry",
                 "summary": "decision_lane_shadow:ingest_reconciliation",
                 "failed_operations_disposition": "retry_required",
-            },
+            }
+
+        monkeypatch.setattr(
+            ingest,
+            "_run_ingest_frontier_review",
+            production_reviewer,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (authority, None),
         )
 
         result = ingest._review_and_apply_ingest_operations(
@@ -3310,6 +3328,7 @@ class TestIngestFrontierGate:
         )
 
         assert result["status"] == "needs_retry"
+        assert result["audit"]["mode"] == "local"
         assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
 
     def test_explicit_correction_signal_requires_structured_review(
@@ -3318,17 +3337,24 @@ class TestIngestFrontierGate:
         from llm_wiki_mcp import ingest
 
         captured: list[dict] = []
+        authority = self._production_authority("a")
+
+        def production_reviewer(proposal, **_kwargs):
+            captured.append(proposal)
+            return self._authority_review(
+                authority,
+                summary="correction is grounded",
+            )
+
         monkeypatch.setattr(
             ingest,
             "_run_ingest_frontier_review",
-            lambda proposal, **_kwargs: (
-                captured.append(proposal)
-                or {
-                    "decision": "apply_available",
-                    "summary": "correction is grounded",
-                    "failed_operations_disposition": "none",
-                }
-            ),
+            production_reviewer,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (authority, None),
         )
 
         result = ingest._review_and_apply_ingest_operations(
@@ -4656,7 +4682,11 @@ class TestRunIngestPartialFailure:
         )
         job = jobs.job_store.create(processor="ollama")
 
-        ingest.run_ingest("grounded raw", job.job_id)
+        ingest.run_ingest(
+            "grounded raw",
+            job.job_id,
+            frontier_reviewer=ingest._run_ingest_frontier_review,
+        )
 
         finished = jobs.job_store.get(job.job_id)
         assert finished.status == jobs.JobStatus.FAILED
@@ -4884,6 +4914,7 @@ class TestRunIngestPartialFailure:
             on_finally=lambda failed, triage_failed: finally_calls.append(
                 {"failed": failed, "triage_failed": triage_failed}
             ),
+            frontier_reviewer=ingest._run_ingest_frontier_review,
         )
 
         finished = jobs.job_store.get(job.job_id)
@@ -4900,6 +4931,24 @@ class TestRunIngestPartialFailure:
 
         monkeypatch.setattr(ingest, "_triage", lambda _content: [])
         monkeypatch.setattr(ingest, "is_available", lambda: True)
+        authority_before = TestIngestFrontierGate._production_authority("a")
+        authority_after = TestIngestFrontierGate._production_authority("b")
+        authority_checks = 0
+
+        def changing_authority(**_kwargs):
+            nonlocal authority_checks
+            authority_checks += 1
+            return (
+                (authority_before, None)
+                if authority_checks == 1
+                else (authority_after, None)
+            )
+
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            changing_authority,
+        )
         monkeypatch.setattr(
             ingest,
             "_review_and_apply_ingest_operations",
@@ -4908,16 +4957,11 @@ class TestRunIngestPartialFailure:
                 "source_key": "noop-source",
                 "proposal_sha256": "a" * 64,
                 "review": {"decision": "confirmed_noop"},
-                "authority": {"epoch": "before"},
+                "authority": authority_before,
                 "created": [],
                 "updated": [],
                 "audit": {},
             },
-        )
-        monkeypatch.setattr(
-            ingest,
-            "_current_ingest_review_authority",
-            lambda **_kwargs: ({"epoch": "after"}, None),
         )
         completed: list[bool] = []
         job = jobs.job_store.create(processor="ollama")
@@ -5026,6 +5070,7 @@ class TestRunIngestPartialFailure:
             on_finally=lambda failed, triage_failed: on_finally_calls.append(
                 {"failed": failed, "triage_failed": triage_failed}
             ),
+            frontier_reviewer=ingest._run_ingest_frontier_review,
         )
 
         # on_complete fires → raws marked processed (no infinite retry).
@@ -5089,6 +5134,7 @@ class TestRunIngestPartialFailure:
             "raw content",
             job.job_id,
             on_complete=lambda: on_complete_called.append(True),
+            frontier_reviewer=ingest._run_ingest_frontier_review,
         )
 
         assert attempts.get("misc/p1.md") == 1
@@ -5128,6 +5174,7 @@ class TestRunIngestPartialFailure:
             on_finally=lambda failed, triage_failed: on_finally_calls.append(
                 {"failed": failed, "triage_failed": triage_failed}
             ),
+            frontier_reviewer=ingest._run_ingest_frontier_review,
         )
 
         # Nothing succeeded, but raws are marked processed to avoid an
@@ -5196,6 +5243,7 @@ class TestRunIngestPartialFailure:
             "raw content",
             job.job_id,
             on_complete=lambda: on_complete_called.append(True),
+            frontier_reviewer=ingest._run_ingest_frontier_review,
         )
 
         assert seen_ops[0]["type"] == "create"
@@ -5248,6 +5296,7 @@ class TestRunIngestPartialFailure:
             "raw content",
             job.job_id,
             metadata={"raw_keywords": ["Claude Code", "Cursor", "Mac Studio"]},
+            frontier_reviewer=ingest._run_ingest_frontier_review,
         )
 
         assert seen_ops[0]["type"] == "create"
@@ -5770,6 +5819,17 @@ class TestRunIngestFrontierDisposition:
             "_generate_one",
             lambda *_args, **_kwargs: calls.append("generate") or None,
         )
+
+        def foreign_review_adapter(*_args, **_kwargs):
+            calls.append("review")
+            return {}
+
+        foreign_review_adapter.__module__ = "tests.foreign_review_adapter"
+        monkeypatch.setattr(
+            ingest,
+            "_review_and_apply_ingest_operations",
+            foreign_review_adapter,
+        )
         job = jobs.job_store.create(processor="ollama")
 
         ingest.run_ingest("grounded raw", job.job_id)
@@ -6037,6 +6097,7 @@ class TestRawKeywordsMetadataPropagation:
             "raw content",
             job.job_id,
             metadata={"raw_keywords": ["alpha", "beta"]},
+            frontier_reviewer=ingest._run_ingest_frontier_review,
         )
 
         # Every _generate_one call saw the same raw_keywords payload.
@@ -6121,6 +6182,7 @@ class TestRawKeywordsMetadataPropagation:
                 f"raw content {index}",
                 job.job_id,
                 metadata={"raw_keywords": bad},
+                frontier_reviewer=ingest._run_ingest_frontier_review,
             )
             assert captured == [None], f"bad={bad!r}"
 
@@ -6309,7 +6371,10 @@ class TestOrchestrator:
         continuation_results: list[dict] = []
         final_result: dict | None = None
         for _attempt in range(8):
-            result = orchestrator.run_pending_ingest(force=True)
+            result = orchestrator.run_pending_ingest(
+                force=True,
+                frontier_reviewer=review,
+            )
             if result["files_processed"]:
                 final_result = result
                 break
@@ -6465,7 +6530,10 @@ class TestOrchestrator:
         approved_progress: list[int] = []
         final_result: dict | None = None
         for _attempt in range(8):
-            result = orchestrator.run_pending_ingest(force=True)
+            result = orchestrator.run_pending_ingest(
+                force=True,
+                frontier_reviewer=review,
+            )
             if result["files_processed"]:
                 final_result = result
                 break
@@ -9190,6 +9258,7 @@ class TestPhase6Compatibility:
             lambda failed, triage_failed: on_finally_called.append(
                 (failed, triage_failed)
             ),
+            frontier_reviewer=ingest._run_ingest_frontier_review,
         )
 
         finished = jobs.job_store.get(job.job_id)
@@ -9241,6 +9310,7 @@ class TestPhase6Compatibility:
             "raw",
             job.job_id,
             metadata={"raw_keywords": ["fm-only"]},
+            frontier_reviewer=ingest._run_ingest_frontier_review,
         )
 
         # Triage's ``keywords`` survived on the op (used downstream by
@@ -12433,6 +12503,7 @@ class TestRebuildIndexNonFatal:
             "raw",
             job.job_id,
             on_complete=lambda: on_complete_calls.append(True),
+            frontier_reviewer=ingest_mod._run_ingest_frontier_review,
         )
 
         finished = jobs.job_store.get(job.job_id)
@@ -12479,6 +12550,7 @@ class TestRebuildIndexNonFatal:
             "raw",
             job.job_id,
             on_complete=lambda: on_complete_calls.append(True),
+            frontier_reviewer=ingest_mod._run_ingest_frontier_review,
         )
 
         finished = jobs.job_store.get(job.job_id)
@@ -12651,6 +12723,7 @@ class TestPostApplyLogSafety:
             "raw",
             job.job_id,
             on_complete=lambda: on_complete_calls.append(True),
+            frontier_reviewer=ingest_mod._run_ingest_frontier_review,
         )
 
         finished = jobs.job_store.get(job.job_id)
