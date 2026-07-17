@@ -27,6 +27,8 @@ from llm_wiki_mcp.runtime_config import (
 CODEX_HOOKS_FILE = Path.home() / ".config/codex/hooks.json"
 CODEX_CONFIG_FILE = Path.home() / ".config/codex/config.toml"
 CLAUDE_SETTINGS_FILE = Path.home() / "dotfiles/claude/settings.json"
+USER_PROMPT_HOOK_TIMEOUT_MS = 7000
+STOP_HOOK_TIMEOUT_MS = 5000
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -278,8 +280,8 @@ def install_codex_hooks(
         "CODEX_HOME=/Users/trafficsign/.config/codex "
         f"{prefix} --host codex --event Stop --hook"
     )
-    user_hook = _hook("command", user_command, 5000)
-    stop_hook = _hook("command", stop_command, 5000)
+    user_hook = _hook("command", user_command, USER_PROMPT_HOOK_TIMEOUT_MS)
+    stop_hook = _hook("command", stop_command, STOP_HOOK_TIMEOUT_MS)
     _replace_event_llm_wiki_hooks(data, "UserPromptSubmit", [user_hook])
     _replace_event_llm_wiki_hooks(data, "Stop", [stop_hook])
 
@@ -323,12 +325,12 @@ def install_claude_code_hooks(
     _replace_event_llm_wiki_hooks(
         data,
         "UserPromptSubmit",
-        [_hook("command", user_command, 5000)],
+        [_hook("command", user_command, USER_PROMPT_HOOK_TIMEOUT_MS)],
     )
     _replace_event_llm_wiki_hooks(
         data,
         "Stop",
-        [_hook("command", stop_command, 5000)],
+        [_hook("command", stop_command, STOP_HOOK_TIMEOUT_MS)],
     )
     if not dry_run:
         write_json(CLAUDE_SETTINGS_FILE, data)

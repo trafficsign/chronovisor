@@ -14,6 +14,8 @@ entire path has one wall-clock deadline (`recall.total_timeout_ms`, 4000 ms by
 default), not a separate unbounded timeout per stage. The remaining budget is
 propagated to query rewrite, semantic embedding, search, and the evidence
 judge. A process-level timer is the final boundary around the complete hook.
+The installed host command allows 7000 ms, leaving bounded startup/cache
+resolution headroom around the 4000 ms Recall deadline.
 
 Recall is strictly fail-open for the host. Config errors, unavailable local
 models, search failures, and either soft or hard deadline exhaustion produce no

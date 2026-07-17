@@ -256,6 +256,7 @@ def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeyp
             "llm-wiki-hook --host codex --event UserPromptSubmit --hook"
         ),
     ]
+    assert user_hooks[-1]["timeout"] == 7000
     assert [hook["command"] for hook in stop_hooks] == [
         "cmux stop",
         (
@@ -263,6 +264,7 @@ def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeyp
             "llm-wiki-hook --host codex --event Stop --hook"
         ),
     ]
+    assert stop_hooks[-1]["timeout"] == 5000
     assert set(result["trusted_hashes"]) == {"user_prompt_submit:0:1", "stop:0:1"}
     config_text = config_file.read_text(encoding="utf-8")
     assert "old-user" not in config_text
@@ -327,11 +329,13 @@ def test_install_claude_code_hooks_preserves_non_wiki_entries(tmp_path, monkeypa
         "llm-wiki-hook --host claude-code --event UserPromptSubmit --hook",
         "agent-router",
     ]
+    assert installed["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] == 7000
     assert [hook["command"] for hook in installed["hooks"]["Stop"][0]["hooks"]] == [
         "afplay done.aiff",
         "lazy-detect",
         "llm-wiki-hook --host claude-code --event Stop --hook",
     ]
+    assert installed["hooks"]["Stop"][0]["hooks"][-1]["timeout"] == 5000
 
 
 def test_hooks_install_cli_dry_run_json(tmp_path, monkeypatch, capsys) -> None:
