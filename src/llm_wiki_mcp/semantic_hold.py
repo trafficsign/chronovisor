@@ -25,6 +25,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_strict as canonical_sha256,
+    canonical_json_strict as _canonical_json,
+)
 from llm_wiki_mcp.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_provenance_error,
@@ -62,22 +66,6 @@ _HOLD_FIELDS = frozenset(
         "hold_sha256",
     }
 )
-
-
-def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def canonical_sha256(value: object) -> str:
-    """Return the canonical JSON digest used by every hold identity."""
-
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 STRUCTURED_REVIEW_HOLD_RESOLVER_SHA256 = canonical_sha256(

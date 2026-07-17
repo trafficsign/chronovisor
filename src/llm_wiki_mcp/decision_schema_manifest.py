@@ -7,6 +7,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from llm_wiki_mcp.canonical_json import canonical_json_sha256_strict
+
 SIGNATURE_POLICY_VERSION = 5
 NON_DECISION_FIELDS = frozenset(
     {
@@ -32,14 +34,7 @@ NON_DECISION_FIELDS = frozenset(
 def schema_sha256(schema: Mapping[str, Any]) -> str:
     """Hash a schema with the same canonical JSON used by replay artifacts."""
 
-    encoded = json.dumps(
-        schema,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return canonical_json_sha256_strict(schema)
 
 
 def default_decision_value(value: Any) -> Any:

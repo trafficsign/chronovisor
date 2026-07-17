@@ -25,6 +25,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_stringifying as _canonical_json_sha256,
+)
+
 from llm_wiki_mcp.claims import rebuild_claim_index
 from llm_wiki_mcp.convergence import (
     ConvergenceStore,
@@ -1300,17 +1304,6 @@ def _triage_path(key: str) -> Path:
 def _classification_directive_path(key: str) -> Path:
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return PROPOSALS_DIR.parent / "classification-directives" / f"{digest}.json"
-
-
-def _canonical_json_sha256(value: Any) -> str:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:

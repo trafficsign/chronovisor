@@ -23,6 +23,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_strict as _sha256_json,
+    canonical_json_strict as _canonical_json,
+)
+
 import httpx
 
 from llm_wiki_mcp import ollama
@@ -444,20 +449,6 @@ class ReplayCorpus:
 
 
 ModelMetadataProvider = Callable[[Sequence[str]], Mapping[str, Any]]
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _sha256_json(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _set_coverage_rate(selected: Sequence[str], available: Sequence[str]) -> float:

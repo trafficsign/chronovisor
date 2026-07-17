@@ -23,6 +23,11 @@ from pathlib import Path
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_strict as _sha256_json,
+    canonical_json_strict as _canonical_json,
+)
+
 from llm_wiki_mcp.decision_lane_prompts import (
     INGEST_PROPOSAL_SCHEMA_VERSION,
     build_autonomy_duplicate_review_prompt,
@@ -41,20 +46,6 @@ from llm_wiki_mcp.decision_lane_prompts import (
 
 CASES_PER_MODEL_BACKED_LANE = 5
 LANE_CONTRACT_CASE_ID_VERSION = 20
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _sha256_json(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _coverage_label(expected: dict[str, Any]) -> str | None:

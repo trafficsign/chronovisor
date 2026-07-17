@@ -14,6 +14,10 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_stringifying as _canonical_json_sha256,
+)
+
 import tomllib
 
 from llm_wiki_mcp import decision_authority, wiki
@@ -256,17 +260,6 @@ def apply_key_for(record: dict[str, Any]) -> str:
         or ""
     )
     return f"{action}:{normalize_key}:{page}:{payload_key}"
-
-
-def _canonical_json_sha256(payload: Any) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _resolved_review_dir(log_file: Path | None, review_dir: Path | None) -> Path:

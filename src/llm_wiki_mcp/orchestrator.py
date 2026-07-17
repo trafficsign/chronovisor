@@ -21,6 +21,7 @@ from typing import Any
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, LOG_FILE
 from llm_wiki_mcp.ollama import is_available
 from llm_wiki_mcp import runtime_status
+from llm_wiki_mcp.durable_state import fsync_directory as _fsync_directory
 from llm_wiki_mcp.link_fix import atomic_write
 
 # Config
@@ -545,14 +546,6 @@ def _read_fragment_quarantine_manifest(manifest_path: Path) -> dict:
     if payload.get("status") not in {"prepared", "completed"}:
         raise RuntimeError(f"invalid fragment quarantine status: {manifest_path.name}")
     return payload
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _fragment_quarantine_result(manifest_path: Path, manifest: dict) -> dict:

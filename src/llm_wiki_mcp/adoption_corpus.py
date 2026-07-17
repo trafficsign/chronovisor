@@ -30,6 +30,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_strict as _sha256_json,
+    canonical_json_strict as _canonical_json,
+)
+
 from llm_wiki_mcp.decision_schema_manifest import (
     decision_signature_value,
     production_decision_schemas,
@@ -106,20 +111,6 @@ EFFECTIVE_REQUEST_CONFLICT_EXCLUSION = "conflicting_effective_request_expectatio
 EFFECTIVE_REQUEST_DUPLICATE_EXCLUSION = "duplicate_effective_request_v1"
 LOCAL_CONSENSUS_SELF_LABEL_EXCLUSION = "model_self_label_local_consensus_v1"
 LEGACY_MISSING_SOURCE_LABEL = "legacy_source_missing"
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _sha256_json(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _tagged_json_object(text: str, tag: str) -> dict[str, Any] | None:

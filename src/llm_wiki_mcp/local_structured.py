@@ -26,6 +26,7 @@ from uuid import uuid4
 import httpx
 
 from llm_wiki_mcp import ollama
+from llm_wiki_mcp.canonical_json import canonical_json_strict as _canonical_json
 
 MAX_REPAIR_TURNS = 2
 MAX_RESPONSES = 1 + MAX_REPAIR_TURNS
@@ -1002,16 +1003,6 @@ def _matches_type(value: Any, expected: str) -> bool:
     if expected == "number":
         return actual in {"integer", "number"}
     return actual == expected
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
 
 
 def _json_equal(left: Any, right: Any) -> bool:

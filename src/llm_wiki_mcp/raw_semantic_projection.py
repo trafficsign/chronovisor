@@ -22,6 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_line_bytes_strict as _canonical_bytes,
+)
+from llm_wiki_mcp.durable_state import fsync_directory as _fsync_directory
+
 from llm_wiki_mcp.save_transaction import (
     SaveTransactionReceipt,
     parse_save_transaction_receipt,
@@ -117,19 +122,6 @@ class _TranscriptRecord:
     timestamp: str | None
     phase: str | None
     row_sha256: str
-
-
-def _canonical_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
 
 
 def _sha256(data: bytes) -> str:
@@ -577,14 +569,6 @@ def _pack_children(
     if len(children) > _MAX_INDEX:
         raise ProjectionCapacityError("projection requires too many children")
     return children
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _atomic_create_or_verify(path: Path, payload: bytes) -> bool:

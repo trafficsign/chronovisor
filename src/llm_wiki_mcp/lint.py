@@ -13,6 +13,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Iterator
 
+from llm_wiki_mcp.canonical_json import canonical_json_permissive as _canonical_json
 from llm_wiki_mcp.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -406,15 +407,6 @@ def _sha256_text(value: str) -> str:
 
 def _canonical_hash(value: Mapping[str, Any]) -> str:
     return _sha256_text(_canonical_json(dict(value)))
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
 
 
 def _render_review_packet(value: Mapping[str, Any]) -> str:

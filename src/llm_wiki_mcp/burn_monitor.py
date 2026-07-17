@@ -25,6 +25,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_bytes_stringifying as canonical_bytes,
+)
+
 
 WIKI_ROOT = Path.home() / ".wiki"
 RUNTIME_ROOT = WIKI_ROOT / "runtime"
@@ -107,16 +111,6 @@ OLLAMA_PATTERNS = (
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def canonical_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
 
 
 def sha256_value(value: Any) -> str:

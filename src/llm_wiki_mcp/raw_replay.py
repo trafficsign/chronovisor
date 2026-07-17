@@ -16,10 +16,10 @@ import json
 import os
 import re
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from llm_wiki_mcp.convergence import is_human_required_result
 from llm_wiki_mcp.decision_authority import (
@@ -29,6 +29,7 @@ from llm_wiki_mcp.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_error,
 )
+from llm_wiki_mcp.durable_state import sidecar_exclusive_lock as _queue_lock
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.jobs import JobStatus, job_store
 from llm_wiki_mcp.page_mutation import decision_authority_lock
@@ -997,18 +998,6 @@ def _queue_sort_key(row: dict[str, Any]) -> tuple[int, str, str]:
         str(row.get("date") or ""),
         str(row.get("key") or ""),
     )
-
-
-@contextmanager
-def _queue_lock(path: Path) -> Iterator[None]:
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _mark_completed(

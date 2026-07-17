@@ -13,6 +13,11 @@ import json
 import re
 from typing import Any
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_stringifying_strict as canonical_json_sha256,
+    canonical_json_stringifying_strict as _canonical_json,
+)
+
 from llm_wiki_mcp.tags import parse_tags, validate_axis_counts, validate_tag
 
 
@@ -28,23 +33,6 @@ INGEST_FRONTMATTER_LOCAL_CONTEXT_MAX_UTF8_BYTES = 96
 INGEST_REPAIR_HOST_BLOCK = "HOST_ONLY_INGEST_REPAIR_PREFLIGHT_JSON"
 INGEST_REPAIR_MODEL_BLOCK = "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON"
 INGEST_REVIEW_MODEL_BLOCK = "INGEST_REVIEW_PROJECTION_JSON"
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-        default=str,
-    )
-
-
-def canonical_json_sha256(value: Any) -> str:
-    """Return the shared canonical digest used by ingest durable artifacts."""
-
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def validate_ingest_proposal_envelope(proposal: Any) -> bool:

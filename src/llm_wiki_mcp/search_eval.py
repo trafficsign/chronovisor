@@ -21,6 +21,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from llm_wiki_mcp.canonical_json import (
+    canonical_json_sha256_stringifying as _canonical_json_sha256,
+)
+
 from llm_wiki_mcp.convergence import is_human_required_result
 from llm_wiki_mcp import decision_authority
 from llm_wiki_mcp.feedback_ledger import active_feedback_rows
@@ -226,18 +230,6 @@ def _str_tuple(value: Any) -> tuple[str, ...]:
 
 def _str_list(value: Any) -> list[str]:
     return list(_str_tuple(value))
-
-
-def _canonical_json_sha256(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def _label_candidate_payload(row: Mapping[str, Any]) -> dict[str, Any]:
