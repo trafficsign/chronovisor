@@ -259,9 +259,7 @@ def autonomy_hardening_kpi() -> dict[str, Any]:
     except Exception as exc:
         quality = {"status": "invalid", "error": str(exc)}
     try:
-        deadman_threshold = read_sealed_json(
-            autonomy / "observer-threshold-state.json"
-        )
+        deadman_threshold = read_sealed_json(autonomy / "observer-threshold-state.json")
     except DurableStateError:
         deadman_threshold = {"status": "unavailable"}
     artifacts = runtime / "decision-artifacts"
@@ -557,6 +555,30 @@ def capture_pipeline_kpi() -> dict[str, Any]:
     return {"background_jobs": job_snapshot(), "session_sweeper": sweeper}
 
 
+def ingest_liveness_kpi() -> dict[str, Any]:
+    path = WIKI_ROOT / "runtime" / "ingest-liveness.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "status": "unknown",
+            "path": str(path),
+            "alert": False,
+            "pending_raws": None,
+        }
+    if not isinstance(payload, dict):
+        return {"status": "invalid", "path": str(path), "alert": False}
+    waiting = payload.get("status") == "waiting_for_ollama"
+    pending = int(payload.get("pending_raws") or 0)
+    return {
+        **payload,
+        "status": "alert" if waiting and pending > 0 else "ok",
+        "runtime_status": payload.get("status"),
+        "alert": waiting and pending > 0,
+        "path": str(path),
+    }
+
+
 def _queue_status_counts(path: Path, field: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in _read_jsonl(path, limit=100000):
@@ -576,8 +598,9 @@ def health_snapshot() -> dict[str, Any]:
     raw_replay_queue = WIKI_ROOT / "review" / "raw-replay-queue.jsonl"
     label_statuses = _queue_status_counts(label_queue, "queue_status")
     replay_statuses = _queue_status_counts(raw_replay_queue, "status")
+    ingest_liveness = ingest_liveness_kpi()
     return {
-        "status": "ok",
+        "status": "alert" if ingest_liveness.get("alert") else "ok",
         "runtime": runtime_identity(),
         "coverage": coverage,
         "capture": capture_kpi(),
@@ -590,6 +613,7 @@ def health_snapshot() -> dict[str, Any]:
         "recall_feedback": recall_feedback_kpi(),
         "convergence": convergence_kpi(),
         "capture_pipeline": capture_pipeline_kpi(),
+        "ingest_liveness": ingest_liveness,
         "queues": {
             "duplicate_candidates": _jsonl_count(duplicate_queue),
             "lint_repair": _jsonl_count(lint_queue),

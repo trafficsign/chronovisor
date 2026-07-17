@@ -132,11 +132,11 @@ class RerankerConfig:
     enabled: bool = False
     model: str = "BAAI/bge-reranker-v2-m3"
     backend: str = "transformers"
-    top_n: int = 20
-    max_length: int = 1024
-    batch_size: int = 8
+    top_n: int = 10
+    max_length: int = 384
+    batch_size: int = 10
     device: str = ""
-    weight: float = 0.25
+    weight: float = 1.0
 
 
 @dataclass(frozen=True)

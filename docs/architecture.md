@@ -6,14 +6,15 @@ wiki store.
 ```text
 UserPromptSubmit
   -> llm-wiki-hook
-  -> inject bounded always-on state as untrusted JSON
+  -> inject bounded allowlisted core memory as non-executable JSON
   -> strip non-user blocks and trivial prompts
   -> load recall/sessions/<session_id>.json
   -> build queries, rewriting ambiguous references when needed
   -> BM25 + semantic + graph-expanded search
   -> evidence gate (features -> none/cards/read)
   -> optional bounded RECALL_CONTEXT as untrusted JSON
-  -> fail open at one total deadline; breaker preserves BM25 degradation
+  -> reserve a final model-free BM25 fallback inside the total deadline
+  -> fail open to the host; breaker preserves BM25 degradation
 
 Stop
   -> llm-wiki-hook
@@ -61,6 +62,12 @@ Exceptional system repair
 - `recall/content-feedback.jsonl`: immutable audit records for applied content corrections.
 - `recall/calibration.json`: validated evidence-gate weights.
 - `runtime/`: status, events, and metrics for observability.
+- `runtime/ingest-liveness.json`: Ollama readiness, pending Raw count,
+  outage duration, and recovery transition for the persistent drain worker.
+- `runtime/provisional-recall/`: a capped, citation-only search namespace for
+  verified projections of semantically deferred Raw units. Ranking uses
+  IDF-weighted coverage, match density, and exact-phrase evidence inside this
+  namespace only; it can never authorize mutation.
 - `runtime/convergence/`: exact-once state, leases, retry/backoff, and terminal decisions.
 - `runtime/content-correction/`: per-session capture cursors plus immutable
   proposal and structured-review artifacts used for crash recovery. Some files
@@ -74,12 +81,13 @@ Exceptional system repair
 ## Runtime Roles
 
 - **MCP server**: exposes wiki tools to hosts.
-- **Recall gate**: fast evidence-based search gate with separate L1 state and
+- **Recall gate**: fast evidence-based search gate with separate L1 core-memory and
   L2 page-card budgets. The complete hook shares one deadline and an outer hard
-  timer. BM25 is always attempted; semantic, graph expansion, rewrite, and
-  calibrated weights fail open. Repeated failure opens a cooldown breaker that
-  keeps only the cheap BM25 path active. Injected material is untrusted JSON,
-  not an instruction channel.
+  timer. The primary path reserves time for an L1 + BM25 fallback; semantic,
+  graph expansion, rewrite, and calibrated weights may degrade without losing
+  deterministic retrieval. Repeated failure opens a cooldown breaker that
+  keeps only the cheap BM25 path active. Injected material is data, not an
+  instruction channel.
 - **Save harness**: host-specific transcript parser plus a deterministic,
   lossless delta writer. It uses durable cursors/receipts, chunks oversized
   deltas, and performs no LLM inference.

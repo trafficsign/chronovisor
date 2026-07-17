@@ -42,13 +42,24 @@ def test_user_prompt_dispatches_to_recall_runtime(monkeypatch, capsys) -> None:
         )
 
     monkeypatch.setattr(recall_runtime, "run_recall", fake_run_recall)
-    monkeypatch.setattr(recall_runtime, "load_policy", lambda _path: recall_runtime.RecallPolicy(log_decisions=False))
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(log_decisions=False),
+    )
     monkeypatch.setattr(
         "sys.stdin",
-        io.StringIO(json.dumps({"prompt": "今日暑いな", "cwd": "/repo"}, ensure_ascii=False)),
+        io.StringIO(
+            json.dumps({"prompt": "今日暑いな", "cwd": "/repo"}, ensure_ascii=False)
+        ),
     )
 
-    assert hook_dispatcher.main(["--host", "codex", "--event", "UserPromptSubmit", "--hook"]) == 0
+    assert (
+        hook_dispatcher.main(
+            ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+        )
+        == 0
+    )
 
     output = capsys.readouterr().out.strip()
     assert output == "{}"
@@ -73,7 +84,9 @@ def test_user_prompt_unexpected_failure_is_exit_zero_fail_open(
         "run_recall",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
     )
-    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember","thread_id":"t1"}'))
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO('{"prompt":"remember","thread_id":"t1"}')
+    )
 
     assert (
         hook_dispatcher.main(
@@ -82,6 +95,49 @@ def test_user_prompt_unexpected_failure_is_exit_zero_fail_open(
         == 0
     )
     assert capsys.readouterr().out.strip() == "{}"
+    assert recall_breaker.snapshot()["failures"] == 1
+
+
+def test_user_prompt_hard_timeout_injects_model_free_fallback(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(log_decisions=False),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_recall",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            hook_dispatcher.RecallWallClockTimeout("primary timeout")
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_deterministic_fallback",
+        lambda *_args, **_kwargs: recall_runtime.RecallResult(
+            status="degraded",
+            decision="read",
+            confidence=0.7,
+            queries=["fallback"],
+            reasons=["deterministic fallback"],
+            matched_terms={},
+            context="[WORKING_MEMORY]\ncore\n[/WORKING_MEMORY]",
+        ),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"前回の続き"}'))
+
+    assert (
+        hook_dispatcher.main(
+            ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+        )
+        == 0
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert "core" in output["hookSpecificOutput"]["additionalContext"]
     assert recall_breaker.snapshot()["failures"] == 1
 
 
@@ -170,29 +226,34 @@ def test_user_prompt_init_failure_is_still_exit_zero_fail_open(
     assert capsys.readouterr().out.strip() == "{}"
 
 
-def test_stop_dispatch_only_save_for_legacy_wrapper(monkeypatch, tmp_path, capsys) -> None:
+def test_stop_dispatch_only_save_for_legacy_wrapper(
+    monkeypatch, tmp_path, capsys
+) -> None:
     config = tmp_path / "config.toml"
     config.write_text("[hooks.stop]\nsave = true\naudit = true\n", encoding="utf-8")
     monkeypatch.setenv("CODEX_WIKI_SAVE_ENABLED", "1")
     monkeypatch.setenv("LLM_WIKI_RECALL_AUDIT_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
-    assert hook_dispatcher.main(
-        [
-            "--host",
-            "codex",
-            "--event",
-            "Stop",
-            "--hook",
-            "--config",
-            str(config),
-            "--only",
-            "save",
-            "--dry-run",
-            "--format",
-            "json",
-        ]
-    ) == 0
+    assert (
+        hook_dispatcher.main(
+            [
+                "--host",
+                "codex",
+                "--event",
+                "Stop",
+                "--hook",
+                "--config",
+                str(config),
+                "--only",
+                "save",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert [task["name"] for task in output["tasks"]] == ["codex-save"]
@@ -231,20 +292,23 @@ def test_stop_dispatch_full_entrypoint_enqueues_only_capture_work(
     monkeypatch.setenv("LLM_WIKI_RECALL_IMPROVE_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
-    assert hook_dispatcher.main(
-        [
-            "--host",
-            "claude-code",
-            "--event",
-            "Stop",
-            "--hook",
-            "--config",
-            str(config),
-            "--dry-run",
-            "--format",
-            "json",
-        ]
-    ) == 0
+    assert (
+        hook_dispatcher.main(
+            [
+                "--host",
+                "claude-code",
+                "--event",
+                "Stop",
+                "--hook",
+                "--config",
+                str(config),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert [task["name"] for task in output["tasks"]] == [
@@ -264,26 +328,32 @@ def test_stop_dispatch_full_entrypoint_enqueues_only_capture_work(
 
 def test_stop_dispatch_only_improve_is_disabled(monkeypatch, tmp_path, capsys) -> None:
     config = tmp_path / "config.toml"
-    config.write_text("[hooks.stop]\nsave = true\naudit = true\nrecall_improve = true\n", encoding="utf-8")
+    config.write_text(
+        "[hooks.stop]\nsave = true\naudit = true\nrecall_improve = true\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("LLM_WIKI_RECALL_IMPROVE_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
-    assert hook_dispatcher.main(
-        [
-            "--host",
-            "codex",
-            "--event",
-            "Stop",
-            "--hook",
-            "--config",
-            str(config),
-            "--only",
-            "improve",
-            "--dry-run",
-            "--format",
-            "json",
-        ]
-    ) == 0
+    assert (
+        hook_dispatcher.main(
+            [
+                "--host",
+                "codex",
+                "--event",
+                "Stop",
+                "--hook",
+                "--config",
+                str(config),
+                "--only",
+                "improve",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert output["tasks"] == []
@@ -301,22 +371,25 @@ def test_stop_dispatch_only_content_correction_uses_capture_only_worker(
     monkeypatch.setenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
-    assert hook_dispatcher.main(
-        [
-            "--host",
-            "codex",
-            "--event",
-            "Stop",
-            "--hook",
-            "--config",
-            str(config),
-            "--only",
-            "correction",
-            "--dry-run",
-            "--format",
-            "json",
-        ]
-    ) == 0
+    assert (
+        hook_dispatcher.main(
+            [
+                "--host",
+                "codex",
+                "--event",
+                "Stop",
+                "--hook",
+                "--config",
+                str(config),
+                "--only",
+                "correction",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert output["tasks"] == [
@@ -342,19 +415,22 @@ def test_stop_content_correction_false_enqueues_nothing(
     monkeypatch.setenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO('{"session_id":"session-1"}'))
 
-    assert hook_dispatcher.main(
-        [
-            "--host",
-            "codex",
-            "--event",
-            "Stop",
-            "--hook",
-            "--config",
-            str(config),
-            "--format",
-            "json",
-        ]
-    ) == 0
+    assert (
+        hook_dispatcher.main(
+            [
+                "--host",
+                "codex",
+                "--event",
+                "Stop",
+                "--hook",
+                "--config",
+                str(config),
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
 
     assert json.loads(capsys.readouterr().out)["tasks"] == []
 
@@ -462,7 +538,9 @@ def test_spawn_task_only_enqueues_without_process(monkeypatch) -> None:
     assert seen["stdin_text"] == '{"session_id":"session-1"}'
 
 
-def test_stop_dispatch_requires_env_without_unified_config(monkeypatch, tmp_path, capsys) -> None:
+def test_stop_dispatch_requires_env_without_unified_config(
+    monkeypatch, tmp_path, capsys
+) -> None:
     legacy = tmp_path / "recall.toml"
     legacy.write_text("enabled = true\n", encoding="utf-8")
     monkeypatch.delenv("CODEX_WIKI_SAVE_ENABLED", raising=False)
@@ -471,20 +549,23 @@ def test_stop_dispatch_requires_env_without_unified_config(monkeypatch, tmp_path
     monkeypatch.delenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", raising=False)
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
-    assert hook_dispatcher.main(
-        [
-            "--host",
-            "codex",
-            "--event",
-            "Stop",
-            "--hook",
-            "--config",
-            str(legacy),
-            "--dry-run",
-            "--format",
-            "json",
-        ]
-    ) == 0
+    assert (
+        hook_dispatcher.main(
+            [
+                "--host",
+                "codex",
+                "--event",
+                "Stop",
+                "--hook",
+                "--config",
+                str(legacy),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert output["tasks"] == []
@@ -494,9 +575,25 @@ def test_internal_frontier_stop_never_spawns_tasks(monkeypatch, capsys) -> None:
     monkeypatch.setenv("LLM_WIKI_INTERNAL_FRONTIER", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
-    assert hook_dispatcher.main([
-        "--host", "codex", "--event", "Stop", "--hook", "--dry-run", "--format", "json",
-    ]) == 0
+    assert (
+        hook_dispatcher.main(
+            [
+                "--host",
+                "codex",
+                "--event",
+                "Stop",
+                "--hook",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
 
     output = json.loads(capsys.readouterr().out)
-    assert output == {"status": "suppressed", "reason": "internal_frontier", "tasks": []}
+    assert output == {
+        "status": "suppressed",
+        "reason": "internal_frontier",
+        "tasks": [],
+    }

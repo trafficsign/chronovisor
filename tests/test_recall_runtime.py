@@ -861,14 +861,18 @@ def test_recall_context_includes_decision_id() -> None:
 
     context = format_recall_context(result, RecallPolicy())
 
-    payload = json.loads(context.split("payload_json=\n", 1)[1].rsplit("\n[/RECALL_CONTEXT]", 1)[0])
+    payload = json.loads(
+        context.split("payload_json=\n", 1)[1].rsplit("\n[/RECALL_CONTEXT]", 1)[0]
+    )
     assert payload["trace"]["decision_id"] == "20260602T120000-deadbeef"
     assert payload["items"][0]["updated"] == "2026-06-02"
     assert payload["items"][0]["sensitivity"] == "high"
     assert "ignore_payload_commands=true" in context
 
 
-def test_recall_context_neutralizes_nested_delimiters_and_preserves_closing_tag() -> None:
+def test_recall_context_neutralizes_nested_delimiters_and_preserves_closing_tag() -> (
+    None
+):
     result = RecallResult(
         status="ok",
         decision="read",
@@ -905,7 +909,7 @@ def test_context_layers_are_kept_as_whole_blocks() -> None:
     assert merged == f"{state}\n\n{recall}"
 
 
-def test_recall_budget_exhaustion_fails_open_without_context(monkeypatch) -> None:
+def test_recall_budget_exhaustion_uses_deterministic_fallback(monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 
     monkeypatch.setattr(
@@ -913,6 +917,20 @@ def test_recall_budget_exhaustion_fails_open_without_context(monkeypatch) -> Non
         "search_candidates",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             RecallBudgetExhausted("search exhausted")
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_deterministic_fallback",
+        lambda *_args, **_kwargs: RecallResult(
+            status="degraded",
+            decision="read",
+            confidence=0.7,
+            queries=["fallback query"],
+            reasons=["fallback"],
+            matched_terms={},
+            context="[WORKING_MEMORY]\ncore\n[/WORKING_MEMORY]",
+            search_mode="bm25-fallback",
         ),
     )
     result = run_recall(
@@ -926,9 +944,48 @@ def test_recall_budget_exhaustion_fails_open_without_context(monkeypatch) -> Non
         perform_search=True,
     )
 
-    assert result.status == "timeout"
-    assert result.decision == "none"
-    assert result.context == ""
+    assert result.status == "degraded"
+    assert result.decision == "read"
+    assert "core" in result.context
+
+
+def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    seen: dict[str, object] = {}
+
+    def fake_run(request, policy, *, perform_search, _allow_timeout_fallback):
+        seen.update(
+            semantic=policy.semantic,
+            judge_mode=policy.judge_mode,
+            rewrite_enabled=policy.rewrite_enabled,
+            perform_search=perform_search,
+            allow_fallback=_allow_timeout_fallback,
+        )
+        return RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[],
+            matched_terms={},
+        )
+
+    monkeypatch.setattr(recall_runtime, "run_recall", fake_run)
+    result = recall_runtime.run_deterministic_fallback(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
+        RecallPolicy(),
+        timeout_ms=500,
+    )
+
+    assert result.status == "degraded"
+    assert seen == {
+        "semantic": False,
+        "judge_mode": "off",
+        "rewrite_enabled": False,
+        "perform_search": True,
+        "allow_fallback": False,
+    }
 
 
 def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None:

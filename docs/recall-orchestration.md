@@ -26,16 +26,18 @@ they do not weaken the store's provenance, review, or adoption gates.
 
 ## Synchronous Contract
 
-The default total deadline is 4000 ms. The budget is shared by rewrite,
-embedding, search, and judging, and the outer hook timer covers code that cannot
-cooperate with the remaining-budget checks. On error or timeout the hook exits
-successfully with no Recall context. A durable circuit breaker opens after two
-consecutive failures, disables rewrite/semantic/judge for 60 seconds, and keeps
-BM25 available.
+The default total deadline is 4000 ms. The primary path shares 3400 ms across
+rewrite, embedding, search, and judging, reserving the final 600 ms for
+allowlisted L1 memory plus deterministic BM25 fallback. The outer hook timer
+covers code that cannot cooperate with remaining-budget checks; deployment
+headroom allows one separately bounded fallback after a hard timeout. A durable
+circuit breaker opens after two degraded or failed runs, disables
+rewrite/semantic/judge for 60 seconds, and keeps BM25 available.
 
-L1 and L2 are serialized as untrusted JSON strings. Page text cannot issue
-instructions, close its own context block, or silently consume the other
-layer's budget. The combined output includes only complete blocks.
+L1 and L2 are serialized as non-executable JSON strings. L1 is restricted to
+`current-state`, `user-profile`, and `lessons-learned`. Page text cannot issue
+commands, close its own context block, or silently consume the other layer's
+budget. The combined output includes only complete blocks.
 
 ## Decision Trace
 

@@ -167,3 +167,41 @@ def test_parser_reads_max_units_from_environment(
     args = ingest_drain.build_parser().parse_args([])
 
     assert args.max_units == 1
+
+
+def test_drain_waits_for_ollama_and_recovers_without_losing_pending_raws(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"pending": 2, "available": False, "runs": 0}
+    monkeypatch.setattr(ingest_drain, "init_wiki", lambda: None)
+    monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "get_pending_raw_files",
+        lambda: [object()] * state["pending"],
+    )
+    monkeypatch.setattr(ingest_drain.ollama, "is_available", lambda: state["available"])
+
+    def run_pending(*, force: bool, max_units: int) -> dict:
+        state["runs"] += 1
+        state["pending"] = 0
+        return {"triggered": True, "files_processed": ["a.md", "b.md"]}
+
+    monkeypatch.setattr(ingest_drain.orchestrator, "run_pending_ingest", run_pending)
+    log_file = tmp_path / "drain.jsonl"
+
+    waiting = ingest_drain.drain(max_batches=1, sleep_seconds=0, log_file=log_file)
+
+    assert waiting["status"] == "waiting_for_ollama"
+    assert waiting["pending_after"] == 2
+    assert waiting["alert"] is True
+    assert state["runs"] == 0
+
+    state["available"] = True
+    recovered = ingest_drain.drain(max_batches=1, sleep_seconds=0, log_file=log_file)
+
+    assert recovered["status"] == "drained"
+    assert recovered["pending_after"] == 0
+    assert state["runs"] == 1
+    assert recovered["liveness"]["last_recovered_at"]

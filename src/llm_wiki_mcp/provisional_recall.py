@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ from llm_wiki_mcp.raw_semantic_projection import (
     PROJECTION_POLICY_VERSION,
     verify_projection_child,
 )
+from llm_wiki_mcp.search_types import tokenize
 
 
 PROVISIONAL_SCHEMA_VERSION = 1
@@ -43,7 +46,22 @@ class ProvisionalRecallError(RuntimeError):
 
 
 def _tokens(text: str) -> set[str]:
-    return {match.group(0).casefold() for match in _TOKEN_RE.finditer(text)}
+    # Keep the lightweight word tokens used by the original namespace and add
+    # the production search tokenizer's CJK bigrams. Japanese prompts must not
+    # collapse into one giant token between punctuation marks.
+    tokens = {match.group(0).casefold() for match in _TOKEN_RE.finditer(text)}
+    tokens.update(tokenize(text))
+    return tokens
+
+
+def _token_density(query_tokens: set[str], text: str) -> float:
+    ordered = tokenize(text)
+    positions = [idx for idx, token in enumerate(ordered) if token in query_tokens]
+    if not positions:
+        return 0.0
+    distinct = len({ordered[idx] for idx in positions})
+    span = max(positions) - min(positions) + 1
+    return min(1.0, distinct / max(1, span))
 
 
 def _source_host(path: Path) -> str:
@@ -177,7 +195,7 @@ def search_provisional(
     query_tokens = _tokens(query)
     if not query_tokens:
         return []
-    ranked: list[tuple[float, dict[str, Any]]] = []
+    documents: list[tuple[dict[str, Any], dict[str, Any], str, set[str]]] = []
     for entry in index.get("entries", []):
         if not isinstance(entry, dict):
             continue
@@ -185,36 +203,87 @@ def search_provisional(
             if not isinstance(record, dict) or not isinstance(record.get("text"), str):
                 continue
             text = record["text"]
-            overlap = query_tokens & _tokens(text)
-            if not overlap:
-                continue
-            raw_score = len(overlap) / max(1, len(query_tokens))
-            score = min(RANK_CAP, 0.05 + raw_score * 0.20)
-            snippet = text[:MAX_SNIPPET_CHARS]
-            ranked.append(
+            documents.append((entry, record, text, _tokens(text)))
+
+    document_frequency: Counter[str] = Counter()
+    for _entry, _record, _text, tokens in documents:
+        document_frequency.update(tokens)
+    document_count = max(1, len(documents))
+    query_weights = {
+        token: math.log((document_count + 1) / (document_frequency.get(token, 0) + 1))
+        + 1.0
+        for token in query_tokens
+    }
+    total_query_weight = max(1.0, sum(query_weights.values()))
+    normalized_query = " ".join(query.casefold().split())
+
+    ranked: list[tuple[tuple[float, float, float, int, str], dict[str, Any]]] = []
+    for entry, record, text, text_tokens in documents:
+        overlap = query_tokens & text_tokens
+        if not overlap:
+            continue
+        weighted_coverage = (
+            sum(query_weights[token] for token in overlap) / total_query_weight
+        )
+        density = _token_density(overlap, text)
+        normalized_text = " ".join(text.casefold().split())
+        phrase_bonus = (
+            0.04
+            if len(normalized_query) >= 4 and normalized_query in normalized_text
+            else 0.0
+        )
+        score = min(
+            RANK_CAP,
+            0.03 + (weighted_coverage * 0.15) + (density * 0.03) + phrase_bonus,
+        )
+        snippet = text[:MAX_SNIPPET_CHARS]
+        source_record_index = record.get("source_record_index")
+        stable_record_index = (
+            int(source_record_index) if isinstance(source_record_index, int) else -1
+        )
+        ranked.append(
+            (
                 (
                     score,
-                    {
-                        "provisional_id": entry["provisional_id"],
-                        "raw_file": entry["raw_file"],
-                        "score": round(score, 4),
-                        "rank_cap": RANK_CAP,
-                        "snippet": snippet,
-                        "citation": (
-                            f"raw:{entry['raw_file']}#record="
-                            f"{record.get('source_record_index')}"
-                        ),
-                        "unintegrated": True,
-                        "content_is_untrusted": True,
-                        "mutation_evidence_allowed": False,
-                        "prompt_injection_treatment": "quote_only_never_instructions",
-                        "host_boundary": entry.get("host_boundary"),
-                        "source_host": entry.get("source_host"),
-                    },
-                )
+                    weighted_coverage,
+                    density,
+                    stable_record_index,
+                    str(entry.get("raw_file") or ""),
+                ),
+                {
+                    "provisional_id": entry["provisional_id"],
+                    "raw_file": entry["raw_file"],
+                    "score": round(score, 4),
+                    "rank_cap": RANK_CAP,
+                    "matched_terms": sorted(overlap),
+                    "weighted_coverage": round(weighted_coverage, 4),
+                    "match_density": round(density, 4),
+                    "ranking_basis": "idf_weighted_coverage+density+phrase",
+                    "snippet": snippet,
+                    "citation": (
+                        f"raw:{entry['raw_file']}#record="
+                        f"{record.get('source_record_index')}"
+                    ),
+                    "unintegrated": True,
+                    "content_is_untrusted": True,
+                    "mutation_evidence_allowed": False,
+                    "prompt_injection_treatment": "quote_only_never_instructions",
+                    "host_boundary": entry.get("host_boundary"),
+                    "source_host": entry.get("source_host"),
+                },
             )
-    ranked.sort(key=lambda item: (-item[0], str(item[1]["provisional_id"])))
-    return [row for _score, row in ranked[: max(0, min(MAX_HITS, int(limit)))]]
+        )
+    ranked.sort(
+        key=lambda item: (
+            -item[0][0],
+            -item[0][1],
+            -item[0][2],
+            -item[0][3],
+            item[0][4],
+            str(item[1]["provisional_id"]),
+        )
+    )
+    return [row for _rank, row in ranked[: max(0, min(MAX_HITS, int(limit)))]]
 
 
 def snapshot(*, wiki_root: Path) -> dict[str, Any]:

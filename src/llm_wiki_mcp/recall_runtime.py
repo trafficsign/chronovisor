@@ -171,12 +171,13 @@ class RecallPolicy:
     enabled: bool = True
     search_threshold: float = 0.35
     read_threshold: float = 0.65
-    max_context_chars: int = 600
-    max_state_context_chars: int = 600
-    max_total_context_chars: int = 1202
+    max_context_chars: int = 800
+    max_state_context_chars: int = 1600
+    max_total_context_chars: int = 2402
     max_pages: int = 3
     max_queries: int = 3
     total_timeout_ms: int = 4000
+    deterministic_fallback_reserve_ms: int = 600
     circuit_breaker_failures: int = 2
     circuit_breaker_cooldown_seconds: int = 60
     semantic: bool = True
@@ -336,6 +337,14 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             policy.judge_timeout_ms = max(200, budgets["judge_timeout_ms"])
         if isinstance(budgets.get("total_timeout_ms"), int):
             policy.total_timeout_ms = max(500, budgets["total_timeout_ms"])
+        if isinstance(budgets.get("deterministic_fallback_reserve_ms"), int):
+            policy.deterministic_fallback_reserve_ms = max(
+                0,
+                min(
+                    policy.total_timeout_ms - 100,
+                    budgets["deterministic_fallback_reserve_ms"],
+                ),
+            )
 
     recall = data.get("recall", {})
     if isinstance(recall, dict):
@@ -1587,7 +1596,9 @@ def _render_recall_payload(payload: dict[str, Any], max_chars: int) -> str:
 def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
     if result.decision == "none" or not result.context_items:
         return ""
-    return _render_recall_payload(_recall_payload(result, policy), policy.max_context_chars)
+    return _render_recall_payload(
+        _recall_payload(result, policy), policy.max_context_chars
+    )
 
 
 def merge_context_blocks(*blocks: str, max_chars: int) -> str:
@@ -1640,6 +1651,7 @@ def run_recall(
     policy: RecallPolicy | None = None,
     *,
     perform_search: bool = True,
+    _allow_timeout_fallback: bool = True,
 ) -> RecallResult:
     started = time.monotonic()
     policy = policy or load_policy()
@@ -1647,9 +1659,36 @@ def run_recall(
         policy.max_total_context_chars,
         policy.max_state_context_chars + policy.max_context_chars + 2,
     )
-    deadline_at = started + (policy.total_timeout_ms / 1000.0)
+    final_deadline_at = started + (policy.total_timeout_ms / 1000.0)
+    reserve_ms = (
+        max(
+            0,
+            min(
+                policy.deterministic_fallback_reserve_ms, policy.total_timeout_ms - 100
+            ),
+        )
+        if _allow_timeout_fallback and perform_search
+        else 0
+    )
+    deadline_at = final_deadline_at - (reserve_ms / 1000.0)
 
-    def fail_open_budget(reason: str, matched: dict[str, list[str]] | None = None) -> RecallResult:
+    def fail_open_budget(
+        reason: str, matched: dict[str, list[str]] | None = None
+    ) -> RecallResult:
+        if _allow_timeout_fallback and perform_search:
+            remaining_ms = _remaining_budget_ms(final_deadline_at)
+            if remaining_ms is not None and remaining_ms >= 100:
+                fallback = run_deterministic_fallback(
+                    request,
+                    policy,
+                    perform_search=True,
+                    timeout_ms=remaining_ms,
+                    reason=reason,
+                )
+                fallback.latency_ms = _elapsed_ms(started)
+                if policy.log_decisions:
+                    append_recall_log(request, fallback)
+                return fallback
         result = RecallResult(
             status="timeout",
             decision="none",
@@ -1660,9 +1699,14 @@ def run_recall(
             latency_ms=_elapsed_ms(started),
             error=reason,
         )
+        result.state_context = state_context_for_request(request, policy)
+        result.context = result.state_context
+        if result.state_context:
+            result.reasons.extend(["core memory injected", "state register injected"])
         if policy.log_decisions:
             append_recall_log(request, result)
         return result
+
     if not policy.enabled:
         return RecallResult(
             status="disabled",
@@ -1767,9 +1811,7 @@ def run_recall(
                 preliminary_features=evidence_features,
             ):
                 rewrite_started = time.monotonic()
-                rewrite_timeout_ms = _require_remaining_budget(
-                    deadline_at, "rewrite"
-                )
+                rewrite_timeout_ms = _require_remaining_budget(deadline_at, "rewrite")
                 rewrite_queries, rewrite_confidence, rewrite_reason = (
                     run_query_rewriter(
                         active_request,
@@ -1928,7 +1970,7 @@ def run_recall(
         max_chars=policy.max_total_context_chars,
     )
     if result.state_context:
-        result.reasons.append("state register injected")
+        result.reasons.extend(["core memory injected", "state register injected"])
     if session_state is not None:
         try:
             from llm_wiki_mcp.recall_session import update_session_after_recall
@@ -1945,6 +1987,47 @@ def run_recall(
             pass
     if policy.log_decisions:
         append_recall_log(request, result)
+    return result
+
+
+def run_deterministic_fallback(
+    request: RecallRequest,
+    policy: RecallPolicy,
+    *,
+    perform_search: bool = True,
+    timeout_ms: int | None = None,
+    reason: str = "primary recall unavailable",
+) -> RecallResult:
+    """Run the cheap L1 + BM25 path without any local-model dependency."""
+
+    budget_ms = max(
+        100,
+        int(timeout_ms)
+        if isinstance(timeout_ms, int)
+        else policy.deterministic_fallback_reserve_ms,
+    )
+    fallback_policy = replace(
+        policy,
+        semantic=False,
+        judge_mode="off",
+        rewrite_enabled=False,
+        total_timeout_ms=budget_ms,
+        deterministic_fallback_reserve_ms=0,
+        log_decisions=False,
+    )
+    result = run_recall(
+        request,
+        fallback_policy,
+        perform_search=perform_search,
+        _allow_timeout_fallback=False,
+    )
+    result.reasons.insert(0, f"deterministic BM25 fallback: {reason}")
+    result.search_mode = (
+        f"{result.search_mode}+fallback" if result.search_mode else "bm25-fallback"
+    )
+    result.error = reason
+    if result.status == "ok":
+        result.status = "degraded"
     return result
 
 

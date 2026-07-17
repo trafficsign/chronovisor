@@ -47,6 +47,31 @@ def test_latest_memory_integrity_reads_summary(tmp_path: Path, monkeypatch) -> N
     assert payload["capture_rate"] == 0.5
 
 
+def test_ingest_liveness_kpi_alerts_when_ollama_blocks_pending_raws(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    state_path = wiki_root / "runtime" / "ingest-liveness.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "status": "waiting_for_ollama",
+                "pending_raws": 7,
+                "observed_at": "2026-07-17T12:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "WIKI_ROOT", wiki_root)
+
+    payload = health.ingest_liveness_kpi()
+
+    assert payload["status"] == "alert"
+    assert payload["runtime_status"] == "waiting_for_ollama"
+    assert payload["pending_raws"] == 7
+
+
 def test_cofire_kpi_reads_graph_summary(tmp_path: Path, monkeypatch) -> None:
     wiki_root = tmp_path / "wiki"
     recall_dir = wiki_root / "recall"

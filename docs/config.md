@@ -162,11 +162,11 @@ max_entries = 500
 enabled = false
 backend = "transformers"
 model = "BAAI/bge-reranker-v2-m3"
-top_n = 20
-max_length = 1024
-batch_size = 4
+top_n = 10
+max_length = 384
+batch_size = 10
 device = "mps"
-weight = 0.25
+weight = 1.0
 
 [recall.thresholds]
 search = 0.35
@@ -187,16 +187,18 @@ warmup_timeout_ms = 15000
 
 [recall.budgets]
 # L2 automatic Recall budget.
-max_context_chars = 600
+max_context_chars = 800
 # L1 always-on state budget.
-max_state_context_chars = 600
+max_state_context_chars = 1600
 # Whole-block merge ceiling. Values below L1 + L2 + delimiters are normalized
 # upward so neither layer silently steals the other's configured budget.
-max_total_context_chars = 1202
+max_total_context_chars = 2402
 max_pages = 3
 max_queries = 3
 # One wall-clock budget shared by rewrite, embedding, search, and judge.
 total_timeout_ms = 4000
+# Reserved from the total deadline for model-free L1 + BM25 degradation.
+deterministic_fallback_reserve_ms = 600
 
 [recall]
 gate_mode = "evidence"
@@ -327,11 +329,18 @@ hook never calls the reranker. If enabled, the Hugging Face Transformers backend
 uses `BAAI/bge-reranker-v2-m3` only for MCP `wiki.search` top candidates and
 explicit search-eval reranker experiments.
 
+The tuned local profile reranks only the first 10 fused candidates with a 384
+token passage ceiling and equal reciprocal-rank weight (`weight = 1.0`). Keep
+the feature disabled until a reviewed locked-holdout sample improves Recall/MRR
+without worsening negative-hit rate; the synchronous prompt hook is never part
+of this adoption.
+
 ## Recall Defaults
 
 The completed recall path defaults to `gate_mode = "evidence"`,
 `context_style = "cards"`, `semantic = true`, rewrite enabled, and calibration
-enabled. The complete synchronous path has a 4000 ms wall-clock deadline and
-fails open with no injected context. BM25 still runs without Ollama; after two
-consecutive failures the breaker temporarily disables rewrite, semantic search,
-and judge while keeping BM25 available.
+enabled. The complete synchronous path has a 4000 ms wall-clock deadline,
+reserves 600 ms for allowlisted L1 memory plus BM25 fallback, and remains
+fail-open for the host. BM25 still runs without Ollama; after two degraded or
+failed runs the breaker temporarily disables rewrite, semantic search, and
+judge while keeping BM25 available.

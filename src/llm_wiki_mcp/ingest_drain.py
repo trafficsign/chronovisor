@@ -11,13 +11,67 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from llm_wiki_mcp import orchestrator, runtime_status
+from llm_wiki_mcp import ollama, orchestrator, runtime_status
+from llm_wiki_mcp.link_fix import atomic_write
 from llm_wiki_mcp.wiki import WIKI_ROOT, init_wiki
 
 DEFAULT_MAX_BATCHES = 24
 DEFAULT_MAX_UNITS = orchestrator.MAX_INGEST_BATCH_UNITS
 DEFAULT_SLEEP_SECONDS = 1.0
 DEFAULT_IDLE_SLEEP_SECONDS = 60.0
+
+
+def _liveness_file() -> Path:
+    return WIKI_ROOT / "runtime" / "ingest-liveness.json"
+
+
+def _read_liveness() -> dict[str, Any]:
+    try:
+        payload = json.loads(_liveness_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _record_liveness(
+    status: str,
+    *,
+    pending: int,
+    error: str = "",
+) -> dict[str, Any]:
+    previous = _read_liveness()
+    now = datetime.now().isoformat(timespec="seconds")
+    previous_status = str(previous.get("status") or "")
+    waiting = status == "waiting_for_ollama"
+    payload = {
+        "schema_version": 1,
+        "status": status,
+        "observed_at": now,
+        "pending_raws": max(0, int(pending)),
+        "ollama_available": not waiting,
+        "alert": waiting and pending > 0,
+        "retryable": waiting,
+        "consecutive_unavailable_checks": (
+            int(previous.get("consecutive_unavailable_checks") or 0) + 1
+            if waiting
+            else 0
+        ),
+        "unavailable_since": (
+            str(previous.get("unavailable_since") or now) if waiting else None
+        ),
+        "last_recovered_at": (
+            now
+            if not waiting and previous_status == "waiting_for_ollama"
+            else previous.get("last_recovered_at")
+        ),
+        "error": error,
+        "transitioned": previous_status != status,
+    }
+    atomic_write(
+        _liveness_file(),
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
+    return payload
 
 
 def _env_int(name: str, default: int) -> int:
@@ -98,6 +152,45 @@ def drain(
             "managed_holds": managed_holds,
         }
 
+    if pending_start == 0:
+        liveness = _record_liveness("idle", pending=0)
+    elif not ollama.is_available():
+        liveness = _record_liveness(
+            "waiting_for_ollama",
+            pending=pending_start,
+            error="ollama unavailable; raw capture remains durable and drain will retry",
+        )
+        if liveness["transitioned"]:
+            _append_jsonl(
+                log_path,
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "kind": "ingest_liveness",
+                    "status": liveness["status"],
+                    "pending_before": pending_start,
+                    "pending_after": pending_start,
+                    "alert": True,
+                    "retryable": True,
+                    "error": liveness["error"],
+                },
+            )
+        return {
+            "status": "waiting_for_ollama",
+            "pending_start": pending_start,
+            "pending_after": pending_start,
+            "batches_run": 0,
+            "files_processed": 0,
+            "stop_reason": "ollama unavailable",
+            "elapsed_seconds": round(time.time() - started, 2),
+            "log_file": str(log_path),
+            "alert": True,
+            "retryable": True,
+            "liveness": liveness,
+            "managed_holds": managed_holds,
+        }
+    else:
+        liveness = _record_liveness("ready", pending=pending_start)
+
     for batch_index in range(1, max_batches + 1):
         pending_before = len(orchestrator.get_pending_raw_files())
         if pending_before == 0:
@@ -161,6 +254,10 @@ def drain(
     else:
         status = "partial"
 
+    liveness = _record_liveness(
+        "idle" if pending_final == 0 else "ready",
+        pending=pending_final,
+    )
     return {
         "status": status,
         "pending_start": pending_start,
@@ -171,6 +268,7 @@ def drain(
         "elapsed_seconds": round(time.time() - started, 2),
         "log_file": str(log_path),
         "managed_holds": managed_holds,
+        "liveness": liveness,
     }
 
 

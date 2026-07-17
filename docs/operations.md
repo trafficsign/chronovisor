@@ -372,10 +372,18 @@ machine-checkable trail.
 
 ## Working Memory
 
-`system/current-state.md` is treated as a state register. Codex/Claude Code
-prompt hooks inject it as a small `[WORKING_MEMORY]` block even when the normal
-recall gate decides `none`. System notifications and internal prompts remain
-filtered before this path.
+`system/current-state.md`, `system/user-profile.md`, and
+`system/lessons-learned.md` form a fixed core-memory allowlist. Codex/Claude
+Code prompt hooks inject bounded excerpts as one `[WORKING_MEMORY]` block even
+when the normal recall gate decides `none`. Arbitrary pages cannot enter this
+layer. System notifications and internal prompts remain filtered before this
+path.
+
+The persistent ingest drain probes Ollama before starting semantic work. If it
+is unavailable, Raw capture remains durable, the drain writes
+`runtime/ingest-liveness.json`, health becomes `alert`, and no failing ingest
+job is started. The watcher retries on its normal interval and records the
+recovery transition before automatically draining the backlog.
 
 ## Sensitivity Tiers
 
@@ -656,7 +664,9 @@ writes `recall/search-policy.json` only after both gates pass.
 
 The optional Hugging Face reranker is disabled in the normal local profile.
 Ranking still runs through BM25 + semantic fusion; enable `[search.reranker]`
-only for explicit MCP `wiki.search` or search-eval reranker experiments.
+only for explicit MCP `wiki.search` after a reviewed locked-holdout experiment.
+The tuned starting point is `top_n = 10`, `max_length = 384`,
+`batch_size = 10`, and `weight = 1.0`; the hook path remains unchanged.
 
 ## Calibration
 

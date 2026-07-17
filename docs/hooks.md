@@ -17,17 +17,22 @@ judge. A process-level timer is the final boundary around the complete hook.
 The installed host command allows 7000 ms, leaving bounded startup/cache
 resolution headroom around the 4000 ms Recall deadline.
 
-Recall is strictly fail-open for the host. Config errors, unavailable local
-models, search failures, and either soft or hard deadline exhaustion produce no
-injected context, exit successfully, and let the user prompt continue. After
-two consecutive failed Recall runs, the default circuit breaker disables
+Recall is strictly fail-open for the host. The primary path reserves 600 ms of
+its deadline for a model-free fallback. A soft deadline first degrades to
+allowlisted L1 memory plus BM25; if a non-cooperative call reaches the outer
+hard timer, the installed command's startup headroom permits the same tightly
+bounded fallback once. Config corruption or a second fallback failure still
+prints a host no-op, exits successfully, and lets the user prompt continue.
+After two degraded or failed Recall runs, the default circuit breaker disables
 rewrite, semantic search, and the local judge for 60 seconds while BM25 remains
 available. A successful normal run resets the breaker.
 
-Always-on state and automatic Recall have independent budgets. Both are
-rendered as explicitly untrusted JSON data, with memory content quoted as JSON
-strings rather than executable-looking prose. Delimiter-like text inside a
-page is neutralized. The combined
+Always-on memory and automatic Recall have independent budgets. L1 admits only
+the fixed system-page allowlist `current-state`, `user-profile`, and
+`lessons-learned`; arbitrary pages cannot enter it. Both layers are rendered as
+non-executable JSON data, with memory content quoted as JSON strings rather
+than executable-looking prose. Delimiter-like text inside a page is
+neutralized. The combined
 context is assembled from whole blocks only; a block that does not fit is
 omitted rather than cut into ambiguous partial syntax. See
 [Recall Orchestration](recall-orchestration.md) for the full contract.

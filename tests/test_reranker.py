@@ -65,6 +65,24 @@ def test_rerank_results_unavailable_preserves_order() -> None:
     assert outcome.metadata["status"] == "unavailable"
 
 
+def test_rerank_results_rejects_partial_score_vectors(monkeypatch) -> None:
+    candidates = [page("a"), page("b")]
+    monkeypatch.setattr(reranker, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(
+        reranker,
+        "_score_fn",
+        lambda _config: lambda _query, _passages, _cfg: [0.9],
+    )
+
+    outcome = rerank_results(
+        "query", candidates, config=RerankerConfig(enabled=True, top_n=2)
+    )
+
+    assert outcome.results == candidates
+    assert outcome.metadata["status"] == "unavailable"
+    assert outcome.metadata["score_count"] == 1
+
+
 def test_wiki_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
     class FakeStore:
         def refresh(self) -> None:
@@ -77,7 +95,7 @@ def test_wiki_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
             return []
 
     def fake_search(**kwargs):
-        assert kwargs["top_n"] == 20
+        assert kwargs["top_n"] == 10
         return [page("a"), page("b")], "hybrid"
 
     def fake_rerank(query, candidates, *, config):
@@ -99,12 +117,18 @@ def test_wiki_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
     from llm_wiki_mcp import runtime_config
 
     monkeypatch.setattr(search_mod, "search", fake_search)
-    monkeypatch.setattr(runtime_config, "load_reranker_config", lambda: RerankerConfig(enabled=True))
+    monkeypatch.setattr(
+        runtime_config, "load_reranker_config", lambda: RerankerConfig(enabled=True)
+    )
     monkeypatch.setattr(reranker, "rerank_results", fake_rerank)
     monkeypatch.setattr(server, "get_store", lambda: FakeStore())
     monkeypatch.setattr(server, "find_page", lambda _page_id: None)
 
-    tool_fn = server.wiki_search.fn if hasattr(server.wiki_search, "fn") else server.wiki_search
+    tool_fn = (
+        server.wiki_search.fn
+        if hasattr(server.wiki_search, "fn")
+        else server.wiki_search
+    )
     payload = json.loads(tool_fn("needle", depth=0))
 
     assert payload["search_mode"] == "hybrid+rerank"
@@ -126,7 +150,7 @@ def test_wiki_search_reranks_after_tag_filter(monkeypatch) -> None:
     seen_candidates: list[list[str]] = []
 
     def fake_search(**kwargs):
-        assert kwargs["top_n"] == 20
+        assert kwargs["top_n"] == 10
         return [page("keep"), page("drop")], "hybrid"
 
     def fake_rerank(query, candidates, *, config):
@@ -147,12 +171,18 @@ def test_wiki_search_reranks_after_tag_filter(monkeypatch) -> None:
     from llm_wiki_mcp import runtime_config
 
     monkeypatch.setattr(search_mod, "search", fake_search)
-    monkeypatch.setattr(runtime_config, "load_reranker_config", lambda: RerankerConfig(enabled=True))
+    monkeypatch.setattr(
+        runtime_config, "load_reranker_config", lambda: RerankerConfig(enabled=True)
+    )
     monkeypatch.setattr(reranker, "rerank_results", fake_rerank)
     monkeypatch.setattr(server, "get_store", lambda: FakeStore())
     monkeypatch.setattr(server, "find_page", lambda _page_id: None)
 
-    tool_fn = server.wiki_search.fn if hasattr(server.wiki_search, "fn") else server.wiki_search
+    tool_fn = (
+        server.wiki_search.fn
+        if hasattr(server.wiki_search, "fn")
+        else server.wiki_search
+    )
     payload = json.loads(tool_fn("needle", depth=0, tags=["d/keep"]))
 
     assert seen_candidates == [["keep"]]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass, replace
@@ -38,14 +39,19 @@ def _candidate_text(page: ScoredPage, *, max_chars: int = 2400) -> str:
 def _select_torch_device(torch_mod: Any, requested: str) -> str:
     if requested:
         return requested
-    if getattr(torch_mod.backends, "mps", None) and torch_mod.backends.mps.is_available():
+    if (
+        getattr(torch_mod.backends, "mps", None)
+        and torch_mod.backends.mps.is_available()
+    ):
         return "mps"
     if torch_mod.cuda.is_available():
         return "cuda"
     return "cpu"
 
 
-def _transformer_scores(query: str, passages: list[str], config: RerankerConfig) -> list[float]:
+def _transformer_scores(
+    query: str, passages: list[str], config: RerankerConfig
+) -> list[float]:
     try:
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -68,7 +74,7 @@ def _transformer_scores(query: str, passages: list[str], config: RerankerConfig)
     batch_size = max(1, config.batch_size)
     with torch.no_grad():
         for i in range(0, len(passages), batch_size):
-            batch = passages[i:i + batch_size]
+            batch = passages[i : i + batch_size]
             encoded = tokenizer(
                 [query] * len(batch),
                 batch,
@@ -83,11 +89,15 @@ def _transformer_scores(query: str, passages: list[str], config: RerankerConfig)
                 values = logits[:, -1]
             else:
                 values = logits.reshape(-1)
-            scores.extend(float(value) for value in values.detach().float().cpu().tolist())
+            scores.extend(
+                float(value) for value in values.detach().float().cpu().tolist()
+            )
     return scores
 
 
-def _flagembedding_scores(query: str, passages: list[str], config: RerankerConfig) -> list[float]:
+def _flagembedding_scores(
+    query: str, passages: list[str], config: RerankerConfig
+) -> list[float]:
     try:
         from FlagEmbedding import FlagReranker
     except Exception as exc:  # pragma: no cover - exercised via missing-dep tests
@@ -115,7 +125,9 @@ def _flagembedding_scores(query: str, passages: list[str], config: RerankerConfi
     return [float(score) for score in raw_scores]
 
 
-def _score_fn(config: RerankerConfig) -> Callable[[str, list[str], RerankerConfig], list[float]]:
+def _score_fn(
+    config: RerankerConfig,
+) -> Callable[[str, list[str], RerankerConfig], list[float]]:
     backend = config.backend.lower()
     if backend == "transformers":
         return _transformer_scores
@@ -142,7 +154,9 @@ def rerank_results(
             },
         )
     if not candidates:
-        return RerankOutcome(candidates, {"status": "skipped", "reason": "no_candidates"})
+        return RerankOutcome(
+            candidates, {"status": "skipped", "reason": "no_candidates"}
+        )
 
     rerank_n = min(max(1, cfg.top_n), len(candidates))
     head = candidates[:rerank_n]
@@ -163,9 +177,29 @@ def rerank_results(
             },
         )
 
-    reranked = sorted(zip(head, scores), key=lambda item: float(item[1]), reverse=True)
-    rerank_rank = {page.page_id: rank for rank, (page, _score) in enumerate(reranked, start=1)}
+    if len(scores) != rerank_n or any(
+        not math.isfinite(float(score)) for score in scores
+    ):
+        return RerankOutcome(
+            candidates,
+            {
+                "status": "unavailable",
+                "reason": "reranker returned invalid score cardinality or non-finite scores",
+                "model": cfg.model,
+                "backend": cfg.backend,
+                "candidate_count": rerank_n,
+                "score_count": len(scores),
+            },
+        )
+
     original_rank = {page.page_id: rank for rank, page in enumerate(head, start=1)}
+    reranked = sorted(
+        zip(head, scores),
+        key=lambda item: (-float(item[1]), original_rank[item[0].page_id]),
+    )
+    rerank_rank = {
+        page.page_id: rank for rank, (page, _score) in enumerate(reranked, start=1)
+    }
 
     rescored = []
     for page in head:
@@ -175,6 +209,13 @@ def rerank_results(
         rescored.append(replace(page, score=blended_score))
     rescored.sort(key=lambda page: page.score, reverse=True)
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+    moved = sum(
+        original_rank[page.page_id] != rerank_rank[page.page_id] for page in head
+    )
+    max_rank_delta = max(
+        (abs(original_rank[page.page_id] - rerank_rank[page.page_id]) for page in head),
+        default=0,
+    )
     return RerankOutcome(
         rescored + tail,
         {
@@ -184,5 +225,7 @@ def rerank_results(
             "candidate_count": rerank_n,
             "weight": cfg.weight,
             "latency_ms": elapsed_ms,
+            "moved_candidates": moved,
+            "max_rank_delta": max_rank_delta,
         },
     )

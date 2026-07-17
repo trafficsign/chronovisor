@@ -133,7 +133,11 @@ def save_enabled(host: str, explicit_config: Path | None = None) -> bool:
     policy = load_hook_policy(explicit_config)
     if not policy.stop_save:
         return False
-    env_name = "CODEX_WIKI_SAVE_ENABLED" if host == "codex" else "CLAUDE_CODE_WIKI_SAVE_ENABLED"
+    env_name = (
+        "CODEX_WIKI_SAVE_ENABLED"
+        if host == "codex"
+        else "CLAUDE_CODE_WIKI_SAVE_ENABLED"
+    )
     flag = env_flag(env_name)
     if flag is not None:
         return flag
@@ -181,7 +185,9 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
 
     payload = read_hook_payload(stdin_text) if args.hook else {}
     request = (
-        recall_runtime.request_from_hook_payload(payload, host=host, event="UserPromptSubmit")
+        recall_runtime.request_from_hook_payload(
+            payload, host=host, event="UserPromptSubmit"
+        )
         if args.hook
         else recall_runtime.RecallRequest(
             host=host,
@@ -225,8 +231,29 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
             threshold=policy.circuit_breaker_failures,
             cooldown_seconds=policy.circuit_breaker_cooldown_seconds,
         )
-        _record_recall_fail_open(request, policy, status="timeout", error=str(exc))
-        _print_host_noop(host)
+        # Host hooks have deployment-level headroom beyond the primary Recall
+        # deadline. Use a tightly bounded model-free pass instead of throwing
+        # away both retrieval and L1 memory when a model call ignores its soft
+        # timeout by a few milliseconds.
+        try:
+            fallback_ms = max(100, policy.deterministic_fallback_reserve_ms)
+            with recall_wall_clock_deadline(fallback_ms):
+                result = recall_runtime.run_deterministic_fallback(
+                    request,
+                    policy,
+                    perform_search=not args.no_search,
+                    timeout_ms=fallback_ms,
+                    reason=str(exc),
+                )
+            if policy.log_decisions:
+                recall_runtime.append_recall_log(request, result)
+            output = recall_runtime.render_output(
+                result, args.format or host_output_format(host)
+            )
+            print(output or "{}")
+        except BaseException:
+            _record_recall_fail_open(request, policy, status="timeout", error=str(exc))
+            _print_host_noop(host)
         return 0
     except Exception as exc:
         error = f"{exc.__class__.__name__}: {exc}"
@@ -239,7 +266,7 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         _print_host_noop(host)
         return 0
 
-    if result.status == "timeout":
+    if result.status in {"timeout", "degraded"}:
         recall_breaker.record_failure(
             result.error or "recall soft deadline exhausted",
             threshold=policy.circuit_breaker_failures,
@@ -249,7 +276,9 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         recall_breaker.record_success()
     if breaker_was_open:
         result.reasons.append("circuit breaker open; expensive recall stages disabled")
-    output = recall_runtime.render_output(result, args.format or host_output_format(host))
+    output = recall_runtime.render_output(
+        result, args.format or host_output_format(host)
+    )
     if output:
         print(output)
     return 0
@@ -376,7 +405,11 @@ def run_stop(args: argparse.Namespace, stdin_text: str) -> int:
     host = normalize_host(args.host)
     if env_flag("LLM_WIKI_INTERNAL_FRONTIER") is True:
         if args.format == "json":
-            print(json.dumps({"status": "suppressed", "reason": "internal_frontier", "tasks": []}))
+            print(
+                json.dumps(
+                    {"status": "suppressed", "reason": "internal_frontier", "tasks": []}
+                )
+            )
         else:
             print("{}")
         return 0
@@ -416,12 +449,21 @@ def run_stop(args: argparse.Namespace, stdin_text: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Dispatch Codex/Claude Code hooks into LLM Wiki.")
+    parser = argparse.ArgumentParser(
+        description="Dispatch Codex/Claude Code hooks into LLM Wiki."
+    )
     parser.add_argument("--host", choices=sorted(HOSTS), default="generic")
     parser.add_argument("--event", required=True)
-    parser.add_argument("--hook", action="store_true", help="Read hook JSON from stdin.")
-    parser.add_argument("--config", help="Config file override. Defaults to ~/.wiki/config.toml then recall.toml.")
-    parser.add_argument("--format", choices=["json", "plain", "claude", "codex", "hook-json"])
+    parser.add_argument(
+        "--hook", action="store_true", help="Read hook JSON from stdin."
+    )
+    parser.add_argument(
+        "--config",
+        help="Config file override. Defaults to ~/.wiki/config.toml then recall.toml.",
+    )
+    parser.add_argument(
+        "--format", choices=["json", "plain", "claude", "codex", "hook-json"]
+    )
     parser.add_argument("--prompt")
     parser.add_argument("--cwd")
     parser.add_argument("--session-id")

@@ -4,19 +4,34 @@ import json
 from pathlib import Path
 
 from llm_wiki_mcp import recall_runtime
-from llm_wiki_mcp.recall_runtime import RecallPolicy, RecallRequest, render_output, run_recall
+from llm_wiki_mcp.recall_runtime import (
+    RecallPolicy,
+    RecallRequest,
+    render_output,
+    run_recall,
+)
 from llm_wiki_mcp import page_mutation, state_register
 
 
 def test_state_register_context_is_injected_for_codex(monkeypatch) -> None:
-    monkeypatch.setattr(recall_runtime, "should_inject_state", lambda host: host == "codex")
+    monkeypatch.setattr(
+        recall_runtime, "should_inject_state", lambda host: host == "codex"
+    )
     monkeypatch.setattr(
         recall_runtime,
         "format_state_context",
-        lambda *, host, cwd: "[WORKING_MEMORY]\ncurrent project state\n[/WORKING_MEMORY]",
+        lambda *, host, cwd: (
+            "[WORKING_MEMORY]\ncurrent project state\n[/WORKING_MEMORY]"
+        ),
     )
-    request = RecallRequest(host="codex", event="UserPromptSubmit", prompt="うん", cwd="/tmp")
-    result = run_recall(request, RecallPolicy(judge_mode="off", log_decisions=False), perform_search=False)
+    request = RecallRequest(
+        host="codex", event="UserPromptSubmit", prompt="うん", cwd="/tmp"
+    )
+    result = run_recall(
+        request,
+        RecallPolicy(judge_mode="off", log_decisions=False),
+        perform_search=False,
+    )
 
     assert result.decision == "none"
     assert "current project state" in result.context
@@ -40,7 +55,36 @@ def test_format_state_context_marks_stale_state(tmp_path: Path) -> None:
     assert "old body" in context
 
 
-def test_refresh_state_register_writes_recent_pages(tmp_path: Path, monkeypatch) -> None:
+def test_format_state_context_includes_only_allowlisted_core_memory(
+    tmp_path: Path,
+) -> None:
+    for page_id, body in (
+        ("current-state", "current project"),
+        ("user-profile", "prefers local models"),
+        ("lessons-learned", "verify before completion"),
+        ("arbitrary-page", "must not be injected"),
+    ):
+        (tmp_path / f"{page_id}.md").write_text(
+            f"---\ntitle: {page_id}\nupdated: 2026-07-17\n---\n# {page_id}\n\n{body}",
+            encoding="utf-8",
+        )
+
+    context = state_register.format_state_context(
+        host="codex",
+        path=tmp_path / "current-state.md",
+        max_chars=1200,
+    )
+
+    assert "current project" in context
+    assert "prefers local models" in context
+    assert "verify before completion" in context
+    assert "must not be injected" not in context
+    assert len(context) <= 1200
+
+
+def test_refresh_state_register_writes_recent_pages(
+    tmp_path: Path, monkeypatch
+) -> None:
     path = tmp_path / "current-state.md"
 
     class FakeStore:
@@ -130,15 +174,23 @@ def test_refresh_preserves_approved_current_state_correction(
     assert "Installed RAM is 16GB." not in written
     assert "Installed RAM is 32GB." in written
     assert "applied_corrections: [corr-current-state-ram]" in written
-    assert payload["mutation"]["correction_constraints"]["current-state"][0][
-        "correction_id"
-    ] == "corr-current-state-ram"
+    assert (
+        payload["mutation"]["correction_constraints"]["current-state"][0][
+            "correction_id"
+        ]
+        == "corr-current-state-ram"
+    )
 
 
-def test_refresh_state_register_skips_placeholder_pages(tmp_path: Path, monkeypatch) -> None:
+def test_refresh_state_register_skips_placeholder_pages(
+    tmp_path: Path, monkeypatch
+) -> None:
     path = tmp_path / "current-state.md"
     real = tmp_path / "real.md"
-    real.write_text("---\ntitle: Real\nupdated: 2026-07-06\nsummary: Useful\n---\nBody\n", encoding="utf-8")
+    real.write_text(
+        "---\ntitle: Real\nupdated: 2026-07-06\nsummary: Useful\n---\nBody\n",
+        encoding="utf-8",
+    )
 
     class FakeStore:
         def refresh(self) -> None:
@@ -153,7 +205,14 @@ def test_refresh_state_register_skips_placeholder_pages(tmp_path: Path, monkeypa
                     "updated": "2026-04-28",
                     "page_type": "knowledge",
                 }
-            return {"page_id": page_id, "title": "Real", "summary": "Useful", "updated": "2026-07-06", "page_type": "knowledge", "path": str(real)}
+            return {
+                "page_id": page_id,
+                "title": "Real",
+                "summary": "Useful",
+                "updated": "2026-07-06",
+                "page_type": "knowledge",
+                "path": str(real),
+            }
 
         def all_pages_meta(self, include_system: bool = False):
             return [{"page_id": "baz"}, {"page_id": "real"}]
@@ -166,12 +225,18 @@ def test_refresh_state_register_skips_placeholder_pages(tmp_path: Path, monkeypa
     assert "[[baz]]" not in path.read_text(encoding="utf-8")
 
 
-def test_refresh_state_register_skips_deprecated_pages(tmp_path: Path, monkeypatch) -> None:
+def test_refresh_state_register_skips_deprecated_pages(
+    tmp_path: Path, monkeypatch
+) -> None:
     path = tmp_path / "current-state.md"
     deprecated = tmp_path / "old.md"
     active = tmp_path / "active.md"
-    deprecated.write_text("---\ntitle: Old\nupdated: 2026-07-06\n---\nOld\n", encoding="utf-8")
-    active.write_text("---\ntitle: Active\nupdated: 2026-07-06\n---\nActive\n", encoding="utf-8")
+    deprecated.write_text(
+        "---\ntitle: Old\nupdated: 2026-07-06\n---\nOld\n", encoding="utf-8"
+    )
+    active.write_text(
+        "---\ntitle: Active\nupdated: 2026-07-06\n---\nActive\n", encoding="utf-8"
+    )
 
     class FakeStore:
         def refresh(self) -> None:
