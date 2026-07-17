@@ -2976,6 +2976,16 @@ def _find_page_casefold(page_id: str) -> Path | None:
     """find_page with macOS-case-insensitive + NFC-normalized semantics."""
     direct = find_page(page_id)
     if direct is not None:
+        # ``Path.rglob('foo.md')`` can return a query-spelled path on a
+        # case-insensitive filesystem even when the directory entry is
+        # actually ``Foo.md``.  Preserve the filesystem spelling because the
+        # page_id is a durable identity surfaced in ingest results and logs.
+        try:
+            for candidate in direct.parent.iterdir():
+                if candidate.is_file() and candidate.samefile(direct):
+                    return candidate
+        except OSError:
+            pass
         return direct
     target = _normalize_for_collision(page_id)
     for p in PAGES_DIR.rglob("*.md"):
