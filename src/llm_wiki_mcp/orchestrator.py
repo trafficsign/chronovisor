@@ -745,6 +745,37 @@ def _prepare_pending_raw_units(
     return units, quarantined, deferred
 
 
+def _raw_unit_keywords(
+    raw_keywords: tuple[str, ...] | list[str] | None,
+    raw_text: str,
+) -> list[str]:
+    """Resolve current then legacy frontmatter keywords for one semantic unit."""
+
+    if raw_keywords is not None:
+        return list(raw_keywords)
+    from llm_wiki_mcp.frontmatter import parse as _frontmatter_parse
+
+    meta, _body = _frontmatter_parse(raw_text)
+    current = _coerce_str_list(meta.get("raw_keywords"))
+    if current is not None:
+        return current
+    return _coerce_str_list(meta.get("keywords")) or []
+
+
+def _raw_unit_event(
+    *, succeeded: bool, deferred: bool, continued: bool
+) -> tuple[str, str]:
+    """Classify one unit's durable outcome for the operator event stream."""
+
+    if succeeded:
+        return "success", "processed"
+    if continued:
+        return "info", "shard review continuation pending"
+    if deferred:
+        return "info", "semantic deferred"
+    return "warn", "not processed"
+
+
 @_serialize_ingest_across_processes
 def run_pending_ingest(
     force: bool = False,
@@ -990,13 +1021,7 @@ def run_pending_ingest(
                 # Extract raw_keywords from frontmatter, falling back to the
                 # legacy ``keywords`` field for raws written before Phase 1.
                 # Anything that isn't a list of strings is normalized to [].
-                if unit.raw_keywords is not None:
-                    raw_keywords = list(unit.raw_keywords)
-                else:
-                    meta, _body = _frontmatter_parse(raw_text)
-                    raw_keywords = _coerce_str_list(meta.get("raw_keywords"))
-                    if raw_keywords is None:
-                        raw_keywords = _coerce_str_list(meta.get("keywords")) or []
+                raw_keywords = _raw_unit_keywords(unit.raw_keywords, raw_text)
 
                 processor = "ollama" if is_available() else "unavailable"
                 job = job_store.create(processor=processor)
@@ -1378,26 +1403,14 @@ def run_pending_ingest(
                 if completion_ack_summary[0] is not None:
                     raw_result["completion_ack"] = completion_ack_summary[0]
                 per_raw.append(raw_result)
+                event_level, event_outcome = _raw_unit_event(
+                    succeeded=raw_success_flag[0],
+                    deferred=semantic_deferred,
+                    continued=shard_continuing,
+                )
                 runtime_status.safe_append_event(
-                    (
-                        "success"
-                        if raw_success_flag[0]
-                        else "info"
-                        if semantic_deferred or shard_continuing
-                        else "warn"
-                    ),
-                    (
-                        f"orchestrator | raw {fname} "
-                        + (
-                            "processed"
-                            if raw_success_flag[0]
-                            else "shard review continuation pending"
-                            if shard_continuing
-                            else "semantic deferred"
-                            if semantic_deferred
-                            else "not processed"
-                        )
-                    ),
+                    event_level,
+                    f"orchestrator | raw {fname} {event_outcome}",
                     source="orchestrator",
                     raw_file=fname,
                     job_id=job.job_id,

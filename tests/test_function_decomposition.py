@@ -43,3 +43,27 @@ def test_run_ingest_metadata_normalization_accepts_only_exact_side_channels() ->
         {"raw_keywords": ["ok", 1], "source_raw": 3}
     ) == (None, None)
     assert _normalize_ingest_source_metadata(None) == (None, None)
+
+
+def test_orchestrator_unit_keyword_and_event_decisions_are_deterministic() -> None:
+    from llm_wiki_mcp.orchestrator import _raw_unit_event, _raw_unit_keywords
+
+    raw = "---\nraw_keywords: [current]\nkeywords: [legacy]\n---\nbody\n"
+    assert _raw_unit_keywords(None, raw) == ["current"]
+    assert _raw_unit_keywords(("bound",), raw) == ["bound"]
+    assert _raw_unit_event(succeeded=True, deferred=True, continued=True) == (
+        "success",
+        "processed",
+    )
+    assert _raw_unit_event(succeeded=False, deferred=True, continued=True) == (
+        "info",
+        "shard review continuation pending",
+    )
+    assert _raw_unit_event(succeeded=False, deferred=True, continued=False) == (
+        "info",
+        "semantic deferred",
+    )
+    assert _raw_unit_event(succeeded=False, deferred=False, continued=False) == (
+        "warn",
+        "not processed",
+    )
