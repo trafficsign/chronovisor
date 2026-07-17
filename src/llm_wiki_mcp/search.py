@@ -486,7 +486,9 @@ def _vec_norm(vec: list[float]) -> float:
     return math.sqrt(sum(x * x for x in vec))
 
 
-def _connect_embeddings() -> sqlite3.Connection:
+def _connect_embeddings_raw() -> sqlite3.Connection:
+    """Open the SQLite store without entering one-time migration."""
+
     if os.environ.get("LLM_WIKI_READ_ONLY") == "1":
         return sqlite3.connect(f"file:{EMBEDDINGS_DB}?mode=ro", uri=True)
     EMBEDDINGS_DB.parent.mkdir(parents=True, exist_ok=True)
@@ -559,7 +561,7 @@ def _connect_embeddings() -> sqlite3.Connection:
 _legacy_migration_done = False
 
 
-def _maybe_migrate_legacy_json() -> None:
+def _ensure_legacy_embedding_migration() -> None:
     """One-shot import of ~/.wiki/.embeddings.json into SQLite.
 
     Runs at most once per process. The legacy file is left in place so a
@@ -585,7 +587,7 @@ def _maybe_migrate_legacy_json() -> None:
         if not isinstance(payload, dict) or not payload:
             _legacy_migration_done = True
             return
-        conn = _connect_embeddings()
+        conn = _connect_embeddings_raw()
         try:
             existing = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
             if existing > 0:
@@ -618,9 +620,15 @@ def _maybe_migrate_legacy_json() -> None:
         _legacy_migration_done = True
 
 
+def _connect_embeddings() -> sqlite3.Connection:
+    """Open the SQLite store after the rollback-safe legacy import check."""
+
+    _ensure_legacy_embedding_migration()
+    return _connect_embeddings_raw()
+
+
 def _load_embedding(pid: str) -> tuple[list[float], float, float] | None:
     """Return (vector, mtime, norm) for a single page, or None."""
-    _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
     conn = _connect_embeddings()
     try:
@@ -661,7 +669,7 @@ def _store_embeddings_batch(
         for pid, vec, mtime in rows
     ]
     with _EMBED_DB_LOCK:
-        conn = _connect_embeddings()
+        conn = _connect_embeddings_raw()
         try:
             conn.executemany(
                 """
@@ -701,7 +709,7 @@ def _store_question_embeddings_batch(
         for pid, idx, question, vec, mtime in rows
     ]
     with _EMBED_DB_LOCK:
-        conn = _connect_embeddings()
+        conn = _connect_embeddings_raw()
         try:
             conn.executemany(
                 """
@@ -725,7 +733,7 @@ def _delete_chunk_embeddings(
     if not page_ids:
         return
     with _EMBED_DB_LOCK:
-        conn = _connect_embeddings()
+        conn = _connect_embeddings_raw()
         try:
             for pid in page_ids:
                 conn.execute(
@@ -765,7 +773,7 @@ def _store_chunk_embeddings_batch(
         for pid, idx, text, vec, mtime in rows
     ]
     with _EMBED_DB_LOCK:
-        conn = _connect_embeddings()
+        conn = _connect_embeddings_raw()
         try:
             conn.executemany(
                 """
@@ -782,7 +790,6 @@ def _store_chunk_embeddings_batch(
 
 def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
     """Snapshot all rows as (page_id, vector, mtime, norm)."""
-    _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
     conn = _connect_embeddings()
     try:
@@ -805,7 +812,6 @@ def _iter_all_chunk_embeddings() -> (
     "list[tuple[str, str, int, str, list[float], float, float]]"
 ):
     """Snapshot chunk rows as (key, page_id, idx, text, vector, mtime, norm)."""
-    _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
     conn = _connect_embeddings()
     try:
@@ -839,7 +845,6 @@ def _iter_all_question_embeddings() -> (
     "list[tuple[str, str, int, list[float], float, float]]"
 ):
     """Snapshot all recall-question rows as (key, page_id, idx, vector, mtime, norm)."""
-    _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
     conn = _connect_embeddings()
     try:
@@ -869,7 +874,6 @@ def _iter_all_question_embeddings() -> (
 
 
 def _embedding_count() -> int:
-    _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
     try:
         conn = _connect_embeddings()
@@ -885,7 +889,6 @@ def _embedding_count() -> int:
 
 
 def _chunked_page_ids() -> set[str]:
-    _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
     conn = _connect_embeddings()
     try:
@@ -1024,7 +1027,6 @@ def update_embeddings(
     if not is_available():
         return 0
 
-    _maybe_migrate_legacy_json()
     model, document_prefix, _query_prefix = _embedding_profile()
 
     # Pull existing mtimes for the candidate page set in one query so
@@ -1156,8 +1158,6 @@ def semantic_search(
         if strict:
             raise RuntimeError("semantic search backend is unavailable")
         return []
-
-    _maybe_migrate_legacy_json()
 
     if _embedding_count() == 0:
         if strict:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
@@ -393,6 +394,52 @@ cooldown_seconds = 120
     assert policy.total_timeout_ms == 2750
     assert policy.circuit_breaker_failures == 4
     assert policy.circuit_breaker_cooldown_seconds == 120
+
+
+def test_unified_and_legacy_recall_shapes_produce_identical_policy(tmp_path) -> None:
+    legacy = tmp_path / "recall.toml"
+    unified = tmp_path / "config.toml"
+    legacy.write_text(
+        """
+enabled = false
+model = "judge:test"
+
+[thresholds]
+search = 0.21
+read = 0.73
+
+[gate]
+timeout_ms = 1234
+
+[policy]
+fail_silent_on_judge_unavailable = false
+
+[recall]
+semantic = true
+""",
+        encoding="utf-8",
+    )
+    unified.write_text(
+        """
+[recall]
+enabled = false
+model = "judge:test"
+semantic = true
+
+[recall.thresholds]
+search = 0.21
+read = 0.73
+
+[recall.gate]
+timeout_ms = 1234
+
+[recall.policy]
+fail_silent_on_judge_unavailable = false
+""",
+        encoding="utf-8",
+    )
+
+    assert asdict(load_policy(unified)) == asdict(load_policy(legacy))
 
 
 def test_gate_defaults_keep_model_resident_and_rewrite_timeout_longer(tmp_path) -> None:

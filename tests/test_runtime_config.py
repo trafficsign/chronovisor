@@ -62,28 +62,6 @@ def test_active_config_falls_back_to_legacy_recall(tmp_path: Path, monkeypatch) 
     assert runtime_config.config_summary()["mode"] == "legacy-recall"
 
 
-def test_normalize_recall_config_maps_nested_unified_shape() -> None:
-    normalized = runtime_config.normalize_recall_config(
-        {
-            "recall": {
-                "enabled": True,
-                "semantic": False,
-                "judge_mode": "auto",
-                "thresholds": {"search": 0.2, "read": 0.8},
-                "gate": {"model": "qwen3.5:4b-mlx", "timeout_ms": 1000},
-                "policy": {"fail_silent_on_judge_unavailable": True},
-                "circuit_breaker": {"failures": 3, "cooldown_seconds": 90},
-            }
-        }
-    )
-
-    assert normalized["enabled"] is True
-    assert normalized["thresholds"]["read"] == 0.8
-    assert normalized["gate"]["model"] == "qwen3.5:4b-mlx"
-    assert normalized["circuit_breaker"]["failures"] == 3
-    assert normalized["recall"] == {"semantic": False, "judge_mode": "auto"}
-
-
 def test_hook_policy_reads_nested_hooks_section(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(

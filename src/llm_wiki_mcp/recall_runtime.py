@@ -25,10 +25,7 @@ from typing import Any
 from llm_wiki_mcp.index_store import get_store
 from llm_wiki_mcp.jsonl_write import append_jsonl_durable
 from llm_wiki_mcp.local_structured import LocalStructuredSession
-from llm_wiki_mcp.runtime_config import (
-    active_config_file,
-    normalize_recall_config,
-)
+from llm_wiki_mcp.runtime_config import active_config_file
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 from llm_wiki_mcp.search import search as run_search
 from llm_wiki_mcp.state_register import format_state_context, should_inject_state
@@ -272,7 +269,7 @@ def load_policy(path: Path = RECALL_CONFIG_FILE) -> RecallPolicy:
     path = active_config_file(path)
     if path.exists():
         try:
-            data = normalize_recall_config(tomllib.loads(path.read_text()))
+            data = tomllib.loads(path.read_text())
         except (OSError, tomllib.TOMLDecodeError):
             data = {}
         _apply_config(policy, data)
@@ -305,20 +302,32 @@ def stable_prompt_hash(text: str) -> str:
 
 
 def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
-    if isinstance(data.get("enabled"), bool):
-        policy.enabled = data["enabled"]
-    if isinstance(data.get("model"), str):
-        policy.judge_model = data["model"]
+    recall = data.get("recall")
+    recall_root = recall if isinstance(recall, dict) else {}
 
-    thresholds = data.get("thresholds", {})
-    if isinstance(thresholds, dict):
+    enabled = recall_root.get("enabled", data.get("enabled"))
+    if isinstance(enabled, bool):
+        policy.enabled = enabled
+    model = recall_root.get("model", data.get("model"))
+    if isinstance(model, str):
+        policy.judge_model = model
+
+    def section(name: str) -> dict[str, Any]:
+        nested = recall_root.get(name)
+        if isinstance(nested, dict):
+            return nested
+        legacy = data.get(name)
+        return legacy if isinstance(legacy, dict) else {}
+
+    thresholds = section("thresholds")
+    if thresholds:
         if isinstance(thresholds.get("search"), int | float):
             policy.search_threshold = float(thresholds["search"])
         if isinstance(thresholds.get("read"), int | float):
             policy.read_threshold = float(thresholds["read"])
 
-    budgets = data.get("budgets", {})
-    if isinstance(budgets, dict):
+    budgets = section("budgets")
+    if budgets:
         if isinstance(budgets.get("max_context_tokens"), int):
             policy.max_context_chars = max(400, budgets["max_context_tokens"] * 4)
         if isinstance(budgets.get("max_context_chars"), int):
@@ -348,23 +357,21 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
                 ),
             )
 
-    recall = data.get("recall", {})
-    if isinstance(recall, dict):
-        if isinstance(recall.get("semantic"), bool):
-            policy.semantic = recall["semantic"]
-        if isinstance(recall.get("gate_mode"), str):
-            policy.gate_mode = recall["gate_mode"]
-        if isinstance(recall.get("context_style"), str):
-            policy.context_style = recall["context_style"]
-        if isinstance(recall.get("max_context_chars"), int):
-            policy.max_context_chars = max(400, recall["max_context_chars"])
-        if isinstance(recall.get("judge_mode"), str):
-            policy.judge_mode = recall["judge_mode"]
-        if isinstance(recall.get("session_ttl_seconds"), int):
-            policy.session_ttl_seconds = max(3600, recall["session_ttl_seconds"])
+    if isinstance(recall_root.get("semantic"), bool):
+        policy.semantic = recall_root["semantic"]
+    if isinstance(recall_root.get("gate_mode"), str):
+        policy.gate_mode = recall_root["gate_mode"]
+    if isinstance(recall_root.get("context_style"), str):
+        policy.context_style = recall_root["context_style"]
+    if isinstance(recall_root.get("max_context_chars"), int):
+        policy.max_context_chars = max(400, recall_root["max_context_chars"])
+    if isinstance(recall_root.get("judge_mode"), str):
+        policy.judge_mode = recall_root["judge_mode"]
+    if isinstance(recall_root.get("session_ttl_seconds"), int):
+        policy.session_ttl_seconds = max(3600, recall_root["session_ttl_seconds"])
 
-    gate = data.get("gate", {})
-    if isinstance(gate, dict):
+    gate = section("gate")
+    if gate:
         if isinstance(gate.get("model"), str):
             policy.judge_model = gate["model"]
         if isinstance(gate.get("think"), bool):
@@ -384,8 +391,8 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
         if isinstance(gate.get("warmup_timeout_ms"), int):
             policy.warmup_timeout_ms = max(1000, gate["warmup_timeout_ms"])
 
-    rewrite = data.get("rewrite", {})
-    if isinstance(rewrite, dict):
+    rewrite = section("rewrite")
+    if rewrite:
         if isinstance(rewrite.get("enabled"), bool):
             policy.rewrite_enabled = rewrite["enabled"]
         if isinstance(rewrite.get("model"), str):
@@ -393,8 +400,8 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
         if isinstance(rewrite.get("timeout_ms"), int):
             policy.rewrite_timeout_ms = max(200, rewrite["timeout_ms"])
 
-    circuit_breaker = data.get("circuit_breaker", {})
-    if isinstance(circuit_breaker, dict):
+    circuit_breaker = section("circuit_breaker")
+    if circuit_breaker:
         if isinstance(circuit_breaker.get("failures"), int):
             policy.circuit_breaker_failures = max(1, circuit_breaker["failures"])
         if isinstance(circuit_breaker.get("cooldown_seconds"), int):
@@ -402,8 +409,8 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
                 1, circuit_breaker["cooldown_seconds"]
             )
 
-    fusion = data.get("fusion", {})
-    if isinstance(fusion, dict):
+    fusion = section("fusion")
+    if fusion:
         for key, attr in (
             ("bm25", "fusion_bm25"),
             ("semantic", "fusion_semantic"),
@@ -422,8 +429,8 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             if isinstance(value, int | float):
                 setattr(policy, attr, max(0.0, float(value)))
 
-    calibration = data.get("calibration", {})
-    if isinstance(calibration, dict):
+    calibration = section("calibration")
+    if calibration:
         if isinstance(calibration.get("enabled"), bool):
             policy.calibration_enabled = calibration["enabled"]
         if isinstance(calibration.get("min_samples"), int):
@@ -437,8 +444,8 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
                 0.0, float(calibration["min_improvement"])
             )
 
-    behavior = data.get("policy", {})
-    if isinstance(behavior, dict):
+    behavior = section("policy")
+    if behavior:
         if isinstance(behavior.get("log_decisions"), bool):
             policy.log_decisions = behavior["log_decisions"]
         if isinstance(behavior.get("avoid_heavy_personal_context_in_chitchat"), bool):

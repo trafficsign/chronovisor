@@ -36,7 +36,7 @@ def test_semantic_search_strict_mode_surfaces_embedding_failure(
         "embed",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
     )
-    monkeypatch.setattr(search, "_maybe_migrate_legacy_json", lambda: None)
+    monkeypatch.setattr(search, "_ensure_legacy_embedding_migration", lambda: None)
     monkeypatch.setattr(search, "_embedding_count", lambda: 1)
     monkeypatch.setattr(
         search,
@@ -60,6 +60,32 @@ def test_read_only_embedding_probe_does_not_create_missing_database(
 
     assert search._embedding_count() == 0
     assert not database.exists()
+
+
+def test_legacy_embedding_migration_uses_raw_connection_once(
+    tmp_path, monkeypatch
+) -> None:
+    database = tmp_path / ".index" / "embeddings.sqlite"
+    legacy = tmp_path / ".embeddings.json"
+    legacy.write_text(
+        json.dumps({"legacy-page": {"vector": [3.0, 4.0], "mtime": 12.5}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(search, "EMBEDDINGS_DB", database)
+    monkeypatch.setattr(search, "LEGACY_EMBEDDINGS_FILE", legacy)
+    monkeypatch.setattr(search, "_legacy_migration_done", False)
+    monkeypatch.setattr(
+        search,
+        "load_embedding_config",
+        lambda: EmbeddingConfig(model=search.EMBED_MODEL),
+    )
+
+    first = search._load_embedding("legacy-page")
+    second = search._load_embedding("legacy-page")
+
+    assert first == ([3.0, 4.0], 12.5, 5.0)
+    assert second == first
+    assert search._legacy_migration_done is True
 
 
 def test_bm25_read_only_refresh_persists_dirty_cache_on_next_normal_build(
