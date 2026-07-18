@@ -826,6 +826,7 @@ def _semantic_packet_source_raws(
     packet: dict[str, Any],
     *,
     verify_sources: bool,
+    raw_store: Any | None = None,
 ) -> frozenset[str] | None:
     """Validate packet source evidence and optionally bind it to RAW_DIR bytes."""
 
@@ -856,7 +857,7 @@ def _semantic_packet_source_raws(
             try:
                 from llm_wiki_mcp.raw_store import RawStore
 
-                store = RawStore(wiki.RAW_DIR)
+                store = raw_store or RawStore(wiki.RAW_DIR)
                 unit = store.resolve(filename)
                 if unit is None:
                     return None
@@ -880,6 +881,11 @@ def _semantic_defer_packet_records(
         packet_paths = sorted(packets_dir.glob("*.json"))
     except OSError:
         return []
+    raw_store = None
+    if verify_sources:
+        from llm_wiki_mcp.raw_store import RawStore
+
+        raw_store = RawStore(wiki.RAW_DIR)
     records: list[tuple[Path, dict[str, Any], frozenset[str]]] = []
     for packet_path in packet_paths:
         packet = _read_packet_object(packet_path)
@@ -899,6 +905,7 @@ def _semantic_defer_packet_records(
         source_raws = _semantic_packet_source_raws(
             packet,
             verify_sources=verify_sources,
+            raw_store=raw_store,
         )
         if source_raws is None:
             continue

@@ -205,6 +205,46 @@ def test_related_raws_share_one_idempotent_terminal_packet_and_reset_together(
     assert failure_supervisor.operational_deferred_raw_files([first, second]) == {}
 
 
+def test_defer_reconciliation_shares_one_raw_snapshot_across_packets(
+    semantic_defer_wiki: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import failure_supervisor, raw_store
+
+    wiki_root, artifact = semantic_defer_wiki
+    error = _no_quorum_error(_sha256(artifact))
+    first = wiki_root / "raw" / "first.md"
+    second = wiki_root / "raw" / "second.md"
+    first.write_text("first source\n")
+    second.write_text("second source\n")
+    failure_supervisor.record_semantic_no_quorum_defer(
+        raw_path=first,
+        error=error,
+    )
+    failure_supervisor.record_semantic_no_quorum_defer(
+        raw_path=second,
+        error=error,
+    )
+
+    real_store = raw_store.RawStore
+    constructions = 0
+
+    class CountingRawStore(real_store):
+        def __init__(self, *args, **kwargs):
+            nonlocal constructions
+            constructions += 1
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(raw_store, "RawStore", CountingRawStore)
+
+    assert failure_supervisor.operational_deferred_raw_files() == {
+        first.name: "semantic_no_quorum",
+        second.name: "semantic_no_quorum",
+    }
+    # One snapshot lists available raws and one verifies every packet source.
+    assert constructions == 2
+
+
 def test_guarded_semantic_publish_keeps_newer_operational_hold_atomic(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
