@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 import time
 from dataclasses import dataclass, replace
 from typing import Any, Callable
@@ -14,6 +15,9 @@ from llm_wiki_mcp.wiki import find_page
 
 _FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n?", re.DOTALL)
 _MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
+_MODEL_LOCK = threading.RLock()
+_WARMUP_LOCK = threading.Lock()
+_WARMUP_THREAD: threading.Thread | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,22 @@ def _select_torch_device(torch_mod: Any, requested: str) -> str:
     return "cpu"
 
 
+def _load_transformer_components(
+    config: RerankerConfig,
+    tokenizer_cls: Any,
+    model_cls: Any,
+) -> tuple[Any, Any]:
+    """Prefer a complete local snapshot, then allow first-install download."""
+
+    try:
+        tokenizer = tokenizer_cls.from_pretrained(config.model, local_files_only=True)
+        model = model_cls.from_pretrained(config.model, local_files_only=True)
+    except (OSError, ValueError):
+        tokenizer = tokenizer_cls.from_pretrained(config.model)
+        model = model_cls.from_pretrained(config.model)
+    return tokenizer, model
+
+
 def _transformer_scores(
     query: str, passages: list[str], config: RerankerConfig
 ) -> list[float]:
@@ -60,38 +80,47 @@ def _transformer_scores(
 
     device = _select_torch_device(torch, config.device)
     key = ("transformers", config.model, device)
-    cached = _MODEL_CACHE.get(key)
-    if cached is None:
-        tokenizer = AutoTokenizer.from_pretrained(config.model)
-        model = AutoModelForSequenceClassification.from_pretrained(config.model)
-        model.to(device)
-        model.eval()
-        cached = (tokenizer, model)
-        _MODEL_CACHE[key] = cached
-    tokenizer, model = cached
+    # Hugging Face's default path performs remote metadata checks even when
+    # all weights are cached. Prefer the complete local snapshot and only use
+    # the network on the first installation of a model.
+    with _MODEL_LOCK:
+        cached = _MODEL_CACHE.get(key)
+        if cached is None:
+            tokenizer, model = _load_transformer_components(
+                config,
+                AutoTokenizer,
+                AutoModelForSequenceClassification,
+            )
+            model.to(device)
+            model.eval()
+            cached = (tokenizer, model)
+            _MODEL_CACHE[key] = cached
+        tokenizer, model = cached
 
-    scores: list[float] = []
-    batch_size = max(1, config.batch_size)
-    with torch.no_grad():
-        for i in range(0, len(passages), batch_size):
-            batch = passages[i : i + batch_size]
-            encoded = tokenizer(
-                [query] * len(batch),
-                batch,
-                padding=True,
-                truncation=True,
-                max_length=max(1, config.max_length),
-                return_tensors="pt",
-            )
-            encoded = {name: value.to(device) for name, value in encoded.items()}
-            logits = model(**encoded).logits
-            if len(logits.shape) == 2 and logits.shape[1] > 1:
-                values = logits[:, -1]
-            else:
-                values = logits.reshape(-1)
-            scores.extend(
-                float(value) for value in values.detach().float().cpu().tolist()
-            )
+        # Serialize MPS inference with startup warmup. Otherwise an immediate
+        # first search can race the warmup thread on the same model instance.
+        scores: list[float] = []
+        batch_size = max(1, config.batch_size)
+        with torch.no_grad():
+            for i in range(0, len(passages), batch_size):
+                batch = passages[i : i + batch_size]
+                encoded = tokenizer(
+                    [query] * len(batch),
+                    batch,
+                    padding=True,
+                    truncation=True,
+                    max_length=max(1, config.max_length),
+                    return_tensors="pt",
+                )
+                encoded = {name: value.to(device) for name, value in encoded.items()}
+                logits = model(**encoded).logits
+                if len(logits.shape) == 2 and logits.shape[1] > 1:
+                    values = logits[:, -1]
+                else:
+                    values = logits.reshape(-1)
+                scores.extend(
+                    float(value) for value in values.detach().float().cpu().tolist()
+                )
     return scores
 
 
@@ -134,6 +163,52 @@ def _score_fn(
     if backend == "flagembedding":
         return _flagembedding_scores
     raise RuntimeError(f"unsupported reranker backend: {config.backend}")
+
+
+def warm_reranker(config: RerankerConfig | None = None) -> dict[str, Any]:
+    """Load and exercise the configured reranker before the first search."""
+
+    cfg = config or load_reranker_config()
+    if not cfg.enabled:
+        return {"status": "disabled", "reason": "config_disabled"}
+    started = time.perf_counter()
+    try:
+        scores = _score_fn(cfg)("reranker warmup", ["reranker warmup"], cfg)
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "reason": str(exc),
+            "model": cfg.model,
+            "backend": cfg.backend,
+        }
+    return {
+        "status": "ready" if len(scores) == 1 else "unavailable",
+        "model": cfg.model,
+        "backend": cfg.backend,
+        "latency_ms": int(round((time.perf_counter() - started) * 1000)),
+    }
+
+
+def start_reranker_warmup(
+    config: RerankerConfig | None = None,
+) -> threading.Thread | None:
+    """Start one daemon warmup per MCP process without delaying startup."""
+
+    cfg = config or load_reranker_config()
+    if not cfg.enabled:
+        return None
+    global _WARMUP_THREAD
+    with _WARMUP_LOCK:
+        if _WARMUP_THREAD is not None and _WARMUP_THREAD.is_alive():
+            return _WARMUP_THREAD
+        _WARMUP_THREAD = threading.Thread(
+            target=warm_reranker,
+            args=(cfg,),
+            name="llm-wiki-reranker-warmup",
+            daemon=True,
+        )
+        _WARMUP_THREAD.start()
+        return _WARMUP_THREAD
 
 
 def rerank_results(

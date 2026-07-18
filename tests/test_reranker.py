@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 from llm_wiki_mcp import reranker, server
 from llm_wiki_mcp.reranker import RerankOutcome, rerank_results
@@ -81,6 +82,83 @@ def test_rerank_results_rejects_partial_score_vectors(monkeypatch) -> None:
     assert outcome.results == candidates
     assert outcome.metadata["status"] == "unavailable"
     assert outcome.metadata["score_count"] == 1
+
+
+def test_transformer_loader_prefers_complete_local_snapshot() -> None:
+    calls: list[tuple[str, bool]] = []
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, _model, **kwargs):
+            calls.append(("tokenizer", kwargs.get("local_files_only", False)))
+            return "tokenizer"
+
+    class FakeModel:
+        @classmethod
+        def from_pretrained(cls, _model, **kwargs):
+            calls.append(("model", kwargs.get("local_files_only", False)))
+            return "model"
+
+    tokenizer, model = reranker._load_transformer_components(
+        RerankerConfig(enabled=True), FakeTokenizer, FakeModel
+    )
+
+    assert (tokenizer, model) == ("tokenizer", "model")
+    assert calls == [("tokenizer", True), ("model", True)]
+
+
+def test_transformer_loader_allows_first_install_fallback() -> None:
+    calls: list[tuple[str, bool]] = []
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, _model, **kwargs):
+            local = kwargs.get("local_files_only", False)
+            calls.append(("tokenizer", local))
+            if local:
+                raise OSError("not cached")
+            return "tokenizer"
+
+    class FakeModel:
+        @classmethod
+        def from_pretrained(cls, _model, **kwargs):
+            calls.append(("model", kwargs.get("local_files_only", False)))
+            return "model"
+
+    tokenizer, model = reranker._load_transformer_components(
+        RerankerConfig(enabled=True), FakeTokenizer, FakeModel
+    )
+
+    assert (tokenizer, model) == ("tokenizer", "model")
+    assert calls[:3] == [
+        ("tokenizer", True),
+        ("tokenizer", False),
+        ("model", False),
+    ]
+
+
+def test_start_reranker_warmup_is_single_daemon(monkeypatch) -> None:
+    started: list[str] = []
+    release = threading.Event()
+
+    def fake_warm(config):
+        started.append(config.model)
+        release.wait(1)
+        return {"status": "ready"}
+
+    monkeypatch.setattr(reranker, "warm_reranker", fake_warm)
+    monkeypatch.setattr(reranker, "_WARMUP_THREAD", None)
+    config = RerankerConfig(enabled=True)
+
+    first = reranker.start_reranker_warmup(config)
+    second = reranker.start_reranker_warmup(config)
+
+    assert first is not None
+    assert first is second
+    assert first.daemon is True
+    release.set()
+    first.join(1)
+    assert started == [config.model]
 
 
 def test_wiki_search_uses_reranker_only_when_enabled(monkeypatch) -> None:

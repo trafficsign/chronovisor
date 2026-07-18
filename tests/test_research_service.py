@@ -22,7 +22,11 @@ def test_service_writes_bundle_audit_and_receipt(tmp_path: Path, monkeypatch) ->
 
         def plan(self, *_args, **_kwargs):
             return PlannerResponse(
-                {"type": "finish", "arguments": {"answer": "unknown"}, "rationale": "test"}
+                {
+                    "type": "finish",
+                    "arguments": {"answer": "unknown"},
+                    "rationale": "test",
+                }
             )
 
     result = run_evidence_research(
@@ -35,7 +39,9 @@ def test_service_writes_bundle_audit_and_receipt(tmp_path: Path, monkeypatch) ->
     )
     assert result["evidence_bundle_id"].startswith("bundle:")
     assert result["claims"][0]["status"] == "unknown"
-    assert any(row.get("kind") == "durable_receipt" for row in store.events("service-run"))
+    assert any(
+        row.get("kind") == "durable_receipt" for row in store.events("service-run")
+    )
     assert (tmp_path / "wiki" / "research" / "bundles" / "service-run.json").exists()
 
 
@@ -84,3 +90,11 @@ def test_cli_sync_is_explicit(monkeypatch, capsys) -> None:
     payload = capsys.readouterr().out
     assert '"status": "completed"' in payload
     assert '"goal": "local evidence"' in payload
+
+
+def test_server_publishes_wiki_research() -> None:
+    from llm_wiki_mcp import server
+
+    names = {tool.name for tool in server.mcp._tool_manager.list_tools()}
+
+    assert "wiki_research" in names

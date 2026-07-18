@@ -1366,6 +1366,17 @@ def wiki_tick() -> str:
 
 def main():
     init_wiki()
+    # Importing torch, resolving the Hugging Face snapshot, and compiling the
+    # first MPS inference used to add ~15 s to the first interactive search.
+    # Warm it in parallel with the existing index startup work. reranker.py
+    # serializes a truly immediate search against the same model instance.
+    reranker_warmup = None
+    try:
+        from llm_wiki_mcp.reranker import start_reranker_warmup
+
+        reranker_warmup = start_reranker_warmup()
+    except Exception:
+        pass
     # job_store is in-memory: any current_job_id persisted from a previous
     # process is, by definition, stale. Clear it so a crash mid-ingest
     # doesn't permanently lock out run_pending_ingest.
@@ -1386,6 +1397,10 @@ def main():
         get_bm25().build()
     except Exception:
         pass
+    # Cached production models complete in a few seconds. Bound the wait so a
+    # first-ever model download can never prevent MCP from advertising tools.
+    if reranker_warmup is not None:
+        reranker_warmup.join(timeout=8.0)
     mcp.run(transport="stdio")
 
 

@@ -56,6 +56,18 @@ wiki_research(query="current status of the target", claims=["..."])
 wiki_jobs(job_id="...")
 ```
 
+MCP hosts freeze their tool schema when a conversation is created. If
+`wiki_research` was added after that conversation started, reconnecting only
+the process is insufficient in some hosts: start a new conversation and verify
+that `wiki_research` appears in the advertised tool list. The server publishes
+it unconditionally; a publication regression is covered by the test suite.
+
+When the optional reranker is enabled, the MCP process warms its locally cached
+model in parallel with index startup and waits at most eight seconds before
+advertising tools. Model loading prefers the complete local Hugging Face
+snapshot and only permits a network fallback on first install, so remote
+metadata checks do not inflate the first interactive search.
+
 The GitHub-installed package exposes the same background-first contract for
 deployment canaries and shell use:
 
