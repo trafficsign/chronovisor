@@ -11,7 +11,14 @@ from typing import Any
 from llm_wiki_mcp.evidence_bundle import simple_assess_claims
 from llm_wiki_mcp.research_types import EvidenceArtifact
 
-DEFAULT_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "research_holdout.jsonl"
+_PACKAGED_FIXTURE = Path(__file__).with_name("fixtures") / "research_holdout.jsonl"
+_SOURCE_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "tests"
+    / "fixtures"
+    / "research_holdout.jsonl"
+)
+DEFAULT_FIXTURE = _PACKAGED_FIXTURE if _PACKAGED_FIXTURE.is_file() else _SOURCE_FIXTURE
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
@@ -97,7 +104,9 @@ def run_eval(path: Path = DEFAULT_FIXTURE) -> dict[str, Any]:
     baseline_rescue = baseline_hits / count
     agentic_rescue = agentic_hits / count
     evidence_precision = correct_claims / count
-    unknown_retention = unknown_preserved / unknown_expected if unknown_expected else 1.0
+    unknown_retention = (
+        unknown_preserved / unknown_expected if unknown_expected else 1.0
+    )
     waste_rate = wasted / actions if actions else 0.0
     pass_gate = (
         agentic_rescue >= baseline_rescue + 0.03

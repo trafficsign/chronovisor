@@ -9,6 +9,7 @@ from llm_wiki_mcp.research_eval import DEFAULT_FIXTURE, run_eval
 
 
 def test_locked_research_holdout_passes_adoption_gate() -> None:
+    assert DEFAULT_FIXTURE.is_file()
     result = run_eval(DEFAULT_FIXTURE)
     assert result["status"] == "pass"
     assert result["agentic_rescue_rate"] > result["baseline_rescue_rate"]
@@ -19,6 +20,8 @@ def test_locked_research_holdout_passes_adoption_gate() -> None:
 
 def test_holdout_rejects_non_locked_rows(tmp_path: Path) -> None:
     fixture = tmp_path / "bad.jsonl"
-    fixture.write_text(json.dumps({"case_id": "x", "split": "dev"}) + "\n", encoding="utf-8")
+    fixture.write_text(
+        json.dumps({"case_id": "x", "split": "dev"}) + "\n", encoding="utf-8"
+    )
     with pytest.raises(ValueError, match="locked-test"):
         run_eval(fixture)
