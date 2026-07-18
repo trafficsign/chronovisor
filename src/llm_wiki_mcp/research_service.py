@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import uuid
@@ -181,3 +182,53 @@ def enqueue_evidence_research(
             ensure_ascii=False,
         ),
     )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run or durably enqueue source-backed LLM Wiki research."
+    )
+    parser.add_argument("query", help="Research question or goal.")
+    parser.add_argument(
+        "--claim",
+        action="append",
+        default=[],
+        help="Claim to assess; repeat for multiple claims.",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Run now instead of using the default durable background queue.",
+    )
+    parser.add_argument("--no-challenge", dest="challenge", action="store_false")
+    parser.add_argument("--purpose", default="explicit")
+    parser.add_argument("--json", action="store_true")
+    parser.set_defaults(challenge=True)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.sync:
+        payload = run_evidence_research(
+            args.query,
+            claims=args.claim,
+            challenge=args.challenge,
+            purpose=args.purpose,
+        )
+    else:
+        payload = enqueue_evidence_research(
+            args.query,
+            claims=args.claim,
+            challenge=args.challenge,
+            purpose=args.purpose,
+        )
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(json.dumps(payload, ensure_ascii=False, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

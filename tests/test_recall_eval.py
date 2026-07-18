@@ -149,5 +149,8 @@ def test_page_ignored_is_neither_positive_nor_prompt_false_positive(monkeypatch)
     payload = recall_eval.evaluate_examples(examples, policy=RecallPolicy(log_decisions=False))
 
     assert payload["metrics"]["positives"] == 0
-    assert payload["metrics"]["false_positives"] == 1
-    assert payload["metrics"]["waste_injection_rate"] == 1.0
+    # Neither page-level ignore nor lack of an explicit usage receipt is a
+    # prompt-level negative label. Only an explicit false-positive receipt
+    # contributes to the waste metric.
+    assert payload["metrics"]["false_positives"] == 0
+    assert payload["metrics"]["waste_injection_rate"] == 0.0

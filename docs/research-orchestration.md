@@ -1,0 +1,107 @@
+# Agentic Evidence and Memory Orchestration
+
+LLM Wiki keeps its existing safety layers and adds a bounded, read-only
+research plane. This is an orchestration layer, not a second memory authority.
+
+## Authority and call hierarchy
+
+1. L1 core memory and L2 automatic Recall remain on the synchronous prompt
+   path with the existing four-second, fail-open contract.
+2. L3 explicit `wiki_search`, `wiki_read`, and `wiki_recall_used` remain the
+   normal interactive tools.
+3. `wiki_deep_dive` v2 uses the finite research kernel but is Wiki-only.
+4. `wiki_research` follows Wiki -> verified claims -> Raw/prior conversation ->
+   Web. Raw and Web are permitted only after local evidence access. A fetch URL
+   must have appeared in the run's Web search result.
+5. After a durable Evidence Bundle receipt, the auditor can feed proposal-only
+   Sleep consolidation. It cannot edit Pages directly.
+
+Raw remains the lossless rebuild authority. Pages remain reviewed semantic
+memory. Research event logs and checkpoints are rebuildable derived state.
+Evidence Artifacts and Bundles adopted by a run are durable, content-addressed
+records under `~/.wiki/research`.
+
+## Scheduler and budgets
+
+The local planner, challenger, tie-breaker, and repair calls all use the same
+cross-process sync-first scheduler. At most one research generation runs. A
+foreground marker prevents new research admission and cancels a running model
+subprocess within the configured grace period. Automatic/shadow model research
+fails closed unless `LLM_WIKI_RESEARCH_CAPACITY_PROVEN=1`; explicit and Sleep
+work remain available with fixed per-call and total wall deadlines.
+
+Budgets are separate for planner, challenge, tie-break, repair, total model
+calls, searches, fetches, iterations, elapsed time, generation tokens, and
+observation bytes. Malformed output, duplicate Action, authority violation,
+timeout, interruption, and orphaned Action all receive terminal trace records.
+
+## Evidence contract
+
+Claims are classified as `stable`, `freshness-sensitive`, or `user-reported`
+and resolved to `supported`, `contradicted`, or `unknown`. User reports and
+external verification are separate fields. Local/official sources rank before
+untrusted snippets. Every Evidence Artifact records source URI, retrieval time,
+SHA-256, byte length, trust, MIME type, quote range, provider/cache metadata,
+and run/iteration provenance.
+
+The primary planner gathers evidence. The challenger audits support,
+contradictions, and prompt injection. The tie-break model runs only on genuine
+disagreement. A reject/inconclusive challenge can narrow `supported` to
+`contradicted` or `unknown`; it cannot fabricate support. Answer citations are
+rendered deterministically from artifact metadata.
+
+## Web boundary
+
+Search and fetch are different permissions. Live egress is off unless both
+`adapter_enabled` and `live_egress_enabled` are true. Queries containing
+secrets, PII, private paths, invisible control characters, or excessive text
+are blocked before egress. Fetch blocks credentials, localhost/private/link-
+local/metadata IPs, DNS rebinding, cross-host redirects, redirect loops,
+unsupported MIME types, and declared/streamed oversized bodies. Provider
+outages degrade to Wiki-only research.
+
+Supported search adapters are Brave, Tavily, SearXNG, and the keyless MediaWiki
+Action API fallback. Cached Web bodies are TTL-bound derived data; durable
+Evidence is stored only when adopted by a research run.
+
+## Checkpoints and consolidation
+
+Zero-wait prefetch is consumed at most once by the next iteration. Context
+compaction keeps complete Action/Observation pairs; an unpaired Action forces
+full-history fallback. Checkpoint GC can remove only inactive checkpoints with
+a durable receipt, and must converge under its size cap without touching Raw or
+durable Evidence.
+
+Sleep consolidation requires a durable research receipt, elapsed-time and
+new-session thresholds, and a nonblocking lease. It writes only allowlisted
+`query_hint`, `alias`, or `tag` proposals with latest-wins `supersedes`
+provenance. The cursor advances only after the proposal append is durable.
+Replay/Holdout and local consensus remain the adoption gates.
+
+## Recommended explicit configuration
+
+```toml
+[research]
+enabled = true
+mode = "explicit"
+planner_model = "maxwell1500/ornith-35b:Q5_K_M"
+challenge_model = "gpt-oss:20b"
+tie_break_model = "gemma4:26b"
+
+[research.web]
+adapter_enabled = true
+live_egress_enabled = true
+provider = "mediawiki"
+endpoint = "https://ja.wikipedia.org/w/api.php"
+
+[research.compaction]
+enabled = true
+checkpoint_enabled = true
+
+[research.consolidation]
+enabled = true
+mutation_mode = "proposal_only"
+```
+
+Use `mode = "off"`, `live_egress_enabled = false`, `compaction.enabled =
+false`, or `consolidation.enabled = false` as independent rollback switches.

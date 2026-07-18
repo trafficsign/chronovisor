@@ -98,7 +98,7 @@ def test_user_prompt_unexpected_failure_is_exit_zero_fail_open(
     assert recall_breaker.snapshot()["failures"] == 1
 
 
-def test_user_prompt_hard_timeout_injects_model_free_fallback(
+def test_user_prompt_outer_timeout_does_not_start_second_fallback(
     monkeypatch,
     capsys,
 ) -> None:
@@ -115,18 +115,11 @@ def test_user_prompt_hard_timeout_injects_model_free_fallback(
             hook_dispatcher.RecallWallClockTimeout("primary timeout")
         ),
     )
+    fallback_calls: list[bool] = []
     monkeypatch.setattr(
         recall_runtime,
         "run_deterministic_fallback",
-        lambda *_args, **_kwargs: recall_runtime.RecallResult(
-            status="degraded",
-            decision="read",
-            confidence=0.7,
-            queries=["fallback"],
-            reasons=["deterministic fallback"],
-            matched_terms={},
-            context="[WORKING_MEMORY]\ncore\n[/WORKING_MEMORY]",
-        ),
+        lambda *_args, **_kwargs: fallback_calls.append(True),
     )
     monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"前回の続き"}'))
 
@@ -136,9 +129,18 @@ def test_user_prompt_hard_timeout_injects_model_free_fallback(
         )
         == 0
     )
-    output = json.loads(capsys.readouterr().out)
-    assert "core" in output["hookSpecificOutput"]["additionalContext"]
+    assert capsys.readouterr().out.strip() == "{}"
+    assert fallback_calls == []
     assert recall_breaker.snapshot()["failures"] == 1
+
+
+def test_outer_recall_deadline_is_the_total_budget() -> None:
+    policy = recall_runtime.RecallPolicy(
+        total_timeout_ms=4_000,
+        deterministic_fallback_reserve_ms=600,
+    )
+
+    assert hook_dispatcher.recall_outer_deadline_ms(policy) == 4_000
 
 
 def test_user_prompt_open_breaker_uses_bm25_only_policy(monkeypatch, capsys) -> None:

@@ -47,3 +47,22 @@ must not be substituted into the baseline after implementation begins.
   episodes, strict join accepted/rejected 0/0.
 - Positive promotion remains intentionally held until a production
   `wiki_recall_used` durable receipt joins exactly to one decision/session.
+
+## Phase 9 locked adoption results
+
+- Stable kind-balanced Recall corpus: 200 of 18,361 available rows, selection
+  SHA-256 `073ab007bc7ac65f75b438fd177a038f9374fc42e13c2998141106f7aa77367a`.
+- Adopted synchronous policy: evidence/cards, BM25, rewrite disabled,
+  `judge_mode = "auto"`, 4,000 ms total with a 600 ms internal deterministic
+  fallback reserve.
+- Recall: Recall@1 `0.0419`, Recall@3 `0.0599`, MRR `0.0563`; p50 `646.5 ms`,
+  p95 `2267 ms`, max `3234 ms`, deadline violations zero.
+- Waste uses only three explicit `false-positive` receipts and is `0.3333`.
+  The 56 `injection_ignored` rows remain exposure-only and are not converted
+  into negative supervision.
+- Agentic locked holdout SHA-256
+  `09ea7015abfc2779441e0d9ebd6f64f6a2e5e90b8f8fbc6e1fe79d80676ea1de`:
+  baseline rescue `0.3333`, agentic rescue `1.0`, source-backed claim
+  precision `1.0`, unknown retention `1.0`, action waste `0.0`.
+- Temp-only adversarial research verifier: seven of seven checks passed.
+- Raw full verify remained 10,848 logical units with zero errors.

@@ -160,10 +160,11 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
         web=web,
         compaction=compaction,
         consolidation_enabled=_bool(consolidation, "enabled", False),
-        consolidation_mutation_mode=(
-            "proposal_only"
-            if str(consolidation.get("mutation_mode") or "proposal_only") != "proposal_only"
-            else "proposal_only"
+        # Preserve an invalid value so the consolidation runner can reject it
+        # explicitly instead of silently turning it into an allowed mutation
+        # mode. The default remains proposal-only.
+        consolidation_mutation_mode=str(
+            consolidation.get("mutation_mode") or "proposal_only"
         ),
         consolidation_min_interval_seconds=_int(
             consolidation, "min_interval_seconds", 86_400

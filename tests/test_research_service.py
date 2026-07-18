@@ -4,6 +4,7 @@ from pathlib import Path
 
 from llm_wiki_mcp.research_config import ResearchConfig
 from llm_wiki_mcp.research_orchestrator import PlannerResponse
+from llm_wiki_mcp import research_service
 from llm_wiki_mcp.research_service import run_evidence_research
 from llm_wiki_mcp.research_store import ResearchStore
 
@@ -36,3 +37,50 @@ def test_service_writes_bundle_audit_and_receipt(tmp_path: Path, monkeypatch) ->
     assert result["claims"][0]["status"] == "unknown"
     assert any(row.get("kind") == "durable_receipt" for row in store.events("service-run"))
     assert (tmp_path / "wiki" / "research" / "bundles" / "service-run.json").exists()
+
+
+def test_cli_defaults_to_durable_background_queue(monkeypatch, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_enqueue(goal, *, claims, challenge, purpose):
+        seen.update(
+            goal=goal,
+            claims=claims,
+            challenge=challenge,
+            purpose=purpose,
+        )
+        return {"status": "queued", "job_id": "job-1"}
+
+    monkeypatch.setattr(research_service, "enqueue_evidence_research", fake_enqueue)
+
+    assert (
+        research_service.main(
+            ["latest claim", "--claim", "claim one", "--no-challenge", "--json"]
+        )
+        == 0
+    )
+
+    assert seen == {
+        "goal": "latest claim",
+        "claims": ["claim one"],
+        "challenge": False,
+        "purpose": "explicit",
+    }
+    assert '"status": "queued"' in capsys.readouterr().out
+
+
+def test_cli_sync_is_explicit(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        research_service,
+        "run_evidence_research",
+        lambda goal, **kwargs: {
+            "status": "completed",
+            "goal": goal,
+            "challenge": kwargs["challenge"],
+        },
+    )
+
+    assert research_service.main(["local evidence", "--sync", "--json"]) == 0
+    payload = capsys.readouterr().out
+    assert '"status": "completed"' in payload
+    assert '"goal": "local evidence"' in payload

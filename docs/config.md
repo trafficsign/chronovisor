@@ -191,6 +191,69 @@ batch_size = 10
 device = "mps"
 weight = 1.0
 
+[research]
+# Explicit keeps the bounded MCP/Sleep lane usable without automatic 35B work.
+# auto/shadow still fail closed until protected capacity is proved.
+enabled = true
+mode = "explicit"
+planner_model = "maxwell1500/ornith-35b:Q5_K_M"
+challenge_model = "gpt-oss:20b"
+tie_break_model = "gemma4:26b"
+max_depth = 1
+
+[research.budgets]
+max_iterations = 5
+max_total_wall_seconds = 90
+max_single_generation_seconds = 30
+max_single_generation_tokens = 512
+max_planner_calls = 5
+max_challenge_calls = 2
+max_tie_break_calls = 1
+max_repair_calls = 2
+max_total_model_calls = 10
+max_observation_bytes = 200000
+
+[research.resources]
+scheduler = "sync_first"
+max_concurrent_generations = 1
+preempt_on_sync = true
+preempt_grace_ms = 250
+protected_models = ["ornith:9b-q4_K_M", "bge-m3"]
+require_protected_residency = true
+sync_reserved_headroom_gib = 16
+sync_lease_wait_limit_ms = 50
+coordinate_ollama = true
+coordinate_mps_reranker = true
+
+[research.web]
+adapter_enabled = true
+live_egress_enabled = true
+provider = "mediawiki"
+endpoint = "https://ja.wikipedia.org/w/api.php"
+max_searches = 8
+max_fetches = 5
+cache_ttl_seconds = 900
+allow_private_network = false
+max_fetch_bytes = 2000000
+
+[research.compaction]
+enabled = true
+checkpoint_enabled = true
+checkpoint_ttl_seconds = 604800
+checkpoint_max_total_bytes = 536870912
+gc_on_durable_receipt = true
+
+[research.consolidation]
+enabled = true
+mutation_mode = "proposal_only"
+min_interval_seconds = 86400
+min_new_sessions = 5
+max_jobs = 20
+
+[research.security]
+egress_guard = true
+external_content_trust = "untrusted"
+
 [recall.thresholds]
 search = 0.35
 read = 0.65
@@ -360,10 +423,13 @@ of this adoption.
 
 ## Recall Defaults
 
-The completed recall path defaults to `gate_mode = "evidence"`,
-`context_style = "cards"`, `semantic = true`, rewrite enabled, and calibration
-enabled. The complete synchronous path has a 4000 ms wall-clock deadline,
-reserves 600 ms for allowlisted L1 memory plus BM25 fallback, and remains
-fail-open for the host. BM25 still runs without Ollama; after two degraded or
-failed runs the breaker temporarily disables rewrite, semantic search, and
-judge while keeping BM25 available.
+The production recall profile uses `gate_mode = "evidence"`,
+`context_style = "cards"`, synchronous `semantic = false`, rewrite disabled,
+`judge_mode = "auto"`, and calibration enabled. Semantic fusion still serves
+normal MCP search and explicit/deep research; it is excluded from production L2
+because the fixed paired Recall gate showed no quality gain within the four-
+second envelope. The complete synchronous path has a 4000 ms wall-clock
+deadline, reserves 600 ms for allowlisted L1 memory plus BM25 fallback, and
+remains fail-open for the host. BM25 still runs without Ollama; after two
+degraded or failed runs the breaker temporarily disables rewrite, semantic
+search, and judge while keeping BM25 available.

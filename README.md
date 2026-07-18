@@ -21,6 +21,12 @@ exceptional, repeatedly reproduced system-code repair incidents.
   host transcript-delta capture. The save path does not call an LLM.
 - `llm-wiki-local-model-eval`: read-only, full-corpus replay gate for measuring
   the local decision fleet before an artifact-backed atomic policy adoption.
+- `wiki_research` / `llm-wiki-research`: asynchronous-by-default, bounded
+  evidence research through MCP or CLI. It
+  follows Wiki -> verified claims -> Raw -> Web, persists source-backed
+  Evidence Bundles, and challenges accepted evidence locally.
+- `llm-wiki-research-verify`: temp-only adversarial verification with explicit
+  PASS/FAIL commands.
 
 The routine decision fleet is:
 
@@ -49,6 +55,7 @@ their separate repair queue.
   system/    # privileged user/profile/state pages
   recall/    # recall log, retrieval/content feedback, query hints, auto-apply log
   runtime/   # observable status, correction cursors/reviews, convergence state
+  research/  # durable evidence CAS manifests and Evidence Bundles
 ```
 
 ## Hook Entry Point
@@ -75,5 +82,6 @@ To update local Codex and Claude Code settings in one pass:
 llm-wiki hooks install --host all
 ```
 
-See `docs/architecture.md`, `docs/config.md`, `docs/hooks.md`, and
-`docs/operations.md` for the operational model.
+See `docs/architecture.md`, `docs/config.md`, `docs/hooks.md`,
+`docs/research-orchestration.md`, and `docs/operations.md` for the operational
+model.

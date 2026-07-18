@@ -14,6 +14,10 @@ recall-question coverage, raw-to-claim capture coverage, sensitivity-tier
 distribution, read-back pass rate, duplicate candidates, lint repair queue
 size, and golden-set size.
 
+Research health adds run/claim counts, source provider and cache use,
+first-pass malformed vs repair counts, role budgets, stop reasons, and Decision
+Trace coverage. The same fields appear in the dashboard Memory Health panel.
+
 ## Doctor
 
 ```sh
@@ -41,6 +45,44 @@ turns, pair agreement, tie-break use, and unresolved quarantine. Save Load and
 Batch Yield render artifact-bound ingest semantic defers separately from
 pending and failed work. Guarded Codex repair has a separate incident/budget
 view. A missing or dead worker PID is idle, not live work.
+
+## Evidence Research
+
+`wiki_research` is an MCP tool and is asynchronous by default. Inspect the
+returned durable job with `wiki_jobs(job_id)`:
+
+```text
+wiki_research(query="current status of the target", claims=["..."])
+wiki_jobs(job_id="...")
+```
+
+The GitHub-installed package exposes the same background-first contract for
+deployment canaries and shell use:
+
+```sh
+llm-wiki-research "current status of the target" --claim "..." --json
+# Explicit live diagnostic only; normal use stays queued.
+llm-wiki-research "current status of the target" --sync --no-challenge --json
+```
+
+The tool follows Wiki -> verified claims -> Raw -> Web. Web search and fetch
+have separate permission checks and independent kill switches. Fetch accepts
+only public, non-authenticated URLs returned by the search action. Results are
+untrusted data, never instructions. Supported claims receive citations derived
+from immutable Evidence Artifacts; contradicted and unknown claims remain
+explicit.
+
+Run the mutation-free adversarial verifier before rollout or after changing
+budgets/providers:
+
+```sh
+llm-wiki-research-verify --json
+```
+
+Research, Web, checkpoint compaction, and Sleep consolidation are separately
+reversible. `mode = "explicit"` keeps research usable through the MCP tool
+without allowing automatic 35B work. Do not use `auto` or `shadow` until the
+protected 9B/embedding residency and foreground latency gate are proven.
 
 ## Hook Install
 

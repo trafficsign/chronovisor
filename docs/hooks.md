@@ -20,12 +20,21 @@ resolution headroom around the 4000 ms Recall deadline.
 Recall is strictly fail-open for the host. The primary path reserves 600 ms of
 its deadline for a model-free fallback. A soft deadline first degrades to
 allowlisted L1 memory plus BM25; if a non-cooperative call reaches the outer
-hard timer, the installed command's startup headroom permits the same tightly
-bounded fallback once. Config corruption or a second fallback failure still
-prints a host no-op, exits successfully, and lets the user prompt continue.
+timer, no second pass is started and the hook immediately fails open. Thus the
+primary path plus its one internal fallback stays inside the same 4000 ms
+Recall budget. Config corruption or a fallback failure still prints a host
+no-op, exits successfully, and lets the user prompt continue.
 After two degraded or failed Recall runs, the default circuit breaker disables
 rewrite, semantic search, and the local judge for 60 seconds while BM25 remains
 available. A successful normal run resets the breaker.
+
+The synchronous hook never starts `wiki_research`, Deep Recall, Web search,
+Web fetch, the 35B planner, or the cross-encoder reranker. Those lanes are
+explicit/background or Sleep work. Foreground Recall announces a short-lived
+sync marker before local inference; a running research child observes that
+marker and is cancelled/deferred within its preemption budget. Automatic and
+shadow 35B research are rejected unless protected model capacity has been
+proved explicitly.
 
 Always-on memory and automatic Recall have independent budgets. L1 admits only
 the fixed system-page allowlist `current-state`, `user-profile`, and

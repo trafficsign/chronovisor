@@ -60,6 +60,8 @@ llm-wiki-oracle = "llm_wiki_mcp.oracle:main"
 llm-wiki-burn-monitor = "llm_wiki_mcp.burn_monitor:main"
 llm-wiki-repair-runbook = "llm_wiki_mcp.repair_runbook:main"
 llm-wiki-research-verify = "llm_wiki_mcp.research_verification:main"
+llm-wiki-research-eval = "llm_wiki_mcp.research_eval:main"
+llm-wiki-research = "llm_wiki_mcp.research_service:main"
 
 [build-system]
 requires = ["hatchling"]

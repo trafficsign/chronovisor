@@ -73,6 +73,12 @@ def recall_wall_clock_deadline(timeout_ms: int):
             )
 
 
+def recall_outer_deadline_ms(policy: recall_runtime.RecallPolicy) -> int:
+    """Return the final host boundary; ``run_recall`` owns its inner reserve."""
+
+    return max(100, int(policy.total_timeout_ms))
+
+
 @dataclass(frozen=True)
 class BackgroundTask:
     name: str
@@ -219,7 +225,7 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         else policy
     )
     try:
-        with recall_wall_clock_deadline(policy.total_timeout_ms):
+        with recall_wall_clock_deadline(recall_outer_deadline_ms(policy)):
             result = recall_runtime.run_recall(
                 request,
                 effective_policy,
@@ -231,29 +237,12 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
             threshold=policy.circuit_breaker_failures,
             cooldown_seconds=policy.circuit_breaker_cooldown_seconds,
         )
-        # Host hooks have deployment-level headroom beyond the primary Recall
-        # deadline. Use a tightly bounded model-free pass instead of throwing
-        # away both retrieval and L1 memory when a model call ignores its soft
-        # timeout by a few milliseconds.
-        try:
-            fallback_ms = max(100, policy.deterministic_fallback_reserve_ms)
-            with recall_wall_clock_deadline(fallback_ms):
-                result = recall_runtime.run_deterministic_fallback(
-                    request,
-                    policy,
-                    perform_search=not args.no_search,
-                    timeout_ms=fallback_ms,
-                    reason=str(exc),
-                )
-            if policy.log_decisions:
-                recall_runtime.append_recall_log(request, result)
-            output = recall_runtime.render_output(
-                result, args.format or host_output_format(host)
-            )
-            print(output or "{}")
-        except BaseException:
-            _record_recall_fail_open(request, policy, status="timeout", error=str(exc))
-            _print_host_noop(host)
+        # ``run_recall`` already reserves and runs its deterministic fallback
+        # inside this total deadline. Reaching the outer timer means a lower
+        # layer ignored its own timeout, so starting any second pass here would
+        # violate the host's four-second contract.
+        _record_recall_fail_open(request, policy, status="timeout", error=str(exc))
+        _print_host_noop(host)
         return 0
     except Exception as exc:
         error = f"{exc.__class__.__name__}: {exc}"

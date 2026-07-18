@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +18,7 @@ from llm_wiki_mcp.recall_runtime import (
     RECALL_LOG_FILE,
     RecallPolicy,
     RecallRequest,
+    RecallResult,
     load_policy,
     run_recall,
 )
@@ -46,7 +49,10 @@ class RecallExample:
 
     @property
     def is_false_positive(self) -> bool:
-        return self.kind in {"false-positive", "injection_ignored"}
+        # Lack of an explicit usage receipt is exposure-only supervision. It
+        # must never be promoted to a negative label. Only an explicit
+        # false-positive receipt contributes to the waste denominator.
+        return self.kind == "false-positive"
 
 
 @dataclass(frozen=True)
@@ -177,6 +183,39 @@ def percentile(values: list[int], pct: float) -> float:
     return float(ordered[max(0, min(idx, len(ordered) - 1))])
 
 
+def select_examples(examples: list[RecallExample], *, limit: int = 0) -> list[RecallExample]:
+    """Select a stable kind-balanced paired corpus instead of log-order rows."""
+
+    if limit <= 0 or len(examples) <= limit:
+        return list(examples)
+    buckets: dict[str, list[RecallExample]] = {}
+    for example in examples:
+        buckets.setdefault(example.kind or "unknown", []).append(example)
+    for rows in buckets.values():
+        rows.sort(
+            key=lambda item: hashlib.sha256(
+                json.dumps(
+                    [item.kind, item.prompt, list(item.expected_pages), list(item.negative_pages), item.ref],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+    selected: list[RecallExample] = []
+    kinds = sorted(buckets)
+    while len(selected) < limit:
+        progressed = False
+        for kind in kinds:
+            if buckets[kind]:
+                selected.append(buckets[kind].pop(0))
+                progressed = True
+                if len(selected) >= limit:
+                    break
+        if not progressed:
+            break
+    return selected
+
+
 def evaluate_examples(
     examples: list[RecallExample],
     *,
@@ -204,7 +243,30 @@ def evaluate_examples(
                 cwd=example.cwd,
                 session_id="",
             )
-            result = run_recall(request, eval_policy, perform_search=True)
+            from llm_wiki_mcp.hook_dispatcher import (
+                RecallWallClockTimeout,
+                recall_outer_deadline_ms,
+                recall_wall_clock_deadline,
+            )
+
+            started = time.monotonic()
+            try:
+                with recall_wall_clock_deadline(recall_outer_deadline_ms(eval_policy)):
+                    result = run_recall(request, eval_policy, perform_search=True)
+            except RecallWallClockTimeout as exc:
+                result = RecallResult(
+                    status="timeout",
+                    decision="none",
+                    confidence=0.0,
+                    queries=[],
+                    reasons=["synchronous recall failed open"],
+                    matched_terms={},
+                    error=str(exc),
+                )
+                result.latency_ms = min(
+                    eval_policy.total_timeout_ms,
+                    round((time.monotonic() - started) * 1000),
+                )
             pages = [item.page_id for item in result.context_items]
             decision = result.decision
             latency = result.latency_ms
@@ -275,8 +337,10 @@ def run_eval(
     replay: bool = True,
     save: bool = False,
     overrides: list[str] | None = None,
+    limit: int = 0,
 ) -> dict[str, Any]:
-    examples = build_dataset(log_file=log_file, feedback_file=feedback_file)
+    all_examples = build_dataset(log_file=log_file, feedback_file=feedback_file)
+    examples = select_examples(all_examples, limit=max(0, limit))
     policy = load_policy(config_file) if config_file else load_policy()
     policy = apply_overrides(policy, overrides)
     result = evaluate_examples(examples, policy=policy, replay=replay)
@@ -284,6 +348,15 @@ def run_eval(
         "status": "ok",
         "dataset": {
             "examples": len(examples),
+            "available_examples": len(all_examples),
+            "selection": "stable-kind-balanced" if len(examples) < len(all_examples) else "all",
+            "selection_sha256": hashlib.sha256(
+                json.dumps(
+                    [[row.kind, row.prompt, row.ref] for row in examples],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
             "log_file": str(log_file),
             "feedback_file": str(feedback_file),
         },
@@ -292,6 +365,7 @@ def run_eval(
             "context_style": getattr(policy, "context_style", "legacy"),
             "semantic": policy.semantic,
             "rewrite_enabled": getattr(policy, "rewrite_enabled", False),
+            "judge_mode": getattr(policy, "judge_mode", "off"),
         },
         **result,
     }
@@ -309,6 +383,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-replay", dest="replay", action="store_false")
     parser.add_argument("--save-baseline", action="store_true")
     parser.add_argument("--config-override", action="append", default=[])
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Stable kind-balanced paired corpus size (0 evaluates every row).",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -322,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
         replay=args.replay,
         save=args.save_baseline,
         overrides=args.config_override,
+        limit=max(0, args.limit),
     )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
