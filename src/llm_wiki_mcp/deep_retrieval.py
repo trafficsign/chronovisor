@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tempfile
-import threading
+import uuid
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +13,6 @@ from typing import Any
 
 from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
 from llm_wiki_mcp.index_store import get_store
-from llm_wiki_mcp.jobs import JobStatus, job_store
 from llm_wiki_mcp.local_structured import ChatTransport, LocalStructuredSession
 from llm_wiki_mcp.runtime_config import load_decision_router_config
 from llm_wiki_mcp.search import ScoredPage, search as run_search
@@ -348,40 +347,27 @@ def start_deep_dive(
     fanout: int = 5,
     semantic: bool = True,
     use_llm: bool = True,
+    engine: str = "v2",
 ) -> str:
-    job = job_store.create(processor="deep-retrieval")
-    job_store.update(
-        job.job_id,
-        status=JobStatus.RUNNING,
-        stage="search-read-requery",
-        total_ops=max(1, min(5, int(max_iterations))),
-        completed_ops=0,
+    """Durably enqueue a deep retrieval run that survives MCP restarts."""
+
+    from llm_wiki_mcp.background_jobs import enqueue_job
+
+    run_id = uuid.uuid4().hex
+    job = enqueue_job(
+        name="deep-retrieval",
+        module="llm_wiki_mcp.deep_retrieval_worker",
+        args=["--run-id", run_id, "--engine", "v2" if engine == "v2" else "v1"],
+        env={},
+        stdin_text=json.dumps(
+            {
+                "query": query,
+                "max_iterations": max(1, min(5, int(max_iterations))),
+                "fanout": max(1, min(10, int(fanout))),
+                "semantic": bool(semantic),
+                "use_llm": bool(use_llm),
+            },
+            ensure_ascii=False,
+        ),
     )
-
-    def worker() -> None:
-        try:
-            result = run_deep_dive(
-                query,
-                max_iterations=max_iterations,
-                fanout=fanout,
-                semantic=semantic,
-                use_llm=use_llm,
-            )
-            job_store.update(
-                job.job_id,
-                status=JobStatus.COMPLETED,
-                completed_at=datetime.now().isoformat(),
-                completed_ops=len(result.get("iterations", [])),
-                result=result,
-            )
-        except Exception as exc:
-            job_store.update(
-                job.job_id,
-                status=JobStatus.FAILED,
-                completed_at=datetime.now().isoformat(),
-                error=str(exc),
-            )
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    return job.job_id
+    return str(job["job_id"])

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
-import time
 
 from llm_wiki_mcp import deep_retrieval, server
-from llm_wiki_mcp.jobs import JobStatus, job_store
 from llm_wiki_mcp.runtime_config import DecisionRouterConfig
 from llm_wiki_mcp.research_config import ResearchConfig
 from llm_wiki_mcp.research_store import ResearchStore
 from llm_wiki_mcp.search import ScoredPage
+
+
+def _tool(function):
+    return function.fn if hasattr(function, "fn") else function
 
 
 def page(page_id: str, score: float = 1.0) -> ScoredPage:
@@ -73,26 +75,22 @@ def test_run_deep_dive_searches_reads_links_and_requeries(tmp_path, monkeypatch)
     assert {page["page_id"] for page in result["pages"]} == {"alpha", "beta", "target"}
 
 
-def test_start_deep_dive_completes_background_job(monkeypatch) -> None:
-    monkeypatch.setattr(
-        deep_retrieval,
-        "run_deep_dive",
-        lambda *args, **kwargs: {"status": "completed", "iterations": [{"iteration": 1}]},
-    )
+def test_start_deep_dive_enqueues_durable_worker(monkeypatch) -> None:
+    from llm_wiki_mcp import background_jobs
+
+    recorded = []
+
+    def enqueue(**kwargs):
+        recorded.append(kwargs)
+        return {"job_id": "durable-job"}
+
+    monkeypatch.setattr(background_jobs, "enqueue_job", enqueue)
 
     job_id = deep_retrieval.start_deep_dive("q", max_iterations=1)
 
-    for _ in range(50):
-        job = job_store.get(job_id)
-        if job and job.status == JobStatus.COMPLETED:
-            break
-        time.sleep(0.01)
-
-    job = job_store.get(job_id)
-    assert job is not None
-    assert job.status == JobStatus.COMPLETED
-    assert job.completed_ops == 1
-    assert job.result == {"status": "completed", "iterations": [{"iteration": 1}]}
+    assert job_id == "durable-job"
+    assert recorded[0]["module"] == "llm_wiki_mcp.deep_retrieval_worker"
+    assert json.loads(recorded[0]["stdin_text"])["query"] == "q"
 
 
 def test_wiki_deep_dive_sync_returns_payload(monkeypatch) -> None:
@@ -108,6 +106,29 @@ def test_wiki_deep_dive_sync_returns_payload(monkeypatch) -> None:
     payload = json.loads(tool_fn("q", background=False, engine="v1"))
 
     assert payload == {"status": "completed", "query": "q", "iterations": []}
+
+
+def test_wiki_jobs_reads_durable_deep_retrieval_job(monkeypatch) -> None:
+    from llm_wiki_mcp import background_jobs
+
+    monkeypatch.setattr(
+        background_jobs,
+        "get_job",
+        lambda _job_id: {
+            "job_id": "durable-job",
+            "name": "deep-retrieval",
+            "status": "queued",
+            "created_at": "2026-07-18T00:00:00+00:00",
+            "updated_at": "2026-07-18T00:00:00+00:00",
+            "attempts": 0,
+            "output_tail": "",
+        },
+    )
+
+    payload = json.loads(_tool(server.wiki_jobs)("durable-job"))
+
+    assert payload["status"] == "queued"
+    assert payload["processor"] == "deep-retrieval"
 
 
 def test_v2_deep_dive_uses_bounded_wiki_only_kernel(tmp_path, monkeypatch) -> None:

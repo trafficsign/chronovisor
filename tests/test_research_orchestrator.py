@@ -64,3 +64,37 @@ def test_malformed_action_is_terminal_and_never_executed(tmp_path, monkeypatch) 
 
     assert result["stop_reason"] == "malformed_action"
     assert any(row.get("kind") == "malformed_action" and row.get("terminal") is True for row in store.events(result["research_run_id"]))
+
+
+def test_restart_terminalizes_orphan_action_and_advances_epoch(tmp_path, monkeypatch) -> None:
+    _isolate_scheduler(tmp_path, monkeypatch)
+    store = ResearchStore(tmp_path / "store")
+    store.append_event(
+        "resumed-run",
+        {
+            "kind": "action",
+            "epoch": 0,
+            "iteration": 1,
+            "action": {"type": "wiki_search", "arguments": {"query": "old"}},
+        },
+    )
+    monkeypatch.setattr(
+        research_orchestrator,
+        "execute_tool",
+        lambda action, _context: {"results": []}
+        if action.type.value == "wiki_search"
+        else {},
+    )
+
+    result = research_orchestrator.run_research(
+        "goal",
+        run_id="resumed-run",
+        config=ResearchConfig(enabled=True, mode="trace"),
+        planner=DeterministicPlanner(),
+        store=store,
+    )
+    events = store.events("resumed-run")
+
+    assert result["stop_reason"] == "completed"
+    assert any(row.get("status") == "orphan_terminalized" for row in events)
+    assert any(row.get("kind") == "action" and row.get("epoch") == 1 for row in events)

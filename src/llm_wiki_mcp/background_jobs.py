@@ -661,6 +661,23 @@ def snapshot() -> dict[str, Any]:
     }
 
 
+def get_job(job_id: str) -> dict[str, Any] | None:
+    """Return one durable job without exposing the full ledger."""
+
+    repair_stale()
+    with _lock():
+        job = _load()["jobs"].get(job_id)
+    return dict(job) if isinstance(job, dict) else None
+
+
+def recent_jobs(*, limit: int = 10) -> list[dict[str, Any]]:
+    repair_stale()
+    with _lock():
+        jobs = [dict(row) for row in _load()["jobs"].values() if isinstance(row, dict)]
+    jobs.sort(key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""), reverse=True)
+    return jobs[: max(0, limit)]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)

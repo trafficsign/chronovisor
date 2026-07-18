@@ -1034,7 +1034,29 @@ def wiki_jobs(job_id: str | None = None) -> str:
     if job_id:
         job = job_store.get(job_id)
         if not job:
-            return json.dumps({"error": f"Job '{job_id}' not found"})
+            from llm_wiki_mcp.background_jobs import get_job
+
+            durable = get_job(job_id)
+            if durable is None:
+                return json.dumps({"error": f"Job '{job_id}' not found"})
+            return json.dumps(
+                {
+                    "job_id": durable.get("job_id"),
+                    "status": durable.get("status"),
+                    "processor": durable.get("name"),
+                    "stage": "durable-worker",
+                    "created_at": durable.get("created_at"),
+                    "updated_at": durable.get("updated_at"),
+                    "attempts": durable.get("attempts"),
+                    "output_tail": durable.get("output_tail"),
+                    "error": (
+                        durable.get("output_tail")
+                        if durable.get("status") in {"failed", "quarantined"}
+                        else None
+                    ),
+                },
+                ensure_ascii=False,
+            )
         return json.dumps({
             "job_id": job.job_id,
             "status": job.status.value,
@@ -1099,6 +1121,7 @@ def wiki_deep_dive(
             fanout=fanout,
             semantic=semantic,
             use_llm=use_llm,
+            engine=engine,
         )
         return json.dumps(
             {
