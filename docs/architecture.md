@@ -56,7 +56,12 @@ Exceptional system repair
   range. Sealed parts use `.jsonl.zst` plus a full-restore-verified manifest.
   There is deliberately no `hot/` or `archive/` tier: date is the physical
   grouping and the suffix/manifest is lifecycle state.
-- `pages/`: structured pages created by ingest/lint workflows.
+- `pages/`: structured pages created by ingest/lint workflows. Knowledge pages
+  always live at `pages/<top-level-folder>/<page-id>.md`; direct Markdown files
+  under `pages/` are forbidden. Triage prefers the best matching existing
+  folder and may create one specific kebab-case folder when none fits. The
+  host validator repairs invalid model output, and the final prepare boundary
+  rejects root-level creates even for replayed or previously reviewed plans.
 - `system/`: privileged pages such as profile, current state, and lessons.
 - `recall/`: recall decisions, feedback, query hints, and auto-apply logs.
 - `recall/feedback.jsonl`: append-only recall supervision. Exact historical

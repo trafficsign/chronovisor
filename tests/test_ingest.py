@@ -1070,6 +1070,23 @@ class TestApplyOperations:
         assert "title: T" in body and body.endswith("\n")
         assert f"updated: {date.today().isoformat()}" in body
 
+    @pytest.mark.parametrize("filename", ["root-page.md", "a/b/nested-page.md"])
+    def test_create_refuses_wrong_path_depth_even_if_triage_was_bypassed(
+        self, isolated_wiki: Path, filename: str
+    ) -> None:
+        ops = [
+            {
+                "type": "create",
+                "filename": filename,
+                "content": "---\ntitle: Root\nupdated: 2026-07-18\n---\nbody",
+            }
+        ]
+
+        with pytest.raises(IngestApplyError, match="top-level folder"):
+            _apply_operations(ops)
+
+        assert not (isolated_wiki / "pages" / filename).exists()
+
     def test_create_collision_converts_to_update(self, isolated_wiki: Path) -> None:
         path = _seed_page(
             isolated_wiki,
@@ -1269,7 +1286,7 @@ class TestApplyOperations:
             [
                 {
                     "type": "create",
-                    "filename": "alternate-display-memory.md",
+                    "filename": "hardware/alternate-display-memory.md",
                     "content": (
                         "---\ntitle: Alternate display memory\nupdated: 2026-07-11\n---\n"
                         "The setup has two G32P 32-inch 6K displays.\n"
@@ -1280,7 +1297,9 @@ class TestApplyOperations:
 
         assert updated == []
         assert created == ["alternate-display-memory"]
-        alternate = page_mutation.PAGES_DIR / "alternate-display-memory.md"
+        alternate = (
+            page_mutation.PAGES_DIR / "hardware" / "alternate-display-memory.md"
+        )
         written = alternate.read_text(encoding="utf-8")
         assert "two G32P 32-inch 6K displays" not in written
         assert "one G32P 32-inch 6K display" in written
@@ -5208,7 +5227,7 @@ class TestRunIngestPartialFailure:
         plan = [
             {
                 "type": "update",
-                "filename": "career-transition-strategy-2026.md",
+                "filename": "career/career-transition-strategy-2026.md",
                 "summary": "Capture career transition strategy discussion",
                 "keywords": ["career", "strategy"],
             }
@@ -5253,7 +5272,12 @@ class TestRunIngestPartialFailure:
         assert finished.pages_created == ["career-transition-strategy-2026"]
         assert finished.pages_updated == []
         assert on_complete_called == [True]
-        assert (isolated_wiki / "pages" / "career-transition-strategy-2026.md").exists()
+        assert (
+            isolated_wiki
+            / "pages"
+            / "career"
+            / "career-transition-strategy-2026.md"
+        ).exists()
 
     def test_failure_packet_missing_update_target_becomes_create(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -5263,7 +5287,7 @@ class TestRunIngestPartialFailure:
         plan = [
             {
                 "type": "update",
-                "filename": "claude-code-vs-claude-code-structural-analysis.md",
+                "filename": "ai/claude-code-vs-claude-code-structural-analysis.md",
                 "summary": "Capture Claude Code and Cursor adoption analysis",
             }
         ]
@@ -5318,6 +5342,7 @@ class TestRunIngestPartialFailure:
         page = (
             isolated_wiki
             / "pages"
+            / "ai"
             / "claude-code-vs-claude-code-structural-analysis.md"
         )
         assert page.exists()
@@ -9448,6 +9473,80 @@ class TestTriagePlanSchema:
         ]
         assert _validate_triage_plan(plan) == plan
 
+    def test_bare_create_is_rejected_with_folder_repair_contract(self) -> None:
+        from llm_wiki_mcp.ingest import _triage_plan_validation_issues
+
+        operation = {
+            "type": "create",
+            "filename": "root-page.md",
+            "title": "Root Page",
+            "keywords": ["root", "page"],
+            "summary": "A durable page that needs classification.",
+        }
+
+        issues = _triage_plan_validation_issues([operation])
+
+        assert len(issues) == 1
+        assert issues[0].pointer == "/0/filename"
+        assert issues[0].keyword == "createPathDepth"
+        assert issues[0].expected["format"] == "folder/page-id.md"
+
+    def test_live_triage_repairs_bare_create_into_existing_folder(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        _seed_page(
+            isolated_wiki,
+            "ai/existing.md",
+            "---\ntitle: Existing\nupdated: 2026-07-18\n---\nbody\n",
+        )
+        invalid = {
+            "type": "create",
+            "filename": "new-topic.md",
+            "title": "New Topic",
+            "keywords": ["new", "topic"],
+            "summary": "Durable AI knowledge.",
+        }
+        repaired = {**invalid, "filename": "ai/new-topic.md"}
+        transport = _QueueStructuredTransport(
+            json.dumps([invalid]), json.dumps([repaired])
+        )
+
+        assert ingest._triage("AI topic", transport=transport) == [repaired]
+        assert len(transport.requests) == 2
+        initial_prompt = transport.requests[0].messages[-1]["content"]
+        assert "Existing top-level folders" in initial_prompt
+        assert "ai/" in initial_prompt
+        assert "Every create filename must be folder/page.md" in initial_prompt
+        feedback = transport.requests[1].messages[-1]["content"]
+        assert '"keyword":"createPathDepth"' in feedback
+
+    def test_live_triage_repairs_missing_bare_update_into_foldered_create(
+        self, isolated_wiki: Path
+    ) -> None:
+        from llm_wiki_mcp import ingest
+
+        invalid = {
+            "type": "update",
+            "filename": "new-topic.md",
+            "title": "New Topic",
+            "keywords": ["new", "topic"],
+            "summary": "Durable knowledge without an existing page.",
+        }
+        repaired = {
+            **invalid,
+            "type": "create",
+            "filename": "new-domain/new-topic.md",
+        }
+        transport = _QueueStructuredTransport(
+            json.dumps([invalid]), json.dumps([repaired])
+        )
+
+        assert ingest._triage("new domain knowledge", transport=transport) == [repaired]
+        feedback = transport.requests[1].messages[-1]["content"]
+        assert '"keyword":"missingUpdateNeedsFolderedCreate"' in feedback
+
     def test_more_than_8_operations_is_rejected_by_host_validator(self) -> None:
         from llm_wiki_mcp.ingest import _triage_plan_validation_issues
 
@@ -9727,7 +9826,7 @@ class TestTriagePlanSchema:
         plan = [
             {
                 "type": "update",
-                "filename": "career-transition-strategy-2026.md",
+                "filename": "career/career-transition-strategy-2026.md",
                 "title": "Career Transition Strategy 2026",
                 "keywords": ["career", "transition", "strategy", "2026"],
                 "summary": "Career transition strategy memory",
@@ -9744,7 +9843,7 @@ class TestTriagePlanSchema:
         assert out == [
             {
                 "type": "create",
-                "filename": "career-transition-strategy-2026.md",
+                "filename": "career/career-transition-strategy-2026.md",
                 "summary": "Career transition strategy memory",
                 "title": "Career Transition Strategy 2026",
                 "keywords": ["career", "transition", "strategy", "2026"],
@@ -9777,14 +9876,14 @@ class TestTriagePlanSchema:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
         out = _validate_triage_plan(
-            [{"type": "update", "filename": "missing-topic.md"}],
+            [{"type": "update", "filename": "memory/missing-topic.md"}],
             coerce_missing_updates=True,
         )
 
         assert out == [
             {
                 "type": "create",
-                "filename": "missing-topic.md",
+                "filename": "memory/missing-topic.md",
                 "title": "Missing Topic",
                 "summary": "Missing Topic",
                 "keywords": ["missing", "topic"],
@@ -12422,10 +12521,10 @@ class TestFilenameSchemaStrict:
         ):
             assert _validate_triage_plan([self._create(bad)]) is None, bad
 
-    def test_kebab_with_optional_folder_accepted(self) -> None:
+    def test_kebab_with_required_folder_accepted(self) -> None:
         from llm_wiki_mcp.ingest import _validate_triage_plan
 
-        for good in ("ai/foo.md", "foo.md", "foo", "ai/career-note"):
+        for good in ("ai/foo.md", "ai/career-note"):
             out = _validate_triage_plan([self._create(good)])
             assert out is not None, good
 

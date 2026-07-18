@@ -222,6 +222,8 @@ class _ResourceClient:
 def test_triage_prompt_requires_filename_for_updates() -> None:
     assert 'MUST use "filename"' in ollama.TRIAGE_SYSTEM_PROMPT
     assert 'Never emit a "page_id" field' in ollama.TRIAGE_SYSTEM_PROMPT
+    assert "a bare filename is forbidden" in ollama.TRIAGE_SYSTEM_PROMPT
+    assert "when no existing folder fits" in ollama.TRIAGE_SYSTEM_PROMPT
 
 
 def test_http_error_preserves_ollama_response_detail() -> None:

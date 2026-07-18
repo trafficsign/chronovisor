@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from typing import Any, Callable
 
 from llm_wiki_mcp import ollama as ollama_runtime
+from llm_wiki_mcp.local_structured import ChatTransport
 
 
 def _runtime():
@@ -69,7 +70,15 @@ def triage(
         {p.parent.name for p in all_pages() if p.parent != _runtime().PAGES_DIR}
     )
     catalog_lines = [
-        f"Existing folders: {', '.join(f'{f}/' for f in existing_folders)}",
+        (
+            "Existing top-level folders (prefer the best semantic match for "
+            f"every create): {', '.join(f'{f}/' for f in existing_folders)}"
+        ),
+        (
+            "Create routing contract: never create directly under pages/. "
+            "Use an existing folder when one fits; otherwise create a specific "
+            "new kebab-case folder. Every create filename must be folder/page.md."
+        ),
         "",
     ]
 

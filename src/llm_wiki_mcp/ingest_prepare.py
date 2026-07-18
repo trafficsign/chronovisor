@@ -137,6 +137,16 @@ def prepare_operations(
         full_path = _safe_resolve_page_path(op["filename"])
         page_id = full_path.stem
 
+        # Defense in depth: reviewed/replayed artifacts can reach prepare
+        # without passing through today's triage validator.  Never let a
+        # create operation write directly under pages/, even on those paths.
+        relative_parts = full_path.relative_to(_runtime().PAGES_DIR.resolve()).parts
+        if op_type == "create" and len(relative_parts) != 2:
+            raise IngestApplyError(
+                "create target must use exactly one top-level folder "
+                f"(expected folder/page-id.md): {op['filename']!r}"
+            )
+
         # Detect intra-batch dups using the same case/Unicode-insensitive key
         # we use against the existing corpus, so two ops whose ids differ
         # only in case or NFC/NFD form are caught before any write.
@@ -378,4 +388,3 @@ def prepare_operations(
         )
 
     return constrained_plans, totals
-

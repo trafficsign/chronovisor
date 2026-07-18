@@ -499,14 +499,16 @@ def _triage(
     )
 
 
-# Filename hardening: kebab-case ASCII, optional single folder segment,
-# .md suffix, capped length. Anything else is treated as a triage failure
-# so it accrues toward dead-letter instead of crashing later in apply.
+# Filename hardening for new pages: exactly one kebab-case ASCII folder,
+# a kebab-case ASCII stem, optional .md suffix, and a capped total length.
+# Existing updates may still use a bare page ID because resilient lookup finds
+# its canonical nested path. New pages never belong directly under pages/.
 _FILENAME_PATTERN = re.compile(
-    r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?/)?"  # optional folder/
+    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?/"  # required folder/
     r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"  # stem
     r"(?:\.md)?$"  # optional .md
 )
+_BARE_FILENAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.md)?$")
 _MAX_FILENAME_LEN = 200
 _TRIAGE_PLAN_FIELDS = frozenset({"type", "filename", "title", "keywords", "summary"})
 
@@ -591,9 +593,19 @@ def _triage_plan_validation_issues(
                 )
             elif op_type == "create" and not _FILENAME_PATTERN.fullmatch(fn):
                 filename_error = (
-                    "pattern",
-                    _FILENAME_PATTERN.pattern,
-                    "create filename must be ASCII kebab-case with at most one folder",
+                    "createPathDepth",
+                    {
+                        "format": "folder/page-id.md",
+                        "folder_policy": (
+                            "prefer a semantically matching existing top-level "
+                            "folder; create a specific new kebab-case folder only "
+                            "when none fits"
+                        ),
+                    },
+                    (
+                        "create filename must contain exactly one ASCII kebab-case "
+                        "top-level folder; bare pages/ filenames are forbidden"
+                    ),
                 )
             if filename_error is not None:
                 keyword, expected, message = filename_error
@@ -693,6 +705,40 @@ def _triage_plan_validation_issues(
     if issues:
         return issues
 
+    if resolve_effective_targets:
+        for index, operation in enumerate(operations):
+            if operation.get("type") != "update":
+                continue
+            filename = operation.get("filename")
+            if not isinstance(filename, str):
+                continue
+            fn = filename.strip()
+            if not _BARE_FILENAME_PATTERN.fullmatch(fn):
+                continue
+            if _triage_update_target_exists(fn):
+                continue
+            issues.append(
+                ValidationIssue(
+                    pointer=f"/{index}/filename",
+                    keyword="missingUpdateNeedsFolderedCreate",
+                    expected={
+                        "type": "create",
+                        "format": "folder/page-id.md",
+                        "folder_policy": (
+                            "prefer a semantically matching existing folder; "
+                            "create a specific new folder only when none fits"
+                        ),
+                    },
+                    received={"type": "string", "value": filename},
+                    message=(
+                        "update target does not exist; return a create operation "
+                        "with exactly one top-level folder instead of a bare filename"
+                    ),
+                )
+            )
+        if issues:
+            return issues
+
     _collapsed, collisions = distinct_target_collisions(
         operations,
         effective_filename=(
@@ -737,7 +783,7 @@ def _validate_triage_plan(
     Validation is **op-type aware**:
 
     * ``create``: filename must be ASCII kebab-case (``[a-z0-9-]``,
-      ≤200 chars, optional single folder segment, optional ``.md``).
+      ≤200 chars, exactly one folder segment, optional ``.md``).
       We're choosing the canonical id for a brand-new page, so strict
       hygiene is appropriate.
     * ``update``: filename may point at a legacy page predating the kebab
@@ -796,7 +842,16 @@ def _validate_triage_plan(
     # structured session; it must never be silently dropped here.
     cleaned = collapse_exact_duplicate_operations(cleaned)
     if coerce_missing_updates:
-        return _normalize_triage_plan(cleaned)
+        normalized = _normalize_triage_plan(cleaned)
+        for operation in normalized:
+            if operation.get("type") != "update":
+                continue
+            filename = operation.get("filename")
+            if not isinstance(filename, str):
+                return None
+            if not _triage_update_target_exists(filename):
+                return None
+        return normalized
     return cleaned
 
 
@@ -815,6 +870,19 @@ def _filename_allowed_for_create(filename: str) -> bool:
     if not fn.endswith(".md"):
         fn += ".md"
     return bool(_FILENAME_PATTERN.fullmatch(fn))
+
+
+def _triage_update_target_exists(filename: str) -> bool:
+    """Return whether an update target resolves to a committed knowledge page."""
+
+    try:
+        requested = _safe_resolve_page_path(filename)
+        if requested.exists():
+            return True
+        resolved = _find_page_resilient(requested.stem, emit_logs=False)
+    except IngestApplyError:
+        return False
+    return resolved is not None and resolved.exists()
 
 
 def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
