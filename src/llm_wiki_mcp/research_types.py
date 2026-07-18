@@ -115,7 +115,7 @@ class ResearchBudget:
     max_iterations: int = 5
     max_total_wall_seconds: float = 90.0
     max_single_generation_seconds: float = 30.0
-    max_single_generation_tokens: int = 512
+    max_single_generation_tokens: int = 256
     max_planner_calls: int = 5
     max_challenge_calls: int = 2
     max_tie_break_calls: int = 1
