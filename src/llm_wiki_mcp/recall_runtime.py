@@ -1659,7 +1659,7 @@ def _require_remaining_budget(deadline_at: float | None, stage: str) -> int | No
     return remaining_ms
 
 
-def run_recall(
+def _run_recall_impl(
     request: RecallRequest,
     policy: RecallPolicy | None = None,
     *,
@@ -2000,6 +2000,35 @@ def run_recall(
             pass
     if policy.log_decisions:
         append_recall_log(request, result)
+    return result
+
+
+def run_recall(
+    request: RecallRequest,
+    policy: RecallPolicy | None = None,
+    *,
+    perform_search: bool = True,
+    _allow_timeout_fallback: bool = True,
+) -> RecallResult:
+    """Run synchronous recall while preempting low-priority research work."""
+
+    from llm_wiki_mcp.research_scheduler import foreground_lane
+
+    with foreground_lane(preempt_grace_ms=250) as receipt:
+        result = _run_recall_impl(
+            request,
+            policy,
+            perform_search=perform_search,
+            _allow_timeout_fallback=_allow_timeout_fallback,
+        )
+    result.evidence_features.setdefault(
+        "scheduler",
+        {
+            "resource_wait_ms": receipt.resource_wait_ms,
+            "research_overlap": receipt.research_overlap,
+            "research_preempted": receipt.preempted,
+        },
+    )
     return result
 
 
