@@ -64,6 +64,26 @@ def _hub_markdown(kind: str, name: str, pages: list[dict[str, Any]], *, today: d
     )
 
 
+def _existing_hub_path(store: Any, page_id: str) -> Path | None:
+    """Keep an existing hub at its indexed path instead of duplicating its ID."""
+
+    if not hasattr(store, "meta"):
+        return None
+    meta = store.meta(page_id)
+    value = meta.get("path") if isinstance(meta, dict) else None
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = Path(value).expanduser().resolve(strict=False)
+    pages_root = PAGES_DIR.expanduser().resolve(strict=False)
+    try:
+        candidate.relative_to(pages_root)
+    except ValueError:
+        return None
+    if not candidate.is_file() or candidate.is_symlink():
+        return None
+    return candidate
+
+
 def build_hub_pages(
     *,
     output_dir: Path = HUBS_DIR,
@@ -108,7 +128,8 @@ def build_hub_pages(
     plans = []
     today = date.today()
     for kind, name, pages in selected:
-        path = output_dir / f"{kind}-{_slug(name)}-hub.md"
+        page_id = f"{kind}-{_slug(name)}-hub"
+        path = _existing_hub_path(store, page_id) or output_dir / f"{page_id}.md"
         if write:
             plans.append(
                 prepare_wiki_write(

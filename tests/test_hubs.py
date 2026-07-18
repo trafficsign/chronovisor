@@ -16,6 +16,16 @@ class FakeStore:
         ]
 
 
+class ExistingHubStore(FakeStore):
+    def __init__(self, existing_hub: Path) -> None:
+        self.existing_hub = existing_hub
+
+    def meta(self, page_id: str):
+        if page_id == "folder-ai-hub":
+            return {"page_id": page_id, "path": str(self.existing_hub)}
+        return None
+
+
 def test_build_hub_pages_writes_folder_hub(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(hubs, "get_store", lambda: FakeStore())
 
@@ -24,3 +34,28 @@ def test_build_hub_pages_writes_folder_hub(tmp_path: Path, monkeypatch) -> None:
     assert payload["hubs"] >= 1
     assert payload["mutation"]["status"] == "applied"
     assert any(path.name.endswith("-hub.md") for path in tmp_path.iterdir())
+
+
+def test_build_hub_pages_updates_existing_page_id_without_relocation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pages_dir = tmp_path / "pages"
+    legacy_dir = pages_dir / "llm-wiki"
+    output_dir = pages_dir / "hubs"
+    legacy_dir.mkdir(parents=True)
+    output_dir.mkdir()
+    existing = legacy_dir / "folder-ai-hub.md"
+    existing.write_text("old hub", encoding="utf-8")
+    monkeypatch.setattr(hubs, "PAGES_DIR", pages_dir)
+    monkeypatch.setattr(hubs, "get_store", lambda: ExistingHubStore(existing))
+
+    payload = hubs.build_hub_pages(
+        output_dir=output_dir,
+        min_pages=2,
+        max_hubs=1,
+    )
+
+    assert payload["paths"] == [str(existing)]
+    assert "Auto-maintained folder hub" in existing.read_text(encoding="utf-8")
+    assert not (output_dir / "folder-ai-hub.md").exists()
