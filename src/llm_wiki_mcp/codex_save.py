@@ -650,6 +650,26 @@ def bounded_transcript_slice(
     )
 
 
+def bounded_transcript_slice_for_layout(
+    transcript_slice: TranscriptSlice,
+    *,
+    max_chars: int,
+    layout: str,
+) -> TranscriptSlice:
+    """Allow one oversized native JSONL row only in the lossless v2 layout."""
+
+    bounded = bounded_transcript_slice(transcript_slice, max_chars=max_chars)
+    if layout != "v2" or bounded.records or not transcript_slice.records:
+        return bounded
+    first = transcript_slice.records[0]
+    return replace(
+        transcript_slice,
+        records=[first],
+        scanned_until_line=first.line,
+        user_turn_count=1 if first.role == "user" else 0,
+    )
+
+
 def _serialized_records_bytes(records: list[TranscriptRecord]) -> bytes:
     return serialize_transcript_records(records).encode("utf-8")
 
@@ -1024,7 +1044,11 @@ def _run_save_transaction(
             base_result={**base_result, "decision_policy": policy_result},
         )
 
-    transcript_slice = bounded_transcript_slice(transcript_slice, max_chars=args.max_chars)
+    transcript_slice = bounded_transcript_slice_for_layout(
+        transcript_slice,
+        max_chars=args.max_chars,
+        layout=layout,
+    )
     base_result["scanned_until_line"] = transcript_slice.scanned_until_line
     base_result["record_count"] = len(transcript_slice.records)
     transcript_json = serialize_transcript_records(transcript_slice.records)

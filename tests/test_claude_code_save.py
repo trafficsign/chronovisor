@@ -559,6 +559,37 @@ def test_v2_save_preserves_source_lines_without_legacy_markdown(
     assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 8
 
 
+def test_v2_save_accepts_one_oversized_native_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "oversized.jsonl"
+    state = tmp_path / "state.json"
+    raw_dir = tmp_path / "raw"
+    write_jsonl(
+        session,
+        [
+            {
+                "type": "user",
+                "sessionId": "oversized-v2",
+                "message": {"content": "X" * 2_000},
+            }
+        ],
+    )
+    monkeypatch.setenv("LLM_WIKI_RAW_LAYOUT", "v2")
+    monkeypatch.setattr(claude_code_save, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    args = args_for(session, state, ignore_state=True)
+    args.max_chars = 128
+
+    result = claude_code_save.run(args)
+
+    assert result["status"] == "saved"
+    assert Path(result["save_result"]["path"]).read_bytes() == session.read_bytes()
+    assert result["after_line"] == 0
+    assert result["scanned_until_line"] == 1
+    assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 1
+
+
 def test_one_stop_drains_every_bounded_transcript_chunk(
     tmp_path: Path, monkeypatch
 ) -> None:

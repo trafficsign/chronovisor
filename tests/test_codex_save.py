@@ -496,6 +496,41 @@ def test_v2_save_preserves_source_lines_without_legacy_markdown(
     assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 5
 
 
+def test_v2_save_accepts_oversized_native_record_after_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "oversized.jsonl"
+    state = tmp_path / "state.json"
+    raw_dir = tmp_path / "raw"
+    write_jsonl(
+        session,
+        [
+            {"type": "session_meta", "payload": {"id": "oversized-v2"}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "X" * 2_000}],
+                },
+            },
+        ],
+    )
+    monkeypatch.setenv("LLM_WIKI_RAW_LAYOUT", "v2")
+    monkeypatch.setattr(codex_save, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(codex_save, "init_wiki", lambda: None)
+    args = args_for(session, state, ignore_state=True)
+    args.max_chars = 128
+
+    result = codex_save.run(args)
+
+    assert result["status"] == "saved"
+    assert result["chunk_count"] == 2
+    assert Path(result["save_result"]["path"]).read_bytes() == session.read_bytes()
+    assert result["scanned_until_line"] == 2
+    assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 2
+
+
 def test_shadow_save_compares_legacy_records_with_native_source(
     tmp_path: Path, monkeypatch
 ) -> None:
