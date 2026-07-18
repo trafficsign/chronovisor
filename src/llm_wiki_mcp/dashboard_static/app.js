@@ -2155,11 +2155,31 @@ function render(snapshot) {
 }
 
 let refreshInFlight = null;
+let hasRenderedFullSnapshot = false;
 const SNAPSHOT_TIMEOUT_MS = 180000;
+const FAST_SNAPSHOT_TIMEOUT_MS = 3000;
 const ACTIVE_REFRESH_DELAY_MS = 5000;
 const IDLE_REFRESH_DELAY_MS = 10000;
 const ERROR_REFRESH_DELAY_MS = 5000;
 let nextRefreshDelayMs = IDLE_REFRESH_DELAY_MS;
+
+async function refreshFast() {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), FAST_SNAPSHOT_TIMEOUT_MS);
+  try {
+    const response = await fetch("/api/fast-snapshot", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    render(await response.json());
+    document.body.dataset.snapshotState = "summary";
+  } catch {
+    // The full snapshot remains authoritative and reports its own failures.
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 function refresh() {
   if (refreshInFlight !== null) return refreshInFlight;
@@ -2174,6 +2194,8 @@ function refresh() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const snapshot = await response.json();
       render(snapshot);
+      hasRenderedFullSnapshot = true;
+      document.body.dataset.snapshotState = snapshot._dashboard?.stale ? "stale" : "full";
       const status = snapshot.status || {};
       const batch = status.batch || {};
       const llm = status.llm || {};
@@ -2206,6 +2228,7 @@ function refresh() {
 
 async function refreshLoop() {
   try {
+    if (!hasRenderedFullSnapshot) await refreshFast();
     await refresh();
   } catch {
     // refresh() reports normal fetch failures; keep polling after unexpected ones.

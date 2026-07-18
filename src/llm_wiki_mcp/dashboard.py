@@ -98,6 +98,8 @@ ACTIVE_BATCH_STAGES = {
 DECISION_ROUTER_DASHBOARD_CACHE_SECONDS = 15.0
 SNAPSHOT_ACTIVE_CACHE_SECONDS = 5.0
 SNAPSHOT_IDLE_CACHE_SECONDS = 60.0
+SAVE_HISTORY_SEGMENT_DETAIL_DAYS = 30
+SAVE_HISTORY_MAX_SEGMENTS_PER_DAY = 64
 _PROCESS_IDENTITY_MATCH = "match"
 _PROCESS_IDENTITY_MISMATCH = "mismatch"
 _PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
@@ -108,10 +110,12 @@ _DECISION_ROUTER_CACHE: dict[str, Any] = {
     "config": None,
 }
 _SNAPSHOT_CACHE_LOCK = threading.Lock()
+_SNAPSHOT_BUILD_LOCK = threading.Lock()
 _SNAPSHOT_CACHE: dict[str, Any] = {
     "built_at": 0.0,
     "fingerprint": None,
     "snapshot": None,
+    "refreshing": False,
 }
 
 
@@ -714,6 +718,43 @@ def _new_save_day(day: date) -> dict[str, Any]:
     }
 
 
+def _compact_raw_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bound dashboard payload while preserving exact byte/status totals."""
+
+    ordered = sorted(segments, key=lambda item: str(item.get("name") or ""))
+    if len(ordered) <= SAVE_HISTORY_MAX_SEGMENTS_PER_DAY:
+        return ordered
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for segment in ordered:
+        status = str(segment.get("status") or "pending")
+        aggregate = grouped.setdefault(
+            status,
+            {
+                "name": "",
+                "bytes": 0,
+                "status": status,
+                "source": "aggregate",
+                "count": 0,
+            },
+        )
+        aggregate["bytes"] += _int_value(segment.get("bytes"))
+        aggregate["count"] += 1
+    compacted: list[dict[str, Any]] = []
+    for status in ("processed", "pending", "deferred", "failed"):
+        aggregate = grouped.pop(status, None)
+        if aggregate is None:
+            continue
+        count = int(aggregate.pop("count"))
+        aggregate["name"] = f"{count} {status} Raw saves"
+        compacted.append(aggregate)
+    for status, aggregate in sorted(grouped.items()):
+        count = int(aggregate.pop("count"))
+        aggregate["name"] = f"{count} {status} Raw saves"
+        compacted.append(aggregate)
+    return compacted
+
+
 def _add_sample(row: dict[str, Any], key: str, value: str, limit: int = 6) -> None:
     samples = row.setdefault(key, [])
     if isinstance(samples, list) and value not in samples and len(samples) < limit:
@@ -744,6 +785,7 @@ def _projection_parent_name(
     source_parent: dict[str, Any],
     *,
     raw_store: Any | None = None,
+    verified_archives: set[Path] | None = None,
 ) -> str | None:
     """Resolve one manifest parent without trusting its path-like fields."""
 
@@ -782,7 +824,27 @@ def _projection_parent_name(
         unit = raw_store.resolve(parent_name)
         if unit is None:
             return None
-        observed_sha256 = hashlib.sha256(raw_store.read_bytes(unit)).hexdigest()
+        if unit.storage == "legacy_archive" and unit.sha256 is not None:
+            # Verify the compressed archive object once, then use the member
+            # digest bound into that verified manifest. Reopening each member
+            # separately repeatedly decompressed the same tar stream.
+            from llm_wiki_mcp.legacy_archive import verify_legacy_manifest
+
+            member = unit.archive_member
+            archive_path = getattr(member, "archive_path", None)
+            manifest_path = getattr(member, "manifest_path", None)
+            if not isinstance(archive_path, Path) or not isinstance(
+                manifest_path, Path
+            ):
+                return None
+            verified = verified_archives if verified_archives is not None else set()
+            if archive_path not in verified:
+                verify_legacy_manifest(manifest_path, full=False)
+                verified.add(archive_path)
+            observed_sha256 = unit.sha256
+        else:
+            # Flat files and Raw v2 ranges still receive byte-level validation.
+            observed_sha256 = hashlib.sha256(raw_store.read_bytes(unit)).hexdigest()
     except (OSError, ValueError):
         return None
     return parent_name if observed_sha256 == expected_sha256 else None
@@ -798,6 +860,7 @@ def _projection_parent_raw_names_by_child(
     from llm_wiki_mcp.raw_store import RawStore
 
     raw_store = RawStore(raw_dir)
+    verified_archives: set[Path] = set()
     children_by_projection: dict[str, set[str]] = {}
     for child_name in child_names:
         match = SEMANTIC_PROJECTION_CHILD_RE.fullmatch(child_name)
@@ -846,6 +909,7 @@ def _projection_parent_raw_names_by_child(
                 raw_dir,
                 source_parent,
                 raw_store=raw_store,
+                verified_archives=verified_archives,
             )
             if parent_name is not None:
                 parent_names.add(parent_name)
@@ -1202,6 +1266,9 @@ def _save_history_snapshot(
         "days_with_saves": 0,
     }
     source_totals: dict[str, int] = {}
+    segment_detail_start = end - timedelta(
+        days=min(max(1, days), SAVE_HISTORY_SEGMENT_DETAIL_DAYS) - 1
+    )
     for filename, meta in raw_files.items():
         row = rows.get(str(meta["date"]))
         if not row:
@@ -1221,16 +1288,21 @@ def _save_history_snapshot(
         else:
             row["pending_bytes"] += raw_bytes
             status = "pending"
-        segments = row.setdefault("raw_segments", [])
-        if isinstance(segments, list):
-            segments.append(
-                {
-                    "name": filename,
-                    "bytes": raw_bytes,
-                    "status": status,
-                    "source": meta.get("source") or _raw_source_label(filename),
-                }
-            )
+        # The year heatmap and detail card use day aggregates.  Only the
+        # 30-day load chart needs per-Raw hover regions, so do not ship a year
+        # of segment names that the client never reads.
+        if date.fromisoformat(str(meta["date"])) >= segment_detail_start:
+            segments = row.setdefault("raw_segments", [])
+            if isinstance(segments, list):
+                segments.append(
+                    {
+                        "name": filename,
+                        "bytes": raw_bytes,
+                        "status": status,
+                        "source": meta.get("source")
+                        or _raw_source_label(filename),
+                    }
+                )
     for row in rows.values():
         sources = row.get("sources") if isinstance(row.get("sources"), dict) else {}
         for source, count in sources.items():
@@ -1243,7 +1315,7 @@ def _save_history_snapshot(
         ]
         raw_segments = row.get("raw_segments")
         if isinstance(raw_segments, list):
-            raw_segments.sort(key=lambda item: str(item.get("name") or ""))
+            row["raw_segments"] = _compact_raw_segments(raw_segments)
         if (
             row["raw_saved"]
             or row["processed"]
@@ -2836,6 +2908,32 @@ def _safe_snapshot_component(
         }
 
 
+def build_fast_snapshot() -> dict[str, Any]:
+    """Return the live status shell without scanning Raw or audit history."""
+
+    init_wiki()
+    status = runtime_status.read_status()
+    if not isinstance(status, dict):
+        status = {}
+    return {
+        "status": status,
+        "events": runtime_status.read_events(limit=40)[-40:],
+        "metrics": runtime_status.read_metrics(limit=60)[-60:],
+        "local_consensus": status.get("local_consensus") or {},
+        "frontier_repair": status.get("frontier_repair") or {},
+        "ollama": {},
+        "model_status": {},
+        "self_heal": {},
+        "recall": {},
+        "recall_improvement": {},
+        "model_lab": {},
+        "save_history": {},
+        "knowledge_mix": {},
+        "health": {},
+        "_dashboard": {"detail_state": "loading"},
+    }
+
+
 def build_snapshot() -> dict[str, Any]:
     init_wiki()
     cached_status = runtime_status.read_status()
@@ -3179,30 +3277,30 @@ def _snapshot_is_active(snapshot: dict[str, Any]) -> bool:
     )
 
 
-def _cached_snapshot() -> dict[str, Any]:
-    """Single-flight expensive snapshots and reuse unchanged idle results."""
+def _build_snapshot_cache(
+    fingerprint: tuple[Any, ...], observed_built_at: float
+) -> dict[str, Any]:
+    """Build one full snapshot and publish it atomically to the cache."""
 
+    try:
+        with _SNAPSHOT_BUILD_LOCK:
+            with _SNAPSHOT_CACHE_LOCK:
+                cached = _SNAPSHOT_CACHE.get("snapshot")
+                if (
+                    isinstance(cached, dict)
+                    and _SNAPSHOT_CACHE.get("fingerprint") == fingerprint
+                    and float(_SNAPSHOT_CACHE.get("built_at") or 0.0)
+                    != observed_built_at
+                ):
+                    _SNAPSHOT_CACHE["refreshing"] = False
+                    return cached
+            snapshot = build_snapshot()
+            post_build_fingerprint = _snapshot_source_fingerprint()
+    except Exception:
+        with _SNAPSHOT_CACHE_LOCK:
+            _SNAPSHOT_CACHE["refreshing"] = False
+        raise
     with _SNAPSHOT_CACHE_LOCK:
-        # Compute after acquiring the single-flight lock. A request that
-        # waited for another build must compare against the post-build source
-        # state, not the fingerprint it observed before waiting.
-        fingerprint = _snapshot_source_fingerprint()
-        now = time.monotonic()
-        cached = _SNAPSHOT_CACHE.get("snapshot")
-        if isinstance(cached, dict):
-            max_age = (
-                SNAPSHOT_ACTIVE_CACHE_SECONDS
-                if _snapshot_is_active(cached)
-                else SNAPSHOT_IDLE_CACHE_SECONDS
-            )
-            if (
-                _SNAPSHOT_CACHE.get("fingerprint") == fingerprint
-                and now - float(_SNAPSHOT_CACHE.get("built_at") or 0.0) < max_age
-            ):
-                return cached
-
-        snapshot = build_snapshot()
-        post_build_fingerprint = _snapshot_source_fingerprint()
         _SNAPSHOT_CACHE.update(
             {
                 "built_at": time.monotonic(),
@@ -3216,9 +3314,74 @@ def _cached_snapshot() -> dict[str, Any]:
                     else None
                 ),
                 "snapshot": snapshot,
+                "refreshing": False,
             }
         )
-        return snapshot
+    return snapshot
+
+
+def _refresh_snapshot_cache(
+    fingerprint: tuple[Any, ...], observed_built_at: float
+) -> None:
+    """Refresh a stale dashboard snapshot without blocking an HTTP request."""
+
+    try:
+        _build_snapshot_cache(fingerprint, observed_built_at)
+    except Exception:
+        # The last successful snapshot remains available. A later poll retries.
+        return
+
+
+def _cached_snapshot(*, allow_stale: bool = False) -> dict[str, Any]:
+    """Single-flight expensive snapshots and reuse unchanged idle results."""
+
+    with _SNAPSHOT_CACHE_LOCK:
+        # Compute after acquiring the single-flight lock. A request that
+        # waited for another build must compare against the post-build source
+        # state, not the fingerprint it observed before waiting.
+        fingerprint = _snapshot_source_fingerprint()
+        now = time.monotonic()
+        observed_built_at = float(_SNAPSHOT_CACHE.get("built_at") or 0.0)
+        cached = _SNAPSHOT_CACHE.get("snapshot")
+        if isinstance(cached, dict):
+            max_age = (
+                SNAPSHOT_ACTIVE_CACHE_SECONDS
+                if _snapshot_is_active(cached)
+                else SNAPSHOT_IDLE_CACHE_SECONDS
+            )
+            if (
+                _SNAPSHOT_CACHE.get("fingerprint") == fingerprint
+                and now - observed_built_at < max_age
+            ):
+                return cached
+            if allow_stale:
+                start_refresh = not bool(_SNAPSHOT_CACHE.get("refreshing"))
+                if start_refresh:
+                    _SNAPSHOT_CACHE["refreshing"] = True
+                stale = {
+                    **cached,
+                    "_dashboard": {
+                        "detail_state": "refreshing",
+                        "stale": True,
+                    },
+                }
+            else:
+                start_refresh = False
+                stale = None
+        else:
+            start_refresh = False
+            stale = None
+
+    if stale is not None:
+        if start_refresh:
+            threading.Thread(
+                target=_refresh_snapshot_cache,
+                args=(fingerprint, observed_built_at),
+                name="llm-wiki-dashboard-refresh",
+                daemon=True,
+            ).start()
+        return stale
+    return _build_snapshot_cache(fingerprint, observed_built_at)
 
 
 def _load_or_create_dashboard_token(path: Path) -> str:
@@ -3661,47 +3824,94 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 _file_response(self, STATIC_DIR / "index.html")
             elif path == "/api/lan-access":
                 self._lan_access_response()
+            elif path == "/api/fast-snapshot":
+                _json_response(self, build_fast_snapshot())
             elif path == "/api/snapshot":
-                _json_response(self, _cached_snapshot())
+                _json_response(self, _cached_snapshot(allow_stale=True))
             elif path == "/api/status":
-                _json_response(self, {"status": _cached_snapshot()["status"]})
+                _json_response(
+                    self,
+                    {"status": _cached_snapshot(allow_stale=True)["status"]},
+                )
             elif path == "/api/local-consensus":
                 _json_response(
                     self,
-                    {"local_consensus": _cached_snapshot()["local_consensus"]},
+                    {
+                        "local_consensus": _cached_snapshot(allow_stale=True)[
+                            "local_consensus"
+                        ]
+                    },
                 )
             elif path == "/api/frontier-repair":
                 _json_response(
                     self,
-                    {"frontier_repair": _cached_snapshot()["frontier_repair"]},
+                    {
+                        "frontier_repair": _cached_snapshot(allow_stale=True)[
+                            "frontier_repair"
+                        ]
+                    },
                 )
             elif path == "/api/events":
-                _json_response(self, {"events": _cached_snapshot()["events"]})
+                _json_response(
+                    self,
+                    {"events": _cached_snapshot(allow_stale=True)["events"]},
+                )
             elif path == "/api/metrics":
-                _json_response(self, {"metrics": _cached_snapshot()["metrics"]})
+                _json_response(
+                    self,
+                    {"metrics": _cached_snapshot(allow_stale=True)["metrics"]},
+                )
             elif path == "/api/self-heal":
-                _json_response(self, {"self_heal": _cached_snapshot()["self_heal"]})
+                _json_response(
+                    self,
+                    {
+                        "self_heal": _cached_snapshot(allow_stale=True)["self_heal"]
+                    },
+                )
             elif path == "/api/recall":
-                _json_response(self, {"recall": _cached_snapshot()["recall"]})
+                _json_response(
+                    self,
+                    {"recall": _cached_snapshot(allow_stale=True)["recall"]},
+                )
             elif path == "/api/recall-improvement":
                 _json_response(
                     self,
-                    {"recall_improvement": _cached_snapshot()["recall_improvement"]},
+                    {
+                        "recall_improvement": _cached_snapshot(allow_stale=True)[
+                            "recall_improvement"
+                        ]
+                    },
                 )
             elif path == "/api/model-lab":
-                _json_response(self, {"model_lab": _cached_snapshot()["model_lab"]})
+                _json_response(
+                    self,
+                    {"model_lab": _cached_snapshot(allow_stale=True)["model_lab"]},
+                )
             elif path == "/api/save-history":
                 _json_response(
-                    self, {"save_history": _cached_snapshot()["save_history"]}
+                    self,
+                    {
+                        "save_history": _cached_snapshot(allow_stale=True)[
+                            "save_history"
+                        ]
+                    },
                 )
             elif path == "/api/knowledge-mix":
                 _json_response(
-                    self, {"knowledge_mix": _cached_snapshot()["knowledge_mix"]}
+                    self,
+                    {
+                        "knowledge_mix": _cached_snapshot(allow_stale=True)[
+                            "knowledge_mix"
+                        ]
+                    },
                 )
             elif path == "/api/health":
-                _json_response(self, {"health": _cached_snapshot()["health"]})
+                _json_response(
+                    self,
+                    {"health": _cached_snapshot(allow_stale=True)["health"]},
+                )
             elif path == "/api/model-status":
-                snapshot = _cached_snapshot()
+                snapshot = _cached_snapshot(allow_stale=True)
                 _json_response(
                     self,
                     {

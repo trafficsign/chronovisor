@@ -1088,7 +1088,12 @@ def test_cached_snapshot_reuses_idle_result_until_a_source_changes(
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
     dashboard._SNAPSHOT_CACHE.update(
-        {"built_at": 0.0, "fingerprint": None, "snapshot": None}
+        {
+            "built_at": 0.0,
+            "fingerprint": None,
+            "snapshot": None,
+            "refreshing": False,
+        }
     )
     calls = 0
 
@@ -1120,7 +1125,12 @@ def test_cached_snapshot_uses_short_ttl_while_active(
         orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
     )
     dashboard._SNAPSHOT_CACHE.update(
-        {"built_at": 0.0, "fingerprint": None, "snapshot": None}
+        {
+            "built_at": 0.0,
+            "fingerprint": None,
+            "snapshot": None,
+            "refreshing": False,
+        }
     )
     clock = [100.0]
     calls = 0
@@ -1144,6 +1154,82 @@ def test_cached_snapshot_uses_short_ttl_while_active(
     assert calls == 2
 
 
+def test_cached_snapshot_serves_stale_while_refreshing_in_background(
+    monkeypatch,
+) -> None:
+    dashboard._SNAPSHOT_CACHE.update(
+        {
+            "built_at": 0.0,
+            "fingerprint": ("old",),
+            "snapshot": {"serial": 1, "status": {"state": "idle"}},
+            "refreshing": False,
+        }
+    )
+    calls = 0
+
+    def fake_build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {"serial": 2, "status": {"state": "idle"}}
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs) -> None:
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
+    monkeypatch.setattr(
+        dashboard, "_snapshot_source_fingerprint", lambda: ("new",)
+    )
+    monkeypatch.setattr(dashboard.threading, "Thread", ImmediateThread)
+
+    stale = dashboard._cached_snapshot(allow_stale=True)
+
+    assert stale["serial"] == 1
+    assert stale["_dashboard"] == {
+        "detail_state": "refreshing",
+        "stale": True,
+    }
+    assert dashboard._SNAPSHOT_CACHE["snapshot"]["serial"] == 2
+    assert dashboard._SNAPSHOT_CACHE["refreshing"] is False
+    assert calls == 1
+
+
+def test_fast_snapshot_reads_status_without_building_archive_components(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(dashboard, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        runtime_status,
+        "read_status",
+        lambda: {"state": "running", "stage": "generate", "pending": 3},
+    )
+    monkeypatch.setattr(
+        runtime_status, "read_events", lambda limit: [{"kind": "event"}]
+    )
+    monkeypatch.setattr(
+        runtime_status, "read_metrics", lambda limit: [{"kind": "metric"}]
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_save_history_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fast snapshot must not scan save history")
+        ),
+    )
+
+    snapshot = dashboard.build_fast_snapshot()
+
+    assert snapshot["status"]["pending"] == 3
+    assert snapshot["events"] == [{"kind": "event"}]
+    assert snapshot["metrics"] == [{"kind": "metric"}]
+    assert snapshot["save_history"] == {}
+    assert snapshot["_dashboard"] == {"detail_state": "loading"}
+
+
 def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1159,7 +1245,12 @@ def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
     dashboard._SNAPSHOT_CACHE.update(
-        {"built_at": 0.0, "fingerprint": None, "snapshot": None}
+        {
+            "built_at": 0.0,
+            "fingerprint": None,
+            "snapshot": None,
+            "refreshing": False,
+        }
     )
     calls = 0
 
@@ -1192,7 +1283,12 @@ def test_cached_idle_snapshot_invalidates_on_standalone_consensus_activity(
         orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
     )
     dashboard._SNAPSHOT_CACHE.update(
-        {"built_at": 0.0, "fingerprint": None, "snapshot": None}
+        {
+            "built_at": 0.0,
+            "fingerprint": None,
+            "snapshot": None,
+            "refreshing": False,
+        }
     )
     calls = 0
 
@@ -2039,6 +2135,60 @@ def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
     assert history["totals"]["raw_bytes"] == 0
     assert history["totals"]["pending_bytes"] == 0
     assert history["days"][0]["raw_segments"] == []
+
+
+def test_save_history_only_includes_segment_detail_for_recent_chart_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    raw_dir = wiki_root / "raw"
+    raw_dir.mkdir(parents=True)
+    old_name = "20260701-120000-codex-old-detail-aaaaaaaa.md"
+    recent_name = "20260702-120000-codex-recent-detail-bbbbbbbb.md"
+    (raw_dir / old_name).write_text("old", encoding="utf-8")
+    (raw_dir / recent_name).write_text("recent", encoding="utf-8")
+
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+
+    history = dashboard._save_history_snapshot(days=31, today=date(2026, 7, 31))
+    by_date = {row["date"]: row for row in history["days"]}
+
+    assert by_date["2026-07-01"]["raw_saved"] == 1
+    assert by_date["2026-07-01"]["raw_bytes"] == 3
+    assert by_date["2026-07-01"]["raw_segments"] == []
+    assert by_date["2026-07-02"]["raw_segments"] == [
+        {
+            "name": recent_name,
+            "bytes": 6,
+            "status": "pending",
+            "source": "codex",
+        }
+    ]
+
+
+def test_save_history_compacts_large_days_without_losing_status_bytes() -> None:
+    segments = [
+        {
+            "name": f"raw-{index:03d}.md",
+            "bytes": index + 1,
+            "status": "processed" if index % 2 == 0 else "pending",
+            "source": "codex",
+        }
+        for index in range(dashboard.SAVE_HISTORY_MAX_SEGMENTS_PER_DAY + 1)
+    ]
+
+    compacted = dashboard._compact_raw_segments(segments)
+
+    assert [segment["status"] for segment in compacted] == [
+        "processed",
+        "pending",
+    ]
+    assert sum(segment["bytes"] for segment in compacted) == sum(
+        segment["bytes"] for segment in segments
+    )
+    assert compacted[0]["source"] == "aggregate"
+    assert compacted[0]["name"].endswith("processed Raw saves")
 
 
 def test_knowledge_mix_snapshot_groups_pages_by_category(

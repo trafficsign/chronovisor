@@ -374,6 +374,75 @@ def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
     assert constructions == 1
 
 
+def test_projection_parent_resolution_verifies_archive_once_without_member_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_wiki_mcp import dashboard, legacy_archive
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    session_key = "a" * 24
+    expected_sha256 = "b" * 64
+    parent_name = f"save-codex-{session_key}-from3-to4.md"
+    source_parent = {
+        "raw_sha256": expected_sha256,
+        "receipt": {
+            "host": "codex",
+            "session_key": session_key,
+            "after_line": 3,
+            "until_line": 4,
+            "idempotency_key": f"codex-{session_key}-from3-to4",
+        },
+    }
+    archive_path = raw_dir / "legacy-part-0001.tar.zst"
+    manifest_path = raw_dir / "legacy-part-0001.manifest.json"
+    unit = SimpleNamespace(
+        storage="legacy_archive",
+        sha256=expected_sha256,
+        archive_member=SimpleNamespace(
+            archive_path=archive_path,
+            manifest_path=manifest_path,
+        ),
+    )
+    verified_calls: list[Path] = []
+    monkeypatch.setattr(
+        legacy_archive,
+        "verify_legacy_manifest",
+        lambda path, *, full: verified_calls.append(path),
+    )
+
+    class IndexedRawStore:
+        def resolve(self, raw_id: str) -> object | None:
+            return unit if raw_id == parent_name else None
+
+        def read_bytes(self, _unit: object) -> bytes:
+            raise AssertionError("indexed immutable Raw must not be reopened")
+
+    verified_archives: set[Path] = set()
+    for _index in range(2):
+        assert (
+            dashboard._projection_parent_name(
+                raw_dir,
+                source_parent,
+                raw_store=IndexedRawStore(),
+                verified_archives=verified_archives,
+            )
+            == parent_name
+        )
+    assert verified_calls == [manifest_path]
+
+    unit.sha256 = "c" * 64
+    assert (
+        dashboard._projection_parent_name(
+            raw_dir,
+            source_parent,
+            raw_store=IndexedRawStore(),
+            verified_archives=verified_archives,
+        )
+        is None
+    )
+
+
 def test_snapshot_separates_semantic_and_operational_holds_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
