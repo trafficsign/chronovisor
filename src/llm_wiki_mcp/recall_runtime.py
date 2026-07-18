@@ -738,6 +738,7 @@ def run_local_judge(
             max_input_chars=16_384,
             max_output_chars=384,
             max_feedback_chars=512,
+            max_responses=1,
         ).run(
             json.dumps(prompt, ensure_ascii=False),
             schema,
@@ -877,6 +878,7 @@ def run_query_rewriter(
             max_input_chars=16_384,
             max_output_chars=384,
             max_feedback_chars=512,
+            max_responses=1,
         ).run(json.dumps(prompt, ensure_ascii=False), schema)
         if not result.ok:
             return (

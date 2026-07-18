@@ -233,7 +233,9 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
             rewrite_enabled=False,
         )
     try:
-        with recall_wall_clock_deadline(recall_outer_deadline_ms(policy)):
+        with recall_wall_clock_deadline(
+            recall_outer_deadline_ms(effective_policy)
+        ):
             result = recall_runtime.run_recall(
                 request,
                 effective_policy,
@@ -249,7 +251,12 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         # inside this total deadline. Reaching the outer timer means a lower
         # layer ignored its own timeout, so starting any second pass here would
         # violate the host's four-second contract.
-        _record_recall_fail_open(request, policy, status="timeout", error=str(exc))
+        _record_recall_fail_open(
+            request,
+            effective_policy,
+            status="timeout",
+            error=str(exc),
+        )
         _print_host_noop(host)
         return 0
     except Exception as exc:

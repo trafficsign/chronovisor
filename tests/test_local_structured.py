@@ -483,6 +483,25 @@ def test_same_validation_fingerprint_still_obeys_fixed_repair_limit() -> None:
     assert len(transport.requests) == 3
 
 
+def test_caller_can_disable_repair_turns_for_a_hard_synchronous_budget() -> None:
+    transport = QueueTransport(
+        '{"summary":"missing decision"}',
+        '{"decision":"apply","summary":"unused repair"}',
+    )
+
+    result = _session(transport, max_responses=1).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "repair_exhausted"
+    assert result.repair_turns == 0
+    assert len(transport.requests) == 1
+
+
+def test_max_responses_cannot_exceed_global_repair_safety_cap() -> None:
+    with pytest.raises(ValueError, match="must not exceed the safety cap"):
+        _session(QueueTransport(), max_responses=4)
+
+
 def test_session_stops_after_initial_plus_two_repairs() -> None:
     transport = QueueTransport(
         '{"summary":"missing"}',

@@ -1625,6 +1625,7 @@ class LocalStructuredSession:
         max_input_chars: int = 65_536,
         max_output_chars: int = 8_000,
         max_feedback_chars: int = 2_000,
+        max_responses: int = MAX_RESPONSES,
         resource_managed: bool = False,
         resource_min_num_ctx: int | None = None,
         resource_max_num_ctx: int | None = None,
@@ -1641,6 +1642,7 @@ class LocalStructuredSession:
             "max_input_chars": max_input_chars,
             "max_output_chars": max_output_chars,
             "max_feedback_chars": max_feedback_chars,
+            "max_responses": max_responses,
         }
         if any(
             isinstance(value, bool) or not isinstance(value, int) or value < 1
@@ -1649,6 +1651,10 @@ class LocalStructuredSession:
             raise ValueError("structured session limits must be positive integers")
         if not isinstance(resource_managed, bool):
             raise ValueError("resource_managed must be a boolean")
+        if max_responses > MAX_RESPONSES:
+            raise ValueError(
+                f"max_responses must not exceed the safety cap {MAX_RESPONSES}"
+            )
         resource_limits = {
             "resource_min_num_ctx": resource_min_num_ctx,
             "resource_max_num_ctx": resource_max_num_ctx,
@@ -1680,6 +1686,7 @@ class LocalStructuredSession:
         self.max_input_chars = max_input_chars
         self.max_output_chars = max_output_chars
         self.max_feedback_chars = max_feedback_chars
+        self.max_responses = max_responses
         self.resource_managed = resource_managed
         self.resource_min_num_ctx = resource_min_num_ctx
         self.resource_max_num_ctx = resource_max_num_ctx
@@ -1783,7 +1790,7 @@ class LocalStructuredSession:
         attempts: list[StructuredAttempt] = []
         seen_outputs: set[str] = set()
 
-        for index in range(MAX_RESPONSES):
+        for index in range(self.max_responses):
             estimated_input_tokens = _estimated_message_tokens(messages)
             if (
                 estimated_input_tokens + self.num_predict + CONTEXT_SAFETY_TOKENS
@@ -1864,7 +1871,7 @@ class LocalStructuredSession:
                             issues=(issue,),
                         )
                     )
-                    if index == MAX_RESPONSES - 1:
+                    if index == self.max_responses - 1:
                         return self._failure(
                             "output_truncated",
                             "initial response and compact repairs stopped at the "
@@ -1949,7 +1956,7 @@ class LocalStructuredSession:
                         attempts,
                     )
                 seen_outputs.add(output_sha256)
-                if index == MAX_RESPONSES - 1:
+                if index == self.max_responses - 1:
                     return self._failure(
                         "repair_exhausted",
                         "initial response and two compact-output repairs exceeded "
@@ -2017,7 +2024,7 @@ class LocalStructuredSession:
                 )
             seen_outputs.add(output_sha256)
 
-            if index == MAX_RESPONSES - 1:
+            if index == self.max_responses - 1:
                 return self._failure(
                     "repair_exhausted",
                     "initial response and two repair turns were invalid",

@@ -20,6 +20,10 @@ preemption, process cleanup, rendering, and logging, so the Recall engine gets
 leaving separate bounded startup/cache resolution headroom around the 4000 ms
 hook deadline.
 
+Synchronous judge and rewrite calls allow one structured response only. Schema
+repair remains available to background workflows, but cannot multiply the
+per-call timeout on the prompt critical path.
+
 Recall is strictly fail-open for the host. The primary path reserves 600 ms of
 its deadline for a model-free fallback. A soft deadline first degrades to
 allowlisted L1 memory plus BM25; if a non-cooperative call reaches the outer
