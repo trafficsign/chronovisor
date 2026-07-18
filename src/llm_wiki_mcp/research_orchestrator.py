@@ -170,12 +170,41 @@ class LocalPlanner:
             )
         result = outcome.value
         if not isinstance(result, dict) or not result.get("ok"):
+            failure_class = (
+                str(result.get("failure_class") or "")
+                if isinstance(result, dict)
+                else ""
+            )
+            if failure_class == "transport_timeout":
+                status = "timeout"
+            elif failure_class == "capacity_unavailable":
+                status = "deferred"
+            elif failure_class in {
+                "output_truncated",
+                "repair_exhausted",
+                "repeated_output",
+                "validation_failed",
+            }:
+                status = "malformed"
+            else:
+                status = "error"
+            failure_reason = (
+                str(result.get("failure_reason") or "structured planner failed")
+                if isinstance(result, dict)
+                else "research worker returned an invalid result"
+            )
             return PlannerResponse(
                 None,
-                status="malformed",
+                status=status,
                 first_pass_valid=False,
-                repair_turns=int(result.get("repair_turns", 0)) if isinstance(result, dict) else 0,
-                error=str(result.get("failure_reason") or "invalid structured action") if isinstance(result, dict) else "invalid structured action",
+                repair_turns=(
+                    int(result.get("repair_turns", 0))
+                    if isinstance(result, dict)
+                    else 0
+                ),
+                error=f"{failure_class or 'worker_contract_error'}: {failure_reason}"[
+                    :2000
+                ],
                 latency_ms=outcome.latency_ms,
             )
         return PlannerResponse(
@@ -332,7 +361,7 @@ def run_research(
                     stop_reason = StopReason.BUDGET_EXHAUSTED
                     break
                 response = planner.plan(state, lease=lease, budget=budget, events=events)
-                if not response.first_pass_valid:
+                if response.status in {"completed", "malformed"} and not response.first_pass_valid:
                     state.first_pass_malformed += 1
                 if response.repair_turns:
                     if not state.usage.can_consume(budget, "repair_calls", response.repair_turns):
@@ -345,6 +374,34 @@ def run_research(
                     break
                 if response.status == "timeout":
                     stop_reason = StopReason.MODEL_TIMEOUT
+                    break
+                if response.status == "deferred":
+                    stop_reason = StopReason.ADMISSION_DENIED
+                    store.append_event(
+                        run_id,
+                        {
+                            "kind": "planner_deferred",
+                            "epoch": state.epoch,
+                            "iteration": iteration,
+                            "error": response.error,
+                            "terminal": True,
+                        },
+                    )
+                    break
+                if response.status == "error":
+                    store.append_event(
+                        run_id,
+                        {
+                            "kind": "planner_error",
+                            "epoch": state.epoch,
+                            "iteration": iteration,
+                            "error": response.error,
+                            "terminal": True,
+                        },
+                    )
+                    if iteration < budget.max_iterations:
+                        continue
+                    stop_reason = StopReason.TOOL_ERROR
                     break
                 parsed: ParsedAction = parse_action(response.value, epoch=state.epoch)
                 if parsed.action is None:
