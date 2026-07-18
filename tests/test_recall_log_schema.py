@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.recall_log_schema import page_ids_from_record
+from llm_wiki_mcp.recall_log_schema import (
+    join_used_recall_episodes,
+    page_ids_from_record,
+)
 
 
 def test_page_ids_from_record_supports_current_and_legacy_fields() -> None:
@@ -34,3 +37,64 @@ def test_page_ids_from_record_ignores_malformed_field_values() -> None:
     }
 
     assert page_ids_from_record(row) == []
+
+
+def test_join_used_recall_episodes_is_exact_and_deduplicated() -> None:
+    recalls = [
+        {
+            "decision_id": "accepted",
+            "session_id": "session-a",
+            "prompt_preview": "recall runtime",
+            "pages": ["exposed-only"],
+        },
+        {"decision_id": "ambiguous", "session_id": "session-a"},
+        {"decision_id": "ambiguous", "session_id": "session-a"},
+    ]
+    pulls = [
+        {
+            "type": "used",
+            "event_id": "event-1",
+            "decision_id": "accepted",
+            "session_id": "session-a",
+            "page_ids": ["used-a", "used-a", "used-b"],
+        },
+        {
+            "type": "used",
+            "event_id": "event-1",
+            "decision_id": "accepted",
+            "session_id": "session-a",
+            "page_ids": ["ignored-duplicate"],
+        },
+        {
+            "type": "used",
+            "event_id": "event-orphan",
+            "decision_id": "orphan",
+            "session_id": "session-a",
+            "page_ids": ["ignored"],
+        },
+        {
+            "type": "used",
+            "event_id": "event-mismatch",
+            "decision_id": "accepted",
+            "session_id": "session-b",
+            "page_ids": ["ignored"],
+        },
+        {
+            "type": "used",
+            "event_id": "event-ambiguous",
+            "decision_id": "ambiguous",
+            "session_id": "session-a",
+            "page_ids": ["ignored"],
+        },
+    ]
+
+    joined = join_used_recall_episodes(recalls, pulls)
+
+    assert joined["accepted"] == 1
+    assert joined["episodes"][0]["page_ids"] == ["used-a", "used-b"]
+    assert joined["rejected_by_reason"] == {
+        "ambiguous_decision": 1,
+        "duplicate_event": 1,
+        "orphan_decision": 1,
+        "session_mismatch": 1,
+    }

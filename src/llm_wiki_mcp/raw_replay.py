@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -184,12 +185,38 @@ def _active_terminal_semantic_deferred_raw_names() -> frozenset[str]:
     return frozenset(deferred)
 
 
-def _active_operational_deferred_raw_statuses() -> dict[str, str]:
-    """Return the reason/status mapping used for accurate queue metrics."""
+def _active_operational_deferred_raw_statuses(
+    rows: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Return operational holds relevant to the queue being processed.
+
+    Queue runners are also used with isolated paths by tests and repair tools.
+    Scanning every production Raw unit in that case both leaks global state into
+    the run and needlessly materializes projection files.  Passing the scoped
+    queue rows keeps the supervisor lookup bounded to the actual work set.
+    """
 
     from llm_wiki_mcp.failure_supervisor import operational_deferred_raw_files
 
-    return operational_deferred_raw_files()
+    raw_paths: list[Path] | None = None
+    if rows is not None:
+        raw_paths = []
+        for row in rows:
+            value = row.get("path")
+            if isinstance(value, str) and value:
+                raw_paths.append(Path(value))
+    return operational_deferred_raw_files(raw_paths)
+
+
+def _scoped_operational_deferred_raw_statuses(
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Call the scoped provider while retaining zero-argument test adapters."""
+
+    provider = _active_operational_deferred_raw_statuses
+    if not inspect.signature(provider).parameters:
+        return provider()  # type: ignore[call-arg]
+    return provider(rows)
 
 
 def _at_or_before(left: datetime, right: datetime) -> bool:
@@ -2770,7 +2797,7 @@ def _reconcile_legacy_semantic_no_quorum_rows(
             # A packet released by an authority change between plan and apply
             # must not leave one spurious terminal-defer cycle in the queue.
             with decision_authority_lock():
-                statuses = _active_operational_deferred_raw_statuses()
+                statuses = _scoped_operational_deferred_raw_statuses([row])
                 if statuses.get(raw_name) == "semantic_no_quorum":
                     evidence = _active_semantic_defer_packet_evidence(
                         row,
@@ -2863,7 +2890,7 @@ def _preview_legacy_semantic_no_quorum_rows(
         evidence: dict[str, Any] | None = None
         if preview.get("published") is True:
             with decision_authority_lock():
-                statuses = _active_operational_deferred_raw_statuses()
+                statuses = _scoped_operational_deferred_raw_statuses([row])
                 if statuses.get(raw_name) == "semantic_no_quorum":
                     evidence = _active_semantic_defer_packet_evidence(
                         row,
@@ -3342,7 +3369,10 @@ def run_pending_queue(
 
     if dry_run:
         rows = load_rows(resume_terminals=False)
-        active_deferred_statuses = _active_operational_deferred_raw_statuses()
+        scoped_rows = [row for row in rows if in_scope(row)]
+        active_deferred_statuses = _scoped_operational_deferred_raw_statuses(
+            scoped_rows
+        )
         semantic_deferred_raws |= frozenset(active_deferred_statuses)
         completed = _completed_replays(
             history_file=history_target,
@@ -3482,7 +3512,9 @@ def run_pending_queue(
             now=current_time,
             budget=budget,
         )
-        active_deferred_statuses = _active_operational_deferred_raw_statuses()
+        active_deferred_statuses = _scoped_operational_deferred_raw_statuses(
+            scoped_rows
+        )
         semantic_deferred_raws |= frozenset(active_deferred_statuses)
         completed = _completed_replays(
             history_file=history_target,
@@ -3648,7 +3680,7 @@ def run_pending_queue(
                 }
             )
 
-        deferred_statuses = _active_operational_deferred_raw_statuses()
+        deferred_statuses = _scoped_operational_deferred_raw_statuses(scoped_rows)
         for row in scoped_rows:
             raw_name = _raw_name(row)
             if raw_name in semantic_deferred_raws:
@@ -3661,7 +3693,7 @@ def run_pending_queue(
             raw_name = _raw_name(row)
             if raw_name not in _active_terminal_semantic_deferred_raw_names():
                 return False
-            status = _active_operational_deferred_raw_statuses().get(raw_name)
+            status = _scoped_operational_deferred_raw_statuses([row]).get(raw_name)
             reason = status or "semantic_no_quorum"
             record_operational_hold(row, reason=reason)
             return True
@@ -3853,9 +3885,9 @@ def run_pending_queue(
                         reason=(
                             record_reason
                             if record_reason == "semantic_no_quorum"
-                            else _active_operational_deferred_raw_statuses().get(
-                                raw_name
-                            )
+                            else _scoped_operational_deferred_raw_statuses(
+                                [updated]
+                            ).get(raw_name)
                         )
                         or record_reason
                         or "operational_failure_hold",

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
@@ -30,3 +33,103 @@ def page_ids_from_record(row: Mapping[str, Any]) -> list[str]:
         page_ids.extend(value for value in values if isinstance(value, str) and value)
 
     return list(dict.fromkeys(page_ids))
+
+
+def used_page_ids_from_record(row: Mapping[str, Any]) -> list[str]:
+    """Return only pages explicitly declared as materially used."""
+
+    if row.get("type") != "used":
+        return []
+    values = row.get("page_ids")
+    if not isinstance(values, list):
+        return []
+    return list(
+        dict.fromkeys(
+            value for value in values if isinstance(value, str) and value
+        )
+    )
+
+
+def pull_event_id(row: Mapping[str, Any]) -> str:
+    """Return the durable event ID, with a stable legacy-row fallback."""
+
+    event_id = row.get("event_id")
+    if isinstance(event_id, str) and event_id:
+        return event_id
+    encoded = json.dumps(
+        dict(row), ensure_ascii=False, sort_keys=True, default=str
+    ).encode("utf-8")
+    return "legacy-" + hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def join_used_recall_episodes(
+    recall_rows: list[Mapping[str, Any]],
+    pull_rows: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Join explicit usage receipts to one unambiguous recall decision.
+
+    Positive supervision is deliberately stricter than telemetry analysis:
+    decision IDs must be unique, the session identity must be present and
+    equal whenever the recall decision has one, and duplicate event receipts
+    are ignored.  Rejected counts are returned so a silent loss of learning
+    signal becomes observable.
+    """
+
+    decisions: dict[str, list[Mapping[str, Any]]] = {}
+    for row in recall_rows:
+        decision_id = str(row.get("decision_id") or "")
+        if decision_id:
+            decisions.setdefault(decision_id, []).append(row)
+
+    episodes: list[dict[str, Any]] = []
+    rejected: Counter[str] = Counter()
+    seen_events: set[str] = set()
+    for pull in pull_rows:
+        if pull.get("type") != "used":
+            continue
+        event_id = pull_event_id(pull)
+        if event_id in seen_events:
+            rejected["duplicate_event"] += 1
+            continue
+        seen_events.add(event_id)
+        decision_id = str(pull.get("decision_id") or "")
+        if not decision_id:
+            rejected["missing_decision_id"] += 1
+            continue
+        candidates = decisions.get(decision_id, [])
+        if not candidates:
+            rejected["orphan_decision"] += 1
+            continue
+        if len(candidates) != 1:
+            rejected["ambiguous_decision"] += 1
+            continue
+        recall = candidates[0]
+        recall_session = str(recall.get("session_id") or "")
+        pull_session = str(pull.get("session_id") or "")
+        if recall_session and not pull_session:
+            rejected["missing_session_id"] += 1
+            continue
+        if recall_session and pull_session != recall_session:
+            rejected["session_mismatch"] += 1
+            continue
+        pages = used_page_ids_from_record(pull)
+        if not pages:
+            rejected["missing_page_ids"] += 1
+            continue
+        episodes.append(
+            {
+                "event_id": event_id,
+                "decision_id": decision_id,
+                "session_id": pull_session or recall_session,
+                "page_ids": pages,
+                "recall": dict(recall),
+                "pull": dict(pull),
+            }
+        )
+
+    return {
+        "episodes": episodes,
+        "accepted": len(episodes),
+        "rejected": sum(rejected.values()),
+        "rejected_by_reason": dict(sorted(rejected.items())),
+    }

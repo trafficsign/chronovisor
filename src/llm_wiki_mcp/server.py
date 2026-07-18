@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import uuid
 import secrets
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -266,7 +267,9 @@ def _append_log(message: str) -> None:
     LOG_FILE.write_text(content)
 
 
-def _append_pull_log(record: dict) -> None:
+def _append_pull_log(record: dict) -> bool:
+    """Append pull telemetry and return a durable-write receipt."""
+
     try:
         from llm_wiki_mcp.recall_runtime import RECALL_PULL_LOG_FILE, append_jsonl
 
@@ -275,8 +278,9 @@ def _append_pull_log(record: dict) -> None:
             **record,
         }
         append_jsonl(RECALL_PULL_LOG_FILE, record)
+        return True
     except Exception:
-        pass
+        return False
 
 
 @mcp.tool()
@@ -564,19 +568,31 @@ def wiki_recall_used(
     )[:20]
     if not pages:
         return json.dumps({"status": "error", "error": "page_ids is required"})
-    _append_pull_log(
+    event_id = uuid.uuid4().hex
+    recorded = _append_pull_log(
         {
             "type": "used",
             "stage": "used",
+            "event_id": event_id,
             "session_id": session_id or "",
             "decision_id": decision_id,
             "page_ids": pages,
             "note": note[:500],
         }
     )
+    if recorded is not True:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "used receipt was not durably recorded",
+                "decision_id": decision_id,
+            },
+            ensure_ascii=False,
+        )
     return json.dumps(
         {
             "status": "recorded",
+            "event_id": event_id,
             "decision_id": decision_id,
             "page_ids": pages,
         },

@@ -14,10 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from llm_wiki_mcp.recall_log_schema import page_ids_from_record
+from llm_wiki_mcp.recall_log_schema import (
+    join_used_recall_episodes,
+    page_ids_from_record,
+)
 from llm_wiki_mcp.recall_runtime_paths import RECALL_DIR
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
+RECALL_PULL_LOG_FILE = RECALL_DIR / "pull-log.jsonl"
 COFIRE_FILE = RECALL_DIR / "cofire.json"
 
 
@@ -41,46 +45,80 @@ def _read_recent_jsonl(path: Path, *, limit: int = 5000) -> list[dict[str, Any]]
 def build_cofire_graph(
     *,
     log_file: Path = RECALL_LOG_FILE,
+    pull_log_file: Path = RECALL_PULL_LOG_FILE,
     output_file: Path = COFIRE_FILE,
     limit: int = 5000,
     min_count: int = 2,
     write: bool = True,
 ) -> dict[str, Any]:
     rows = _read_recent_jsonl(log_file, limit=limit)
-    pair_counts: Counter[tuple[str, str]] = Counter()
-    node_counts: Counter[str] = Counter()
-    episodes = 0
-    for row in rows:
-        page_ids = page_ids_from_record(row)
-        if len(page_ids) < 2:
-            continue
-        episodes += 1
-        for page_id in page_ids:
-            node_counts[page_id] += 1
-        for left, right in itertools.combinations(sorted(page_ids), 2):
-            pair_counts[(left, right)] += 1
+    joined = join_used_recall_episodes(
+        rows,
+        _read_recent_jsonl(pull_log_file, limit=limit),
+    )
 
-    edges: dict[str, list[dict[str, Any]]] = {}
-    for (left, right), count in pair_counts.items():
-        if count < min_count:
-            continue
-        denom = max(node_counts[left], node_counts[right], 1)
-        weight = count / denom
-        edges.setdefault(left, []).append({"page_id": right, "count": count, "weight": round(weight, 4)})
-        edges.setdefault(right, []).append({"page_id": left, "count": count, "weight": round(weight, 4)})
-    for page_id, items in edges.items():
-        items.sort(key=lambda item: (float(item["weight"]), int(item["count"])), reverse=True)
-        edges[page_id] = items[:20]
+    def compile_graph(page_sets: list[list[str]]) -> tuple[dict[str, list[dict[str, Any]]], int]:
+        pair_counts: Counter[tuple[str, str]] = Counter()
+        node_counts: Counter[str] = Counter()
+        episodes = 0
+        for page_ids in page_sets:
+            if len(page_ids) < 2:
+                continue
+            episodes += 1
+            for page_id in page_ids:
+                node_counts[page_id] += 1
+            for left, right in itertools.combinations(sorted(page_ids), 2):
+                pair_counts[(left, right)] += 1
+        graph: dict[str, list[dict[str, Any]]] = {}
+        for (left, right), count in pair_counts.items():
+            if count < min_count:
+                continue
+            denom = max(node_counts[left], node_counts[right], 1)
+            weight = count / denom
+            edge = {"count": count, "weight": round(weight, 4)}
+            graph.setdefault(left, []).append({"page_id": right, **edge})
+            graph.setdefault(right, []).append({"page_id": left, **edge})
+        for page_id, items in graph.items():
+            items.sort(
+                key=lambda item: (float(item["weight"]), int(item["count"])),
+                reverse=True,
+            )
+            graph[page_id] = items[:20]
+        return graph, episodes
+
+    exposure_graph, exposure_episodes = compile_graph(
+        [page_ids_from_record(row) for row in rows]
+    )
+    positive_graph, positive_episodes = compile_graph(
+        [episode["page_ids"] for episode in joined["episodes"]]
+    )
 
     payload = {
+        "schema_version": 2,
         "status": "ok",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "log_file": str(log_file),
-        "episodes": episodes,
-        "nodes": len(edges),
-        "edges": sum(len(items) for items in edges.values()),
+        "episodes": exposure_episodes,
+        "positive_episodes": positive_episodes,
+        "nodes": len(exposure_graph),
+        "edges": sum(len(items) for items in exposure_graph.values()),
+        "positive_nodes": len(positive_graph),
+        "positive_edges": sum(len(items) for items in positive_graph.values()),
         "min_count": min_count,
-        "graph": edges,
+        "join": {key: value for key, value in joined.items() if key != "episodes"},
+        "graphs": {
+            "positive_used": {
+                "supervision": "explicit_used_receipt",
+                "graph": positive_graph,
+            },
+            "exposure": {
+                "supervision": "recalled_not_confirmed_used",
+                "graph": exposure_graph,
+            },
+        },
+        # Compatibility alias: explicitly the exposure graph, never a positive
+        # usage label.
+        "graph": exposure_graph,
     }
     if write:
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -88,18 +126,63 @@ def build_cofire_graph(
     return payload
 
 
-def neighbors(page_id: str, *, path: Path = COFIRE_FILE, limit: int = 8) -> list[dict[str, Any]]:
+def neighbors(
+    page_id: str,
+    *,
+    path: Path = COFIRE_FILE,
+    limit: int = 8,
+    positive_weight: float = 4.0,
+    exposure_weight: float = 1.0,
+) -> list[dict[str, Any]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
-    graph = payload.get("graph")
-    if not isinstance(graph, dict):
-        return []
-    rows = graph.get(page_id, [])
-    if not isinstance(rows, list):
-        return []
-    return [row for row in rows[:limit] if isinstance(row, dict) and isinstance(row.get("page_id"), str)]
+    scored: dict[str, dict[str, Any]] = {}
+
+    def add_graph(graph: Any, supervision: str, multiplier: float) -> None:
+        if multiplier <= 0 or not isinstance(graph, dict):
+            return
+        rows = graph.get(page_id, [])
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("page_id"), str):
+                continue
+            target = row["page_id"]
+            score = float(row.get("weight") or 0.0) * multiplier
+            current = scored.setdefault(
+                target,
+                {"page_id": target, "count": 0, "weight": 0.0, "signals": []},
+            )
+            current["count"] += int(row.get("count") or 0)
+            current["weight"] += score
+            current["signals"].append(supervision)
+
+    graphs = payload.get("graphs")
+    if isinstance(graphs, dict):
+        positive = graphs.get("positive_used")
+        exposure = graphs.get("exposure")
+        add_graph(
+            positive.get("graph") if isinstance(positive, dict) else None,
+            "positive_used",
+            positive_weight,
+        )
+        add_graph(
+            exposure.get("graph") if isinstance(exposure, dict) else None,
+            "exposure",
+            exposure_weight,
+        )
+    else:
+        add_graph(payload.get("graph"), "legacy_exposure", exposure_weight)
+    ranked = sorted(
+        scored.values(),
+        key=lambda row: (float(row["weight"]), int(row["count"])),
+        reverse=True,
+    )
+    for row in ranked:
+        row["weight"] = round(float(row["weight"]), 4)
+    return ranked[:limit]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,7 +198,13 @@ def main(argv: list[str] | None = None) -> int:
         write=not args.no_write,
     )
     if args.json:
-        print(json.dumps({k: v for k, v in payload.items() if k != "graph"}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {k: v for k, v in payload.items() if k not in {"graph", "graphs"}},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     else:
         print(f"episodes\t{payload['episodes']}")
         print(f"nodes\t{payload['nodes']}")
