@@ -1187,7 +1187,7 @@ def run_pending_ingest(
                     )
                     projection_output_dir = (
                         RAW_DIR
-                        if raw_layout_mode() == "legacy"
+                        if raw_layout_mode(wiki_root=RAW_DIR.parent) == "legacy"
                         else RAW_DIR.parent
                         / "runtime"
                         / "raw-projections"

@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from llm_wiki_mcp.raw_segment import append_capture, seal_segment
-from llm_wiki_mcp.raw_store import RawStore
+from llm_wiki_mcp.raw_store import RawStore, raw_layout_mode
 from llm_wiki_mcp.raw_semantic_projection import project_native_transcript
 
 
@@ -104,6 +104,19 @@ def test_store_includes_flat_and_date_partitioned_manual_markdown(
 
     assert {unit.raw_id for unit in store} == {"legacy.md", "manual-new.md"}
     assert store.read_text("manual-new.md") == "new"
+
+
+def test_layout_mode_uses_wiki_config_with_environment_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "config.toml").write_text('[raw]\nlayout = "shadow"\n')
+
+    assert raw_layout_mode(wiki_root=tmp_path) == "shadow"
+    assert RawStore(tmp_path / "raw").mode == "shadow"
+
+    monkeypatch.setenv("LLM_WIKI_RAW_LAYOUT", "v2")
+    assert raw_layout_mode(wiki_root=tmp_path) == "v2"
+    assert RawStore(tmp_path / "raw").mode == "v2"
 
 
 def test_materialized_reference_projects_native_transcript_without_copying_it(

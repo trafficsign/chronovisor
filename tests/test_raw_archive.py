@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
+import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from llm_wiki_mcp.raw_archive import (
     archive_status,
     export_raw,
+    migrate_legacy,
     restore_segment,
     seal_eligible,
     verify_archive,
 )
 from llm_wiki_mcp.raw_segment import append_capture, capture_date
+from llm_wiki_mcp.raw_semantic_projection import project_parent_raw
+from llm_wiki_mcp.raw_store import RawStore
+from llm_wiki_mcp.save_transaction import (
+    attach_save_transaction_marker,
+    make_save_transaction,
+)
 from llm_wiki_mcp import server
 
 
@@ -109,3 +118,57 @@ def test_v2_manual_raw_is_published_directly_under_capture_date(
     assert path.read_bytes() == b"manual bytes\n"
     assert path.relative_to(raw_dir).parts[:3] == tuple(capture_date().split("/"))
     assert path.name.startswith("manual-")
+
+
+def test_completed_projection_json_archives_with_processed_bundle(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    session_file = tmp_path / "session.jsonl"
+    transaction = make_save_transaction(
+        host="codex",
+        session_file=session_file,
+        session_id="session",
+        after_line=0,
+        until_line=1,
+    )
+    parent = raw_dir / f"save-{transaction.idempotency_key}.md"
+    content = "\n".join(
+        [
+            "# Codex Session Transcript Delta",
+            "",
+            "## Transcript Delta",
+            "",
+            "```json",
+            json.dumps([{"line": 1, "role": "user", "text": "archive bundle"}]),
+            "```",
+            "",
+        ]
+    )
+    parent.write_text(attach_save_transaction_marker(transaction, content))
+    projection = project_parent_raw(
+        parent,
+        output_dir=raw_dir,
+        max_child_bytes=32_000,
+    )
+    processed = [parent.name, *(path.name for path in projection.child_paths)]
+    (tmp_path / ".orchestrator_state.json").write_text(
+        json.dumps({"processed_raw_files": processed})
+    )
+    old = datetime(2026, 7, 16, tzinfo=ZoneInfo("Asia/Tokyo")).timestamp()
+    for path in raw_dir.iterdir():
+        os.utime(path, (old, old))
+
+    shadow = migrate_legacy(raw_dir, before="2026/07/18", dry_run=False)
+    assert shadow["members"] == 4
+    migrate_legacy(
+        raw_dir,
+        before="2026/07/18",
+        dry_run=False,
+        remove_source=True,
+    )
+
+    assert not list(raw_dir.glob("semantic-*.json"))
+    store = RawStore(raw_dir)
+    assert {unit.raw_id for unit in store.iter_units()} == set(processed)

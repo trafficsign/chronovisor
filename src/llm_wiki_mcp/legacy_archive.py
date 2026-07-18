@@ -303,7 +303,8 @@ def migrate_processed_legacy(
         "already_archived": 0,
         "oversized": 0,
     }
-    for path in sorted(raw_dir.glob("*.md")):
+    candidates = tuple(raw_dir.glob("*.md")) + tuple(raw_dir.glob("semantic-*.json"))
+    for path in sorted(candidates, key=lambda item: item.name):
         if not path.is_file() or path.is_symlink():
             continue
         if path.name not in processed_raw_ids:

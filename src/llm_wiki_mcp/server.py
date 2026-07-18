@@ -745,7 +745,7 @@ def _raw_candidate_path(prefix: str = "", topic_slug: str = "") -> Path:
     readable = _raw_readable_component(prefix, topic_slug)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     suffix = secrets.token_hex(4)  # 8 hex chars / 32 bits
-    if raw_layout_mode() == "v2":
+    if raw_layout_mode(wiki_root=RAW_DIR.parent) == "v2":
         day_dir = RAW_DIR / capture_date()
         day_dir.mkdir(parents=True, exist_ok=True)
         return day_dir / f"manual-{ts}{readable}-{suffix}.md"

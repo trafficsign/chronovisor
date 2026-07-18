@@ -237,7 +237,7 @@ def publish_transcript_capture(
     from llm_wiki_mcp.raw_segment import append_capture
     from llm_wiki_mcp.raw_store import raw_layout_mode
 
-    mode = raw_layout_mode()
+    mode = raw_layout_mode(wiki_root=raw_dir.parent)
     if mode == "legacy":
         return legacy_publisher(
             legacy_content,
@@ -372,7 +372,7 @@ def publish_oversized_shadow(
     from llm_wiki_mcp.raw_store import raw_layout_mode
     from llm_wiki_mcp.save_transaction import make_save_transaction
 
-    if raw_layout_mode() != "shadow":
+    if raw_layout_mode(wiki_root=raw_dir.parent) != "shadow":
         return {}
     transaction = make_save_transaction(
         host=host,

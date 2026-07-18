@@ -52,6 +52,12 @@ def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
     monkeypatch.setattr(raw_replay, "FAILURE_PACKETS_DIR", paths["packets"])
     monkeypatch.setattr(raw_replay, "QUARANTINED_RAW_DIR", paths["quarantine"])
     monkeypatch.setattr(failure_supervisor, "reset_raw_failure", lambda _raw: None)
+    # Every replay fixture owns an isolated failure universe. Without this,
+    # ordinary unit cases scan the operator's live Raw archive through the
+    # failure supervisor and make test time depend on years of retained data.
+    monkeypatch.setattr(
+        failure_supervisor, "operational_deferred_raw_files", lambda _paths=None: {}
+    )
     return paths
 
 

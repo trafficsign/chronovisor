@@ -6,6 +6,7 @@ import hashlib
 import fcntl
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,11 @@ from llm_wiki_mcp.raw_segment import (
 )
 from llm_wiki_mcp.raw_store import RawStore
 from llm_wiki_mcp.legacy_archive import migrate_processed_legacy, verify_legacy_manifest
+
+
+_PROJECTION_MANIFEST_RE = re.compile(
+    r"^semantic-(?P<projection>[0-9a-f]{64})\.manifest\.json$"
+)
 
 
 def _sha256(value: bytes) -> str:
@@ -382,6 +388,76 @@ def restore_segment(manifest_path: Path, output: Path) -> dict[str, Any]:
     }
 
 
+def _completed_projection_artifact_ids(
+    raw_dir: Path,
+    *,
+    processed_raw_ids: set[str],
+) -> set[str]:
+    """Return verified flat projection JSON that can leave the active store.
+
+    A bundle is eligible only when its manifest verifies in full, every child
+    Raw is durably processed, and every source parent has its processed ACK.
+    Any incomplete, orphaned, held, or partially processed bundle stays flat.
+    """
+
+    from llm_wiki_mcp.raw_semantic_projection import verify_projection_bundle
+
+    eligible: set[str] = set()
+    for manifest_path in sorted(raw_dir.glob("semantic-*.manifest.json")):
+        match = _PROJECTION_MANIFEST_RE.fullmatch(manifest_path.name)
+        if match is None:
+            continue
+        projection_id = match.group("projection")
+        try:
+            manifest = verify_projection_bundle(manifest_path)
+        except (OSError, TypeError, ValueError):
+            continue
+        children = manifest.get("children")
+        if not isinstance(children, list):
+            continue
+        child_names = {
+            str(row["filename"])
+            for row in children
+            if isinstance(row, dict) and isinstance(row.get("filename"), str)
+        }
+        if len(child_names) != len(children) or not child_names.issubset(
+            processed_raw_ids
+        ):
+            continue
+        source = manifest.get("source")
+        parents = source.get("parents") if isinstance(source, dict) else None
+        if not isinstance(parents, list) or not parents:
+            continue
+        parent_names: set[str] = set()
+        valid_parents = True
+        for row in parents:
+            receipt = row.get("receipt") if isinstance(row, dict) else None
+            idempotency_key = (
+                receipt.get("idempotency_key") if isinstance(receipt, dict) else None
+            )
+            if not isinstance(idempotency_key, str) or not idempotency_key:
+                valid_parents = False
+                break
+            parent_names.add(f"save-{idempotency_key}.md")
+        if not valid_parents or not parent_names.issubset(processed_raw_ids):
+            continue
+        prefix = f"semantic-{projection_id}"
+        group = {
+            path.name
+            for path in raw_dir.glob(f"{prefix}*.json")
+            if path.is_file() and not path.is_symlink()
+        }
+        declared_json = {manifest_path.name}
+        for field in ("bundle_receipt_filename", "noop_receipt_filename"):
+            filename = manifest.get(field)
+            if isinstance(filename, str):
+                declared_json.add(filename)
+        if not declared_json.issubset(group):
+            continue
+        eligible.update(group)
+    return eligible
+
+
 def migrate_legacy(
     raw_dir: Path,
     *,
@@ -403,6 +479,12 @@ def migrate_legacy(
         {value for value in processed if isinstance(value, str)}
         if isinstance(processed, list)
         else set()
+    )
+    processed_ids.update(
+        _completed_projection_artifact_ids(
+            raw_dir.expanduser().resolve(strict=False),
+            processed_raw_ids=processed_ids,
+        )
     )
 
     def record_relocation(manifest_path: Path, manifest: dict[str, Any]) -> None:

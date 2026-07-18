@@ -5,8 +5,15 @@ LLM Wiki falls back to the legacy `~/.wiki/recall.toml` shape.
 
 ## Raw Archive rollout
 
-Transcript storage uses a process environment feature flag so rollback does
-not depend on rewriting Wiki data:
+Transcript storage uses one durable Wiki-wide setting so Stop hooks, MCP,
+ingest, sleep, and dashboard processes cannot drift onto different layouts:
+
+```toml
+[raw]
+layout = "legacy" # legacy | shadow | v2
+```
+
+`LLM_WIKI_RAW_LAYOUT` remains an emergency per-process override:
 
 ```sh
 LLM_WIKI_RAW_LAYOUT=legacy  # default; flat Markdown authority

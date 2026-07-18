@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal
@@ -32,10 +33,30 @@ RawStorageKind = Literal[
 RAW_REFERENCE_SCHEMA = "llm-wiki.raw-reference.v1"
 
 
-def raw_layout_mode(value: str | None = None) -> RawLayoutMode:
-    selected = (
-        (value or os.environ.get("LLM_WIKI_RAW_LAYOUT") or "legacy").strip().lower()
-    )
+def raw_layout_mode(
+    value: str | None = None, *, wiki_root: Path | None = None
+) -> RawLayoutMode:
+    """Resolve one durable storage mode for every Wiki process.
+
+    An explicit argument is useful for offline tools and tests.  The
+    environment variable remains the emergency/operator override.  Normal
+    production processes converge on ``[raw].layout`` in the Wiki root so a
+    Stop hook, MCP server, ingest worker, and dashboard cannot silently use
+    different layouts.
+    """
+
+    configured: object = None
+    if value is None and os.environ.get("LLM_WIKI_RAW_LAYOUT") is None and wiki_root:
+        config_path = wiki_root.expanduser() / "config.toml"
+        try:
+            payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            payload = {}
+        raw_config = payload.get("raw") if isinstance(payload, dict) else None
+        if isinstance(raw_config, dict):
+            configured = raw_config.get("layout")
+    selected_value = value or os.environ.get("LLM_WIKI_RAW_LAYOUT") or configured
+    selected = str(selected_value or "legacy").strip().lower()
     if selected not in {"legacy", "shadow", "v2"}:
         raise ValueError("LLM_WIKI_RAW_LAYOUT must be legacy, shadow, or v2")
     return selected  # type: ignore[return-value]
@@ -68,7 +89,7 @@ class RawStore:
 
     def __init__(self, raw_dir: Path, *, mode: RawLayoutMode | str | None = None):
         self.raw_dir = raw_dir.expanduser().resolve(strict=False)
-        self.mode = raw_layout_mode(mode)
+        self.mode = raw_layout_mode(mode, wiki_root=self.raw_dir.parent)
 
     def _legacy_units(self) -> Iterator[RawUnit]:
         candidates = list(self.raw_dir.glob("*.md"))
@@ -116,6 +137,11 @@ class RawStore:
         from llm_wiki_mcp.legacy_archive import iter_legacy_members
 
         for member in iter_legacy_members(self.raw_dir):
+            # Projection manifests/receipts/noop records may share a legacy
+            # archive with their completed semantic child. They are durable
+            # bundle evidence, not logical Raw queue units.
+            if not member.raw_id.endswith(".md"):
+                continue
             yield RawUnit(
                 raw_id=member.raw_id,
                 storage="legacy_archive",
