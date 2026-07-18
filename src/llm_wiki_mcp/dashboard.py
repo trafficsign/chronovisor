@@ -742,6 +742,8 @@ def _semantic_deferred_raw_names(raw_paths: list[Path]) -> list[str]:
 def _projection_parent_name(
     raw_dir: Path,
     source_parent: dict[str, Any],
+    *,
+    raw_store: Any | None = None,
 ) -> str | None:
     """Resolve one manifest parent without trusting its path-like fields."""
 
@@ -773,13 +775,14 @@ def _projection_parent_name(
         return None
     parent_name = f"save-{expected_idempotency_key}.md"
     try:
-        from llm_wiki_mcp.raw_store import RawStore
+        if raw_store is None:
+            from llm_wiki_mcp.raw_store import RawStore
 
-        store = RawStore(raw_dir)
-        unit = store.resolve(parent_name)
+            raw_store = RawStore(raw_dir)
+        unit = raw_store.resolve(parent_name)
         if unit is None:
             return None
-        observed_sha256 = hashlib.sha256(store.read_bytes(unit)).hexdigest()
+        observed_sha256 = hashlib.sha256(raw_store.read_bytes(unit)).hexdigest()
     except (OSError, ValueError):
         return None
     return parent_name if observed_sha256 == expected_sha256 else None
@@ -792,7 +795,9 @@ def _projection_parent_raw_names_by_child(
     """Resolve projection children to verified lossless saved raws."""
 
     from llm_wiki_mcp.raw_semantic_projection import verify_projection_bundle
+    from llm_wiki_mcp.raw_store import RawStore
 
+    raw_store = RawStore(raw_dir)
     children_by_projection: dict[str, set[str]] = {}
     for child_name in child_names:
         match = SEMANTIC_PROJECTION_CHILD_RE.fullmatch(child_name)
@@ -837,7 +842,11 @@ def _projection_parent_raw_names_by_child(
         for source_parent in source_parents:
             if not isinstance(source_parent, dict):
                 continue
-            parent_name = _projection_parent_name(raw_dir, source_parent)
+            parent_name = _projection_parent_name(
+                raw_dir,
+                source_parent,
+                raw_store=raw_store,
+            )
             if parent_name is not None:
                 parent_names.add(parent_name)
         for child_name in matched_children:
@@ -2844,8 +2853,14 @@ def build_snapshot() -> dict[str, Any]:
     )
     artifact_dir = WIKI_ROOT / "runtime" / "raw-projections" / "artifacts"
     if artifact_dir.exists():
-        raw_paths.extend(sorted(artifact_dir.glob("*.md")))
-        raw_paths = sorted(dict.fromkeys(raw_paths), key=lambda path: path.name)
+        # A migrated legacy archive can contain a semantic child that is also
+        # present in the projection artifact store. Queue identity is the Raw
+        # basename, so count it once and prefer the directly readable artifact.
+        paths_by_raw_id = {path.name: path for path in raw_paths}
+        paths_by_raw_id.update(
+            {path.name: path for path in sorted(artifact_dir.glob("*.md"))}
+        )
+        raw_paths = sorted(paths_by_raw_id.values(), key=lambda path: path.name)
     deferred_statuses = _operational_deferred_raw_statuses(raw_paths)
     processed_raw_files = orch_state.get("processed_raw_files")
     processed_raw_names = (

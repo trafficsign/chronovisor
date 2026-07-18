@@ -29,6 +29,13 @@ def isolate_decision_authority_lock(
         "DECISION_AUTHORITY_LOCK",
         tmp_path / "runtime" / "decision-authority.lock",
     )
+    # Raw replay binds semantic holds to the current runtime-status evidence.
+    # Never let the live ingest worker update that evidence mid-test.
+    monkeypatch.setattr(
+        raw_replay,
+        "RUNTIME_STATUS_FILE",
+        tmp_path / "runtime" / "status.json",
+    )
 
 
 def test_raw_replay_reuses_exact_semantic_hold_without_review(

@@ -314,6 +314,66 @@ def test_projection_parent_resolution_rejects_unbound_receipt_and_symlink(
     assert dashboard._projection_parent_name(raw_dir, source_parent) is None
 
 
+def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_wiki_mcp import dashboard, raw_semantic_projection, raw_store
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    projection_id = "a" * 64
+    child_name = f"semantic-{projection_id}-child-00000001-{'b' * 64}.md"
+    source_parents = []
+    expected_names = set()
+    for index in range(2):
+        session_key = f"{index + 1:024x}"
+        idempotency_key = f"codex-{session_key}-from{index}-to{index + 1}"
+        parent_name = f"save-{idempotency_key}.md"
+        parent_bytes = f"source-{index}".encode()
+        (raw_dir / parent_name).write_bytes(parent_bytes)
+        expected_names.add(parent_name)
+        source_parents.append(
+            {
+                "raw_sha256": hashlib.sha256(parent_bytes).hexdigest(),
+                "receipt": {
+                    "host": "codex",
+                    "session_key": session_key,
+                    "after_line": index,
+                    "until_line": index + 1,
+                    "idempotency_key": idempotency_key,
+                },
+            }
+        )
+
+    monkeypatch.setattr(
+        raw_semantic_projection,
+        "verify_projection_bundle",
+        lambda _path: {
+            "children": [{"filename": child_name}],
+            "source": {"parents": source_parents},
+        },
+    )
+    original = raw_store.RawStore
+    constructions = 0
+
+    class CountingRawStore(original):
+        def __init__(self, *args, **kwargs):
+            nonlocal constructions
+            constructions += 1
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(raw_store, "RawStore", CountingRawStore)
+
+    parents = dashboard._projection_parent_raw_names_by_child(
+        raw_dir,
+        {child_name},
+    )
+
+    assert parents == {child_name: expected_names}
+    assert constructions == 1
+
+
 def test_snapshot_separates_semantic_and_operational_holds_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -326,6 +386,12 @@ def test_snapshot_separates_semantic_and_operational_holds_once(
     raw_dir.mkdir(parents=True)
     for name in ("semantic.md", "operational.md"):
         (raw_dir / name).write_text(name, encoding="utf-8")
+    artifact_dir = wiki_root / "runtime" / "raw-projections" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "semantic.md").write_text(
+        "same logical semantic child",
+        encoding="utf-8",
+    )
 
     scans: list[list[str]] = []
 
