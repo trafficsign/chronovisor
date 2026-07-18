@@ -71,5 +71,62 @@ def test_foreground_marker_cancels_running_research_child(tmp_path, monkeypatch)
         with research_scheduler.foreground_lane(preempt_grace_ms=250) as receipt:
             thread.join(timeout=1)
             assert receipt.research_overlap is True
+            assert receipt.preempted is True
+            assert receipt.resource_wait_ms <= 50
         assert result[0].status == "cancelled"
         assert result[0].latency_ms < 1000
+
+
+def test_foreground_does_not_wait_for_non_model_research_phase(
+    tmp_path, monkeypatch
+) -> None:
+    _paths(tmp_path, monkeypatch)
+    with research_scheduler.research_lane(
+        "run", enabled=True, mode="explicit", purpose="explicit", needs_model=True
+    ):
+        active = research_scheduler._active_research()
+        assert active is not None
+        assert active["model_active"] is False
+
+        with research_scheduler.foreground_lane(preempt_grace_ms=250) as receipt:
+            assert receipt.research_overlap is True
+            assert receipt.preempted is False
+            assert receipt.resource_wait_ms <= 50
+
+
+def test_sync_pending_prevents_model_child_start(tmp_path, monkeypatch) -> None:
+    _paths(tmp_path, monkeypatch)
+    with research_scheduler.research_lane(
+        "run", enabled=True, mode="explicit", purpose="explicit", needs_model=True
+    ) as lease:
+        research_scheduler.SYNC_DIR.mkdir(parents=True)
+        (research_scheduler.SYNC_DIR / "pending.json").write_text("{}")
+        result = research_scheduler.run_cancellable_command(
+            [sys.executable, "-c", "raise SystemExit(99)"],
+            "",
+            lease,
+            timeout_seconds=10,
+        )
+
+    assert result.status == "cancelled"
+    assert result.error == "cancelled for foreground sync"
+
+
+def test_cancellable_child_receives_stdin(tmp_path, monkeypatch) -> None:
+    _paths(tmp_path, monkeypatch)
+    with research_scheduler.research_lane(
+        "run", enabled=True, mode="explicit", purpose="explicit", needs_model=True
+    ) as lease:
+        result = research_scheduler.run_cancellable_command(
+            [
+                sys.executable,
+                "-c",
+                "import json,sys; print(json.dumps({'value': sys.stdin.read()}))",
+            ],
+            "payload",
+            lease,
+            timeout_seconds=10,
+        )
+
+    assert result.status == "completed"
+    assert result.value == {"value": "payload"}

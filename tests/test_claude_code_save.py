@@ -555,7 +555,17 @@ def test_v2_save_preserves_source_lines_without_legacy_markdown(
     assert result["save_result"]["storage"] == "segment_open"
     segment = Path(result["save_result"]["path"])
     assert segment.read_bytes() == source_bytes
-    assert segment.relative_to(raw_dir).parts[:3] == ("2026", "07", "18")
+    commit = json.loads(
+        Path(result["save_result"]["commit_path"])
+        .read_text(encoding="utf-8")
+        .splitlines()[-1]
+    )
+    captured = datetime.fromisoformat(commit["captured_at"])
+    assert segment.relative_to(raw_dir).parts[:3] == (
+        captured.strftime("%Y"),
+        captured.strftime("%m"),
+        captured.strftime("%d"),
+    )
     assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 8
 
 

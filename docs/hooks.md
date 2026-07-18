@@ -32,9 +32,12 @@ The synchronous hook never starts `wiki_research`, Deep Recall, Web search,
 Web fetch, the 35B planner, or the cross-encoder reranker. Those lanes are
 explicit/background or Sleep work. Foreground Recall announces a short-lived
 sync marker before local inference; a running research child observes that
-marker and is cancelled/deferred within its preemption budget. Automatic and
-shadow 35B research are rejected unless protected model capacity has been
-proved explicitly.
+marker and is cancelled/deferred within its preemption budget. The scheduler
+tracks the isolated model worker separately from non-model research phases: a
+foreground prompt kills only an overlapping stateless model worker, while
+search/checkpoint work never consumes the synchronous resource-wait budget.
+Automatic and shadow 35B research are rejected unless protected model capacity
+has been proved explicitly.
 
 Always-on memory and automatic Recall have independent budgets. L1 admits only
 the fixed system-page allowlist `current-state`, `user-profile`, and
