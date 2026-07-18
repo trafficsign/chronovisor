@@ -89,7 +89,11 @@ class DeterministicPlanner:
         del lease, budget, events
         if not state.actions:
             return PlannerResponse(
-                {"type": "wiki_search", "arguments": {"query": state.goal, "limit": 8}, "rationale": "initial local evidence search"}
+                {
+                    "type": "wiki_search",
+                    "arguments": {"query": state.goal, "limit": 8},
+                    "rationale": "initial local evidence search",
+                }
             )
         last = state.observations[-1] if state.observations else None
         if last and last.action.type == ActionType.WIKI_SEARCH:
@@ -99,10 +103,18 @@ class DeterministicPlanner:
                 page_id = str(results[0].get("page_id") or "")
             if page_id:
                 return PlannerResponse(
-                    {"type": "wiki_read", "arguments": {"page_id": page_id}, "rationale": "read the strongest local result"}
+                    {
+                        "type": "wiki_read",
+                        "arguments": {"page_id": page_id},
+                        "rationale": "read the strongest local result",
+                    }
                 )
         return PlannerResponse(
-            {"type": "finish", "arguments": {"answer": "local evidence collected"}, "rationale": "bounded deterministic completion"}
+            {
+                "type": "finish",
+                "arguments": {"answer": "local evidence collected"},
+                "rationale": "bounded deterministic completion",
+            }
         )
 
 
@@ -166,9 +178,7 @@ class LocalPlanner:
             0,
             budget.max_repair_calls - state.usage.repair_calls,
         )
-        session_timeout = budget.max_single_generation_seconds * (
-            1 + remaining_repairs
-        )
+        session_timeout = budget.max_single_generation_seconds * (1 + remaining_repairs)
         if state.deadline_monotonic > 0:
             session_timeout = min(
                 session_timeout,
@@ -237,6 +247,50 @@ class LocalPlanner:
 def _observation_preview(payload: dict[str, Any], *, limit: int = 1800) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return encoded if len(encoded) <= limit else encoded[:limit] + "..."
+
+
+def _recover_duplicate_action(
+    state: ResearchState,
+    *,
+    allowed_actions: set[ActionType] | frozenset[ActionType] | None,
+) -> Action | None:
+    """Turn a repeated search into a bounded read of its best unseen result.
+
+    Small local planners occasionally describe a ``wiki_read`` in their
+    rationale while emitting the previous ``wiki_search`` action again.  A
+    repeated action must never execute twice, but terminating immediately also
+    throws away the already-ranked page candidates.  Reading one unseen local
+    page is deterministic, read-only, and stays on the same authority rung.
+    """
+
+    if allowed_actions is not None and ActionType.WIKI_READ not in allowed_actions:
+        return None
+    read_page_ids = {
+        str(action.arguments.get("page_id") or "")
+        for action in state.actions
+        if action.type == ActionType.WIKI_READ
+    }
+    for observation in reversed(state.observations):
+        if observation.action.type != ActionType.WIKI_SEARCH:
+            continue
+        results = observation.metadata.get("results")
+        if not isinstance(results, list):
+            continue
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            page_id = str(row.get("page_id") or "").strip()
+            if not page_id or page_id in read_page_ids:
+                continue
+            recovered = Action(
+                ActionType.WIKI_READ,
+                {"page_id": page_id},
+                rationale="deterministic recovery from repeated search",
+                epoch=state.epoch,
+            )
+            if recovered.canonical_key() not in state.seen_actions:
+                return recovered
+    return None
 
 
 def _resume_orphans(store: ResearchStore, state: ResearchState) -> list[dict[str, Any]]:
@@ -311,11 +365,17 @@ def run_research(
 
     def prefetch() -> None:
         try:
-            action = Action(ActionType.WIKI_SEARCH, {"query": state.goal, "limit": 5, "semantic": False})
+            action = Action(
+                ActionType.WIKI_SEARCH,
+                {"query": state.goal, "limit": 5, "semantic": False},
+            )
             prefetch_queue.put(execute_tool(action, tool_context), block=False)
         except Exception as exc:
             try:
-                prefetch_queue.put({"status": "error", "error": f"{exc.__class__.__name__}: {exc}"}, block=False)
+                prefetch_queue.put(
+                    {"status": "error", "error": f"{exc.__class__.__name__}: {exc}"},
+                    block=False,
+                )
             except Exception:
                 pass
 
@@ -330,7 +390,11 @@ def run_research(
             stop_reason = StopReason.ADMISSION_DENIED
             store.append_event(
                 run_id,
-                {"kind": "stop", "stop_reason": stop_reason.value, "reason": lease.admission.reason},
+                {
+                    "kind": "stop",
+                    "stop_reason": stop_reason.value,
+                    "reason": lease.admission.reason,
+                },
             )
         else:
             write_working_checkpoint()
@@ -380,11 +444,18 @@ def run_research(
                 if not state.usage.consume(budget, "planner_calls"):
                     stop_reason = StopReason.BUDGET_EXHAUSTED
                     break
-                response = planner.plan(state, lease=lease, budget=budget, events=events)
-                if response.status in {"completed", "malformed"} and not response.first_pass_valid:
+                response = planner.plan(
+                    state, lease=lease, budget=budget, events=events
+                )
+                if (
+                    response.status in {"completed", "malformed"}
+                    and not response.first_pass_valid
+                ):
                     state.first_pass_malformed += 1
                 if response.repair_turns:
-                    if not state.usage.can_consume(budget, "repair_calls", response.repair_turns):
+                    if not state.usage.can_consume(
+                        budget, "repair_calls", response.repair_turns
+                    ):
                         stop_reason = StopReason.BUDGET_EXHAUSTED
                         break
                     state.usage.consume(budget, "repair_calls", response.repair_turns)
@@ -465,8 +536,13 @@ def run_research(
                     rejection = ""
                     if action.type == ActionType.RAW_SEARCH and not local_started:
                         rejection = "authority ladder requires Wiki/claims before Raw"
-                    elif action.type in {ActionType.WEB_SEARCH, ActionType.WEB_FETCH} and not local_started:
-                        rejection = "authority ladder requires local evidence before Web"
+                    elif (
+                        action.type in {ActionType.WEB_SEARCH, ActionType.WEB_FETCH}
+                        and not local_started
+                    ):
+                        rejection = (
+                            "authority ladder requires local evidence before Web"
+                        )
                     elif action.type == ActionType.WEB_FETCH:
                         requested = str(action.arguments.get("url") or "")
                         searched_urls = {
@@ -498,18 +574,36 @@ def run_research(
                         break
                 key = action.canonical_key()
                 if key in state.seen_actions:
-                    stop_reason = StopReason.DUPLICATE_ACTION
+                    recovered = _recover_duplicate_action(
+                        state,
+                        allowed_actions=allowed_actions,
+                    )
+                    if recovered is None:
+                        stop_reason = StopReason.DUPLICATE_ACTION
+                        store.append_event(
+                            run_id,
+                            {
+                                "kind": "duplicate_action",
+                                "epoch": state.epoch,
+                                "iteration": iteration,
+                                "action": action.to_dict(),
+                                "terminal": True,
+                            },
+                        )
+                        break
                     store.append_event(
                         run_id,
                         {
-                            "kind": "duplicate_action",
+                            "kind": "duplicate_action_recovered",
                             "epoch": state.epoch,
                             "iteration": iteration,
-                            "action": action.to_dict(),
-                            "terminal": True,
+                            "duplicate_action": action.to_dict(),
+                            "recovery_action": recovered.to_dict(),
+                            "terminal": False,
                         },
                     )
-                    break
+                    action = recovered
+                    key = action.canonical_key()
                 state.seen_actions.add(key)
                 if action.type in {
                     ActionType.WIKI_SEARCH,
@@ -555,10 +649,17 @@ def run_research(
                 tool_started = time.monotonic()
                 try:
                     payload = execute_tool(action, tool_context)
-                    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-                    if not state.usage.consume(budget, "observation_bytes", len(encoded)):
+                    encoded = json.dumps(
+                        payload, ensure_ascii=False, sort_keys=True, default=str
+                    ).encode("utf-8")
+                    if not state.usage.consume(
+                        budget, "observation_bytes", len(encoded)
+                    ):
                         stop_reason = StopReason.BUDGET_EXHAUSTED
-                        payload = {"status": "terminal", "error": "observation byte budget exhausted"}
+                        payload = {
+                            "status": "terminal",
+                            "error": "observation byte budget exhausted",
+                        }
                         encoded = json.dumps(payload).encode("utf-8")
                     artifact_id = ""
                     evidence_action = action.type in {
@@ -581,9 +682,22 @@ def run_research(
                             encoded,
                             source_type=action.type.value,
                             source_uri=source_uri,
+                            title=str(
+                                payload.get("title")
+                                or payload.get("page_id")
+                                or action.arguments.get("query")
+                                or ""
+                            )[:500],
                             mime_type="application/json",
-                            citation=source_uri,
-                            trust="untrusted" if action.type in {ActionType.WEB_SEARCH, ActionType.WEB_FETCH, ActionType.RAW_SEARCH} else "local",
+                            citation=str(payload.get("citation") or source_uri),
+                            trust="untrusted"
+                            if action.type
+                            in {
+                                ActionType.WEB_SEARCH,
+                                ActionType.WEB_FETCH,
+                                ActionType.RAW_SEARCH,
+                            }
+                            else "local",
                             durable=evidence_action,
                             metadata={
                                 "research_run_id": run_id,

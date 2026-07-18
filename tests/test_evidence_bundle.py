@@ -13,7 +13,9 @@ from llm_wiki_mcp.research_store import ResearchStore
 from llm_wiki_mcp.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
 
 
-def _artifact(artifact_id: str, preview: str, *, trust: str = "official") -> EvidenceArtifact:
+def _artifact(
+    artifact_id: str, preview: str, *, trust: str = "official"
+) -> EvidenceArtifact:
     return EvidenceArtifact(
         artifact_id=artifact_id,
         source_type="wiki_read",
@@ -31,21 +33,43 @@ def _artifact(artifact_id: str, preview: str, *, trust: str = "official") -> Evi
 
 def test_claim_classification_and_unknown_preservation() -> None:
     assert classify_claim("最新バージョンは何か") == ClaimKind.FRESHNESS_SENSITIVE
-    assert classify_claim("私はこれを使う", user_reported=True) == ClaimKind.USER_REPORTED
+    assert (
+        classify_claim("私はこれを使う", user_reported=True) == ClaimKind.USER_REPORTED
+    )
     rows = simple_assess_claims([("unmatched claim", False)], [])
     assert rows[0].status == ClaimStatus.UNKNOWN
 
 
 def test_source_backed_support_contradiction_and_citation() -> None:
-    supported = _artifact("sha256:" + "a" * 64, "Python version is current and supported")
+    supported = _artifact(
+        "sha256:" + "a" * 64, "Python version is current and supported"
+    )
     contradicted = _artifact("sha256:" + "b" * 64, "Python version is not supported")
     rows = simple_assess_claims([("Python version is supported", False)], [supported])
     assert rows[0].status == ClaimStatus.SUPPORTED
     assert deterministic_citations(rows[0], {supported.artifact_id: supported}) == [
         "[Fact](https://example.com/fact)"
     ]
-    rows = simple_assess_claims([("Python version is supported", False)], [contradicted])
+    rows = simple_assess_claims(
+        [("Python version is supported", False)], [contradicted]
+    )
     assert rows[0].status == ClaimStatus.CONTRADICTED
+    assert deterministic_citations(
+        rows[0], {contradicted.artifact_id: contradicted}
+    ) == ["[Fact](https://example.com/fact)"]
+
+
+def test_unrelated_negation_does_not_contradict_identifier_claim() -> None:
+    artifact = _artifact(
+        "sha256:" + "c" * 64,
+        "MCP wiki tools are listed here. Old conversations are not updated.",
+    )
+    rows = simple_assess_claims(
+        [("wiki_research is published by MCP", False)],
+        [artifact],
+    )
+
+    assert rows[0].status == ClaimStatus.UNKNOWN
 
 
 def test_bundle_is_durable_and_rebuildable(tmp_path: Path, monkeypatch) -> None:
@@ -60,7 +84,9 @@ def test_bundle_is_durable_and_rebuildable(tmp_path: Path, monkeypatch) -> None:
         durable=True,
     )
     assessment = simple_assess_claims([("evidence", False)], [artifact])
-    bundle = build_bundle(run_id="run-1", claims=assessment, artifacts=[artifact], store=store)
+    bundle = build_bundle(
+        run_id="run-1", claims=assessment, artifacts=[artifact], store=store
+    )
     assert store.read_artifact(artifact.artifact_id) == b"evidence"
     assert (tmp_path / "wiki" / "research" / "bundles" / "run-1.json").exists()
     assert bundle.research_run_id == "run-1"

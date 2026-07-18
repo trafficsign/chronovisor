@@ -74,7 +74,10 @@ def test_malformed_action_is_terminal_and_never_executed(tmp_path, monkeypatch) 
     )
 
     assert result["stop_reason"] == "malformed_action"
-    assert any(row.get("kind") == "malformed_action" and row.get("terminal") is True for row in store.events(result["research_run_id"]))
+    assert any(
+        row.get("kind") == "malformed_action" and row.get("terminal") is True
+        for row in store.events(result["research_run_id"])
+    )
 
 
 def test_action_contract_rejects_wrong_arguments_before_execution(
@@ -183,7 +186,9 @@ def test_local_planner_session_timeout_respects_run_deadline(monkeypatch) -> Non
     assert 0 < calls[0]["timeout_seconds"] <= 5
 
 
-def test_transport_error_retries_without_counting_malformed(tmp_path, monkeypatch) -> None:
+def test_transport_error_retries_without_counting_malformed(
+    tmp_path, monkeypatch
+) -> None:
     _isolate_scheduler(tmp_path, monkeypatch)
 
     class TransientPlanner:
@@ -223,7 +228,64 @@ def test_transport_error_retries_without_counting_malformed(tmp_path, monkeypatc
     )
 
 
-def test_restart_terminalizes_orphan_action_and_advances_epoch(tmp_path, monkeypatch) -> None:
+def test_duplicate_search_recovers_by_reading_best_unseen_page(
+    tmp_path, monkeypatch
+) -> None:
+    _isolate_scheduler(tmp_path, monkeypatch)
+
+    class RepeatingPlanner:
+        needs_model = False
+
+        def plan(self, state, **_kwargs):
+            if not state.actions:
+                return PlannerResponse(
+                    {"type": "wiki_search", "arguments": {"query": "topic"}}
+                )
+            if not any(action.type.value == "wiki_read" for action in state.actions):
+                return PlannerResponse(
+                    {"type": "wiki_search", "arguments": {"query": "topic"}}
+                )
+            return PlannerResponse(
+                {"type": "finish", "arguments": {"answer": "recovered"}}
+            )
+
+    def tool(action, _context):
+        if action.type.value == "wiki_search":
+            return {"results": [{"page_id": "best-page"}]}
+        return {
+            "page_id": "best-page",
+            "title": "Best Page",
+            "body": "evidence",
+            "citation": "wiki:best-page",
+        }
+
+    monkeypatch.setattr(research_orchestrator, "execute_tool", tool)
+    store = ResearchStore(tmp_path / "store")
+    result = research_orchestrator.run_research(
+        "goal",
+        config=ResearchConfig(enabled=True, mode="trace"),
+        planner=RepeatingPlanner(),
+        store=store,
+    )
+    events = store.events(result["research_run_id"])
+
+    assert result["stop_reason"] == "completed"
+    assert result["answer"] == "recovered"
+    assert [
+        (row.get("action") or {}).get("type")
+        for row in events
+        if row.get("kind") == "action"
+    ] == [
+        "wiki_search",
+        "wiki_read",
+        "finish",
+    ]
+    assert any(row.get("kind") == "duplicate_action_recovered" for row in events)
+
+
+def test_restart_terminalizes_orphan_action_and_advances_epoch(
+    tmp_path, monkeypatch
+) -> None:
     _isolate_scheduler(tmp_path, monkeypatch)
     store = ResearchStore(tmp_path / "store")
     store.append_event(
@@ -238,9 +300,9 @@ def test_restart_terminalizes_orphan_action_and_advances_epoch(tmp_path, monkeyp
     monkeypatch.setattr(
         research_orchestrator,
         "execute_tool",
-        lambda action, _context: {"results": []}
-        if action.type.value == "wiki_search"
-        else {},
+        lambda action, _context: (
+            {"results": []} if action.type.value == "wiki_search" else {}
+        ),
     )
 
     result = research_orchestrator.run_research(
@@ -266,9 +328,11 @@ def test_large_observation_is_externalized_and_checkpoint_receipted(
     monkeypatch.setattr(
         research_orchestrator,
         "execute_tool",
-        lambda action, _context: {"results": [{"page_id": "x", "blob": "z" * 5000}]}
-        if action.type.value == "wiki_search"
-        else {},
+        lambda action, _context: (
+            {"results": [{"page_id": "x", "blob": "z" * 5000}]}
+            if action.type.value == "wiki_search"
+            else {}
+        ),
     )
     config = ResearchConfig(
         enabled=True,
@@ -286,7 +350,8 @@ def test_large_observation_is_externalized_and_checkpoint_receipted(
         "goal", config=config, planner=DeterministicPlanner(), store=store
     )
     observations = [
-        row for row in store.events(result["research_run_id"])
+        row
+        for row in store.events(result["research_run_id"])
         if row.get("kind") == "observation"
     ]
     import json

@@ -12,7 +12,6 @@ from typing import Any, Iterable, Mapping
 from llm_wiki_mcp.background_jobs import enqueue_job
 from llm_wiki_mcp.evidence_bundle import (
     ClaimAssessment,
-    EvidenceBundle,
     build_bundle,
     deterministic_citations,
     simple_assess_claims,
@@ -40,7 +39,9 @@ def _usage_from_summary(summary: Mapping[str, Any]) -> BudgetUsage:
     return BudgetUsage(**{key: int(raw.get(key) or 0) for key in fields})
 
 
-def _claim_inputs(goal: str, claims: Iterable[str | Mapping[str, Any]] | None) -> list[tuple[str, bool]]:
+def _claim_inputs(
+    goal: str, claims: Iterable[str | Mapping[str, Any]] | None
+) -> list[tuple[str, bool]]:
     rows: list[tuple[str, bool]] = []
     for item in claims or ():
         if isinstance(item, str):
@@ -59,12 +60,24 @@ def _reconcile(
     claims: tuple[ClaimAssessment, ...],
     challenge: Mapping[str, Any],
 ) -> tuple[ClaimAssessment, ...]:
-    challenger = challenge.get("challenger") if isinstance(challenge.get("challenger"), Mapping) else {}
+    challenger = (
+        challenge.get("challenger")
+        if isinstance(challenge.get("challenger"), Mapping)
+        else {}
+    )
     verdict = str(challenger.get("verdict") or "")
-    tie = challenge.get("tie_break") if isinstance(challenge.get("tie_break"), Mapping) else {}
+    tie = (
+        challenge.get("tie_break")
+        if isinstance(challenge.get("tie_break"), Mapping)
+        else {}
+    )
     if verdict not in {"reject", "inconclusive"} or tie.get("choice") == "planner":
         return claims
-    unsupported = {str(item).casefold() for item in challenger.get("unsupported_claims", []) if isinstance(item, str)}
+    unsupported = {
+        str(item).casefold()
+        for item in challenger.get("unsupported_claims", [])
+        if isinstance(item, str)
+    }
     contradictions = bool(challenger.get("contradictions"))
     out: list[ClaimAssessment] = []
     for claim in claims:
@@ -73,13 +86,36 @@ def _reconcile(
             out.append(
                 replace(
                     claim,
-                    status=ClaimStatus.CONTRADICTED if verdict == "reject" and contradictions else ClaimStatus.UNKNOWN,
+                    status=ClaimStatus.CONTRADICTED
+                    if verdict == "reject" and contradictions
+                    else ClaimStatus.UNKNOWN,
                     rationale=f"local challenge {verdict}; planner support not adopted",
                 )
             )
         else:
             out.append(claim)
     return tuple(out)
+
+
+def _render_deterministic_answer(
+    claims: tuple[ClaimAssessment, ...],
+    citations: Mapping[str, list[str]],
+    *,
+    stop_reason: str,
+) -> str:
+    """Render a conservative answer when the planner never emits ``finish``."""
+
+    lines = [
+        f"Planner synthesis stopped with {stop_reason or 'unknown'}; "
+        "deterministic evidence assessment follows."
+    ]
+    for claim in claims:
+        line = f"- [{claim.status.value}] {claim.claim}: {claim.rationale}"
+        sources = citations.get(claim.claim, [])
+        if sources:
+            line += " Sources: " + "; ".join(sources)
+        lines.append(line)
+    return "\n".join(lines)[:8_000]
 
 
 def run_evidence_research(
@@ -140,10 +176,23 @@ def run_evidence_research(
     )
     by_id = {artifact.artifact_id: artifact for artifact in artifacts}
     citations = {
-        claim.claim: deterministic_citations(claim, by_id)
-        for claim in bundle.claims
+        claim.claim: deterministic_citations(claim, by_id) for claim in bundle.claims
     }
-    audit = audit_research_run(summary, bundle, store=store)
+    planner_answer = str(summary.get("answer") or "").strip()
+    answer_mode = "planner"
+    if not planner_answer:
+        planner_answer = _render_deterministic_answer(
+            bundle.claims,
+            citations,
+            stop_reason=str(summary.get("stop_reason") or ""),
+        )
+        answer_mode = "deterministic_claim_assessment"
+    effective_summary = {
+        **summary,
+        "answer": planner_answer,
+        "answer_mode": answer_mode,
+    }
+    audit = audit_research_run(effective_summary, bundle, store=store)
     store.append_event(
         run_id,
         {
@@ -153,7 +202,7 @@ def run_evidence_research(
         },
     )
     result = {
-        **summary,
+        **effective_summary,
         "evidence_bundle_id": bundle.bundle_id,
         "claims": [claim.to_dict() for claim in bundle.claims],
         "citations": citations,
@@ -176,7 +225,14 @@ def enqueue_evidence_research(
         name="research",
         module="llm_wiki_mcp.research_worker",
         args=["--run-id", run_id, "--purpose", purpose],
-        env={"LLM_WIKI_RESEARCH_RUN_ID": run_id, **{key: value for key, value in os.environ.items() if key.startswith("OLLAMA_")}},
+        env={
+            "LLM_WIKI_RESEARCH_RUN_ID": run_id,
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if key.startswith("OLLAMA_")
+            },
+        },
         stdin_text=json.dumps(
             {"goal": goal, "claims": list(claims or ()), "challenge": bool(challenge)},
             ensure_ascii=False,

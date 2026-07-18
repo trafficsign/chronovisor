@@ -71,7 +71,11 @@ def classify_claim(claim: str, *, user_reported: bool = False) -> ClaimKind:
         "version",
         "バージョン",
     )
-    return ClaimKind.FRESHNESS_SENSITIVE if any(term in folded for term in temporal) else ClaimKind.STABLE
+    return (
+        ClaimKind.FRESHNESS_SENSITIVE
+        if any(term in folded for term in temporal)
+        else ClaimKind.STABLE
+    )
 
 
 def deterministic_citations(
@@ -79,7 +83,10 @@ def deterministic_citations(
     artifacts: Mapping[str, EvidenceArtifact],
 ) -> list[str]:
     citations: list[str] = []
-    for artifact_id in assessment.evidence_ids:
+    artifact_ids = dict.fromkeys(
+        (*assessment.evidence_ids, *assessment.contradiction_ids)
+    )
+    for artifact_id in artifact_ids:
         artifact = artifacts.get(artifact_id)
         if artifact is None:
             continue
@@ -92,6 +99,31 @@ def deterministic_citations(
     return citations
 
 
+def _claim_tokens(claim: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(
+            r"[a-z0-9][a-z0-9_.:/-]{2,}|[\u3040-\u30ff\u3400-\u9fff]{2,}",
+            claim.casefold(),
+        )
+        if token not in {"that", "this", "with", "from", "して", "いる", "ある"}
+    }
+
+
+def _negated_near_match(haystack: str, matched_tokens: Iterable[str]) -> bool:
+    negations = (" not ", "ない", "ではない", "false", "contradict")
+    for token in matched_tokens:
+        start = 0
+        while (position := haystack.find(token, start)) >= 0:
+            window = haystack[
+                max(0, position - 48) : min(len(haystack), position + len(token) + 48)
+            ]
+            if any(term in window for term in negations):
+                return True
+            start = position + max(1, len(token))
+    return False
+
+
 def simple_assess_claims(
     claims: Iterable[tuple[str, bool]],
     artifacts: Iterable[EvidenceArtifact],
@@ -101,11 +133,7 @@ def simple_assess_claims(
     artifact_rows = list(artifacts)
     out: list[ClaimAssessment] = []
     for claim, user_reported in claims:
-        tokens = {
-            token
-            for token in re.findall(r"[a-z0-9]{3,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", claim.casefold())
-            if token not in {"that", "this", "with", "from", "して", "いる", "ある"}
-        }
+        tokens = _claim_tokens(claim)
         matched: list[str] = []
         contradicted: list[str] = []
         ranked = sorted(
@@ -116,14 +144,14 @@ def simple_assess_claims(
                 item.artifact_id,
             ),
         )
-        negated = any(term in claim.casefold() for term in (" not ", "ない", "ではない", "誤り"))
+        negated = any(
+            term in claim.casefold() for term in (" not ", "ない", "ではない", "誤り")
+        )
         for artifact in ranked:
             haystack = f"{artifact.title} {artifact.preview}".casefold()
-            if tokens and len([token for token in tokens if token in haystack]) >= max(1, min(2, len(tokens))):
-                evidence_negated = any(
-                    term in haystack
-                    for term in (" not ", "ない", "ではない", "false", "contradict")
-                )
+            matched_tokens = [token for token in tokens if token in haystack]
+            if tokens and len(matched_tokens) >= max(1, min(2, len(tokens))):
+                evidence_negated = _negated_near_match(haystack, matched_tokens)
                 if evidence_negated != negated:
                     contradicted.append(artifact.artifact_id)
                 else:

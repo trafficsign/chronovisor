@@ -45,6 +45,51 @@ def test_service_writes_bundle_audit_and_receipt(tmp_path: Path, monkeypatch) ->
     assert (tmp_path / "wiki" / "research" / "bundles" / "service-run.json").exists()
 
 
+def test_service_never_returns_empty_answer_after_planner_terminal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from llm_wiki_mcp import research_auditor
+
+    monkeypatch.setattr(research_auditor, "AUDIT_LOG", tmp_path / "audit.jsonl")
+    store = ResearchStore(root=tmp_path / "research")
+    artifact = store.put_artifact(
+        '{"body":"wiki_research is published by fresh MCP"}',
+        source_type="wiki_read",
+        source_uri="wiki:mcp-publication",
+        title="MCP Publication",
+        citation="wiki:mcp-publication",
+        trust="local",
+        durable=True,
+    )
+    monkeypatch.setattr(
+        research_service,
+        "run_research",
+        lambda *_args, **_kwargs: {
+            "schema_version": 1,
+            "status": "terminal",
+            "research_run_id": "terminal-run",
+            "goal": "check publication",
+            "answer": "",
+            "stop_reason": "duplicate_action",
+            "usage": {},
+            "artifact_ids": [artifact.artifact_id],
+        },
+    )
+
+    result = run_evidence_research(
+        "check publication",
+        claims=["wiki_research is published by fresh MCP"],
+        config=ResearchConfig(enabled=True, mode="explicit"),
+        challenge=False,
+        run_id="terminal-run",
+        store=store,
+    )
+
+    assert result["answer"]
+    assert result["answer_mode"] == "deterministic_claim_assessment"
+    assert "[supported]" in result["answer"]
+
+
 def test_cli_defaults_to_durable_background_queue(monkeypatch, capsys) -> None:
     seen: dict[str, object] = {}
 

@@ -34,6 +34,9 @@ Budgets are separate for planner, challenge, tie-break, repair, total model
 calls, searches, fetches, iterations, elapsed time, generation tokens, and
 observation bytes. Malformed output, duplicate Action, authority violation,
 timeout, interruption, and orphaned Action all receive terminal trace records.
+A repeated search is never executed twice. When it already produced ranked
+local candidates, the kernel may recover by reading the highest-ranked unseen
+page and records that substitution as `duplicate_action_recovered`.
 
 ## Evidence contract
 
@@ -49,6 +52,13 @@ contradictions, and prompt injection. The tie-break model runs only on genuine
 disagreement. A reject/inconclusive challenge can narrow `supported` to
 `contradicted` or `unknown`; it cannot fabricate support. Answer citations are
 rendered deterministically from artifact metadata.
+
+If the planner reaches a safe terminal state before emitting `finish`, the
+service never returns an empty answer. It renders a conservative deterministic
+claim assessment from the adopted artifacts, preserves the original terminal
+reason, and labels the result `answer_mode=deterministic_claim_assessment`.
+Both supporting and contradicting evidence receive citations; unrelated
+negation elsewhere in a long artifact is not treated as a contradiction.
 
 ## Web boundary
 
