@@ -47,6 +47,7 @@ class ResearchState:
     first_pass_malformed: int = 0
     repair_turns: int = 0
     invalid_executions: int = 0
+    deadline_monotonic: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -157,11 +158,23 @@ class LocalPlanner:
                 "Choose finish when evidence is sufficient or budgets are low."
             ),
         }
+        remaining_repairs = max(
+            0,
+            budget.max_repair_calls - state.usage.repair_calls,
+        )
+        session_timeout = budget.max_single_generation_seconds * (
+            1 + remaining_repairs
+        )
+        if state.deadline_monotonic > 0:
+            session_timeout = min(
+                session_timeout,
+                max(0.001, state.deadline_monotonic - time.monotonic()),
+            )
         outcome = run_cancellable_command(
             [sys.executable, "-m", "llm_wiki_mcp.research_model_worker"],
             json.dumps(worker_request, ensure_ascii=False),
             lease,
-            timeout_seconds=budget.max_single_generation_seconds,
+            timeout_seconds=session_timeout,
         )
         if outcome.status != "completed":
             return PlannerResponse(
@@ -266,6 +279,7 @@ def run_research(
     planner = planner or LocalPlanner(config.planner_model)
     budget = config.budgets
     started = time.monotonic()
+    state.deadline_monotonic = started + budget.max_total_wall_seconds
     stop_reason = StopReason.NO_PROGRESS
     answer = ""
     events = _resume_orphans(store, state)

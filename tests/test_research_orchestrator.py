@@ -112,10 +112,11 @@ def test_action_contract_rejects_wrong_arguments_before_execution(
 
 
 def test_local_planner_preserves_transport_failure_class(monkeypatch) -> None:
-    monkeypatch.setattr(
-        research_orchestrator,
-        "run_cancellable_command",
-        lambda *_args, **_kwargs: CancellableResult(
+    calls = []
+
+    def run_worker(*_args, **kwargs):
+        calls.append(kwargs)
+        return CancellableResult(
             "completed",
             value={
                 "ok": False,
@@ -124,7 +125,12 @@ def test_local_planner_preserves_transport_failure_class(monkeypatch) -> None:
                 "repair_turns": 0,
             },
             latency_ms=123,
-        ),
+        )
+
+    monkeypatch.setattr(
+        research_orchestrator,
+        "run_cancellable_command",
+        run_worker,
     )
     lease = ResearchLease(
         ResearchAdmission(True, "admitted", "run-a"),
@@ -141,6 +147,40 @@ def test_local_planner_preserves_transport_failure_class(monkeypatch) -> None:
     assert response.status == "error"
     assert response.error == "transport_error: connection reset"
     assert response.latency_ms == 123
+    assert calls[0]["timeout_seconds"] == 90.0
+
+
+def test_local_planner_session_timeout_respects_run_deadline(monkeypatch) -> None:
+    calls = []
+
+    def run_worker(*_args, **kwargs):
+        calls.append(kwargs)
+        return CancellableResult("timeout", error="deadline")
+
+    monkeypatch.setattr(
+        research_orchestrator,
+        "run_cancellable_command",
+        run_worker,
+    )
+    state = ResearchState(
+        "run-deadline",
+        "goal",
+        deadline_monotonic=research_orchestrator.time.monotonic() + 5,
+    )
+    lease = ResearchLease(
+        ResearchAdmission(True, "admitted", "run-deadline"),
+        0.0,
+    )
+
+    response = LocalPlanner("planner-model").plan(
+        state,
+        lease=lease,
+        budget=ResearchBudget(),
+        events=[],
+    )
+
+    assert response.status == "timeout"
+    assert 0 < calls[0]["timeout_seconds"] <= 5
 
 
 def test_transport_error_retries_without_counting_malformed(tmp_path, monkeypatch) -> None:
