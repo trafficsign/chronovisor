@@ -18,6 +18,7 @@ def test_build_reflection_markdown_includes_health_signals() -> None:
 
     assert "Memory Reflection 2026-07-06" in doc
     assert "Summary coverage: 0.500" in doc
+    assert "[[retention]]" not in doc
 
 
 def test_write_reflection_uses_verified_wiki_mutation(
@@ -31,3 +32,26 @@ def test_write_reflection_uses_verified_wiki_mutation(
     assert result["status"] == "ok"
     assert result["mutation"]["status"] == "applied"
     assert Path(result["path"]).exists()
+
+
+def test_write_reflection_updates_existing_page_id_without_relocation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pages_dir = tmp_path / "pages"
+    existing_dir = pages_dir / "llm-wiki"
+    preferred_dir = pages_dir / "insights"
+    existing_dir.mkdir(parents=True)
+    page_id = f"memory-reflection-{date.today().isoformat()}"
+    existing = existing_dir / f"{page_id}.md"
+    existing.write_text("old reflection\n", encoding="utf-8")
+    monkeypatch.setattr(reflection, "health_snapshot", lambda: {})
+    monkeypatch.setattr(reflection, "INSIGHTS_DIR", preferred_dir)
+    monkeypatch.setattr(reflection, "find_page", lambda value: existing if value == page_id else None)
+
+    result = reflection.write_reflection_page()
+
+    assert result["status"] == "ok"
+    assert result["path"] == str(existing)
+    assert "Memory Reflection" in existing.read_text(encoding="utf-8")
+    assert not (preferred_dir / f"{page_id}.md").exists()

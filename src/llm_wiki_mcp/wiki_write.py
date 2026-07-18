@@ -21,6 +21,7 @@ from llm_wiki_mcp.page_mutation import (
     enforce_correction_constraints,
     wiki_mutation_lock,
 )
+from llm_wiki_mcp.wiki import PAGES_DIR, SYSTEM_DIR
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,34 @@ def _rollback_owned_write_locked(item: PreparedWikiWrite) -> bool:
         return False
 
 
+def _global_page_id_conflicts(item: PreparedWikiWrite) -> list[Path]:
+    """Return other Wiki files that already own ``item.page_id``.
+
+    Page IDs are filename stems and are global across pages/ and system/.
+    The check is only applied to actual Wiki targets, leaving explicit
+    temporary/export paths independent from the operator's live Wiki.
+    Callers hold ``wiki_mutation_lock`` so the check is adjacent to creation.
+    """
+
+    target = item.path.expanduser().resolve(strict=False)
+    roots = (
+        PAGES_DIR.expanduser().resolve(strict=False),
+        SYSTEM_DIR.expanduser().resolve(strict=False),
+    )
+    if not any(target == root or root in target.parents for root in roots):
+        return []
+
+    conflicts: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for candidate in root.rglob(f"{item.page_id}.md"):
+            resolved = candidate.expanduser().resolve(strict=False)
+            if resolved != target:
+                conflicts.append(candidate)
+    return conflicts
+
+
 def apply_wiki_writes(items: Iterable[PreparedWikiWrite]) -> dict[str, Any]:
     """Apply a whole-file batch with lock-time CAS and owned-byte rollback."""
 
@@ -138,6 +167,14 @@ def apply_wiki_writes(items: Iterable[PreparedWikiWrite]) -> dict[str, Any]:
         return {
             "status": "retry",
             "reason": "duplicate_target_path",
+            "paths": paths,
+            "rolled_back": {},
+        }
+    page_ids = [item.page_id for item in plans]
+    if len(page_ids) != len(set(page_ids)):
+        return {
+            "status": "retry",
+            "reason": "duplicate_page_id",
             "paths": paths,
             "rolled_back": {},
         }
@@ -153,6 +190,12 @@ def apply_wiki_writes(items: Iterable[PreparedWikiWrite]) -> dict[str, Any]:
                     # The comparison sits inside the shared lock immediately
                     # beside the replace. A stale snapshot can never overwrite
                     # a correction, ingest, or another generated artifact.
+                    conflicts = _global_page_id_conflicts(item)
+                    if conflicts:
+                        locations = ", ".join(str(path) for path in conflicts)
+                        raise WikiWriteError(
+                            f"page_id {item.page_id!r} already exists at {locations}"
+                        )
                     current = _read_optional(item.path)
                     effective_updated, applied = _correction_safe_updated(item, current)
                     effective_item = replace(item, updated=effective_updated)

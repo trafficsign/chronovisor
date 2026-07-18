@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_mcp.health import health_snapshot
-from llm_wiki_mcp.wiki import PAGES_DIR
+from llm_wiki_mcp.wiki import PAGES_DIR, find_page
 from llm_wiki_mcp.wiki_write import apply_wiki_writes, prepare_wiki_write
 
 INSIGHTS_DIR = PAGES_DIR / "insights"
@@ -55,7 +55,7 @@ def build_reflection_markdown(snapshot: dict[str, Any], *, today: date | None = 
             f"- Search golden examples: {_fmt(queues.get('search_golden'))}",
             "",
             "## Next Checks",
-            "- Review archive candidates from [[retention]] output before excluding anything.",
+            "- Review archive candidates from retention output before excluding anything.",
             "- Promote high-confidence duplicate candidates through the review lane.",
             "- Keep generated reflections cited by metric source, not as standalone facts.",
             "",
@@ -63,10 +63,22 @@ def build_reflection_markdown(snapshot: dict[str, Any], *, today: date | None = 
     )
 
 
-def write_reflection_page(*, output_dir: Path = INSIGHTS_DIR, write: bool = True) -> dict[str, Any]:
+def write_reflection_page(
+    *,
+    output_dir: Path | None = None,
+    write: bool = True,
+) -> dict[str, Any]:
     snapshot = health_snapshot()
     today = date.today()
-    path = output_dir / f"memory-reflection-{today.isoformat()}.md"
+    page_id = f"memory-reflection-{today.isoformat()}"
+    if output_dir is None:
+        # Generated page IDs are global even when an operator reorganizes the
+        # pages tree. Keep updating the existing page at its current location
+        # instead of recreating the same ID in the generator's preferred
+        # directory. Explicit output_dir remains isolated for tests/exports.
+        path = find_page(page_id) or INSIGHTS_DIR / f"{page_id}.md"
+    else:
+        path = output_dir / f"{page_id}.md"
     markdown = build_reflection_markdown(snapshot, today=today)
     mutation: dict[str, Any] | None = None
     if write:

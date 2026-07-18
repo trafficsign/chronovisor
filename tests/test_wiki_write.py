@@ -145,3 +145,43 @@ def test_rollback_does_not_clobber_foreign_bytes(tmp_path: Path, monkeypatch) ->
     assert result["rolled_back"][str(first)] is False
     assert first.read_text(encoding="utf-8") == "foreign\n"
     assert second.read_text(encoding="utf-8") == "second-old\n"
+
+
+def test_batch_rejects_duplicate_page_ids_before_writing(tmp_path: Path) -> None:
+    first = tmp_path / "a" / "same.md"
+    second = tmp_path / "b" / "same.md"
+    plans = [
+        wiki_write.prepare_wiki_write(first, "first\n"),
+        wiki_write.prepare_wiki_write(second, "second\n"),
+    ]
+
+    result = wiki_write.apply_wiki_writes(plans)
+
+    assert result["status"] == "retry"
+    assert result["reason"] == "duplicate_page_id"
+    assert not first.exists()
+    assert not second.exists()
+
+
+def test_wiki_create_rejects_existing_page_id_in_other_folder(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pages_dir = tmp_path / "wiki" / "pages"
+    system_dir = tmp_path / "wiki" / "system"
+    existing = pages_dir / "organized" / "generated.md"
+    target = pages_dir / "preferred" / "generated.md"
+    existing.parent.mkdir(parents=True)
+    system_dir.mkdir(parents=True)
+    existing.write_text("existing\n", encoding="utf-8")
+    monkeypatch.setattr(wiki_write, "PAGES_DIR", pages_dir)
+    monkeypatch.setattr(wiki_write, "SYSTEM_DIR", system_dir)
+
+    result = wiki_write.apply_wiki_writes(
+        [wiki_write.prepare_wiki_write(target, "duplicate\n")]
+    )
+
+    assert result["status"] == "retry"
+    assert "already exists" in result["reason"]
+    assert existing.read_text(encoding="utf-8") == "existing\n"
+    assert not target.exists()
