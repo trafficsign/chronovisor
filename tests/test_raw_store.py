@@ -109,6 +109,7 @@ def test_store_includes_flat_and_date_partitioned_manual_markdown(
 def test_layout_mode_uses_wiki_config_with_environment_override(
     tmp_path: Path, monkeypatch
 ) -> None:
+    monkeypatch.delenv("LLM_WIKI_RAW_LAYOUT")
     (tmp_path / "config.toml").write_text('[raw]\nlayout = "shadow"\n')
 
     assert raw_layout_mode(wiki_root=tmp_path) == "shadow"

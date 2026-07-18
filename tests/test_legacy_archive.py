@@ -21,7 +21,7 @@ from llm_wiki_mcp.raw_store import RawStore
 def _legacy_files(raw_dir: Path) -> tuple[Path, Path]:
     raw_dir.mkdir(parents=True)
     first = raw_dir / "save-old-one.md"
-    second = raw_dir / "save-old-two.md"
+    second = raw_dir / "save-old-日本語-two.md"
     first.write_bytes(b"first byte-exact raw\n")
     second.write_bytes("second 日本語 raw\n".encode())
     old = datetime(2026, 7, 16, 12, tzinfo=ZoneInfo("Asia/Tokyo")).timestamp()

@@ -21,7 +21,7 @@ from llm_wiki_mcp.raw_segment import CAPTURE_TIMEZONE, RawSegmentCorrupt
 
 LEGACY_ARCHIVE_SCHEMA = "llm-wiki.raw-legacy-archive.v1"
 DEFAULT_ARCHIVE_BYTES = 128 * 1024 * 1024
-_RAW_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,239}$")
+MAX_RAW_ID_CHARS = 240
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,21 @@ def _sha256_path(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _safe_raw_id(value: object) -> bool:
+    """Accept historical Unicode basenames without weakening path safety."""
+
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= MAX_RAW_ID_CHARS
+        and value not in {".", ".."}
+        and not value.startswith(".")
+        and "/" not in value
+        and "\\" not in value
+        and Path(value).name == value
+        and all(ord(char) >= 32 and ord(char) != 127 for char in value)
+    )
 
 
 def _fsync_directory(path: Path) -> None:
@@ -92,9 +107,7 @@ def iter_legacy_members(raw_dir: Path) -> Iterator[LegacyArchiveMember]:
             length = row.get("bytes")
             sha256 = row.get("sha256")
             if (
-                not isinstance(raw_id, str)
-                or _RAW_ID_RE.fullmatch(raw_id) is None
-                or Path(raw_id).name != raw_id
+                not _safe_raw_id(raw_id)
                 or isinstance(length, bool)
                 or not isinstance(length, int)
                 or not 0 <= length <= DEFAULT_ARCHIVE_BYTES
