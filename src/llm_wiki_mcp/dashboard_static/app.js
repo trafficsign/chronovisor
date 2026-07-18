@@ -97,6 +97,9 @@ const els = {
   healthHolds: document.getElementById("health-holds"),
   healthProvisional: document.getElementById("health-provisional"),
   healthLedger: document.getElementById("health-ledger"),
+  healthResearchRuns: document.getElementById("health-research-runs"),
+  healthResearchClaims: document.getElementById("health-research-claims"),
+  healthResearchTrace: document.getElementById("health-research-trace"),
   modelCaption: document.getElementById("model-caption"),
   modelInstalled: document.getElementById("model-installed"),
   modelLoaded: document.getElementById("model-loaded"),
@@ -1679,6 +1682,8 @@ function renderHealth(health) {
   const quality = hardening.quality || {};
   const holds = hardening.managed_holds || {};
   const provisional = hardening.provisional_recall || {};
+  const research = data.research || {};
+  const researchTotals = research.totals || {};
   const artifacts = hardening.decision_artifacts || {};
   const ledger = readBack.derived_view_integrity || {};
   const sensitivity = coverage.sensitivity || {};
@@ -1719,6 +1724,13 @@ function renderHealth(health) {
   els.healthHolds.textContent = intValue(holds.total).toLocaleString();
   els.healthProvisional.textContent = intValue(provisional.entries).toLocaleString();
   els.healthLedger.textContent = fmt(ledger.status || "--");
+  els.healthResearchRuns.textContent = intValue(researchTotals.runs).toLocaleString();
+  els.healthResearchClaims.textContent = `${intValue(researchTotals.supported_claims).toLocaleString()}/${(
+    intValue(researchTotals.supported_claims)
+    + intValue(researchTotals.contradicted_claims)
+    + intValue(researchTotals.unknown_claims)
+  ).toLocaleString()}`;
+  els.healthResearchTrace.textContent = healthPercent(research.decision_trace_coverage);
 }
 
 const MODEL_ROLE_LABELS = {

@@ -529,7 +529,16 @@ def run_research(
                         artifact_id=artifact_id,
                         bytes=len(encoded),
                         latency_ms=round((time.monotonic() - tool_started) * 1000),
-                        metadata=payload if len(encoded) <= 20_000 else {"externalized": True},
+                        metadata=(
+                            payload
+                            if len(encoded) <= 20_000
+                            else {
+                                "externalized": True,
+                                "provider": str(payload.get("provider") or ""),
+                                "cache": str(payload.get("cache") or ""),
+                                "security": payload.get("security"),
+                            }
+                        ),
                     )
                 except Exception as exc:
                     observation = Observation(

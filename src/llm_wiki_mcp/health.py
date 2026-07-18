@@ -590,6 +590,111 @@ def ingest_liveness_kpi() -> dict[str, Any]:
     }
 
 
+def research_kpi(*, limit: int = 200) -> dict[str, Any]:
+    """Bounded summary of durable research traces for dashboard/alerts."""
+
+    from llm_wiki_mcp.research_config import load_research_config
+
+    root = WIKI_ROOT / "runtime" / "research"
+    runs_root = root / "runs"
+    try:
+        summaries = sorted(
+            runs_root.glob("*/summary.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[: max(1, limit)]
+    except OSError:
+        summaries = []
+    runs: list[dict[str, Any]] = []
+    totals = {
+        "runs": 0,
+        "completed": 0,
+        "terminal": 0,
+        "first_pass_malformed": 0,
+        "repair_turns": 0,
+        "invalid_action_executions": 0,
+        "actions": 0,
+        "observations": 0,
+        "supported_claims": 0,
+        "contradicted_claims": 0,
+        "unknown_claims": 0,
+        "observation_bytes": 0,
+    }
+    stop_reasons: dict[str, int] = {}
+    provider_counts: dict[str, int] = {}
+    cache_counts: dict[str, int] = {}
+    traced_actions = 0
+    traced_observations = 0
+    for index, path in enumerate(summaries):
+        try:
+            summary = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(summary, dict):
+            continue
+        totals["runs"] += 1
+        status = str(summary.get("status") or "terminal")
+        totals["completed" if status == "completed" else "terminal"] += 1
+        for key in ("first_pass_malformed", "repair_turns", "invalid_action_executions", "actions", "observations"):
+            totals[key] += int(summary.get(key) or 0)
+        usage = summary.get("usage") if isinstance(summary.get("usage"), dict) else {}
+        totals["observation_bytes"] += int(usage.get("observation_bytes") or 0)
+        reason = str(summary.get("stop_reason") or "unknown")
+        stop_reasons[reason] = stop_reasons.get(reason, 0) + 1
+        for claim in summary.get("claims", []):
+            if not isinstance(claim, dict):
+                continue
+            claim_status = str(claim.get("status") or "unknown")
+            key = f"{claim_status}_claims"
+            if key in totals:
+                totals[key] += 1
+        events_path = path.with_name("events.jsonl")
+        for event in _read_jsonl(events_path, limit=2_000) if index < 20 else ():
+            if event.get("kind") == "action":
+                traced_actions += 1
+            elif event.get("kind") == "observation":
+                traced_observations += 1
+                metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+                provider = str(metadata.get("provider") or "")
+                cache = str(metadata.get("cache") or "")
+                if provider:
+                    provider_counts[provider] = provider_counts.get(provider, 0) + 1
+                if cache:
+                    cache_counts[cache] = cache_counts.get(cache, 0) + 1
+        runs.append(
+            {
+                "research_run_id": summary.get("research_run_id"),
+                "status": status,
+                "stop_reason": reason,
+                "elapsed_ms": summary.get("elapsed_ms"),
+                "usage": usage,
+                "first_pass_malformed": summary.get("first_pass_malformed", 0),
+                "repair_turns": summary.get("repair_turns", 0),
+            }
+        )
+    config = load_research_config()
+    claim_total = totals["supported_claims"] + totals["contradicted_claims"] + totals["unknown_claims"]
+    return {
+        "status": "ok",
+        "enabled": config.enabled,
+        "mode": config.mode,
+        "kill_switches": {
+            "agent": not config.enabled,
+            "web": not (config.web.adapter_enabled and config.web.live_egress_enabled),
+            "compaction": not config.compaction.enabled,
+            "consolidation": not config.consolidation_enabled,
+        },
+        "totals": totals,
+        "claim_coverage": (totals["supported_claims"] / claim_total) if claim_total else 0.0,
+        "decision_trace_coverage": min(1.0, traced_observations / traced_actions) if traced_actions else 1.0,
+        "stop_reasons": dict(sorted(stop_reasons.items())),
+        "providers": dict(sorted(provider_counts.items())),
+        "cache": dict(sorted(cache_counts.items())),
+        "active": (root / "active-research.json").exists(),
+        "recent": runs[:20],
+    }
+
+
 def _queue_status_counts(path: Path, field: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in _read_jsonl(path, limit=100000):
@@ -625,6 +730,7 @@ def health_snapshot() -> dict[str, Any]:
         "convergence": convergence_kpi(),
         "capture_pipeline": capture_pipeline_kpi(),
         "ingest_liveness": ingest_liveness,
+        "research": research_kpi(),
         "queues": {
             "duplicate_candidates": _jsonl_count(duplicate_queue),
             "lint_repair": _jsonl_count(lint_queue),

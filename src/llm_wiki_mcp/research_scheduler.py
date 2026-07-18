@@ -87,7 +87,13 @@ def foreground_lane(*, preempt_grace_ms: int = 250) -> Iterator[ForegroundReceip
     marker_id = uuid.uuid4().hex
     SYNC_DIR.mkdir(parents=True, exist_ok=True)
     marker = SYNC_DIR / f"{os.getpid()}-{marker_id}.json"
-    _atomic_json(marker, {"pid": os.getpid(), "marker_id": marker_id, "ts": _iso()})
+    # This is an ephemeral cross-process cancellation marker, not durable
+    # state. Visibility is the contract; fsync would put disk latency on every
+    # prompt and violate the foreground wait budget under filesystem pressure.
+    marker.write_text(
+        json.dumps({"pid": os.getpid(), "marker_id": marker_id, "ts": _iso()}),
+        encoding="utf-8",
+    )
     active = _active_research()
     overlap = active is not None
     deadline = started + max(0, preempt_grace_ms) / 1000.0
