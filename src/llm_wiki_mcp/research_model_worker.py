@@ -4,8 +4,28 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import Any
 
-from llm_wiki_mcp.local_structured import LocalStructuredSession
+from llm_wiki_mcp.local_structured import (
+    LocalStructuredSession,
+    ValidationIssue,
+)
+from llm_wiki_mcp.research_types import parse_action
+
+
+def _validate_action(value: Any) -> list[ValidationIssue]:
+    parsed = parse_action(value, epoch=0)
+    if parsed.action is not None:
+        return []
+    return [
+        ValidationIssue(
+            pointer="",
+            keyword="actionContract",
+            expected="one valid action with type-specific arguments",
+            received={"type": "invalid_action"},
+            message=parsed.error,
+        )
+    ]
 
 
 def main() -> int:
@@ -30,6 +50,7 @@ def main() -> int:
                 if isinstance(request.get("format_schema"), dict)
                 else None
             ),
+            value_validator=_validate_action,
         )
         print(
             json.dumps(

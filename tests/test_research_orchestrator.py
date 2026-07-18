@@ -77,6 +77,40 @@ def test_malformed_action_is_terminal_and_never_executed(tmp_path, monkeypatch) 
     assert any(row.get("kind") == "malformed_action" and row.get("terminal") is True for row in store.events(result["research_run_id"]))
 
 
+def test_action_contract_rejects_wrong_arguments_before_execution(
+    tmp_path, monkeypatch
+) -> None:
+    _isolate_scheduler(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        research_orchestrator,
+        "execute_tool",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("invalid action executed")),
+    )
+
+    class WrongArguments:
+        needs_model = False
+
+        def plan(self, *args, **kwargs):
+            return PlannerResponse(
+                {
+                    "type": "wiki_read",
+                    "arguments": {"query": "topic", "url": "https://example.test"},
+                    "rationale": "read",
+                }
+            )
+
+    result = research_orchestrator.run_research(
+        "goal",
+        config=ResearchConfig(enabled=True, mode="trace"),
+        planner=WrongArguments(),
+        store=ResearchStore(tmp_path / "store"),
+    )
+
+    assert result["stop_reason"] == "malformed_action"
+    assert result["actions"] == 0
+    assert result["invalid_action_executions"] == 0
+
+
 def test_local_planner_preserves_transport_failure_class(monkeypatch) -> None:
     monkeypatch.setattr(
         research_orchestrator,

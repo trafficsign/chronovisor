@@ -200,6 +200,29 @@ def parse_action(value: Any, *, epoch: int) -> ParsedAction:
     arguments = value.get("arguments", {})
     if not isinstance(arguments, Mapping):
         return ParsedAction(None, "action arguments must be an object")
+    argument_contracts: dict[ActionType, tuple[frozenset[str], str]] = {
+        ActionType.WIKI_SEARCH: (frozenset({"query", "limit", "semantic"}), "query"),
+        ActionType.WIKI_READ: (frozenset({"page_id", "max_chars"}), "page_id"),
+        ActionType.WIKI_NEIGHBORS: (frozenset({"page_id"}), "page_id"),
+        ActionType.VERIFIED_CLAIMS: (frozenset({"query"}), "query"),
+        ActionType.RAW_SEARCH: (frozenset({"query", "limit", "scan_limit"}), "query"),
+        ActionType.WEB_SEARCH: (frozenset({"query", "limit"}), "query"),
+        ActionType.WEB_FETCH: (frozenset({"url"}), "url"),
+        ActionType.FINISH: (frozenset({"answer"}), "answer"),
+    }
+    allowed_arguments, required_argument = argument_contracts[action_type]
+    unknown_arguments = sorted(set(arguments) - allowed_arguments)
+    if unknown_arguments:
+        return ParsedAction(
+            None,
+            f"unknown {action_type.value} arguments: {', '.join(unknown_arguments)}",
+        )
+    required_value = arguments.get(required_argument)
+    if not isinstance(required_value, str) or not required_value.strip():
+        return ParsedAction(
+            None,
+            f"{action_type.value} requires non-empty {required_argument}",
+        )
     rationale = value.get("rationale", "")
     if not isinstance(rationale, str):
         return ParsedAction(None, "action rationale must be a string")
