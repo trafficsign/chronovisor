@@ -46,6 +46,7 @@ class ResearchStore:
         self.root = root or (WIKI_ROOT / "runtime" / "research")
         self.runs = self.root / "runs"
         self.cas = self.root / "evidence-cas"
+        self.durable_cas = WIKI_ROOT / "research" / "evidence-cas"
         self.durable_manifests = WIKI_ROOT / "research" / "evidence-manifests"
         self.checkpoints = WIKI_ROOT / "runtime" / "session-checkpoints"
 
@@ -95,7 +96,8 @@ class ResearchStore:
         raw = content.encode("utf-8") if isinstance(content, str) else bytes(content)
         digest = hashlib.sha256(raw).hexdigest()
         artifact_id = f"sha256:{digest}"
-        blob = self.cas / digest[:2] / f"{digest}.zst"
+        blob_root = self.durable_cas if durable else self.cas
+        blob = blob_root / digest[:2] / f"{digest}.zst"
         if not blob.exists():
             compressor = zstandard.ZstdCompressor(level=9)
             _atomic_bytes(blob, compressor.compress(raw))
@@ -128,14 +130,41 @@ class ResearchStore:
         digest = artifact_id.removeprefix("sha256:")
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise ValueError("invalid artifact ID")
-        compressed = (self.cas / digest[:2] / f"{digest}.zst").read_bytes()
+        paths = (
+            self.durable_cas / digest[:2] / f"{digest}.zst",
+            self.cas / digest[:2] / f"{digest}.zst",
+        )
+        compressed = next((path.read_bytes() for path in paths if path.exists()), None)
+        if compressed is None:
+            raise FileNotFoundError(artifact_id)
         raw = zstandard.ZstdDecompressor().decompress(compressed)
         if hashlib.sha256(raw).hexdigest() != digest:
             raise ValueError("evidence artifact checksum mismatch")
         return raw
 
+    def artifact_manifest(self, artifact_id: str) -> EvidenceArtifact | None:
+        digest = artifact_id.removeprefix("sha256:")
+        for path in (
+            self.durable_manifests / f"{digest}.json",
+            self.cas / digest[:2] / f"{digest}.json",
+        ):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                return EvidenceArtifact(**payload)
+            except (OSError, json.JSONDecodeError, TypeError):
+                continue
+        return None
+
     def write_summary(self, run_id: str, payload: Mapping[str, Any]) -> Path:
         path = self.run_dir(run_id) / "summary.json"
+        _atomic_bytes(
+            path,
+            (json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+        )
+        return path
+
+    def write_bundle(self, run_id: str, payload: Mapping[str, Any]) -> Path:
+        path = WIKI_ROOT / "research" / "bundles" / f"{run_id}.json"
         _atomic_bytes(
             path,
             (json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8"),
