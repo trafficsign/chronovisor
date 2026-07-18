@@ -25,6 +25,11 @@ def main() -> int:
             str(request["prompt"]),
             dict(request["schema"]),
             system=str(request.get("system") or ""),
+            format_schema=(
+                dict(request["format_schema"])
+                if isinstance(request.get("format_schema"), dict)
+                else None
+            ),
         )
         print(
             json.dumps(

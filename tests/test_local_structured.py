@@ -67,6 +67,34 @@ def test_structured_generation_policy_seals_the_fixed_sampler() -> None:
     assert len(structured_generation_policy_sha256()) == 64
 
 
+def test_transport_format_schema_does_not_weaken_client_validation() -> None:
+    validation_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["summary"],
+        "properties": {"summary": {"type": "string", "maxLength": 2}},
+    }
+    format_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["summary"],
+        "properties": {"summary": {"type": "string"}},
+    }
+    transport = QueueTransport('{"summary":"too long"}', '{"summary":"ok"}')
+
+    result = _session(transport).run(
+        "summarize",
+        validation_schema,
+        format_schema=format_schema,
+    )
+
+    assert result.ok is True
+    assert result.value == {"summary": "ok"}
+    assert result.first_pass_valid is False
+    assert transport.requests[0].schema == format_schema
+    assert transport.requests[0].messages[0]["content"].find('"maxLength": 2') > 0
+
+
 @pytest.fixture(autouse=True)
 def _isolate_default_audit_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

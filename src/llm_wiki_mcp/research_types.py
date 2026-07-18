@@ -236,3 +236,23 @@ ACTION_SCHEMA: dict[str, Any] = {
         "rationale": {"type": "string", "maxLength": 500},
     },
 }
+
+
+def _ollama_action_format_schema(value: Any) -> Any:
+    """Drop grammar-only length bounds unsupported by some GGUF runners."""
+
+    if isinstance(value, dict):
+        return {
+            key: _ollama_action_format_schema(item)
+            for key, item in value.items()
+            if key != "maxLength"
+        }
+    if isinstance(value, list):
+        return [_ollama_action_format_schema(item) for item in value]
+    return value
+
+
+# Client validation continues to use ACTION_SCHEMA. This relaxed copy is only
+# sent to Ollama's grammar compiler; the session repairs or rejects any value
+# that violates the full schema above.
+ACTION_FORMAT_SCHEMA: dict[str, Any] = _ollama_action_format_schema(ACTION_SCHEMA)

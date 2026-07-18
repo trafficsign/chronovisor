@@ -1743,6 +1743,7 @@ class LocalStructuredSession:
         schema: Mapping[str, Any],
         *,
         system: str | None = None,
+        format_schema: Mapping[str, Any] | None = None,
         value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
         num_ctx: int | None = None,
         activity_update: Callable[[str, int | None], None] | None = None,
@@ -1762,6 +1763,7 @@ class LocalStructuredSession:
                 "schema_invalid",
                 "validated schema was not materialized",
             )
+        transport_schema = schema_copy if format_schema is None else format_schema
         base_input_tokens = _estimated_message_tokens(messages)
         worst_case_history_tokens = base_input_tokens + MAX_REPAIR_TURNS * (
             64 + self.max_output_chars + self.max_feedback_chars
@@ -1797,7 +1799,7 @@ class LocalStructuredSession:
             request = ChatRequest(
                 model=self.model,
                 messages=tuple(dict(message) for message in messages),
-                schema=schema_copy,
+                schema=transport_schema,
                 num_ctx=effective_num_ctx,
                 num_predict=self.num_predict,
                 keep_alive=self.keep_alive,
@@ -2050,9 +2052,24 @@ class LocalStructuredSession:
         schema: Mapping[str, Any],
         *,
         system: str | None = None,
+        format_schema: Mapping[str, Any] | None = None,
         value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
     ) -> LocalStructuredResult:
-        request_sha256 = structured_request_sha256(prompt, schema, system)
+        format_schema_copy: dict[str, Any] | None = None
+        format_schema_error = ""
+        if format_schema is not None:
+            try:
+                validate_schema_definition(format_schema)
+                format_schema_copy = json.loads(_canonical_json(format_schema))
+            except (SchemaDefinitionError, TypeError, ValueError) as exc:
+                format_schema_error = str(exc)
+        request_schema: object = schema
+        if format_schema is not None:
+            request_schema = {
+                "client_validation_schema": schema,
+                "transport_format_schema": format_schema,
+            }
+        request_sha256 = structured_request_sha256(prompt, request_schema, system)
         with self.audit_store.activity(
             request_sha256=request_sha256,
             role=self.role,
@@ -2060,10 +2077,13 @@ class LocalStructuredSession:
         ) as activity_update:
             run_kwargs = {
                 "system": system,
+                "format_schema": format_schema_copy,
                 "value_validator": value_validator,
                 "activity_update": activity_update,
             }
-            if not self._uses_default_transport:
+            if format_schema_error:
+                result = self._failure("schema_invalid", format_schema_error)
+            elif not self._uses_default_transport:
                 result = self._run_impl(prompt, schema, **run_kwargs)
             elif self.resource_managed:
                 if ollama.model_resource_lease_mode() != "exclusive":
