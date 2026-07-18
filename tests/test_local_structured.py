@@ -4,9 +4,10 @@ import hashlib
 import json
 import threading
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 import pytest
@@ -849,6 +850,39 @@ def test_default_transport_oversize_input_has_no_runner_side_effects(
     assert unload_calls == []
     assert chat_calls == []
     assert ollama.model_resource_lease_mode() is None
+
+
+def test_default_transport_maps_resource_lease_timeout_to_capacity_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def busy_lease(**_kwargs: object) -> Iterator[None]:
+        raise TimeoutError("busy")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ollama, "model_resource_lease", busy_lease)
+    monkeypatch.setattr(
+        ollama,
+        "plan_model_residency",
+        lambda *_args, **_kwargs: pytest.fail(
+            "busy resource must fail before residency planning"
+        ),
+    )
+
+    result = LocalStructuredSession(
+        model="local:test",
+        audit_root=tmp_path / "audit",
+        num_ctx=32_768,
+        num_predict=256,
+        max_input_chars=20_000,
+        max_output_chars=1_000,
+        max_feedback_chars=2_000,
+        resource_lease_timeout_ms=25,
+    ).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "capacity_unavailable"
+    assert result.failure_reason == "structured model resource is busy"
 
 
 def test_default_transport_holds_exclusive_lease_across_all_repair_turns(

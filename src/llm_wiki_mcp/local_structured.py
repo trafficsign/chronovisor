@@ -15,7 +15,7 @@ import math
 import os
 import re
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -600,6 +600,7 @@ def _default_transport_resource_broker(
     *,
     model: str,
     request: _StructuredResourceRequest,
+    lease_timeout_ms: int | None = None,
 ) -> Iterator[int]:
     """Exclusively admit one live runner for an entire repair session."""
 
@@ -608,7 +609,19 @@ def _default_transport_resource_broker(
             "capacity_unavailable",
             "standalone structured session cannot upgrade a shared model lease",
         )
-    with ollama.model_resource_lease(exclusive=True):
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(
+                ollama.model_resource_lease(
+                    exclusive=True,
+                    timeout_ms=lease_timeout_ms,
+                )
+            )
+        except TimeoutError as exc:
+            raise _StructuredResourceError(
+                "capacity_unavailable",
+                "structured model resource is busy",
+            ) from exc
         try:
             plan = ollama.plan_model_residency(
                 [model],
@@ -1630,6 +1643,7 @@ class LocalStructuredSession:
         resource_min_num_ctx: int | None = None,
         resource_max_num_ctx: int | None = None,
         resource_memory_reserve_gib: int | None = None,
+        resource_lease_timeout_ms: int | None = None,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model is required")
@@ -1651,6 +1665,12 @@ class LocalStructuredSession:
             raise ValueError("structured session limits must be positive integers")
         if not isinstance(resource_managed, bool):
             raise ValueError("resource_managed must be a boolean")
+        if resource_lease_timeout_ms is not None and (
+            isinstance(resource_lease_timeout_ms, bool)
+            or not isinstance(resource_lease_timeout_ms, int)
+            or resource_lease_timeout_ms < 0
+        ):
+            raise ValueError("resource_lease_timeout_ms must be a non-negative integer")
         if max_responses > MAX_RESPONSES:
             raise ValueError(
                 f"max_responses must not exceed the safety cap {MAX_RESPONSES}"
@@ -1691,6 +1711,7 @@ class LocalStructuredSession:
         self.resource_min_num_ctx = resource_min_num_ctx
         self.resource_max_num_ctx = resource_max_num_ctx
         self.resource_memory_reserve_gib = resource_memory_reserve_gib
+        self.resource_lease_timeout_ms = resource_lease_timeout_ms
 
     def _failure(
         self,
@@ -2135,6 +2156,7 @@ class LocalStructuredSession:
                             with _default_transport_resource_broker(
                                 model=self.model,
                                 request=resource_request,
+                                lease_timeout_ms=self.resource_lease_timeout_ms,
                             ) as admitted_num_ctx:
                                 result = self._run_impl(
                                     prompt,

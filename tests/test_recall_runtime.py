@@ -273,6 +273,35 @@ def test_judge_timeout_can_fall_back_when_fail_silent_disabled(monkeypatch) -> N
     assert "judge unavailable: ReadTimeout" in result.reasons
 
 
+def test_judge_resource_contention_uses_deterministic_evidence(monkeypatch) -> None:
+    from llm_wiki_mcp import recall_runtime
+
+    def busy_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
+        return None, [], "judge unavailable: capacity_unavailable"
+
+    monkeypatch.setattr(recall_runtime, "run_local_judge", busy_judge)
+    policy = RecallPolicy(
+        judge_mode="auto",
+        log_decisions=False,
+        fail_silent_on_judge_unavailable=True,
+    )
+    request = RecallRequest(
+        host="test",
+        event="UserPromptSubmit",
+        prompt="LLM Wiki の運用どうする?",
+        cwd="/tmp/llm-wiki-mcp",
+    )
+
+    result = recall_runtime.run_recall(request, policy, perform_search=False)
+
+    assert result.status == "ok"
+    assert result.decision == "search"
+    assert result.queries
+    assert "judge unavailable: capacity_unavailable" in result.reasons
+    assert "judge resource busy; using deterministic evidence" in result.reasons
+    assert "judge unavailable; fail-silent" not in result.reasons
+
+
 def test_judge_can_lower_search_zone_to_none(monkeypatch) -> None:
     from llm_wiki_mcp import recall_runtime
 

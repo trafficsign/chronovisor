@@ -1,5 +1,6 @@
 """Ollama API client for Ingest/Lint operations."""
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -57,23 +58,28 @@ class _ProcessResourceLock:
         self._writer_thread: int | None = None
         self._waiting_writers = 0
 
-    def acquire(self, *, exclusive: bool) -> None:
+    def acquire(self, *, exclusive: bool, timeout_s: float | None = None) -> bool:
         thread_id = threading.get_ident()
         with self._condition:
             if exclusive:
                 self._waiting_writers += 1
                 try:
-                    self._condition.wait_for(
-                        lambda: self._writer_thread is None and self._readers == 0
+                    acquired = self._condition.wait_for(
+                        lambda: self._writer_thread is None and self._readers == 0,
+                        timeout=timeout_s,
                     )
-                    self._writer_thread = thread_id
+                    if acquired:
+                        self._writer_thread = thread_id
+                    return acquired
                 finally:
                     self._waiting_writers -= 1
-                return
-            self._condition.wait_for(
-                lambda: self._writer_thread is None and self._waiting_writers == 0
+            acquired = self._condition.wait_for(
+                lambda: self._writer_thread is None and self._waiting_writers == 0,
+                timeout=timeout_s,
             )
-            self._readers += 1
+            if acquired:
+                self._readers += 1
+            return acquired
 
     def release(self, *, exclusive: bool) -> None:
         with self._condition:
@@ -222,8 +228,35 @@ def _raise_for_status_with_detail(response: httpx.Response) -> None:
         raise RuntimeError(f"Ollama HTTP {response.status_code}{suffix}") from exc
 
 
+def _acquire_file_lease(
+    handle: Any,
+    *,
+    exclusive: bool,
+    deadline_at: float | None,
+) -> None:
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    if deadline_at is None:
+        fcntl.flock(handle.fileno(), operation)
+        return
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), operation | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+        remaining_s = deadline_at - time.monotonic()
+        if remaining_s <= 0:
+            raise TimeoutError("Ollama resource lease acquisition timed out")
+        time.sleep(min(0.005, remaining_s))
+
+
 @contextmanager
-def model_resource_lease(*, exclusive: bool) -> Iterator[None]:
+def model_resource_lease(
+    *,
+    exclusive: bool,
+    timeout_ms: int | None = None,
+) -> Iterator[None]:
     """Coordinate inference and runner eviction across threads and processes.
 
     A thread holding an exclusive lease may safely enter shared or exclusive
@@ -231,6 +264,12 @@ def model_resource_lease(*, exclusive: bool) -> Iterator[None]:
     is rejected instead of risking an upgrade deadlock.
     """
 
+    if timeout_ms is not None and (
+        isinstance(timeout_ms, bool)
+        or not isinstance(timeout_ms, int)
+        or timeout_ms < 0
+    ):
+        raise ValueError("timeout_ms must be a non-negative integer")
     depth = int(getattr(_RESOURCE_LEASE_STATE, "depth", 0))
     if depth > 0:
         held_exclusive = bool(getattr(_RESOURCE_LEASE_STATE, "exclusive", False))
@@ -251,12 +290,21 @@ def model_resource_lease(*, exclusive: bool) -> Iterator[None]:
         )
     )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    _PROCESS_RESOURCE_LOCK.acquire(exclusive=exclusive)
+    deadline_at = None if timeout_ms is None else time.monotonic() + (timeout_ms / 1000)
+    acquired_process_lease = _PROCESS_RESOURCE_LOCK.acquire(
+        exclusive=exclusive,
+        timeout_s=(
+            None if deadline_at is None else max(0.0, deadline_at - time.monotonic())
+        ),
+    )
+    if not acquired_process_lease:
+        raise TimeoutError("Ollama resource lease acquisition timed out")
     try:
         with lock_path.open("a+") as handle:
-            fcntl.flock(
-                handle.fileno(),
-                fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+            _acquire_file_lease(
+                handle,
+                exclusive=exclusive,
+                deadline_at=deadline_at,
             )
             _RESOURCE_LEASE_STATE.depth = 1
             _RESOURCE_LEASE_STATE.exclusive = exclusive

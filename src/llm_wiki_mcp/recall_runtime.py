@@ -739,6 +739,7 @@ def run_local_judge(
             max_output_chars=384,
             max_feedback_chars=512,
             max_responses=1,
+            resource_lease_timeout_ms=25,
         ).run(
             json.dumps(prompt, ensure_ascii=False),
             schema,
@@ -879,6 +880,7 @@ def run_query_rewriter(
             max_output_chars=384,
             max_feedback_chars=512,
             max_responses=1,
+            resource_lease_timeout_ms=25,
         ).run(json.dumps(prompt, ensure_ascii=False), schema)
         if not result.ok:
             return (
@@ -1903,7 +1905,10 @@ def _run_recall_impl(
                 reasons.append("judge: " + judge_reason)
         elif judge_reason:
             reasons.append(judge_reason)
-            if policy.fail_silent_on_judge_unavailable:
+            resource_busy = "capacity_unavailable" in judge_reason
+            if resource_busy:
+                reasons.append("judge resource busy; using deterministic evidence")
+            if policy.fail_silent_on_judge_unavailable and not resource_busy:
                 reasons.append("judge unavailable; fail-silent")
                 result = RecallResult(
                     status="skipped",

@@ -537,9 +537,7 @@ def test_embed_uses_remaining_recall_timeout(monkeypatch) -> None:
     client = _PostClient()
     monkeypatch.setattr(ollama, "_client", lambda: client)
 
-    assert ollama.embed(
-        ["hello"], model="bge-m3", read_timeout_ms=750
-    ) == [[1.0, 2.0]]
+    assert ollama.embed(["hello"], model="bge-m3", read_timeout_ms=750) == [[1.0, 2.0]]
 
     assert isinstance(client.timeout, httpx.Timeout)
     assert client.timeout.read == 0.75
@@ -647,6 +645,51 @@ with ollama.model_resource_lease(exclusive=False):
     stdout, stderr = process.communicate(timeout=5)
     assert process.returncode == 0, (stdout, stderr)
     assert acquired_path.exists()
+
+
+def test_resource_lease_timeout_does_not_wait_for_another_process(
+    tmp_path, monkeypatch
+) -> None:
+    lock_path = tmp_path / "resource.lock"
+    ready_path = tmp_path / "ready"
+    timed_out_path = tmp_path / "timed-out"
+    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(lock_path))
+    env = os.environ.copy()
+    env.update(
+        {
+            "LEASE_READY_PATH": str(ready_path),
+            "LEASE_TIMED_OUT_PATH": str(timed_out_path),
+        }
+    )
+    script = """
+import os
+from pathlib import Path
+from llm_wiki_mcp import ollama
+
+Path(os.environ["LEASE_READY_PATH"]).write_text("ready", encoding="utf-8")
+try:
+    with ollama.model_resource_lease(exclusive=True, timeout_ms=25):
+        raise AssertionError("contended lease must not be acquired")
+except TimeoutError:
+    Path(os.environ["LEASE_TIMED_OUT_PATH"]).write_text("timeout", encoding="utf-8")
+"""
+
+    with ollama.model_resource_lease(exclusive=True):
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 5
+        while not ready_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_path.exists()
+        stdout, stderr = process.communicate(timeout=5)
+
+    assert process.returncode == 0, (stdout, stderr)
+    assert timed_out_path.exists()
 
 
 def test_public_heavy_operations_take_expected_resource_lease(monkeypatch) -> None:
