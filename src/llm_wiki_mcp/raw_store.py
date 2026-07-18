@@ -90,6 +90,9 @@ class RawStore:
     def __init__(self, raw_dir: Path, *, mode: RawLayoutMode | str | None = None):
         self.raw_dir = raw_dir.expanduser().resolve(strict=False)
         self.mode = raw_layout_mode(mode, wiki_root=self.raw_dir.parent)
+        self._units_cache: tuple[RawUnit, ...] | None = None
+        self._units_by_id: dict[str, RawUnit] | None = None
+        self._segment_units_cache: tuple[RawUnit, ...] | None = None
 
     def _legacy_units(self) -> Iterator[RawUnit]:
         candidates = list(self.raw_dir.glob("*.md"))
@@ -175,40 +178,51 @@ class RawStore:
                 )
 
     def iter_units(self) -> Iterator[RawUnit]:
-        legacy = tuple(self._legacy_archive_units()) + tuple(self._legacy_units())
-        # A crash after publishing a sealed manifest but before deleting its
-        # open files may expose both copies.  The sealed manifest is the newer
-        # durable evidence, so load open first and sealed second.
-        segments = tuple(self._open_units()) + tuple(self._sealed_units())
-        ordered = (
-            segments + legacy
-            if self.mode in {"legacy", "shadow"}
-            else legacy + segments
-        )
-        selected: dict[str, RawUnit] = {}
-        for unit in ordered:
-            previous = selected.get(unit.raw_id)
-            if (
-                previous is not None
-                and previous.storage == unit.storage
-                and previous.path != unit.path
-            ):
-                raise RawSegmentCorrupt(f"duplicate physical Raw ID: {unit.raw_id}")
-            selected[unit.raw_id] = unit
-        yield from (selected[raw_id] for raw_id in sorted(selected))
+        if self._units_cache is None:
+            legacy = tuple(self._legacy_archive_units()) + tuple(self._legacy_units())
+            # A crash after publishing a sealed manifest but before deleting
+            # its open files may expose both copies. The sealed manifest is
+            # the newer durable evidence, so load open first and sealed second.
+            segments = tuple(self._open_units()) + tuple(self._sealed_units())
+            ordered = (
+                segments + legacy
+                if self.mode in {"legacy", "shadow"}
+                else legacy + segments
+            )
+            selected: dict[str, RawUnit] = {}
+            for unit in ordered:
+                previous = selected.get(unit.raw_id)
+                if (
+                    previous is not None
+                    and previous.storage == unit.storage
+                    and previous.path != unit.path
+                ):
+                    raise RawSegmentCorrupt(
+                        f"duplicate physical Raw ID: {unit.raw_id}"
+                    )
+                selected[unit.raw_id] = unit
+            self._units_by_id = selected
+            self._units_cache = tuple(selected[raw_id] for raw_id in sorted(selected))
+        yield from self._units_cache
 
     def iter_segment_units(self) -> Iterator[RawUnit]:
         """List v2 logical units without touching the legacy flat directory."""
 
-        selected: dict[str, RawUnit] = {}
-        for unit in tuple(self._open_units()) + tuple(self._sealed_units()):
-            selected[unit.raw_id] = unit
-        yield from (selected[raw_id] for raw_id in sorted(selected))
+        if self._segment_units_cache is None:
+            selected: dict[str, RawUnit] = {}
+            for unit in tuple(self._open_units()) + tuple(self._sealed_units()):
+                selected[unit.raw_id] = unit
+            self._segment_units_cache = tuple(
+                selected[raw_id] for raw_id in sorted(selected)
+            )
+        yield from self._segment_units_cache
 
     def resolve(self, raw_id: str) -> RawUnit | None:
         if Path(raw_id).name != raw_id or not raw_id:
             raise ValueError("raw_id must be a basename")
-        return next((unit for unit in self.iter_units() if unit.raw_id == raw_id), None)
+        if self._units_by_id is None:
+            tuple(self.iter_units())
+        return self._units_by_id.get(raw_id) if self._units_by_id is not None else None
 
     def list_all(self) -> tuple[RawUnit, ...]:
         return tuple(self.iter_units())

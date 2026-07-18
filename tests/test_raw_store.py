@@ -119,6 +119,30 @@ def test_layout_mode_uses_wiki_config_with_environment_override(
     assert RawStore(tmp_path / "raw").mode == "v2"
 
 
+def test_repeated_resolve_builds_one_immutable_store_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "first.md").write_text("first")
+    (raw_dir / "second.md").write_text("second")
+    store = RawStore(raw_dir)
+    original = store._legacy_units
+    scans = 0
+
+    def counted_units():
+        nonlocal scans
+        scans += 1
+        yield from original()
+
+    monkeypatch.setattr(store, "_legacy_units", counted_units)
+
+    assert store.resolve("first.md") is not None
+    assert store.resolve("second.md") is not None
+    assert store.resolve("missing.md") is None
+    assert scans == 1
+
+
 def test_materialized_reference_projects_native_transcript_without_copying_it(
     tmp_path: Path,
 ) -> None:
