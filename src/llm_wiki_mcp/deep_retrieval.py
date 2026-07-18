@@ -6,6 +6,7 @@ import json
 import re
 import tempfile
 import threading
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -236,6 +237,107 @@ def run_deep_dive(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "iterations": iterations,
         "pages": list(collected_pages.values()),
+    }
+
+
+def run_deep_dive_v2(
+    query: str,
+    *,
+    max_iterations: int = 3,
+    fanout: int = 5,
+    semantic: bool = True,
+    use_llm: bool = True,
+    config: Any = None,
+) -> dict[str, Any]:
+    """Run the shared research kernel with Wiki-only authority."""
+
+    from llm_wiki_mcp.research_config import load_research_config
+    from llm_wiki_mcp.research_orchestrator import (
+        DeterministicPlanner,
+        LocalPlanner,
+        run_research,
+    )
+    from llm_wiki_mcp.research_store import ResearchStore
+    from llm_wiki_mcp.research_types import ActionType
+
+    selected = config or load_research_config()
+    selected = replace(
+        selected,
+        budgets=replace(
+            selected.budgets,
+            max_iterations=max(1, min(5, int(max_iterations))),
+        ),
+    )
+    planner = LocalPlanner(selected.planner_model) if use_llm else DeterministicPlanner()
+    store = ResearchStore()
+    summary = run_research(
+        query,
+        config=selected,
+        planner=planner,
+        purpose="explicit",
+        store=store,
+        allowed_actions=frozenset(
+            {
+                ActionType.WIKI_SEARCH,
+                ActionType.WIKI_READ,
+                ActionType.WIKI_NEIGHBORS,
+                ActionType.VERIFIED_CLAIMS,
+                ActionType.FINISH,
+            }
+        ),
+    )
+    events = store.events(str(summary["research_run_id"]))
+    actions = {
+        (int(row.get("epoch") or 0), int(row.get("iteration") or 0)): row
+        for row in events
+        if row.get("kind") == "action"
+    }
+    iterations: list[dict[str, Any]] = []
+    pages: dict[str, dict[str, Any]] = {}
+    for row in events:
+        if row.get("kind") != "observation":
+            continue
+        key = (int(row.get("epoch") or 0), int(row.get("iteration") or 0))
+        action_row = actions.get(key, {})
+        action = action_row.get("action") if isinstance(action_row.get("action"), dict) else {}
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        action_type = str(action.get("type") or "")
+        iteration = {
+            "iteration": key[1],
+            "action": action_type,
+            "arguments": action.get("arguments") or {},
+            "status": row.get("status"),
+            "artifact_id": row.get("artifact_id") or "",
+            "latency_ms": row.get("latency_ms") or 0,
+        }
+        if action_type == "wiki_search":
+            iteration["query"] = str((action.get("arguments") or {}).get("query") or "")
+            iteration["search_mode"] = metadata.get("search_mode")
+            iteration["direct_hits"] = metadata.get("results") or []
+        elif action_type == "wiki_read":
+            page_id = str(metadata.get("page_id") or "")
+            if page_id:
+                pages[page_id] = {
+                    "page_id": page_id,
+                    "title": metadata.get("title") or page_id,
+                    "updated": metadata.get("updated") or "unknown",
+                    "snippet": str(metadata.get("body") or "")[:1200],
+                    "outlinks": metadata.get("outlinks") or [],
+                    "backlinks": metadata.get("backlinks") or [],
+                }
+        iterations.append(iteration)
+    return {
+        "status": summary["status"],
+        "engine": "v2",
+        "query": query,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "research_run_id": summary["research_run_id"],
+        "stop_reason": summary["stop_reason"],
+        "iterations": iterations,
+        "pages": list(pages.values()),
+        "budget": summary["usage"],
+        "authority": "wiki_only",
+        "requested": {"fanout": fanout, "semantic": semantic},
     }
 
 

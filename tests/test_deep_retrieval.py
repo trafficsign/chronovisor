@@ -6,6 +6,8 @@ import time
 from llm_wiki_mcp import deep_retrieval, server
 from llm_wiki_mcp.jobs import JobStatus, job_store
 from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+from llm_wiki_mcp.research_config import ResearchConfig
+from llm_wiki_mcp.research_store import ResearchStore
 from llm_wiki_mcp.search import ScoredPage
 
 
@@ -103,9 +105,50 @@ def test_wiki_deep_dive_sync_returns_payload(monkeypatch) -> None:
     )
 
     tool_fn = server.wiki_deep_dive.fn if hasattr(server.wiki_deep_dive, "fn") else server.wiki_deep_dive
-    payload = json.loads(tool_fn("q", background=False))
+    payload = json.loads(tool_fn("q", background=False, engine="v1"))
 
     assert payload == {"status": "completed", "query": "q", "iterations": []}
+
+
+def test_v2_deep_dive_uses_bounded_wiki_only_kernel(tmp_path, monkeypatch) -> None:
+    from llm_wiki_mcp import research_orchestrator, research_scheduler, research_store
+
+    scheduler_root = tmp_path / "scheduler"
+    monkeypatch.setattr(research_scheduler, "SYNC_DIR", scheduler_root / "sync")
+    monkeypatch.setattr(research_scheduler, "RESEARCH_LOCK", scheduler_root / "lock")
+    monkeypatch.setattr(research_scheduler, "ACTIVE_FILE", scheduler_root / "active.json")
+    monkeypatch.setattr(research_scheduler, "SCHEDULER_LOG", scheduler_root / "log.jsonl")
+    store = ResearchStore(tmp_path / "store")
+    monkeypatch.setattr(research_store, "ResearchStore", lambda: store)
+
+    def tool(action, _context):
+        if action.type.value == "wiki_search":
+            return {
+                "query": "q",
+                "search_mode": "bm25",
+                "results": [{"page_id": "target", "title": "Target", "score": 1.0}],
+            }
+        return {
+            "page_id": "target",
+            "title": "Target",
+            "updated": "2026-07-18",
+            "body": "target evidence",
+            "outlinks": [],
+            "backlinks": [],
+        }
+
+    monkeypatch.setattr(research_orchestrator, "execute_tool", tool)
+    result = deep_retrieval.run_deep_dive_v2(
+        "q",
+        max_iterations=3,
+        use_llm=False,
+        config=ResearchConfig(enabled=True, mode="trace"),
+    )
+
+    assert result["engine"] == "v2"
+    assert result["authority"] == "wiki_only"
+    assert result["stop_reason"] == "completed"
+    assert result["pages"][0]["page_id"] == "target"
 
 
 def _router_config() -> DecisionRouterConfig:

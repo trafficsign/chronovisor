@@ -222,6 +222,7 @@ def run_research(
     run_id: str | None = None,
     store: ResearchStore | None = None,
     web_provider: Any = None,
+    allowed_actions: set[ActionType] | frozenset[ActionType] | None = None,
 ) -> dict[str, Any]:
     config = config or load_research_config()
     store = store or ResearchStore()
@@ -337,6 +338,20 @@ def run_research(
                     )
                     break
                 action = parsed.action
+                if allowed_actions is not None and action.type not in allowed_actions:
+                    stop_reason = StopReason.TOOL_ERROR
+                    store.append_event(
+                        run_id,
+                        {
+                            "kind": "action_rejected",
+                            "epoch": state.epoch,
+                            "iteration": iteration,
+                            "action": action.to_dict(),
+                            "error": "action is outside this research authority",
+                            "terminal": True,
+                        },
+                    )
+                    break
                 key = action.canonical_key()
                 if key in state.seen_actions:
                     stop_reason = StopReason.DUPLICATE_ACTION

@@ -1072,6 +1072,7 @@ def wiki_deep_dive(
     semantic: bool = True,
     use_llm: bool = True,
     background: bool = True,
+    engine: str = "v2",
 ) -> str:
     """Run agentic search -> read -> wikilink -> requery retrieval.
 
@@ -1085,7 +1086,11 @@ def wiki_deep_dive(
         background: When True, return a job_id immediately and inspect with
             wiki.jobs(job_id). When False, run synchronously and return result.
     """
-    from llm_wiki_mcp.deep_retrieval import run_deep_dive, start_deep_dive
+    from llm_wiki_mcp.deep_retrieval import (
+        run_deep_dive,
+        run_deep_dive_v2,
+        start_deep_dive,
+    )
 
     if background:
         job_id = start_deep_dive(
@@ -1105,7 +1110,8 @@ def wiki_deep_dive(
             ensure_ascii=False,
         )
 
-    result = run_deep_dive(
+    runner = run_deep_dive_v2 if engine == "v2" else run_deep_dive
+    result = runner(
         query,
         max_iterations=max_iterations,
         fanout=fanout,
