@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from llm_wiki_mcp import research_orchestrator, research_scheduler
-from llm_wiki_mcp.research_config import ResearchConfig
+from llm_wiki_mcp.research_config import CompactionConfig, ResearchConfig
 from llm_wiki_mcp.research_orchestrator import DeterministicPlanner, PlannerResponse
 from llm_wiki_mcp.research_store import ResearchStore
 
@@ -98,3 +98,45 @@ def test_restart_terminalizes_orphan_action_and_advances_epoch(tmp_path, monkeyp
     assert result["stop_reason"] == "completed"
     assert any(row.get("status") == "orphan_terminalized" for row in events)
     assert any(row.get("kind") == "action" and row.get("epoch") == 1 for row in events)
+
+
+def test_large_observation_is_externalized_and_checkpoint_receipted(
+    tmp_path, monkeypatch
+) -> None:
+    _isolate_scheduler(tmp_path, monkeypatch)
+    store = ResearchStore(tmp_path / "store")
+    store.checkpoints = tmp_path / "checkpoints"
+    monkeypatch.setattr(
+        research_orchestrator,
+        "execute_tool",
+        lambda action, _context: {"results": [{"page_id": "x", "blob": "z" * 5000}]}
+        if action.type.value == "wiki_search"
+        else {},
+    )
+    config = ResearchConfig(
+        enabled=True,
+        mode="trace",
+        compaction=CompactionConfig(
+            enabled=True,
+            checkpoint_enabled=True,
+            checkpoint_ttl_seconds=60,
+            checkpoint_max_total_bytes=1_000_000,
+            gc_on_durable_receipt=True,
+        ),
+    )
+
+    result = research_orchestrator.run_research(
+        "goal", config=config, planner=DeterministicPlanner(), store=store
+    )
+    observations = [
+        row for row in store.events(result["research_run_id"])
+        if row.get("kind") == "observation"
+    ]
+    import json
+
+    checkpoint = json.loads(next(store.checkpoints.glob("*.json")).read_text())
+
+    assert observations[0]["artifact_id"].startswith("sha256:")
+    assert store.read_artifact(observations[0]["artifact_id"])
+    assert checkpoint["active"] is False
+    assert checkpoint["durable_receipt"] is True

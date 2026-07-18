@@ -235,6 +235,24 @@ def run_research(
     answer = ""
     events = _resume_orphans(store, state)
     tool_context = ToolContext(config=config, store=store, web_provider=web_provider)
+    checkpoint_path = None
+
+    def write_working_checkpoint() -> None:
+        nonlocal checkpoint_path
+        if not config.compaction.checkpoint_enabled:
+            return
+        checkpoint_path = store.checkpoint(
+            run_id,
+            {
+                "goal": state.goal,
+                "epoch": state.epoch,
+                "iteration": state.iterations,
+                "usage": state.usage.to_dict(),
+                "context": compact_event_context(events)["events"],
+            },
+            active=True,
+            durable_receipt=False,
+        )
 
     prefetch_queue: Queue[dict[str, Any]] = Queue(maxsize=1)
 
@@ -262,6 +280,7 @@ def run_research(
                 {"kind": "stop", "stop_reason": stop_reason.value, "reason": lease.admission.reason},
             )
         else:
+            write_working_checkpoint()
             prefetch_thread = threading.Thread(target=prefetch, daemon=True)
             prefetch_thread.start()
             store.append_event(
@@ -405,6 +424,7 @@ def run_research(
                         },
                     )
                     events.append(observation_event)
+                    write_working_checkpoint()
                     stop_reason = StopReason.COMPLETED
                     break
                 tool_started = time.monotonic()
@@ -455,6 +475,7 @@ def run_research(
                     },
                 )
                 events.append(observation_event)
+                write_working_checkpoint()
                 if stop_reason == StopReason.BUDGET_EXHAUSTED:
                     break
             else:
@@ -489,11 +510,11 @@ def run_research(
         "purpose": purpose,
     }
     store.write_summary(run_id, summary)
-    if config.compaction.checkpoint_enabled:
-        store.checkpoint(
-            run_id,
-            {"summary": summary, "events": compact_event_context(store.events(run_id))["events"]},
-            active=False,
-            durable_receipt=True,
-        )
+    if checkpoint_path is not None:
+        store.mark_checkpoint_receipt(checkpoint_path)
+        if config.compaction.gc_on_durable_receipt:
+            store.gc_checkpoints(
+                ttl_seconds=config.compaction.checkpoint_ttl_seconds,
+                max_total_bytes=config.compaction.checkpoint_max_total_bytes,
+            )
     return summary
