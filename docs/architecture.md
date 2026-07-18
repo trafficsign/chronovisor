@@ -49,7 +49,13 @@ Exceptional system repair
 
 `~/.wiki` is the source of memory truth.
 
-- `raw/`: append-only session captures.
+- `raw/`: immutable Raw archive. Legacy flat Markdown remains readable during
+  rollout. Native transcript capture is stored directly under
+  `YYYY/MM/DD/<host>-<session-key>-part-NNN.jsonl.open`; a fsynced adjacent
+  commit journal maps each stable `save-...md` logical Raw ID to an exact byte
+  range. Sealed parts use `.jsonl.zst` plus a full-restore-verified manifest.
+  There is deliberately no `hot/` or `archive/` tier: date is the physical
+  grouping and the suffix/manifest is lifecycle state.
 - `pages/`: structured pages created by ingest/lint workflows.
 - `system/`: privileged pages such as profile, current state, and lessons.
 - `recall/`: recall decisions, feedback, query hints, and auto-apply logs.
@@ -62,6 +68,10 @@ Exceptional system repair
 - `recall/content-feedback.jsonl`: immutable audit records for applied content corrections.
 - `recall/calibration.json`: validated evidence-gate weights.
 - `runtime/`: status, events, and metrics for observability.
+- `runtime/raw-projections/parents/`: small deterministic logical references
+  used by Path-oriented queues. They contain stable Raw IDs, hashes, and commit
+  evidence, not a physical locator or second transcript copy. Semantic projection resolves and verifies the
+  authoritative Raw bytes before use.
 - `runtime/ingest-liveness.json`: Ollama readiness, pending Raw count,
   outage duration, and recovery transition for the persistent drain worker.
 - `runtime/provisional-recall/`: a capped, citation-only search namespace for
@@ -89,8 +99,18 @@ Exceptional system repair
   keeps only the cheap BM25 path active. Injected material is data, not an
   instruction channel.
 - **Save harness**: host-specific transcript parser plus a deterministic,
-  lossless delta writer. It uses durable cursors/receipts, chunks oversized
-  deltas, and performs no LLM inference.
+  lossless delta writer. `legacy` keeps the Markdown writer, `shadow` keeps it
+  authoritative while mirroring exact source lines, and `v2` appends original
+  newline-terminated JSONL line bytes without parse/re-serialization drift.
+  Data fsync precedes commit-journal fsync and receipt read-back; only then may
+  the cursor advance. A single oversized source record remains one committed
+  range in v2. The save path performs no compression or LLM inference.
+- **Raw archiver**: a bounded local maintenance lane, independent of Ollama.
+  It seals only pre-today open segments, verifies a streamed full restore and
+  every logical range digest, atomically publishes the manifest, and only then
+  removes the open data/journal. Existing processed flat Raw can separately be
+  shadow-packed as byte-exact `legacy-part-NNN.tar.zst`; unprocessed, held,
+  quarantined, and current-day files are excluded.
 - **Local structured session**: sends a schema-constrained Ollama chat request.
   If validation fails, it returns the exact schema errors to the same chat and
   allows at most two repair turns. Input, output, feedback, timeout, and context

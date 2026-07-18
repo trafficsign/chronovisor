@@ -75,8 +75,12 @@ def _tokens(text: str, *, limit: int = 12) -> list[str]:
 
 def expected_terms_from_raw(path: Path, *, limit: int = 10) -> list[str]:
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+        from llm_wiki_mcp.raw_store import RawStore
+
+        store = RawStore(WIKI_ROOT / "raw")
+        unit = store.resolve_reference(path) or store.resolve(path.name)
+        text = store.read_text(unit) if unit is not None else path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
         return _tokens(path.stem, limit=limit)
     try:
         meta, body = parse_frontmatter(text)
@@ -158,12 +162,22 @@ def evaluate_raw(path: Path, *, claimed: set[str] | None = None) -> dict[str, An
     top_score = max((float(item.get("score") or 0.0) for item in evidence), default=0.0)
     search_present = top_score >= SEARCH_PASS_THRESHOLD
     status = "pass" if search_present else "miss"
+    from llm_wiki_mcp.raw_store import RawStore
+
+    store = RawStore(WIKI_ROOT / "raw")
+    unit = store.resolve_reference(path) or store.resolve(path.name)
+    logical_bytes = unit.length if unit is not None else path.stat().st_size
+    logical_date = (
+        unit.captured_at[:10].replace("-", "")
+        if unit is not None and unit.captured_at
+        else raw_date(path)
+    )
     return {
         "raw": path.name,
         "path": str(path),
-        "date": raw_date(path),
+        "date": logical_date,
         "host": raw_host(path),
-        "bytes": path.stat().st_size,
+        "bytes": logical_bytes,
         "terms": terms,
         "query": query,
         "claim_present": claim_present,

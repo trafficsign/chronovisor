@@ -293,13 +293,44 @@ def raw_date(path: Path) -> str:
 
 
 def select_raws(*, since: str = "", limit: int = 0) -> list[Path]:
-    candidates = sorted(
-        (path for path in RAW_DIR.glob("*.md") if not is_raw_retracted(path)),
-        key=lambda path: (raw_date(path), path.name),
-    )
+    from llm_wiki_mcp.raw_store import RawStore
+
+    store = RawStore(RAW_DIR)
+    reference_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
+    candidates_with_dates: list[tuple[str, Path]] = []
+    for unit in store.iter_units():
+        try:
+            text = store.read_text(unit)
+        except (OSError, UnicodeError):
+            continue
+        meta, _body = parse_frontmatter(text)
+        status = meta.get("raw_status")
+        if isinstance(status, str) and status.strip().casefold() == "retracted":
+            continue
+        path = (
+            unit.path
+            if unit.storage == "legacy_file"
+            else store.materialize_ingest(unit, reference_dir)
+        )
+        if unit.captured_at:
+            date_key = unit.captured_at[:10].replace("-", "")
+        else:
+            match = RAW_DATE_RE.search(unit.raw_id)
+            date_key = (
+                match.group(1)
+                if match
+                else datetime.fromtimestamp(unit.path.stat().st_mtime).strftime(
+                    "%Y%m%d"
+                )
+            )
+        candidates_with_dates.append((date_key, path))
+    candidates_with_dates.sort(key=lambda row: (row[0], row[1].name))
+    candidates = [path for _date, path in candidates_with_dates]
     if since:
         normalized = since.replace("-", "")
-        candidates = [path for path in candidates if raw_date(path) >= normalized]
+        candidates = [
+            path for date_key, path in candidates_with_dates if date_key >= normalized
+        ]
     if limit:
         candidates = candidates[:limit]
     return candidates
@@ -435,7 +466,104 @@ def _resolve_raw_path(raw_name: str, preferred: object = None) -> Path | None:
     for path in candidates:
         if path.is_file():
             return path
+    from llm_wiki_mcp.raw_store import RawStore
+
+    store = RawStore(RAW_DIR)
+    unit = store.resolve(raw_name)
+    if unit is not None:
+        return store.materialize_ingest(
+            unit,
+            RAW_DIR.parent / "runtime" / "raw-projections" / "parents",
+        )
     return None
+
+
+def _logical_raw_bytes(raw_name: str, path: Path) -> bytes:
+    """Read the immutable logical Raw behind a flat file or reference."""
+
+    from llm_wiki_mcp.raw_store import RawStore
+
+    store = RawStore(RAW_DIR)
+    referenced = store.resolve_reference(path)
+    if referenced is not None:
+        return store.read_bytes(referenced)
+    if path.is_file() and path.parent in {
+        RAW_DIR,
+        QUARANTINED_RAW_DIR,
+        RAW_DIR / ".dead-letter",
+    }:
+        return path.read_bytes()
+    unit = store.resolve(raw_name)
+    return store.read_bytes(unit) if unit is not None else path.read_bytes()
+
+
+def _replay_ingest_content(
+    raw_name: str, path: Path
+) -> tuple[str | None, dict[str, Any]]:
+    """Return semantic replay input without exposing a v2 transport trace.
+
+    Legacy Raw files already contain the historical ingest envelope and remain
+    byte-for-byte passthrough inputs.  A source-native v2 Raw is first projected
+    through the same deterministic adapter used by the ordinary orchestrator.
+    The verified child envelopes are then bundled into one replay operation so
+    the replay lifecycle keeps its existing one-job/one-completion contract.
+    """
+
+    from llm_wiki_mcp.raw_semantic_projection import project_native_transcript
+    from llm_wiki_mcp.raw_store import RawStore
+    from llm_wiki_mcp.runtime_config import load_ingest_config
+
+    store = RawStore(RAW_DIR)
+    unit = store.resolve_reference(path) or store.resolve(raw_name)
+    if unit is None or unit.commit is None:
+        value = _logical_raw_bytes(raw_name, path)
+        return value.decode("utf-8"), {"kind": "legacy_passthrough"}
+
+    raw_bytes = store.read_bytes(unit)
+    projection = project_native_transcript(
+        path,
+        raw_bytes,
+        unit.commit,
+        output_dir=WIKI_ROOT / "runtime" / "raw-projections" / "artifacts",
+        max_child_bytes=load_ingest_config().semantic_projection_max_child_bytes,
+    )
+    summary: dict[str, Any] = {
+        "kind": projection.kind,
+        "projection_sha256": projection.projection_sha256,
+        "manifest_path": (
+            str(projection.manifest_path)
+            if projection.manifest_path is not None
+            else None
+        ),
+        "child_count": projection.child_count,
+    }
+    if projection.kind == "noop":
+        return None, summary
+    children = [
+        json.loads(child.read_text(encoding="utf-8"))
+        for child in projection.child_paths
+    ]
+    bundle = {
+        "schema": "llm-wiki.raw-replay-semantic-bundle.v1",
+        "kind": "raw_replay_semantic_bundle",
+        "source_raw": raw_name,
+        "projection_sha256": projection.projection_sha256,
+        "children": children,
+    }
+    return (
+        json.dumps(bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        summary,
+    )
+
+
+def _logical_raw_date(raw_name: str, path: Path) -> str:
+    from llm_wiki_mcp.raw_store import RawStore
+
+    store = RawStore(RAW_DIR)
+    unit = store.resolve_reference(path) or store.resolve(raw_name)
+    if unit is not None and unit.captured_at:
+        return unit.captured_at[:10].replace("-", "")
+    return raw_date(path)
 
 
 def _candidate(
@@ -448,14 +576,16 @@ def _candidate(
     if is_raw_retracted(path):
         return None
     raw = path.name
+    value = _logical_raw_bytes(raw, path)
     return {
         "schema_version": SCHEMA_VERSION,
         "key": stable_key(raw),
         "type": "raw_replay_candidate",
         "raw": raw,
         "path": str(path),
-        "date": raw_date(path),
-        "bytes": path.stat().st_size,
+        "date": _logical_raw_date(raw, path),
+        "bytes": len(value),
+        "raw_sha256": hashlib.sha256(value).hexdigest(),
         "priority": SOURCE_PRIORITY[source],
         "sources": [source],
         "reasons": [reason] if reason else [],
@@ -523,8 +653,10 @@ def _normalize_queue_row(
         else _nonnegative_int(row.get("priority"))
     )
     if path is not None:
-        normalized["bytes"] = path.stat().st_size
-        normalized["date"] = raw_date(path)
+        value = _logical_raw_bytes(raw, path)
+        normalized["bytes"] = len(value)
+        normalized["raw_sha256"] = hashlib.sha256(value).hexdigest()
+        normalized["date"] = _logical_raw_date(raw, path)
     else:
         normalized["bytes"] = _nonnegative_int(row.get("bytes"))
         normalized["date"] = str(row.get("date") or "")
@@ -1033,7 +1165,8 @@ def _raw_hash_still_matches(row: dict[str, Any]) -> bool:
     if path is None:
         return False
     try:
-        return _sha256_path(path) == expected
+        value = _logical_raw_bytes(_raw_name(row), path)
+        return hashlib.sha256(value).hexdigest() == expected
     except OSError:
         return False
 
@@ -1240,7 +1373,7 @@ def _raw_replay_review_evidence(
 ) -> dict[str, Any]:
     raw_path = _resolve_raw_path(str(row.get("raw") or ""), row.get("path"))
     try:
-        raw_payload = raw_path.read_bytes() if raw_path else b""
+        raw_payload = _logical_raw_bytes(_raw_name(row), raw_path) if raw_path else b""
         raw_excerpt = raw_payload.decode("utf-8")[:4000] if raw_path else ""
         current_raw_sha256 = (
             hashlib.sha256(raw_payload).hexdigest() if raw_path else None
@@ -2243,10 +2376,15 @@ def _publish_semantic_no_quorum_defer(
     ):
         return None
     try:
-        if _sha256_path(path) != expected_raw_sha256:
+        if (
+            hashlib.sha256(_logical_raw_bytes(_raw_name(row), path)).hexdigest()
+            != expected_raw_sha256
+        ):
             return None
         source_text = (
-            raw_text if raw_text is not None else path.read_text(encoding="utf-8")
+            raw_text
+            if raw_text is not None
+            else _logical_raw_bytes(_raw_name(row), path).decode("utf-8")
         )
     except (OSError, UnicodeDecodeError):
         return None
@@ -2302,7 +2440,10 @@ def _preview_semantic_no_quorum_defer(
     ):
         return None
     try:
-        if _sha256_path(path) != expected_raw_sha256:
+        if (
+            hashlib.sha256(_logical_raw_bytes(_raw_name(row), path)).hexdigest()
+            != expected_raw_sha256
+        ):
             return None
     except OSError:
         return None
@@ -2868,6 +3009,7 @@ def _run_candidate(
     failure_reset_error: str | None = None
     semantic_defer: dict[str, Any] | None = None
     content: str | None = None
+    projection_summary: dict[str, Any] | None = None
     if _raw_name(row) in _active_terminal_semantic_deferred_raw_names():
         return _operational_deferred_candidate_result(
             row,
@@ -2882,7 +3024,7 @@ def _run_candidate(
         error = f"raw file not found: {raw}"
     else:
         try:
-            content = path.read_text(encoding="utf-8")
+            content, projection_summary = _replay_ingest_content(raw, path)
             if not active_job_id:
                 job = job_store.create(processor="ollama")
                 active_job_id = job.job_id
@@ -2959,12 +3101,26 @@ def _run_candidate(
                     job_id=active_job_id,
                     attempt_started=attempt_started,
                 )
-            run_ingest(
-                content,
-                active_job_id,
-                on_complete=record_processed,
-                metadata={"source_raw": f"replay:{raw}"},
-            )
+            if content is None:
+                job_store.update(
+                    active_job_id,
+                    status=JobStatus.COMPLETED,
+                    completed_at=_iso(now),
+                    processor="deterministic-projection",
+                    stage="semantic-noop",
+                    result={"semantic_projection": projection_summary or {}},
+                )
+                record_processed()
+            else:
+                metadata: dict[str, Any] = {"source_raw": f"replay:{raw}"}
+                if (projection_summary or {}).get("kind") != "legacy_passthrough":
+                    metadata["semantic_projection"] = projection_summary
+                run_ingest(
+                    content,
+                    active_job_id,
+                    on_complete=record_processed,
+                    metadata=metadata,
+                )
             finished = job_store.get(active_job_id)
             job_status = _job_status(finished)
             if finished is not None:

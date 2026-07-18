@@ -279,6 +279,8 @@ def render_summary(payload: dict[str, Any]) -> str:
             f"duplicates\t{field('duplicates', 'count')}",
             f"recall_improve\t{field('recall_improve', 'status')}",
             f"autonomy\t{field('autonomy', 'status')}",
+            f"raw_archive\t{field('raw_archive', 'status')}",
+            f"raw_segments_sealed\t{field('raw_archive', 'eligible')}",
         ]
     )
     if payload.get("lane_errors"):
@@ -650,6 +652,16 @@ def _run_sleep_cycle(
     raw_replay = {"status": "ok", "queue_refresh": raw_queue, "drain": raw_drain}
     if any(item.get("status") == "error" for item in (raw_queue, raw_drain)):
         raw_replay["status"] = "error"
+    raw_archive = _run_lane(
+        "raw_archive",
+        lambda: __import__(
+            "llm_wiki_mcp.raw_archive", fromlist=["seal_eligible"]
+        ).seal_eligible(
+            WIKI_ROOT / "raw",
+            dry_run=dry_run,
+            max_segments=4,
+        ),
+    )
 
     search_labels = (
         _run_lane(
@@ -805,6 +817,7 @@ def _run_sleep_cycle(
         "metadata_backfill": metadata_backfill,
         "entity_backfill": entity_backfill,
         "raw_replay": raw_replay,
+        "raw_archive": raw_archive,
         "lint_due": lint_due,
         "lint_repair": lint_repair,
         "search_labels": search_labels,

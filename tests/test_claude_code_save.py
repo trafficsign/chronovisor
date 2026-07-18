@@ -532,6 +532,33 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
     assert saved_state["files"][str(session)]["last_saved_line"] == 8
 
 
+def test_v2_save_preserves_source_lines_without_legacy_markdown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "session.jsonl"
+    state = tmp_path / "state.json"
+    raw_dir = tmp_path / "raw"
+    sample_session(session)
+    source_bytes = session.read_bytes()
+    monkeypatch.setenv("LLM_WIKI_RAW_LAYOUT", "v2")
+    monkeypatch.setattr(claude_code_save, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(claude_code_save, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        claude_code_save,
+        "save_raw",
+        lambda *_args, **_kwargs: pytest.fail("v2 must not publish legacy Markdown"),
+    )
+
+    result = claude_code_save.run(args_for(session, state, ignore_state=True))
+
+    assert result["status"] == "saved"
+    assert result["save_result"]["storage"] == "segment_open"
+    segment = Path(result["save_result"]["path"])
+    assert segment.read_bytes() == source_bytes
+    assert segment.relative_to(raw_dir).parts[:3] == ("2026", "07", "18")
+    assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 8
+
+
 def test_one_stop_drains_every_bounded_transcript_chunk(
     tmp_path: Path, monkeypatch
 ) -> None:

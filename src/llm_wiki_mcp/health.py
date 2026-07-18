@@ -72,9 +72,16 @@ def _raw_host(path: Path) -> str:
 
 
 def capture_kpi() -> dict[str, Any]:
-    raws = sorted(RAW_DIR.glob("*.md")) if RAW_DIR.exists() else []
+    from llm_wiki_mcp.raw_store import RawStore
+
+    raws = tuple(RawStore(RAW_DIR).iter_units()) if RAW_DIR.exists() else ()
+    artifact_dir = WIKI_ROOT / "runtime" / "raw-projections" / "artifacts"
+    artifact_paths = tuple(artifact_dir.glob("*.md")) if artifact_dir.exists() else ()
     by_host: dict[str, int] = {}
-    for path in raws:
+    for unit in raws:
+        host = _raw_host(Path(unit.raw_id))
+        by_host[host] = by_host.get(host, 0) + 1
+    for path in artifact_paths:
         host = _raw_host(path)
         by_host[host] = by_host.get(host, 0) + 1
 
@@ -84,12 +91,16 @@ def capture_kpi() -> dict[str, Any]:
         for row in claims
         if isinstance(row.get("source_raw"), str) and row.get("source_raw")
     }
-    raw_names = {path.name for path in raws}
+    raw_names = {unit.raw_id for unit in raws} | {path.name for path in artifact_paths}
     covered = raw_names & claimed_raws
     return {
-        "raw_files": len(raws),
+        "raw_files": len(raws) + len(artifact_paths),
         "claimed_raw_files": len(covered),
-        "claim_coverage": (len(covered) / len(raws)) if raws else None,
+        "claim_coverage": (
+            len(covered) / (len(raws) + len(artifact_paths))
+            if raws or artifact_paths
+            else None
+        ),
         "raw_by_host": by_host,
         "claim_rows": len(claims),
     }

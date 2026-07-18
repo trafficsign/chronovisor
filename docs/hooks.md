@@ -60,9 +60,13 @@ fires Stop exactly once.
 
 The save worker deterministically captures every uncaptured transcript delta
 after an exact per-session cursor. A delayed append or a previously failed job
-is picked up on the next run. Oversized deltas are split into lossless bounded
-raw chunks, and the cursor advances only with the corresponding durable
-receipt. The normal save path does not ask a model whether a turn is worth
+is picked up on the next run. In the legacy layout, oversized deltas retain the
+compatible reassemblable fragment format. In v2, original complete JSONL lines
+are appended directly to a date-partitioned segment, so even one oversized
+record needs no base64 fragmentation. Data and commit journal are separately
+fsynced and read back; the cursor advances only with that durable logical Raw
+receipt. Compression is asynchronous and can never run in the hook or save
+critical path. The normal save path does not ask a model whether a turn is worth
 saving and does not call any local or frontier model. Only after the save job
 records a successful durable receipt does the same background-state transaction
 enqueue one Recall audit candidate. The audit is therefore downstream of

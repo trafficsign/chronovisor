@@ -623,6 +623,56 @@ def build_parser() -> argparse.ArgumentParser:
     raw_replay_parser.add_argument("--limit", type=int, default=0)
     raw_replay_parser.add_argument("--run", action="store_true")
     raw_replay_parser.add_argument("--json", action="store_true")
+    raw_parser = sub.add_parser("raw", help="Inspect and operate Raw Archive v2.")
+    raw_sub = raw_parser.add_subparsers(dest="raw_command", required=True)
+    raw_status = raw_sub.add_parser("status", help="Show Raw archive inventory.")
+    raw_status.add_argument("--json", action="store_true")
+    raw_verify = raw_sub.add_parser("verify", help="Verify segment receipts and manifests.")
+    raw_verify.add_argument("--full", action="store_true")
+    raw_verify.add_argument("--json", action="store_true")
+    raw_seal = raw_sub.add_parser("seal", help="Seal date-eligible open segments.")
+    raw_seal.add_argument("--before", help="Exclusive cutoff in YYYY/MM/DD.")
+    raw_seal.add_argument("--apply", action="store_true")
+    raw_seal.add_argument("--dry-run", action="store_true")
+    raw_seal.add_argument("--level", type=int, default=9)
+    raw_seal.add_argument("--limit", type=int, default=0)
+    raw_seal.add_argument("--json", action="store_true")
+    raw_archive_cmd = raw_sub.add_parser(
+        "archive", help="Alias for date-eligible segment sealing."
+    )
+    raw_archive_cmd.add_argument("--before", help="Exclusive cutoff in YYYY/MM/DD.")
+    raw_archive_cmd.add_argument("--apply", action="store_true")
+    raw_archive_cmd.add_argument("--dry-run", action="store_true")
+    raw_archive_cmd.add_argument("--level", type=int, default=9)
+    raw_archive_cmd.add_argument("--limit", type=int, default=0)
+    raw_archive_cmd.add_argument("--json", action="store_true")
+    raw_export = raw_sub.add_parser("export", help="Export one logical Raw by ID.")
+    raw_export.add_argument("raw_id")
+    raw_export.add_argument("output")
+    raw_export.add_argument("--json", action="store_true")
+    raw_restore = raw_sub.add_parser("restore", help="Restore one complete sealed segment.")
+    raw_restore.add_argument("manifest")
+    raw_restore.add_argument("output")
+    raw_restore.add_argument("--json", action="store_true")
+    raw_migrate = raw_sub.add_parser(
+        "migrate", help="Byte-exact archive of processed legacy flat Raw files."
+    )
+    raw_migrate.add_argument("--before", help="Exclusive cutoff in YYYY/MM/DD.")
+    raw_migrate.add_argument("--apply", action="store_true")
+    raw_migrate.add_argument(
+        "--shadow",
+        action="store_true",
+        help="Create verified archives while retaining flat authority.",
+    )
+    raw_migrate.add_argument("--dry-run", action="store_true")
+    raw_migrate.add_argument(
+        "--remove-source",
+        action="store_true",
+        help="Remove flat files only after full archive restore verification.",
+    )
+    raw_migrate.add_argument("--max-archive-mib", type=int, default=128)
+    raw_migrate.add_argument("--level", type=int, default=9)
+    raw_migrate.add_argument("--json", action="store_true")
     convergence_drain_parser = sub.add_parser(
         "convergence-drain",
         help="Drain only a durable snapshot of existing convergence keys.",
@@ -957,6 +1007,49 @@ def dispatch(args: argparse.Namespace) -> int:
                 )
             )
         return 0
+    if args.command == "raw":
+        from llm_wiki_mcp import raw_archive
+
+        if args.raw_command == "status":
+            data = raw_archive.archive_status(wiki.RAW_DIR)
+        elif args.raw_command == "verify":
+            data = raw_archive.verify_archive(wiki.RAW_DIR, full=args.full)
+        elif args.raw_command in {"seal", "archive"}:
+            if args.apply and args.dry_run:
+                raise ValueError("--apply and --dry-run are mutually exclusive")
+            data = raw_archive.seal_eligible(
+                wiki.RAW_DIR,
+                before=args.before,
+                dry_run=not args.apply,
+                compression_level=args.level,
+                max_segments=max(0, args.limit),
+            )
+        elif args.raw_command == "export":
+            data = raw_archive.export_raw(
+                wiki.RAW_DIR, args.raw_id, Path(args.output)
+            )
+        elif args.raw_command == "restore":
+            data = raw_archive.restore_segment(
+                Path(args.manifest), Path(args.output)
+            )
+        else:
+            if args.dry_run and (args.apply or args.shadow):
+                raise ValueError("--dry-run cannot be combined with --apply/--shadow")
+            if args.remove_source and (not args.apply or args.shadow):
+                raise ValueError("--remove-source requires --apply")
+            data = raw_archive.migrate_legacy(
+                wiki.RAW_DIR,
+                before=args.before,
+                dry_run=not (args.apply or args.shadow),
+                remove_source=args.remove_source,
+                max_archive_bytes=max(1, args.max_archive_mib) * 1024 * 1024,
+                compression_level=args.level,
+            )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print("\t".join(f"{key}={value}" for key, value in data.items() if key != "results"))
+        return 1 if data.get("status") == "error" else 0
     if args.command == "convergence-drain":
         from llm_wiki_mcp import convergence_drain
 

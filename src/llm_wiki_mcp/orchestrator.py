@@ -299,7 +299,22 @@ def get_pending_raw_files() -> list[Path]:
 
     state = _load_state()
     processed = set(state.get("processed_raw_files", []))
-    raw_paths = sorted(RAW_DIR.glob("*.md"))
+    from llm_wiki_mcp.raw_store import RawStore
+
+    raw_store = RawStore(RAW_DIR)
+    reference_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
+    raw_paths = sorted(
+        (
+            raw_store.materialize_ingest(unit, reference_dir)
+            if unit.storage != "legacy_file"
+            else unit.path
+        )
+        for unit in raw_store.iter_units()
+    )
+    artifact_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "artifacts"
+    if artifact_dir.exists():
+        raw_paths.extend(sorted(artifact_dir.glob("*.md")))
+        raw_paths = sorted(dict.fromkeys(raw_paths), key=lambda path: path.name)
     operational_deferred = operational_deferred_raw_files(raw_paths)
     pending = []
     for f in raw_paths:
@@ -438,6 +453,9 @@ class _PendingRawUnit:
     raw_keywords: tuple[str, ...] | None = None
     fragment_record_sha256: str | None = None
     reassembled_record_bytes: bytes | None = None
+    native_raw_bytes: bytes | None = None
+    native_commit: object | None = None
+    logical_raw_bytes: bytes | None = None
 
     @property
     def representative(self) -> Path:
@@ -677,9 +695,36 @@ def _prepare_pending_raw_units(
             fragments.append(fragment)
             fragment_paths.add(path)
 
-    units = [
-        _PendingRawUnit(paths=(path,)) for path in pending if path not in fragment_paths
-    ]
+    from llm_wiki_mcp.raw_store import RawStore
+
+    raw_store = RawStore(RAW_DIR)
+    units: list[_PendingRawUnit] = []
+    for path in pending:
+        if path in fragment_paths:
+            continue
+        native = raw_store.resolve_reference(path)
+        if native is None:
+            units.append(_PendingRawUnit(paths=(path,)))
+            continue
+        if native.commit is None:
+            value = raw_store.read_bytes(native)
+            units.append(
+                _PendingRawUnit(
+                    paths=(path,),
+                    content=value.decode("utf-8"),
+                    logical_raw_bytes=value,
+                )
+            )
+            continue
+        host_label = "Claude Code" if native.commit.host == "claude-code" else "Codex"
+        units.append(
+            _PendingRawUnit(
+                paths=(path,),
+                raw_keywords=(host_label, "transcript-delta", "source-native"),
+                native_raw_bytes=raw_store.read_bytes(native),
+                native_commit=native.commit,
+            )
+        )
     grouped_fragments: dict[object, list] = {}
     for fragment in fragments:
         grouped_fragments.setdefault(fragment.identity, []).append(fragment)
@@ -941,10 +986,12 @@ def run_pending_ingest(
             ProjectionConflictError,
             RawSemanticProjectionError,
             project_parent_raw,
+            project_native_transcript,
             project_reassembled_raws,
             verify_projection_bundle,
         )
         from llm_wiki_mcp.runtime_config import load_ingest_config
+        from llm_wiki_mcp.raw_store import raw_layout_mode
         from llm_wiki_mcp.raw_completion_ack import (
             RawCompletionAckError,
             RawCompletionStatePending,
@@ -1138,18 +1185,39 @@ def run_pending_ingest(
                     max_child_bytes = (
                         load_ingest_config().semantic_projection_max_child_bytes
                     )
-                    if unit.reassembled_record_bytes is not None:
+                    projection_output_dir = (
+                        RAW_DIR
+                        if raw_layout_mode() == "legacy"
+                        else RAW_DIR.parent
+                        / "runtime"
+                        / "raw-projections"
+                        / "artifacts"
+                    )
+                    if unit.native_raw_bytes is not None:
+                        from llm_wiki_mcp.raw_segment import RawSegmentCommit
+
+                        if not isinstance(unit.native_commit, RawSegmentCommit):
+                            raise RuntimeError("native Raw unit lost its commit")
+                        projection = project_native_transcript(
+                            raw_path,
+                            unit.native_raw_bytes,
+                            unit.native_commit,
+                            output_dir=projection_output_dir,
+                            max_child_bytes=max_child_bytes,
+                        )
+                    elif unit.reassembled_record_bytes is not None:
                         projection = project_reassembled_raws(
                             unit.paths,
                             unit.reassembled_record_bytes,
-                            output_dir=RAW_DIR,
+                            output_dir=projection_output_dir,
                             max_child_bytes=max_child_bytes,
                         )
                     else:
                         projection = project_parent_raw(
                             raw_path,
-                            output_dir=RAW_DIR,
+                            output_dir=projection_output_dir,
                             max_child_bytes=max_child_bytes,
+                            raw_bytes=unit.logical_raw_bytes,
                         )
                     projection_summary = {
                         "kind": projection.kind,

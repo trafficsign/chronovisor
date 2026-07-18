@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from llm_wiki_mcp.raw_store import RawStore
+
 
 _MARKER_PREFIX = "<!-- llm-wiki-save-transaction:"
 _MARKER_SUFFIX = "-->"
@@ -202,6 +204,28 @@ def validate_published_save_receipt(
     expected: SaveTransaction,
 ) -> Path:
     """Validate the exact file returned by raw publication before state commit."""
+    storage = save_result.get("storage")
+    if storage in {"segment_open", "segment_sealed"}:
+        expected_raw_id = f"save-{expected.idempotency_key}.md"
+        raw_id = save_result.get("raw_id") or save_result.get("saved")
+        if raw_id != expected_raw_id:
+            raise ValueError("segment publisher returned the wrong logical Raw ID")
+        unit = RawStore(raw_dir, mode="v2").resolve_segment(expected_raw_id)
+        if unit is None or unit.commit is None:
+            raise ValueError("segment publisher receipt cannot be resolved")
+        commit = unit.commit
+        if (
+            commit.host != expected.host
+            or commit.session_key != expected.session_key
+            or commit.after_line != expected.after_line
+            or commit.until_line != expected.until_line
+            or commit.idempotency_key != expected.idempotency_key
+        ):
+            raise ValueError("segment publisher receipt transaction is invalid")
+        # read_bytes verifies the exact committed range against its digest.
+        RawStore(raw_dir, mode="v2").read_bytes(unit)
+        return unit.path
+
     raw_path = save_result.get("path")
     if isinstance(raw_path, str) and raw_path:
         path = Path(raw_path).expanduser()
@@ -249,6 +273,32 @@ def find_published_save_transaction(
     )
     prefix = f"save-{normalized_host}-{session_key}-from{after_line}-to"
     candidates: list[PublishedSaveTransaction] = []
+    try:
+        segment_units = RawStore(raw_dir, mode="v2").iter_segment_units()
+        for unit in segment_units:
+            commit = unit.commit
+            if (
+                commit is None
+                or commit.host != normalized_host
+                or commit.session_key != session_key
+                or commit.after_line != after_line
+            ):
+                continue
+            RawStore(raw_dir, mode="v2").read_bytes(unit)
+            candidates.append(
+                PublishedSaveTransaction(
+                    transaction=SaveTransaction(
+                        host=commit.host,
+                        session_key=commit.session_key,
+                        after_line=commit.after_line,
+                        until_line=commit.until_line,
+                        idempotency_key=commit.idempotency_key,
+                    ),
+                    path=unit.path,
+                )
+            )
+    except FileNotFoundError:
+        pass
     search_roots = (
         raw_dir,
         raw_dir / ".dead-letter",
@@ -274,6 +324,31 @@ def find_published_save_transaction(
             candidates.append(
                 PublishedSaveTransaction(transaction=transaction, path=path)
             )
+    from llm_wiki_mcp.legacy_archive import iter_legacy_members, read_legacy_member
+
+    for member in iter_legacy_members(raw_dir):
+        if not member.raw_id.startswith(prefix):
+            continue
+        try:
+            transaction = parse_save_transaction_marker(
+                read_legacy_member(member).decode("utf-8")
+            )
+        except (OSError, UnicodeError):
+            continue
+        if (
+            transaction is None
+            or transaction.host != normalized_host
+            or transaction.session_key != session_key
+            or transaction.after_line != after_line
+            or member.raw_id != f"save-{transaction.idempotency_key}.md"
+        ):
+            continue
+        candidates.append(
+            PublishedSaveTransaction(
+                transaction=transaction,
+                path=member.archive_path,
+            )
+        )
     if not candidates:
         return None
     return max(candidates, key=lambda item: item.transaction.until_line)

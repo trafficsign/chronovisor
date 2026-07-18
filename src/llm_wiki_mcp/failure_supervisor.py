@@ -854,7 +854,13 @@ def _semantic_packet_source_raws(
             return None
         if verify_sources:
             try:
-                raw = (wiki.RAW_DIR / filename).read_bytes()
+                from llm_wiki_mcp.raw_store import RawStore
+
+                store = RawStore(wiki.RAW_DIR)
+                unit = store.resolve(filename)
+                if unit is None:
+                    return None
+                raw = store.read_bytes(unit)
             except (OSError, ValueError):
                 return None
             if len(raw) != byte_count or hashlib.sha256(raw).hexdigest() != sha256:
@@ -1669,12 +1675,21 @@ def _operational_deferred_raw_files_unlocked(
     failures = state.get("failures")
     if not isinstance(failures, dict):
         failures = {}
-    available_paths = {
-        path.name: path
-        for path in (
-            raw_paths if raw_paths is not None else sorted(wiki.RAW_DIR.glob("*.md"))
-        )
-    }
+    if raw_paths is None:
+        from llm_wiki_mcp.raw_store import RawStore
+
+        store = RawStore(wiki.RAW_DIR)
+        reference_dir = wiki.RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
+        available_paths = {
+            unit.raw_id: (
+                unit.path
+                if unit.storage == "legacy_file"
+                else store.materialize_ingest(unit, reference_dir)
+            )
+            for unit in store.iter_units()
+        }
+    else:
+        available_paths = {path.name: path for path in raw_paths}
     deferred: dict[str, str] = {}
     authority_sha256_loaded = False
     current_authority_sha256: str | None = None
@@ -1710,7 +1725,19 @@ def _operational_deferred_raw_files_unlocked(
             and value.get("self_heal_queued") is not True
         ):
             continue
-        raw_path = available_paths.get(raw_file, wiki.RAW_DIR / raw_file)
+        raw_path = available_paths.get(raw_file)
+        if raw_path is None:
+            from llm_wiki_mcp.raw_store import RawStore
+
+            store = RawStore(wiki.RAW_DIR)
+            unit = store.resolve(raw_file)
+            if unit is None:
+                deferred[raw_file] = _packet_status(value)
+                continue
+            raw_path = store.materialize_ingest(
+                unit,
+                wiki.RAW_DIR.parent / "runtime" / "raw-projections" / "parents",
+            )
         if _operational_entry_is_released(raw_path, value):
             continue
         if _projection_parent_can_retry(raw_path, value):

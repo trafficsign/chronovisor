@@ -27,6 +27,8 @@ from llm_wiki_mcp.agent_save_base import (
     iter_jsonl,
     last_saved_at,
     load_state,
+    publish_transcript_capture,
+    publish_oversized_shadow,
     read_hook_payload,
     sanitize_keywords,
     save_raw,
@@ -50,6 +52,8 @@ from llm_wiki_mcp.save_transaction import (
     save_transaction_lock,
     validate_published_save_receipt,
 )
+from llm_wiki_mcp.raw_segment import copy_source_interval
+from llm_wiki_mcp.raw_store import raw_layout_mode
 from llm_wiki_mcp.wiki import RAW_DIR, WIKI_ROOT, init_wiki
 
 DEFAULT_STATE_FILE = WIKI_ROOT / "claude-code-save-state.json"
@@ -715,6 +719,15 @@ def _capture_oversized_record(
             ) from exc
         save_results.append(save_result)
 
+    shadow = publish_oversized_shadow(
+        raw_dir=RAW_DIR,
+        host="claude-code",
+        session_file=transcript_slice.session_file,
+        session_id=transcript_slice.session_id,
+        source_line=record.line,
+    )
+    if isinstance(shadow.get("shadow_comparison"), dict):
+        shadow["shadow_comparison"]["legacy_fragment_count"] = len(fragments)
     committed_slice = replace(
         transcript_slice,
         records=[record],
@@ -733,6 +746,7 @@ def _capture_oversized_record(
         "status": "saved",
         "save_result": save_results[-1],
         "save_results": save_results,
+        **shadow,
     }
 
 
@@ -937,7 +951,12 @@ def _run_save_transaction(
 
     if args.max_chars < 1:
         raise ClaudeCodeSaveError("max_chars must be a positive byte limit")
-    if len(_serialized_records_bytes([transcript_slice.records[0]])) > args.max_chars:
+    layout = raw_layout_mode()
+    if (
+        layout != "v2"
+        and len(_serialized_records_bytes([transcript_slice.records[0]]))
+        > args.max_chars
+    ):
         return _capture_oversized_record(
             args=args,
             transcript_slice=transcript_slice,
@@ -977,23 +996,41 @@ def _run_save_transaction(
         transcript_slice,
         transaction=transaction,
     )
+    source_bytes = copy_source_interval(
+        session_file,
+        after_line=transaction.after_line,
+        until_line=transaction.until_line,
+    )
     if args.dry_run or not args.save:
-        raw_bytes = raw_content.encode("utf-8")
+        raw_bytes = (
+            source_bytes if layout == "v2" else raw_content.encode("utf-8")
+        )
         return {
             **base_result,
             **capture_result,
             "status": "dry_run",
             "raw_content_bytes": len(raw_bytes),
             "raw_content_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "raw_layout": layout,
             "decision_policy": policy_result,
         }
 
-    save_result = save_raw(
-        raw_content,
-        session_id=raw_session_id(transcript_slice),
+    save_result = publish_transcript_capture(
+        raw_dir=RAW_DIR,
+        host="claude-code",
+        session_key=transaction.session_key,
+        session_id=transcript_slice.session_id,
+        session_file=session_file,
+        after_line=transaction.after_line,
+        until_line=transaction.until_line,
+        idempotency_key=transaction.idempotency_key,
+        source_bytes=source_bytes,
+        record_count=len(transcript_slice.records),
+        legacy_content=raw_content,
+        legacy_session_id=raw_session_id(transcript_slice),
         keywords=capture_result["keywords"],
         trigger_ingest=False,
-        idempotency_key=transaction.idempotency_key,
+        legacy_publisher=save_raw,
     )
     try:
         validate_published_save_receipt(

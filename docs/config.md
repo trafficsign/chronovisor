@@ -3,6 +3,22 @@
 The preferred runtime config is `~/.wiki/config.toml`. If it does not exist,
 LLM Wiki falls back to the legacy `~/.wiki/recall.toml` shape.
 
+## Raw Archive rollout
+
+Transcript storage uses a process environment feature flag so rollback does
+not depend on rewriting Wiki data:
+
+```sh
+LLM_WIKI_RAW_LAYOUT=legacy  # default; flat Markdown authority
+LLM_WIKI_RAW_LAYOUT=shadow  # flat authority plus source-native v2 mirror
+LLM_WIKI_RAW_LAYOUT=v2      # source-native date-partitioned authority
+```
+
+An unknown value fails before capture. `wiki_save_raw` remains the compatible
+manual UTF-8/Markdown API in every mode; only the Codex and Claude transcript
+savers use source-native segments. Compression is never performed by Stop or
+the save worker. The sleep cycle seals at most four eligible segments per run.
+
 ## Unified Shape
 
 ```toml

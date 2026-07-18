@@ -35,6 +35,19 @@ def test_every_registered_command_has_working_help(capsys) -> None:
         assert "usage:" in capsys.readouterr().out
 
 
+def test_raw_status_cli_reports_archive_inventory(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    patch_wiki(tmp_path, monkeypatch)
+
+    assert cli.main(["raw", "status", "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["legacy_units"] == 1
+    assert output["logical_units"] == 1
+    assert output["open_segments"] == 0
+
+
 def patch_wiki(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "wiki"
     raw = root / "raw"

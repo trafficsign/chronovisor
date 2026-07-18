@@ -153,7 +153,11 @@ def sync_index(*, wiki_root: Path) -> dict[str, Any]:
     from llm_wiki_mcp.raw_replay import is_raw_retracted
 
     raw_dir = wiki_root / "raw"
+    artifact_dir = wiki_root / "runtime" / "raw-projections" / "artifacts"
     raw_paths = sorted(raw_dir.glob("*.md"))
+    if artifact_dir.exists():
+        raw_paths.extend(sorted(artifact_dir.glob("*.md")))
+        raw_paths = sorted(dict.fromkeys(raw_paths), key=lambda path: path.name)
     deferred = operational_deferred_raw_files(raw_paths)
     entries: list[dict[str, Any]] = []
     for raw_path in raw_paths:

@@ -170,7 +170,20 @@ def _raw_defer_counts() -> tuple[int, int, int]:
         operational_deferred_raw_files,
     )
 
-    raw_paths = sorted(RAW_DIR.glob("*.md"))
+    from llm_wiki_mcp.raw_store import RawStore
+
+    raw_store = RawStore(RAW_DIR)
+    reference_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
+    raw_paths = sorted(
+        unit.path
+        if unit.storage == "legacy_file"
+        else raw_store.materialize_ingest(unit, reference_dir)
+        for unit in raw_store.iter_units()
+    )
+    artifact_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "artifacts"
+    if artifact_dir.exists():
+        raw_paths.extend(sorted(artifact_dir.glob("*.md")))
+        raw_paths = sorted(dict.fromkeys(raw_paths), key=lambda path: path.name)
     deferred = operational_deferred_raw_files(raw_paths)
     semantic_deferred = sum(
         reason == SEMANTIC_NO_QUORUM_DEFER_REASON for reason in deferred.values()
@@ -726,9 +739,16 @@ def _raw_readable_component(prefix: str, topic_slug: str) -> str:
 
 
 def _raw_candidate_path(prefix: str = "", topic_slug: str = "") -> Path:
+    from llm_wiki_mcp.raw_segment import capture_date
+    from llm_wiki_mcp.raw_store import raw_layout_mode
+
     readable = _raw_readable_component(prefix, topic_slug)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     suffix = secrets.token_hex(4)  # 8 hex chars / 32 bits
+    if raw_layout_mode() == "v2":
+        day_dir = RAW_DIR / capture_date()
+        day_dir.mkdir(parents=True, exist_ok=True)
+        return day_dir / f"manual-{ts}{readable}-{suffix}.md"
     return RAW_DIR / f"{ts}{readable}-{suffix}.md"
 
 
@@ -785,7 +805,7 @@ def _publish_raw(content: str, *, prefix: str = "", topic_slug: str = "") -> Pat
             target = _raw_candidate_path(prefix=prefix, topic_slug=topic_slug)
             try:
                 _link_raw_no_replace(staging, target)
-                _fsync_directory(RAW_DIR)
+                _fsync_directory(target.parent)
                 published = target
                 break
             except FileExistsError as exc:
@@ -1103,16 +1123,29 @@ def wiki_provenance(page: str) -> str:
     # Find raw files that might be the source.
     # raw files are walked in mtime-descending order; once a file exceeds the
     # threshold, every subsequent file also exceeds it, so we can break.
+    from llm_wiki_mcp.raw_store import RawStore
+
     raw_candidates = []
-    for raw_path in sorted(RAW_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
-        raw_mtime = datetime.fromtimestamp(raw_path.stat().st_mtime)
+    raw_store = RawStore(RAW_DIR)
+    candidates = []
+    for unit in raw_store.iter_units():
+        raw_mtime = (
+            datetime.fromisoformat(unit.captured_at).replace(tzinfo=None)
+            if unit.captured_at
+            else datetime.fromtimestamp(unit.path.stat().st_mtime)
+        )
+        candidates.append((raw_mtime, unit))
+    for raw_mtime, unit in sorted(candidates, key=lambda row: row[0], reverse=True):
         if raw_mtime > threshold:
             break
-        raw_content = raw_path.read_text()[:500]
+        try:
+            raw_content = raw_store.read_text(unit)[:500]
+        except (OSError, UnicodeError):
+            continue
         raw_lower = raw_content.lower()
         if page_dehyphen in raw_lower or page_title_lower in raw_lower:
             raw_candidates.append({
-                "raw_file": raw_path.name,
+                "raw_file": unit.raw_id,
                 "created": raw_mtime.isoformat(),
                 "preview": raw_content[:200].strip(),
             })

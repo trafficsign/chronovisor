@@ -1198,19 +1198,19 @@ def _release_operational_failure_after_local_repair_unlocked(
             observed_raw_files=sorted(observed_group_names),
         )
 
-    raw_root = wiki.RAW_DIR.expanduser().resolve(strict=True)
     affected_raws: list[dict[str, Any]] = []
     legacy_state_raws: list[str] = []
     try:
+        from llm_wiki_mcp.raw_store import RawStore
+
+        raw_store = RawStore(wiki.RAW_DIR)
         for raw_file, entry in affected_group:
-            raw_path = wiki.RAW_DIR / raw_file
-            if (
-                Path(raw_file).name != raw_file
-                or raw_path.is_symlink()
-                or raw_path.resolve(strict=True).parent != raw_root
-            ):
+            if Path(raw_file).name != raw_file:
                 raise ValueError("affected_raw_invalid")
-            raw = raw_path.read_bytes()
+            unit = raw_store.resolve(raw_file)
+            if unit is None:
+                raise ValueError("affected_raw_missing")
+            raw = raw_store.read_bytes(unit)
             digest = hashlib.sha256(raw).hexdigest()
             expected_digest = expected_raw_manifest[raw_file]
             if digest != expected_digest:

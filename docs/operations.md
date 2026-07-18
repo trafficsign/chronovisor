@@ -465,6 +465,52 @@ becomes `indeterminate`: local consensus chooses processed, safe replay,
 or quarantine. It is never blindly retried and never becomes a human content
 decision.
 
+## Raw Archive
+
+Raw is the immutable evidence/rebuild layer, not the normal Recall search
+database. Pages and verified semantic projections remain the synchronous
+search path. The archive has one date-based hierarchy and no hot/archive tier.
+
+```sh
+# Cheap inventory; reports logical/stored bytes and open/sealed counts
+llm-wiki raw status --json
+
+# Commit/range verification; --full streams every sealed byte back
+llm-wiki raw verify --full --json
+
+# Preview yesterday-and-older v2 segments, then seal a bounded batch
+llm-wiki raw seal --limit 4 --json
+llm-wiki raw seal --limit 4 --apply --json
+
+# Restore one logical Raw or a whole sealed segment without mutating the store
+llm-wiki raw export save-<transaction>.md /safe/output/raw.jsonl
+llm-wiki raw restore ~/.wiki/raw/YYYY/MM/DD/<segment>.manifest.json /safe/output/segment.jsonl
+```
+
+Existing flat transcript Raw uses a separate two-step migration. Eligibility
+requires the logical Raw ID to be in the durable processed ledger and its file
+date to be older than today. The first apply is shadow-only and retains every
+flat source:
+
+```sh
+llm-wiki raw migrate --json
+llm-wiki raw migrate --shadow --json
+llm-wiki raw verify --full --json
+```
+
+After an observation window and restore drill, the same command may remove
+only sources already reproduced byte-for-byte from a verified archive:
+
+```sh
+llm-wiki raw migrate --apply --remove-source --json
+```
+
+Never use `--remove-source` as a backup substitute. The zstd object and the
+flat file share the same machine until a separate backup copies them elsewhere.
+Manifests contain relative locators, so moving the complete Raw root or sealed
+date folders does not depend on the old absolute path; run `raw verify --full`
+after any move.
+
 ## Memory Integrity Eval
 
 ```sh

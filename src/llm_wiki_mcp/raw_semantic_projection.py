@@ -26,6 +26,7 @@ from llm_wiki_mcp.canonical_json import (
     canonical_json_line_bytes_strict as _canonical_bytes,
 )
 from llm_wiki_mcp.durable_state import fsync_directory as _fsync_directory
+from llm_wiki_mcp.raw_segment import RawSegmentCommit
 
 from llm_wiki_mcp.save_transaction import (
     SaveTransactionReceipt,
@@ -927,6 +928,131 @@ def project_parent_raw(
         "record_count": len(records),
         "role_counts": role_counts,
         "parents": [_source_parent_payload(parent)],
+    }
+    return _build_projection(
+        parent_paths=(raw_path,),
+        source=source,
+        records=records,
+        output_dir=output_dir,
+        max_child_bytes=max_child_bytes,
+    )
+
+
+def project_native_transcript(
+    raw_path: Path,
+    raw_bytes: bytes,
+    commit: RawSegmentCommit,
+    *,
+    output_dir: Path,
+    max_child_bytes: int,
+) -> ProjectionArtifacts:
+    """Project source-native JSONL bytes referenced by one v2 commit."""
+
+    if raw_path.name != commit.raw_id:
+        raise RawSemanticProjectionError("native Raw reference ID mismatch")
+    if len(raw_bytes) != commit.length or _sha256(raw_bytes) != commit.sha256:
+        raise RawSemanticProjectionError("native Raw bytes disagree with commit")
+    if not raw_bytes.endswith(b"\n"):
+        raise RawSemanticProjectionError("native transcript is not line complete")
+
+    records: list[_TranscriptRecord] = []
+    for index, encoded_line in enumerate(raw_bytes.splitlines(), start=0):
+        try:
+            event = json.loads(encoded_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RawSemanticProjectionError(
+                f"native transcript line {index + 1} is invalid JSON"
+            ) from exc
+        if not isinstance(event, dict):
+            raise RawSemanticProjectionError(
+                f"native transcript line {index + 1} is not an object"
+            )
+        source_line = commit.after_line + index + 1
+        timestamp = event.get("timestamp")
+        timestamp = timestamp if isinstance(timestamp, str) else None
+        phase: str | None = None
+        event_type: str | None = None
+        if commit.host == "codex":
+            from llm_wiki_mcp.codex_save import _codex_semantic_view
+
+            item_type = event.get("type")
+            payload = event.get("payload")
+            role, text = _codex_semantic_view(item_type, payload)
+            payload_type = payload.get("type") if isinstance(payload, dict) else None
+            event_type = (
+                payload_type
+                if isinstance(payload_type, str)
+                else item_type
+                if isinstance(item_type, str)
+                else None
+            )
+            phase_value = payload.get("phase") if isinstance(payload, dict) else None
+            phase = phase_value if isinstance(phase_value, str) else None
+            semantic_row: dict[str, Any] = {
+                "line": source_line,
+                "role": role,
+                "text": text,
+                "timestamp": timestamp,
+                "phase": phase,
+            }
+        elif commit.host == "claude-code":
+            from llm_wiki_mcp.claude_code_save import _claude_semantic_view
+
+            item_type = event.get("type")
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            role, text = _claude_semantic_view(item_type, content)
+            event_type = item_type if isinstance(item_type, str) else None
+            semantic_row = {
+                "line": source_line,
+                "role": role,
+                "text": text,
+                "timestamp": timestamp,
+            }
+        else:
+            raise RawSemanticProjectionError(
+                f"unsupported native transcript host: {commit.host}"
+            )
+        if event_type is not None:
+            semantic_row["event_type"] = event_type
+        semantic_row["event"] = event
+        records.append(
+            _TranscriptRecord(
+                index=index,
+                role=role,
+                text=text,
+                line=source_line,
+                timestamp=timestamp,
+                phase=phase,
+                row_sha256=_sha256(_canonical_bytes(semantic_row)),
+            )
+        )
+    if len(records) != commit.record_count:
+        raise RawSemanticProjectionError(
+            "native transcript record count disagrees with commit"
+        )
+    role_counts = dict(sorted(Counter(record.role for record in records).items()))
+    receipt = {
+        "host": commit.host,
+        "session_key": commit.session_key,
+        "after_line": commit.after_line,
+        "until_line": commit.until_line,
+        "idempotency_key": commit.idempotency_key,
+        "payload_sha256": commit.sha256,
+    }
+    source = {
+        "kind": "transcript_delta",
+        "record_payload_sha256": commit.sha256,
+        "record_payload_bytes": len(raw_bytes),
+        "record_count": len(records),
+        "role_counts": role_counts,
+        "parents": [
+            {
+                "raw_sha256": commit.sha256,
+                "raw_bytes": len(raw_bytes),
+                "receipt": receipt,
+            }
+        ],
     }
     return _build_projection(
         parent_paths=(raw_path,),

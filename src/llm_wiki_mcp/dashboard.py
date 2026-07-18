@@ -772,12 +772,15 @@ def _projection_parent_name(
     if idempotency_key != expected_idempotency_key:
         return None
     parent_name = f"save-{expected_idempotency_key}.md"
-    parent_path = raw_dir / parent_name
-    if parent_path.is_symlink():
-        return None
     try:
-        observed_sha256 = hashlib.sha256(parent_path.read_bytes()).hexdigest()
-    except OSError:
+        from llm_wiki_mcp.raw_store import RawStore
+
+        store = RawStore(raw_dir)
+        unit = store.resolve(parent_name)
+        if unit is None:
+            return None
+        observed_sha256 = hashlib.sha256(store.read_bytes(unit)).hexdigest()
+    except (OSError, ValueError):
         return None
     return parent_name if observed_sha256 == expected_sha256 else None
 
@@ -799,7 +802,19 @@ def _projection_parent_raw_names_by_child(
             )
     parents_by_child: dict[str, set[str]] = {}
     for projection_id, requested_children in children_by_projection.items():
-        manifest_path = raw_dir / f"semantic-{projection_id}.manifest.json"
+        manifest_name = f"semantic-{projection_id}.manifest.json"
+        manifest_candidates = (
+            raw_dir / manifest_name,
+            raw_dir.parent
+            / "runtime"
+            / "raw-projections"
+            / "artifacts"
+            / manifest_name,
+        )
+        manifest_path = next(
+            (path for path in manifest_candidates if path.is_file()),
+            manifest_candidates[0],
+        )
         try:
             manifest = verify_projection_bundle(manifest_path)
         except Exception:
@@ -893,28 +908,56 @@ def _save_history_snapshot(
     raw_dir = WIKI_ROOT / "raw"
     raw_files: dict[str, dict[str, Any]] = {}
     raw_status: dict[str, str] = {}
-    raw_paths = (
-        list(raw_paths)
-        if raw_paths is not None
-        else sorted(raw_dir.glob("*.md"))
-        if raw_dir.exists()
-        else []
-    )
+    raw_entries: list[tuple[Path, str, int, date | None]] = []
+    effective_raw_paths: list[Path] = []
+    if raw_paths is not None:
+        effective_raw_paths = list(raw_paths)
+        raw_entries = [
+            (path, path.name, path.stat().st_size, _raw_file_date(path))
+            for path in effective_raw_paths
+        ]
+    elif raw_dir.exists():
+        from llm_wiki_mcp.raw_store import RawStore
+
+        store = RawStore(raw_dir)
+        reference_dir = raw_dir.parent / "runtime" / "raw-projections" / "parents"
+        for unit in store.iter_units():
+            logical_path = (
+                unit.path
+                if unit.storage == "legacy_file"
+                else store.materialize_ingest(unit, reference_dir)
+            )
+            effective_raw_paths.append(logical_path)
+            captured = None
+            if unit.captured_at:
+                try:
+                    captured = datetime.fromisoformat(unit.captured_at).date()
+                except ValueError:
+                    captured = None
+            raw_entries.append(
+                (
+                    logical_path,
+                    unit.raw_id,
+                    unit.length,
+                    captured or _raw_file_date(logical_path),
+                )
+            )
+        artifact_dir = raw_dir.parent / "runtime" / "raw-projections" / "artifacts"
+        if artifact_dir.exists():
+            effective_raw_paths.extend(sorted(artifact_dir.glob("*.md")))
     if raw_dir.exists():
-        for path in raw_paths:
+        for path, raw_name, raw_bytes, raw_date in raw_entries:
             # Projection children are generated processing artifacts.  The
             # original lossless parent is already counted as the save, so
             # including children would double-count bytes and invent a
             # "manual" user save on the projection date.  Queue cardinality
             # remains visible through the canonical pending counter.
-            if SEMANTIC_PROJECTION_CHILD_RE.fullmatch(path.name.lower()):
+            if SEMANTIC_PROJECTION_CHILD_RE.fullmatch(raw_name.lower()):
                 continue
-            raw_date = _raw_file_date(path)
             if raw_date is None or raw_date < start or raw_date > end:
                 continue
-            raw_bytes = path.stat().st_size
-            source = _raw_source_label(path.name)
-            raw_files[path.name] = {
+            source = _raw_source_label(raw_name)
+            raw_files[raw_name] = {
                 "date": raw_date.isoformat(),
                 "bytes": raw_bytes,
                 "source": source,
@@ -1107,7 +1150,7 @@ def _save_history_snapshot(
     semantic_deferred, projection_pending = _projection_save_states(
         raw_dir,
         raw_files,
-        raw_paths,
+        effective_raw_paths,
         processed_raw_names,
         deferred_statuses=deferred_statuses,
     )
@@ -2788,7 +2831,21 @@ def build_snapshot() -> dict[str, Any]:
     init_wiki()
     cached_status = runtime_status.read_status()
     orch_state = orchestrator._load_state()
-    raw_paths = sorted((WIKI_ROOT / "raw").glob("*.md"))
+    from llm_wiki_mcp.raw_store import RawStore
+
+    raw_dir = WIKI_ROOT / "raw"
+    raw_store = RawStore(raw_dir)
+    reference_dir = WIKI_ROOT / "runtime" / "raw-projections" / "parents"
+    raw_paths = sorted(
+        unit.path
+        if unit.storage == "legacy_file"
+        else raw_store.materialize_ingest(unit, reference_dir)
+        for unit in raw_store.iter_units()
+    )
+    artifact_dir = WIKI_ROOT / "runtime" / "raw-projections" / "artifacts"
+    if artifact_dir.exists():
+        raw_paths.extend(sorted(artifact_dir.glob("*.md")))
+        raw_paths = sorted(dict.fromkeys(raw_paths), key=lambda path: path.name)
     deferred_statuses = _operational_deferred_raw_statuses(raw_paths)
     processed_raw_files = orch_state.get("processed_raw_files")
     processed_raw_names = (
@@ -2931,6 +2988,19 @@ def build_snapshot() -> dict[str, Any]:
         {"lanes": {}, "counts": {"off": 0, "shadow": 0, "enabled": 0}},
     )
     status["decision_policies"] = decision_policies
+    from llm_wiki_mcp.raw_archive import archive_status
+
+    raw_archive = _safe_snapshot_component(
+        "raw_archive",
+        lambda: archive_status(raw_dir),
+        {
+            "logical_units": len(raw_paths),
+            "open_segments": 0,
+            "sealed_segments": 0,
+            "legacy_archives": 0,
+            "unsealed_bytes": 0,
+        },
+    )
 
     return {
         "runtime": runtime_identity(),
@@ -2944,6 +3014,7 @@ def build_snapshot() -> dict[str, Any]:
             "last_lint": orch_state.get("last_lint"),
             "triage_failure_count": orch_state.get("triage_failure_count", 0),
         },
+        "raw_archive": raw_archive,
         "ollama": ollama,
         "model_status": model_status,
         "events": events,
