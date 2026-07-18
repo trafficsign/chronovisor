@@ -155,6 +155,10 @@ class LocalPlanner:
                 "Follow the authority ladder: search/read Wiki first, then verified "
                 "claims, then Raw only for missing local evidence, and Web only for "
                 "freshness or external facts. Fetch only URLs returned by Web search. "
+                "Argument contract: wiki_search(query), wiki_read(page_id), "
+                "wiki_neighbors(page_id), verified_claims(query), raw_search(query), "
+                "web_search(query), web_fetch(url), finish(answer). Do not pass "
+                "arguments belonging to another action. "
                 "Choose finish when evidence is sufficient or budgets are low."
             ),
         }
