@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from llm_wiki_mcp.research_config import ResearchConfig
+from llm_wiki_mcp.research_orchestrator import PlannerResponse
+from llm_wiki_mcp.research_service import run_evidence_research
+from llm_wiki_mcp.research_store import ResearchStore
+
+
+def test_service_writes_bundle_audit_and_receipt(tmp_path: Path, monkeypatch) -> None:
+    from llm_wiki_mcp import research_auditor, research_scheduler, research_store
+
+    monkeypatch.setattr(research_store, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(research_scheduler, "RUNTIME_DIR", tmp_path / "scheduler")
+    monkeypatch.setattr(research_auditor, "AUDIT_LOG", tmp_path / "audit.jsonl")
+    store = ResearchStore(root=tmp_path / "research")
+
+    class FinishPlanner:
+        needs_model = False
+
+        def plan(self, *_args, **_kwargs):
+            return PlannerResponse(
+                {"type": "finish", "arguments": {"answer": "unknown"}, "rationale": "test"}
+            )
+
+    result = run_evidence_research(
+        "no local evidence",
+        config=ResearchConfig(enabled=True, mode="explicit"),
+        planner=FinishPlanner(),
+        challenge=False,
+        run_id="service-run",
+        store=store,
+    )
+    assert result["evidence_bundle_id"].startswith("bundle:")
+    assert result["claims"][0]["status"] == "unknown"
+    assert any(row.get("kind") == "durable_receipt" for row in store.events("service-run"))
+    assert (tmp_path / "wiki" / "research" / "bundles" / "service-run.json").exists()

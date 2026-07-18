@@ -189,5 +189,17 @@ def apply_prepared_operations(
             f"rewritten={totals['rewritten']} unwrapped={totals['unwrapped']}"
         )
 
-    return created, updated
+    # Research is never allowed to delay or roll back an approved ingest.
+    # Only a small durable candidate record is emitted here; verification is
+    # handled asynchronously by the explicit/Sleep research lane.
+    try:
+        from llm_wiki_mcp.freshness_candidates import enqueue_from_operations
 
+        enqueue_from_operations(planned)
+    except Exception as exc:
+        _safe_log(
+            "ingest | freshness candidate enqueue degraded: "
+            f"{exc.__class__.__name__}: {exc}"
+        )
+
+    return created, updated

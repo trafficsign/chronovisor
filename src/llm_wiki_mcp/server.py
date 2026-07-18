@@ -1145,6 +1145,48 @@ def wiki_deep_dive(
 
 
 @mcp.tool()
+def wiki_research(
+    query: str,
+    claims: list[str] | None = None,
+    challenge: bool = True,
+    background: bool = True,
+) -> str:
+    """Run bounded source-backed research with citations and local challenge.
+
+    The authority ladder is Wiki -> verified claims -> Raw -> Web. Web is
+    unavailable unless its independent kill switches are enabled. This tool is
+    asynchronous by default so the host prompt path never waits on a 35B model.
+
+    Args:
+        query: Research goal.
+        claims: Optional concrete claims to classify and verify.
+        challenge: Ask the configured local challenger and conditional tie-breaker.
+        background: Return a durable job immediately when True.
+    """
+    from llm_wiki_mcp.research_service import (
+        enqueue_evidence_research,
+        run_evidence_research,
+    )
+
+    if background:
+        job = enqueue_evidence_research(query, claims=claims, challenge=challenge)
+        return json.dumps(
+            {
+                "status": "started" if job.get("status") in {"queued", "running"} else job.get("status"),
+                "job_id": job.get("job_id"),
+                "processor": "research",
+                "query": query,
+                "coalesced": job.get("coalesced", False),
+            },
+            ensure_ascii=False,
+        )
+    return json.dumps(
+        run_evidence_research(query, claims=claims, challenge=challenge),
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
 def wiki_provenance(page: str) -> str:
     """Trace the provenance of a wiki page back to raw session data.
 
