@@ -141,6 +141,53 @@ def test_outer_recall_deadline_is_the_total_budget() -> None:
     )
 
     assert hook_dispatcher.recall_outer_deadline_ms(policy) == 4_000
+    assert hook_dispatcher.recall_inner_budget_ms(policy) == 3_750
+
+
+def test_user_prompt_reserves_host_headroom_inside_total_deadline(
+    monkeypatch,
+    capsys,
+) -> None:
+    seen: dict[str, int] = {}
+
+    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(
+            total_timeout_ms=4_000,
+            deterministic_fallback_reserve_ms=600,
+            log_decisions=False,
+        ),
+    )
+    monkeypatch.setattr(recall_breaker, "is_open", lambda: False)
+
+    def fake_run(_request, policy, *, perform_search: bool):
+        seen["total_timeout_ms"] = policy.total_timeout_ms
+        seen["fallback_reserve_ms"] = policy.deterministic_fallback_reserve_ms
+        return recall_runtime.RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[],
+            matched_terms={},
+        )
+
+    monkeypatch.setattr(recall_runtime, "run_recall", fake_run)
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember"}'))
+
+    assert (
+        hook_dispatcher.main(
+            ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == "{}"
+    assert seen == {
+        "total_timeout_ms": 3_750,
+        "fallback_reserve_ms": 600,
+    }
 
 
 def test_user_prompt_open_breaker_uses_bm25_only_policy(monkeypatch, capsys) -> None:

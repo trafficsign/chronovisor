@@ -28,6 +28,7 @@ from llm_wiki_mcp.runtime_config import (
 from llm_wiki_mcp.wiki import WIKI_ROOT, init_wiki
 
 LOG_DIR = WIKI_ROOT / "logs"
+RECALL_HOST_HEADROOM_MS = 250
 
 HOSTS = {"codex", "claude-code", "generic"}
 USER_PROMPT_EVENTS = {"user-prompt-submit", "userpromptsubmit", "prompt-submit"}
@@ -77,6 +78,12 @@ def recall_outer_deadline_ms(policy: recall_runtime.RecallPolicy) -> int:
     """Return the final host boundary; ``run_recall`` owns its inner reserve."""
 
     return max(100, int(policy.total_timeout_ms))
+
+
+def recall_inner_budget_ms(policy: recall_runtime.RecallPolicy) -> int:
+    """Reserve process/render headroom inside the configured host deadline."""
+
+    return max(500, int(policy.total_timeout_ms) - RECALL_HOST_HEADROOM_MS)
 
 
 @dataclass(frozen=True)
@@ -214,16 +221,17 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
     from llm_wiki_mcp import recall_breaker
 
     breaker_was_open = recall_breaker.is_open()
-    effective_policy = (
-        replace(
-            policy,
+    effective_policy = replace(
+        policy,
+        total_timeout_ms=recall_inner_budget_ms(policy),
+    )
+    if breaker_was_open:
+        effective_policy = replace(
+            effective_policy,
             semantic=False,
             judge_mode="off",
             rewrite_enabled=False,
         )
-        if breaker_was_open
-        else policy
-    )
     try:
         with recall_wall_clock_deadline(recall_outer_deadline_ms(policy)):
             result = recall_runtime.run_recall(
