@@ -76,6 +76,10 @@ class ResearchConfig:
     web: WebConfig = field(default_factory=WebConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     consolidation_enabled: bool = False
+    consolidation_mutation_mode: str = "proposal_only"
+    consolidation_min_interval_seconds: int = 86_400
+    consolidation_min_new_sessions: int = 5
+    consolidation_max_jobs: int = 20
     egress_guard: bool = True
     external_content_trust: str = "untrusted"
 
@@ -156,6 +160,18 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
         web=web,
         compaction=compaction,
         consolidation_enabled=_bool(consolidation, "enabled", False),
+        consolidation_mutation_mode=(
+            "proposal_only"
+            if str(consolidation.get("mutation_mode") or "proposal_only") != "proposal_only"
+            else "proposal_only"
+        ),
+        consolidation_min_interval_seconds=_int(
+            consolidation, "min_interval_seconds", 86_400
+        ),
+        consolidation_min_new_sessions=_int(
+            consolidation, "min_new_sessions", 5, 1
+        ),
+        consolidation_max_jobs=_int(consolidation, "max_jobs", 20, 1),
         egress_guard=_bool(security, "egress_guard", True),
         external_content_trust=str(security.get("external_content_trust") or "untrusted"),
     )

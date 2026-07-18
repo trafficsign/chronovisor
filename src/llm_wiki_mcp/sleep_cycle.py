@@ -784,6 +784,12 @@ def _run_sleep_cycle(
             max_elapsed_seconds=120,
         ),
     )
+    research_consolidation = _run_lane(
+        "research_consolidation",
+        lambda: __import__(
+            "llm_wiki_mcp.research_consolidation", fromlist=["run_consolidation"]
+        ).run_consolidation(dry_run=dry_run),
+    )
     payload = {
         "status": "ok",
         "run_id": run_id,
@@ -835,6 +841,7 @@ def _run_sleep_cycle(
         "model_lab": model_lab,
         "recall_calibration": calibration,
         "search_self_tune": search_self_tune,
+        "research_consolidation": research_consolidation,
     }
     payload["autonomy"] = _run_lane(
         "autonomy",

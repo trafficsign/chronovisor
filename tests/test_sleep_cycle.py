@@ -135,6 +135,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
     monkeypatch.setattr("llm_wiki_mcp.duplicate_review.build_duplicate_review_queue", lambda limit: [{"id": "a"}])
     monkeypatch.setattr("llm_wiki_mcp.duplicate_review.write_review_queue", lambda records: "/tmp/dupes.jsonl")
     monkeypatch.setattr("llm_wiki_mcp.recall_improvement.run_due", lambda **kwargs: {"status": "skipped", "dry_run": kwargs["dry_run"]})
+    monkeypatch.setattr("llm_wiki_mcp.research_consolidation.run_consolidation", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"], "mutation_mode": "proposal_only"})
     monkeypatch.setattr("llm_wiki_mcp.autonomy.run_autonomy_cycle", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
     monkeypatch.setattr("llm_wiki_mcp.autonomy.resolve_deferred_duplicates_with_frontier", lambda records, **kwargs: {"status": "ok", "seen": len(records), "dry_run": kwargs["dry_run"]})
     monkeypatch.setattr("llm_wiki_mcp.orphan_link.run_autonomous", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
@@ -172,6 +173,7 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     assert drain_kwargs["eligible_keys"] == set()
     assert payload["duplicates"]["count"] == 1
     assert payload["recall_improve"]["status"] == "skipped"
+    assert payload["research_consolidation"]["mutation_mode"] == "proposal_only"
     assert payload["autonomy"]["status"] == "ok"
     assert payload["lint_repair"]["status"] == "ok"
     assert payload["search_label_review"]["status"] == "ok"
