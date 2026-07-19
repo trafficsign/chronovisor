@@ -406,6 +406,26 @@ def test_chat_uses_fixed_structured_options_and_returns_final_content(
     }
 
 
+def test_chat_forwards_explicit_reasoning_level(monkeypatch) -> None:
+    client = _ChatClient('{"decision":"apply"}')
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    result = ollama.chat(
+        [{"role": "user", "content": "decide"}],
+        model="gpt-oss:20b",
+        format={"type": "object"},
+        num_ctx=65_536,
+        num_predict=1_024,
+        keep_alive="20m",
+        read_timeout_ms=120_000,
+        max_output_chars=1_000,
+        think="low",
+    )
+
+    assert result == '{"decision":"apply"}'
+    assert client.payload["think"] == "low"
+
+
 def test_chat_enforces_output_char_cap(monkeypatch) -> None:
     client = _ChatClient("x" * 11)
     monkeypatch.setattr(ollama, "_client", lambda: client)

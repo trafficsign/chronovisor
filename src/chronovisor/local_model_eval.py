@@ -86,7 +86,7 @@ ARTIFACT_SCHEMA_VERSION = 12
 # explicit seed) into replay fingerprints and adoption identity. Policy 19
 # allowed Ollama's omitted-seed behavior, which produced different valid votes
 # for the same temperature-zero request and made a safety veto nondeterministic.
-EVALUATOR_POLICY_VERSION = 20
+EVALUATOR_POLICY_VERSION = 21
 LEGACY_REPLAY_PROMPT_LIMIT = 50_000
 STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION = "stale_historical_request_identity"
 # This is deliberately not configurable from the CLI.  A tiny hand-picked
@@ -1119,6 +1119,7 @@ def _live_transport(request: ChatRequest) -> str | ollama.ChatResponse:
         max_output_chars=request.max_output_chars,
         temperature=request.temperature,
         seed=request.seed,
+        think=request.think,
         return_metadata=True,
     )
 

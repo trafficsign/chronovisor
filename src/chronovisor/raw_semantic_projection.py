@@ -27,7 +27,7 @@ from chronovisor.canonical_json import (
 )
 from chronovisor.durable_state import fsync_directory as _fsync_directory
 from chronovisor.raw_segment import RawSegmentCommit
-from chronovisor.schema_compat import schema_matches
+from chronovisor.sealed_artifact_decoder import schema_matches
 
 from chronovisor.save_transaction import (
     SaveTransactionReceipt,

@@ -275,12 +275,15 @@ def test_user_prompt_init_failure_is_still_exit_zero_fail_open(
     assert capsys.readouterr().out.strip() == "{}"
 
 
-def test_stop_dispatch_only_save_for_legacy_wrapper(
+def test_stop_dispatch_enqueues_save_and_receipt_audit(
     monkeypatch, tmp_path, capsys
 ) -> None:
     config = tmp_path / "config.toml"
-    config.write_text("[hooks.stop]\nsave = true\naudit = true\n", encoding="utf-8")
-    monkeypatch.setenv("CODEX_WIKI_SAVE_ENABLED", "1")
+    config.write_text(
+        "[hooks.stop]\nsave = true\naudit = true\ncontent_correction = false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_CHRONOVISOR_RECORD_ENABLED", "1")
     monkeypatch.setenv("CHRONOVISOR_RECALL_AUDIT_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
@@ -294,8 +297,6 @@ def test_stop_dispatch_only_save_for_legacy_wrapper(
                 "--hook",
                 "--config",
                 str(config),
-                "--only",
-                "save",
                 "--dry-run",
                 "--format",
                 "json",
@@ -375,48 +376,16 @@ def test_stop_dispatch_full_entrypoint_enqueues_only_capture_work(
     ]
 
 
-def test_stop_dispatch_only_improve_is_disabled(monkeypatch, tmp_path, capsys) -> None:
-    config = tmp_path / "config.toml"
-    config.write_text(
-        "[hooks.stop]\nsave = true\naudit = true\nrecall_improve = true\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CHRONOVISOR_RECALL_IMPROVE_ENABLED", "1")
-    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
-
-    assert (
-        hook_dispatcher.main(
-            [
-                "--host",
-                "codex",
-                "--event",
-                "Stop",
-                "--hook",
-                "--config",
-                str(config),
-                "--only",
-                "improve",
-                "--dry-run",
-                "--format",
-                "json",
-            ]
-        )
-        == 0
-    )
-    output = json.loads(capsys.readouterr().out)
-
-    assert output["tasks"] == []
-    assert output["status"] == "compatibility_noop"
-    assert output["deprecated"] is True
-
-
-def test_stop_dispatch_only_content_correction_uses_capture_only_worker(
+def test_stop_dispatch_content_correction_uses_capture_only_worker(
     monkeypatch,
     tmp_path,
     capsys,
 ) -> None:
     config = tmp_path / "config.toml"
-    config.write_text("[hooks.stop]\ncontent_correction = true\n", encoding="utf-8")
+    config.write_text(
+        "[hooks.stop]\nsave = false\ncontent_correction = true\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("CHRONOVISOR_CONTENT_CORRECTION_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
@@ -430,8 +399,6 @@ def test_stop_dispatch_only_content_correction_uses_capture_only_worker(
                 "--hook",
                 "--config",
                 str(config),
-                "--only",
-                "correction",
                 "--dry-run",
                 "--format",
                 "json",
@@ -587,12 +554,11 @@ def test_spawn_task_only_enqueues_without_process(monkeypatch) -> None:
     assert seen["stdin_text"] == '{"session_id":"session-1"}'
 
 
-def test_stop_dispatch_requires_env_without_unified_config(
+def test_stop_dispatch_requires_env_for_noncanonical_config_override(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    legacy = tmp_path / "recall.toml"
-    legacy.write_text("enabled = true\n", encoding="utf-8")
-    monkeypatch.delenv("CODEX_WIKI_SAVE_ENABLED", raising=False)
+    override_config = tmp_path / "override.toml"
+    override_config.write_text("enabled = true\n", encoding="utf-8")
     monkeypatch.delenv("CODEX_CHRONOVISOR_RECORD_ENABLED", raising=False)
     monkeypatch.delenv("CHRONOVISOR_RECALL_AUDIT_ENABLED", raising=False)
     monkeypatch.delenv("CHRONOVISOR_RECALL_IMPROVE_ENABLED", raising=False)
@@ -608,7 +574,7 @@ def test_stop_dispatch_requires_env_without_unified_config(
                 "Stop",
                 "--hook",
                 "--config",
-                str(legacy),
+                str(override_config),
                 "--dry-run",
                 "--format",
                 "json",

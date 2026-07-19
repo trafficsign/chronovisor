@@ -131,6 +131,8 @@ def test_layout_mode_uses_wiki_config_with_environment_override(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.delenv("CHRONOVISOR_RAW_LAYOUT")
+    assert raw_layout_mode() == "v2"
+
     (tmp_path / "config.toml").write_text('[raw]\nlayout = "shadow"\n')
 
     assert raw_layout_mode(chronovisor_root=tmp_path) == "shadow"

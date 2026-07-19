@@ -1367,7 +1367,7 @@ def _build_safe_fix_prompt(
             rendered_details["replacement_evidence"] = compact_replacement
         rendered_proposal["details"] = rendered_details
     return f"""\
-You are the final autonomous reviewer for an LLM Wiki semantic page mutation.
+You are the final autonomous reviewer for a Chronovisor semantic page mutation.
 A local deterministic checker produced the proposal below, but it has no
 authority to change content or metadata. Independently decide whether this
 exact mutation is correct. Approve only when every change is justified by the

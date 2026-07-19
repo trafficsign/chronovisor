@@ -439,14 +439,14 @@ def get_bm25() -> BM25Index:
 #   vector). `norm` is precomputed at write time so semantic_search never
 #   recomputes per-row norms at query time.
 #
-# Migration: a one-shot import from the legacy ~/.wiki/.embeddings.json runs
+# Migration: a one-shot import from the former JSON embedding store runs
 # on first connect when the SQLite file does not yet exist.
 
 EMBED_MODEL = DEFAULT_EMBEDDING_MODEL
 
 EMBEDDINGS_DB = CHRONOVISOR_ROOT / ".index" / "embeddings.sqlite"
-LEGACY_EMBEDDINGS_FILE = CHRONOVISOR_ROOT / ".embeddings.json"
-EMBEDDINGS_FILE = LEGACY_EMBEDDINGS_FILE  # back-compat alias for any external imports
+JSON_EMBEDDINGS_FILE = CHRONOVISOR_ROOT / ".embeddings.json"
+EMBEDDINGS_FILE = JSON_EMBEDDINGS_FILE
 
 _EMBED_DB_LOCK = threading.Lock()
 MAX_CHUNKS_PER_PAGE = 8
@@ -558,40 +558,39 @@ def _connect_embeddings_raw() -> sqlite3.Connection:
     return conn
 
 
-_legacy_migration_done = False
+_json_import_done = False
 
 
-def _ensure_legacy_embedding_migration() -> None:
-    """One-shot import of ~/.wiki/.embeddings.json into SQLite.
+def _ensure_json_embedding_import() -> None:
+    """One-shot import of the former JSON embedding store into SQLite.
 
-    Runs at most once per process. The legacy file is left in place so a
-    rollback to the old code path remains possible; subsequent runs are
-    no-ops because the SQLite table is already populated.
+    Runs at most once per process. The JSON file is left in place as immutable
+    import evidence; subsequent runs are no-ops once SQLite is populated.
     """
-    global _legacy_migration_done
+    global _json_import_done
     if os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
         return
-    if _legacy_migration_done:
+    if _json_import_done:
         return
     with _EMBED_DB_LOCK:
-        if _legacy_migration_done:
+        if _json_import_done:
             return
-        if not LEGACY_EMBEDDINGS_FILE.exists():
-            _legacy_migration_done = True
+        if not JSON_EMBEDDINGS_FILE.exists():
+            _json_import_done = True
             return
         try:
-            payload = json.loads(LEGACY_EMBEDDINGS_FILE.read_text())
+            payload = json.loads(JSON_EMBEDDINGS_FILE.read_text())
         except (OSError, json.JSONDecodeError):
-            _legacy_migration_done = True
+            _json_import_done = True
             return
         if not isinstance(payload, dict) or not payload:
-            _legacy_migration_done = True
+            _json_import_done = True
             return
         conn = _connect_embeddings_raw()
         try:
             existing = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
             if existing > 0:
-                _legacy_migration_done = True
+                _json_import_done = True
                 return
             model = EMBED_MODEL
             text_prefix = ""
@@ -617,13 +616,13 @@ def _ensure_legacy_embedding_migration() -> None:
                 conn.commit()
         finally:
             conn.close()
-        _legacy_migration_done = True
+        _json_import_done = True
 
 
 def _connect_embeddings() -> sqlite3.Connection:
-    """Open the SQLite store after the rollback-safe legacy import check."""
+    """Open the SQLite store after the idempotent JSON import check."""
 
-    _ensure_legacy_embedding_migration()
+    _ensure_json_embedding_import()
     return _connect_embeddings_raw()
 
 
@@ -746,6 +745,34 @@ def _delete_chunk_embeddings(
             conn.commit()
         finally:
             conn.close()
+
+
+def _delete_stale_embedding_pages(current_page_ids: set[str]) -> int:
+    """Remove every derived embedding row whose source page no longer exists."""
+
+    deleted_page_ids: set[str] = set()
+    with _EMBED_DB_LOCK:
+        conn = _connect_embeddings_raw()
+        try:
+            for table in ("embeddings", "question_embeddings", "chunk_embeddings"):
+                stored = {
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT DISTINCT page_id FROM {table}"
+                    ).fetchall()
+                }
+                stale = stored - current_page_ids
+                if not stale:
+                    continue
+                conn.executemany(
+                    f"DELETE FROM {table} WHERE page_id = ?",
+                    ((page_id,) for page_id in sorted(stale)),
+                )
+                deleted_page_ids.update(stale)
+            conn.commit()
+        finally:
+            conn.close()
+    return len(deleted_page_ids)
 
 
 def _store_chunk_embeddings_batch(
@@ -1029,6 +1056,9 @@ def update_embeddings(
 
     model, document_prefix, _query_prefix = _embedding_profile()
 
+    page_paths = list(searchable_pages())
+    current_page_ids = {page_id_from_path(path) for path in page_paths}
+
     # Pull existing mtimes for the candidate page set in one query so
     # we don't pay per-row SELECTs inside the loop.
     conn = _connect_embeddings()
@@ -1045,10 +1075,11 @@ def update_embeddings(
         }
     finally:
         conn.close()
+    _delete_stale_embedding_pages(current_page_ids)
 
     existing_chunk_pages = _chunked_page_ids()
     pages_to_process: list[tuple[str, str, int, str, float]] = []
-    for path in searchable_pages():
+    for path in page_paths:
         pid = page_id_from_path(path)
         if page_ids and pid not in page_ids:
             continue

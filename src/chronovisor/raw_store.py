@@ -24,7 +24,7 @@ from chronovisor.raw_segment import (
     read_open_range,
     read_sealed_range,
 )
-from chronovisor.schema_compat import schema_matches
+from chronovisor.sealed_artifact_decoder import schema_matches
 
 
 RawLayoutMode = Literal["legacy", "shadow", "v2"]
@@ -57,7 +57,7 @@ def raw_layout_mode(
         if isinstance(raw_config, dict):
             configured = raw_config.get("layout")
     selected_value = value or os.environ.get("CHRONOVISOR_RAW_LAYOUT") or configured
-    selected = str(selected_value or "legacy").strip().lower()
+    selected = str(selected_value or "v2").strip().lower()
     if selected not in {"legacy", "shadow", "v2"}:
         raise ValueError("CHRONOVISOR_RAW_LAYOUT must be legacy, shadow, or v2")
     return selected  # type: ignore[return-value]

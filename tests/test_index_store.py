@@ -34,6 +34,7 @@ def isolated_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(
         index_store_mod, "BACKLINKS_INDEX_FILE", index_dir / "backlinks.json"
     )
+    monkeypatch.setattr(index_store_mod, "_canonical_aliases", lambda: {})
     return chronovisor_root
 
 
@@ -251,6 +252,33 @@ class TestBuildEntryRawKeywords:
 
 
 class TestRawKeywordsAccessor:
+    def test_alias_targets_are_canonicalized_and_alias_changes_rebuild_cache(
+        self,
+        isolated_index: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed(
+            isolated_index,
+            "source.md",
+            "---\ntitle: Source\n---\n[[old-page]]\n",
+        )
+        aliases = {"old-page": "current-page"}
+        monkeypatch.setattr(index_store_mod, "_canonical_aliases", lambda: aliases)
+        store = IndexStore()
+
+        store.refresh()
+
+        assert store.outlinks("source") == ["current-page"]
+        assert store.backlinks("current-page") == ["source"]
+        assert store.backlinks("old-page") == []
+
+        aliases = {"old-page": "new-page"}
+        store.refresh()
+
+        assert store.outlinks("source") == ["new-page"]
+        assert store.backlinks("new-page") == ["source"]
+        assert store.backlinks("current-page") == []
+
     def test_read_only_refresh_rebuilds_memory_without_persisting(
         self, isolated_index: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -1,7 +1,6 @@
 # Configuration
 
-The preferred runtime config is `~/.chronovisor/config.toml`. If it does not exist,
-Chronovisor falls back to the legacy `~/.chronovisor/recall.toml` shape.
+The runtime config is `~/.chronovisor/config.toml`.
 
 ## Raw Archive rollout
 
@@ -10,15 +9,15 @@ ingest, sleep, and dashboard processes cannot drift onto different layouts:
 
 ```toml
 [raw]
-layout = "legacy" # legacy | shadow | v2
+layout = "v2" # canonical default; legacy | shadow are explicit recovery modes
 ```
 
 `CHRONOVISOR_RAW_LAYOUT` remains an emergency per-process override:
 
 ```sh
-CHRONOVISOR_RAW_LAYOUT=legacy  # default; flat Markdown authority
+CHRONOVISOR_RAW_LAYOUT=legacy  # explicit recovery: flat Markdown authority
 CHRONOVISOR_RAW_LAYOUT=shadow  # flat authority plus source-native v2 mirror
-CHRONOVISOR_RAW_LAYOUT=v2      # source-native date-partitioned authority
+CHRONOVISOR_RAW_LAYOUT=v2      # default; source-native date-partitioned authority
 ```
 
 An unknown value fails before capture. `chronovisor_record` remains the compatible
@@ -94,14 +93,15 @@ adaptive_residency = true
 residency_policy_version = 2
 memory_reserve_gib = 16
 max_resident_models = 3
-# This is the post-adoption production shape. The v56 artifact is sealed by
-# artifact schema 12, evaluator policy 20, decision-semantics policy 11,
+# This is the post-adoption production shape. The v64 artifact is sealed by
+# artifact schema 12, evaluator policy 21, decision-semantics policy 12,
 # quorum-safety policy 1, action-signature policy 5, effective-request-
-# fingerprint policy 4, structured-generation policy 1, lane-contract registry
-# policy 9 (artifact identity
-# only), lane prompt policy 7 for 17 lanes, 8 for raw replay, 14 for ingest, and
-# lane-contract case policy 20 (source deterministic_lane_contract_v20).
-# Evaluator policy 20 seals deterministic seed 0 as well as hash-bound ingest
+# fingerprint policy 4, structured-generation policy 3, lane-contract registry
+# policy 10 (artifact identity
+# only), lane prompt policy 8 for 16 lanes, 9 for raw replay and recall
+# auto-apply, 16 for ingest, and lane-contract case policy 24 (source
+# deterministic_lane_contract_v26).
+# Evaluator policy 21 seals deterministic seed 0 as well as hash-bound ingest
 # repair option selection and host-only byte materialization into the artifact
 # identity. Repair option
 # policy 2 exposes no heuristic semantic receipts; both models judge the exact
@@ -110,7 +110,7 @@ max_resident_models = 3
 # engine/model-drifted artifacts make enabled semantic lanes quarantine before
 # inference. Set this to "" and keep the 19 model-backed lanes in shadow only
 # while compiling and evaluating a replacement candidate.
-adoption_artifact = "~/.chronovisor/runtime/model-lab/local-eval/adoption-v56-evaluator20.json"
+adoption_artifact = "~/.chronovisor/runtime/model-lab/local-eval/adoption-v64-evaluator21.json"
 
 [decision_policies]
 # Deterministic/non-model lanes and the guarded repair-only lane are live
@@ -355,18 +355,11 @@ min_count = 1
 actions = ["alias", "query_hint", "page_tag"]
 ```
 
-## Compatibility
-
-Existing `recall.toml` files with top-level `[gate]`, `[thresholds]`,
-`[budgets]`, `[recall]`, `[policy]`, `[auditor]`, and `[auto_apply]` sections
-remain supported.
-
 ## Environment Overrides
 
 - `CHRONOVISOR_RECALL_ENABLED=0`: disable synchronous recall.
 - `CODEX_CHRONOVISOR_RECORD_ENABLED=1`: enable the Codex record hook.
 - `CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED=1`: enable the Claude Code record hook.
-- Legacy `*_WIKI_SAVE_ENABLED` names remain read-only compatibility aliases.
 - `CHRONOVISOR_RECALL_AUDIT_ENABLED` and
   `CHRONOVISOR_CONTENT_CORRECTION_ENABLED`: legacy compatibility switches. The
   Stop dispatcher is save-only and does not schedule those lanes.
@@ -400,10 +393,6 @@ Older settings may still expose `frontier_mode`, `frontier_*`, or
 unless they belong to the guarded code-repair settings listed above. Routine
 `run_structured_review()` calls always use `[decision_router]`.
 
-The compatibility wrappers preserve old command-line and environment parsing,
-but they do not weaken the capture-only Stop invariant. `--only audit` and
-`--only improve` are deprecated no-ops; `chronovisor hooks inspect` labels them and
-emits a migration warning. They are scheduled for removal after 2026-10-01.
 Direct `chronovisor-hook --event Stop` deployments may enable save and
 deterministic correction capture, but never semantic work.
 

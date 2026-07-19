@@ -1,40 +1,18 @@
-"""Chronovisor directory management and legacy-root compatibility."""
+"""Chronovisor directory management."""
 
 import os
 from pathlib import Path
 
 DEFAULT_ROOT = Path.home() / ".chronovisor"
-LEGACY_ROOT = Path.home() / ".wiki"
 
 
 def resolve_root() -> Path:
-    """Return the one authoritative data root.
-
-    Before migration an existing legacy root remains usable.  After migration
-    ``~/.wiki`` may only coexist as a symlink to ``~/.chronovisor``.  Two
-    independent trees are rejected so writers can never diverge silently.
-    """
+    """Return the one authoritative Chronovisor data root."""
 
     configured = os.environ.get("CHRONOVISOR_ROOT", "").strip()
     if configured:
         return Path(configured).expanduser().resolve(strict=False)
 
-    new_exists = DEFAULT_ROOT.exists()
-    legacy_exists = LEGACY_ROOT.exists() or LEGACY_ROOT.is_symlink()
-    if new_exists and legacy_exists:
-        try:
-            if LEGACY_ROOT.resolve(strict=True) == DEFAULT_ROOT.resolve(strict=True):
-                return DEFAULT_ROOT
-        except OSError:
-            pass
-        raise RuntimeError(
-            "split-brain data roots detected: both ~/.chronovisor and ~/.wiki "
-            "exist independently"
-        )
-    if new_exists:
-        return DEFAULT_ROOT
-    if legacy_exists:
-        return LEGACY_ROOT.resolve(strict=False)
     return DEFAULT_ROOT
 
 

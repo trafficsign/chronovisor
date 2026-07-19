@@ -114,25 +114,6 @@ router fully validates a different adopted-artifact SHA. A changed but invalid
 nomination fails closed. Operational runtime failures stay in the separate
 repair queue.
 
-## Legacy Wrappers
-
-These scripts remain for existing host settings:
-
-- `scripts/codex_recall_hook.sh`
-- `scripts/codex_chronovisor_record_hook.sh`
-- `scripts/codex_recall_audit_hook.sh`
-- `scripts/claude_code_recall_hook.sh`
-- `scripts/claude_code_chronovisor_record_hook.sh`
-- `scripts/claude_code_recall_audit_hook.sh`
-
-Wrappers may still call the dispatcher with `--only save`, `--only audit`,
-`--only correction`, or `--only improve`. The save selection enqueues raw
-capture, and the correction selection enqueues only the dedicated
-`--capture-only` worker. Audit and improve are deprecated compatibility no-ops;
-their replacement is the save receipt's asynchronous audit candidate and the
-bounded convergence worker. These no-op selections are scheduled for removal
-after 2026-10-01. No selection starts semantic review in the Stop process.
-
 ## Install
 
 ```sh

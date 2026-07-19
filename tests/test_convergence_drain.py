@@ -534,7 +534,7 @@ def test_adoption_fingerprint_binds_resolved_policy_mode(monkeypatch) -> None:
         runtime_config.DecisionRouterConfig,
     )
     # This test verifies the registered default versus an environment override.
-    # Do not let the operator's live ~/.wiki/config.toml decide the baseline.
+    # Do not let the operator's live Chronovisor config decide the baseline.
     monkeypatch.setattr(decision_policy, "load_toml_file", lambda *_args, **_kwargs: {})
     for name in convergence_drain.DECISION_POLICY_LANES:
         env_name = "CHRONOVISOR_DECISION_POLICY_" + name.upper()

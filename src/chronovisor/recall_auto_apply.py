@@ -290,16 +290,38 @@ def _target_page_id(record: dict[str, Any], *, effective_action: str) -> str:
 
 def _bounded_page_evidence(page_id: str, *, max_chars: int = 4_000) -> dict[str, Any]:
     if not page_id:
-        return {"page_id": "", "exists": False, "sha256": "", "content": ""}
+        return {
+            "page_id": "",
+            "exists": False,
+            "snapshot_status": "missing",
+            "sha256": "",
+            "content": "",
+            "content_truncated": False,
+        }
     path = chronovisor_store.find_page(page_id)
     if path is None:
-        return {"page_id": page_id, "exists": False, "sha256": "", "content": ""}
+        return {
+            "page_id": page_id,
+            "exists": False,
+            "snapshot_status": "missing",
+            "sha256": "",
+            "content": "",
+            "content_truncated": False,
+        }
     try:
         raw = path.read_bytes()
         content = raw.decode("utf-8")
     except (OSError, UnicodeDecodeError):
-        return {"page_id": page_id, "exists": False, "sha256": "", "content": ""}
-    if len(content) > max_chars:
+        return {
+            "page_id": page_id,
+            "exists": False,
+            "snapshot_status": "unreadable",
+            "sha256": "",
+            "content": "",
+            "content_truncated": False,
+        }
+    content_truncated = len(content) > max_chars
+    if content_truncated:
         half = max(1, max_chars // 2)
         content = (
             content[:half] + "\n\n[... bounded page evidence ...]\n\n" + content[-half:]
@@ -307,8 +329,10 @@ def _bounded_page_evidence(page_id: str, *, max_chars: int = 4_000) -> dict[str,
     return {
         "page_id": page_id,
         "exists": True,
+        "snapshot_status": "verified",
         "sha256": hashlib.sha256(raw).hexdigest(),
         "content": content,
+        "content_truncated": content_truncated,
     }
 
 

@@ -17,7 +17,7 @@ import zstandard as zstd
 
 from chronovisor.link_fix import atomic_write
 from chronovisor.raw_segment import CAPTURE_TIMEZONE, RawSegmentCorrupt
-from chronovisor.schema_compat import schema_matches
+from chronovisor.sealed_artifact_decoder import schema_matches
 
 
 LEGACY_ARCHIVE_SCHEMA = "chronovisor.raw-legacy-archive.v1"

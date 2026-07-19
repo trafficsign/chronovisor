@@ -26,7 +26,7 @@ from chronovisor.raw_semantic_projection import (
     PROJECTION_POLICY_VERSION,
     verify_projection_child,
 )
-from chronovisor.schema_compat import schema_matches
+from chronovisor.sealed_artifact_decoder import schema_matches
 from chronovisor.search_types import tokenize
 
 

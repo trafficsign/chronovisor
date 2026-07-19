@@ -14,6 +14,7 @@ The store is a process-wide singleton accessed via :func:`get_store`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -26,7 +27,7 @@ from chronovisor.link_fix import atomic_write, extract_targets
 from chronovisor.store import PAGES_DIR, SYSTEM_DIR, CHRONOVISOR_ROOT
 
 
-SCHEMA_VERSION = 8  # bumped for sensitivity
+SCHEMA_VERSION = 9  # bumped for canonical alias targets
 INDEX_DIR = CHRONOVISOR_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
@@ -42,6 +43,31 @@ VALID_PAGE_TYPES = {
     "decision",
 }
 VALID_SENSITIVITY_TIERS = {"normal", "high"}
+
+
+def _canonical_aliases() -> dict[str, str]:
+    """Return page-id aliases normalized to the stem-based index contract."""
+
+    from chronovisor.alias_store import load_aliases
+
+    canonical: dict[str, str] = {}
+    for alias, target in load_aliases().items():
+        alias_id = Path(str(alias).removesuffix(".md")).name
+        target_id = Path(str(target).removesuffix(".md")).name
+        if alias_id and target_id and alias_id != target_id:
+            canonical[alias_id] = target_id
+    return canonical
+
+
+def _alias_sha256(aliases: dict[str, str]) -> str:
+    encoded = json.dumps(
+        aliases, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_page_id(page_id: str, aliases: dict[str, str]) -> str:
+    return aliases.get(page_id, page_id)
 
 
 def _normalize_lifecycle_status(value: object) -> str:
@@ -223,6 +249,7 @@ class IndexStore:
         self._backlinks: dict[str, list[str]] = {}
         self._loaded = False
         self._persistence_dirty = False
+        self._alias_sha256 = ""
 
     # -- persistence ------------------------------------------------------
 
@@ -242,6 +269,8 @@ class IndexStore:
         # Mismatch => one file is stale; rebuild from scratch on next refresh.
         if pages_doc.get("generation") != backlinks_doc.get("generation"):
             return
+        if pages_doc.get("alias_sha256") != backlinks_doc.get("alias_sha256"):
+            return
         try:
             entries = {
                 pid: PageEntry.from_dict(d)
@@ -256,18 +285,21 @@ class IndexStore:
         self._entries = entries
         self._page_order = [pid for pid in order if pid in entries]
         self._backlinks = backlinks
+        self._alias_sha256 = str(pages_doc.get("alias_sha256") or "")
 
     def _persist(self, generation: int) -> None:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         pages_doc = {
             "schema_version": SCHEMA_VERSION,
             "generation": generation,
+            "alias_sha256": self._alias_sha256,
             "page_order": list(self._page_order),
             "entries": {pid: e.to_dict() for pid, e in self._entries.items()},
         }
         backlinks_doc = {
             "schema_version": SCHEMA_VERSION,
             "generation": generation,
+            "alias_sha256": self._alias_sha256,
             "edges": {pid: list(refs) for pid, refs in self._backlinks.items()},
         }
         # atomic_write each file. Cross-file consistency is guarded by the
@@ -313,6 +345,10 @@ class IndexStore:
                 self._load_from_disk()
                 self._loaded = True
 
+            aliases = _canonical_aliases()
+            alias_sha256 = _alias_sha256(aliases)
+            aliases_changed = alias_sha256 != self._alias_sha256
+
             current = self._scan_disk()
             seen_ids: dict[str, tuple[Path, bool, int, int]] = {}
             duplicates: list[str] = []
@@ -347,7 +383,9 @@ class IndexStore:
                 existing = self._entries.get(pid)
                 path_str = str(path)
                 if existing is None:
-                    entry = self._build_entry(pid, path, is_system, mtime_ns, size)
+                    entry = self._build_entry(
+                        pid, path, is_system, mtime_ns, size, aliases=aliases
+                    )
                     if entry is not None:
                         self._entries[pid] = entry
                         changed = True
@@ -358,14 +396,21 @@ class IndexStore:
                     or existing.size != size
                     or existing.path != path_str
                     or existing.is_system != is_system
+                    or aliases_changed
                 ):
-                    entry = self._build_entry(pid, path, is_system, mtime_ns, size)
+                    entry = self._build_entry(
+                        pid, path, is_system, mtime_ns, size, aliases=aliases
+                    )
                     if entry is not None:
                         self._entries[pid] = entry
                         changed = True
 
             if self._page_order != new_order:
                 self._page_order = new_order
+                changed = True
+
+            if aliases_changed:
+                self._alias_sha256 = alias_sha256
                 changed = True
 
             if changed:
@@ -385,7 +430,13 @@ class IndexStore:
 
     @staticmethod
     def _build_entry(
-        pid: str, path: Path, is_system: bool, mtime_ns: int, size: int
+        pid: str,
+        path: Path,
+        is_system: bool,
+        mtime_ns: int,
+        size: int,
+        *,
+        aliases: dict[str, str] | None = None,
     ) -> PageEntry | None:
         text = _read_text_stable(path)
         if text is None:
@@ -393,7 +444,11 @@ class IndexStore:
         fm = _parse_frontmatter(text)
         title = fm.get("title", path.stem)
         updated = fm.get("updated", "unknown")
-        outlinks = extract_targets(text, strip=True)
+        canonical_aliases = aliases or {}
+        outlinks = [
+            _canonical_page_id(target, canonical_aliases)
+            for target in extract_targets(text, strip=True)
+        ]
         # raw_keywords / tags: trust the frontmatter only when it's an
         # actual ``list[str]``. Anything else (scalar string, missing,
         # broken cache from a manual edit) collapses to an empty list so
@@ -418,11 +473,11 @@ class IndexStore:
             summary=fm.get("summary", "") if isinstance(fm.get("summary", ""), str) else "",
             recall_questions=_coerce_str_list(fm.get("recall_questions")),
             status=_normalize_lifecycle_status(fm.get("status")),
-            superseded_by=(
-                fm.get("superseded_by", "")
-                if isinstance(fm.get("superseded_by", ""), str)
-                else ""
-            ),
+            superseded_by=_canonical_page_id(
+                fm.get("superseded_by", ""), canonical_aliases
+            )
+            if isinstance(fm.get("superseded_by", ""), str)
+            else "",
             page_type=_normalize_page_type(fm.get("type"), path=path),
             entities=_coerce_str_list(fm.get("entities")),
             sensitivity=_normalize_sensitivity(fm.get("sensitivity"), path=path),

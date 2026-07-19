@@ -23,7 +23,7 @@ from chronovisor.durable_state import (
     seal_object,
     verify_sealed_object,
 )
-from chronovisor.schema_compat import schema_matches
+from chronovisor.sealed_artifact_decoder import schema_matches
 
 
 EXECUTION_FINGERPRINT_VERSION = 1

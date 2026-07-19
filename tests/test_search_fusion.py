@@ -36,7 +36,7 @@ def test_semantic_search_strict_mode_surfaces_embedding_failure(
         "embed",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
     )
-    monkeypatch.setattr(search, "_ensure_legacy_embedding_migration", lambda: None)
+    monkeypatch.setattr(search, "_ensure_json_embedding_import", lambda: None)
     monkeypatch.setattr(search, "_embedding_count", lambda: 1)
     monkeypatch.setattr(
         search,
@@ -54,15 +54,15 @@ def test_read_only_embedding_probe_does_not_create_missing_database(
 ) -> None:
     database = tmp_path / "missing" / "embeddings.sqlite"
     monkeypatch.setattr(search, "EMBEDDINGS_DB", database)
-    monkeypatch.setattr(search, "LEGACY_EMBEDDINGS_FILE", tmp_path / "missing.json")
-    monkeypatch.setattr(search, "_legacy_migration_done", False)
+    monkeypatch.setattr(search, "JSON_EMBEDDINGS_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr(search, "_json_import_done", False)
     monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
 
     assert search._embedding_count() == 0
     assert not database.exists()
 
 
-def test_legacy_embedding_migration_uses_raw_connection_once(
+def test_json_embedding_import_uses_raw_connection_once(
     tmp_path, monkeypatch
 ) -> None:
     database = tmp_path / ".index" / "embeddings.sqlite"
@@ -72,8 +72,8 @@ def test_legacy_embedding_migration_uses_raw_connection_once(
         encoding="utf-8",
     )
     monkeypatch.setattr(search, "EMBEDDINGS_DB", database)
-    monkeypatch.setattr(search, "LEGACY_EMBEDDINGS_FILE", legacy)
-    monkeypatch.setattr(search, "_legacy_migration_done", False)
+    monkeypatch.setattr(search, "JSON_EMBEDDINGS_FILE", legacy)
+    monkeypatch.setattr(search, "_json_import_done", False)
     monkeypatch.setattr(
         search,
         "load_embedding_config",
@@ -85,7 +85,7 @@ def test_legacy_embedding_migration_uses_raw_connection_once(
 
     assert first == ([3.0, 4.0], 12.5, 5.0)
     assert second == first
-    assert search._legacy_migration_done is True
+    assert search._json_import_done is True
 
 
 def test_bm25_read_only_refresh_persists_dirty_cache_on_next_normal_build(
@@ -266,10 +266,10 @@ def test_update_embeddings_rebuilds_when_model_profile_changes(
     monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
     monkeypatch.setattr(
-        search, "LEGACY_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
+        search, "JSON_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
     )
     monkeypatch.setattr(search, "all_pages", lambda: [page_path])
-    monkeypatch.setattr(search, "_legacy_migration_done", True)
+    monkeypatch.setattr(search, "_json_import_done", True)
     monkeypatch.setattr(ollama, "is_available", lambda: True)
 
     profile = {
@@ -331,10 +331,10 @@ def test_update_embeddings_stores_markdown_chunks(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
     monkeypatch.setattr(
-        search, "LEGACY_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
+        search, "JSON_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
     )
     monkeypatch.setattr(search, "all_pages", lambda: [page_path])
-    monkeypatch.setattr(search, "_legacy_migration_done", True)
+    monkeypatch.setattr(search, "_json_import_done", True)
     monkeypatch.setattr(ollama, "is_available", lambda: True)
     monkeypatch.setattr(
         search,
@@ -359,6 +359,99 @@ def test_update_embeddings_stores_markdown_chunks(tmp_path, monkeypatch) -> None
     assert rows
     assert rows[0][0] == "chunky"
     assert any("Late Heading" in row[2] for row in rows)
+
+
+def test_update_embeddings_prunes_rows_for_deleted_pages(tmp_path, monkeypatch) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    pages_dir = chronovisor_root / "pages"
+    system_dir = chronovisor_root / "system"
+    index_dir = chronovisor_root / ".index"
+    pages_dir.mkdir(parents=True)
+    system_dir.mkdir(parents=True)
+    index_dir.mkdir(parents=True)
+    page_path = pages_dir / "current.md"
+    page_path.write_text("---\ntitle: Current\n---\nbody\n", encoding="utf-8")
+    db_path = index_dir / "embeddings.sqlite"
+
+    monkeypatch.setattr(search, "PAGES_DIR", pages_dir)
+    monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
+    monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
+    monkeypatch.setattr(
+        search, "JSON_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
+    )
+    monkeypatch.setattr(search, "all_pages", lambda: [page_path])
+    monkeypatch.setattr(search, "_json_import_done", True)
+    monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(
+        search,
+        "load_embedding_config",
+        lambda: EmbeddingConfig(model="m", document_prefix="", query_prefix=""),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "embed",
+        lambda texts, *, model=None: [[1.0, 2.0] for _ in texts],
+    )
+
+    assert search.update_embeddings() == 1
+    conn = sqlite3.connect(db_path)
+    try:
+        vector, mtime, norm, dim, model, prefix = conn.execute(
+            "SELECT vector, mtime, norm, dim, model, text_prefix FROM embeddings "
+            "WHERE page_id = 'current'"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO embeddings VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("retired-page", vector, mtime, norm, dim, model, prefix),
+        )
+        conn.execute(
+            "INSERT INTO question_embeddings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "retired-page#q0",
+                "retired-page",
+                0,
+                "old question",
+                vector,
+                mtime,
+                norm,
+                dim,
+                model,
+                prefix,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO chunk_embeddings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "retired-page#c0",
+                "retired-page",
+                0,
+                "old chunk",
+                vector,
+                mtime,
+                norm,
+                dim,
+                model,
+                prefix,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert search.update_embeddings() == 0
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM embeddings WHERE page_id = 'retired-page'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM question_embeddings WHERE page_id = 'retired-page'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM chunk_embeddings WHERE page_id = 'retired-page'"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def test_semantic_search_applies_query_prefix(tmp_path, monkeypatch) -> None:

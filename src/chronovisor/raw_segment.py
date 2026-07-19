@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import zstandard as zstd
 
-from chronovisor.schema_compat import schema_matches
+from chronovisor.sealed_artifact_decoder import schema_matches
 
 
 COMMIT_SCHEMA = "chronovisor.raw-segment-commit.v1"

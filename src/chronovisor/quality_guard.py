@@ -26,7 +26,7 @@ from chronovisor.durable_state import (
     verify_sealed_object,
     write_sealed_json,
 )
-from chronovisor.schema_compat import canonical_schema
+from chronovisor.sealed_artifact_decoder import canonical_schema
 
 
 QUALITY_POLICY_VERSION = 1

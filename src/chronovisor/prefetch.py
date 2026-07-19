@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.recall_log_schema import (
+    canonicalize_page_ids,
     join_used_recall_episodes,
     page_ids_from_record,
 )
@@ -64,6 +65,9 @@ def build_prefetch_cache(
         recall_rows,
         _read_recent_jsonl(pull_log_file, limit=limit),
     )
+    from chronovisor.alias_store import load_aliases
+
+    aliases = load_aliases()
 
     def compile_rows(
         rows: list[tuple[dict[str, Any], list[str]]],
@@ -106,12 +110,15 @@ def build_prefetch_cache(
         )
 
     exposure_rows = [
-        (row, page_ids_from_record(row))
+        (row, canonicalize_page_ids(page_ids_from_record(row), aliases))
         for row in recall_rows
         if page_ids_from_record(row)
     ]
     positive_rows = [
-        (episode["recall"], episode["page_ids"])
+        (
+            episode["recall"],
+            canonicalize_page_ids(episode["page_ids"], aliases),
+        )
         for episode in joined["episodes"]
     ]
     exposure_buckets, exposure_tokens, exposure_episodes = compile_rows(

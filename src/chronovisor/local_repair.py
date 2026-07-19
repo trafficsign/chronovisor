@@ -50,7 +50,7 @@ LOCAL_REPAIR_SCHEMA: dict[str, Any] = {
 
 
 LOCAL_REPAIR_SYSTEM_PROMPT = """\
-You are one independent local repair voter for LLM Wiki.
+You are one independent local repair voter for Chronovisor.
 Return JSON only. Choose only one whitelisted action.
 Prefer conservative repairs: if the packet has exactly one similar_existing_pages
 candidate for apply.update_target_not_found, resolve_update_target is allowed.
@@ -414,7 +414,7 @@ def semantic_hold_epoch(packet: dict[str, Any]) -> dict[str, Any]:
 
 def build_prompt(packet: dict[str, Any]) -> str:
     return (
-        "Diagnose this LLM Wiki failure packet and return one JSON repair decision.\n\n"
+        "Diagnose this Chronovisor failure packet and return one JSON repair decision.\n\n"
         + json.dumps(semantic_request_packet(packet), ensure_ascii=False, indent=2)
     )
 

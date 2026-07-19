@@ -1,9 +1,4 @@
-"""Shared runtime configuration helpers.
-
-The old runtime grew separate knobs around ``recall.toml``.  Keep that file
-working, but prefer ``config.toml`` when it exists so hook, recall, audit, and
-auto-apply settings can converge on one public shape.
-"""
+"""Shared Chronovisor runtime configuration helpers."""
 
 from __future__ import annotations
 
@@ -19,7 +14,6 @@ from typing import Any
 from chronovisor.store import CHRONOVISOR_ROOT
 
 CONFIG_FILE = CHRONOVISOR_ROOT / "config.toml"
-LEGACY_RECALL_CONFIG_FILE = CHRONOVISOR_ROOT / "recall.toml"
 
 FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
@@ -207,9 +201,7 @@ class DecisionRouterConfig:
 def active_config_file(path: Path | str | None = None) -> Path:
     if path:
         return Path(path).expanduser()
-    if CONFIG_FILE.exists():
-        return CONFIG_FILE
-    return LEGACY_RECALL_CONFIG_FILE
+    return CONFIG_FILE
 
 
 def load_toml_file(path: Path | str | None = None) -> dict[str, Any]:
@@ -766,7 +758,7 @@ def config_summary(path: Path | str | None = None) -> dict[str, Any]:
     return {
         "path": str(resolved),
         "exists": resolved.exists(),
-        "mode": "unified" if resolved == CONFIG_FILE else "legacy-recall",
+        "mode": "canonical" if resolved == CONFIG_FILE else "override",
         "hook_policy": load_hook_policy(resolved).__dict__,
         "sections": sorted(data.keys()),
     }

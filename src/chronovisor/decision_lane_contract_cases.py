@@ -45,7 +45,7 @@ from chronovisor.decision_lane_prompts import (
 
 
 CASES_PER_MODEL_BACKED_LANE = 5
-LANE_CONTRACT_CASE_ID_VERSION = 20
+LANE_CONTRACT_CASE_ID_VERSION = 26
 
 
 def _coverage_label(expected: dict[str, Any]) -> str | None:
@@ -296,10 +296,14 @@ def _retention_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             {
                 "page_id": "retired-stub",
                 "page_sha256": "4" * 64,
+                "snapshot_status": "verified",
                 "active_recall_uses": 0,
                 "canonical_successor": "current-guide",
                 "successor_contains_all_content": True,
+                "successor_verified": True,
                 "distinct_event": False,
+                "current_fact": False,
+                "soft_archive_reversible": True,
             },
         ),
         (
@@ -336,11 +340,15 @@ def _retention_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             {
                 "page_id": "verified-redirect",
                 "page_sha256": "7" * 64,
+                "snapshot_status": "verified",
                 "active_recall_uses": 0,
                 "canonical_successor": "complete-canonical-page",
                 "successor_contains_all_content": True,
+                "successor_verified": True,
                 "redirect_verified": True,
                 "distinct_event": False,
+                "current_fact": False,
+                "soft_archive_reversible": True,
             },
         ),
     ]
@@ -700,7 +708,7 @@ def _entity_backfill_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
         "codex": ["Codex"],
         "ollama": ["Ollama"],
         "qwen": ["Qwen"],
-        "llm-wiki": ["LLM Wiki", "wiki"],
+        "chronovisor": ["Chronovisor", "memory system"],
     }
     bodies = [
         ("Codex runtime", "Codex runs the bounded review.", "approved"),
@@ -711,8 +719,8 @@ def _entity_backfill_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             "rejected",
         ),
         (
-            "Generic wiki migration",
-            "Move a generic team wiki between two ordinary web hosts.",
+            "Generic memory system migration",
+            "Move a generic memory system between two ordinary web hosts.",
             "rejected",
         ),
         (
@@ -829,7 +837,7 @@ def _ingest_proposal(
     """Build the exact production proposal envelope used by ingest review."""
 
     raw_sha256 = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
-    raw_keywords = ["llm-wiki", "ingest-contract"]
+    raw_keywords = ["chronovisor", "ingest-contract"]
     source_key = _sha256_json({"raw_sha256": raw_sha256, "raw_keywords": raw_keywords})
     return {
         "schema_version": INGEST_PROPOSAL_SCHEMA_VERSION,
@@ -855,25 +863,21 @@ def _ingest_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
     preference_raw = (
         "The user has a stable preference for concise, technically direct answers."
     )
-    preference_before = (
-        "---\ntitle: User preferences\nupdated: 2026-07-10\n---\n"
-        "The user prefers Japanese responses.\n"
+    preference_proposed = (
+        "---\ntitle: Answer style preference\nupdated: 2026-07-10\n---\n"
+        f"{preference_raw}\n"
     )
-    preference_fragment = (
-        "The user has a stable preference for concise, technically direct answers."
-    )
-    preference_after = preference_before + "\n" + preference_fragment + "\n"
     preference_plan = {
-        "type": "update",
-        "filename": "memory/user-preferences.md",
-        "title": "User preferences",
+        "type": "create",
+        "filename": "memory/answer-style-preference.md",
+        "title": "Answer style preference",
         "summary": "Record the stable answer-style preference.",
     }
     preference_operation = {
-        "type": "update",
-        "filename": "memory/user-preferences.md",
-        "content": preference_fragment,
-        "raw_keywords": ["llm-wiki", "ingest-contract"],
+        "type": "create",
+        "filename": "memory/answer-style-preference.md",
+        "content": preference_proposed,
+        "raw_keywords": ["chronovisor", "ingest-contract"],
     }
 
     quorum_raw = "Routine ingest authorization uses a three-model local quorum."
@@ -899,11 +903,11 @@ def _ingest_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
         "type": "update",
         "filename": "memory/current-ingest-policy.md",
         "content": quorum_fragment,
-        "raw_keywords": ["llm-wiki", "ingest-contract"],
+        "raw_keywords": ["chronovisor", "ingest-contract"],
     }
 
     repair_raw = (
-        "Ollama serves local inference for the LLM Wiki. "
+        "Ollama serves local inference for Chronovisor. "
         "This is runtime configuration, not finance."
     )
     repair_plan = {
@@ -926,7 +930,7 @@ def _ingest_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
         "type": "create",
         "filename": "memory/ollama-runtime.md",
         "content": repair_proposed,
-        "raw_keywords": ["llm-wiki", "ingest-contract"],
+        "raw_keywords": ["chronovisor", "ingest-contract"],
     }
     repair_proposal = _ingest_proposal(
         raw_content=repair_raw,
@@ -955,10 +959,10 @@ def _ingest_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
                 triage_plan=[preference_plan],
                 local_generated_operations=[preference_operation],
                 prepared_operations=[
-                    _ingest_prepared_update(
-                        page_id="user-preferences",
-                        previous_text=preference_before,
-                        proposed_text=preference_after,
+                    _ingest_prepared_create(
+                        page_id="answer-style-preference",
+                        proposed_text=preference_proposed,
+                        new_tags=[],
                     )
                 ],
                 failed_operation_specs=[],
@@ -1894,6 +1898,16 @@ def _read_back_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _recall_auto_apply_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
+    def page_evidence(page_id: str, content: str) -> dict[str, Any]:
+        return {
+            "page_id": page_id,
+            "exists": True,
+            "snapshot_status": "verified",
+            "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "content": content,
+            "content_truncated": False,
+        }
+
     definitions = [
         (
             "approved",
@@ -1907,22 +1921,23 @@ def _recall_auto_apply_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
                 "expected_pages": ["adaptive-residency"],
                 "action_payload": {
                     "page_id": "adaptive-residency",
-                    "query": "How many runners fit?",
+                    "query": "How does adaptive residency decide how many runners fit?",
                 },
-                "missing_signal": "The adaptive-residency page was not recalled.",
-                "prompt": "How many runners fit?",
+                "missing_signal": (
+                    "The adaptive-residency page was not recalled for this exact "
+                    "question."
+                ),
+                "prompt": "How does adaptive residency decide how many runners fit?",
                 "local_validation": {
                     "action": "query_hint",
                     "status": "dry_run",
                     "page_id": "adaptive-residency",
-                    "query": "How many runners fit?",
+                    "query": "How does adaptive residency decide how many runners fit?",
                 },
-                "page_evidence": {
-                    "page_id": "adaptive-residency",
-                    "exists": True,
-                    "sha256": "1" * 64,
-                    "content": "Runner admission uses memory and context to decide how many runners fit.",
-                },
+                "page_evidence": page_evidence(
+                    "adaptive-residency",
+                    "Adaptive residency decides how many runners fit by accounting for model memory and context.",
+                ),
             },
         ),
         (
@@ -1944,12 +1959,10 @@ def _recall_auto_apply_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
                     "alias": "billing",
                     "target": "gpu-memory",
                 },
-                "page_evidence": {
-                    "page_id": "gpu-memory",
-                    "exists": True,
-                    "sha256": "2" * 64,
-                    "content": "GPU model weights and KV cache determine memory use; this page has no billing information.",
-                },
+                "page_evidence": page_evidence(
+                    "gpu-memory",
+                    "GPU model weights and KV cache determine memory use; this page has no billing information.",
+                ),
             },
         ),
         (
@@ -1977,8 +1990,10 @@ def _recall_auto_apply_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
                 "page_evidence": {
                     "page_id": "changed-page",
                     "exists": False,
+                    "snapshot_status": "missing",
                     "sha256": "",
                     "content": "",
+                    "content_truncated": False,
                 },
             },
         ),
@@ -2001,12 +2016,10 @@ def _recall_auto_apply_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
                     "page_id": "local-json-repair",
                     "tag": "d/ai",
                 },
-                "page_evidence": {
-                    "page_id": "local-json-repair",
-                    "exists": True,
-                    "sha256": "3" * 64,
-                    "content": "AI local structured-model repair returns validator feedback in the same session.",
-                },
+                "page_evidence": page_evidence(
+                    "local-json-repair",
+                    "AI local structured-model repair returns validator feedback in the same session.",
+                ),
             },
         ),
         (
@@ -2031,12 +2044,10 @@ def _recall_auto_apply_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
                     "page_id": "conflicted-page",
                     "query": "Which value is current?",
                 },
-                "page_evidence": {
-                    "page_id": "conflicted-page",
-                    "exists": True,
-                    "sha256": "4" * 64,
-                    "content": "Unresolved conflict: source A says the current value is 1, while source B says it is 2.",
-                },
+                "page_evidence": page_evidence(
+                    "conflicted-page",
+                    "Unresolved conflict: source A says the current value is 1, while source B says it is 2.",
+                ),
             },
         ),
     ]
@@ -2371,7 +2382,7 @@ def _search_label_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
                     "page_id": page_id,
                     "exists": exists,
                     "path": (
-                        f"/__llm_wiki_lane_contract__/pages/{page_id}.md"
+                        f"/__chronovisor_lane_contract__/pages/{page_id}.md"
                         if exists
                         else ""
                     ),

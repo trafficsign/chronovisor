@@ -39,7 +39,7 @@ from chronovisor.runtime_config import (
     load_decision_router_config,
     load_reranker_config,
 )
-from chronovisor.schema_compat import schema_matches
+from chronovisor.sealed_artifact_decoder import schema_matches
 from chronovisor.store import LOG_FILE, CHRONOVISOR_ROOT, init_chronovisor
 
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
@@ -3209,7 +3209,6 @@ def _save_history_materialization_fingerprint(raw_paths: list[Path]) -> str:
 def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
     paths = [
         CHRONOVISOR_ROOT / "config.toml",
-        CHRONOVISOR_ROOT / "recall.toml",
         CHRONOVISOR_ROOT / "pages",
         CHRONOVISOR_ROOT / "claims",
         CHRONOVISOR_ROOT / "recall",
@@ -3254,7 +3253,6 @@ def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
 def _model_status_materialization_fingerprint(ollama: dict[str, Any]) -> str:
     paths = [
         CHRONOVISOR_ROOT / "config.toml",
-        CHRONOVISOR_ROOT / "recall.toml",
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "active-policy.json",
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "state.json",
     ]
@@ -3613,7 +3611,6 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
         CHRONOVISOR_ROOT / "recall" / "calibration.json",
         CHRONOVISOR_ROOT / "recall" / "calibration-history.jsonl",
         CHRONOVISOR_ROOT / "config.toml",
-        CHRONOVISOR_ROOT / "recall.toml",
         LOG_FILE,
         orchestrator.STATE_FILE,
         runtime_status.STATUS_FILE,

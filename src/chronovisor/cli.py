@@ -113,41 +113,6 @@ def _hook_entries(data: dict[str, Any], event: str) -> list[dict[str, Any]]:
 
 
 def _hook_compatibility(command: str) -> dict[str, Any]:
-    noop_removal_after = "2026-10-01"
-    no_op_markers = (
-        "codex_recall_audit_hook.sh",
-        "claude_code_recall_audit_hook.sh",
-        "--only audit",
-        "--only improve",
-    )
-    legacy_markers = (
-        "codex_recall_hook.sh",
-        "codex_wiki_save_hook.sh",
-        "codex_chronovisor_record_hook.sh",
-        "claude_code_recall_hook.sh",
-        "claude_code_wiki_save_hook.sh",
-        "claude_code_chronovisor_record_hook.sh",
-        "llm-wiki-recall",
-        "llm-wiki-codex-save",
-        "llm-wiki-claude-code-save",
-    )
-    if any(marker in command for marker in no_op_markers):
-        return {
-            "compatibility": "deprecated_noop",
-            "deprecated": True,
-            "warning": "This legacy audit/improve wrapper is a compatibility no-op.",
-            "replacement": "chronovisor-hook --event Stop; audit is queued after durable save receipt",
-            "removal_after": noop_removal_after,
-        }
-    if "chronovisor-hook" not in command and any(
-        marker in command for marker in legacy_markers
-    ):
-        return {
-            "compatibility": "legacy_wrapper",
-            "deprecated": True,
-            "warning": "Legacy wrapper; migrate with `chronovisor hooks install`.",
-            "replacement": "direct chronovisor-hook entry",
-        }
     return {"compatibility": "current", "deprecated": False}
 
 
@@ -195,21 +160,7 @@ def default_hook_command_prefix() -> str:
 def _is_chronovisor_command(command: object) -> bool:
     if not isinstance(command, str):
         return False
-    markers = (
-        "chronovisor-hook",
-        "llm-wiki-recall",
-        "llm-wiki-codex-save",
-        "llm-wiki-claude-code-save",
-        "codex_recall_hook.sh",
-        "codex_wiki_save_hook.sh",
-        "codex_chronovisor_record_hook.sh",
-        "codex_recall_audit_hook.sh",
-        "claude_code_recall_hook.sh",
-        "claude_code_wiki_save_hook.sh",
-        "claude_code_chronovisor_record_hook.sh",
-        "claude_code_recall_audit_hook.sh",
-    )
-    return any(marker in command for marker in markers)
+    return "chronovisor-hook" in command
 
 
 def _hook(type_: str, command: str, timeout: int | None = None) -> dict[str, Any]:
@@ -585,14 +536,6 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="Show content, recall, and runtime status."
     )
     status_parser.add_argument("--json", action="store_true")
-    migrate_brand_parser = sub.add_parser(
-        "migrate-brand",
-        help="Inspect, apply, verify, or roll back the ~/.chronovisor data-root rename.",
-    )
-    migrate_brand_parser.add_argument(
-        "action", choices=("preflight", "apply", "verify", "rollback")
-    )
-    migrate_brand_parser.add_argument("--json", action="store_true")
     runtime_identity_parser = sub.add_parser(
         "runtime-identity",
         help="Show the installed package revision without reading Wiki content.",
@@ -618,7 +561,7 @@ def build_parser() -> argparse.ArgumentParser:
     health_parser = sub.add_parser("health", help="Show knowledge health KPIs.")
     health_parser.add_argument("--json", action="store_true")
     snapshot_parser = sub.add_parser(
-        "chronovisor-snapshot",
+        "snapshot",
         help="Commit ~/.chronovisor into its own git history.",
     )
     snapshot_parser.add_argument("reason", nargs="?", default="manual")
@@ -904,25 +847,6 @@ def dispatch(args: argparse.Namespace) -> int:
         else:
             print_plain_status(data)
         return 0
-    if args.command == "migrate-brand":
-        from chronovisor import brand_migration
-
-        actions = {
-            "preflight": brand_migration.preflight,
-            "apply": brand_migration.apply,
-            "verify": brand_migration.verify,
-            "rollback": brand_migration.rollback,
-        }
-        try:
-            data = actions[args.action]()
-        except brand_migration.BrandMigrationError as exc:
-            data = {"status": "error", "error": str(exc)}
-        if args.json:
-            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-        else:
-            for key, value in data.items():
-                print(f"{key}\t{value}")
-        return 0 if data.get("status") != "error" else 1
     if args.command == "runtime-identity":
         data = runtime_identity()
         if args.json:
@@ -1004,7 +928,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"lint_repair\t{queues['lint_repair']}")
             print(f"search_golden\t{queues['search_golden']}")
         return 0
-    if args.command == "chronovisor-snapshot":
+    if args.command == "snapshot":
         from chronovisor.snapshot import snapshot_chronovisor
 
         data = snapshot_chronovisor(args.reason, allow_empty=args.allow_empty)

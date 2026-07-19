@@ -15,7 +15,7 @@ from chronovisor.durable_state import (
     read_sealed_json,
     write_sealed_json,
 )
-from chronovisor.schema_compat import schema_matches
+from chronovisor.sealed_artifact_decoder import schema_matches
 
 
 HEARTBEAT_SCHEMA = "chronovisor.deadman-heartbeat.v1"

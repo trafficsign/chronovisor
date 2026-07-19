@@ -162,7 +162,7 @@ def test_contract_cases_cover_every_model_backed_lane_independently() -> None:
     assert min(counts.values()) == CASES_PER_MODEL_BACKED_LANE
     assert counts["content_correction_classification"] == 6
     assert len({case.case_id for case in cases}) == len(cases)
-    assert all(case.case_id.startswith("lane-contract-v20:") for case in cases)
+    assert all(case.case_id.startswith("lane-contract-v26:") for case in cases)
 
 
 def test_contract_cases_bind_to_the_exact_live_lane_envelope() -> None:
@@ -177,10 +177,10 @@ def test_contract_cases_bind_to_the_exact_live_lane_envelope() -> None:
         prompt_policy_version = LANE_PROMPT_POLICY_VERSIONS[case.lane]
         assert f'policy="{prompt_policy_version}"' in prompt
         assert f'lane="{case.lane}"' in prompt
-        # The adopted lane envelope is a sealed historical protocol.  Its
-        # marker remains byte-for-byte compatible across the product rename.
-        assert f"LLM_WIKI_LANE_CONTRACT_POLICY={prompt_policy_version}" in system
-        assert f"LLM_WIKI_LANE={case.lane}" in system
+        assert (
+            f"CHRONOVISOR_LANE_CONTRACT_POLICY={prompt_policy_version}" in system
+        )
+        assert f"CHRONOVISOR_LANE={case.lane}" in system
         assert case.prompt in prompt
 
 
@@ -365,18 +365,24 @@ def test_content_review_contracts_distinguish_three_nonapproval_evidence_states(
 
 
 def test_lane_contract_case_source_version_tracks_the_resealed_cases() -> None:
-    assert LANE_CONTRACT_POLICY_VERSION == 9
+    assert LANE_CONTRACT_POLICY_VERSION == 10
     assert INGEST_REPAIR_OPTION_POLICY_VERSION == 2
-    assert LANE_CONTRACT_CASE_VERSION == 20
-    assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v20"
+    assert LANE_CONTRACT_CASE_VERSION == 26
+    assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v26"
     assert set(LANE_PROMPT_POLICY_VERSIONS) == set(model_backed_lane_names())
-    assert LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] == 14
-    assert LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] == 8
+    assert LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] == 16
+    assert LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] == 9
+    assert LANE_PROMPT_POLICY_VERSIONS["recall_auto_apply"] == 9
     assert {
         version
         for lane, version in LANE_PROMPT_POLICY_VERSIONS.items()
-        if lane not in {"ingest_reconciliation", "raw_replay_reconciliation"}
-    } == {7}
+        if lane
+        not in {
+            "ingest_reconciliation",
+            "raw_replay_reconciliation",
+            "recall_auto_apply",
+        }
+    } == {8}
 
 
 def test_raw_replay_prompt_treats_process_missing_as_observed_after_receipt() -> None:

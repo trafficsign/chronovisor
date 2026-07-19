@@ -75,12 +75,10 @@ def test_authority_observation_detects_a_b_a_file_generation(
     from chronovisor import local_model_eval, runtime_config
 
     config_path = tmp_path / "config.toml"
-    legacy_path = tmp_path / "recall.toml"
     artifact_path = tmp_path / "adoption.json"
     config_path.write_text("authority = 'a'\n", encoding="utf-8")
     artifact_path.write_text('{"authority":"a"}\n', encoding="utf-8")
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config_path)
-    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", legacy_path)
     monkeypatch.setattr(
         runtime_config,
         "load_decision_router_config",

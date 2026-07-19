@@ -36,7 +36,7 @@ SAFE_ACTIVITY_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 1
+STRUCTURED_GENERATION_POLICY_VERSION = 3
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -92,10 +92,27 @@ def structured_generation_policy() -> dict[str, Any]:
         "version": STRUCTURED_GENERATION_POLICY_VERSION,
         "temperature": STRUCTURED_GENERATION_TEMPERATURE,
         "seed": STRUCTURED_GENERATION_SEED,
-        "think": False,
+        "think": {
+            "default": False,
+            "model_family_overrides": {
+                "gpt-oss": {
+                    "default": "medium",
+                    "num_ctx_at_least": {"65536": "low"},
+                }
+            },
+        },
         "stream": False,
         "format": "json_schema",
     }
+
+
+def structured_think_mode(model: str, *, num_ctx: int) -> bool | str:
+    """Select the explicit Ollama reasoning mode sealed by the policy."""
+
+    family = model.strip().casefold().rsplit("/", 1)[-1].split(":", 1)[0]
+    if family != "gpt-oss":
+        return False
+    return "low" if num_ctx >= 65_536 else "medium"
 
 
 def structured_generation_policy_sha256() -> str:
@@ -204,7 +221,7 @@ class ChatRequest:
     max_output_chars: int
     temperature: int = STRUCTURED_GENERATION_TEMPERATURE
     seed: int = STRUCTURED_GENERATION_SEED
-    think: bool = False
+    think: bool | str = False
 
 
 @dataclass(frozen=True)
@@ -1573,6 +1590,7 @@ def _default_transport(request: ChatRequest) -> str | ollama.ChatResponse:
         max_output_chars=request.max_output_chars,
         temperature=request.temperature,
         seed=request.seed,
+        think=request.think,
         return_metadata=True,
     )
 
@@ -1835,6 +1853,7 @@ class LocalStructuredSession:
                 max_output_chars=self.max_output_chars,
                 temperature=STRUCTURED_GENERATION_TEMPERATURE,
                 seed=STRUCTURED_GENERATION_SEED,
+                think=structured_think_mode(self.model, num_ctx=effective_num_ctx),
             )
             if activity_update is not None:
                 activity_update("generate" if index == 0 else "repair", index)
@@ -2203,6 +2222,7 @@ __all__ = [
     "required_structured_context_tokens",
     "structured_generation_policy",
     "structured_generation_policy_sha256",
+    "structured_think_mode",
     "structured_request_sha256",
     "validate_json",
     "validate_schema_definition",

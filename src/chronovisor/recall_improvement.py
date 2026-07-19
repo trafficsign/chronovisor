@@ -438,7 +438,7 @@ def _proposal_prompt(
     recent_rejection_blockers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
-        "task": "Propose one small recall policy patch for LLM Wiki.",
+        "task": "Propose one small recall policy patch for Chronovisor.",
         "model_role": model,
         "rules": [
             "Use only allowed fields.",
@@ -1246,7 +1246,7 @@ def build_frontier_audit_prompt(
         "failure_samples": record.get("failure_samples", [])[:5],
     }
     return f"""\
-You are an autonomous local-consensus auditor for LLM Wiki recall
+You are an autonomous local-consensus auditor for Chronovisor recall
 self-improvement. This is a routine local decision, not a frontier review.
 
 Review whether the proposed recall policy patch is safe to adopt.

@@ -350,12 +350,12 @@ def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
     assert result.confidence >= policy.read_threshold
 
 
-def test_gate_config_overrides_legacy_model_and_budget(tmp_path) -> None:
-    config = tmp_path / "recall.toml"
+def test_gate_config_overrides_flat_model_and_budget(tmp_path) -> None:
+    config = tmp_path / "flat-config.toml"
     config.write_text(
         """
 enabled = true
-model = "legacy-local-model"
+model = "flat-local-model"
 
 [budgets]
 judge_timeout_ms = 4000
@@ -425,10 +425,10 @@ cooldown_seconds = 120
     assert policy.circuit_breaker_cooldown_seconds == 120
 
 
-def test_unified_and_legacy_recall_shapes_produce_identical_policy(tmp_path) -> None:
-    legacy = tmp_path / "recall.toml"
-    unified = tmp_path / "config.toml"
-    legacy.write_text(
+def test_nested_and_flat_recall_shapes_produce_identical_policy(tmp_path) -> None:
+    flat = tmp_path / "flat-config.toml"
+    nested = tmp_path / "config.toml"
+    flat.write_text(
         """
 enabled = false
 model = "judge:test"
@@ -448,7 +448,7 @@ semantic = true
 """,
         encoding="utf-8",
     )
-    unified.write_text(
+    nested.write_text(
         """
 [recall]
 enabled = false
@@ -468,11 +468,11 @@ fail_silent_on_judge_unavailable = false
         encoding="utf-8",
     )
 
-    assert asdict(load_policy(unified)) == asdict(load_policy(legacy))
+    assert asdict(load_policy(nested)) == asdict(load_policy(flat))
 
 
 def test_gate_defaults_keep_model_resident_and_rewrite_timeout_longer(tmp_path) -> None:
-    config = tmp_path / "recall.toml"
+    config = tmp_path / "config.toml"
     config.write_text("enabled = true\n")
 
     policy = load_policy(config)
@@ -485,7 +485,7 @@ def test_gate_defaults_keep_model_resident_and_rewrite_timeout_longer(tmp_path) 
 
 
 def test_fusion_config_reads_channel_weights_and_bm25_bonus(tmp_path) -> None:
-    config = tmp_path / "recall.toml"
+    config = tmp_path / "config.toml"
     config.write_text(
         """
 [fusion]

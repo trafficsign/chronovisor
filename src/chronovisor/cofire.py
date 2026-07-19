@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.recall_log_schema import (
+    canonicalize_page_ids,
     join_used_recall_episodes,
     page_ids_from_record,
 )
@@ -56,6 +57,9 @@ def build_cofire_graph(
         rows,
         _read_recent_jsonl(pull_log_file, limit=limit),
     )
+    from chronovisor.alias_store import load_aliases
+
+    aliases = load_aliases()
 
     def compile_graph(page_sets: list[list[str]]) -> tuple[dict[str, list[dict[str, Any]]], int]:
         pair_counts: Counter[tuple[str, str]] = Counter()
@@ -87,10 +91,13 @@ def build_cofire_graph(
         return graph, episodes
 
     exposure_graph, exposure_episodes = compile_graph(
-        [page_ids_from_record(row) for row in rows]
+        [canonicalize_page_ids(page_ids_from_record(row), aliases) for row in rows]
     )
     positive_graph, positive_episodes = compile_graph(
-        [episode["page_ids"] for episode in joined["episodes"]]
+        [
+            canonicalize_page_ids(episode["page_ids"], aliases)
+            for episode in joined["episodes"]
+        ]
     )
 
     payload = {

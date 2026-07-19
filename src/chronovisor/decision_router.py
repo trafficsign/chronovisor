@@ -82,7 +82,7 @@ ModelObserver = Callable[[str], tuple[int, int] | None]
 ModelUnloader = Callable[[str], bool]
 AUDIT_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 ADOPTION_ARTIFACT_SCHEMA_VERSION = 12
-DECISION_SEMANTICS_POLICY_VERSION = 11
+DECISION_SEMANTICS_POLICY_VERSION = 12
 QUORUM_SAFETY_POLICY_VERSION = 1
 DECISION_REQUEST_FINGERPRINT_VERSION = 4
 MIN_ADOPTION_USABLE_CASES = 100
@@ -131,7 +131,7 @@ _CLASSIFICATION_SCHEMA_FIELDS = {
 }
 _DUPLICATE_SCHEMA_FIELDS = {"decision", "confidence", "summary"}
 _DECISION_SEMANTICS_MARKER = (
-    f"LLM_WIKI_DECISION_SEMANTICS_POLICY={DECISION_SEMANTICS_POLICY_VERSION}"
+    f"CHRONOVISOR_DECISION_SEMANTICS_POLICY={DECISION_SEMANTICS_POLICY_VERSION}"
 )
 _CLASSIFICATION_DECISION_OVERLAY = f"""\
 {_DECISION_SEMANTICS_MARKER}
@@ -1572,10 +1572,9 @@ def _validated_adoption_artifact(
         )
     ):
         raise ValueError("adoption artifact source path no longer resolves")
-    # Preserve the sealed spelling for the identity comparison. The corpus
-    # loader resolves symlinks so a compatibility alias such as ~/.wiki ->
-    # ~/.chronovisor would otherwise invalidate byte-identical adopted
-    # evidence solely because its absolute path spelling changed.
+    # Preserve the sealed path spelling for identity comparison. The corpus
+    # loader resolves symlinks, while adopted evidence binds the exact absolute
+    # path string in addition to the bytes it identifies.
     authoritative_source = dict(authoritative_source)
     authoritative_source["source_path"] = source_path_value
     source_identity_fields = {

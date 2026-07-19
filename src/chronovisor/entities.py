@@ -34,9 +34,6 @@ DEFAULT_ALIASES: dict[str, list[str]] = {
     "chronovisor": [
         "Chronovisor",
         "クロノバイザー",
-        "LLM Wiki",
-        "llm wiki",
-        "LLMウィキ",
         "ウィキ",
     ],
     "codex": ["Codex", "コードエクス", "コーデックス"],

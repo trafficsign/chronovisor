@@ -141,6 +141,35 @@ def test_legacy_auto_hints_are_quarantined(tmp_path: Path, monkeypatch) -> None:
     assert [row["page_id"] for row in recall_hints.load_query_hints(path)] == ["manual"]
 
 
+def test_canonicalize_query_hint_targets_rewrites_only_page_identity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "query-hints.json"
+    original = {
+        "version": 1,
+        "hints": [
+            {
+                "page_id": "former-page",
+                "query": "historical product name stays searchable",
+                "normalize_key": "immutable-provenance-key",
+            }
+        ],
+    }
+    path.write_text(json.dumps(original), encoding="utf-8")
+
+    result = recall_hints.canonicalize_query_hint_targets(
+        path=path,
+        aliases={"former-page": "chronovisor/current-page"},
+        write=True,
+    )
+
+    rewritten = json.loads(path.read_text(encoding="utf-8"))["hints"][0]
+    assert result["changed"] == 1
+    assert rewritten["page_id"] == "current-page"
+    assert rewritten["query"] == original["hints"][0]["query"]
+    assert rewritten["normalize_key"] == "immutable-provenance-key"
+
+
 def test_background_job_failure_is_durable_and_retryable(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")

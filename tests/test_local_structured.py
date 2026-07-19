@@ -22,6 +22,7 @@ from chronovisor.local_structured import (
     normalize_json_output,
     structured_generation_policy,
     structured_generation_policy_sha256,
+    structured_think_mode,
     validate_json,
 )
 
@@ -56,15 +57,29 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_the_fixed_sampler() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 1
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 3
     assert structured_generation_policy() == {
-        "version": 1,
+        "version": 3,
         "temperature": 0,
         "seed": 0,
-        "think": False,
+        "think": {
+            "default": False,
+            "model_family_overrides": {
+                "gpt-oss": {
+                    "default": "medium",
+                    "num_ctx_at_least": {"65536": "low"},
+                }
+            },
+        },
         "stream": False,
         "format": "json_schema",
     }
+    assert structured_think_mode("gpt-oss:20b", num_ctx=32_768) == "medium"
+    assert (
+        structured_think_mode("registry/local/gpt-oss:20b", num_ctx=65_536)
+        == "low"
+    )
+    assert structured_think_mode("ornith:35b", num_ctx=114_688) is False
     assert len(structured_generation_policy_sha256()) == 64
 
 

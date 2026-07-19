@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.index_store import get_store
-from chronovisor.recall_log_schema import page_ids_from_record
+from chronovisor.recall_log_schema import canonicalize_page_ids, page_ids_from_record
 from chronovisor.recall_runtime_paths import RECALL_DIR
 
 RETENTION_FILE = RECALL_DIR / "retention.json"
@@ -76,10 +76,13 @@ def build_retention_scores(
     success: Counter[str] = Counter()
     lapse: Counter[str] = Counter()
     exposures: Counter[str] = Counter()
+    from chronovisor.alias_store import load_aliases
+
+    aliases = load_aliases()
 
     for row in _read_recent_jsonl(feedback_file, limit=limit):
         kind = str(row.get("kind") or "")
-        page_ids = page_ids_from_record(row)
+        page_ids = canonicalize_page_ids(page_ids_from_record(row), aliases)
         if not page_ids:
             continue
         if kind == "injection_used":
@@ -89,7 +92,7 @@ def build_retention_scores(
         exposures.update(page_ids)
 
     for row in _read_recent_jsonl(recall_log_file, limit=limit):
-        page_ids = page_ids_from_record(row)
+        page_ids = canonicalize_page_ids(page_ids_from_record(row), aliases)
         exposures.update(page_ids)
         decision = str(row.get("decision") or "")
         if decision in {"inject", "allow"}:

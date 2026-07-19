@@ -152,6 +152,7 @@ def test_live_transport_requests_and_preserves_ollama_context_accounting(
 
     assert local_model_eval._live_transport(request) == response
     assert captured["return_metadata"] is True
+    assert captured["think"] is False
     assert captured["num_ctx"] == 16_384
     assert captured["temperature"] == 0
     assert captured["seed"] == 0
@@ -762,7 +763,7 @@ def test_full_minimum_representative_corpus_can_adopt(tmp_path: Path) -> None:
     assert result["source"]["usable_cases"] == 100
     assert result["metrics"]["expected_signature_match_rate"] == 1.0
     assert result["schema_version"] == 12
-    assert result["evaluator_policy_version"] == 20
+    assert result["evaluator_policy_version"] == 21
     assert "expected_effect_match_rate" in result["thresholds"]
     assert "expected_effect_match_rate" in result["metrics"]
     assert "expected_signature_match_rate" in result["metrics"]

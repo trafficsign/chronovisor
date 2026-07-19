@@ -1227,7 +1227,7 @@ def build_frontier_label_prompt(
     }
     schema = FRONTIER_LABEL_SCHEMA
     return f"""\
-You are the final autonomous label reviewer for LLM Wiki search evaluation.
+You are the final autonomous label reviewer for Chronovisor search evaluation.
 Search label policy version: {SEARCH_LABEL_PROMPT_POLICY_VERSION}.
 
 Goal:

@@ -151,14 +151,7 @@ def save_enabled(host: str, explicit_config: Path | None = None) -> bool:
         if host == "codex"
         else "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED"
     )
-    legacy_env_name = (
-        "CODEX_WIKI_SAVE_ENABLED"
-        if host == "codex"
-        else "CLAUDE_CODE_WIKI_SAVE_ENABLED"
-    )
     flag = env_flag(env_name)
-    if flag is None:
-        flag = env_flag(legacy_env_name)
     if flag is not None:
         return flag
     return active_config_file(explicit_config).name == "config.toml"
@@ -351,8 +344,7 @@ def spawn_task(task: BackgroundTask, stdin_text: str) -> dict[str, Any]:
 def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
     config = active_config_file(args.config)
     tasks: list[BackgroundTask] = []
-    run_save = args.only in {None, "save"}
-    if run_save and save_enabled(host, config):
+    if save_enabled(host, config):
         if host == "codex":
             tasks.append(
                 BackgroundTask(
@@ -391,10 +383,8 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                     ],
                 )
             )
-    run_correction_capture = args.only in {None, "correction"}
     if (
-        run_correction_capture
-        and host in {"codex", "claude-code"}
+        host in {"codex", "claude-code"}
         and content_correction_enabled(config)
     ):
         tasks.append(
@@ -425,7 +415,6 @@ def run_stop(args: argparse.Namespace, stdin_text: str) -> int:
             print("{}")
         return 0
     tasks = stop_tasks(host, args)
-    compatibility_noop = args.only in {"audit", "improve"}
     spawned: list[dict[str, Any]] = []
     for task in tasks:
         if args.dry_run:
@@ -441,18 +430,7 @@ def run_stop(args: argparse.Namespace, stdin_text: str) -> int:
         else:
             spawned.append({"name": task.name, **spawn_task(task, stdin_text)})
     if args.format == "json":
-        payload: dict[str, Any] = {
-            "status": "compatibility_noop" if compatibility_noop else "ok",
-            "tasks": spawned,
-        }
-        if compatibility_noop:
-            payload.update(
-                {
-                    "deprecated": True,
-                    "reason": f"legacy --only {args.only} selection is a no-op",
-                    "replacement": "recall audit candidates are enqueued after a durable save receipt",
-                }
-            )
+        payload: dict[str, Any] = {"status": "ok", "tasks": spawned}
         print(json.dumps(payload, ensure_ascii=False))
     else:
         print("{}")
@@ -470,10 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config",
-        help=(
-            "Config file override. Defaults to ~/.chronovisor/config.toml "
-            "then recall.toml."
-        ),
+        help="Config file override. Defaults to ~/.chronovisor/config.toml.",
     )
     parser.add_argument(
         "--format", choices=["json", "plain", "claude", "codex", "hook-json"]
@@ -483,11 +458,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id")
     parser.add_argument("--no-search", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--only",
-        choices=["save", "audit", "correction", "improve"],
-        help="Limit Stop dispatch for legacy wrappers.",
-    )
     return parser
 
 

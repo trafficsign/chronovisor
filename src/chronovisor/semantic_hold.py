@@ -166,7 +166,6 @@ def structured_review_authority_observation_sha256(
     )
     from chronovisor.runtime_config import (
         CONFIG_FILE,
-        LEGACY_RECALL_CONFIG_FILE,
         load_decision_router_config,
     )
 
@@ -182,7 +181,6 @@ def structured_review_authority_observation_sha256(
     payload = {
         "authority_sha256": canonical_sha256(authority),
         "config_file": _file_observation(CONFIG_FILE),
-        "legacy_config_file": _file_observation(LEGACY_RECALL_CONFIG_FILE),
         "adoption_artifact": (
             _file_observation(adoption_path) if adoption_path is not None else None
         ),

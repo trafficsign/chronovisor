@@ -357,8 +357,7 @@ def test_ingest_replay_accounts_effective_model_prompt_but_retains_host_contract
     assert INGEST_REPAIR_HOST_BLOCK in replay["prompt"]
     assert INGEST_REPAIR_HOST_BLOCK not in model_prompt
     assert full_prompt in replay["prompt"]
-    # Preserve the sealed adopted request envelope across the brand rename.
-    assert replay["prompt"].startswith("<LLM_WIKI_LANE_REQUEST ")
+    assert replay["prompt"].startswith("<CHRONOVISOR_LANE_REQUEST ")
     assert replay["effective_model_prompt_chars"] == len(model_prompt)
     assert (
         replay["effective_model_prompt_sha256"]
@@ -1583,7 +1582,7 @@ def test_runtime_switches_all_roles_only_from_a_valid_adopted_artifact(
     artifact_payload = json.loads(artifact.read_text(encoding="utf-8"))
     assert artifact_payload["schema_version"] == ARTIFACT_SCHEMA_VERSION == 12
     assert (
-        artifact_payload["evaluator_policy_version"] == EVALUATOR_POLICY_VERSION == 20
+        artifact_payload["evaluator_policy_version"] == EVALUATOR_POLICY_VERSION == 21
     )
     assert artifact_payload["structured_generation_policy"] == (
         structured_generation_policy()
@@ -2467,7 +2466,7 @@ def test_classification_decision_policy_is_idempotent_and_schema_scoped() -> Non
     assert effective is not None
     assert original in effective
     assert (
-        f"LLM_WIKI_DECISION_SEMANTICS_POLICY={DECISION_SEMANTICS_POLICY_VERSION}"
+        f"CHRONOVISOR_DECISION_SEMANTICS_POLICY={DECISION_SEMANTICS_POLICY_VERSION}"
         in effective
     )
     assert "This includes wrong_retrieval" in effective
@@ -2496,7 +2495,7 @@ def test_duplicate_decision_policy_requires_strict_containment_and_is_idempotent
     assert effective is not None
     assert original in effective
     assert (
-        f"LLM_WIKI_DECISION_SEMANTICS_POLICY={DECISION_SEMANTICS_POLICY_VERSION}"
+        f"CHRONOVISOR_DECISION_SEMANTICS_POLICY={DECISION_SEMANTICS_POLICY_VERSION}"
         in effective
     )
     assert "destructive" in effective

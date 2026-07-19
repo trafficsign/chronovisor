@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from chronovisor.recall_log_schema import (
+    canonicalize_page_ids,
     join_used_recall_episodes,
     page_ids_from_record,
 )
@@ -37,6 +38,16 @@ def test_page_ids_from_record_ignores_malformed_field_values() -> None:
     }
 
     assert page_ids_from_record(row) == []
+
+
+def test_canonicalize_page_ids_resolves_alias_targets_and_deduplicates() -> None:
+    assert canonicalize_page_ids(
+        ["former-page", "current-page", "nested-former"],
+        {
+            "former-page": "current-page",
+            "nested-former": "chronovisor/nested-current.md",
+        },
+    ) == ["current-page", "nested-current"]
 
 
 def test_join_used_recall_episodes_is_exact_and_deduplicated() -> None:

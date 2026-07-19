@@ -131,8 +131,8 @@ weights, rewrite settings, or context style.
 # Make one immutable candidate config first. Its [decision_router] section
 # must contain the intended production values and adoption_artifact = "".
 CANDIDATE_CONFIG="$HOME/.chronovisor/runtime/model-lab/decision-router-candidate.toml"
-CORPUS="$HOME/.chronovisor/runtime/model-lab/adoption-corpus-v56.jsonl"
-ARTIFACT="$HOME/.chronovisor/runtime/model-lab/local-eval/adoption-v56-evaluator20.json"
+CORPUS="$HOME/.chronovisor/runtime/model-lab/adoption-corpus-v64.jsonl"
+ARTIFACT="$HOME/.chronovisor/runtime/model-lab/local-eval/adoption-v64-evaluator21.json"
 chmod 600 "$CANDIDATE_CONFIG"
 
 # Preflight the deterministic selection without replacing the durable corpus.
@@ -183,19 +183,20 @@ request-fingerprint policy, or candidate config changes; do not overwrite a
 corpus after an evaluation has started. The same immutable candidate config
 must be supplied to both the compiler and every fresh or resumed evaluator
 invocation. A config change is a new evaluation identity, never a resumable
-continuation. The current v56 identity uses artifact schema 12, evaluator
-policy 20, decision-semantics policy 11, quorum-safety policy 1, action-
+continuation. The current v64 identity uses artifact schema 12, evaluator
+policy 21, decision-semantics policy 12, quorum-safety policy 1, action-
 signature policy 5, effective-request-fingerprint policy 4, structured-
-generation policy 1, lane-contract registry policy 9, lane-contract case policy
-20 with source `deterministic_lane_contract_v20`, residency policy 2, and
-`num_predict = 3072`. Evaluator policy 20 seals explicit deterministic seed 0,
+generation policy 3, lane-contract registry policy 10, lane-contract case policy
+26 with source `deterministic_lane_contract_v26`, residency policy 2, and
+`num_predict = 3072`. Evaluator policy 21 seals explicit deterministic seed 0,
 hash-bound ingest repair option selection, host-only byte-exact materialization
 before action signatures/quorum, and repair-attempt accounting into the
 artifact identity.
-Registry policy 9 is aggregate artifact/run identity only and is not
+Registry policy 10 is aggregate artifact/run identity only and is not
 rendered into model requests. The model-visible prompt-contract version is
-lane-scoped: 17 lanes remain at version 7, `ingest_reconciliation` is at version
-14, and `raw_replay_reconciliation` is at version 8. Unchanged lane prompt
+lane-scoped: 16 lanes are at version 8, `ingest_reconciliation` is at version
+16, and `raw_replay_reconciliation` plus `recall_auto_apply` are at version 9.
+Unchanged lane prompt
 bytes remain stable, but effective-request fingerprint policy 4 intentionally
 reseals every lane identity and the aggregate canonical case manifest.
 
@@ -205,14 +206,14 @@ versioned corpus, and run a fresh evaluator artifact. The changed per-lane hash
 updates the aggregate manifest and artifact identity automatically; do not put
 the registry version into every model request, because that would invalidate
 all 19 lanes. Increment the registry policy itself only when the registry or
-artifact identity contract changes. The fixed v56 baseline contains 100
+artifact identity contract changes. The fixed v64 baseline contains 100
 canonical cases spanning all 19 model-backed lanes and all four executable
-context buckets. Legacy replay rows are included only when their independent
+context buckets. Previous replay rows are included only when their independent
 provenance, contract identity, expected effect, and action signature all match
 the current policy. During compilation only, non-deterministic historical rows
 with stale lane or request identity are counted and excluded; deterministic
 contract fixtures, the frozen corpus, evaluation, and runtime loading remain
-strict. The v56 corpus admits no stale historical rows.
+strict. The v64 corpus admits no stale historical rows.
 
 Canonical fixtures must be reachable through the same deterministic preflight
 as production. Entity-backfill missing, malformed, truncated, or alias-
@@ -350,7 +351,7 @@ Increasing the resident count also requires spare capacity of at least 2 GiB or
 10% of the proposed resident set, whichever is larger, so small memory changes
 do not flap repeatedly between two and three runners.
 
-After the v56/evaluator-policy-20 artifact reports `adopted=true`, nominate it in
+After the v64/evaluator-policy-21 artifact reports `adopted=true`, nominate it in
 `decision_router.adoption_artifact`, revalidate it through a fresh runtime, and
 promote all 19 model-backed semantic lanes from `shadow` to `enabled`. Together
 with the five deterministic/guarded lanes, the post-adoption production state
@@ -633,7 +634,7 @@ pages directly.
 ## Wiki Snapshots
 
 ```sh
-chronovisor chronovisor-snapshot "before manual repair"
+chronovisor snapshot "before manual repair"
 chronovisor-snapshot "before manual repair"
 ```
 

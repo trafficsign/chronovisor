@@ -146,6 +146,22 @@ def _candidate(
     }
 
 
+def test_bounded_page_evidence_seals_snapshot_status_and_full_hash(
+    tmp_path, monkeypatch
+) -> None:
+    pages_root = tmp_path / "wiki"
+    path = _page(pages_root, "target-page", body="0123456789")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
+
+    evidence = recall_auto_apply._bounded_page_evidence("target-page", max_chars=8)
+
+    assert evidence["snapshot_status"] == "verified"
+    assert evidence["exists"] is True
+    assert evidence["content_truncated"] is True
+    assert evidence["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_query_hint_auto_apply_feeds_runtime_context(tmp_path, monkeypatch) -> None:
     pages_root = tmp_path / "wiki"
     _page(pages_root, "claude-code-recall-hook-implementation")

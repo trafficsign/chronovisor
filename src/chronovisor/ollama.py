@@ -1410,6 +1410,7 @@ def _chat_unlocked(
     max_output_chars: int,
     temperature: int | float = 0,
     seed: int = 0,
+    think: bool | str = False,
     return_metadata: bool = False,
 ) -> str | ChatResponse:
     """Call Ollama's chat API for one fixed-cap structured-output turn.
@@ -1428,11 +1429,13 @@ def _chat_unlocked(
         raise ValueError("chat seed must be a non-negative integer")
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
         raise ValueError("chat temperature must be numeric")
+    if not isinstance(think, bool) and think not in {"low", "medium", "high"}:
+        raise ValueError("chat think must be a boolean or low, medium, high")
     payload = {
         "model": model,
         "messages": [dict(message) for message in messages],
         "stream": False,
-        "think": False,
+        "think": think,
         "shift": False,
         "truncate": False,
         "format": format,
@@ -1503,6 +1506,7 @@ def chat(
     max_output_chars: int,
     temperature: int | float = 0,
     seed: int = 0,
+    think: bool | str = False,
     return_metadata: bool = False,
 ) -> str | ChatResponse:
     with model_resource_lease(exclusive=False):
@@ -1517,6 +1521,7 @@ def chat(
             max_output_chars=max_output_chars,
             temperature=temperature,
             seed=seed,
+            think=think,
             return_metadata=return_metadata,
         )
 

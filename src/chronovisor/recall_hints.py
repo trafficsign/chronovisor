@@ -123,6 +123,50 @@ def save_query_hints(hints: list[dict[str, Any]], path: Path | None = None) -> N
         _save_query_hints_unlocked(hints, path)
 
 
+def canonicalize_query_hint_targets(
+    *,
+    path: Path | None = None,
+    aliases: dict[str, str] | None = None,
+    write: bool = False,
+) -> dict[str, Any]:
+    """Resolve page aliases in the mutable query-hint view."""
+
+    from chronovisor.alias_store import load_aliases
+    from chronovisor.recall_log_schema import canonicalize_page_ids
+
+    path = _hint_path(path)
+    alias_map = aliases if aliases is not None else load_aliases()
+
+    def transform(hints: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+        changed = 0
+        normalized: list[dict[str, Any]] = []
+        for hint in hints:
+            row = dict(hint)
+            page_id = row.get("page_id")
+            if isinstance(page_id, str):
+                resolved = canonicalize_page_ids([page_id], alias_map)
+                if resolved and resolved[0] != page_id:
+                    row["page_id"] = resolved[0]
+                    changed += 1
+            normalized.append(row)
+        return normalized, changed
+
+    if write:
+        with _hint_lock(path):
+            hints, changed = transform(load_query_hints(path))
+            if changed:
+                _save_query_hints_unlocked(hints, path)
+    else:
+        hints, changed = transform(load_query_hints(path))
+    return {
+        "status": "ok",
+        "path": str(path),
+        "hints": len(hints),
+        "changed": changed,
+        "write": write,
+    }
+
+
 def add_query_hint(
     *,
     page_id: str,
@@ -215,6 +259,10 @@ def matching_hint_page_ids(queries: list[str], *, limit: int = 3, path: Path | N
     if not queries or limit <= 0:
         return []
     path = _hint_path(path)
+    from chronovisor.alias_store import load_aliases
+    from chronovisor.recall_log_schema import canonicalize_page_ids
+
+    aliases = load_aliases()
     out: list[str] = []
     seen: set[str] = set()
     for hint in load_query_hints(path):
@@ -226,7 +274,13 @@ def matching_hint_page_ids(queries: list[str], *, limit: int = 3, path: Path | N
         ):
             continue
         page_id = hint.get("page_id")
-        if not isinstance(page_id, str) or page_id in seen:
+        if not isinstance(page_id, str):
+            continue
+        resolved = canonicalize_page_ids([page_id], aliases)
+        if not resolved:
+            continue
+        page_id = resolved[0]
+        if page_id in seen:
             continue
         if any(hint_matches_query(hint, query) for query in queries):
             if chronovisor_store.find_page(page_id) is None:

@@ -2160,7 +2160,7 @@ def test_structured_review_forwards_optional_system_to_local_router(
         SystemCapturingLocalRouter,
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
-    marker = "CHRONOVISOR_READ_BACK_EVIDENCE_POLICY=1"
+    marker = "CHRONOVISOR_READ_BACK_EVIDENCE_POLICY=2"
 
     result = frontier_review.run_structured_review(
         "review this",

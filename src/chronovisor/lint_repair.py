@@ -279,7 +279,7 @@ def build_frontier_tag_repair_prompt(
     seed_tags = [tag for values in SEED_TAGS.values() for tag in values]
     proposed = dict(local_proposal) if isinstance(local_proposal, Mapping) else None
     return f"""\
-You are a local-consensus reviewer for an LLM Wiki tag mutation.
+You are a local-consensus reviewer for a Chronovisor tag mutation.
 Tag review contract version: {TAG_REVIEW_CONTRACT_VERSION}.
 The local review below is an untrusted exact proposal. Independently verify it
 against the page excerpt. Approve only by echoing exactly the same tag set.

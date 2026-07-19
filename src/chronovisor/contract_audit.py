@@ -1,4 +1,4 @@
-"""Reject unclassified legacy branding in the maintained source tree."""
+"""Reject non-canonical product contracts in maintained source files."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def _allowed(path: str, patterns: list[str]) -> bool:
 
 
 def audit(repo_root: Path) -> dict[str, Any]:
-    manifest_path = repo_root / "brand-rename-manifest.json"
+    manifest_path = repo_root / "chronovisor-contract-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     policy = manifest["audit"]
     violations: list[dict[str, Any]] = []
@@ -29,14 +29,11 @@ def audit(repo_root: Path) -> dict[str, Any]:
             continue
         scanned += 1
         if not _allowed(relative, policy["allowlisted_paths"]):
-            for token in policy["forbidden"]:
-                if token in text:
-                    violations.append({"path": relative, "token": token})
-            for token in policy["compatibility_tokens"]:
+            for token in (*policy["forbidden"], *policy["compatibility_tokens"]):
                 if token in text:
                     violations.append({"path": relative, "token": token})
     return {
-        "schema": "chronovisor.brand-audit.v1",
+        "schema": "chronovisor.contract-audit.v2",
         "status": "ok" if not violations else "violation",
         "scanned_files": scanned,
         "violations": violations,

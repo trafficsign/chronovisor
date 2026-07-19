@@ -19,7 +19,7 @@ from chronovisor.canonical_json import (
     canonical_json_bytes_strict as _canonical_bytes,
 )
 from chronovisor.link_fix import atomic_write
-from chronovisor.schema_compat import schema_matches
+from chronovisor.sealed_artifact_decoder import schema_matches
 
 
 RECEIPT_SCHEMA = "chronovisor.raw-completion-ack.v1"

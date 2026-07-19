@@ -35,6 +35,13 @@ def test_every_registered_command_has_working_help(capsys) -> None:
         assert "usage:" in capsys.readouterr().out
 
 
+def test_snapshot_subcommand_does_not_repeat_product_name() -> None:
+    paths = _registered_command_paths(cli.build_parser())
+
+    assert ("snapshot",) in paths
+    assert ("chronovisor-snapshot",) not in paths
+
+
 def test_raw_status_cli_reports_archive_inventory(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -76,7 +83,6 @@ def patch_wiki(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(store, "SYSTEM_DIR", system)
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
-    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", root / "recall.toml")
     monkeypatch.setattr(recall_runtime, "RECALL_DIR", recall)
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", recall / "recall-log.jsonl")
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", recall / "feedback.jsonl")
@@ -97,7 +103,7 @@ def test_status_json_reports_wiki_and_recall_counts(tmp_path, monkeypatch, capsy
 
     assert output["chronovisor"]["raw_files"] == 1
     assert output["chronovisor"]["pages"] == 1
-    assert output["config"]["mode"] == "unified"
+    assert output["config"]["mode"] == "canonical"
     assert output["recall"]["decisions"] == {"read": 1}
     assert output["recall"]["feedback"] == {"missed_candidate": 1}
 
@@ -128,7 +134,7 @@ def test_hooks_inspect_json_handles_missing_host_files(tmp_path, monkeypatch, ca
     assert output["warnings"] == []
 
 
-def test_hooks_inspect_marks_legacy_audit_wrapper_as_noop(
+def test_hooks_inspect_reports_canonical_hook_as_current(
     tmp_path,
     monkeypatch,
     capsys,
@@ -143,8 +149,8 @@ def test_hooks_inspect_marks_legacy_audit_wrapper_as_noop(
                         {
                             "hooks": [
                                 {
-                                    "type": "command",
-                                    "command": "scripts/codex_recall_audit_hook.sh",
+                                        "type": "command",
+                                        "command": "chronovisor-hook --host codex --event Stop --hook",
                                     "timeout": 5000,
                                 }
                             ]
@@ -162,10 +168,9 @@ def test_hooks_inspect_marks_legacy_audit_wrapper_as_noop(
     output = json.loads(capsys.readouterr().out)
 
     entry = output["codex"]["entries"][0]
-    assert entry["compatibility"] == "deprecated_noop"
-    assert entry["deprecated"] is True
-    assert entry["removal_after"] == "2026-10-01"
-    assert output["warnings"][0]["replacement"].startswith("chronovisor-hook")
+    assert entry["compatibility"] == "current"
+    assert entry["deprecated"] is False
+    assert output["warnings"] == []
 
 
 def test_recall_improve_run_due_cli_forwards_scheduler_args(tmp_path, monkeypatch, capsys) -> None:
@@ -228,7 +233,7 @@ def test_sleep_cli_non_json_handles_locked_cycle(monkeypatch, capsys) -> None:
     assert "reason\tsleep cycle already in progress" in output
 
 
-def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeypatch) -> None:
+def test_install_codex_hooks_replaces_existing_entries_and_trust(tmp_path, monkeypatch) -> None:
     patch_wiki(tmp_path, monkeypatch)
     hooks_file = tmp_path / "codex/hooks.json"
     config_file = tmp_path / "codex/config.toml"
@@ -243,7 +248,7 @@ def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeyp
                                 {"type": "command", "command": "cmux notify", "timeout": 1000},
                                 {
                                     "type": "command",
-                                    "command": "bash /repo/scripts/codex_recall_hook.sh",
+                                    "command": "chronovisor-hook --host codex --event UserPromptSubmit --hook",
                                     "timeout": 5000,
                                 },
                             ]
@@ -255,12 +260,12 @@ def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeyp
                                 {"type": "command", "command": "cmux stop", "timeout": 1000},
                                 {
                                     "type": "command",
-                                    "command": "bash /repo/scripts/codex_wiki_save_hook.sh",
+                                    "command": "chronovisor-hook --host codex --event Stop --hook",
                                     "timeout": 5000,
                                 },
                                 {
                                     "type": "command",
-                                    "command": "bash /repo/scripts/codex_recall_audit_hook.sh",
+                                    "command": "chronovisor-hook --host codex --event Stop --hook",
                                     "timeout": 5000,
                                 },
                             ]
@@ -341,7 +346,7 @@ def test_install_claude_code_hooks_preserves_non_wiki_entries(tmp_path, monkeypa
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "bash /repo/scripts/claude_code_recall_hook.sh",
+                                    "command": "chronovisor-hook --host claude-code --event UserPromptSubmit --hook",
                                     "timeout": 5000,
                                 },
                                 {"type": "command", "command": "agent-router", "timeout": 1000},
@@ -355,12 +360,12 @@ def test_install_claude_code_hooks_preserves_non_wiki_entries(tmp_path, monkeypa
                                 {"type": "command", "command": "lazy-detect", "timeout": 1000},
                                 {
                                     "type": "command",
-                                    "command": "bash /repo/scripts/claude_code_wiki_save_hook.sh",
+                                    "command": "chronovisor-hook --host claude-code --event Stop --hook",
                                     "timeout": 5000,
                                 },
                                 {
                                     "type": "command",
-                                    "command": "bash /repo/scripts/claude_code_recall_audit_hook.sh",
+                                    "command": "chronovisor-hook --host claude-code --event Stop --hook",
                                     "timeout": 5000,
                                 },
                             ]

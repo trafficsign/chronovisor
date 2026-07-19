@@ -39,27 +39,13 @@ def test_runtime_repo_root_honors_explicit_checkout(tmp_path, monkeypatch) -> No
     assert runtime_config.runtime_repo_root() == checkout
 
 
-def test_active_config_prefers_unified_config(tmp_path: Path, monkeypatch) -> None:
+def test_active_config_uses_canonical_config(tmp_path: Path, monkeypatch) -> None:
     config = tmp_path / "config.toml"
-    legacy = tmp_path / "recall.toml"
     config.write_text("[hooks.stop]\naudit = true\n", encoding="utf-8")
-    legacy.write_text("enabled = false\n", encoding="utf-8")
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
-    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", legacy)
 
     assert runtime_config.active_config_file() == config
-    assert runtime_config.config_summary()["mode"] == "unified"
-
-
-def test_active_config_falls_back_to_legacy_recall(tmp_path: Path, monkeypatch) -> None:
-    config = tmp_path / "config.toml"
-    legacy = tmp_path / "recall.toml"
-    legacy.write_text("enabled = true\n", encoding="utf-8")
-    monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
-    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", legacy)
-
-    assert runtime_config.active_config_file() == legacy
-    assert runtime_config.config_summary()["mode"] == "legacy-recall"
+    assert runtime_config.config_summary()["mode"] == "canonical"
 
 
 def test_hook_policy_reads_nested_hooks_section(tmp_path: Path) -> None:
@@ -89,7 +75,6 @@ recall_improve = false
 
 def test_embedding_config_reads_model_and_prefixes(tmp_path: Path, monkeypatch) -> None:
     config = tmp_path / "config.toml"
-    legacy = tmp_path / "recall.toml"
     config.write_text(
         """
 [embedding]
@@ -100,7 +85,6 @@ query_prefix = "検索クエリ: "
         encoding="utf-8",
     )
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
-    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", legacy)
 
     cfg = runtime_config.load_embedding_config()
 
@@ -113,7 +97,6 @@ def test_ingest_config_reads_ollama_generation_knobs(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = tmp_path / "config.toml"
-    legacy = tmp_path / "recall.toml"
     config.write_text(
         """
 [ingest]
@@ -131,7 +114,6 @@ semantic_projection_max_child_bytes = 16384
         encoding="utf-8",
     )
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
-    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", legacy)
 
     cfg = runtime_config.load_ingest_config()
 
@@ -250,7 +232,7 @@ adaptive_residency = false
 residency_policy_version = 2
 memory_reserve_gib = 20
 max_resident_models = 2
-adoption_artifact = "~/.wiki/runtime/model-lab/candidate.json"
+adoption_artifact = "~/.chronovisor/runtime/model-lab/candidate.json"
 """,
         encoding="utf-8",
     )
@@ -275,7 +257,7 @@ adoption_artifact = "~/.wiki/runtime/model-lab/candidate.json"
     assert cfg.residency_policy_version == 2
     assert cfg.memory_reserve_gib == 20
     assert cfg.max_resident_models == 2
-    assert cfg.adoption_artifact == "~/.wiki/runtime/model-lab/candidate.json"
+    assert cfg.adoption_artifact == "~/.chronovisor/runtime/model-lab/candidate.json"
 
 
 def test_decision_router_config_accepts_tie_model_alias(tmp_path: Path) -> None:
@@ -327,7 +309,6 @@ def test_reranker_config_reads_nested_search_section(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = tmp_path / "config.toml"
-    legacy = tmp_path / "recall.toml"
     config.write_text(
         """
 [search.reranker]
@@ -343,7 +324,6 @@ weight = 0.4
         encoding="utf-8",
     )
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
-    monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", legacy)
 
     cfg = runtime_config.load_reranker_config()
 

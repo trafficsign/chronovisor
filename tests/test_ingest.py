@@ -880,7 +880,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     Every module that holds a copy of a wiki path constant gets patched.
     Without this an IndexStore.refresh() during the test would scan the
-    real ``~/.wiki`` corpus.
+    operator's real Chronovisor corpus.
     """
     chronovisor_root = tmp_path / "wiki"
     pages = chronovisor_root / "pages"

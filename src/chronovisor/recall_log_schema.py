@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 
@@ -33,6 +34,20 @@ def page_ids_from_record(row: Mapping[str, Any]) -> list[str]:
         page_ids.extend(value for value in values if isinstance(value, str) and value)
 
     return list(dict.fromkeys(page_ids))
+
+
+def canonicalize_page_ids(
+    page_ids: list[str], aliases: Mapping[str, str]
+) -> list[str]:
+    """Resolve immutable historical page IDs into current derived-index IDs."""
+
+    canonical: list[str] = []
+    for page_id in page_ids:
+        target = aliases.get(page_id, page_id)
+        target_id = Path(target.removesuffix(".md")).name
+        if target_id:
+            canonical.append(target_id)
+    return list(dict.fromkeys(canonical))
 
 
 def used_page_ids_from_record(row: Mapping[str, Any]) -> list[str]:

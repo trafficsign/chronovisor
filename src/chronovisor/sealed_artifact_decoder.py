@@ -1,11 +1,11 @@
-"""Compatibility helpers for immutable pre-Chronovisor artifacts."""
+"""Read-only decoder for immutable artifacts written before Chronovisor v2."""
 
 from __future__ import annotations
 
 CURRENT_PREFIX = "chronovisor."
-LEGACY_PREFIX = "llm-wiki."
+SEALED_PREVIOUS_PREFIX = "llm-wiki."
 
-MIGRATED_SCHEMA_SUFFIXES = (
+SEALED_SCHEMA_SUFFIXES = (
     "canonical-decision-artifact.v1",
     "dashboard-component.v1",
     "deadman-heartbeat.v1",
@@ -31,23 +31,36 @@ MIGRATED_SCHEMA_SUFFIXES = (
 )
 
 
-def legacy_schema(current: str) -> str:
-    """Return the read-only legacy spelling for a canonical schema id."""
+def previous_schema(current: str) -> str:
+    """Return the read-only previous spelling for a canonical schema id."""
 
     if not current.startswith(CURRENT_PREFIX):
         raise ValueError(f"not a Chronovisor schema id: {current}")
-    return LEGACY_PREFIX + current.removeprefix(CURRENT_PREFIX)
+    suffix = current.removeprefix(CURRENT_PREFIX)
+    if suffix not in SEALED_SCHEMA_SUFFIXES:
+        raise ValueError(f"schema is not in the sealed-artifact allowlist: {current}")
+    return SEALED_PREVIOUS_PREFIX + suffix
 
 
 def schema_matches(observed: object, current: str) -> bool:
-    """Accept current and immutable legacy schema ids on read."""
+    """Accept current and sealed previous schema ids on read."""
 
-    return observed in {current, legacy_schema(current)}
+    if observed == current:
+        return True
+    try:
+        return observed == previous_schema(current)
+    except ValueError:
+        return False
 
 
 def canonical_schema(observed: str) -> str:
     """Normalize a supported schema id without mutating its source artifact."""
 
-    if observed.startswith(LEGACY_PREFIX):
-        return CURRENT_PREFIX + observed.removeprefix(LEGACY_PREFIX)
+    if observed.startswith(SEALED_PREVIOUS_PREFIX):
+        suffix = observed.removeprefix(SEALED_PREVIOUS_PREFIX)
+        if suffix not in SEALED_SCHEMA_SUFFIXES:
+            raise ValueError(
+                f"schema is not in the sealed-artifact allowlist: {observed}"
+            )
+        return CURRENT_PREFIX + suffix
     return observed
