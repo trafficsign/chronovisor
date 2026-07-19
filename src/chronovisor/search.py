@@ -432,7 +432,7 @@ def get_bm25() -> BM25Index:
 # ---------------------------------------------------------------------------
 #
 # Storage model:
-#   ~/.wiki/.index/embeddings.sqlite stores page and recall-question vectors:
+#   ~/.chronovisor/.index/embeddings.sqlite stores page and recall-question vectors:
 #     embeddings(page_id PK, vector BLOB, mtime REAL, norm REAL, dim INT,
 #                model TEXT, text_prefix TEXT)
 #   `vector` is a packed float64 array (8 bytes per dim -> ~6KB per 768-dim

@@ -31,7 +31,14 @@ REPO_ROOT = runtime_repo_root()
 ENTITY_PROPOSAL_VERSION = 2
 
 DEFAULT_ALIASES: dict[str, list[str]] = {
-    "llm-wiki": ["LLM Wiki", "llm wiki", "LLMウィキ", "ウィキ"],
+    "chronovisor": [
+        "Chronovisor",
+        "クロノバイザー",
+        "LLM Wiki",
+        "llm wiki",
+        "LLMウィキ",
+        "ウィキ",
+    ],
     "codex": ["Codex", "コードエクス", "コーデックス"],
     "claude-code": ["Claude Code", "クラウドコード"],
     "ollama": ["Ollama"],
