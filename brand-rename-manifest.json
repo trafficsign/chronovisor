@@ -1,0 +1,58 @@
+{
+  "schema": "chronovisor.brand-rename-manifest.v1",
+  "canonical": {
+    "product": "Chronovisor",
+    "distribution": "chronovisor",
+    "python_package": "chronovisor",
+    "mcp_server": "chronovisor",
+    "data_root": "~/.chronovisor",
+    "environment_prefix": "CHRONOVISOR_",
+    "launchd_prefix": "com.trafficsign.chronovisor-",
+    "github": "trafficsign/chronovisor"
+  },
+  "legacy_read_only": {
+    "data_root": "~/.wiki",
+    "environment_prefix": "LLM_WIKI_",
+    "schema_prefix": "llm-wiki."
+  },
+  "historical_no_touch": [
+    "~/.chronovisor/raw/**",
+    "~/.chronovisor/runtime/**",
+    "~/.chronovisor/logs/**",
+    "/Users/trafficsign/projects/plan/**"
+  ],
+  "generic_terms": ["wiki", "page", "raw", "recall"],
+  "audit": {
+    "forbidden": [
+      "llm-wiki-mcp",
+      "llm_wiki_mcp",
+      "LLM Wiki",
+      "mcp__llm-wiki__"
+    ],
+    "compatibility_tokens": ["LLM_WIKI_", "llm-wiki.", "~/.wiki"],
+    "allowlisted_paths": [
+      "src/chronovisor/__init__.py",
+      "src/chronovisor/schema_compat.py",
+      "src/chronovisor/store.py",
+      "src/chronovisor/brand_migration.py",
+      "src/chronovisor/cli.py",
+      "src/chronovisor/deadman_observer.py",
+      "src/chronovisor/decision_lane_contract_cases.py",
+      "src/chronovisor/decision_lane_contracts.py",
+      "src/chronovisor/decision_lane_prompts.py",
+      "src/chronovisor/decision_router.py",
+      "src/chronovisor/read_back_repair.py",
+      "src/chronovisor/content_correction.py",
+      "src/chronovisor/entities.py",
+      "src/chronovisor/lint.py",
+      "src/chronovisor/lint_repair.py",
+      "src/chronovisor/local_repair.py",
+      "src/chronovisor/recall_improvement.py",
+      "src/chronovisor/search_eval.py",
+      "src/chronovisor/search.py",
+      "tests/**",
+      "_handoff/**",
+      "brand-rename-manifest.json"
+    ]
+  }
+}

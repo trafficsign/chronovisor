@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.research_config import WebConfig
-from llm_wiki_mcp.web_provider import FixtureSearchProvider, search_web
+from chronovisor.research_config import WebConfig
+from chronovisor.web_provider import FixtureSearchProvider, search_web
 
 
 def test_fixture_search_runs_before_live_egress_is_enabled(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import web_provider
+    from chronovisor import web_provider
 
     monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
     provider = FixtureSearchProvider(
@@ -19,7 +19,7 @@ def test_fixture_search_runs_before_live_egress_is_enabled(tmp_path, monkeypatch
 
 
 def test_sensitive_query_is_blocked_before_provider_call(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import web_provider
+    from chronovisor import web_provider
 
     monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
 
@@ -41,8 +41,8 @@ def test_sensitive_query_is_blocked_before_provider_call(tmp_path, monkeypatch) 
 
 def test_searxng_adapter_normalizes_mocked_live_results(tmp_path, monkeypatch) -> None:
     import httpx
-    from llm_wiki_mcp import web_provider
-    from llm_wiki_mcp.web_provider import HttpSearchProvider
+    from chronovisor import web_provider
+    from chronovisor.web_provider import HttpSearchProvider
 
     monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
     client = httpx.Client(
@@ -78,7 +78,7 @@ def test_searxng_adapter_normalizes_mocked_live_results(tmp_path, monkeypatch) -
 
 def test_mediawiki_adapter_is_a_keyless_bounded_fallback() -> None:
     import httpx
-    from llm_wiki_mcp.web_provider import HttpSearchProvider
+    from chronovisor.web_provider import HttpSearchProvider
 
     client = httpx.Client(
         transport=httpx.MockTransport(

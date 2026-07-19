@@ -15,12 +15,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from llm_wiki_mcp.search import search
-from llm_wiki_mcp.search_eval import DEFAULT_VARIANTS, GOLDEN_FILE, run_report, run_variant
+from chronovisor.search import search
+from chronovisor.search_eval import DEFAULT_VARIANTS, GOLDEN_FILE, run_report, run_variant
 
 
 DEFAULT_QUERIES = (
-    "LLM Wiki 検索 ロードマップ",
+    "Chronovisor 検索 ロードマップ",
     "検索パイプライン reranker negative feedback",
     "Codex 保存 hook trusted_hash",
     "uvx GitHub runtime cache",
@@ -35,7 +35,7 @@ DEFAULT_QUERIES = (
     "dashboard recall metrics",
     "self tune fusion weights",
     "negative feedback injection_ignored",
-    "MCP wiki_search tag filter rerank",
+    "MCP chronovisor_search tag filter rerank",
     "ollama embeddings sqlite",
     "frontier labels confidence votes",
     "plan inbox llm wiki",
@@ -91,7 +91,7 @@ def build_snapshot(
     golden_file: Path,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "schema": "llm-wiki-search-pipeline-snapshot-v1",
+        "schema": "chronovisor-search-pipeline-snapshot-v1",
         "top_n": top_n,
         "queries": [],
     }

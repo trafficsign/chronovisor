@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from llm_wiki_mcp import oracle
-from llm_wiki_mcp.search_types import ScoredPage
+from chronovisor import oracle
+from chronovisor.search_types import ScoredPage
 
 
 def test_oracle_bundle_returns_pages_and_claims(monkeypatch) -> None:

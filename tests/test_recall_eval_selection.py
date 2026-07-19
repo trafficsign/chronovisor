@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.recall_eval import RecallExample, select_examples
+from chronovisor.recall_eval import RecallExample, select_examples
 
 
 def test_paired_corpus_selection_is_stable_and_kind_balanced() -> None:

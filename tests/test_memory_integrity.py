@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_wiki_mcp import memory_integrity
+from chronovisor import memory_integrity
 
 
 class _Result:
@@ -42,13 +42,13 @@ def test_evaluate_raw_does_not_pass_from_claim_presence_only(tmp_path: Path, mon
 
 
 def test_claimed_raw_names_strips_replay_prefix(tmp_path: Path, monkeypatch) -> None:
-    wiki_root = tmp_path / "wiki"
-    claims = wiki_root / "claims"
+    chronovisor_root = tmp_path / "wiki"
+    claims = chronovisor_root / "claims"
     claims.mkdir(parents=True)
     (claims / "claims.jsonl").write_text(
         json.dumps({"source_raw": "replay:20260706-codex-a.md"}, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(memory_integrity, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(memory_integrity, "CHRONOVISOR_ROOT", chronovisor_root)
 
     assert memory_integrity.claimed_raw_names() == {"20260706-codex-a.md"}

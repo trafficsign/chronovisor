@@ -6,14 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import decision_policy, decision_router, frontier_review
-from llm_wiki_mcp.decision_policy import (
+from chronovisor import decision_policy, decision_router, frontier_review
+from chronovisor.decision_policy import (
     DECISION_POLICIES,
     decision_policy_snapshot,
     resolve_decision_policy,
 )
-from llm_wiki_mcp.decision_router import DecisionRouterResult
-from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
+from chronovisor.decision_router import DecisionRouterResult
+from chronovisor.decision_schema_manifest import production_decision_schemas
 from tests.semantic_hold_support import semantic_authority
 
 
@@ -151,7 +151,7 @@ def test_enabled_lane_requires_adopted_artifact(
     FakeRouter.calls = 0
     FakeRouter.source = "bootstrap_current_policy"
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "review",
@@ -175,7 +175,7 @@ def test_enabled_lane_can_return_only_adopted_consensus(
     FakeRouter.calls = 0
     FakeRouter.source = "adopted_artifact"
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "review",
@@ -204,7 +204,7 @@ def test_every_registered_lane_names_a_production_schema() -> None:
 
 
 def test_every_production_structured_review_call_names_a_lane() -> None:
-    src_root = Path(__file__).resolve().parents[1] / "src" / "llm_wiki_mcp"
+    src_root = Path(__file__).resolve().parents[1] / "src" / "chronovisor"
     missing: list[str] = []
     for path in sorted(src_root.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -233,7 +233,7 @@ def test_policy_snapshot_separates_structured_shadow_from_deterministic_enabled(
     monkeypatch.setattr(decision_policy, "load_toml_file", lambda *_args: {})
     for lane in DECISION_POLICIES:
         monkeypatch.delenv(
-            "LLM_WIKI_DECISION_POLICY_" + lane.upper(),
+            "CHRONOVISOR_DECISION_POLICY_" + lane.upper(),
             raising=False,
         )
     snapshot = decision_policy_snapshot()
@@ -253,7 +253,7 @@ def test_schema_mismatch_stops_before_any_model(
 ) -> None:
     FakeRouter.calls = 0
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "review",

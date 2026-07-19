@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import content_correction, page_mutation
-from llm_wiki_mcp.convergence import ConvergenceStore, CycleBudget, RetryPolicy
-from llm_wiki_mcp.feedback_ledger import active_feedback_rows
+from chronovisor import content_correction, page_mutation
+from chronovisor.convergence import ConvergenceStore, CycleBudget, RetryPolicy
+from chronovisor.feedback_ledger import active_feedback_rows
 
 
 ALL_CHECKS = {
@@ -93,10 +93,10 @@ def test_injected_local_proposer_does_not_pollute_production_audit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import wiki
+    from chronovisor import store
 
-    wiki_root = tmp_path / "wiki"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
+    chronovisor_root = tmp_path / "wiki"
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     payload = json.dumps(
         {
             "decision": "ambiguous",
@@ -113,7 +113,7 @@ def test_injected_local_proposer_does_not_pollute_production_audit(
     )
 
     assert result["decision"] == "ambiguous"
-    assert not (wiki_root / "runtime" / "local-consensus").exists()
+    assert not (chronovisor_root / "runtime" / "local-consensus").exists()
 
 
 def _store(tmp_path: Path) -> ConvergenceStore:
@@ -311,7 +311,7 @@ def _patch_page_lookup(monkeypatch, pages: Path) -> None:
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
     monkeypatch.setattr(
         page_mutation,
-        "WIKI_MUTATION_LOCK",
+        "CHRONOVISOR_MUTATION_LOCK",
         pages.parent / "runtime" / "wiki-mutation.lock",
     )
     monkeypatch.setattr(
@@ -471,7 +471,7 @@ def test_disabled_exact_lane_falls_through_to_local_consensus(
     page = pages / "memory.md"
     page.write_text("---\ntitle: Memory\n---\nOld exact fact.\n", encoding="utf-8")
     _patch_page_lookup(monkeypatch, pages)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_EXACT_USER_CORRECTION", "off")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_EXACT_USER_CORRECTION", "off")
     store = _store(tmp_path)
     event = _event()
     event["correction_prompt"] = "「Old exact fact.」ではなく「New exact fact.」"
@@ -959,7 +959,7 @@ def test_source_recall_provenance_uses_exact_turn_time_for_repeated_prompt(
 def test_capture_cursor_processes_delayed_corrections_exactly_once(
     monkeypatch, tmp_path: Path
 ) -> None:
-    from llm_wiki_mcp import codex_save
+    from chronovisor import codex_record
 
     records = [
         SimpleNamespace(role="user", line=1, text="same source prompt"),
@@ -969,7 +969,7 @@ def test_capture_cursor_processes_delayed_corrections_exactly_once(
     ]
     transcript = SimpleNamespace(records=records, session_id="s1", cwd="/repo")
     monkeypatch.setattr(
-        codex_save, "extract_transcript_slice", lambda *_args, **_kwargs: transcript
+        codex_record, "extract_transcript_slice", lambda *_args, **_kwargs: transcript
     )
     monkeypatch.setattr(
         content_correction, "_source_pull_pages", lambda *_args, **_kwargs: []
@@ -1019,7 +1019,7 @@ def test_capture_skips_normal_turns_but_advances_cursor_idempotently(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from llm_wiki_mcp import codex_save
+    from chronovisor import codex_record
 
     session_file = tmp_path / "session.jsonl"
     transcript = SimpleNamespace(
@@ -1033,7 +1033,7 @@ def test_capture_skips_normal_turns_but_advances_cursor_idempotently(
         cwd="/repo",
     )
     monkeypatch.setattr(
-        codex_save,
+        codex_record,
         "extract_transcript_slice",
         lambda *_args, **_kwargs: transcript,
     )
@@ -1082,7 +1082,7 @@ def test_capture_bare_denial_requires_real_recall_candidate(
     has_recall_candidate: bool,
     expected: int,
 ) -> None:
-    from llm_wiki_mcp import codex_save
+    from chronovisor import codex_record
 
     session_file = tmp_path / "session.jsonl"
     page = tmp_path / "memory.md"
@@ -1098,7 +1098,7 @@ def test_capture_bare_denial_requires_real_recall_candidate(
         cwd="/repo",
     )
     monkeypatch.setattr(
-        codex_save,
+        codex_record,
         "extract_transcript_slice",
         lambda *_args, **_kwargs: transcript,
     )
@@ -1598,7 +1598,7 @@ def test_capture_hook_only_enqueues_negative_feedback_without_draining_models(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from llm_wiki_mcp import codex_save
+    from chronovisor import codex_record
 
     session_file = tmp_path / "session.jsonl"
     transcript = SimpleNamespace(
@@ -1612,7 +1612,7 @@ def test_capture_hook_only_enqueues_negative_feedback_without_draining_models(
         cwd="/repo",
     )
     monkeypatch.setattr(
-        codex_save,
+        codex_record,
         "extract_transcript_slice",
         lambda *_args, **_kwargs: transcript,
     )
@@ -1658,7 +1658,7 @@ def test_capture_only_cli_never_calls_run_due(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     captured: list[dict[str, object]] = []
-    monkeypatch.setattr(content_correction, "init_wiki", lambda: None)
+    monkeypatch.setattr(content_correction, "init_chronovisor", lambda: None)
     monkeypatch.setenv(content_correction.HOOK_ENABLE_ENV, "1")
     monkeypatch.setattr(
         content_correction,
@@ -2000,7 +2000,7 @@ def test_wrong_retrieval_requires_frontier_and_records_only_page_scoped_feedback
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     pages = tmp_path / "pages"
     pages.mkdir()
@@ -2067,7 +2067,7 @@ def test_classification_side_effects_recover_without_frontier_redecision(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     pages = tmp_path / "pages"
     pages.mkdir()
@@ -2471,7 +2471,7 @@ def test_nonmutation_triage_artifact_is_revised_when_page_evidence_changes(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     pages = tmp_path / "pages"
     pages.mkdir()
@@ -2643,7 +2643,7 @@ def test_backoff_item_does_not_starve_newer_correction(
 def test_refresh_fails_closed_when_target_embedding_was_not_updated(
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import index_store, ingest, ollama, search
+    from chronovisor import index_store, ingest, ollama, search
 
     monkeypatch.setattr(
         index_store, "get_store", lambda: SimpleNamespace(refresh=lambda: None)
@@ -4330,7 +4330,7 @@ def test_nonmutation_effect_revalidates_classification_authority_inside_lock(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     pages = tmp_path / "pages"
     pages.mkdir()

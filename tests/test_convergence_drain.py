@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import convergence_drain, wiki
-from llm_wiki_mcp.convergence import ConvergenceStore
+from chronovisor import convergence_drain, store as chronovisor_store
+from chronovisor.convergence import ConvergenceStore
 
 
 def _store(tmp_path: Path) -> ConvergenceStore:
@@ -105,7 +105,7 @@ def _bootstrap_adoption_fingerprint() -> dict:
 
 @pytest.fixture
 def isolated_drain(tmp_path, monkeypatch):
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(chronovisor_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(convergence_drain, "_runtime_commit", lambda: "abc123")
     monkeypatch.setattr(
         convergence_drain,
@@ -119,7 +119,7 @@ def test_frontier_fingerprint_tracks_only_frontier_events_and_active_markers(
     tmp_path, monkeypatch
 ) -> None:
     root = tmp_path / "wiki"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", root)
+    monkeypatch.setattr(chronovisor_store, "CHRONOVISOR_ROOT", root)
     baseline = convergence_drain._frontier_fingerprint()
     assert baseline["frontier_events"]["count"] == 0
     assert baseline["frontier_active"]["count"] == 0
@@ -159,14 +159,14 @@ def test_frontier_fingerprint_tracks_only_frontier_events_and_active_markers(
 def test_dry_run_writes_neither_manifest_nor_convergence(
     tmp_path, monkeypatch, isolated_drain
 ) -> None:
-    monkeypatch.delenv("LLM_WIKI_READ_ONLY", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_READ_ONLY", raising=False)
     store = _store(tmp_path)
     item = _add(store, source="one")
     state_before = store.state_file.read_bytes()
     events_before = store.events_file.read_bytes()
 
     def read_only_inventory(items):
-        assert os.environ["LLM_WIKI_READ_ONLY"] == "1"
+        assert os.environ["CHRONOVISOR_READ_ONLY"] == "1"
         return _inventory(list(items))
 
     monkeypatch.setattr(
@@ -182,14 +182,14 @@ def test_dry_run_writes_neither_manifest_nor_convergence(
     assert result["items"][0]["key"] == item["key"]
     assert store.state_file.read_bytes() == state_before
     assert store.events_file.read_bytes() == events_before
-    assert not (wiki.WIKI_ROOT / "runtime" / "convergence" / "drains").exists()
-    assert "LLM_WIKI_READ_ONLY" not in os.environ
+    assert not (chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "convergence" / "drains").exists()
+    assert "CHRONOVISOR_READ_ONLY" not in os.environ
 
 
 def test_plan_with_real_content_inventory_is_byte_for_byte_read_only(
     tmp_path, monkeypatch, isolated_drain
 ) -> None:
-    monkeypatch.delenv("LLM_WIKI_READ_ONLY", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_READ_ONLY", raising=False)
     store = _store(tmp_path)
     _add(store, source="malformed-content-event")
     before = {
@@ -209,7 +209,7 @@ def test_plan_with_real_content_inventory_is_byte_for_byte_read_only(
     assert result["active_keys"] == 1
     assert result["counts"] == {"indeterminate": 1}
     assert after == before
-    assert "LLM_WIKI_READ_ONLY" not in os.environ
+    assert "CHRONOVISOR_READ_ONLY" not in os.environ
 
 
 def test_start_persists_allowlist_before_any_claim(
@@ -337,7 +337,7 @@ def test_frontier_hash_change_fails_postcondition(
     started = convergence_drain.start(store=store, run_once=False)
 
     def mutate_frontier(**_kwargs):
-        runtime = wiki.WIKI_ROOT / "runtime"
+        runtime = chronovisor_store.CHRONOVISOR_ROOT / "runtime"
         runtime.mkdir(parents=True, exist_ok=True)
         (runtime / "events.jsonl").write_text(
             json.dumps(
@@ -526,7 +526,7 @@ def test_policy_mode_only_drift_stops_before_claim(
 
 
 def test_adoption_fingerprint_binds_resolved_policy_mode(monkeypatch) -> None:
-    from llm_wiki_mcp import decision_policy, runtime_config
+    from chronovisor import decision_policy, runtime_config
 
     monkeypatch.setattr(
         runtime_config,
@@ -537,11 +537,11 @@ def test_adoption_fingerprint_binds_resolved_policy_mode(monkeypatch) -> None:
     # Do not let the operator's live ~/.wiki/config.toml decide the baseline.
     monkeypatch.setattr(decision_policy, "load_toml_file", lambda *_args, **_kwargs: {})
     for name in convergence_drain.DECISION_POLICY_LANES:
-        env_name = "LLM_WIKI_DECISION_POLICY_" + name.upper()
+        env_name = "CHRONOVISOR_DECISION_POLICY_" + name.upper()
         monkeypatch.delenv(env_name, raising=False)
 
     before = convergence_drain._adoption_artifact_fingerprint()
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_ORPHAN_LINK", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_ORPHAN_LINK", "enabled")
     after = convergence_drain._adoption_artifact_fingerprint()
 
     assert before["resolved_router_policy"]["status"] == "ok"
@@ -652,14 +652,14 @@ def test_start_rejects_existing_frontier_activity_before_manifest(
         "_build_inventory",
         lambda items: _inventory(list(items)),
     )
-    active = wiki.WIKI_ROOT / "runtime" / "frontier-reviews" / "active"
+    active = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active"
     active.mkdir(parents=True)
     (active / "already-running.json").write_text("{}\n", encoding="utf-8")
 
     with pytest.raises(convergence_drain.DrainError, match="already_active"):
         convergence_drain.start(store=store, run_once=False)
 
-    assert not (wiki.WIKI_ROOT / "runtime" / "convergence" / "drains").exists()
+    assert not (chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "convergence" / "drains").exists()
 
 
 def test_start_rechecks_frontier_immediately_before_manifest_persistence(
@@ -685,7 +685,7 @@ def test_start_rechecks_frontier_immediately_before_manifest_persistence(
     with pytest.raises(convergence_drain.DrainError, match="before manifest"):
         convergence_drain.start(store=store, run_once=False)
 
-    drain_dir = wiki.WIKI_ROOT / "runtime" / "convergence" / "drains"
+    drain_dir = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "convergence" / "drains"
     assert not list(drain_dir.glob("*.json"))
 
 
@@ -793,7 +793,7 @@ def test_status_reports_live_frontier_drift_even_after_prior_failure(
     manifest["status"] = "failed"
     manifest["failure_reason"] = "simulated_failure"
     convergence_drain._write_manifest(started["run_id"], manifest)
-    events = wiki.WIKI_ROOT / "runtime" / "events.jsonl"
+    events = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "events.jsonl"
     events.parent.mkdir(parents=True, exist_ok=True)
     events.write_text(
         json.dumps(
@@ -883,7 +883,7 @@ def test_incomplete_inventory_is_indeterminate_and_never_rejected(
 def test_missing_lint_inventory_marks_every_target_indeterminate(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(chronovisor_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
 
     current, path, uncertain = convergence_drain._lint_inventory(
         {"tag_missing:one", "tag_missing:two"}
@@ -900,8 +900,8 @@ def test_missing_lint_inventory_marks_every_target_indeterminate(
 def test_unreadable_lint_page_is_indeterminate_not_superseded(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
-    queue = wiki.WIKI_ROOT / "review" / "lint-repair-queue.jsonl"
+    monkeypatch.setattr(chronovisor_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
+    queue = chronovisor_store.CHRONOVISOR_ROOT / "review" / "lint-repair-queue.jsonl"
     queue.parent.mkdir(parents=True)
     queue.write_text(
         json.dumps(
@@ -916,7 +916,7 @@ def test_unreadable_lint_page_is_indeterminate_not_superseded(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        wiki,
+        chronovisor_store,
         "find_page",
         lambda _page: (_ for _ in ()).throw(OSError("read failed")),
     )
@@ -931,7 +931,7 @@ def test_duplicate_inventory_failure_marks_current_and_legacy_indeterminate(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "llm_wiki_mcp.duplicate_review.build_duplicate_review_queue",
+        "chronovisor.duplicate_review.build_duplicate_review_queue",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("embedding unavailable")),
     )
 
@@ -953,7 +953,7 @@ def test_truncated_retention_inventory_never_rejects_unlisted_target(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "llm_wiki_mcp.retention.build_retention_scores",
+        "chronovisor.retention.build_retention_scores",
         lambda **_kwargs: {
             "status": "ok",
             "pages": {},
@@ -979,7 +979,7 @@ def test_malformed_retention_inventory_marks_every_target_indeterminate(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "llm_wiki_mcp.retention.build_retention_scores",
+        "chronovisor.retention.build_retention_scores",
         lambda **_kwargs: {
             "status": "ok",
             "pages": {},
@@ -1003,7 +1003,7 @@ def test_malformed_retention_inventory_marks_every_target_indeterminate(
 
 
 def test_unreadable_orphan_page_is_indeterminate(monkeypatch) -> None:
-    from llm_wiki_mcp import index_store, orphan_link
+    from chronovisor import index_store, orphan_link
 
     class Index:
         def refresh(self) -> None:
@@ -1017,7 +1017,7 @@ def test_unreadable_orphan_page_is_indeterminate(monkeypatch) -> None:
     monkeypatch.setattr(orphan_link, "gather_candidates", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(orphan_link, "_content_hash", lambda _page: "unreadable")
     monkeypatch.setattr(
-        "llm_wiki_mcp.decision_authority.current_semantic_authority",
+        "chronovisor.decision_authority.current_semantic_authority",
         lambda _lane: ({"version": "test"}, None),
     )
 
@@ -1030,7 +1030,7 @@ def test_unreadable_orphan_page_is_indeterminate(monkeypatch) -> None:
 def test_orphan_semantic_outage_is_indeterminate_not_empty_inventory(
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import index_store, orphan_link, search
+    from chronovisor import index_store, orphan_link, search
 
     class Index:
         def refresh(self) -> None:
@@ -1073,7 +1073,7 @@ def test_content_inventory_classifies_actionable_stale_and_indeterminate(
         }[item["source_id"]]
 
     monkeypatch.setattr(
-        "llm_wiki_mcp.content_correction.correction_item_actionability",
+        "chronovisor.content_correction.correction_item_actionability",
         tri_state,
     )
 
@@ -1091,7 +1091,7 @@ def test_content_inventory_classifies_actionable_stale_and_indeterminate(
 def test_content_false_positive_uses_dedicated_migration_without_model_call(
     tmp_path, monkeypatch, isolated_drain
 ) -> None:
-    from llm_wiki_mcp import content_correction
+    from chronovisor import content_correction
 
     store = _store(tmp_path)
     event = {
@@ -1133,7 +1133,7 @@ def test_content_predicate_exception_is_indeterminate(tmp_path, monkeypatch) -> 
     store = _store(tmp_path)
     item = _add(store, source="malformed")
     monkeypatch.setattr(
-        "llm_wiki_mcp.content_correction.correction_item_actionability",
+        "chronovisor.content_correction.correction_item_actionability",
         lambda _item: (_ for _ in ()).throw(ValueError("bad metadata")),
     )
 
@@ -1756,19 +1756,19 @@ def test_source_retirement_is_limited_to_explicit_keys(tmp_path) -> None:
 
 
 def test_local_only_environment_is_restored(monkeypatch) -> None:
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_SYSTEM_CODE_REPAIR", "on")
-    monkeypatch.delenv("LLM_WIKI_SELF_HEAL_AUTORUN", raising=False)
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_SYSTEM_CODE_REPAIR", "on")
+    monkeypatch.delenv("CHRONOVISOR_SELF_HEAL_AUTORUN", raising=False)
 
     with convergence_drain._local_only_environment():
-        assert os.environ["LLM_WIKI_DECISION_POLICY_SYSTEM_CODE_REPAIR"] == "off"
-        assert os.environ["LLM_WIKI_SELF_HEAL_AUTORUN"] == "0"
+        assert os.environ["CHRONOVISOR_DECISION_POLICY_SYSTEM_CODE_REPAIR"] == "off"
+        assert os.environ["CHRONOVISOR_SELF_HEAL_AUTORUN"] == "0"
 
-    assert os.environ["LLM_WIKI_DECISION_POLICY_SYSTEM_CODE_REPAIR"] == "on"
-    assert "LLM_WIKI_SELF_HEAL_AUTORUN" not in os.environ
+    assert os.environ["CHRONOVISOR_DECISION_POLICY_SYSTEM_CODE_REPAIR"] == "on"
+    assert "CHRONOVISOR_SELF_HEAL_AUTORUN" not in os.environ
 
 
 def test_lane_dispatch_passes_exact_per_lane_allowlists(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import autonomy, content_correction, lint_repair, orphan_link
+    from chronovisor import autonomy, content_correction, lint_repair, orphan_link
 
     store = _store(tmp_path)
     items = {
@@ -1825,7 +1825,7 @@ def test_lane_dispatch_passes_exact_per_lane_allowlists(tmp_path, monkeypatch) -
 
 
 def test_cli_exposes_plan_start_resume_and_status(monkeypatch, capsys) -> None:
-    from llm_wiki_mcp import cli
+    from chronovisor import cli
 
     calls: list[tuple[str, dict]] = []
 

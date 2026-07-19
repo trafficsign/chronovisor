@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp.system_incident_supervisor import SystemIncidentSupervisor
+from chronovisor.system_incident_supervisor import SystemIncidentSupervisor
 
 
 BASE = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
@@ -290,7 +290,7 @@ def test_self_heal_enqueue_helper_uses_durable_ledger_without_popen(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import background_jobs, self_heal
+    from chronovisor import background_jobs, self_heal
 
     captured: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -339,7 +339,7 @@ def test_self_heal_enqueue_helper_uses_durable_ledger_without_popen(
     assert captured == [
         {
             "name": "system-code-repair",
-            "module": "llm_wiki_mcp.self_heal",
+            "module": "chronovisor.self_heal",
             "args": [
                 "--packet",
                 str(packet.resolve()),
@@ -354,8 +354,8 @@ def test_self_heal_enqueue_helper_uses_durable_ledger_without_popen(
 def test_watchdog_captures_health_exception_without_raw_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import autonomy
-    from llm_wiki_mcp import system_incident_supervisor as supervisor_module
+    from chronovisor import autonomy
+    from chronovisor import system_incident_supervisor as supervisor_module
 
     secret = "private user text at /Users/alice/secret.md"
     health_calls = 0
@@ -381,7 +381,7 @@ def test_watchdog_captures_health_exception_without_raw_error(
             "distinct_input_count": 1,
         }
 
-    monkeypatch.setattr("llm_wiki_mcp.health.health_snapshot", broken_health)
+    monkeypatch.setattr("chronovisor.health.health_snapshot", broken_health)
     monkeypatch.setattr(supervisor_module, "supervise_health_snapshot_exception", fake_supervise)
     monkeypatch.setattr(autonomy, "_latest_jsonl", lambda _path: {})
 
@@ -403,11 +403,11 @@ def test_watchdog_captures_health_exception_without_raw_error(
 def test_normal_watchdog_alert_never_calls_incident_supervisor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import autonomy
-    from llm_wiki_mcp import system_incident_supervisor as supervisor_module
+    from chronovisor import autonomy
+    from chronovisor import system_incident_supervisor as supervisor_module
 
     monkeypatch.setattr(
-        "llm_wiki_mcp.health.health_snapshot",
+        "chronovisor.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -429,9 +429,9 @@ def test_normal_watchdog_alert_never_calls_incident_supervisor(
 def test_disabled_derived_repair_lane_performs_no_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp.system_incident_supervisor import _default_health_repair
+    from chronovisor.system_incident_supervisor import _default_health_repair
 
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_DERIVED_INDEX_REBUILD", "off")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_DERIVED_INDEX_REBUILD", "off")
 
     with pytest.raises(RuntimeError, match="disabled"):
         _default_health_repair(1, dry_run=False)

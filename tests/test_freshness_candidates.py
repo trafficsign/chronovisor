@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from llm_wiki_mcp.freshness_candidates import enqueue_from_operations
+from chronovisor.freshness_candidates import enqueue_from_operations
 
 
 @dataclass

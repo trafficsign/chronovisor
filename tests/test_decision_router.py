@@ -8,16 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp.autonomy import DUPLICATE_FRONTIER_SCHEMA
-from llm_wiki_mcp.adoption_corpus import contract_candidates
-from llm_wiki_mcp.decision_lane_contract_cases import (
+from chronovisor.autonomy import DUPLICATE_FRONTIER_SCHEMA
+from chronovisor.adoption_corpus import contract_candidates
+from chronovisor.decision_lane_contract_cases import (
     decision_lane_contract_case_manifest_sha256,
 )
-from llm_wiki_mcp.decision_lane_contracts import (
+from chronovisor.decision_lane_contracts import (
     LANE_CONTRACT_POLICY_VERSION,
     lane_contract_manifest_sha256,
 )
-from llm_wiki_mcp.decision_router import (
+from chronovisor.decision_router import (
     DECISION_SEMANTICS_POLICY_VERSION,
     QUORUM_SAFETY_POLICY_VERSION,
     DecisionRouter,
@@ -34,17 +34,17 @@ from llm_wiki_mcp.decision_router import (
     _ingest_reconciliation_value_validator,
     _prompt_json_block,
 )
-from llm_wiki_mcp.decision_schema_manifest import (
+from chronovisor.decision_schema_manifest import (
     decision_signature_value,
     production_decision_schemas,
 )
-from llm_wiki_mcp.decision_lane_prompts import (
+from chronovisor.decision_lane_prompts import (
     INGEST_PROPOSAL_SCHEMA_VERSION,
     INGEST_REPAIR_HOST_BLOCK,
     build_ingest_reconciliation_prompt,
     ingest_repair_option_id,
 )
-from llm_wiki_mcp.local_structured import (
+from chronovisor.local_structured import (
     ChatRequest,
     STRUCTURED_GENERATION_POLICY_VERSION,
     required_structured_context_tokens,
@@ -52,7 +52,7 @@ from llm_wiki_mcp.local_structured import (
     structured_generation_policy_sha256,
     structured_request_sha256,
 )
-from llm_wiki_mcp.local_model_eval import (
+from chronovisor.local_model_eval import (
     ARTIFACT_SCHEMA_VERSION,
     EVALUATOR_POLICY_VERSION,
     AdoptionThresholds,
@@ -66,13 +66,13 @@ from llm_wiki_mcp.local_model_eval import (
     replay_semantic_effect,
     _safe_model_metadata,
 )
-from llm_wiki_mcp.local_repair import LOCAL_REPAIR_SCHEMA
-from llm_wiki_mcp.lint_repair import TAG_REPAIR_SCHEMA
-from llm_wiki_mcp.search_eval import FRONTIER_LABEL_SCHEMA
-from llm_wiki_mcp.frontier_review import FRONTIER_DECISION_SCHEMA
-from llm_wiki_mcp.ingest import INGEST_FRONTIER_DECISION_SCHEMA
-from llm_wiki_mcp.runtime_config import DecisionRouterConfig
-from llm_wiki_mcp.content_correction import (
+from chronovisor.local_repair import LOCAL_REPAIR_SCHEMA
+from chronovisor.lint_repair import TAG_REPAIR_SCHEMA
+from chronovisor.search_eval import FRONTIER_LABEL_SCHEMA
+from chronovisor.frontier_review import FRONTIER_DECISION_SCHEMA
+from chronovisor.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+from chronovisor.runtime_config import DecisionRouterConfig
+from chronovisor.content_correction import (
     FRONTIER_CLASSIFICATION_SCHEMA,
     FRONTIER_REVIEW_SCHEMA,
 )
@@ -82,9 +82,9 @@ from llm_wiki_mcp.content_correction import (
 def _isolate_default_audit_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import wiki
+    from chronovisor import store
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
 
 
 SCHEMA = {
@@ -356,6 +356,7 @@ def test_ingest_replay_accounts_effective_model_prompt_but_retains_host_contract
     assert INGEST_REPAIR_HOST_BLOCK in replay["prompt"]
     assert INGEST_REPAIR_HOST_BLOCK not in model_prompt
     assert full_prompt in replay["prompt"]
+    # Preserve the sealed adopted request envelope across the brand rename.
     assert replay["prompt"].startswith("<LLM_WIKI_LANE_REQUEST ")
     assert replay["effective_model_prompt_chars"] == len(model_prompt)
     assert (

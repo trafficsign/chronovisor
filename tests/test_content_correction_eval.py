@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.content_correction_eval import load_cases, run_eval
+from chronovisor.content_correction_eval import load_cases, run_eval
 
 
 def test_correction_detection_corpus_has_independent_splits_and_passes() -> None:

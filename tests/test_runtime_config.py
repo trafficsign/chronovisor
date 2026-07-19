@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import runtime_config
+from chronovisor import runtime_config
 
 
 def test_uvx_runtime_command_uses_pushed_github_source(monkeypatch) -> None:
-    monkeypatch.delenv("LLM_WIKI_RUNTIME_SOURCE", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_RUNTIME_SOURCE", raising=False)
 
     command = runtime_config.uvx_runtime_command(
-        "llm-wiki-sleep",
+        "chronovisor-sleep",
         executable="/opt/homebrew/bin/uvx",
         refresh=True,
     )
@@ -19,22 +19,22 @@ def test_uvx_runtime_command_uses_pushed_github_source(monkeypatch) -> None:
     assert command == [
         "/opt/homebrew/bin/uvx",
         "--refresh-package",
-        "llm-wiki-mcp",
+        "chronovisor",
         "--from",
-        "git+ssh://git@github.com/trafficsign/llm-wiki-mcp",
-        "llm-wiki-sleep",
+        "git+ssh://git@github.com/trafficsign/chronovisor",
+        "chronovisor-sleep",
     ]
 
 
 def test_runtime_source_override_is_explicit(monkeypatch) -> None:
-    monkeypatch.setenv("LLM_WIKI_RUNTIME_SOURCE", "git+ssh://example.invalid/fork")
+    monkeypatch.setenv("CHRONOVISOR_RUNTIME_SOURCE", "git+ssh://example.invalid/fork")
 
     assert runtime_config.runtime_source() == "git+ssh://example.invalid/fork"
 
 
 def test_runtime_repo_root_honors_explicit_checkout(tmp_path, monkeypatch) -> None:
-    checkout = tmp_path / "llm-wiki-mcp"
-    monkeypatch.setenv("LLM_WIKI_REPO_ROOT", str(checkout))
+    checkout = tmp_path / "chronovisor"
+    monkeypatch.setenv("CHRONOVISOR_REPO_ROOT", str(checkout))
 
     assert runtime_config.runtime_repo_root() == checkout
 

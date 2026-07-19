@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import ingest_drain
+from chronovisor import ingest_drain
 
 
 @pytest.fixture(autouse=True)
@@ -20,14 +20,14 @@ def _disable_runtime_status_reset(
         "reset_stale_runtime_status",
         lambda: False,
     )
-    monkeypatch.setattr(ingest_drain, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(ingest_drain, "CHRONOVISOR_ROOT", tmp_path / "wiki")
 
 
 def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:
     state = {"pending": 25, "init": 0, "reset": 0}
 
     monkeypatch.setattr(
-        ingest_drain, "init_wiki", lambda: state.__setitem__("init", state["init"] + 1)
+        ingest_drain, "init_chronovisor", lambda: state.__setitem__("init", state["init"] + 1)
     )
     monkeypatch.setattr(
         ingest_drain.orchestrator,
@@ -70,7 +70,7 @@ def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_drain_stops_when_batch_makes_no_progress(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(ingest_drain, "init_wiki", lambda: None)
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
     monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
     monkeypatch.setattr(
         ingest_drain.orchestrator, "get_pending_raw_files", lambda: [object()] * 3
@@ -95,7 +95,7 @@ def test_drain_stops_when_batch_makes_no_progress(tmp_path: Path, monkeypatch) -
 
 
 def test_drain_check_mode_does_not_run_ingest(monkeypatch) -> None:
-    monkeypatch.setattr(ingest_drain, "init_wiki", lambda: None)
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
     monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
     monkeypatch.setattr(
         ingest_drain.orchestrator, "get_pending_raw_files", lambda: [object()] * 2
@@ -121,7 +121,7 @@ def test_drain_forwards_single_unit_pilot_limit(
     state = {"pending": 2}
     calls: list[tuple[bool, int]] = []
 
-    monkeypatch.setattr(ingest_drain, "init_wiki", lambda: None)
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
     monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
     monkeypatch.setattr(
         ingest_drain.orchestrator,
@@ -162,7 +162,7 @@ def test_drain_rejects_out_of_range_max_units(max_units: int) -> None:
 def test_parser_reads_max_units_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLM_WIKI_INGEST_DRAIN_MAX_UNITS", "1")
+    monkeypatch.setenv("CHRONOVISOR_INGEST_DRAIN_MAX_UNITS", "1")
 
     args = ingest_drain.build_parser().parse_args([])
 
@@ -174,7 +174,7 @@ def test_drain_waits_for_ollama_and_recovers_without_losing_pending_raws(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = {"pending": 2, "available": False, "runs": 0}
-    monkeypatch.setattr(ingest_drain, "init_wiki", lambda: None)
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
     monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
     monkeypatch.setattr(
         ingest_drain.orchestrator,

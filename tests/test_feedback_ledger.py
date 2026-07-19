@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from llm_wiki_mcp.feedback_ledger import active_feedback_rows, feedback_row_sha256
+from chronovisor.feedback_ledger import active_feedback_rows, feedback_row_sha256
 
 
 def test_retraction_requires_exact_key_and_row_digest(tmp_path) -> None:

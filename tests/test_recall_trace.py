@@ -3,21 +3,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_wiki_mcp import server
+from chronovisor import server
 
 
 def _tool(function):
     return function.fn if hasattr(function, "fn") else function
 
 
-def test_wiki_recall_used_records_only_explicit_used_pages(monkeypatch) -> None:
+def test_chronovisor_recall_used_records_only_explicit_used_pages(monkeypatch) -> None:
     recorded: list[dict] = []
     monkeypatch.setattr(
         server,
         "_append_pull_log",
         lambda record: recorded.append(record) is None,
     )
-    tool = _tool(server.wiki_recall_used)
+    tool = _tool(server.chronovisor_recall_used)
 
     result = json.loads(
         tool(
@@ -42,11 +42,11 @@ def test_wiki_recall_used_records_only_explicit_used_pages(monkeypatch) -> None:
     }
 
 
-def test_wiki_recall_used_fails_when_durable_append_fails(monkeypatch) -> None:
+def test_chronovisor_recall_used_fails_when_durable_append_fails(monkeypatch) -> None:
     monkeypatch.setattr(server, "_append_pull_log", lambda _record: False)
 
     result = json.loads(
-        _tool(server.wiki_recall_used)(
+        _tool(server.chronovisor_recall_used)(
             decision_id="decision-1",
             session_id="session-1",
             page_ids=["page-a"],
@@ -60,7 +60,7 @@ def test_wiki_recall_used_fails_when_durable_append_fails(monkeypatch) -> None:
     }
 
 
-def test_wiki_read_forwards_turn_trace_without_marking_page_used(
+def test_chronovisor_read_forwards_turn_trace_without_marking_page_used(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -83,7 +83,7 @@ def test_wiki_read_forwards_turn_trace_without_marking_page_used(
     monkeypatch.setattr(server, "_append_pull_log", recorded.append)
 
     result = json.loads(
-        _tool(server.wiki_read)(
+        _tool(server.chronovisor_read)(
             "page-a", session_id="session-1", decision_id="decision-1"
         )
     )

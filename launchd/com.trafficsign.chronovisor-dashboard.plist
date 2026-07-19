@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.trafficsign.chronovisor-dashboard</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/trafficsign/projects/personal/chronovisor/scripts/chronovisor-dashboard</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8765</string>
+    <string>--lan</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/trafficsign/projects/personal/chronovisor</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/trafficsign</string>
+    <key>PATH</key>
+    <string>/Users/trafficsign/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/sbin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/trafficsign/.chronovisor/logs/dashboard.launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/trafficsign/.chronovisor/logs/dashboard.launchd.err.log</string>
+</dict>
+</plist>

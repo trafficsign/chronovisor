@@ -43,7 +43,7 @@ def _seed_raws(root: Path) -> Path:
 def _patch_deferred_statuses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[list[str]]:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
     scans: list[list[str]] = []
 
@@ -62,16 +62,16 @@ def _patch_deferred_statuses(
     return scans
 
 
-def test_wiki_status_separates_runnable_and_deferred_raws(
+def test_chronovisor_status_separates_runnable_and_deferred_raws(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import health, ollama, orchestrator, server
+    from chronovisor import health, ollama, orchestrator, server
 
     raw_dir = _seed_raws(tmp_path)
     scans = _patch_deferred_statuses(monkeypatch)
     monkeypatch.setattr(server, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(server, "WIKI_ROOT", tmp_path)
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
     monkeypatch.setattr(server, "get_store", lambda: _Store())
     monkeypatch.setattr(
         orchestrator,
@@ -89,7 +89,7 @@ def test_wiki_status_separates_runnable_and_deferred_raws(
 
     monkeypatch.setattr(ollama, "_client", lambda: Client())
 
-    payload = json.loads(server.wiki_status())
+    payload = json.loads(server.chronovisor_status())
 
     assert scans == [["operational.md", "pending-a.md", "pending-b.md", "semantic.md"]]
     assert payload["raw_total"] == 4
@@ -101,11 +101,11 @@ def test_wiki_status_separates_runnable_and_deferred_raws(
     assert payload["ollama_status"] == "running"
 
 
-def test_wiki_init_reports_deferred_counts_in_parallel_bootstrap_status(
+def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import ollama, orchestrator, server
+    from chronovisor import ollama, orchestrator, server
 
     raw_dir = _seed_raws(tmp_path)
     system_dir = tmp_path / "system"
@@ -118,7 +118,7 @@ def test_wiki_init_reports_deferred_counts_in_parallel_bootstrap_status(
     scans = _patch_deferred_statuses(monkeypatch)
     monkeypatch.setattr(server, "RAW_DIR", raw_dir)
     monkeypatch.setattr(server, "SYSTEM_DIR", system_dir)
-    monkeypatch.setattr(server, "WIKI_ROOT", tmp_path)
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
     monkeypatch.setattr(server, "get_store", lambda: _Store())
     monkeypatch.setattr(
         orchestrator,
@@ -127,7 +127,7 @@ def test_wiki_init_reports_deferred_counts_in_parallel_bootstrap_status(
     )
     monkeypatch.setattr(ollama, "is_available", lambda: False)
 
-    payload = json.loads(server.wiki_init())
+    payload = json.loads(server.chronovisor_init())
 
     assert scans == [["operational.md", "pending-a.md", "pending-b.md", "semantic.md"]]
     assert payload["status"] == {
@@ -138,7 +138,7 @@ def test_wiki_init_reports_deferred_counts_in_parallel_bootstrap_status(
         "operational_deferred": 1,
         "raw_outstanding": 4,
         "ollama_status": "stopped",
-        "wiki_root": str(tmp_path),
+        "chronovisor_root": str(tmp_path),
     }
     assert set(payload["system_pages"]) == {
         "user-profile",

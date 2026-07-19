@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import lint_repair
-from llm_wiki_mcp.convergence import CycleBudget, ConvergenceStore, RetryPolicy
-from llm_wiki_mcp.decision_router import canonical_agreement_signature
-from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
-from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+from chronovisor import lint_repair
+from chronovisor.convergence import CycleBudget, ConvergenceStore, RetryPolicy
+from chronovisor.decision_router import canonical_agreement_signature
+from chronovisor.decision_schema_manifest import production_decision_schemas
+from chronovisor.frontmatter import parse as parse_frontmatter
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
@@ -25,7 +25,7 @@ def isolate_decision_authority_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import page_mutation
+    from chronovisor import page_mutation
 
     monkeypatch.setattr(
         page_mutation,
@@ -289,7 +289,7 @@ def test_local_approved_tags_require_frontier_approval_before_apply(
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
     monkeypatch.setattr(
-        lint_repair.wiki,
+        lint_repair.chronovisor_store,
         "find_page",
         lambda candidate: _find_only(candidate, page_id, page_path),
     )
@@ -353,7 +353,7 @@ def test_tag_apply_preserves_correction_that_lands_before_locked_cas(
         page_path.write_text(corrected, encoding="utf-8")
         yield
 
-    monkeypatch.setattr(lint_repair, "wiki_mutation_lock", correction_wins)
+    monkeypatch.setattr(lint_repair, "chronovisor_mutation_lock", correction_wins)
 
     result = lint_repair.apply_tags_cas(
         page_path,
@@ -374,7 +374,7 @@ def test_local_approval_cannot_mutate_when_frontier_rejects(
     original = _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
 
     result = lint_repair.run_lint_repair(
@@ -418,7 +418,7 @@ def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
     original = _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
     frontier_calls = 0
 
@@ -495,7 +495,7 @@ def test_stale_durable_verdict_is_not_reused_across_authority_epoch(
     original = _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
     authority_a = _semantic_authority("a" * 64)
     authority_b = _semantic_authority("b" * 64)
@@ -566,7 +566,7 @@ def test_authority_change_before_effect_blocks_page_and_terminal_transition(
     original = _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
     authority_a = _semantic_authority("a" * 64)
     authority_b = _semantic_authority("b" * 64)
@@ -615,7 +615,7 @@ def test_production_verdict_without_policy_audit_cannot_be_persisted_or_applied(
     original = _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     authority = _semantic_authority("a" * 64)
     monkeypatch.setattr(
         lint_repair,
@@ -657,7 +657,7 @@ def test_frontier_artifact_write_failure_is_fail_closed(
     original = _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
 
     def fail_artifact(*_args, **_kwargs):
         raise OSError("disk unavailable")
@@ -699,7 +699,7 @@ def test_invalid_local_proposal_cannot_be_replaced_by_review_panel(
     _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id, issue_type="tag_count_violation")])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
     budget = _budget()
 
@@ -746,7 +746,7 @@ def test_frontier_rejection_is_terminal_and_does_not_mutate_page(
     original = _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
 
     result = lint_repair.run_lint_repair(
@@ -784,7 +784,7 @@ def test_tag_no_quorum_reuses_hold_until_exact_authority_changes(
     original = _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
     authority_a = semantic_authority(
         lint_repair.TAG_REPAIR_DECISION_LANE,
@@ -864,7 +864,7 @@ def test_frontier_auth_failure_is_the_only_kind_that_requires_a_human(
     original = _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
 
     result = lint_repair.run_lint_repair(
@@ -908,7 +908,7 @@ def test_stale_is_observed_and_duplicate_orphan_are_terminally_routed(
             _row("orphan-page", lane="review", issue_type="orphan"),
         ],
     )
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: None)
     store = _store(tmp_path)
 
     result = lint_repair.run_lint_repair(
@@ -948,7 +948,7 @@ def test_dry_run_is_byte_for_byte_read_only_and_calls_no_models(
     page_before = _page(page_path).encode()
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     queue_before = _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
     budget = _budget()
 
@@ -986,7 +986,7 @@ def test_max_items_bounds_queue_work(tmp_path: Path, monkeypatch) -> None:
             _row("second", lane="monitor", issue_type="stale"),
         ],
     )
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: None)
     store = _store(tmp_path)
 
     result = lint_repair.run_lint_repair(
@@ -1032,7 +1032,7 @@ def test_cas_conflict_quarantines_without_overwriting_concurrent_change(
     _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
     concurrent = (
         "---\ntitle: Concurrent\nupdated: 2026-07-10\n---\n\n# Changed elsewhere\n"
@@ -1085,7 +1085,7 @@ def test_backoff_row_does_not_starve_later_actionable_row(
         ],
     )
     monkeypatch.setattr(
-        lint_repair.wiki,
+        lint_repair.chronovisor_store,
         "find_page",
         lambda page_id: page_path if page_id == "retrying" else None,
     )
@@ -1136,7 +1136,7 @@ def test_existing_valid_tags_finish_without_calling_a_model(
     original = _page(page_path, tags=VALID_TAGS)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
 
     result = lint_repair.run_lint_repair(
@@ -1168,7 +1168,7 @@ def test_exact_already_applied_recovery_only_finalizes_bookkeeping(
     _page(page_path)
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row(page_id)])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
     real_complete = store.complete
 
@@ -1223,7 +1223,7 @@ def test_exact_already_applied_recovery_only_finalizes_bookkeeping(
 def test_missing_page_is_rejected_once(tmp_path: Path, monkeypatch) -> None:
     queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
     _queue(queue_path, [_row("missing-page")])
-    monkeypatch.setattr(lint_repair.wiki, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: None)
     store = _store(tmp_path)
 
     result = lint_repair.run_lint_repair(

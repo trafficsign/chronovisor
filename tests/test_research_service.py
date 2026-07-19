@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llm_wiki_mcp.research_config import ResearchConfig
-from llm_wiki_mcp.research_orchestrator import PlannerResponse
-from llm_wiki_mcp import research_service
-from llm_wiki_mcp.research_service import run_evidence_research
-from llm_wiki_mcp.research_store import ResearchStore
+from chronovisor.research_config import ResearchConfig
+from chronovisor.research_orchestrator import PlannerResponse
+from chronovisor import research_service
+from chronovisor.research_service import run_evidence_research
+from chronovisor.research_store import ResearchStore
 
 
 def test_service_writes_bundle_audit_and_receipt(tmp_path: Path, monkeypatch) -> None:
-    from llm_wiki_mcp import research_auditor, research_scheduler, research_store
+    from chronovisor import research_auditor, research_scheduler, research_store
 
-    monkeypatch.setattr(research_store, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(research_scheduler, "RUNTIME_DIR", tmp_path / "scheduler")
     monkeypatch.setattr(research_auditor, "AUDIT_LOG", tmp_path / "audit.jsonl")
     store = ResearchStore(root=tmp_path / "research")
@@ -48,13 +48,13 @@ def test_service_writes_bundle_audit_and_receipt(tmp_path: Path, monkeypatch) ->
 def test_service_never_returns_empty_answer_after_planner_terminal(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from llm_wiki_mcp import research_auditor
+    from chronovisor import research_auditor
 
     monkeypatch.setattr(research_auditor, "AUDIT_LOG", tmp_path / "audit.jsonl")
     store = ResearchStore(root=tmp_path / "research")
     artifact = store.put_artifact(
-        '{"body":"wiki_research is published by fresh MCP"}',
-        source_type="wiki_read",
+        '{"body":"chronovisor_research is published by fresh MCP"}',
+        source_type="chronovisor_read",
         source_uri="wiki:mcp-publication",
         title="MCP Publication",
         citation="wiki:mcp-publication",
@@ -78,7 +78,7 @@ def test_service_never_returns_empty_answer_after_planner_terminal(
 
     result = run_evidence_research(
         "check publication",
-        claims=["wiki_research is published by fresh MCP"],
+        claims=["chronovisor_research is published by fresh MCP"],
         config=ResearchConfig(enabled=True, mode="explicit"),
         challenge=False,
         run_id="terminal-run",
@@ -137,9 +137,9 @@ def test_cli_sync_is_explicit(monkeypatch, capsys) -> None:
     assert '"goal": "local evidence"' in payload
 
 
-def test_server_publishes_wiki_research() -> None:
-    from llm_wiki_mcp import server
+def test_server_publishes_chronovisor_research() -> None:
+    from chronovisor import server
 
     names = {tool.name for tool in server.mcp._tool_manager.list_tools()}
 
-    assert "wiki_research" in names
+    assert "chronovisor_research" in names

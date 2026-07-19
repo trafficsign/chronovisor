@@ -13,7 +13,7 @@ raw 取り込み時にフィルタされず流入したものを削除する。
 - 引数なし / --dry-run: 一覧表示のみ、削除しない
 - --apply: 廃止済み。削除提案は frontier-managed sleep lane が処理する
 
-ログ: ~/.wiki/backups/<latest>/cleanup.log に記録
+ログ: ~/.chronovisor/backups/<latest>/cleanup.log に記録
 """
 
 import argparse
@@ -23,13 +23,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+from chronovisor.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
 
-WIKI_ROOT = Path.home() / ".wiki"
-WIKI_PAGES = WIKI_ROOT / "pages"
-BACKUPS_DIR = WIKI_ROOT / "backups"
+CHRONOVISOR_ROOT = Path.home() / ".chronovisor"
+WIKI_PAGES = CHRONOVISOR_ROOT / "pages"
+BACKUPS_DIR = CHRONOVISOR_ROOT / "backups"
 
 # GitHub テンプレ / プロジェクト管理ファイル (page_id lowercase)
 GARBAGE_FILENAMES = frozenset({
@@ -157,7 +157,7 @@ def main() -> None:
     if args.apply:
         block_legacy_semantic_mutation(
             tool="cleanup_garbage.py",
-            replacement="llm-wiki-sleep",
+            replacement="chronovisor-sleep",
         )
 
     pages = sorted(WIKI_PAGES.rglob("*.md"))
@@ -182,7 +182,7 @@ def main() -> None:
         print(f"  {rel} ({size}B) — {reason}")
     print()
 
-    print("[dry-run] 削除はスキップ。適用は llm-wiki-sleep が frontier review 後に行います。")
+    print("[dry-run] 削除はスキップ。適用は chronovisor-sleep が frontier review 後に行います。")
 
 
 if __name__ == "__main__":

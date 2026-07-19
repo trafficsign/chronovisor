@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.research_security import (
+from chronovisor.research_security import (
     external_content_metadata,
     guard_egress_query,
     guard_url,

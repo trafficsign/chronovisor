@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp.research_config import ResearchConfig
-from llm_wiki_mcp.research_consolidation import ALLOWED_OPERATIONS, run_consolidation
-from llm_wiki_mcp.research_store import ResearchStore
+from chronovisor.research_config import ResearchConfig
+from chronovisor.research_consolidation import ALLOWED_OPERATIONS, run_consolidation
+from chronovisor.research_store import ResearchStore
 
 
 def _receipt(store: ResearchStore, run_id: str, claim: str) -> None:
@@ -37,9 +37,9 @@ def _config() -> ResearchConfig:
 
 
 def test_receipt_gated_proposal_only_and_latest_wins(tmp_path: Path, monkeypatch) -> None:
-    from llm_wiki_mcp import research_store
+    from chronovisor import research_store
 
-    monkeypatch.setattr(research_store, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runs")
     state = tmp_path / "state.json"
     lock = tmp_path / "lease.lock"
@@ -63,9 +63,9 @@ def test_receipt_gated_proposal_only_and_latest_wins(tmp_path: Path, monkeypatch
 
 
 def test_failure_does_not_advance_cursor(tmp_path: Path, monkeypatch) -> None:
-    from llm_wiki_mcp import research_consolidation, research_store
+    from chronovisor import research_consolidation, research_store
 
-    monkeypatch.setattr(research_store, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runs")
     _receipt(store, "run", "latest fact")
     state = tmp_path / "state.json"
@@ -86,9 +86,9 @@ def test_failure_does_not_advance_cursor(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_without_receipt_never_runs_even_when_forced(tmp_path: Path, monkeypatch) -> None:
-    from llm_wiki_mcp import research_store
+    from chronovisor import research_store
 
-    monkeypatch.setattr(research_store, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runs")
     store.append_event("run", {"kind": "post_answer_audit", "audit": {"missing_evidence": ["x"]}})
     result = run_consolidation(

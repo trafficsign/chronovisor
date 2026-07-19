@@ -4,8 +4,8 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 
-from llm_wiki_mcp import entities
-from llm_wiki_mcp.entities import extract_entities, patch_entities_frontmatter
+from chronovisor import entities
+from chronovisor.entities import extract_entities, patch_entities_frontmatter
 
 
 def _frontier_decision(
@@ -28,11 +28,11 @@ def _entity_page(title: str = "Qwen Notes", body: str = "notes") -> str:
 
 
 def test_extract_entities_uses_alias_registry() -> None:
-    registry = {"mhi": ["MHI", "三菱重工"], "llm-wiki": ["LLM Wiki"]}
+    registry = {"mhi": ["MHI", "三菱重工"], "chronovisor": ["Chronovisor"]}
 
-    assert extract_entities("三菱重工と LLM Wiki の話", registry=registry) == [
+    assert extract_entities("三菱重工と Chronovisor の話", registry=registry) == [
         "mhi",
-        "llm-wiki",
+        "chronovisor",
     ]
 
 
@@ -154,7 +154,7 @@ def test_backfill_preserves_correction_that_lands_before_cas(
         page.write_text(corrected, encoding="utf-8")
         yield
 
-    monkeypatch.setattr(entities, "wiki_mutation_lock", correction_wins)
+    monkeypatch.setattr(entities, "chronovisor_mutation_lock", correction_wins)
 
     result = entities.backfill_entities(
         reviewer=lambda _prompt, _schema: _frontier_decision("approved"),
@@ -368,7 +368,7 @@ def test_budget_defer_persists_proposal_and_resumes_next_run(
 
 
 def test_both_cli_entrypoints_forward_frontier_budget(monkeypatch, capsys) -> None:
-    from llm_wiki_mcp import cli
+    from chronovisor import cli
 
     seen: list[int] = []
 

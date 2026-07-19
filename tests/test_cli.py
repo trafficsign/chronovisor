@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import cli, runtime_config, runtime_status, wiki
-from llm_wiki_mcp import recall_runtime
+from chronovisor import cli, runtime_config, runtime_status, store
+from chronovisor import recall_runtime
 
 
 def _registered_command_paths(
@@ -71,10 +71,10 @@ def patch_wiki(tmp_path: Path, monkeypatch) -> None:
     config = root / "config.toml"
     config.write_text("[hooks.stop]\nsave = true\naudit = true\n", encoding="utf-8")
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", root)
-    monkeypatch.setattr(wiki, "RAW_DIR", raw)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages)
-    monkeypatch.setattr(wiki, "SYSTEM_DIR", system)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(store, "RAW_DIR", raw)
+    monkeypatch.setattr(store, "PAGES_DIR", pages)
+    monkeypatch.setattr(store, "SYSTEM_DIR", system)
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
     monkeypatch.setattr(runtime_config, "LEGACY_RECALL_CONFIG_FILE", root / "recall.toml")
     monkeypatch.setattr(recall_runtime, "RECALL_DIR", recall)
@@ -95,11 +95,23 @@ def test_status_json_reports_wiki_and_recall_counts(tmp_path, monkeypatch, capsy
     assert cli.main(["status", "--json"]) == 0
     output = json.loads(capsys.readouterr().out)
 
-    assert output["wiki"]["raw_files"] == 1
-    assert output["wiki"]["pages"] == 1
+    assert output["chronovisor"]["raw_files"] == 1
+    assert output["chronovisor"]["pages"] == 1
     assert output["config"]["mode"] == "unified"
     assert output["recall"]["decisions"] == {"read": 1}
     assert output["recall"]["feedback"] == {"missed_candidate": 1}
+
+
+def test_status_plain_uses_chronovisor_response_key(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    patch_wiki(tmp_path, monkeypatch)
+
+    assert cli.main(["status"]) == 0
+    output = capsys.readouterr().out
+
+    assert "chronovisor:" in output
+    assert "raw=1 pages=1 system=1" in output
 
 
 def test_hooks_inspect_json_handles_missing_host_files(tmp_path, monkeypatch, capsys) -> None:
@@ -153,12 +165,12 @@ def test_hooks_inspect_marks_legacy_audit_wrapper_as_noop(
     assert entry["compatibility"] == "deprecated_noop"
     assert entry["deprecated"] is True
     assert entry["removal_after"] == "2026-10-01"
-    assert output["warnings"][0]["replacement"].startswith("llm-wiki-hook")
+    assert output["warnings"][0]["replacement"].startswith("chronovisor-hook")
 
 
 def test_recall_improve_run_due_cli_forwards_scheduler_args(tmp_path, monkeypatch, capsys) -> None:
     patch_wiki(tmp_path, monkeypatch)
-    from llm_wiki_mcp import recall_improvement
+    from chronovisor import recall_improvement
 
     seen: dict[str, object] = {}
 
@@ -177,7 +189,7 @@ def test_recall_improve_run_due_cli_forwards_scheduler_args(tmp_path, monkeypatc
 
 
 def test_sleep_cli_non_json_handles_partial_cycle(monkeypatch, capsys) -> None:
-    from llm_wiki_mcp import sleep_cycle
+    from chronovisor import sleep_cycle
 
     monkeypatch.setattr(
         sleep_cycle,
@@ -198,7 +210,7 @@ def test_sleep_cli_non_json_handles_partial_cycle(monkeypatch, capsys) -> None:
 
 
 def test_sleep_cli_non_json_handles_locked_cycle(monkeypatch, capsys) -> None:
-    from llm_wiki_mcp import sleep_cycle
+    from chronovisor import sleep_cycle
 
     monkeypatch.setattr(
         sleep_cycle,
@@ -285,7 +297,7 @@ def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeyp
     monkeypatch.setattr(cli, "CODEX_HOOKS_FILE", hooks_file)
     monkeypatch.setattr(cli, "CODEX_CONFIG_FILE", config_file)
 
-    result = cli.install_codex_hooks("llm-wiki-hook")
+    result = cli.install_codex_hooks("chronovisor-hook")
 
     installed = json.loads(hooks_file.read_text(encoding="utf-8"))
     user_hooks = installed["hooks"]["UserPromptSubmit"][0]["hooks"]
@@ -294,7 +306,7 @@ def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeyp
         "cmux notify",
         (
             "CODEX_HOME=/Users/trafficsign/.config/codex "
-            "llm-wiki-hook --host codex --event UserPromptSubmit --hook"
+            "chronovisor-hook --host codex --event UserPromptSubmit --hook"
         ),
     ]
     assert user_hooks[-1]["timeout"] == 7000
@@ -302,7 +314,7 @@ def test_install_codex_hooks_replaces_legacy_entries_and_trust(tmp_path, monkeyp
         "cmux stop",
         (
             "CODEX_HOME=/Users/trafficsign/.config/codex "
-            "llm-wiki-hook --host codex --event Stop --hook"
+            "chronovisor-hook --host codex --event Stop --hook"
         ),
     ]
     assert stop_hooks[-1]["timeout"] == 5000
@@ -363,18 +375,18 @@ def test_install_claude_code_hooks_preserves_non_wiki_entries(tmp_path, monkeypa
     )
     monkeypatch.setattr(cli, "CLAUDE_SETTINGS_FILE", settings_file)
 
-    cli.install_claude_code_hooks("llm-wiki-hook")
+    cli.install_claude_code_hooks("chronovisor-hook")
 
     installed = json.loads(settings_file.read_text(encoding="utf-8"))
     assert [hook["command"] for hook in installed["hooks"]["UserPromptSubmit"][0]["hooks"]] == [
-        "llm-wiki-hook --host claude-code --event UserPromptSubmit --hook",
+        "chronovisor-hook --host claude-code --event UserPromptSubmit --hook",
         "agent-router",
     ]
     assert installed["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] == 7000
     assert [hook["command"] for hook in installed["hooks"]["Stop"][0]["hooks"]] == [
         "afplay done.aiff",
         "lazy-detect",
-        "llm-wiki-hook --host claude-code --event Stop --hook",
+        "chronovisor-hook --host claude-code --event Stop --hook",
     ]
     assert installed["hooks"]["Stop"][0]["hooks"][-1]["timeout"] == 5000
 
@@ -391,7 +403,7 @@ def test_hooks_install_cli_dry_run_json(tmp_path, monkeypatch, capsys) -> None:
         "--host",
         "all",
         "--command-prefix",
-        "llm-wiki-hook",
+        "chronovisor-hook",
         "--dry-run",
         "--json",
     ]) == 0
@@ -405,10 +417,10 @@ def test_hooks_install_cli_dry_run_json(tmp_path, monkeypatch, capsys) -> None:
 
 
 def test_default_hook_prefix_uses_pushed_github_runtime(monkeypatch) -> None:
-    monkeypatch.delenv("LLM_WIKI_RUNTIME_SOURCE", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_RUNTIME_SOURCE", raising=False)
 
     prefix = cli.default_hook_command_prefix()
 
     assert prefix.startswith("uvx --from ")
-    assert "git+ssh://git@github.com/trafficsign/llm-wiki-mcp" in prefix
+    assert "git+ssh://git@github.com/trafficsign/chronovisor" in prefix
     assert "uv run --project" not in prefix

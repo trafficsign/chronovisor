@@ -5,10 +5,10 @@ import json
 
 import pytest
 
-from llm_wiki_mcp import negative_feedback
-from llm_wiki_mcp.feedback_ledger import feedback_row_sha256
-from llm_wiki_mcp.runtime_config import NegativeFeedbackConfig, load_negative_feedback_config
-from llm_wiki_mcp.search import ScoredPage
+from chronovisor import negative_feedback
+from chronovisor.feedback_ledger import feedback_row_sha256
+from chronovisor.runtime_config import NegativeFeedbackConfig, load_negative_feedback_config
+from chronovisor.search import ScoredPage
 
 
 def page(page_id: str, score: float) -> ScoredPage:

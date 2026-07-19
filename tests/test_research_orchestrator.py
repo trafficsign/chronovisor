@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from llm_wiki_mcp import research_orchestrator, research_scheduler
-from llm_wiki_mcp.research_config import CompactionConfig, ResearchConfig
-from llm_wiki_mcp.research_orchestrator import (
+from chronovisor import research_orchestrator, research_scheduler
+from chronovisor.research_config import CompactionConfig, ResearchConfig
+from chronovisor.research_orchestrator import (
     DeterministicPlanner,
     LocalPlanner,
     PlannerResponse,
     ResearchState,
 )
-from llm_wiki_mcp.research_scheduler import (
+from chronovisor.research_scheduler import (
     CancellableResult,
     ResearchAdmission,
     ResearchLease,
 )
-from llm_wiki_mcp.research_types import ResearchBudget
-from llm_wiki_mcp.research_store import ResearchStore
+from chronovisor.research_types import ResearchBudget
+from chronovisor.research_store import ResearchStore
 
 
 def _isolate_scheduler(tmp_path, monkeypatch) -> None:
@@ -30,7 +30,7 @@ def test_deterministic_kernel_terminalizes_every_action(tmp_path, monkeypatch) -
     _isolate_scheduler(tmp_path, monkeypatch)
 
     def tool(action, _context):
-        if action.type.value == "wiki_search":
+        if action.type.value == "chronovisor_search":
             return {"results": [{"page_id": "page-a"}]}
         return {"page_id": "page-a", "body": "evidence"}
 
@@ -96,7 +96,7 @@ def test_action_contract_rejects_wrong_arguments_before_execution(
         def plan(self, *args, **kwargs):
             return PlannerResponse(
                 {
-                    "type": "wiki_read",
+                    "type": "chronovisor_read",
                     "arguments": {"query": "topic", "url": "https://example.test"},
                     "rationale": "read",
                 }
@@ -239,18 +239,18 @@ def test_duplicate_search_recovers_by_reading_best_unseen_page(
         def plan(self, state, **_kwargs):
             if not state.actions:
                 return PlannerResponse(
-                    {"type": "wiki_search", "arguments": {"query": "topic"}}
+                    {"type": "chronovisor_search", "arguments": {"query": "topic"}}
                 )
-            if not any(action.type.value == "wiki_read" for action in state.actions):
+            if not any(action.type.value == "chronovisor_read" for action in state.actions):
                 return PlannerResponse(
-                    {"type": "wiki_search", "arguments": {"query": "topic"}}
+                    {"type": "chronovisor_search", "arguments": {"query": "topic"}}
                 )
             return PlannerResponse(
                 {"type": "finish", "arguments": {"answer": "recovered"}}
             )
 
     def tool(action, _context):
-        if action.type.value == "wiki_search":
+        if action.type.value == "chronovisor_search":
             return {"results": [{"page_id": "best-page"}]}
         return {
             "page_id": "best-page",
@@ -276,8 +276,8 @@ def test_duplicate_search_recovers_by_reading_best_unseen_page(
         for row in events
         if row.get("kind") == "action"
     ] == [
-        "wiki_search",
-        "wiki_read",
+        "chronovisor_search",
+        "chronovisor_read",
         "finish",
     ]
     assert any(row.get("kind") == "duplicate_action_recovered" for row in events)
@@ -294,14 +294,14 @@ def test_restart_terminalizes_orphan_action_and_advances_epoch(
             "kind": "action",
             "epoch": 0,
             "iteration": 1,
-            "action": {"type": "wiki_search", "arguments": {"query": "old"}},
+            "action": {"type": "chronovisor_search", "arguments": {"query": "old"}},
         },
     )
     monkeypatch.setattr(
         research_orchestrator,
         "execute_tool",
         lambda action, _context: (
-            {"results": []} if action.type.value == "wiki_search" else {}
+            {"results": []} if action.type.value == "chronovisor_search" else {}
         ),
     )
 
@@ -330,7 +330,7 @@ def test_large_observation_is_externalized_and_checkpoint_receipted(
         "execute_tool",
         lambda action, _context: (
             {"results": [{"page_id": "x", "blob": "z" * 5000}]}
-            if action.type.value == "wiki_search"
+            if action.type.value == "chronovisor_search"
             else {}
         ),
     )

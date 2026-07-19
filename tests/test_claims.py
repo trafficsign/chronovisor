@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_wiki_mcp import claims
+from chronovisor import claims
 
 
 def test_page_claims_extracts_summary_entities_and_lead(tmp_path: Path, monkeypatch) -> None:
@@ -161,7 +161,7 @@ def test_disabled_conflict_lane_preserves_queue_without_review_or_write(
     )
     monkeypatch.setattr(claims, "CLAIM_CONFLICT_FILE", conflict_file)
     monkeypatch.setattr(claims, "CLAIM_REVIEW_FILE", review_file)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_CLAIMS_CONFLICT", "off")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_CLAIMS_CONFLICT", "off")
 
     result = claims.review_claim_conflicts(
         reviewer=lambda *_args, **_kwargs: pytest.fail("disabled lane must not review")

@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import search, search_eval
-from llm_wiki_mcp import pipeline as pipeline_mod
-from llm_wiki_mcp.reranker import RerankOutcome
-from llm_wiki_mcp.runtime_config import NegativeFeedbackConfig, RerankerConfig
-from llm_wiki_mcp.search import ScoredPage
+from chronovisor import search, search_eval
+from chronovisor import pipeline as pipeline_mod
+from chronovisor.reranker import RerankOutcome
+from chronovisor.runtime_config import NegativeFeedbackConfig, RerankerConfig
+from chronovisor.search import ScoredPage
 
 
 def page(page_id: str, score: float, *, status: str = "active") -> ScoredPage:
@@ -43,8 +43,8 @@ def disabled_negative_feedback() -> NegativeFeedbackConfig:
 def test_pipeline_module_does_not_import_upper_layers() -> None:
     source = Path(pipeline_mod.__file__).read_text(encoding="utf-8")
 
-    assert "llm_wiki_mcp.server" not in source
-    assert "llm_wiki_mcp.search_eval" not in source
+    assert "chronovisor.server" not in source
+    assert "chronovisor.search_eval" not in source
 
 
 def test_production_search_calls_zero_weight_graph_and_skips_usage_prior(monkeypatch) -> None:

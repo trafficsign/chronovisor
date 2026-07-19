@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.recall_log_schema import (
+from chronovisor.recall_log_schema import (
     join_used_recall_episodes,
     page_ids_from_record,
 )

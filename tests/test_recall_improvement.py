@@ -8,12 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import recall_improvement
-from llm_wiki_mcp.convergence import CycleBudget
-from llm_wiki_mcp.decision_router import canonical_agreement_signature
-from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
-from llm_wiki_mcp.recall_improvement import PolicyProposal
-from llm_wiki_mcp.recall_runtime import RecallPolicy
+from chronovisor import recall_improvement
+from chronovisor.convergence import CycleBudget
+from chronovisor.decision_router import canonical_agreement_signature
+from chronovisor.decision_schema_manifest import production_decision_schemas
+from chronovisor.recall_improvement import PolicyProposal
+from chronovisor.recall_runtime import RecallPolicy
 
 
 def _improvement_authority(epoch: str) -> dict:
@@ -122,7 +122,7 @@ def _durable_schedule_result(
 
 
 def test_default_improvement_models_use_ornith_and_gemma_pair(monkeypatch) -> None:
-    monkeypatch.delenv("LLM_WIKI_RECALL_IMPROVEMENT_MODELS", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_RECALL_IMPROVEMENT_MODELS", raising=False)
     monkeypatch.setattr(recall_improvement, "load_toml_file", lambda: {})
 
     assert recall_improvement.configured_models() == (
@@ -281,7 +281,7 @@ def _write_feedback(log_file, feedback_file) -> None:
             {
                 "decision_id": "d1",
                 "host": "codex",
-                "prompt_preview": "LLM Wiki recall policy",
+                "prompt_preview": "Chronovisor recall policy",
                 "pages": ["old-page"],
             },
             ensure_ascii=False,
@@ -293,7 +293,7 @@ def _write_feedback(log_file, feedback_file) -> None:
         json.dumps(
             {
                 "kind": "missed_candidate",
-                "prompt": "LLM Wiki recall policy",
+                "prompt": "Chronovisor recall policy",
                 "expected_pages": ["target-page"],
                 "ref": "d1",
             },
@@ -580,7 +580,7 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
             },
             "rows": [
                 {
-                    "prompt": "LLM Wiki recall policy",
+                    "prompt": "Chronovisor recall policy",
                     "kind": "missed_candidate",
                     "expected_pages": ["target-page"],
                     "pages": ["target-page"] if improved else ["old-page"],
@@ -713,7 +713,7 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
             },
             "rows": [
                 {
-                    "prompt": "LLM Wiki recall policy",
+                    "prompt": "Chronovisor recall policy",
                     "kind": "missed_candidate",
                     "expected_pages": ["target-page"],
                     "pages": ["target-page"] if improved else ["old-page"],

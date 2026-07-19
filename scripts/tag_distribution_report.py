@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from llm_wiki_mcp.tag_distribution import run_dry_run  # noqa: E402
-from llm_wiki_mcp.wiki import SYSTEM_DIR  # noqa: E402
+from chronovisor.tag_distribution import run_dry_run  # noqa: E402
+from chronovisor.store import SYSTEM_DIR  # noqa: E402
 
 
 def main() -> int:
@@ -31,13 +31,13 @@ def main() -> int:
         "--output",
         type=Path,
         default=None,
-        help="Output Markdown path. Default: ~/.wiki/system/tag-distribution-report-{today}.md",
+        help="Output Markdown path. Default: ~/.chronovisor/system/tag-distribution-report-{today}.md",
     )
     parser.add_argument(
         "--raw-log",
         type=Path,
         default=None,
-        help="Append-only LLM raw output log. Default: ~/.wiki/system/tag-report-raw-llm-output-{today}.jsonl",
+        help="Append-only LLM raw output log. Default: ~/.chronovisor/system/tag-report-raw-llm-output-{today}.jsonl",
     )
     parser.add_argument(
         "--sample-a",

@@ -9,13 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import page_mutation, recall_auto_apply, recall_hints, wiki
-from llm_wiki_mcp.convergence import CycleBudget
-from llm_wiki_mcp.decision_router import canonical_agreement_signature
-from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
-from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
-from llm_wiki_mcp.link_fix import atomic_write
-from llm_wiki_mcp.recall_runtime import RecallPolicy, collect_context
+from chronovisor import page_mutation, recall_auto_apply, recall_hints, store
+from chronovisor.convergence import CycleBudget
+from chronovisor.decision_router import canonical_agreement_signature
+from chronovisor.decision_schema_manifest import production_decision_schemas
+from chronovisor.frontmatter import parse as parse_frontmatter
+from chronovisor.link_fix import atomic_write
+from chronovisor.recall_runtime import RecallPolicy, collect_context
 
 
 @pytest.fixture(autouse=True)
@@ -150,8 +150,8 @@ def test_query_hint_auto_apply_feeds_runtime_context(tmp_path, monkeypatch) -> N
     pages_root = tmp_path / "wiki"
     _page(pages_root, "claude-code-recall-hook-implementation")
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
 
     result = recall_auto_apply.apply_feedback_records(
@@ -189,8 +189,8 @@ def test_query_hint_ignores_generic_context_tokens() -> None:
 def test_auto_apply_min_count_groups_by_normalize_key(tmp_path, monkeypatch) -> None:
     pages_root = tmp_path / "wiki"
     _page(pages_root, "claude-code-recall-hook-implementation")
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", tmp_path / "query-hints.json")
 
     one = [_candidate("query_hint", page_id="claude-code-recall-hook-implementation")]
@@ -218,13 +218,13 @@ def test_auto_apply_min_count_groups_by_normalize_key(tmp_path, monkeypatch) -> 
 
 def test_page_tag_auto_apply_patches_frontmatter(tmp_path, monkeypatch) -> None:
     pages_root = tmp_path / "wiki"
-    page = _page(pages_root, "llm-wiki-recall-audit-architecture")
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    page = _page(pages_root, "chronovisor-recall-audit-architecture")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
 
     record = _candidate(
         "page_tag",
-        page_id="llm-wiki-recall-audit-architecture",
+        page_id="chronovisor-recall-audit-architecture",
         payload={"tag": "d/theory"},
     )
     result = recall_auto_apply.apply_feedback_records(
@@ -252,14 +252,14 @@ def test_frontier_rejection_blocks_every_auto_mutation_and_is_durable(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import alias_store
+    from chronovisor import alias_store
 
     pages_root = tmp_path / "wiki"
     page = _page(pages_root, "target-page")
     before = page.read_bytes()
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     seen: list[dict[str, object]] = []
 
@@ -296,8 +296,8 @@ def test_approved_frontier_artifact_survives_mutation_budget_deferral(
     hints_file = tmp_path / "query-hints.json"
     log_file = tmp_path / "auto-apply.jsonl"
     review_dir = tmp_path / "reviews"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     calls = 0
 
@@ -352,8 +352,8 @@ def test_saved_approval_is_not_reused_after_authority_changes(
     hints_file = tmp_path / "query-hints.json"
     log_file = tmp_path / "auto-apply.jsonl"
     review_dir = tmp_path / "reviews"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     authority = _production_authority("a")
     monkeypatch.setattr(
@@ -417,8 +417,8 @@ def test_production_verdict_without_router_audit_is_not_persisted(
     log_file = tmp_path / "auto-apply.jsonl"
     review_dir = tmp_path / "reviews"
     authority = _production_authority("a")
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     monkeypatch.setattr(
         recall_auto_apply,
@@ -466,8 +466,8 @@ def test_authority_change_after_review_blocks_artifact_persistence(
             (_production_authority("b"), None),
         ]
     )
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     monkeypatch.setattr(
         recall_auto_apply,
@@ -502,8 +502,8 @@ def test_authority_is_rechecked_immediately_before_mutation(
     pages_root = tmp_path / "wiki"
     _page(pages_root, "target-page")
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     authorities = iter(
         [
@@ -547,8 +547,8 @@ def test_authority_epoch_is_held_through_approved_mutation(
     pages_root = tmp_path / "wiki"
     _page(pages_root, "target-page")
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     epoch_held = False
 
@@ -600,8 +600,8 @@ def test_existing_effect_uses_recovery_only_convergence_path(
     pages_root = tmp_path / "wiki"
     _page(pages_root, "target-page")
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     recall_hints.add_query_hint(
         page_id="target-page",
@@ -645,8 +645,8 @@ def test_rejected_transition_is_not_committed_after_authority_race(
         ]
     )
     log_file = tmp_path / "auto-apply.jsonl"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(
         recall_auto_apply,
         "_current_review_authority",
@@ -684,8 +684,8 @@ def test_review_migration_recovers_effect_when_authority_changes_before_log(
         calls += 1
         return (authority_a if calls <= 4 else authority_b), None
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     monkeypatch.setattr(recall_auto_apply, "_current_review_authority", authority)
     record = {
@@ -729,14 +729,14 @@ def test_page_tag_does_not_overwrite_concurrent_content_correction(
     pages_root = tmp_path / "wiki"
     page = _page(
         pages_root,
-        "llm-wiki-recall-audit-architecture",
+        "chronovisor-recall-audit-architecture",
         body="The recalled display is a Kuycon G32P.",
     )
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(
         page_mutation,
-        "WIKI_MUTATION_LOCK",
+        "CHRONOVISOR_MUTATION_LOCK",
         pages_root / "runtime" / "wiki-mutation.lock",
     )
 
@@ -748,7 +748,7 @@ def test_page_tag_does_not_overwrite_concurrent_content_correction(
 
     def correction_writer() -> None:
         try:
-            with page_mutation.wiki_mutation_lock():
+            with page_mutation.chronovisor_mutation_lock():
                 correction_locked.set()
                 if not apply_correction.wait(timeout=5):
                     raise TimeoutError("auto-apply did not reach its preimage read")
@@ -773,7 +773,7 @@ def test_page_tag_does_not_overwrite_concurrent_content_correction(
 
     record = _candidate(
         "page_tag",
-        page_id="llm-wiki-recall-audit-architecture",
+        page_id="chronovisor-recall-audit-architecture",
         payload={"tag": "d/theory"},
     )
 
@@ -801,15 +801,15 @@ def test_page_tag_does_not_overwrite_concurrent_content_correction(
 
 def test_invalid_page_tag_falls_back_to_query_hint(tmp_path, monkeypatch) -> None:
     pages_root = tmp_path / "wiki"
-    _page(pages_root, "llm-wiki-recall-audit-architecture")
+    _page(pages_root, "chronovisor-recall-audit-architecture")
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
 
     record = _candidate(
         "page_tag",
-        page_id="llm-wiki-recall-audit-architecture",
+        page_id="chronovisor-recall-audit-architecture",
         payload={"tag": "Assistant wrote a prose reason instead of a taxonomy tag."},
     )
     result = recall_auto_apply.apply_feedback_records(
@@ -826,8 +826,8 @@ def test_invalid_page_tag_falls_back_to_query_hint(tmp_path, monkeypatch) -> Non
 
 def test_page_tag_without_target_is_skipped_not_error(tmp_path, monkeypatch) -> None:
     pages_root = tmp_path / "wiki"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", tmp_path / "query-hints.json")
 
     record = _candidate(
@@ -850,8 +850,8 @@ def test_query_hint_without_target_is_skipped_not_error(tmp_path, monkeypatch) -
     pages_root = tmp_path / "wiki"
     hints_file = tmp_path / "query-hints.json"
     log_file = tmp_path / "auto-apply.jsonl"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
 
     record = _candidate(
@@ -879,12 +879,12 @@ def test_query_hint_without_target_is_skipped_not_error(tmp_path, monkeypatch) -
 
 
 def test_alias_auto_apply_uses_existing_alias_store(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import alias_store
+    from chronovisor import alias_store
 
     pages_root = tmp_path / "wiki"
     _page(pages_root, "canonical-recall-page")
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
 
     record = _candidate(
         "alias",
@@ -907,8 +907,8 @@ def test_invalid_alias_falls_back_to_query_hint(tmp_path, monkeypatch) -> None:
     pages_root = tmp_path / "wiki"
     _page(pages_root, "canonical-recall-page")
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
 
     record = _candidate(
@@ -932,8 +932,8 @@ def test_invalid_alias_target_falls_back_to_expected_page_hint(
     pages_root = tmp_path / "wiki"
     _page(pages_root, "canonical-recall-page")
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
 
     record = _candidate(
@@ -1023,8 +1023,8 @@ def test_apply_feedback_budget_defers_without_burning_attempt(
     feedback_file.write_text(
         json.dumps(_candidate("query_hint", page_id="target")) + "\n"
     )
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     monkeypatch.setattr(recall_auto_apply, "AUTO_APPLY_LOG_FILE", log_file)
     deferred = recall_auto_apply.apply_feedback_file(
@@ -1053,8 +1053,8 @@ def test_existing_query_hint_is_terminal_without_incrementing_evidence_count(
     pages_root = tmp_path / "wiki"
     _page(pages_root, "target")
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     recall_hints.add_query_hint(page_id="target", query="exact query", path=hints_file)
     record = _candidate(
@@ -1260,9 +1260,9 @@ def test_query_hint_accepts_system_pages(tmp_path, monkeypatch) -> None:
         encoding="utf-8",
     )
     hints_file = tmp_path / "query-hints.json"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
-    monkeypatch.setattr(wiki, "SYSTEM_DIR", system_dir)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
 
     hint = recall_hints.add_query_hint(
@@ -1274,7 +1274,7 @@ def test_query_hint_accepts_system_pages(tmp_path, monkeypatch) -> None:
 
 
 def test_auditor_recording_invokes_auto_apply(tmp_path, monkeypatch, capsys) -> None:
-    from llm_wiki_mcp import recall_auditor, recall_runtime
+    from chronovisor import recall_auditor, recall_runtime
 
     pages_root = tmp_path / "wiki"
     _page(pages_root, "claude-code-recall-hook-implementation")
@@ -1301,8 +1301,8 @@ def test_auditor_recording_invokes_auto_apply(tmp_path, monkeypatch, capsys) -> 
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(wiki, "WIKI_ROOT", pages_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
     monkeypatch.setattr(recall_auditor, "RECALL_LOG_FILE", log_file)

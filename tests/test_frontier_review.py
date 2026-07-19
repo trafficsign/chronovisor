@@ -8,14 +8,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import (
+from chronovisor import (
     decision_router,
     frontier_review,
     ollama,
     semantic_hold,
 )
-from llm_wiki_mcp.decision_router import DecisionRouterResult
-from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+from chronovisor.decision_router import DecisionRouterResult
+from chronovisor.runtime_config import DecisionRouterConfig
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
@@ -217,7 +217,7 @@ def isolate_frontier_activity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_frontier_timeout_is_capped_by_sleep_cycle_deadline(monkeypatch) -> None:
-    monkeypatch.setenv("LLM_WIKI_CYCLE_DEADLINE_MONOTONIC", "112.9")
+    monkeypatch.setenv("CHRONOVISOR_CYCLE_DEADLINE_MONOTONIC", "112.9")
     monkeypatch.setattr(frontier_review.time, "monotonic", lambda: 100.0)
 
     assert frontier_review._bounded_timeout(3600) == 12
@@ -252,12 +252,12 @@ def test_frontier_invocation_disables_hooks_and_uses_selected_model(
 def test_frontier_env_marks_internal_children_and_disables_stop_work(
     monkeypatch,
 ) -> None:
-    monkeypatch.delenv("LLM_WIKI_INTERNAL_FRONTIER", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_INTERNAL_FRONTIER", raising=False)
     env = frontier_review._frontier_env()
 
-    assert env["LLM_WIKI_INTERNAL_FRONTIER"] == "1"
+    assert env["CHRONOVISOR_INTERNAL_FRONTIER"] == "1"
     assert env["CODEX_WIKI_SAVE_ENABLED"] == "0"
-    assert env["LLM_WIKI_CONTENT_CORRECTION_ENABLED"] == "0"
+    assert env["CHRONOVISOR_CONTENT_CORRECTION_ENABLED"] == "0"
 
 
 def _preflight_response(cmd: list[str]) -> SimpleNamespace | None:
@@ -455,7 +455,7 @@ def test_run_codex_schema_failure_does_not_spawn_an_unguarded_rescue_session(
         return SimpleNamespace(returncode=0, stdout="diagnosis", stderr="")
 
     monkeypatch.delenv("CODEX_HOME", raising=False)
-    monkeypatch.setenv("LLM_WIKI_FRONTIER_DOC_LOOKUP", "0")
+    monkeypatch.setenv("CHRONOVISOR_FRONTIER_DOC_LOOKUP", "0")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
     monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
@@ -608,7 +608,7 @@ def test_collect_official_frontier_docs_uses_allowlist(monkeypatch) -> None:
             return FakeResponse()
 
     monkeypatch.setenv(
-        "LLM_WIKI_FRONTIER_DOC_URLS",
+        "CHRONOVISOR_FRONTIER_DOC_URLS",
         "https://platform.openai.com/docs,https://example.com/bad",
     )
     monkeypatch.setitem(sys.modules, "httpx", FakeHttpx)
@@ -631,7 +631,7 @@ def test_frontier_without_validated_evidence_starts_no_process(
 
     monkeypatch.setattr(frontier_review, "_run_codex", forbidden)
     monkeypatch.setattr(frontier_review.subprocess, "run", forbidden)
-    monkeypatch.setenv("LLM_WIKI_FRONTIER_CMD", "/bin/forbidden")
+    monkeypatch.setenv("CHRONOVISOR_FRONTIER_CMD", "/bin/forbidden")
 
     result = frontier_review.run_frontier_review(
         {"failure_class": "model_json_invalid"},
@@ -655,7 +655,7 @@ def test_disabled_repair_lane_starts_no_process(
     def forbidden(*_args, **_kwargs):
         raise AssertionError("disabled repair lane must not inspect or start Codex")
 
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_SYSTEM_CODE_REPAIR", "off")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_SYSTEM_CODE_REPAIR", "off")
     monkeypatch.setattr(frontier_review, "_capture_repair_baseline", forbidden)
     monkeypatch.setattr(frontier_review, "_run_codex", forbidden)
 
@@ -674,7 +674,7 @@ def test_missing_reproduction_command_is_rejected_before_baseline_or_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp.frontier_guard import (
+    from chronovisor.frontier_guard import (
         RepairIncidentEvidence,
         repair_fingerprint,
     )
@@ -718,7 +718,7 @@ def test_validated_repair_incident_gets_exactly_one_guarded_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp.frontier_guard import (
+    from chronovisor.frontier_guard import (
         FrontierGuard,
         RepairIncidentEvidence,
         repair_fingerprint,
@@ -775,7 +775,7 @@ def test_validated_repair_incident_gets_exactly_one_guarded_attempt(
         "_isolated_repair_checkout",
         lambda _repo, _baseline: nullcontext(tmp_path),
     )
-    monkeypatch.delenv("LLM_WIKI_FRONTIER_CMD", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_FRONTIER_CMD", raising=False)
 
     first = frontier_review.run_frontier_review(
         {"failure_class": "model_json_invalid"},
@@ -1089,8 +1089,8 @@ def test_runtime_restart_verifies_new_pid_and_archive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pids = {
-        "com.trafficsign.llm-wiki-dashboard": [101, 202],
-        "com.trafficsign.llm-wiki-ingest-drain": [None],
+        "com.trafficsign.chronovisor-dashboard": [101, 202],
+        "com.trafficsign.chronovisor-ingest-drain": [None],
     }
 
     def fake_pid(label: str) -> int | None:
@@ -1136,12 +1136,12 @@ def test_pid_tree_matches_runtime_identity_lib_path_to_exact_uv_archive(
             "100 1 /usr/bin/launch-wrapper dashboard",
             (
                 f"101 100 {expected}/bin/python "
-                f"{expected}/bin/llm-wiki-dashboard --port 8765"
+                f"{expected}/bin/chronovisor-dashboard --port 8765"
             ),
             f"102 100 {expected}/bin/python -c pass",
             (
                 f"201 200 {sibling}/bin/python "
-                f"{sibling}/bin/llm-wiki-ingest-drain --watch"
+                f"{sibling}/bin/chronovisor-ingest-drain --watch"
             ),
         )
     )
@@ -1213,12 +1213,12 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
             artifact_sha256="d" * 64,
         ),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
     # Block the actual Frontier entrypoint without sabotaging the local
     # residency broker's harmless host-memory probes (which also use the
     # process/shutil modules).
     monkeypatch.setattr(frontier_review, "_run_codex", forbidden_subprocess)
-    monkeypatch.setenv("LLM_WIKI_TEST_STRUCTURED_REVIEW_CMD", "/bin/forbidden")
+    monkeypatch.setenv("CHRONOVISOR_TEST_STRUCTURED_REVIEW_CMD", "/bin/forbidden")
     schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
     result = frontier_review.run_structured_review(
@@ -1228,7 +1228,7 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
         audit_root=tmp_path / "local-consensus-audit",
         timeout=1,
         execute_patch=True,
-        command_env="LLM_WIKI_TEST_STRUCTURED_REVIEW_CMD",
+        command_env="CHRONOVISOR_TEST_STRUCTURED_REVIEW_CMD",
         decision_lane="recall_auto_apply",
     )
 
@@ -1260,7 +1260,7 @@ def test_structured_review_defers_mutating_majority_with_conservative_vote(
         reason="mutating_local_majority_vetoed_by_conservative_vote",
     )
     monkeypatch.setattr(decision_router, "DecisionRouter", router)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "review this",
@@ -1317,7 +1317,7 @@ def test_structured_review_keeps_invalid_veto_evidence_operational(
         failure_class=failure_class,
     )
     monkeypatch.setattr(decision_router, "DecisionRouter", router)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "review this",
@@ -1342,7 +1342,7 @@ def test_structured_review_types_three_valid_distinct_semantic_no_quorum(
         reason="local_models_did_not_reach_two_vote_quorum",
     )
     monkeypatch.setattr(decision_router, "DecisionRouter", router)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "review this",
@@ -1380,7 +1380,7 @@ def test_structured_review_reuses_exact_epoch_semantic_hold_without_model_call(
             None,
         ),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
     prompt = "SENSITIVE_PROMPT_MUST_NOT_BE_PERSISTED"
     system = "SENSITIVE_SYSTEM_MUST_NOT_BE_PERSISTED"
 
@@ -1433,7 +1433,7 @@ def test_structured_review_reuses_cached_hold_after_observation_generation_chang
         "_structured_authority_observation",
         lambda _authority: observation_box["value"],
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     first = frontier_review.run_structured_review(
         "same request",
@@ -1479,7 +1479,7 @@ def test_structured_review_restores_cached_a_after_authority_a_b_a(
         "_structured_authority_observation",
         lambda _authority: observation_box["value"],
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result_a = frontier_review.run_structured_review(
         "same request",
@@ -1527,7 +1527,7 @@ def test_structured_review_discards_cached_result_if_observation_drifts_during_l
         "_current_structured_authority",
         lambda _lane: (authority_box["value"], None),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     frontier_review.run_structured_review(
         "same request",
@@ -1588,7 +1588,7 @@ def test_structured_review_discards_current_result_if_authority_drifts_during_st
         "store",
         drifting_store,
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     drifted = frontier_review.run_structured_review(
         "same request",
@@ -1632,7 +1632,7 @@ def test_structured_review_does_not_use_cache_when_initial_observation_unavailab
         "_current_structured_authority",
         lambda _lane: (authority_box["value"], None),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     frontier_review.run_structured_review(
         "same request",
@@ -1674,7 +1674,7 @@ def test_structured_review_does_not_return_cache_when_post_observation_unavailab
         "_current_structured_authority",
         lambda _lane: (authority_box["value"], None),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     frontier_review.run_structured_review(
         "same request",
@@ -1728,7 +1728,7 @@ def test_structured_review_cache_lock_entry_failure_falls_back_once(
         "locked",
         broken_lock,
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "same request",
@@ -1757,7 +1757,7 @@ def test_structured_review_cache_misses_prompt_system_and_authority_changes(
         "_current_structured_authority",
         lambda lane: (authority_box["value"], None),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     def run(prompt: str, system: str | None) -> dict[str, object]:
         return frontier_review.run_structured_review(
@@ -1806,7 +1806,7 @@ def test_structured_review_does_not_store_after_authority_aba_observation(
         "_structured_authority_observation",
         lambda _authority: next(observations),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     results = []
     for _index in range(3):
@@ -1857,7 +1857,7 @@ def test_structured_review_discards_any_model_result_after_authority_drift(
         "_structured_authority_observation",
         lambda _authority: next(observations),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "same request",
@@ -1901,7 +1901,7 @@ def test_structured_review_authority_guard_survives_cache_lock_failure(
         "locked",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("lock failed")),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "same request",
@@ -1932,7 +1932,7 @@ def test_structured_review_never_caches_non_semantic_outcomes(
         "_current_structured_authority",
         lambda lane: (authority_box["value"], None),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     for _index in range(2):
         frontier_review.run_structured_review(
@@ -1967,7 +1967,7 @@ def test_structured_review_keeps_non_three_way_no_quorum_operational(
         reason="local_models_did_not_reach_two_vote_quorum",
     )
     monkeypatch.setattr(decision_router, "DecisionRouter", router)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     result = frontier_review.run_structured_review(
         "review this",
@@ -2013,7 +2013,7 @@ def test_structured_review_local_model_failures_quarantine_without_tie_or_fronti
             source="adopted_artifact",
         ),
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "shadow")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "shadow")
     schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
     result = frontier_review.run_structured_review(
@@ -2052,7 +2052,7 @@ def test_structured_review_rejects_incomplete_approved_json(
             )
 
     monkeypatch.setattr(decision_router, "DecisionRouter", IncompleteLocalRouter)
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
     monkeypatch.setattr(
         frontier_review.subprocess,
         "run",
@@ -2076,7 +2076,7 @@ def test_structured_review_rejects_incomplete_approved_json(
 
 
 def test_local_structured_result_preserves_optional_schema_properties() -> None:
-    from llm_wiki_mcp.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+    from chronovisor.ingest import INGEST_FRONTIER_DECISION_SCHEMA
 
     schema = INGEST_FRONTIER_DECISION_SCHEMA
 
@@ -2109,7 +2109,7 @@ def test_local_structured_result_preserves_optional_schema_properties() -> None:
 
 
 def test_ingest_structured_failure_envelope_uses_retry_decision() -> None:
-    from llm_wiki_mcp.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+    from chronovisor.ingest import INGEST_FRONTIER_DECISION_SCHEMA
 
     result = frontier_review._validated_structured_result(
         None,
@@ -2159,8 +2159,8 @@ def test_structured_review_forwards_optional_system_to_local_router(
         "DecisionRouter",
         SystemCapturingLocalRouter,
     )
-    monkeypatch.setenv("LLM_WIKI_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
-    marker = "LLM_WIKI_READ_BACK_EVIDENCE_POLICY=1"
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+    marker = "CHRONOVISOR_READ_BACK_EVIDENCE_POLICY=1"
 
     result = frontier_review.run_structured_review(
         "review this",

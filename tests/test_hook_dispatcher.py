@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import (
+from chronovisor import (
     background_jobs,
     hook_dispatcher,
     recall_breaker,
@@ -23,7 +23,7 @@ def _isolate_background_jobs(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path / "jobs")
     monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "jobs" / "state.json")
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "jobs" / "state.lock")
-    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
 
 
 def test_user_prompt_dispatches_to_recall_runtime(monkeypatch, capsys) -> None:
@@ -73,7 +73,7 @@ def test_user_prompt_unexpected_failure_is_exit_zero_fail_open(
     monkeypatch,
     capsys,
 ) -> None:
-    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         recall_runtime,
         "load_policy",
@@ -102,7 +102,7 @@ def test_user_prompt_outer_timeout_does_not_start_second_fallback(
     monkeypatch,
     capsys,
 ) -> None:
-    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         recall_runtime,
         "load_policy",
@@ -150,7 +150,7 @@ def test_user_prompt_reserves_host_headroom_inside_total_deadline(
 ) -> None:
     seen: dict[str, int] = {}
 
-    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         recall_runtime,
         "load_policy",
@@ -209,7 +209,7 @@ def test_user_prompt_open_breaker_uses_bm25_only_policy(monkeypatch, capsys) -> 
             matched_terms={},
         )
 
-    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
     monkeypatch.setattr(recall_breaker, "is_open", lambda: True)
     monkeypatch.setattr(recall_runtime, "run_recall", fake_run)
     monkeypatch.setattr(
@@ -238,7 +238,7 @@ def test_user_prompt_policy_failure_is_still_exit_zero_fail_open(
     monkeypatch,
     capsys,
 ) -> None:
-    monkeypatch.setattr(hook_dispatcher, "init_wiki", lambda: None)
+    monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         recall_runtime,
         "load_policy",
@@ -261,7 +261,7 @@ def test_user_prompt_init_failure_is_still_exit_zero_fail_open(
 ) -> None:
     monkeypatch.setattr(
         hook_dispatcher,
-        "init_wiki",
+        "init_chronovisor",
         lambda: (_ for _ in ()).throw(PermissionError("wiki unavailable")),
     )
     monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember"}'))
@@ -281,7 +281,7 @@ def test_stop_dispatch_only_save_for_legacy_wrapper(
     config = tmp_path / "config.toml"
     config.write_text("[hooks.stop]\nsave = true\naudit = true\n", encoding="utf-8")
     monkeypatch.setenv("CODEX_WIKI_SAVE_ENABLED", "1")
-    monkeypatch.setenv("LLM_WIKI_RECALL_AUDIT_ENABLED", "1")
+    monkeypatch.setenv("CHRONOVISOR_RECALL_AUDIT_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
     assert (
@@ -307,13 +307,13 @@ def test_stop_dispatch_only_save_for_legacy_wrapper(
 
     assert [task["name"] for task in output["tasks"]] == ["codex-save"]
     save = output["tasks"][0]
-    assert save["module"] == "llm_wiki_mcp.codex_save"
+    assert save["module"] == "chronovisor.codex_record"
     assert save["args"] == ["--hook", "--save"]
     assert "--trigger-ingest" not in save["args"]
     assert save["on_success"] == [
         {
             "name": "recall-audit-candidate",
-            "module": "llm_wiki_mcp.recall_auditor",
+            "module": "chronovisor.recall_auditor",
             "args": ["--host", "codex", "--hook"],
             "env": {},
             "when_output_status": "saved",
@@ -336,9 +336,9 @@ def test_stop_dispatch_full_entrypoint_enqueues_only_capture_work(
         encoding="utf-8",
     )
     monkeypatch.setenv("CLAUDE_CODE_WIKI_SAVE_ENABLED", "1")
-    monkeypatch.setenv("LLM_WIKI_RECALL_AUDIT_ENABLED", "1")
-    monkeypatch.setenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", "1")
-    monkeypatch.setenv("LLM_WIKI_RECALL_IMPROVE_ENABLED", "1")
+    monkeypatch.setenv("CHRONOVISOR_RECALL_AUDIT_ENABLED", "1")
+    monkeypatch.setenv("CHRONOVISOR_CONTENT_CORRECTION_ENABLED", "1")
+    monkeypatch.setenv("CHRONOVISOR_RECALL_IMPROVE_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
     assert (
@@ -366,7 +366,7 @@ def test_stop_dispatch_full_entrypoint_enqueues_only_capture_work(
     ]
     assert output["tasks"][0]["args"] == ["--hook", "--save"]
     correction = output["tasks"][1]
-    assert correction["module"] == "llm_wiki_mcp.content_correction"
+    assert correction["module"] == "chronovisor.content_correction"
     assert correction["args"] == [
         "--host",
         "claude-code",
@@ -381,7 +381,7 @@ def test_stop_dispatch_only_improve_is_disabled(monkeypatch, tmp_path, capsys) -
         "[hooks.stop]\nsave = true\naudit = true\nrecall_improve = true\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("LLM_WIKI_RECALL_IMPROVE_ENABLED", "1")
+    monkeypatch.setenv("CHRONOVISOR_RECALL_IMPROVE_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
     assert (
@@ -417,7 +417,7 @@ def test_stop_dispatch_only_content_correction_uses_capture_only_worker(
 ) -> None:
     config = tmp_path / "config.toml"
     config.write_text("[hooks.stop]\ncontent_correction = true\n", encoding="utf-8")
-    monkeypatch.setenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", "1")
+    monkeypatch.setenv("CHRONOVISOR_CONTENT_CORRECTION_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
     assert (
@@ -444,7 +444,7 @@ def test_stop_dispatch_only_content_correction_uses_capture_only_worker(
     assert output["tasks"] == [
         {
             "name": "content-correction-capture",
-            "module": "llm_wiki_mcp.content_correction",
+            "module": "chronovisor.content_correction",
             "args": ["--host", "codex", "--hook", "--capture-only"],
             "dry_run": True,
         }
@@ -461,7 +461,7 @@ def test_stop_content_correction_false_enqueues_nothing(
         "[hooks.stop]\nsave = false\ncontent_correction = false\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", "1")
+    monkeypatch.setenv("CHRONOVISOR_CONTENT_CORRECTION_ENABLED", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO('{"session_id":"session-1"}'))
 
     assert (
@@ -495,7 +495,7 @@ def test_stop_capture_enqueue_coalesces_and_never_starts_a_subprocess(
         "[hooks.stop]\nsave = false\ncontent_correction = true\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", "1")
+    monkeypatch.setenv("CHRONOVISOR_CONTENT_CORRECTION_ENABLED", "1")
     monkeypatch.setattr(
         background_jobs.subprocess,
         "run",
@@ -551,7 +551,7 @@ def test_stop_capture_enqueue_coalesces_and_never_starts_a_subprocess(
     assert len(state["jobs"]) == 1
     stored = state["jobs"][first["job_id"]]
     assert stored["lane_key"] == "content-correction-capture"
-    assert stored["module"] == "llm_wiki_mcp.content_correction"
+    assert stored["module"] == "chronovisor.content_correction"
     assert stored["args"] == ["--host", "codex", "--hook", "--capture-only"]
     assert json.loads(stored["stdin"])["turn"] == 2
 
@@ -571,7 +571,7 @@ def test_spawn_task_only_enqueues_without_process(monkeypatch) -> None:
     monkeypatch.setattr(background_jobs, "enqueue_job", fake_enqueue_job)
     task = hook_dispatcher.BackgroundTask(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={"CODEX_WIKI_SAVE_ENABLED": "1"},
     )
@@ -593,9 +593,9 @@ def test_stop_dispatch_requires_env_without_unified_config(
     legacy = tmp_path / "recall.toml"
     legacy.write_text("enabled = true\n", encoding="utf-8")
     monkeypatch.delenv("CODEX_WIKI_SAVE_ENABLED", raising=False)
-    monkeypatch.delenv("LLM_WIKI_RECALL_AUDIT_ENABLED", raising=False)
-    monkeypatch.delenv("LLM_WIKI_RECALL_IMPROVE_ENABLED", raising=False)
-    monkeypatch.delenv("LLM_WIKI_CONTENT_CORRECTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_RECALL_AUDIT_ENABLED", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_RECALL_IMPROVE_ENABLED", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_CONTENT_CORRECTION_ENABLED", raising=False)
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
     assert (
@@ -621,7 +621,7 @@ def test_stop_dispatch_requires_env_without_unified_config(
 
 
 def test_internal_frontier_stop_never_spawns_tasks(monkeypatch, capsys) -> None:
-    monkeypatch.setenv("LLM_WIKI_INTERNAL_FRONTIER", "1")
+    monkeypatch.setenv("CHRONOVISOR_INTERNAL_FRONTIER", "1")
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
 
     assert (

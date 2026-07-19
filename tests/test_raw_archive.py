@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from llm_wiki_mcp.raw_archive import (
+from chronovisor.raw_archive import (
     archive_status,
     export_raw,
     migrate_legacy,
@@ -14,14 +14,14 @@ from llm_wiki_mcp.raw_archive import (
     seal_eligible,
     verify_archive,
 )
-from llm_wiki_mcp.raw_segment import append_capture, capture_date
-from llm_wiki_mcp.raw_semantic_projection import project_parent_raw
-from llm_wiki_mcp.raw_store import RawStore
-from llm_wiki_mcp.save_transaction import (
+from chronovisor.raw_segment import append_capture, capture_date
+from chronovisor.raw_semantic_projection import project_parent_raw
+from chronovisor.raw_store import RawStore
+from chronovisor.save_transaction import (
     attach_save_transaction_marker,
     make_save_transaction,
 )
-from llm_wiki_mcp import server
+from chronovisor import server
 
 
 def _open_segment(raw_dir: Path, source: Path, payload: bytes):
@@ -110,7 +110,7 @@ def test_v2_manual_raw_is_published_directly_under_capture_date(
     tmp_path: Path, monkeypatch
 ) -> None:
     raw_dir = tmp_path / "raw"
-    monkeypatch.setenv("LLM_WIKI_RAW_LAYOUT", "v2")
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
     monkeypatch.setattr(server, "RAW_DIR", raw_dir)
 
     path = server._publish_raw("manual bytes\n", prefix="api")

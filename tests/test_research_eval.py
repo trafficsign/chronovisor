@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp.research_eval import DEFAULT_FIXTURE, run_eval
+from chronovisor.research_eval import DEFAULT_FIXTURE, run_eval
 
 
 def test_locked_research_holdout_passes_adoption_gate() -> None:

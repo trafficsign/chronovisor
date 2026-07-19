@@ -12,21 +12,21 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import index_store as index_store_mod
-from llm_wiki_mcp.index_store import IndexStore, PageEntry
+from chronovisor import index_store as index_store_mod
+from chronovisor.index_store import IndexStore, PageEntry
 
 
 @pytest.fixture()
 def isolated_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point IndexStore module-level paths at a throw-away wiki tree."""
-    wiki_root = tmp_path / "wiki"
-    pages = wiki_root / "pages"
-    system = wiki_root / "system"
-    index_dir = wiki_root / ".index"
+    chronovisor_root = tmp_path / "wiki"
+    pages = chronovisor_root / "pages"
+    system = chronovisor_root / "system"
+    index_dir = chronovisor_root / ".index"
     for d in (pages, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(index_store_mod, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(index_store_mod, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(index_store_mod, "PAGES_DIR", pages)
     monkeypatch.setattr(index_store_mod, "SYSTEM_DIR", system)
     monkeypatch.setattr(index_store_mod, "INDEX_DIR", index_dir)
@@ -34,11 +34,11 @@ def isolated_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(
         index_store_mod, "BACKLINKS_INDEX_FILE", index_dir / "backlinks.json"
     )
-    return wiki_root
+    return chronovisor_root
 
 
-def _seed(wiki_root: Path, rel: str, body: str) -> Path:
-    path = wiki_root / "pages" / rel
+def _seed(chronovisor_root: Path, rel: str, body: str) -> Path:
+    path = chronovisor_root / "pages" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
     return path
@@ -215,12 +215,12 @@ class TestBuildEntryRawKeywords:
         path = _seed(
             isolated_index,
             "p.md",
-            "---\ntitle: P\nupdated: 2026-01-01\nentities: [llm-wiki, qwen]\n---\nbody\n",
+            "---\ntitle: P\nupdated: 2026-01-01\nentities: [chronovisor, qwen]\n---\nbody\n",
         )
         st = path.stat()
         entry = IndexStore._build_entry("p", path, False, st.st_mtime_ns, st.st_size)
         assert entry is not None
-        assert entry.entities == ["llm-wiki", "qwen"]
+        assert entry.entities == ["chronovisor", "qwen"]
 
     def test_extracts_sensitivity_frontmatter(self, isolated_index: Path) -> None:
         path = _seed(
@@ -255,7 +255,7 @@ class TestRawKeywordsAccessor:
         self, isolated_index: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _seed(isolated_index, "p.md", "---\ntitle: P\n---\nbody\n")
-        monkeypatch.setenv("LLM_WIKI_READ_ONLY", "1")
+        monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
         store = IndexStore()
 
         store.refresh()
@@ -264,7 +264,7 @@ class TestRawKeywordsAccessor:
         assert not index_store_mod.PAGES_INDEX_FILE.exists()
         assert not index_store_mod.BACKLINKS_INDEX_FILE.exists()
 
-        monkeypatch.delenv("LLM_WIKI_READ_ONLY")
+        monkeypatch.delenv("CHRONOVISOR_READ_ONLY")
         store.refresh()
 
         assert index_store_mod.PAGES_INDEX_FILE.exists()

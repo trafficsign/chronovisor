@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from llm_wiki_mcp import (
+from chronovisor import (
     background_jobs,
     converge_worker,
     self_heal,

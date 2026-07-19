@@ -13,8 +13,8 @@ from contextlib import contextmanager
 import httpx
 import pytest
 
-from llm_wiki_mcp import ollama
-from llm_wiki_mcp.runtime_config import IngestConfig
+from chronovisor import ollama
+from chronovisor.runtime_config import IngestConfig
 
 
 class _StreamResponse:
@@ -545,7 +545,7 @@ def test_embed_uses_remaining_recall_timeout(monkeypatch) -> None:
 
 
 def test_resource_lease_blocks_exclusive_across_threads(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
     shared_entered = threading.Event()
     release_shared = threading.Event()
     exclusive_attempted = threading.Event()
@@ -586,7 +586,7 @@ def test_resource_lease_blocks_exclusive_across_threads(tmp_path, monkeypatch) -
 
 
 def test_resource_lease_reentry_and_upgrade_policy(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
 
     assert ollama.model_resource_lease_mode() is None
     with ollama.model_resource_lease(exclusive=True):
@@ -610,7 +610,7 @@ def test_resource_lease_blocks_another_process(tmp_path, monkeypatch) -> None:
     lock_path = tmp_path / "resource.lock"
     ready_path = tmp_path / "ready"
     acquired_path = tmp_path / "acquired"
-    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(lock_path))
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(lock_path))
     env = os.environ.copy()
     env.update(
         {
@@ -621,7 +621,7 @@ def test_resource_lease_blocks_another_process(tmp_path, monkeypatch) -> None:
     script = """
 import os
 from pathlib import Path
-from llm_wiki_mcp import ollama
+from chronovisor import ollama
 
 Path(os.environ["LEASE_READY_PATH"]).write_text("ready", encoding="utf-8")
 with ollama.model_resource_lease(exclusive=False):
@@ -653,7 +653,7 @@ def test_resource_lease_timeout_does_not_wait_for_another_process(
     lock_path = tmp_path / "resource.lock"
     ready_path = tmp_path / "ready"
     timed_out_path = tmp_path / "timed-out"
-    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(lock_path))
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(lock_path))
     env = os.environ.copy()
     env.update(
         {
@@ -664,7 +664,7 @@ def test_resource_lease_timeout_does_not_wait_for_another_process(
     script = """
 import os
 from pathlib import Path
-from llm_wiki_mcp import ollama
+from chronovisor import ollama
 
 Path(os.environ["LEASE_READY_PATH"]).write_text("ready", encoding="utf-8")
 try:
@@ -941,7 +941,7 @@ def test_footprint_calibration_persists_and_invalidates_by_identity(
     tmp_path, monkeypatch
 ) -> None:
     calibration_file = tmp_path / "ollama-footprints.json"
-    monkeypatch.setenv("LLM_WIKI_OLLAMA_CALIBRATION_FILE", str(calibration_file))
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_CALIBRATION_FILE", str(calibration_file))
     previous = dict(ollama._MODEL_FOOTPRINT_CALIBRATION)
     ollama._MODEL_FOOTPRINT_CALIBRATION.clear()
     resident: dict[str, tuple[int, int]] = {"ornith:test": (20 * ollama.GIB, 32_768)}
@@ -1025,7 +1025,7 @@ def test_persisted_footprint_is_readable_from_a_fresh_process(
     tmp_path, monkeypatch
 ) -> None:
     calibration_file = tmp_path / "ollama-footprints.json"
-    monkeypatch.setenv("LLM_WIKI_OLLAMA_CALIBRATION_FILE", str(calibration_file))
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_CALIBRATION_FILE", str(calibration_file))
     ollama._persist_model_calibration(
         model="ornith:test",
         context=32_768,
@@ -1036,7 +1036,7 @@ def test_persisted_footprint_is_readable_from_a_fresh_process(
     )
     script = """
 import json
-from llm_wiki_mcp import ollama
+from chronovisor import ollama
 
 rows = ollama._matching_persisted_calibrations(
     installed={"ornith:test": 10},

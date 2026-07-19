@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import frontier_guard
-from llm_wiki_mcp.frontier_guard import (
+from chronovisor import frontier_guard
+from chronovisor.frontier_guard import (
     EvidenceValidationError,
     FrontierGuard,
     PermitDenied,

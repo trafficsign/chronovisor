@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from llm_wiki_mcp.evidence_grounding import (
+from chronovisor.evidence_grounding import (
     ProtectedLiteralGroundingError,
     protected_literals,
     validate_protected_literals,

@@ -10,9 +10,9 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from llm_wiki_mcp.wiki import PAGES_DIR, all_pages
-from llm_wiki_mcp.ollama import generate
-from llm_wiki_mcp.legacy_semantic_write import block_legacy_semantic_mutation
+from chronovisor.store import PAGES_DIR, all_pages
+from chronovisor.ollama import generate
+from chronovisor.legacy_semantic_write import block_legacy_semantic_mutation
 
 BATCH_SIZE = 100
 
@@ -77,7 +77,7 @@ def move_page(path: Path, folder: str) -> bool:
     """Move a page to a subfolder."""
     block_legacy_semantic_mutation(
         tool="migrate_folders.py",
-        replacement="llm-wiki-sleep",
+        replacement="chronovisor-sleep",
     )
     target_dir = PAGES_DIR / folder
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -95,7 +95,7 @@ def main():
     if "--apply" in sys.argv:
         block_legacy_semantic_mutation(
             tool="migrate_folders.py",
-            replacement="llm-wiki-sleep",
+            replacement="chronovisor-sleep",
         )
     pages = get_page_titles()
     print(f"Total pages: {len(pages)}")
@@ -135,7 +135,7 @@ def main():
     with open(assignments_file, "w") as f:
         json.dump(all_assignments, f, indent=2, ensure_ascii=False)
     print(f"\nAssignments saved to {assignments_file}")
-    print("Diagnostic artifact only; llm-wiki-sleep owns any semantic move decision.")
+    print("Diagnostic artifact only; chronovisor-sleep owns any semantic move decision.")
 
     if "--apply" in sys.argv:
         print("\n=== Applying moves ===")

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from llm_wiki_mcp.triage_plan import (
+from chronovisor.triage_plan import (
     canonical_triage_target,
     collapse_exact_duplicate_operations,
     distinct_target_collisions,
@@ -89,7 +89,7 @@ def test_collision_feedback_indices_refer_to_original_plan() -> None:
 def test_ingest_validator_requests_semantic_merge_in_same_session(
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import ingest, search
+    from chronovisor import ingest, search
 
     invalid = [
         _operation(summary=f"fact {index}", keywords=[f"keyword-{index}"])
@@ -137,7 +137,7 @@ def test_ingest_validator_requests_semantic_merge_in_same_session(
 def test_effective_search_before_create_collision_is_repaired_before_generate(
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import ingest
+    from chronovisor import ingest
 
     plan = [
         _operation(filename="ai/new-save-hook.md", summary="first fact"),
@@ -168,7 +168,7 @@ def test_effective_search_before_create_collision_is_repaired_before_generate(
 
 
 def test_prompt_forbids_multiple_operations_for_one_target() -> None:
-    from llm_wiki_mcp.ollama import TRIAGE_SYSTEM_PROMPT
+    from chronovisor.ollama import TRIAGE_SYSTEM_PROMPT
 
     assert "exactly one operation per case/Unicode-insensitive target page ID" in (
         TRIAGE_SYSTEM_PROMPT

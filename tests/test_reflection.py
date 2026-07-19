@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from llm_wiki_mcp import reflection
+from chronovisor import reflection
 
 
 def test_build_reflection_markdown_includes_health_signals() -> None:
@@ -39,7 +39,7 @@ def test_write_reflection_updates_existing_page_id_without_relocation(
     monkeypatch,
 ) -> None:
     pages_dir = tmp_path / "pages"
-    existing_dir = pages_dir / "llm-wiki"
+    existing_dir = pages_dir / "chronovisor"
     preferred_dir = pages_dir / "insights"
     existing_dir.mkdir(parents=True)
     page_id = f"memory-reflection-{date.today().isoformat()}"

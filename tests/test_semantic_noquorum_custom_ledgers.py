@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import (
+from chronovisor import (
     raw_replay,
     read_back_repair,
     recall_auto_apply,
@@ -22,7 +22,7 @@ def isolate_decision_authority_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import page_mutation
+    from chronovisor import page_mutation
 
     monkeypatch.setattr(
         page_mutation,
@@ -131,8 +131,8 @@ def test_read_back_repair_semantic_hold_ignores_cooldown(
 ) -> None:
     page = tmp_path / "page.md"
     page.write_text("---\ntitle: Target\n---\nbody\n", encoding="utf-8")
-    monkeypatch.setattr(recall_hints.wiki, "find_page", lambda _page_id: page)
-    monkeypatch.setattr(recall_hints.wiki, "SYSTEM_DIR", tmp_path / "system")
+    monkeypatch.setattr(recall_hints.chronovisor_store, "find_page", lambda _page_id: page)
+    monkeypatch.setattr(recall_hints.chronovisor_store, "SYSTEM_DIR", tmp_path / "system")
     authority = semantic_authority(
         read_back_repair.READ_BACK_DECISION_LANE,
         schema_name="read_back_repair",
@@ -246,7 +246,7 @@ def test_auto_apply_semantic_hold_is_append_only_terminal(
 ) -> None:
     page = tmp_path / "target.md"
     page.write_text("---\ntitle: Target\n---\nbody\n", encoding="utf-8")
-    monkeypatch.setattr(recall_auto_apply.wiki, "find_page", lambda _page_id: page)
+    monkeypatch.setattr(recall_auto_apply.chronovisor_store, "find_page", lambda _page_id: page)
     monkeypatch.setattr(recall_auto_apply, "load_query_hints", lambda: [])
     authority = semantic_authority(recall_auto_apply.AUTO_APPLY_DECISION_LANE)
     authority_b = semantic_authority(

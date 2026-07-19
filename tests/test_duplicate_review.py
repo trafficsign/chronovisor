@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.duplicate_review import title_duplicate_candidates
+from chronovisor.duplicate_review import title_duplicate_candidates
 
 
 def test_title_duplicate_candidates_detects_near_titles() -> None:

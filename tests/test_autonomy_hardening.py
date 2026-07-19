@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import background_jobs, codex_save, recall_hints, session_sweeper
-from llm_wiki_mcp.frontmatter import normalize_nested, parse
-from llm_wiki_mcp.jsonl import read_jsonl
+from chronovisor import background_jobs, codex_record, recall_hints, session_sweeper
+from chronovisor.frontmatter import normalize_nested, parse
+from chronovisor.jsonl import read_jsonl
 
 
 def test_jsonl_reader_preserves_unicode_line_separator(tmp_path: Path) -> None:
@@ -50,10 +50,10 @@ def test_codex_detects_unified_exec_apply_patch(tmp_path: Path) -> None:
     ]
     session.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
-    result = codex_save.extract_transcript_slice(session)
+    result = codex_record.extract_transcript_slice(session)
 
     assert result.has_file_changes is True
-    assert codex_save.should_process(result, {}) == (True, "file_changes")
+    assert codex_record.should_process(result, {}) == (True, "file_changes")
 
 
 def test_session_sweeper_excludes_internal_codex_sessions(tmp_path: Path) -> None:
@@ -76,14 +76,14 @@ def test_session_sweeper_excludes_internal_codex_sessions(tmp_path: Path) -> Non
 
 
 def test_memory_writer_repairs_grounding_once(tmp_path: Path, monkeypatch) -> None:
-    transcript = codex_save.TranscriptSlice(
+    transcript = codex_record.TranscriptSlice(
         session_file=tmp_path / "session.jsonl",
         scanned_until_line=1,
-        records=[codex_save.TranscriptRecord(line=1, role="user", text="Q-KUN 32GP")],
+        records=[codex_record.TranscriptRecord(line=1, role="user", text="Q-KUN 32GP")],
     )
     outputs = iter([
-        codex_save.WriterResult(True, "Qwen 32GB", ["Qwen"], "first", [], ["Q-KUN 32GB"]),
-        codex_save.WriterResult(False, "", [], "ungrounded", [], []),
+        codex_record.WriterResult(True, "Qwen 32GB", ["Qwen"], "first", [], ["Q-KUN 32GB"]),
+        codex_record.WriterResult(False, "", [], "ungrounded", [], []),
     ])
     prompts: list[str] = []
 
@@ -91,8 +91,8 @@ def test_memory_writer_repairs_grounding_once(tmp_path: Path, monkeypatch) -> No
         prompts.append(prompt)
         return next(outputs)
 
-    monkeypatch.setattr(codex_save, "run_memory_writer", writer)
-    result = codex_save.run_grounded_memory_writer(
+    monkeypatch.setattr(codex_record, "run_memory_writer", writer)
+    result = codex_record.run_grounded_memory_writer(
         "original prompt", transcript, model="test", reasoning_effort="medium", timeout=1
     )
 
@@ -172,14 +172,14 @@ def test_successful_save_enqueues_audit_after_receipt_in_same_commit(
     stdin_text = '{"session_id":"session-1","turn":2}'
     save = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=stdin_text,
         on_success=[
             {
                 "name": "recall-audit-candidate",
-                "module": "llm_wiki_mcp.recall_auditor",
+                "module": "chronovisor.recall_auditor",
                 "args": ["--host", "codex", "--hook"],
                 "env": {},
                 "when_output_status": "saved",
@@ -214,14 +214,14 @@ def test_failed_save_does_not_enqueue_audit_candidate(tmp_path: Path, monkeypatc
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
     save = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text='{"session_id":"session-1"}',
         on_success=[
             {
                 "name": "recall-audit-candidate",
-                "module": "llm_wiki_mcp.recall_auditor",
+                "module": "chronovisor.recall_auditor",
                 "args": ["--host", "codex", "--hook"],
                 "env": {},
                 "when_output_status": "saved",
@@ -246,14 +246,14 @@ def test_successful_save_without_new_receipt_does_not_enqueue_audit(
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
     save = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text='{"session_id":"session-1"}',
         on_success=[
             {
                 "name": "recall-audit-candidate",
-                "module": "llm_wiki_mcp.recall_auditor",
+                "module": "chronovisor.recall_auditor",
                 "args": ["--host", "codex", "--hook"],
                 "env": {},
                 "when_output_status": "saved",
@@ -286,7 +286,7 @@ def test_coalesced_save_carries_receipt_until_latest_pass_finishes(
     followup = [
         {
             "name": "recall-audit-candidate",
-            "module": "llm_wiki_mcp.recall_auditor",
+            "module": "chronovisor.recall_auditor",
             "args": ["--host", "codex", "--hook"],
             "env": {},
             "when_output_status": "saved",
@@ -294,7 +294,7 @@ def test_coalesced_save_carries_receipt_until_latest_pass_finishes(
     ]
     save = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=first_payload,
@@ -303,7 +303,7 @@ def test_coalesced_save_carries_receipt_until_latest_pass_finishes(
     background_jobs._claim(save["job_id"])
     coalesced = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=latest_payload,
@@ -369,7 +369,7 @@ def test_background_job_exact_cancellation_is_terminal(
     args = ["--packet", "/tmp/system-operational-one.json", "--enable-frontier-repair"]
     job = background_jobs.enqueue_job(
         name="system-code-repair",
-        module="llm_wiki_mcp.self_heal",
+        module="chronovisor.self_heal",
         args=args,
         env={},
         stdin_text="sensitive payload",
@@ -379,7 +379,7 @@ def test_background_job_exact_cancellation_is_terminal(
 
     cancelled = background_jobs.cancel_matching_jobs(
         name="system-code-repair",
-        module="llm_wiki_mcp.self_heal",
+        module="chronovisor.self_heal",
         args=args,
         reason="verified repair",
         stdin_text="sensitive payload",
@@ -396,7 +396,7 @@ def test_background_job_exact_cancellation_is_terminal(
         assert finished["status"] == "cancelled"
     stale_enqueue = background_jobs.enqueue_job(
         name="system-code-repair",
-        module="llm_wiki_mcp.self_heal",
+        module="chronovisor.self_heal",
         args=args,
         env={},
         stdin_text="sensitive payload",
@@ -417,13 +417,13 @@ def test_background_job_cancellation_tombstone_blocks_cancel_before_enqueue(
 
     cancelled = background_jobs.cancel_matching_jobs(
         name="system-code-repair",
-        module="llm_wiki_mcp.self_heal",
+        module="chronovisor.self_heal",
         args=args,
         reason="verified repair",
     )
     stale_enqueue = background_jobs.enqueue_job(
         name="system-code-repair",
-        module="llm_wiki_mcp.self_heal",
+        module="chronovisor.self_heal",
         args=args,
         env={},
         stdin_text="",
@@ -452,14 +452,14 @@ def test_capture_jobs_coalesce_by_session_and_keep_latest_payload(
 
     first = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=first_payload,
     )
     second = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=latest_payload,
@@ -483,14 +483,14 @@ def test_capture_jobs_without_session_identity_do_not_cross_coalesce(
 
     first = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text="{}",
     )
     second = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text="{}",
@@ -510,7 +510,7 @@ def test_running_capture_coalesce_requests_one_tail_rerun(
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
     first = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=json.dumps({"session_id": "session-1", "turn": 1}),
@@ -520,7 +520,7 @@ def test_running_capture_coalesce_requests_one_tail_rerun(
 
     coalesced = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=latest_payload,
@@ -543,14 +543,14 @@ def test_background_job_lane_is_single_flight(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
     first = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=json.dumps({"session_id": "session-1"}),
     )
     second = background_jobs.enqueue_job(
         name="codex-save",
-        module="llm_wiki_mcp.codex_save",
+        module="chronovisor.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=json.dumps({"session_id": "session-2"}),

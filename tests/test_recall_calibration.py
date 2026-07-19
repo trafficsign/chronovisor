@@ -4,11 +4,11 @@ import hashlib
 import json
 from contextlib import nullcontext
 
-from llm_wiki_mcp import recall_calibration
-from llm_wiki_mcp.convergence import CycleBudget
-from llm_wiki_mcp.decision_router import canonical_agreement_signature
-from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
-from llm_wiki_mcp.recall_runtime import RecallPolicy
+from chronovisor import recall_calibration
+from chronovisor.convergence import CycleBudget
+from chronovisor.decision_router import canonical_agreement_signature
+from chronovisor.decision_schema_manifest import production_decision_schemas
+from chronovisor.recall_runtime import RecallPolicy
 
 
 def _calibration_authority(epoch: str) -> dict:
@@ -166,7 +166,7 @@ def test_rollback_last_restores_exact_applied_preimage_under_nested_locks(
     )
     monkeypatch.setattr(
         recall_calibration,
-        "wiki_mutation_lock",
+        "chronovisor_mutation_lock",
         lambda: TrackedLock("wiki"),
     )
 
@@ -215,7 +215,7 @@ def test_rollback_last_cas_rejects_calibration_applied_while_waiting_for_lock(
         def __exit__(self, *_args):
             return None
 
-    monkeypatch.setattr(recall_calibration, "wiki_mutation_lock", RacingWikiLock)
+    monkeypatch.setattr(recall_calibration, "chronovisor_mutation_lock", RacingWikiLock)
 
     result = recall_calibration.rollback_last()
 
@@ -396,7 +396,7 @@ def test_calibration_mutation_budget_guards_authoritative_artifact(
         "load_calibration",
         lambda _path=None: {"weights": {"old": 1}},
     )
-    monkeypatch.setattr(recall_calibration, "wiki_mutation_lock", nullcontext)
+    monkeypatch.setattr(recall_calibration, "chronovisor_mutation_lock", nullcontext)
     monkeypatch.setattr(recall_calibration, "load_labeled_rows", lambda **_kwargs: rows)
     monkeypatch.setattr(
         recall_calibration,
@@ -500,7 +500,7 @@ def test_calibration_apply_rechecks_authority_inside_effect_lock(
         "load_calibration",
         lambda _path=None: {"weights": {"old": 1}},
     )
-    monkeypatch.setattr(recall_calibration, "wiki_mutation_lock", nullcontext)
+    monkeypatch.setattr(recall_calibration, "chronovisor_mutation_lock", nullcontext)
     monkeypatch.setattr(recall_calibration, "decision_authority_lock", nullcontext)
     monkeypatch.setattr(recall_calibration, "load_labeled_rows", lambda **_kwargs: rows)
     monkeypatch.setattr(

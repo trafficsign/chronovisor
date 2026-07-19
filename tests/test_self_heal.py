@@ -12,15 +12,15 @@ import pytest
 
 @pytest.fixture()
 def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    wiki_root = tmp_path / "wiki"
-    pages = wiki_root / "pages"
-    raw = wiki_root / "raw"
-    system = wiki_root / "system"
-    runtime = wiki_root / "runtime"
+    chronovisor_root = tmp_path / "wiki"
+    pages = chronovisor_root / "pages"
+    raw = chronovisor_root / "raw"
+    system = chronovisor_root / "system"
+    runtime = chronovisor_root / "runtime"
     for d in (pages, raw, system, runtime):
         d.mkdir(parents=True, exist_ok=True)
 
-    from llm_wiki_mcp import (
+    from chronovisor import (
         background_jobs,
         claims,
         index_store,
@@ -31,29 +31,29 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         runtime_status,
         search,
         state_register,
-        wiki,
+        store,
     )
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages)
-    monkeypatch.setattr(wiki, "RAW_DIR", raw)
-    monkeypatch.setattr(wiki, "SYSTEM_DIR", system)
-    monkeypatch.setattr(wiki, "INDEX_FILE", wiki_root / "index.md")
-    monkeypatch.setattr(wiki, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages)
+    monkeypatch.setattr(store, "RAW_DIR", raw)
+    monkeypatch.setattr(store, "SYSTEM_DIR", system)
+    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
+    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
-    monkeypatch.setattr(ingest, "INDEX_FILE", wiki_root / "index.md")
-    monkeypatch.setattr(ingest, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(ingest, "INDEX_FILE", chronovisor_root / "index.md")
+    monkeypatch.setattr(ingest, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
-    monkeypatch.setattr(orchestrator, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(orchestrator, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(orchestrator, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(orchestrator, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(
         orchestrator,
         "STATE_FILE",
-        wiki_root / ".orchestrator_state.json",
+        chronovisor_root / ".orchestrator_state.json",
     )
     monkeypatch.setattr(
         page_mutation,
-        "WIKI_MUTATION_LOCK",
+        "CHRONOVISOR_MUTATION_LOCK",
         runtime / "wiki-mutation.lock",
     )
     monkeypatch.setattr(
@@ -61,7 +61,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "DECISION_AUTHORITY_LOCK",
         runtime / "decision-authority.lock",
     )
-    monkeypatch.setattr(page_mutation, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
     monkeypatch.setattr(page_mutation, "SYSTEM_DIR", system)
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime)
@@ -92,8 +92,8 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         },
     )
 
-    claims_dir = wiki_root / "claims"
-    monkeypatch.setattr(claims, "WIKI_ROOT", wiki_root)
+    claims_dir = chronovisor_root / "claims"
+    monkeypatch.setattr(claims, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(claims, "CLAIMS_DIR", claims_dir)
     monkeypatch.setattr(claims, "CLAIMS_FILE", claims_dir / "claims.jsonl")
     monkeypatch.setattr(
@@ -112,9 +112,9 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         claims_dir / "claim-conflict-reviews.jsonl",
     )
 
-    index_dir = wiki_root / ".index"
+    index_dir = chronovisor_root / ".index"
     index_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(index_store, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(index_store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(index_store, "PAGES_DIR", pages)
     monkeypatch.setattr(index_store, "SYSTEM_DIR", system)
     monkeypatch.setattr(index_store, "INDEX_DIR", index_dir)
@@ -127,16 +127,16 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(index_store, "_store", None)
     monkeypatch.setattr(ollama, "is_available", lambda: False)
     monkeypatch.setattr(search, "update_embeddings", lambda page_ids=None: 0)
-    return wiki_root
+    return chronovisor_root
 
 
-def _seed_page(wiki_root: Path, rel: str) -> None:
-    path = wiki_root / "pages" / rel
+def _seed_page(chronovisor_root: Path, rel: str) -> None:
+    path = chronovisor_root / "pages" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("---\ntitle: T\nupdated: 2026-01-01\n---\nbody\n")
 
 
-def _write_packet(wiki_root: Path) -> Path:
+def _write_packet(chronovisor_root: Path) -> Path:
     packet = {
         "failure_id": "f1",
         "raw_file": "broken.md",
@@ -148,7 +148,7 @@ def _write_packet(wiki_root: Path) -> Path:
         "similar_existing_pages": ["ai/canonical-target"],
         "status": "pending_local_repair",
     }
-    path = wiki_root / "runtime" / "failures" / "packets" / "f1.json"
+    path = chronovisor_root / "runtime" / "failures" / "packets" / "f1.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(packet))
     return path
@@ -213,7 +213,7 @@ def _install_local_no_quorum_router(
     cache_root: Path,
     artifact_digit: str = "d",
 ) -> tuple[dict, list[str]]:
-    from llm_wiki_mcp import (
+    from chronovisor import (
         decision_policy,
         decision_router,
         frontier_review,
@@ -315,8 +315,8 @@ def _install_local_no_quorum_router(
     return authority, calls
 
 
-def _write_operational_packet(wiki_root: Path) -> Path:
-    path = _write_packet(wiki_root)
+def _write_operational_packet(chronovisor_root: Path) -> Path:
+    path = _write_packet(chronovisor_root)
     packet = json.loads(path.read_text(encoding="utf-8"))
     packet.update(
         {
@@ -333,7 +333,7 @@ def _write_operational_packet(wiki_root: Path) -> Path:
 
 
 def _link_operational_system_incident(
-    wiki_root: Path,
+    chronovisor_root: Path,
     source_packet_path: Path,
     *,
     status: str = "pending_frontier",
@@ -343,7 +343,7 @@ def _link_operational_system_incident(
     source = json.loads(source_packet_path.read_text(encoding="utf-8"))
     incident_fingerprint = "f" * 64
     incident_path = (
-        wiki_root
+        chronovisor_root
         / "runtime"
         / "failures"
         / "packets"
@@ -396,7 +396,7 @@ def operational_release_case(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, dict[str, str]]:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_operational_packet(isolated_wiki)
     raw_path = isolated_wiki / "raw" / "broken.md"
@@ -479,8 +479,8 @@ def _mark_system_code_repair(
 def test_operational_source_rejects_direct_raw_action(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp import self_heal
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor import self_heal
+    from chronovisor.local_repair import LocalRepairDecision
 
     packet = {
         "failure_class": "ingest.generation_transport_error",
@@ -502,8 +502,8 @@ def test_operational_source_routes_resolved_raw_action_to_system_incident(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor import self_heal
+    from chronovisor.local_repair import LocalRepairDecision
 
     packet_path = _write_packet(isolated_wiki)
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -562,8 +562,8 @@ def test_operational_source_routes_resolved_raw_action_to_system_incident(
 def test_deterministic_single_alias_repair_applies_locally_without_frontier(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import self_heal
-    from llm_wiki_mcp.alias_store import load_aliases
+    from chronovisor import self_heal
+    from chronovisor.alias_store import load_aliases
 
     _seed_page(isolated_wiki, "ai/canonical-target.md")
     packet_path = _write_packet(isolated_wiki)
@@ -603,7 +603,7 @@ def test_deterministic_single_alias_repair_applies_locally_without_frontier(
 
 
 def test_drill_returns_local_repair_decision(isolated_wiki: Path) -> None:
-    from llm_wiki_mcp.self_heal import run_drill
+    from chronovisor.self_heal import run_drill
 
     result = run_drill(use_qwen=False)
 
@@ -614,7 +614,7 @@ def test_drill_returns_local_repair_decision(isolated_wiki: Path) -> None:
 def test_auto_apply_error_packet_preserves_local_test_case_deterministically(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp.local_repair import propose_repair
+    from chronovisor.local_repair import propose_repair
 
     packet = {
         "failure_class": "recall.auto_apply_error",
@@ -634,15 +634,15 @@ def test_local_consensus_repair_carries_authority_seal(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import (
+    from chronovisor import (
         decision_policy,
         decision_router,
         frontier_review,
         local_repair,
         semantic_hold,
     )
-    from llm_wiki_mcp.decision_router import canonical_agreement_signature
-    from llm_wiki_mcp.local_repair import LOCAL_REPAIR_SCHEMA
+    from chronovisor.decision_router import canonical_agreement_signature
+    from chronovisor.local_repair import LOCAL_REPAIR_SCHEMA
 
     models = ["primary-model", "challenger-model", "tie-model"]
     router_audit = {
@@ -768,8 +768,8 @@ def test_local_repair_no_quorum_builds_strict_semantic_hold(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import local_repair
-    from llm_wiki_mcp.semantic_hold import persisted_semantic_no_quorum_hold
+    from chronovisor import local_repair
+    from chronovisor.semantic_hold import persisted_semantic_no_quorum_hold
 
     authority, calls = _install_local_no_quorum_router(
         monkeypatch,
@@ -804,7 +804,7 @@ def test_local_repair_semantic_hold_never_opens_live_authority_lock(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import local_repair
+    from chronovisor import local_repair
 
     _authority, calls = _install_local_no_quorum_router(
         monkeypatch,
@@ -846,7 +846,7 @@ def test_local_repair_recovers_model_return_crash_from_common_cache_after_aba(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import frontier_review, local_repair
+    from chronovisor import frontier_review, local_repair
 
     authority_a, calls = _install_local_no_quorum_router(
         monkeypatch,
@@ -898,7 +898,7 @@ def test_local_repair_recovers_model_return_crash_from_common_cache_after_aba(
 def test_local_repair_semantic_epoch_matches_prompt_evidence_projection(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp import local_repair
+    from chronovisor import local_repair
 
     packet = {
         "failure_id": "semantic-split",
@@ -940,7 +940,7 @@ def test_self_heal_no_quorum_is_terminal_until_exact_evidence_changes(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     authority, calls = _install_local_no_quorum_router(
         monkeypatch,
@@ -1000,7 +1000,7 @@ def test_existing_semantic_hold_dry_run_preserves_entire_isolated_tree(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     authority, calls = _install_local_no_quorum_router(
         monkeypatch,
@@ -1073,7 +1073,7 @@ def test_self_heal_no_quorum_reuses_historical_hold_after_authority_aba(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import local_repair, self_heal
+    from chronovisor import local_repair, self_heal
 
     authority_a, calls = _install_local_no_quorum_router(
         monkeypatch,
@@ -1129,8 +1129,8 @@ def test_local_consensus_repair_fails_closed_when_authority_changes_before_effec
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor import self_heal
+    from chronovisor.local_repair import LocalRepairDecision
 
     packet_path = _write_packet(isolated_wiki)
     decision = LocalRepairDecision(
@@ -1184,8 +1184,8 @@ def test_routine_packets_stay_local_even_when_frontier_switch_is_enabled(
     monkeypatch: pytest.MonkeyPatch,
     failure_class: str,
 ) -> None:
-    from llm_wiki_mcp import self_heal
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor import self_heal
+    from chronovisor.local_repair import LocalRepairDecision
 
     packet_path = _write_packet(isolated_wiki)
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -1226,8 +1226,8 @@ def test_valid_system_code_evidence_is_forwarded_to_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
-    from llm_wiki_mcp.frontier_guard import RepairIncidentEvidence
+    from chronovisor import self_heal
+    from chronovisor.frontier_guard import RepairIncidentEvidence
 
     packet_path = _write_packet(isolated_wiki)
     _mark_system_code_repair(packet_path)
@@ -1260,7 +1260,7 @@ def test_frontier_caller_passes_same_evidence_capability(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import frontier_review, self_heal
+    from chronovisor import frontier_review, self_heal
 
     packet_path = _write_packet(isolated_wiki)
     _mark_system_code_repair(packet_path)
@@ -1299,7 +1299,7 @@ def test_incomplete_system_code_evidence_is_quarantined_locally(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -1333,7 +1333,7 @@ def test_incomplete_system_code_evidence_is_quarantined_locally(
 def test_missing_update_without_candidate_retries_create_safe_raw(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp.local_repair import propose_repair
+    from chronovisor.local_repair import propose_repair
 
     packet = {
         "failure_class": "apply.update_target_not_found",
@@ -1366,7 +1366,7 @@ def test_missing_update_without_candidate_retries_create_safe_raw(
 def test_frontier_budget_nonconvergence_retries_raw_deterministically(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp.local_repair import propose_repair
+    from chronovisor.local_repair import propose_repair
 
     packet = {
         "failure_class": "ingest.frontier_nonconvergent",
@@ -1394,7 +1394,7 @@ def test_frontier_budget_nonconvergence_retries_raw_deterministically(
 def test_local_consensus_budget_nonconvergence_retries_raw_deterministically(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp.local_repair import propose_repair
+    from chronovisor.local_repair import propose_repair
 
     packet = {
         "failure_class": "ingest.local_consensus_nonconvergent",
@@ -1421,7 +1421,7 @@ def test_local_consensus_budget_nonconvergence_retries_raw_deterministically(
 def test_missing_update_with_unsafe_page_id_still_escalates(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp.local_repair import propose_repair
+    from chronovisor.local_repair import propose_repair
 
     packet = {
         "failure_class": "apply.update_target_not_found",
@@ -1438,7 +1438,7 @@ def test_missing_update_with_unsafe_page_id_still_escalates(
 def test_missing_update_target_requires_exact_packet_and_request_evidence(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp.local_repair import propose_repair
+    from chronovisor.local_repair import propose_repair
 
     missing_request = {
         "failure_class": "apply.update_target_not_found",
@@ -1474,7 +1474,7 @@ def test_missing_update_target_requires_exact_packet_and_request_evidence(
 def test_missing_update_retry_raw_restores_raw_and_retries(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet = {
         "failure_id": "f-no-candidate",
@@ -1528,7 +1528,7 @@ def test_missing_update_retry_raw_restores_raw_and_retries(
 def test_frontier_nonconvergence_restores_raw_without_frontier(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet = {
         "failure_id": "frontier-loop",
@@ -1598,7 +1598,7 @@ def test_frontier_nonconvergence_restores_raw_without_frontier(
 def test_local_consensus_nonconvergence_restores_raw_without_frontier(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet = {
         "failure_id": "local-consensus-loop",
@@ -1674,9 +1674,9 @@ def test_local_consensus_nonconvergence_restores_raw_without_frontier(
 def test_sandbox_drill_keeps_semantic_repair_out_of_frontier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp.self_heal import run_sandbox_drill
+    from chronovisor.self_heal import run_sandbox_drill
 
-    monkeypatch.setenv("LLM_WIKI_SELF_HEAL_AUTORUN", "0")
+    monkeypatch.setenv("CHRONOVISOR_SELF_HEAL_AUTORUN", "0")
 
     result = run_sandbox_drill(use_qwen=False)
 
@@ -1693,8 +1693,8 @@ def test_sandbox_drill_keeps_semantic_repair_out_of_frontier(
 def test_frontier_human_required_sends_notification(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import self_heal
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor import self_heal
+    from chronovisor.local_repair import LocalRepairDecision
 
     packet = {
         "failure_id": "auth1",
@@ -1775,8 +1775,8 @@ def test_frontier_human_required_sends_notification(
 def test_frontier_pending_review_writes_artifact(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import self_heal
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor import self_heal
+    from chronovisor.local_repair import LocalRepairDecision
 
     packet = {
         "failure_id": "schema1",
@@ -1853,7 +1853,7 @@ def test_human_required_notification_cooldown(
 ) -> None:
     from datetime import datetime, timedelta
 
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet = {
         "failure_id": "auth1",
@@ -1889,7 +1889,7 @@ def test_human_required_notification_cooldown(
 def test_model_human_flag_cannot_widen_external_authority_boundary(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet = {"failure_id": "model1", "raw_file": "model-broken.md"}
     model_failure = {
@@ -1930,7 +1930,7 @@ def test_model_human_flag_cannot_widen_external_authority_boundary(
 def test_legacy_tool_unavailable_human_packet_reopens_autonomously(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = (
         isolated_wiki / "runtime" / "failures" / "packets" / "legacy-tool.json"
@@ -1968,7 +1968,7 @@ def test_frontier_quarantine_is_terminal_after_execution_started(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "quarantine.json"
     packet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1994,7 +1994,7 @@ def test_frontier_quarantine_is_terminal_after_execution_started(
         encoding="utf-8",
     )
     _mark_system_code_repair(packet_path)
-    monkeypatch.setenv("LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "1")
+    monkeypatch.setenv("CHRONOVISOR_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "1")
     monkeypatch.setattr(
         self_heal,
         "_run_frontier",
@@ -2014,7 +2014,7 @@ def test_external_human_boundary_never_calls_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "oauth.json"
     packet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2056,7 +2056,7 @@ def test_external_human_boundary_never_calls_frontier(
 
 
 def test_handle_packet_dry_run_is_byte_for_byte_read_only(isolated_wiki: Path) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     before = packet_path.read_bytes()
@@ -2076,7 +2076,7 @@ def test_fresh_semantic_dry_run_never_starts_local_model_or_writes_audit(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import decision_router, self_heal
+    from chronovisor import decision_router, self_heal
 
     packet_path = (
         isolated_wiki / "runtime" / "failures" / "packets" / "ambiguous-dry-run.json"
@@ -2122,7 +2122,7 @@ def test_fresh_semantic_dry_run_never_starts_local_model_or_writes_audit(
 
 
 def _force_frontier(monkeypatch: pytest.MonkeyPatch, self_heal) -> None:
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor.local_repair import LocalRepairDecision
 
     monkeypatch.setattr(
         self_heal,
@@ -2156,7 +2156,7 @@ def test_run_pending_local_budget_defer_is_no_progress_and_skips_proposal(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     before = packet_path.read_bytes()
@@ -2186,7 +2186,7 @@ def test_deterministic_alias_repair_respects_mutation_budget(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     _seed_page(isolated_wiki, "ai/canonical-target.md")
     packet_path = _write_packet(isolated_wiki)
@@ -2218,8 +2218,8 @@ def test_deterministic_quarantine_completes_locally_without_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor import self_heal
+    from chronovisor.local_repair import LocalRepairDecision
 
     packet_path = _write_packet(isolated_wiki)
     budget = _RecordingBudget(local=True, mutation=True)
@@ -2260,7 +2260,7 @@ def test_frontier_only_executable_retry_charges_only_local_mutation_budget(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -2316,7 +2316,7 @@ def test_mutation_budget_defer_does_not_consume_frontier_attempt(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     _mark_system_code_repair(packet_path)
@@ -2371,7 +2371,7 @@ def test_guard_denial_does_not_consume_frontier_attempt(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     _mark_system_code_repair(packet_path)
@@ -2406,7 +2406,7 @@ def test_guard_deferred_system_repair_resumes_code_patch_without_local_reproposa
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     _mark_system_code_repair(packet_path)
@@ -2507,7 +2507,7 @@ def test_frontier_exception_after_start_is_terminal_and_releases_running_lease(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     _mark_system_code_repair(packet_path)
@@ -2540,7 +2540,7 @@ def test_transient_read_back_packet_is_retired_without_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
     packet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2612,7 +2612,7 @@ def test_empty_query_read_back_packet_is_retired_without_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
     packet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2689,7 +2689,7 @@ def test_exhausted_read_back_query_hint_packet_is_retired_without_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
     packet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2763,7 +2763,7 @@ def test_unverifiable_read_back_query_hint_packet_is_retired_without_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
     packet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2839,7 +2839,7 @@ def test_unverifiable_read_back_query_hint_packet_is_retired_without_frontier(
 def test_transient_read_back_dry_run_is_byte_for_byte_read_only(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = isolated_wiki / "runtime" / "failures" / "packets" / "read-back.json"
     packet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2881,7 +2881,7 @@ def test_pending_packets_recovers_only_expired_running_leases(
 ) -> None:
     from datetime import datetime, timedelta
 
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     now = datetime(2026, 7, 10, 12, 0, 0)
     packet_dir = isolated_wiki / "runtime" / "failures" / "packets"
@@ -2913,7 +2913,7 @@ def test_pending_packets_recovers_only_expired_running_leases(
 def test_packet_lock_enforces_single_flight_without_packet_mutation(
     isolated_wiki: Path,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     before = packet_path.read_bytes()
@@ -2931,7 +2931,7 @@ def test_operational_failure_state_binds_each_raw_exact_bytes(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
     primary = isolated_wiki / "raw" / "primary.md"
     related = isolated_wiki / "raw" / "related.md"
@@ -2975,7 +2975,7 @@ def test_repeated_operational_failure_preserves_invalid_binding_and_release_refu
     monkeypatch: pytest.MonkeyPatch,
     stored_binding: dict[str, object],
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
+    from chronovisor import failure_supervisor, self_heal
 
     raw_path = isolated_wiki / "raw" / "partial-binding.md"
     raw_path.write_bytes(b"immutable\r\nsource\n")
@@ -3041,7 +3041,7 @@ def test_verified_local_repair_releases_exact_operational_packet(
     isolated_wiki: Path,
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
+    from chronovisor import failure_supervisor, self_heal
 
     packet_path, kwargs = operational_release_case
     raw_path = isolated_wiki / "raw" / "broken.md"
@@ -3110,7 +3110,7 @@ def test_verified_local_repair_releases_operational_local_quarantine(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, local_repair, self_heal
+    from chronovisor import failure_supervisor, local_repair, self_heal
 
     packet_path, kwargs = operational_release_case
     raw_path = isolated_wiki / "raw" / "broken.md"
@@ -3163,7 +3163,7 @@ def test_verified_local_repair_supersedes_unstarted_linked_incident_and_job(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import background_jobs, self_heal, system_incident_supervisor
+    from chronovisor import background_jobs, self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     source = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -3179,7 +3179,7 @@ def test_verified_local_repair_supersedes_unstarted_linked_incident_and_job(
     args = ["--packet", str(incident_path), "--enable-frontier-repair"]
     job = background_jobs.enqueue_job(
         name="system-code-repair",
-        module="llm_wiki_mcp.self_heal",
+        module="chronovisor.self_heal",
         args=args,
         env={},
         stdin_text="",
@@ -3255,7 +3255,7 @@ def test_verified_local_repair_rejects_partial_link_metadata(
     operational_release_case: tuple[Path, dict[str, str]],
     path_value: str | None,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
@@ -3285,7 +3285,7 @@ def test_verified_local_repair_linked_incident_dry_run_is_read_only(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal, system_incident_supervisor
+    from chronovisor import self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
@@ -3319,7 +3319,7 @@ def test_verified_local_repair_resumes_after_linked_incident_cancel_commit(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal, system_incident_supervisor
+    from chronovisor import self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
@@ -3358,7 +3358,7 @@ def test_verified_local_repair_retries_after_background_cancel_failure(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import background_jobs, self_heal, system_incident_supervisor
+    from chronovisor import background_jobs, self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
@@ -3401,7 +3401,7 @@ def test_verified_local_repair_with_real_incident_binding_is_idempotent(
     isolated_wiki: Path,
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
     source = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -3508,7 +3508,7 @@ def test_verified_local_repair_refuses_started_or_terminal_linked_incident(
     execution_started: bool,
     reason: str,
 ) -> None:
-    from llm_wiki_mcp import self_heal, system_incident_supervisor
+    from chronovisor import self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(
@@ -3542,7 +3542,7 @@ def test_verified_local_repair_refuses_busy_linked_incident(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal, system_incident_supervisor
+    from chronovisor import self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
@@ -3571,7 +3571,7 @@ def test_verified_local_repair_accepts_remaining_partial_group(
     isolated_wiki: Path,
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
     remaining = isolated_wiki / "raw" / "remaining.md"
@@ -3605,7 +3605,7 @@ def test_verified_local_repair_accepts_remaining_partial_group(
 def test_verified_local_repair_refuses_expected_status_mismatch(
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
     kwargs["expected_status"] = "frontier_retry"
@@ -3623,7 +3623,7 @@ def test_verified_local_repair_refuses_incomplete_group_manifest(
     isolated_wiki: Path,
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
     second = isolated_wiki / "raw" / "second.md"
@@ -3649,7 +3649,7 @@ def test_verified_local_repair_refuses_raw_changed_since_failure(
     isolated_wiki: Path,
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
     raw_path = isolated_wiki / "raw" / "broken.md"
@@ -3671,7 +3671,7 @@ def test_verified_local_repair_refuses_cancelled_packet(
     isolated_wiki: Path,
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
     before = packet_path.read_bytes()
@@ -3698,7 +3698,7 @@ def test_verified_local_repair_late_cancellation_wins_before_packet_commit(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
 
@@ -3756,7 +3756,7 @@ def test_verified_local_repair_refuses_stale_packet_identity(
     expected_fingerprint: str,
     reason: str,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_operational_packet(isolated_wiki)
     before = packet_path.read_bytes()
@@ -3785,7 +3785,7 @@ def test_verified_local_repair_never_releases_semantic_defer(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = _write_operational_packet(isolated_wiki)
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -3824,7 +3824,7 @@ def test_verified_local_repair_never_releases_semantic_defer(
 def test_verified_local_repair_is_idempotent_and_packet_locked(
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
 
@@ -3856,7 +3856,7 @@ def test_verified_local_repair_cached_retry_survives_partial_and_full_state_clea
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
+    from chronovisor import failure_supervisor, self_heal
 
     packet_path, kwargs = operational_release_case
     first_raw = isolated_wiki / "raw" / "broken.md"
@@ -3911,7 +3911,7 @@ def test_verified_local_repair_cached_retry_refuses_different_receipt_evidence(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
+    from chronovisor import failure_supervisor, self_heal
 
     packet_path, fixture_kwargs = operational_release_case
     raw_path = isolated_wiki / "raw" / "broken.md"
@@ -3976,7 +3976,7 @@ def test_verified_local_repair_freezes_group_until_packet_commit(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
+    from chronovisor import failure_supervisor, self_heal
 
     packet_path, kwargs = operational_release_case
     late_raw = isolated_wiki / "raw" / "late.md"
@@ -4027,7 +4027,7 @@ def test_operational_release_lock_order_does_not_block_state_writer(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
+    from chronovisor import failure_supervisor, self_heal
 
     packet_path, kwargs = operational_release_case
     late_raw = isolated_wiki / "raw" / "late.md"
@@ -4088,7 +4088,7 @@ def test_verified_local_repair_dry_run_is_byte_for_byte_read_only(
     isolated_wiki: Path,
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
     before = packet_path.read_bytes()
@@ -4110,7 +4110,7 @@ def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import runtime_config, self_heal
+    from chronovisor import runtime_config, self_heal
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -4137,7 +4137,7 @@ def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
     monkeypatch.setattr(self_heal, "_repo_root", lambda: repo)
     archive_root = tmp_path / "cache" / "archive-v0" / "runtime-id"
     archive_path = archive_root / "lib" / "python3.13"
-    module_path = archive_path / "site-packages" / "llm_wiki_mcp" / "runtime_config.py"
+    module_path = archive_path / "site-packages" / "chronovisor" / "runtime_config.py"
     module_path.parent.mkdir(parents=True)
     module_path.write_text("# installed runtime\n", encoding="utf-8")
 
@@ -4148,9 +4148,9 @@ def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
             "drift": False,
             "archive_path": str(archive_path),
             "module_path": str(module_path),
-            "runtime_source": ("git+ssh://git@github.com/trafficsign/llm-wiki-mcp"),
+            "runtime_source": ("git+ssh://git@github.com/trafficsign/chronovisor"),
             "direct_url": {
-                "url": "ssh://git@github.com/trafficsign/llm-wiki-mcp",
+                "url": "ssh://git@github.com/trafficsign/chronovisor",
                 "vcs_info": {"vcs": "git", "commit_id": commit},
             },
         }
@@ -4211,7 +4211,7 @@ def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
         "runtime_identity",
         lambda: identity(
             direct_url={
-                "url": "ssh://git@github.com/attacker/llm-wiki-mcp",
+                "url": "ssh://git@github.com/attacker/chronovisor",
                 "vcs_info": {"vcs": "git", "commit_id": commit},
             }
         ),
@@ -4236,7 +4236,7 @@ def test_release_operational_repair_cli_routes_all_evidence(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = tmp_path / "packet.json"
     packet_path.write_text("{}", encoding="utf-8")
@@ -4303,7 +4303,7 @@ def test_release_operational_repair_cli_releases_legacy_state_with_manifest(
     operational_release_case: tuple[Path, dict[str, str]],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path, kwargs = operational_release_case
     raw_path = isolated_wiki / "raw" / "broken.md"
@@ -4366,7 +4366,7 @@ def test_release_operational_repair_cli_refuses_other_actions(
     capsys: pytest.CaptureFixture[str],
     conflict: list[str],
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     packet_path = tmp_path / "packet.json"
     packet_path.write_text("{}", encoding="utf-8")
@@ -4403,7 +4403,7 @@ def test_release_evidence_flags_require_release_action(
     capsys: pytest.CaptureFixture[str],
     evidence_flag: str,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     exit_code = self_heal.main([evidence_flag, "unexpected"])
 
@@ -4417,7 +4417,7 @@ def test_completed_packet_is_cached_instead_of_reprocessed(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     _seed_page(isolated_wiki, "ai/canonical-target.md")
     packet_path = _write_packet(isolated_wiki)
@@ -4454,12 +4454,12 @@ def test_start_background_uses_durable_queue_without_popen(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import background_jobs, self_heal
+    from chronovisor import background_jobs, self_heal
 
     packet = tmp_path / "packet.json"
     packet.write_text("{}", encoding="utf-8")
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.setenv("LLM_WIKI_SELF_HEAL_AUTORUN", "1")
+    monkeypatch.setenv("CHRONOVISOR_SELF_HEAL_AUTORUN", "1")
     monkeypatch.setattr(
         self_heal.subprocess,
         "Popen",
@@ -4478,12 +4478,12 @@ def test_start_background_uses_durable_queue_without_popen(
 
     assert result == {"job_id": "job-1", "status": "queued", "enqueued": True}
     assert seen["name"] == "self-heal"
-    assert seen["module"] == "llm_wiki_mcp.self_heal"
+    assert seen["module"] == "chronovisor.self_heal"
     assert seen["args"] == ["--packet", str(packet.resolve())]
 
 
 def test_background_exit_code_preserves_retry_and_terminal_states() -> None:
-    from llm_wiki_mcp import background_jobs, self_heal
+    from chronovisor import background_jobs, self_heal
 
     assert self_heal._background_exit_code({"status": "local_repair_applied"}) == 0
     assert self_heal._background_exit_code({"status": "pending_local_repair"}) == (

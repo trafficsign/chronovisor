@@ -5,9 +5,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from llm_wiki_mcp.raw_segment import append_capture, seal_segment
-from llm_wiki_mcp.raw_store import RawStore, raw_layout_mode
-from llm_wiki_mcp.raw_semantic_projection import project_native_transcript
+from chronovisor.raw_segment import append_capture, seal_segment
+from chronovisor.raw_store import RawStore, raw_layout_mode
+from chronovisor.raw_semantic_projection import project_native_transcript
 
 
 def _append(raw_dir: Path, source: Path, payload: bytes):
@@ -109,14 +109,14 @@ def test_store_includes_flat_and_date_partitioned_manual_markdown(
 def test_layout_mode_uses_wiki_config_with_environment_override(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.delenv("LLM_WIKI_RAW_LAYOUT")
+    monkeypatch.delenv("CHRONOVISOR_RAW_LAYOUT")
     (tmp_path / "config.toml").write_text('[raw]\nlayout = "shadow"\n')
 
-    assert raw_layout_mode(wiki_root=tmp_path) == "shadow"
+    assert raw_layout_mode(chronovisor_root=tmp_path) == "shadow"
     assert RawStore(tmp_path / "raw").mode == "shadow"
 
-    monkeypatch.setenv("LLM_WIKI_RAW_LAYOUT", "v2")
-    assert raw_layout_mode(wiki_root=tmp_path) == "v2"
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
+    assert raw_layout_mode(chronovisor_root=tmp_path) == "v2"
     assert RawStore(tmp_path / "raw").mode == "v2"
 
 
@@ -177,7 +177,7 @@ def test_materialized_reference_projects_native_transcript_without_copying_it(
 def test_v2_parent_and_semantic_child_use_separate_physical_stores(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, orchestrator
+    from chronovisor import failure_supervisor, orchestrator
 
     raw_dir = tmp_path / "raw"
     source = tmp_path / "session.jsonl"
@@ -186,7 +186,7 @@ def test_v2_parent_and_semantic_child_use_separate_physical_stores(
     )
     source.write_bytes(payload)
     _append(raw_dir, source, payload)
-    monkeypatch.setenv("LLM_WIKI_RAW_LAYOUT", "v2")
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(
@@ -222,7 +222,7 @@ def test_v2_parent_and_semantic_child_use_separate_physical_stores(
 def test_raw_replay_projects_v2_transport_before_ingest(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from llm_wiki_mcp import raw_replay
+    from chronovisor import raw_replay
 
     raw_dir = tmp_path / "raw"
     source = tmp_path / "session.jsonl"
@@ -237,13 +237,13 @@ def test_raw_replay_projects_v2_transport_before_ingest(
     assert unit is not None
     reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
     monkeypatch.setattr(raw_replay, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(raw_replay, "WIKI_ROOT", tmp_path)
+    monkeypatch.setattr(raw_replay, "CHRONOVISOR_ROOT", tmp_path)
 
     content, summary = raw_replay._replay_ingest_content(reference.name, reference)
 
     assert content is not None
     bundle = json.loads(content)
-    assert bundle["schema"] == "llm-wiki.raw-replay-semantic-bundle.v1"
+    assert bundle["schema"] == "chronovisor.raw-replay-semantic-bundle.v1"
     assert bundle["children"][0]["records"][0]["text"] == "remember this"
     assert "secret-transport-id" not in content
     assert summary["kind"] == "children"

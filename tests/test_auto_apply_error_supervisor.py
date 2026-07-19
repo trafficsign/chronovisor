@@ -8,26 +8,26 @@ import pytest
 
 @pytest.fixture()
 def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    wiki_root = tmp_path / "wiki"
-    pages = wiki_root / "pages"
-    raw = wiki_root / "raw"
-    system = wiki_root / "system"
-    runtime = wiki_root / "runtime"
-    recall = wiki_root / "recall"
+    chronovisor_root = tmp_path / "wiki"
+    pages = chronovisor_root / "pages"
+    raw = chronovisor_root / "raw"
+    system = chronovisor_root / "system"
+    runtime = chronovisor_root / "runtime"
+    recall = chronovisor_root / "recall"
     for path in (pages, raw, system, runtime, recall):
         path.mkdir(parents=True, exist_ok=True)
 
-    from llm_wiki_mcp import runtime_status, wiki
+    from chronovisor import runtime_status, store
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages)
-    monkeypatch.setattr(wiki, "RAW_DIR", raw)
-    monkeypatch.setattr(wiki, "SYSTEM_DIR", system)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(store, "PAGES_DIR", pages)
+    monkeypatch.setattr(store, "RAW_DIR", raw)
+    monkeypatch.setattr(store, "SYSTEM_DIR", system)
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime / "metrics.jsonl")
-    return wiki_root
+    return chronovisor_root
 
 
 def _auto_apply_error(index: int) -> dict[str, object]:
@@ -52,11 +52,11 @@ def _auto_apply_error(index: int) -> dict[str, object]:
 def test_auto_apply_errors_create_self_heal_packet_after_threshold(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import auto_apply_error_supervisor as supervisor
+    from chronovisor import auto_apply_error_supervisor as supervisor
 
     started: list[Path] = []
     monkeypatch.setattr(
-        "llm_wiki_mcp.self_heal.start_background",
+        "chronovisor.self_heal.start_background",
         lambda path: started.append(path),
     )
 
@@ -78,7 +78,7 @@ def test_auto_apply_errors_create_self_heal_packet_after_threshold(
 
 
 def test_auto_apply_errors_below_threshold_do_not_create_packet(isolated_wiki: Path) -> None:
-    from llm_wiki_mcp import auto_apply_error_supervisor as supervisor
+    from chronovisor import auto_apply_error_supervisor as supervisor
 
     result = supervisor.supervise_error_records(
         [_auto_apply_error(1), _auto_apply_error(2)],
@@ -90,7 +90,7 @@ def test_auto_apply_errors_below_threshold_do_not_create_packet(isolated_wiki: P
 
 
 def test_auto_apply_errors_accumulate_across_runs(isolated_wiki: Path) -> None:
-    from llm_wiki_mcp import auto_apply_error_supervisor as supervisor
+    from chronovisor import auto_apply_error_supervisor as supervisor
 
     first = supervisor.supervise_error_records([_auto_apply_error(1)], threshold=3, start_background=False)
     second = supervisor.supervise_error_records([_auto_apply_error(2)], threshold=3, start_background=False)
@@ -105,7 +105,7 @@ def test_auto_apply_errors_accumulate_across_runs(isolated_wiki: Path) -> None:
 
 
 def test_auto_apply_error_supervisor_dry_run_writes_nothing(isolated_wiki: Path) -> None:
-    from llm_wiki_mcp import auto_apply_error_supervisor as supervisor
+    from chronovisor import auto_apply_error_supervisor as supervisor
 
     result = supervisor.supervise_error_records(
         [_auto_apply_error(1), _auto_apply_error(2), _auto_apply_error(3)],
@@ -124,7 +124,7 @@ def test_auto_apply_error_supervisor_dry_run_writes_nothing(isolated_wiki: Path)
 def test_auto_apply_error_self_heal_cli_path_uses_existing_pipeline(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import self_heal
+    from chronovisor import self_heal
 
     log_file = isolated_wiki / "recall" / "auto-apply.jsonl"
     log_file.write_text(

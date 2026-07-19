@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llm_wiki_mcp import provisional_recall
+from chronovisor import provisional_recall
 
 
 def _entry(provisional_id: str, text: str, record_index: int) -> dict:
@@ -38,7 +38,7 @@ def test_provisional_ranking_uses_idf_coverage_not_a_fixed_score(
     )
 
     hits = provisional_recall.search_provisional(
-        "alpha beta gamma delta", wiki_root=tmp_path
+        "alpha beta gamma delta", chronovisor_root=tmp_path
     )
 
     assert hits[0]["provisional_id"] == "full"
@@ -61,7 +61,7 @@ def test_provisional_ranking_tokenizes_japanese_and_breaks_ties_by_record_recenc
         lambda **_kwargs: {"entries": entries},
     )
 
-    hits = provisional_recall.search_provisional("検索精度", wiki_root=tmp_path)
+    hits = provisional_recall.search_provisional("検索精度", chronovisor_root=tmp_path)
 
     assert [hit["provisional_id"] for hit in hits] == ["newer", "older"]
     assert hits[0]["matched_terms"]

@@ -8,38 +8,38 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import local_model_eval, ollama
-from llm_wiki_mcp.autonomy import DUPLICATE_FRONTIER_SCHEMA
-from llm_wiki_mcp.decision_router import (
+from chronovisor import local_model_eval, ollama
+from chronovisor.autonomy import DUPLICATE_FRONTIER_SCHEMA
+from chronovisor.decision_router import (
     DECISION_REQUEST_FINGERPRINT_VERSION,
     DECISION_SEMANTICS_POLICY_VERSION,
     QUORUM_SAFETY_POLICY_VERSION,
 )
-from llm_wiki_mcp.local_model_eval import (
+from chronovisor.local_model_eval import (
     ReplayInputError,
     ResumeMismatchError,
     evaluate_replays,
     inspect_replays,
     main,
 )
-from llm_wiki_mcp.decision_schema_manifest import schema_sha256
-from llm_wiki_mcp.local_structured import ChatRequest
-from llm_wiki_mcp.runtime_config import DecisionRouterConfig
-from llm_wiki_mcp.content_correction import (
+from chronovisor.decision_schema_manifest import schema_sha256
+from chronovisor.local_structured import ChatRequest
+from chronovisor.runtime_config import DecisionRouterConfig
+from chronovisor.content_correction import (
     FRONTIER_CLASSIFICATION_SCHEMA,
     FRONTIER_REVIEW_SCHEMA,
 )
-from llm_wiki_mcp.ingest import INGEST_FRONTIER_DECISION_SCHEMA
-from llm_wiki_mcp.frontier_review import FRONTIER_DECISION_SCHEMA
-from llm_wiki_mcp.local_repair import LOCAL_REPAIR_SCHEMA
-from llm_wiki_mcp.orphan_link import ORPHAN_FRONTIER_SCHEMA
+from chronovisor.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+from chronovisor.frontier_review import FRONTIER_DECISION_SCHEMA
+from chronovisor.local_repair import LOCAL_REPAIR_SCHEMA
+from chronovisor.orphan_link import ORPHAN_FRONTIER_SCHEMA
 
 
 @pytest.fixture(autouse=True)
 def _isolate_consensus_audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from llm_wiki_mcp import wiki
+    from chronovisor import store
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
 
 
 SCHEMA = {
@@ -793,11 +793,11 @@ def test_full_minimum_representative_corpus_can_adopt(tmp_path: Path) -> None:
 def _canonical_lane_metric_rows() -> tuple[
     list[dict[str, object]], list[dict[str, object]]
 ]:
-    from llm_wiki_mcp.decision_lane_contract_cases import (
+    from chronovisor.decision_lane_contract_cases import (
         decision_lane_contract_case_manifest,
         decision_lane_contract_case_manifest_sha256,
     )
-    from llm_wiki_mcp.decision_lane_contracts import LANE_CONTRACT_SOURCE
+    from chronovisor.decision_lane_contracts import LANE_CONTRACT_SOURCE
 
     manifest = decision_lane_contract_case_manifest()
     manifest_sha256 = decision_lane_contract_case_manifest_sha256()
@@ -1341,7 +1341,7 @@ def test_ingest_confirmed_noop_is_not_misclassified_as_mutating() -> None:
 
 def test_approved_orphan_no_link_is_a_non_mutating_effect() -> None:
     prompt = (
-        "You are the final autonomous reviewer for an LLM Wiki orphan-link "
+        "You are the final autonomous reviewer for an Chronovisor orphan-link "
         'disposition. Candidate: {"proposal_kind": "no_link"}'
     )
 
@@ -2446,7 +2446,7 @@ def test_atomic_adoption_artifact_publish_uses_authority_epoch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import page_mutation
+    from chronovisor import page_mutation
 
     held = False
 

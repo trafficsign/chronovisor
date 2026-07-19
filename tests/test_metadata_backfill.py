@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llm_wiki_mcp import metadata_backfill
+from chronovisor import metadata_backfill
 
 
 def _decision(value: str) -> dict:

@@ -7,7 +7,7 @@ Converts frontmatter from Basic Memory format to Wiki format:
 - Converts filename to kebab-case
 - Preserves content and [[wiki-links]]
 
-Use normal raw capture and ``llm-wiki-sleep`` so a frontier-reviewed ingest
+Use normal raw capture and ``chronovisor-sleep`` so a frontier-reviewed ingest
 proposal owns any new knowledge page.
 """
 
@@ -19,14 +19,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+from chronovisor.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
 
 
 BASIC_MEMORY_ROOT = Path.home() / "basic-memory"
-WIKI_PAGES = Path.home() / ".wiki" / "pages"
-WIKI_RAW = Path.home() / ".wiki" / "raw"
+WIKI_PAGES = Path.home() / ".chronovisor" / "pages"
+WIKI_RAW = Path.home() / ".chronovisor" / "raw"
 
 
 def slugify(text: str) -> str:
@@ -130,7 +130,7 @@ def migrate():
     """Run the migration."""
     block_legacy_semantic_mutation(
         tool="migrate_basic_memory.py",
-        replacement="the normal raw capture plus llm-wiki-sleep ingest lane",
+        replacement="the normal raw capture plus chronovisor-sleep ingest lane",
     )
     WIKI_PAGES.mkdir(parents=True, exist_ok=True)
 

@@ -8,7 +8,7 @@ backfill_links.py の merge_related_section を流用して書き込む。
 引数: バッチ JSON ファイルパス (1 バッチ = ~20 ページ程度)
 
 この旧ローカルモデル実行経路は fail-closed。リンク提案と適用には
-``llm-wiki-sleep`` の frontier-managed orphan-link lane を使う。
+``chronovisor-sleep`` の frontier-managed orphan-link lane を使う。
 """
 
 import json
@@ -17,12 +17,12 @@ import sys
 import time
 from pathlib import Path
 
-# llm-wiki-mcp パッケージから既存ロジックを import
+# chronovisor パッケージから既存ロジックを import
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from llm_wiki_mcp.ollama import generate, is_available  # noqa: E402
-from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+from chronovisor.ollama import generate, is_available  # noqa: E402
+from chronovisor.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
 from backfill_links import merge_related_section, atomic_write  # noqa: E402
@@ -97,7 +97,7 @@ def get_body_excerpt(path: Path, max_chars: int = 3000) -> str:
 def main() -> None:
     block_legacy_semantic_mutation(
         tool="ollama_backfill.py",
-        replacement="llm-wiki-sleep",
+        replacement="chronovisor-sleep",
     )
     if len(sys.argv) != 2:
         print("Usage: python3 ollama_backfill.py <batch.json>", file=sys.stderr)

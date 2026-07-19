@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import recall_auditor
-from llm_wiki_mcp.recall_runtime import stable_prompt_hash
+from chronovisor import recall_auditor
+from chronovisor.recall_runtime import stable_prompt_hash
 
 
 def _valid_auditor_payload() -> dict[str, object]:
@@ -85,12 +85,12 @@ def test_threshold_action_is_review_only_even_if_auditor_is_confident() -> None:
                 "confidence": 0.98,
                 "reason_code": "gate_missed",
                 "auditor_reason": "Gate ignored a clear past-reference.",
-                "expected_pages": ["llm-wiki-recall-configuration"],
+                "expected_pages": ["chronovisor-recall-configuration"],
                 "missing_signal": "past_reference",
                 "action_type": "threshold",
             }
         ),
-        [{"page_id": "llm-wiki-recall-configuration"}],
+        [{"page_id": "chronovisor-recall-configuration"}],
     )
 
     assert decision.action_type == "threshold"
@@ -200,7 +200,7 @@ def test_matching_recall_log_prefers_prompt_hash_and_session(tmp_path, monkeypat
 
 
 def test_cli_records_missed_candidate_with_snapshot(tmp_path, monkeypatch, capsys) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     prompt = "昨日の recall hook の続き"
     decision_id = "20260602T210000-auditme"
@@ -305,7 +305,7 @@ def test_cli_records_missed_candidate_with_snapshot(tmp_path, monkeypatch, capsy
 
 
 def test_run_skips_read_decisions_by_default(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     prompt = "昨日の recall hook の続き"
     decision_id = "20260602T210000-readok"
@@ -506,7 +506,7 @@ def test_feedback_commit_suppresses_pull_duplicate_and_heals_consumed_index(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     pull_log = tmp_path / "pull-log.jsonl"
     feedback_file = tmp_path / "feedback.jsonl"

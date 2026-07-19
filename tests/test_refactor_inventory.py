@@ -14,7 +14,7 @@ def _inventory_module():
 
 
 def test_scan_repository_reports_contract_candidates_and_ingest_seams(tmp_path: Path) -> None:
-    (tmp_path / "src" / "llm_wiki_mcp").mkdir(parents=True)
+    (tmp_path / "src" / "chronovisor").mkdir(parents=True)
     (tmp_path / "tests").mkdir()
     (tmp_path / "scripts").mkdir()
     (tmp_path / "docs").mkdir()
@@ -24,12 +24,12 @@ def test_scan_repository_reports_contract_candidates_and_ingest_seams(tmp_path: 
 name = "sample"
 version = "0.0.0"
 [project.scripts]
-sample-tool = "llm_wiki_mcp.sample:main"
+sample-tool = "chronovisor.sample:main"
 """.strip()
         + "\n",
         encoding="utf-8",
     )
-    (tmp_path / "src" / "llm_wiki_mcp" / "sample.py").write_text(
+    (tmp_path / "src" / "chronovisor" / "sample.py").write_text(
         """
 import fcntl
 import hashlib
@@ -51,7 +51,7 @@ def atomic_write(path, tmp):
     )
     (tmp_path / "tests" / "test_sample.py").write_text(
         """
-from llm_wiki_mcp import ingest as ingest_mod
+from chronovisor import ingest as ingest_mod
 
 def test_patch(monkeypatch):
     monkeypatch.setattr(ingest_mod, "PAGES_DIR", object())

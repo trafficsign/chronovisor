@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 
-from llm_wiki_mcp import deep_retrieval, server
-from llm_wiki_mcp.runtime_config import DecisionRouterConfig
-from llm_wiki_mcp.research_config import ResearchConfig
-from llm_wiki_mcp.research_store import ResearchStore
-from llm_wiki_mcp.search import ScoredPage
+from chronovisor import deep_retrieval, server
+from chronovisor.runtime_config import DecisionRouterConfig
+from chronovisor.research_config import ResearchConfig
+from chronovisor.research_store import ResearchStore
+from chronovisor.search import ScoredPage
 
 
 def _tool(function):
@@ -76,7 +76,7 @@ def test_run_deep_dive_searches_reads_links_and_requeries(tmp_path, monkeypatch)
 
 
 def test_start_deep_dive_enqueues_durable_worker(monkeypatch) -> None:
-    from llm_wiki_mcp import background_jobs
+    from chronovisor import background_jobs
 
     recorded = []
 
@@ -89,12 +89,12 @@ def test_start_deep_dive_enqueues_durable_worker(monkeypatch) -> None:
     job_id = deep_retrieval.start_deep_dive("q", max_iterations=1)
 
     assert job_id == "durable-job"
-    assert recorded[0]["module"] == "llm_wiki_mcp.deep_retrieval_worker"
+    assert recorded[0]["module"] == "chronovisor.deep_retrieval_worker"
     assert json.loads(recorded[0]["stdin_text"])["query"] == "q"
 
 
-def test_wiki_deep_dive_sync_returns_payload(monkeypatch) -> None:
-    from llm_wiki_mcp import deep_retrieval as deep_retrieval_mod
+def test_chronovisor_deep_dive_sync_returns_payload(monkeypatch) -> None:
+    from chronovisor import deep_retrieval as deep_retrieval_mod
 
     monkeypatch.setattr(
         deep_retrieval_mod,
@@ -102,14 +102,14 @@ def test_wiki_deep_dive_sync_returns_payload(monkeypatch) -> None:
         lambda *args, **kwargs: {"status": "completed", "query": "q", "iterations": []},
     )
 
-    tool_fn = server.wiki_deep_dive.fn if hasattr(server.wiki_deep_dive, "fn") else server.wiki_deep_dive
+    tool_fn = server.chronovisor_deep_dive.fn if hasattr(server.chronovisor_deep_dive, "fn") else server.chronovisor_deep_dive
     payload = json.loads(tool_fn("q", background=False, engine="v1"))
 
     assert payload == {"status": "completed", "query": "q", "iterations": []}
 
 
-def test_wiki_jobs_reads_durable_deep_retrieval_job(monkeypatch) -> None:
-    from llm_wiki_mcp import background_jobs
+def test_chronovisor_jobs_reads_durable_deep_retrieval_job(monkeypatch) -> None:
+    from chronovisor import background_jobs
 
     monkeypatch.setattr(
         background_jobs,
@@ -125,14 +125,14 @@ def test_wiki_jobs_reads_durable_deep_retrieval_job(monkeypatch) -> None:
         },
     )
 
-    payload = json.loads(_tool(server.wiki_jobs)("durable-job"))
+    payload = json.loads(_tool(server.chronovisor_jobs)("durable-job"))
 
     assert payload["status"] == "queued"
     assert payload["processor"] == "deep-retrieval"
 
 
 def test_v2_deep_dive_uses_bounded_wiki_only_kernel(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import research_orchestrator, research_scheduler, research_store
+    from chronovisor import research_orchestrator, research_scheduler, research_store
 
     scheduler_root = tmp_path / "scheduler"
     monkeypatch.setattr(research_scheduler, "SYNC_DIR", scheduler_root / "sync")
@@ -143,7 +143,7 @@ def test_v2_deep_dive_uses_bounded_wiki_only_kernel(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(research_store, "ResearchStore", lambda: store)
 
     def tool(action, _context):
-        if action.type.value == "wiki_search":
+        if action.type.value == "chronovisor_search":
             return {
                 "query": "q",
                 "search_mode": "bm25",
@@ -187,7 +187,7 @@ def _router_config() -> DecisionRouterConfig:
 
 
 def test_llm_requeries_repairs_invalid_json_in_same_session(monkeypatch) -> None:
-    from llm_wiki_mcp import ollama
+    from chronovisor import ollama
 
     responses = iter(
         [
@@ -218,7 +218,7 @@ def test_llm_requeries_repairs_invalid_json_in_same_session(monkeypatch) -> None
 
 
 def test_llm_requeries_fails_closed_after_repeated_invalid_json(monkeypatch) -> None:
-    from llm_wiki_mcp import ollama
+    from chronovisor import ollama
 
     calls = 0
 
@@ -246,10 +246,10 @@ def test_injected_requery_transport_does_not_pollute_production_audit(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import ollama, wiki
+    from chronovisor import ollama, store
 
-    wiki_root = tmp_path / "wiki"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
+    chronovisor_root = tmp_path / "wiki"
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(ollama, "is_available", lambda: True)
     monkeypatch.setattr(deep_retrieval, "load_decision_router_config", _router_config)
 
@@ -262,4 +262,4 @@ def test_injected_requery_transport_does_not_pollute_production_audit(
     )
 
     assert queries == ["follow up"]
-    assert not (wiki_root / "runtime" / "local-consensus").exists()
+    assert not (chronovisor_root / "runtime" / "local-consensus").exists()

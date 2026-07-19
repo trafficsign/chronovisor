@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_wiki_mcp import golden_expand
+from chronovisor import golden_expand
 
 
 class FakeStore:

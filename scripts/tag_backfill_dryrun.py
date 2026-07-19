@@ -4,7 +4,7 @@
 Generates the *would-be* tag patches for the N most-recently-updated
 pages that lack a ``tags:`` frontmatter field, writes per-page artefacts
 (original / patched / diff / meta) under
-``~/.wiki/.tag-backfill-dryrun/``, and produces a single morning-review
+``~/.chronovisor/.tag-backfill-dryrun/``, and produces a single morning-review
 summary in ``~/projects/plan/inbox/`` so a human can decide whether
 the LLM's tag choices look reasonable before committing to a full
 1631-page sweep.
@@ -28,18 +28,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from llm_wiki_mcp.frontmatter import parse as fm_parse, patch as fm_patch  # noqa: E402
-from llm_wiki_mcp.index_store import get_store  # noqa: E402
-from llm_wiki_mcp.ollama import generate as _ollama_generate  # noqa: E402
-from llm_wiki_mcp.tag_distribution import (  # noqa: E402
+from chronovisor.frontmatter import parse as fm_parse, patch as fm_patch  # noqa: E402
+from chronovisor.index_store import get_store  # noqa: E402
+from chronovisor.ollama import generate as _ollama_generate  # noqa: E402
+from chronovisor.tag_distribution import (  # noqa: E402
     TAG_REPORT_SYSTEM_PROMPT,
     parse_llm_response,
 )
-from llm_wiki_mcp.tags import SEED_TAGS  # noqa: E402
-from llm_wiki_mcp.wiki import PAGES_DIR, find_page  # noqa: E402
+from chronovisor.tags import SEED_TAGS  # noqa: E402
+from chronovisor.store import PAGES_DIR, find_page  # noqa: E402
 
 
-DRY_RUN_DIR = Path.home() / ".wiki" / ".tag-backfill-dryrun"
+DRY_RUN_DIR = Path.home() / ".chronovisor" / ".tag-backfill-dryrun"
 PLAN_INBOX = Path.home() / "projects" / "plan" / "inbox"
 
 

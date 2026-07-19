@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from llm_wiki_mcp import dashboard, orchestrator, runtime_status
+from chronovisor import dashboard, orchestrator, runtime_status
 
 
 def test_mark_batch_activity_requires_a_running_batch_job() -> None:
@@ -123,7 +123,7 @@ def test_reused_orchestrator_pid_clears_stale_live_status(monkeypatch) -> None:
 
 
 def test_original_orchestrator_process_keeps_live_status(monkeypatch) -> None:
-    from llm_wiki_mcp import orchestrator
+    from chronovisor import orchestrator
 
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(
@@ -147,7 +147,7 @@ def test_original_orchestrator_process_keeps_live_status(monkeypatch) -> None:
 
 
 def test_live_long_lived_process_without_ingest_lease_is_idle(monkeypatch) -> None:
-    from llm_wiki_mcp import orchestrator
+    from chronovisor import orchestrator
 
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(
@@ -199,8 +199,8 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    root = wiki_root / "runtime" / "local-consensus"
+    chronovisor_root = tmp_path / "wiki"
+    root = chronovisor_root / "runtime" / "local-consensus"
     active_dir = root / "active"
     active_dir.mkdir(parents=True)
     alive_pid = os.getpid()
@@ -247,7 +247,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(
         runtime_status,
         "_pid_is_alive",
@@ -417,8 +417,8 @@ def test_local_consensus_snapshot_removes_reused_pid_marker(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    active_dir = wiki_root / "runtime" / "local-consensus" / "active"
+    chronovisor_root = tmp_path / "wiki"
+    active_dir = chronovisor_root / "runtime" / "local-consensus" / "active"
     active_dir.mkdir(parents=True)
     marker_path = active_dir / "reused.json"
     marker_path.write_text(
@@ -433,7 +433,7 @@ def test_local_consensus_snapshot_removes_reused_pid_marker(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(
         dashboard,
@@ -451,8 +451,8 @@ def test_frontier_activity_snapshot_removes_reused_pid_marker(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    active_dir = wiki_root / "runtime" / "frontier-reviews" / "active"
+    chronovisor_root = tmp_path / "wiki"
+    active_dir = chronovisor_root / "runtime" / "frontier-reviews" / "active"
     active_dir.mkdir(parents=True)
     marker_path = active_dir / "reused.json"
     marker_path.write_text(
@@ -465,7 +465,7 @@ def test_frontier_activity_snapshot_removes_reused_pid_marker(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(
         dashboard,
@@ -483,8 +483,8 @@ def test_frontier_repair_snapshot_uses_guard_ledger_and_dead_owner_is_inactive(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    root = wiki_root / "runtime" / "frontier-repair"
+    chronovisor_root = tmp_path / "wiki"
+    root = chronovisor_root / "runtime" / "frontier-repair"
     root.mkdir(parents=True)
     incident_id = "incident-1"
     owner_process_started_at = datetime.fromisoformat("2026-07-11T11:00:00")
@@ -527,7 +527,7 @@ def test_frontier_repair_snapshot_uses_guard_ledger_and_dead_owner_is_inactive(
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(
         dashboard,
@@ -553,8 +553,8 @@ def test_frontier_repair_snapshot_rejects_reused_pid_and_legacy_identity(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    root = wiki_root / "runtime" / "frontier-repair"
+    chronovisor_root = tmp_path / "wiki"
+    root = chronovisor_root / "runtime" / "frontier-repair"
     root.mkdir(parents=True)
     incident_id = "incident-1"
     incident = {
@@ -579,7 +579,7 @@ def test_frontier_repair_snapshot_rejects_reused_pid_and_legacy_identity(
     }
     state_path = root / "state.json"
     state_path.write_text(json.dumps(state), encoding="utf-8")
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(
         dashboard,
@@ -610,8 +610,8 @@ def test_frontier_repair_snapshot_preserves_unavailable_identity_until_lease(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    root = wiki_root / "runtime" / "frontier-repair"
+    chronovisor_root = tmp_path / "wiki"
+    root = chronovisor_root / "runtime" / "frontier-repair"
     root.mkdir(parents=True)
     incident_id = "incident-unavailable"
     now = datetime.now().astimezone()
@@ -635,7 +635,7 @@ def test_frontier_repair_snapshot_preserves_unavailable_identity_until_lease(
     }
     state_path = root / "state.json"
     state_path.write_text(json.dumps(state), encoding="utf-8")
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(dashboard, "_process_started_at", lambda _pid: None)
 
@@ -702,32 +702,32 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
 
 
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
-    runtime_dir = wiki_root / "runtime"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    runtime_dir = chronovisor_root / "runtime"
     raw_dir.mkdir(parents=True)
-    (wiki_root / "pages").mkdir()
-    (wiki_root / "system").mkdir()
+    (chronovisor_root / "pages").mkdir()
+    (chronovisor_root / "system").mkdir()
     (raw_dir / "r1.md").write_text("raw")
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
 
-    from llm_wiki_mcp import orchestrator, wiki
+    from chronovisor import orchestrator, store
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(wiki, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(wiki, "PAGES_DIR", wiki_root / "pages")
-    monkeypatch.setattr(wiki, "SYSTEM_DIR", wiki_root / "system")
-    monkeypatch.setattr(wiki, "INDEX_FILE", wiki_root / "index.md")
-    monkeypatch.setattr(wiki, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(store, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(store, "PAGES_DIR", chronovisor_root / "pages")
+    monkeypatch.setattr(store, "SYSTEM_DIR", chronovisor_root / "system")
+    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
+    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(
-        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
     monkeypatch.setattr(
         dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []}
@@ -949,7 +949,7 @@ def test_dashboard_lan_link_bootstraps_cookie_and_removes_query_token(
     monkeypatch,
 ) -> None:
     token = "a" * 43
-    monkeypatch.setattr(dashboard, "_dashboard_lan_hosts", lambda: ["wiki.local"])
+    monkeypatch.setattr(dashboard, "_dashboard_lan_hosts", lambda: ["store.local"])
     server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
     server.lan_access_enabled = True
     server.lan_access_token = token
@@ -975,7 +975,7 @@ def test_dashboard_lan_link_bootstraps_cookie_and_removes_query_token(
     assert page.status_code == 200
     assert access.json() == {
         "enabled": True,
-        "urls": [f"http://wiki.local:{port}/?access_token={token}"],
+        "urls": [f"http://store.local:{port}/?access_token={token}"],
         "trusted_lan_only": True,
     }
 
@@ -1021,7 +1021,7 @@ def test_dashboard_private_lan_uses_basic_auth_and_keeps_recovery_token(
 
     assert challenge.status_code == 401
     assert challenge.headers["www-authenticate"] == (
-        'Basic realm="LLM Wiki Dashboard", charset="UTF-8"'
+        'Basic realm="Chronovisor Dashboard", charset="UTF-8"'
     )
     assert rejected.status_code == 401
     assert accepted.status_code == 200
@@ -1076,13 +1076,13 @@ def test_dashboard_basic_auth_rate_limits_repeated_failures(
 def test_cached_snapshot_reuses_idle_result_until_a_source_changes(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    runtime_dir = wiki_root / "runtime"
+    chronovisor_root = tmp_path / "wiki"
+    runtime_dir = chronovisor_root / "runtime"
     runtime_dir.mkdir(parents=True)
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(
-        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
@@ -1117,12 +1117,12 @@ def test_cached_snapshot_reuses_idle_result_until_a_source_changes(
 def test_cached_snapshot_uses_short_ttl_while_active(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    wiki_root.mkdir()
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    chronovisor_root = tmp_path / "wiki"
+    chronovisor_root.mkdir()
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(
-        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
     dashboard._SNAPSHOT_CACHE.update(
         {
@@ -1201,7 +1201,7 @@ def test_cached_snapshot_serves_stale_while_refreshing_in_background(
 def test_fast_snapshot_reads_status_without_building_archive_components(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(dashboard, "init_wiki", lambda: None)
+    monkeypatch.setattr(dashboard, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         runtime_status,
         "read_status",
@@ -1233,8 +1233,8 @@ def test_fast_snapshot_reads_status_without_building_archive_components(
 def test_materialized_component_survives_process_memory_reset_and_rejects_tamper(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    chronovisor_root = tmp_path / "wiki"
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(dashboard.time, "time", lambda: 100.0)
     calls = 0
 
@@ -1249,7 +1249,7 @@ def test_materialized_component_survives_process_memory_reset_and_rejects_tamper
         builder=build,
         audit_seconds=60,
     ) == {"serial": 1}
-    cache_key = (str(wiki_root), "test-view")
+    cache_key = (str(chronovisor_root), "test-view")
     dashboard._MATERIALIZED_COMPONENTS.pop(cache_key, None)
 
     assert dashboard._materialized_component(
@@ -1278,8 +1278,8 @@ def test_materialized_component_survives_process_memory_reset_and_rejects_tamper
 def test_materialized_component_returns_stale_while_audit_refreshes(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    chronovisor_root = tmp_path / "wiki"
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     clock = [100.0]
     monkeypatch.setattr(dashboard.time, "time", lambda: clock[0])
     calls = 0
@@ -1327,13 +1327,13 @@ def test_materialized_component_returns_stale_while_audit_refreshes(
 def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    runtime_dir = wiki_root / "runtime"
+    chronovisor_root = tmp_path / "wiki"
+    runtime_dir = chronovisor_root / "runtime"
     runtime_dir.mkdir(parents=True)
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(
-        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
@@ -1369,12 +1369,12 @@ def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
 def test_cached_idle_snapshot_invalidates_on_standalone_consensus_activity(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    wiki_root.mkdir()
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    chronovisor_root = tmp_path / "wiki"
+    chronovisor_root.mkdir()
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(
-        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
     dashboard._SNAPSHOT_CACHE.update(
         {
@@ -1397,7 +1397,7 @@ def test_cached_idle_snapshot_invalidates_on_standalone_consensus_activity(
     monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
 
     assert dashboard._cached_snapshot()["serial"] == 1
-    active_dir = wiki_root / "runtime" / "local-consensus" / "active"
+    active_dir = chronovisor_root / "runtime" / "local-consensus" / "active"
     active_dir.mkdir(parents=True)
     (active_dir / "request.json").write_text("{}\n", encoding="utf-8")
     assert dashboard._cached_snapshot()["serial"] == 2
@@ -1407,31 +1407,31 @@ def test_cached_idle_snapshot_invalidates_on_standalone_consensus_activity(
 def test_build_snapshot_surfaces_frontier_human_required(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
-    runtime_dir = wiki_root / "runtime"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    runtime_dir = chronovisor_root / "runtime"
     raw_dir.mkdir(parents=True)
-    (wiki_root / "pages").mkdir()
-    (wiki_root / "system").mkdir()
+    (chronovisor_root / "pages").mkdir()
+    (chronovisor_root / "system").mkdir()
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
 
-    from llm_wiki_mcp import orchestrator, wiki
+    from chronovisor import orchestrator, store
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(wiki, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(wiki, "PAGES_DIR", wiki_root / "pages")
-    monkeypatch.setattr(wiki, "SYSTEM_DIR", wiki_root / "system")
-    monkeypatch.setattr(wiki, "INDEX_FILE", wiki_root / "index.md")
-    monkeypatch.setattr(wiki, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(store, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(store, "PAGES_DIR", chronovisor_root / "pages")
+    monkeypatch.setattr(store, "SYSTEM_DIR", chronovisor_root / "system")
+    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
+    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(
-        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
     monkeypatch.setattr(
         dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []}
@@ -1760,14 +1760,14 @@ def test_decision_router_dashboard_cache_ttl_starts_after_resolution(
 
 
 def test_self_heal_snapshot_surfaces_watch_status(tmp_path: Path, monkeypatch) -> None:
-    wiki_root = tmp_path / "wiki"
-    failures_dir = wiki_root / "runtime" / "failures"
+    chronovisor_root = tmp_path / "wiki"
+    failures_dir = chronovisor_root / "runtime" / "failures"
     packets_dir = failures_dir / "packets"
-    logs_dir = wiki_root / "logs"
+    logs_dir = chronovisor_root / "logs"
     packets_dir.mkdir(parents=True)
     logs_dir.mkdir(parents=True)
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(
         dashboard,
         "_frontier_preflight_snapshot",
@@ -1829,8 +1829,8 @@ def test_repair_deferred_packet_stays_pending_and_warns(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    packets_dir = wiki_root / "runtime" / "failures" / "packets"
+    chronovisor_root = tmp_path / "wiki"
+    packets_dir = chronovisor_root / "runtime" / "failures" / "packets"
     packets_dir.mkdir(parents=True)
     packet = {
         "failure_id": "system-repair-1",
@@ -1845,7 +1845,7 @@ def test_repair_deferred_packet_stays_pending_and_warns(
         json.dumps(packet),
         encoding="utf-8",
     )
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(
         dashboard,
         "_frontier_preflight_snapshot",
@@ -1875,9 +1875,9 @@ def test_frontier_dashboard_snapshot_never_runs_codex_preflight(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import frontier_review
+    from chronovisor import frontier_review
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(
         frontier_review,
         "run_frontier_preflight",
@@ -1895,13 +1895,13 @@ def test_frontier_dashboard_snapshot_never_runs_codex_preflight(
 
 
 def test_recall_snapshot_reads_logs_and_eval(tmp_path: Path, monkeypatch) -> None:
-    wiki_root = tmp_path / "wiki"
-    recall_dir = wiki_root / "recall"
-    eval_dir = wiki_root / "runtime" / "eval"
+    chronovisor_root = tmp_path / "wiki"
+    recall_dir = chronovisor_root / "recall"
+    eval_dir = chronovisor_root / "runtime" / "eval"
     recall_dir.mkdir(parents=True)
     eval_dir.mkdir(parents=True)
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
 
     records = [
         {
@@ -1966,7 +1966,7 @@ def test_recall_snapshot_reads_logs_and_eval(tmp_path: Path, monkeypatch) -> Non
 
 
 def test_recall_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path / "wiki")
 
     recall = dashboard._recall_snapshot()
 
@@ -1980,14 +1980,14 @@ def test_recall_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
 def test_save_history_snapshot_combines_raw_drain_and_log(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
-    logs_dir = wiki_root / "logs"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    logs_dir = chronovisor_root / "logs"
     raw_dir.mkdir(parents=True)
     logs_dir.mkdir(parents=True)
-    log_file = wiki_root / "log.md"
+    log_file = chronovisor_root / "log.md"
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(dashboard, "LOG_FILE", log_file)
 
     raw_names = [
@@ -2019,7 +2019,7 @@ def test_save_history_snapshot_combines_raw_drain_and_log(
             [
                 "# Change Log",
                 "- [2026-07-01 12:31] ingest | created save-history-dashboard",
-                "- [2026-07-01 12:32] ingest | updated llm-wiki-dashboard",
+                "- [2026-07-01 12:32] ingest | updated chronovisor-dashboard",
                 "- [2026-07-02 12:32] ingest | updated save-history-dashboard",
             ]
         ),
@@ -2080,18 +2080,18 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
     raw_dir.mkdir(parents=True)
     raw_name = "20260704-120000-codex-processed-without-drain-log-aaaaaaaa.md"
     failed_name = "20260704-121000-codex-explicit-failure-bbbbbbbb.md"
     (raw_dir / raw_name).write_text("raw", encoding="utf-8")
     (raw_dir / failed_name).write_text("bad", encoding="utf-8")
-    (wiki_root / ".orchestrator_state.json").write_text(
+    (chronovisor_root / ".orchestrator_state.json").write_text(
         json.dumps({"processed_raw_files": [raw_name, failed_name]}),
         encoding="utf-8",
     )
-    logs_dir = wiki_root / "logs"
+    logs_dir = chronovisor_root / "logs"
     logs_dir.mkdir()
     (logs_dir / "ingest-drain-20260704.jsonl").write_text(
         json.dumps(
@@ -2107,8 +2107,8 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
 
     history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
     day = history["days"][0]
@@ -2136,16 +2136,16 @@ def test_save_history_excludes_generated_semantic_projection_children(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
     raw_dir.mkdir(parents=True)
     parent_name = "20260704-120000-codex-parent-aaaaaaaa.md"
     child_name = f"semantic-{'a' * 64}-child-00000001-{'b' * 64}.md"
     (raw_dir / parent_name).write_text("parent", encoding="utf-8")
     (raw_dir / child_name).write_text("derived child", encoding="utf-8")
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
 
     history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
 
@@ -2162,9 +2162,9 @@ def test_save_history_expands_fragment_group_status_and_processed_wins(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
-    logs_dir = wiki_root / "logs"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    logs_dir = chronovisor_root / "logs"
     raw_dir.mkdir(parents=True)
     logs_dir.mkdir()
     fragment_names = [
@@ -2188,8 +2188,8 @@ def test_save_history_expands_fragment_group_status_and_processed_wins(
     drain_log = logs_dir / "ingest-drain-20260704.jsonl"
     drain_log.write_text(json.dumps(failed) + "\n", encoding="utf-8")
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
 
     failed_history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
     assert failed_history["totals"]["failed_bytes"] == 6
@@ -2218,7 +2218,7 @@ def test_save_history_expands_fragment_group_status_and_processed_wins(
 
 
 def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(dashboard, "LOG_FILE", tmp_path / "wiki" / "log.md")
 
     history = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))
@@ -2234,16 +2234,16 @@ def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
 def test_save_history_only_includes_segment_detail_for_recent_chart_window(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
     raw_dir.mkdir(parents=True)
     old_name = "20260701-120000-codex-old-detail-aaaaaaaa.md"
     recent_name = "20260702-120000-codex-recent-detail-bbbbbbbb.md"
     (raw_dir / old_name).write_text("old", encoding="utf-8")
     (raw_dir / recent_name).write_text("recent", encoding="utf-8")
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
 
     history = dashboard._save_history_snapshot(days=31, today=date(2026, 7, 31))
     by_date = {row["date"]: row for row in history["days"]}
@@ -2288,15 +2288,15 @@ def test_save_history_compacts_large_days_without_losing_status_bytes() -> None:
 def test_knowledge_mix_snapshot_groups_pages_by_category(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    pages_dir = wiki_root / "pages"
+    chronovisor_root = tmp_path / "wiki"
+    pages_dir = chronovisor_root / "pages"
     (pages_dir / "ai").mkdir(parents=True)
     (pages_dir / "macos").mkdir()
     (pages_dir / "ai" / "agent-memory.md").write_text("a" * 20, encoding="utf-8")
     (pages_dir / "ai" / "evals.md").write_text("b" * 10, encoding="utf-8")
     (pages_dir / "macos" / "display.md").write_text("c" * 15, encoding="utf-8")
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
 
     mix = dashboard._knowledge_mix_snapshot()
 

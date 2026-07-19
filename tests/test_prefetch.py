@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_wiki_mcp.prefetch import build_prefetch_cache, prefetch_page_ids
+from chronovisor.prefetch import build_prefetch_cache, prefetch_page_ids
 
 
 def test_prefetch_cache_matches_project_bucket_and_tokens(tmp_path: Path) -> None:
@@ -11,7 +11,7 @@ def test_prefetch_cache_matches_project_bucket_and_tokens(tmp_path: Path) -> Non
     out_file = tmp_path / "prefetch.json"
     row = {
         "host": "codex",
-        "cwd": "/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        "cwd": "/Users/trafficsign/projects/personal/chronovisor",
         "prompt_preview": "recall hook",
         "queries": ["recall runtime"],
         "pages": ["recall-runtime"],
@@ -25,7 +25,7 @@ def test_prefetch_cache_matches_project_bucket_and_tokens(tmp_path: Path) -> Non
     )
     pages = prefetch_page_ids(
         host="codex",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
         queries=["runtime"],
         path=out_file,
     )

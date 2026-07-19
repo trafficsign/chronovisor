@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.research_verification import run_verification
+from chronovisor.research_verification import run_verification
 
 
 def test_independent_verifier_is_temp_only_and_reports_commands() -> None:

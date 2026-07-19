@@ -3,14 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 
-from llm_wiki_mcp import search_eval
-from llm_wiki_mcp.convergence import CycleBudget
-from llm_wiki_mcp.decision_router import canonical_agreement_signature
-from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
-from llm_wiki_mcp.feedback_ledger import feedback_row_sha256
-from llm_wiki_mcp.reranker import RerankOutcome
-from llm_wiki_mcp.runtime_config import RerankerConfig
-from llm_wiki_mcp.search import ScoredPage
+from chronovisor import search_eval
+from chronovisor.convergence import CycleBudget
+from chronovisor.decision_router import canonical_agreement_signature
+from chronovisor.decision_schema_manifest import production_decision_schemas
+from chronovisor.feedback_ledger import feedback_row_sha256
+from chronovisor.reranker import RerankOutcome
+from chronovisor.runtime_config import RerankerConfig
+from chronovisor.search import ScoredPage
 
 
 def page(page_id: str, score: float = 1.0, *, status: str = "active") -> ScoredPage:
@@ -156,7 +156,7 @@ def self_tune_policy(marker: str = "a", *, previous: dict | None = None) -> dict
 
 
 def test_language_and_kind_buckets() -> None:
-    assert search_eval.language_bucket("LLM Wiki 検索") == "mixed"
+    assert search_eval.language_bucket("Chronovisor 検索") == "mixed"
     assert search_eval.language_bucket("検索エンジン") == "ja"
     assert search_eval.language_bucket("search engine") == "en"
     assert search_eval.query_kind("短い質問?") == "short"
@@ -175,8 +175,8 @@ def test_build_candidates_uses_feedback_labels(tmp_path) -> None:
         [
             {
                 "kind": "missed_candidate",
-                "prompt": "LLM Wiki 検索 ロードマップ",
-                "expected_pages": ["llm-wiki-search-improvement-roadmap"],
+                "prompt": "Chronovisor 検索 ロードマップ",
+                "expected_pages": ["chronovisor-search-improvement-roadmap"],
                 "source": "auditor",
                 "ref": "d1",
             },
@@ -206,7 +206,7 @@ def test_build_candidates_uses_feedback_labels(tmp_path) -> None:
     )
 
     assert len(examples) == 3
-    assert examples[0].expected_pages == ("llm-wiki-search-improvement-roadmap",)
+    assert examples[0].expected_pages == ("chronovisor-search-improvement-roadmap",)
     assert examples[0].negative_pages == ()
     assert examples[0].language == "mixed"
     assert examples[0].reviewed is False
@@ -1433,7 +1433,7 @@ def test_frontier_label_quarantine_reopens_after_cooldown(
             }
         ],
     )
-    monkeypatch.setenv("LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "1")
+    monkeypatch.setenv("CHRONOVISOR_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "1")
 
     result = search_eval.review_label_queue_with_frontier(
         queue_file=queue_file,

@@ -142,13 +142,13 @@ class _FunctionInventory(ast.NodeVisitor):
 def _ingest_aliases(tree: ast.AST) -> set[str]:
     aliases = {"ingest"}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "llm_wiki_mcp":
+        if isinstance(node, ast.ImportFrom) and node.module == "chronovisor":
             for name in node.names:
                 if name.name == "ingest":
                     aliases.add(name.asname or name.name)
         elif isinstance(node, ast.Import):
             for name in node.names:
-                if name.name == "llm_wiki_mcp.ingest":
+                if name.name == "chronovisor.ingest":
                     aliases.add(name.asname or "ingest")
     return aliases
 
@@ -174,7 +174,7 @@ def _ingest_references(tree: ast.AST) -> tuple[Counter[str], Counter[str]]:
         ):
             patches[name.value] += 1
         elif isinstance(owner, ast.Constant) and isinstance(owner.value, str):
-            prefix = "llm_wiki_mcp.ingest."
+            prefix = "chronovisor.ingest."
             if owner.value.startswith(prefix):
                 patches[owner.value.removeprefix(prefix).split(".", 1)[0]] += 1
     return attributes, patches
@@ -205,7 +205,7 @@ def _reference_count(needle: str, files: Iterable[Path], *, exclude: Path | None
 
 def scan_repository(root: Path) -> dict[str, Any]:
     root = root.resolve()
-    src_root = root / "src" / "llm_wiki_mcp"
+    src_root = root / "src" / "chronovisor"
     python_files = _python_files(src_root)
     repository_python = _python_files(root)
     text_files = _text_files(root)

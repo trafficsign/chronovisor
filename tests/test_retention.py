@@ -4,7 +4,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from llm_wiki_mcp import retention
+from chronovisor import retention
 
 
 class FakeStore:

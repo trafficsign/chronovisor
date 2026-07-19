@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import burn_monitor
+from chronovisor import burn_monitor
 
 
 def test_evidence_writer_uses_exclusive_create_sorted_utf8_and_fsync(

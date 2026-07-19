@@ -6,10 +6,10 @@ import ast
 from pathlib import Path
 
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "llm_wiki_mcp"
+PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "chronovisor"
 ROUTINE_MODULES = (
-    "codex_save.py",
-    "claude_code_save.py",
+    "codex_record.py",
+    "claude_code_record.py",
     "ingest.py",
     "content_correction.py",
     "recall_improvement.py",

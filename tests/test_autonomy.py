@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import autonomy
-from llm_wiki_mcp.convergence import ConvergenceStore, CycleBudget, RetryPolicy
-from llm_wiki_mcp.decision_router import canonical_agreement_signature
-from llm_wiki_mcp.decision_schema_manifest import production_decision_schemas
-from llm_wiki_mcp.frontmatter import parse as parse_frontmatter
+from chronovisor import autonomy
+from chronovisor.convergence import ConvergenceStore, CycleBudget, RetryPolicy
+from chronovisor.decision_router import canonical_agreement_signature
+from chronovisor.decision_schema_manifest import production_decision_schemas
+from chronovisor.frontmatter import parse as parse_frontmatter
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
@@ -25,7 +25,7 @@ def isolate_decision_authority_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import page_mutation
+    from chronovisor import page_mutation
 
     monkeypatch.setattr(
         page_mutation,
@@ -236,7 +236,7 @@ def test_duplicate_resolution_routes_exact_high_confidence_pair_without_mutation
     monkeypatch.setattr(
         autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
     )
-    monkeypatch.setattr("llm_wiki_mcp.index_store.get_store", lambda: None)
+    monkeypatch.setattr("chronovisor.index_store.get_store", lambda: None)
     monkeypatch.setattr(
         autonomy,
         "_page_quality",
@@ -328,7 +328,7 @@ def test_soft_supersede_preserves_correction_that_lands_before_locked_cas(
         loser.write_text(corrected, encoding="utf-8")
         yield
 
-    monkeypatch.setattr(autonomy, "wiki_mutation_lock", correction_wins)
+    monkeypatch.setattr(autonomy, "chronovisor_mutation_lock", correction_wins)
 
     result = autonomy._soft_supersede_page(
         loser="b",
@@ -452,7 +452,7 @@ def test_lifecycle_guard_avoids_inverse_lock_order(
         order.append("wiki-exit")
 
     monkeypatch.setattr(store, "_exclusive_lock", tracked_state_lock)
-    monkeypatch.setattr(autonomy, "wiki_mutation_lock", tracked_wiki_lock)
+    monkeypatch.setattr(autonomy, "chronovisor_mutation_lock", tracked_wiki_lock)
 
     with autonomy._lifecycle_mutation_guard(
         ["old"], page_path=page, correction_store=store
@@ -2091,7 +2091,7 @@ def test_page_status_patch_rejects_stale_snapshot(monkeypatch, tmp_path: Path) -
 def test_watchdog_alerts_when_sleep_never_ran(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(autonomy, "WATCHDOG_FILE", tmp_path / "watchdog.json")
     monkeypatch.setattr(
-        "llm_wiki_mcp.health.health_snapshot",
+        "chronovisor.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2118,7 +2118,7 @@ def test_watchdog_alerts_when_sleep_never_ran(monkeypatch, tmp_path: Path) -> No
 def test_watchdog_does_not_alert_on_convergence_semantic_defer(monkeypatch) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "llm_wiki_mcp.health.health_snapshot",
+        "chronovisor.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2152,7 +2152,7 @@ def test_watchdog_does_not_alert_on_convergence_semantic_defer(monkeypatch) -> N
 def test_watchdog_alerts_on_operational_convergence_quarantine(monkeypatch) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "llm_wiki_mcp.health.health_snapshot",
+        "chronovisor.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2186,7 +2186,7 @@ def test_watchdog_still_alerts_on_operational_background_quarantine(
 ) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "llm_wiki_mcp.health.health_snapshot",
+        "chronovisor.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2218,7 +2218,7 @@ def test_watchdog_still_alerts_on_operational_background_quarantine(
 def test_watchdog_ignores_retained_old_background_quarantine(monkeypatch) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "llm_wiki_mcp.health.health_snapshot",
+        "chronovisor.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2306,7 +2306,7 @@ def test_watchdog_notification_sends_once_and_reports_recovery(monkeypatch) -> N
 
 def test_watchdog_read_only_never_sends_notification(monkeypatch) -> None:
     monkeypatch.setattr(
-        "llm_wiki_mcp.health.health_snapshot",
+        "chronovisor.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2350,7 +2350,7 @@ def test_watchdog_history_is_compact_and_bounded_to_1000_lines(
     monkeypatch.setattr(autonomy, "WATCHDOG_HISTORY", history_file)
     monkeypatch.setattr(autonomy, "WATCHDOG_FILE", tmp_path / "watchdog-latest.json")
     monkeypatch.setattr(
-        "llm_wiki_mcp.health.health_snapshot",
+        "chronovisor.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.96},
             "queues": {"duplicate_candidates": 7, "lint_repair": 9},
@@ -2413,7 +2413,7 @@ def test_regression_guard_quarantines_cycle_without_global_git_reset(
                 {"type": "capture_rate_regression", "before": 0.95, "after": 0.7}
             ]
         },
-        wiki_snapshot={"head": "abc123"},
+        snapshot={"head": "abc123"},
         auto_revert=True,
         write=True,
     )
@@ -2431,7 +2431,7 @@ def test_regression_guard_quarantines_cycle_without_global_git_reset(
     autonomy.regression_guard(
         before_health={},
         after_watchdog={"alerts": [{"type": "capture_rate_regression"}]},
-        wiki_snapshot={"head": "def456"},
+        snapshot={"head": "def456"},
         auto_revert=True,
         write=False,
     )
@@ -2449,12 +2449,14 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     assert autonomy.SLEEP_LABEL in labels
     assert autonomy.CONVERGE_LABEL in labels
     assert autonomy.WATCHDOG_LABEL in labels
+    assert autonomy.DEADMAN_LABEL in labels
+    assert autonomy.SOAK_LABEL in labels
     programs = {item["label"]: item["program"] for item in payload["plists"]}
-    assert Path(programs[autonomy.SLEEP_LABEL][0]).name == "llm-wiki-sleep"
-    assert Path(programs[autonomy.WATCHDOG_LABEL][0]).name == "llm-wiki-watchdog"
+    assert Path(programs[autonomy.SLEEP_LABEL][0]).name == "chronovisor-sleep"
+    assert Path(programs[autonomy.WATCHDOG_LABEL][0]).name == "chronovisor-watchdog"
     assert (
         Path(programs[autonomy.DEADMAN_LABEL][0]).name
-        == "llm-wiki-deadman-observer"
+        == "chronovisor-deadman-observer"
     )
     assert "/usr/bin/python3" not in programs[autonomy.DEADMAN_LABEL]
     watchdog_plist = next(
@@ -2464,16 +2466,63 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     command = payload["wrappers"][0]["command"]
     assert command[0] == "/opt/homebrew/bin/uvx"
     assert "--refresh-package" in command
-    assert "git+ssh://git@github.com/trafficsign/llm-wiki-mcp" in command
+    assert "git+ssh://git@github.com/trafficsign/chronovisor" in command
     assert "--json" not in payload["wrappers"][0]["command"]
     converge = next(
         item for item in payload["plists"] if item["label"] == autonomy.CONVERGE_LABEL
     )
-    assert converge["program"][0].endswith("llm-wiki-converge")
+    assert converge["program"][0].endswith("chronovisor-converge")
     converge_wrapper = next(
         item
         for item in payload["wrappers"]
-        if Path(item["path"]).name == "llm-wiki-converge"
+        if Path(item["path"]).name == "chronovisor-converge"
     )
     assert "--no-sleep" in converge_wrapper["command"]
     assert "--with-sleep" not in converge_wrapper["command"]
+    soak_wrapper = next(
+        item
+        for item in payload["wrappers"]
+        if Path(item["path"]).name == "chronovisor-soak"
+    )
+    assert "chronovisor-burn-monitor" in soak_wrapper["command"]
+    assert "--expected-commit" in soak_wrapper["command"]
+
+
+def test_uninstall_launchd_dry_run_lists_all_generated_artifacts() -> None:
+    payload = autonomy.uninstall_launchd(dry_run=True, unload=True)
+
+    assert payload["status"] == "ok"
+    assert payload["dry_run"] is True
+    assert len(payload["plists"]) == 5
+    assert any(path.endswith("chronovisor-soak.plist") for path in payload["plists"])
+    assert any(path.endswith("chronovisor-soak") for path in payload["wrappers"])
+
+
+def test_install_then_uninstall_launchd_round_trip_in_fixture(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / ".chronovisor"
+    launch_agents = tmp_path / "LaunchAgents"
+    wrappers = root / "bin"
+    monkeypatch.setattr(autonomy, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(autonomy, "LAUNCH_AGENT_DIR", launch_agents)
+    monkeypatch.setattr(autonomy, "WRAPPER_DIR", wrappers)
+    monkeypatch.setattr(autonomy, "_uvx_path", lambda: "/opt/homebrew/bin/uvx")
+    monkeypatch.setattr(
+        autonomy,
+        "runtime_identity",
+        lambda: {"expected_commit": "a" * 40},
+    )
+
+    installed = autonomy.install_launchd(dry_run=False, load=False)
+
+    assert installed["status"] == "ok"
+    assert len(list(launch_agents.glob("com.trafficsign.chronovisor-*.plist"))) == 5
+    assert (wrappers / "chronovisor-soak").exists()
+    assert "a" * 40 in (wrappers / "chronovisor-soak").read_text(encoding="utf-8")
+
+    removed = autonomy.uninstall_launchd(dry_run=False, unload=False)
+
+    assert removed["status"] == "ok"
+    assert not list(launch_agents.glob("*.plist"))
+    assert not any(Path(path).exists() for path in removed["wrappers"])

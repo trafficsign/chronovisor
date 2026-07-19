@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import adoption_corpus, read_back_repair
-from llm_wiki_mcp.adoption_corpus import (
+from chronovisor import adoption_corpus, read_back_repair
+from chronovisor.adoption_corpus import (
     CONTRACT_SOURCE,
     HISTORICAL_SOURCE,
     INDEPENDENT_LABEL_EVIDENCE_KINDS,
@@ -26,18 +26,18 @@ from llm_wiki_mcp.adoption_corpus import (
     compile_adoption_corpus,
     contract_candidates,
 )
-from llm_wiki_mcp.decision_router import decision_context_buckets
-from llm_wiki_mcp.decision_schema_manifest import (
+from chronovisor.decision_router import decision_context_buckets
+from chronovisor.decision_schema_manifest import (
     production_decision_schemas,
     production_schema_manifest,
 )
-from llm_wiki_mcp.local_model_eval import (
+from chronovisor.local_model_eval import (
     ReplayInputError,
     STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION,
     inspect_replays,
     load_replay_corpus,
 )
-from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+from chronovisor.runtime_config import DecisionRouterConfig
 
 
 def _expected(schema: dict[str, object]) -> dict[str, object]:
@@ -113,7 +113,7 @@ def _old_search_label_row(index: int, *, parseable: bool) -> dict[str, object]:
     )
     return _legacy_row(
         "search_label",
-        "You are the trusted frontier label reviewer for LLM Wiki search "
+        "You are the trusted frontier label reviewer for Chronovisor search "
         f"evaluation.\nCandidate:\n{payload}",
     )
 
@@ -464,7 +464,7 @@ def test_read_back_contracts_exactly_match_the_production_request_builder(
         }
 
     monkeypatch.setattr(
-        "llm_wiki_mcp.frontier_review.run_structured_review",
+        "chronovisor.frontier_review.run_structured_review",
         fake_review,
     )
     first = rows[0]

@@ -14,11 +14,11 @@ def test_save_load_segments_semantic_defer_returns_to_pending_after_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import dashboard
+    from chronovisor import dashboard
 
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
-    logs_dir = wiki_root / "logs"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    logs_dir = chronovisor_root / "logs"
     raw_dir.mkdir(parents=True)
     logs_dir.mkdir()
     names = {
@@ -57,8 +57,8 @@ def test_save_load_segments_semantic_defer_returns_to_pending_after_release(
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     active_deferred = {names["deferred"]: "semantic_no_quorum"}
     monkeypatch.setattr(
         dashboard,
@@ -115,11 +115,11 @@ def test_save_load_shard_continuation_is_pending_not_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import dashboard
+    from chronovisor import dashboard
 
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
-    logs_dir = wiki_root / "logs"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    logs_dir = chronovisor_root / "logs"
     raw_dir.mkdir(parents=True)
     logs_dir.mkdir()
     name = "20260714-101000-codex-continued-eeeeeeee.md"
@@ -148,8 +148,8 @@ def test_save_load_shard_continuation_is_pending_not_failed(
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(
         dashboard,
         "_operational_deferred_raw_statuses",
@@ -177,10 +177,10 @@ def test_save_load_attributes_held_projection_child_to_saved_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import dashboard, raw_semantic_projection
+    from chronovisor import dashboard, raw_semantic_projection
 
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
     raw_dir.mkdir(parents=True)
     session_key = "c" * 24
     idempotency_key = f"claude-code-{session_key}-from1-to2"
@@ -200,7 +200,7 @@ def test_save_load_attributes_held_projection_child_to_saved_parent(
     (raw_dir / f"semantic-{projection_id}.manifest.json").write_text(
         "placeholder", encoding="utf-8"
     )
-    (wiki_root / ".orchestrator_state.json").write_text(
+    (chronovisor_root / ".orchestrator_state.json").write_text(
         json.dumps({"processed_raw_files": [parent_name, processed_child_name]}),
         encoding="utf-8",
     )
@@ -225,8 +225,8 @@ def test_save_load_attributes_held_projection_child_to_saved_parent(
         },
     }
     active_deferred = {child_name: "semantic_no_quorum"}
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(
         dashboard,
         "_operational_deferred_raw_statuses",
@@ -262,7 +262,7 @@ def test_save_load_attributes_held_projection_child_to_saved_parent(
     assert released["totals"]["deferred_bytes"] == 0
     assert released["days"][0]["raw_segments"][0]["status"] == "pending"
 
-    (wiki_root / ".orchestrator_state.json").write_text(
+    (chronovisor_root / ".orchestrator_state.json").write_text(
         json.dumps(
             {
                 "processed_raw_files": [
@@ -285,7 +285,7 @@ def test_save_load_attributes_held_projection_child_to_saved_parent(
 def test_projection_parent_resolution_rejects_unbound_receipt_and_symlink(
     tmp_path: Path,
 ) -> None:
-    from llm_wiki_mcp import dashboard
+    from chronovisor import dashboard
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -318,7 +318,7 @@ def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import dashboard, raw_semantic_projection, raw_store
+    from chronovisor import dashboard, raw_semantic_projection, raw_store
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -377,7 +377,7 @@ def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
 def test_projection_parent_resolution_verifies_archive_once_without_member_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import dashboard, legacy_archive
+    from chronovisor import dashboard, legacy_archive
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -447,15 +447,15 @@ def test_snapshot_separates_semantic_and_operational_holds_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import dashboard, orchestrator, runtime_status
-    from llm_wiki_mcp import decision_policy, runtime_config
+    from chronovisor import dashboard, orchestrator, runtime_status
+    from chronovisor import decision_policy, runtime_config
 
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
     raw_dir.mkdir(parents=True)
     for name in ("semantic.md", "operational.md"):
         (raw_dir / name).write_text(name, encoding="utf-8")
-    artifact_dir = wiki_root / "runtime" / "raw-projections" / "artifacts"
+    artifact_dir = chronovisor_root / "runtime" / "raw-projections" / "artifacts"
     artifact_dir.mkdir(parents=True)
     (artifact_dir / "semantic.md").write_text(
         "same logical semantic child",
@@ -471,8 +471,8 @@ def test_snapshot_separates_semantic_and_operational_holds_once(
             "operational.md": "self_heal_pending",
         }
 
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(dashboard, "init_wiki", lambda: None)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         dashboard, "_operational_deferred_raw_statuses", deferred_statuses
     )
@@ -533,7 +533,7 @@ def test_semantic_defer_packets_are_absent_from_self_heal_history_and_watch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import dashboard
+    from chronovisor import dashboard
 
     failures = tmp_path / "runtime" / "failures"
     packets = failures / "packets"
@@ -587,7 +587,7 @@ def test_semantic_defer_packets_are_absent_from_self_heal_history_and_watch(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(dashboard, "WIKI_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
     monkeypatch.setattr(
         dashboard,
         "_frontier_preflight_snapshot",
@@ -606,7 +606,7 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import (
+    from chronovisor import (
         failure_supervisor,
         ingest,
         jobs,
@@ -616,8 +616,8 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
         runtime_status,
     )
 
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
     raw_dir.mkdir(parents=True)
     raw = raw_dir / "semantic.md"
     raw.write_text("semantic source", encoding="utf-8")
@@ -626,11 +626,11 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
     metrics: list[dict] = []
     events: list[dict] = []
 
-    monkeypatch.setattr(orchestrator, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(orchestrator, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(orchestrator, "LOG_FILE", wiki_root / "log.md")
+    monkeypatch.setattr(orchestrator, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(
-        orchestrator, "STATE_FILE", wiki_root / ".orchestrator_state.json"
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
     monkeypatch.setattr(orchestrator, "is_available", lambda: True)
     monkeypatch.setattr(
@@ -725,7 +725,7 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
 
 
 def test_dashboard_static_contract_exposes_deferred_without_pending_dashes() -> None:
-    root = Path(__file__).parents[1] / "src" / "llm_wiki_mcp" / "dashboard_static"
+    root = Path(__file__).parents[1] / "src" / "chronovisor" / "dashboard_static"
     html = (root / "index.html").read_text(encoding="utf-8")
     js = (root / "app.js").read_text(encoding="utf-8")
 

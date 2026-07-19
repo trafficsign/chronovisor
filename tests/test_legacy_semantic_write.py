@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp.legacy_semantic_write import (
+from chronovisor.legacy_semantic_write import (
     LegacySemanticMutationDisabled,
     block_legacy_semantic_mutation,
 )
@@ -17,13 +17,13 @@ def test_guard_fails_closed_with_frontier_replacement() -> None:
     with pytest.raises(LegacySemanticMutationDisabled) as excinfo:
         block_legacy_semantic_mutation(
             tool="legacy.py",
-            replacement="llm-wiki-sleep",
+            replacement="chronovisor-sleep",
         )
 
     message = str(excinfo.value)
     assert "semantic writes are disabled" in message
     assert "frontier-model final decision" in message
-    assert "llm-wiki-sleep" in message
+    assert "chronovisor-sleep" in message
 
 
 @pytest.mark.parametrize(

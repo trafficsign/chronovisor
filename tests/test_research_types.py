@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.research_types import BudgetUsage, ResearchBudget, parse_action
+from chronovisor.research_types import BudgetUsage, ResearchBudget, parse_action
 
 
 def test_action_schema_rejects_unknown_fields_and_types() -> None:
     unknown = parse_action(
-        {"type": "wiki_search", "arguments": {}, "rationale": "x", "extra": True},
+        {"type": "chronovisor_search", "arguments": {}, "rationale": "x", "extra": True},
         epoch=2,
     )
     invalid = parse_action({"type": "shell", "arguments": {}}, epoch=2)

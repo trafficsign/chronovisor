@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import (
+from chronovisor import (
     burn_monitor,
     decision_authority,
     decision_router,
@@ -21,21 +21,21 @@ from llm_wiki_mcp import (
     read_back_repair,
     repair_runbook,
 )
-from llm_wiki_mcp.deadman import inspect_heartbeat, write_heartbeat
-from llm_wiki_mcp.decision_artifact import DecisionArtifactStore, execution_fingerprint
-from llm_wiki_mcp.decision_router import DecisionRouter
-from llm_wiki_mcp.durable_state import (
+from chronovisor.deadman import inspect_heartbeat, write_heartbeat
+from chronovisor.decision_artifact import DecisionArtifactStore, execution_fingerprint
+from chronovisor.decision_router import DecisionRouter
+from chronovisor.durable_state import (
     DiskPressureError,
     StateSealError,
     atomic_write_bytes,
     read_sealed_json,
     write_sealed_json,
 )
-from llm_wiki_mcp.frontier_guard import EvidenceValidationError, RepairIncidentEvidence
-from llm_wiki_mcp.local_structured import ChatRequest
-from llm_wiki_mcp.managed_hold import ManagedHoldStore
-from llm_wiki_mcp.provisional_recall import search_provisional
-from llm_wiki_mcp.quality_guard import (
+from chronovisor.frontier_guard import EvidenceValidationError, RepairIncidentEvidence
+from chronovisor.local_structured import ChatRequest
+from chronovisor.managed_hold import ManagedHoldStore
+from chronovisor.provisional_recall import search_provisional
+from chronovisor.quality_guard import (
     QualityThresholds,
     append_immutable_anchor,
     evaluate_quality,
@@ -43,12 +43,12 @@ from llm_wiki_mcp.quality_guard import (
     register_last_known_good,
     run_quality_probe,
 )
-from llm_wiki_mcp.raw_semantic_projection import (
+from chronovisor.raw_semantic_projection import (
     PROJECTION_CHILD_SCHEMA,
     PROJECTION_POLICY_VERSION,
 )
-from llm_wiki_mcp.read_back_integrity import scan_jsonl_prefix, verify_prior_prefix
-from llm_wiki_mcp.runtime_config import DecisionRouterConfig
+from chronovisor.read_back_integrity import scan_jsonl_prefix, verify_prior_prefix
+from chronovisor.runtime_config import DecisionRouterConfig
 
 
 SCHEMA = {
@@ -215,9 +215,9 @@ def test_router_replays_same_execution_without_model_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import wiki
+    from chronovisor import store
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(
         decision_router,
         "bind_lane_contract_request",
@@ -254,9 +254,9 @@ def test_router_does_not_replay_unfingerprintable_custom_agreement_callable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import wiki
+    from chronovisor import store
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(
         decision_router,
         "bind_lane_contract_request",
@@ -338,12 +338,12 @@ def test_independent_observer_has_no_package_import_and_cross_checks_main(
     observer_path = (
         Path(__file__).parents[1]
         / "src"
-        / "llm_wiki_mcp"
+        / "chronovisor"
         / "deadman_observer.py"
     )
     source = observer_path.read_text(encoding="utf-8")
-    assert "import llm_wiki_mcp" not in source
-    assert "from llm_wiki_mcp" not in source
+    assert "import chronovisor" not in source
+    assert "from chronovisor" not in source
     spec = importlib.util.spec_from_file_location("deadman_observer_test", observer_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -372,7 +372,7 @@ def test_observer_threshold_debounces_dedupes_and_honors_cooldown(
     observer_path = (
         Path(__file__).parents[1]
         / "src"
-        / "llm_wiki_mcp"
+        / "chronovisor"
         / "deadman_observer.py"
     )
     spec = importlib.util.spec_from_file_location(
@@ -473,7 +473,7 @@ def test_quality_drift_freezes_locally_without_frontier(tmp_path: Path) -> None:
 
 
 def _quality_artifact(*, wrong: bool = False) -> dict:
-    from llm_wiki_mcp.local_model_eval import adoption_evidence_sha256
+    from chronovisor.local_model_eval import adoption_evidence_sha256
 
     cases = []
     for index in range(5):
@@ -726,13 +726,13 @@ def test_provisional_recall_accepts_projection_only_and_caps_rank(
     )
     monkeypatch.setattr(raw_replay, "is_raw_retracted", lambda _path: False)
     monkeypatch.setattr(
-        "llm_wiki_mcp.provisional_recall.verify_projection_child",
+        "chronovisor.provisional_recall.verify_projection_child",
         lambda path: SimpleNamespace(
             file_sha256=hashlib.sha256(path.read_bytes()).hexdigest()
         ),
     )
 
-    hits = search_provisional("Ornith memory", wiki_root=tmp_path)
+    hits = search_provisional("Ornith memory", chronovisor_root=tmp_path)
 
     assert hits and hits[0]["score"] <= 0.25
     assert hits[0]["unintegrated"] is True
@@ -740,7 +740,7 @@ def test_provisional_recall_accepts_projection_only_and_caps_rank(
     assert hits[0]["prompt_injection_treatment"] == "quote_only_never_instructions"
 
     deferred.clear()
-    assert search_provisional("Ornith memory", wiki_root=tmp_path) == []
+    assert search_provisional("Ornith memory", chronovisor_root=tmp_path) == []
     assert read_sealed_json(
         tmp_path / "runtime" / "provisional-recall" / "index.json"
     )["entries"] == []
@@ -809,7 +809,7 @@ def test_read_back_max_zero_rebuilds_duplicate_projection_and_dashboard_kpi(
         "prefix_sha256"
     ]
 
-    monkeypatch.setattr(health, "WIKI_ROOT", tmp_path)
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", tmp_path)
     dashboard_kpi = health.read_back_kpi()
     assert dashboard_kpi["checked"] == 2
     assert dashboard_kpi["failures"] == 2
@@ -842,7 +842,7 @@ def test_l1_runbook_restores_only_allowlisted_sealed_state(tmp_path: Path) -> No
 
     result = repair_runbook.run_l1(
         "restore-durable-state",
-        wiki_root=tmp_path,
+        chronovisor_root=tmp_path,
         target="managed-holds",
     )
 
@@ -851,7 +851,7 @@ def test_l1_runbook_restores_only_allowlisted_sealed_state(tmp_path: Path) -> No
     with pytest.raises(ValueError, match="allowlisted"):
         repair_runbook.run_l1(
             "restore-durable-state",
-            wiki_root=tmp_path,
+            chronovisor_root=tmp_path,
             target="arbitrary-path",
         )
 
@@ -864,11 +864,11 @@ def test_l0_dashboard_plist_requires_keepalive(
 
     launchd = tmp_path / "launchd"
     launchd.mkdir()
-    path = launchd / "com.trafficsign.llm-wiki-dashboard.plist"
+    path = launchd / "com.trafficsign.chronovisor-dashboard.plist"
     with path.open("wb") as stream:
         plistlib.dump(
             {
-                "Label": "com.trafficsign.llm-wiki-dashboard",
+                "Label": "com.trafficsign.chronovisor-dashboard",
                 "KeepAlive": True,
                 "RunAtLoad": True,
             },

@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_wiki_mcp import failure_supervisor, wiki
+from chronovisor import failure_supervisor, store
 
 
 def test_corrupt_failure_state_fails_closed_to_empty_snapshot(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
     path = tmp_path / "runtime" / "failures" / "state.json"
     path.parent.mkdir(parents=True)
     path.write_text("{broken", encoding="utf-8")
@@ -21,7 +21,7 @@ def test_corrupt_failure_state_fails_closed_to_empty_snapshot(
 def test_save_failure_state_preserves_utf8_and_trailing_newline(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
     payload = {"failures": {"raw-a.md": {"error": "意味的な失敗"}}}
 
     failure_supervisor._save_state(payload)
@@ -36,7 +36,7 @@ def test_save_failure_state_preserves_utf8_and_trailing_newline(
 def test_group_snapshot_is_sorted_and_does_not_create_lock_file(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
     failures = tmp_path / "runtime" / "failures"
     failures.mkdir(parents=True)
     packet = tmp_path / "review" / "packet.json"

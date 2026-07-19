@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llm_wiki_mcp import runtime_status
+from chronovisor import runtime_status
 
 
 def patch_runtime(tmp_path: Path, monkeypatch) -> Path:

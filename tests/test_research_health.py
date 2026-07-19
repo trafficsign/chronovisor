@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_wiki_mcp import health
+from chronovisor import health
 
 
 def test_research_kpi_surfaces_trace_claims_and_kill_switches(tmp_path: Path, monkeypatch) -> None:
@@ -40,9 +40,9 @@ def test_research_kpi_surfaces_trace_claims_and_kill_switches(tmp_path: Path, mo
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(health, "WIKI_ROOT", wiki)
-    monkeypatch.setenv("LLM_WIKI_RESEARCH_ENABLED", "0")
-    monkeypatch.setenv("LLM_WIKI_RESEARCH_MODE", "off")
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", wiki)
+    monkeypatch.setenv("CHRONOVISOR_RESEARCH_ENABLED", "0")
+    monkeypatch.setenv("CHRONOVISOR_RESEARCH_MODE", "off")
     result = health.research_kpi()
     assert result["totals"]["runs"] == 1
     assert result["totals"]["supported_claims"] == 1

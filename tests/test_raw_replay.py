@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import raw_replay
-from llm_wiki_mcp.convergence import CycleBudget
-from llm_wiki_mcp.jobs import JobStatus
+from chronovisor import raw_replay
+from chronovisor.convergence import CycleBudget
+from chronovisor.jobs import JobStatus
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -26,7 +26,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
     paths = {
         "raw": tmp_path / "raw",
@@ -149,7 +149,7 @@ def test_operational_hold_blocks_existing_queue_selection_until_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-operational-selection.md"
@@ -178,7 +178,7 @@ def test_operational_hold_blocks_existing_queue_selection_until_release(
         lambda *_args, **_kwargs: dict(deferred),
     )
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda *_args, **_kwargs: pytest.fail(
             "operational hold must not launch ingest"
         ),
@@ -224,7 +224,7 @@ def test_operational_hold_published_after_running_marker_cancels_launch_and_resu
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-operational-race.md"
@@ -277,7 +277,7 @@ def test_operational_hold_published_after_running_marker_cancels_launch_and_resu
         store.finish(job_id)
         on_complete()
 
-    monkeypatch.setattr("llm_wiki_mcp.ingest.run_ingest", run_ingest)
+    monkeypatch.setattr("chronovisor.ingest.run_ingest", run_ingest)
 
     held = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -732,7 +732,7 @@ def test_nonhuman_quarantine_reopens_after_cooldown(
             }
         ],
     )
-    monkeypatch.setenv("LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "1")
+    monkeypatch.setenv("CHRONOVISOR_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "1")
 
     raw_replay.build_queue(
         path=paths["queue"],
@@ -947,7 +947,7 @@ def test_ordinary_replay_claim_after_crash_does_not_suppress_retry(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -995,7 +995,7 @@ def test_partial_replay_is_terminal_and_does_not_repeat_successful_operations(
                 ],
             )
 
-    monkeypatch.setattr("llm_wiki_mcp.ingest.run_ingest", fake_ingest)
+    monkeypatch.setattr("chronovisor.ingest.run_ingest", fake_ingest)
     started = datetime(2026, 7, 10, 10, 0, tzinfo=timezone.utc)
 
     partial = raw_replay.run_pending_queue(
@@ -1041,7 +1041,7 @@ def test_replay_persists_running_marker_before_ingest(
         assert len(running["raw_sha256"]) == 64
         store.finish(job_id)
 
-    monkeypatch.setattr("llm_wiki_mcp.ingest.run_ingest", inspect_then_finish)
+    monkeypatch.setattr("chronovisor.ingest.run_ingest", inspect_then_finish)
 
     result = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -1072,7 +1072,7 @@ def test_completion_callback_recovers_crash_before_queue_finalize(
         on_complete()
         raise SystemExit("simulated process loss")
 
-    monkeypatch.setattr("llm_wiki_mcp.ingest.run_ingest", crash_after_completion)
+    monkeypatch.setattr("chronovisor.ingest.run_ingest", crash_after_completion)
     with pytest.raises(SystemExit):
         raw_replay.run_pending_queue(
             path=paths["queue"],
@@ -1086,7 +1086,7 @@ def test_completion_callback_recovers_crash_before_queue_finalize(
     assert running["status"] == "running"
 
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda *_args, **_kwargs: pytest.fail("completed replay must not launch again"),
     )
     recovered = raw_replay.run_pending_queue(
@@ -1115,7 +1115,7 @@ def test_unknown_crashed_replay_is_frontier_quarantined_not_blindly_retried(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             SystemExit("crash before apply proof")
         ),
@@ -1234,7 +1234,7 @@ def test_safe_replay_preserves_local_audit_and_revalidates_at_launch(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -1302,7 +1302,7 @@ def test_persisted_injected_safe_replay_cannot_run_without_explicit_boundary(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda *_args, **_kwargs: pytest.fail("stale approval must not launch ingest"),
     )
     monkeypatch.setattr(
@@ -1397,7 +1397,7 @@ def test_completed_ingest_with_broken_completion_journal_never_becomes_retryable
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
     monkeypatch.setattr(
@@ -1430,7 +1430,7 @@ def test_run_replay_limit_zero_keeps_legacy_all_raws_behavior(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -1504,7 +1504,7 @@ def test_run_pending_queue_respects_priority_run_and_byte_bounds(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -1532,7 +1532,7 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import index_store, ingest, page_mutation, wiki
+    from chronovisor import index_store, ingest, page_mutation, store
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     pages = tmp_path / "pages"
@@ -1544,14 +1544,14 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
         "The setup has two G32P displays.\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(wiki, "PAGES_DIR", pages)
+    monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
     monkeypatch.setattr(ingest, "INDEX_FILE", tmp_path / "index.md")
     monkeypatch.setattr(ingest, "LOG_FILE", tmp_path / "log.md")
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
     monkeypatch.setattr(
         page_mutation,
-        "WIKI_MUTATION_LOCK",
+        "CHRONOVISOR_MUTATION_LOCK",
         tmp_path / "runtime" / "wiki-mutation.lock",
     )
 
@@ -1619,7 +1619,7 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
         if on_complete is not None:
             on_complete()
 
-    monkeypatch.setattr("llm_wiki_mcp.ingest.run_ingest", replay_via_ingest)
+    monkeypatch.setattr("chronovisor.ingest.run_ingest", replay_via_ingest)
 
     result = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -1676,7 +1676,7 @@ def test_eligibility_union_drains_current_keys_and_prior_auto_lane(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -1764,7 +1764,7 @@ def test_three_failed_attempts_end_in_quarantine(tmp_path: Path, monkeypatch) ->
     store = _FakeJobStore(result_status=JobStatus.FAILED, error="model output invalid")
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        "llm_wiki_mcp.ingest.run_ingest",
+        "chronovisor.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
     started = datetime(2026, 7, 10, 10, 0, tzinfo=timezone.utc)

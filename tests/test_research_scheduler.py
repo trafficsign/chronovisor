@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import sys
 
-from llm_wiki_mcp import research_scheduler
+from chronovisor import research_scheduler
 
 
 def _paths(tmp_path, monkeypatch) -> None:
@@ -17,7 +17,7 @@ def _paths(tmp_path, monkeypatch) -> None:
 
 def test_auto_model_research_is_rejected_without_protected_capacity(tmp_path, monkeypatch) -> None:
     _paths(tmp_path, monkeypatch)
-    monkeypatch.delenv("LLM_WIKI_RESEARCH_CAPACITY_PROVEN", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_RESEARCH_CAPACITY_PROVEN", raising=False)
 
     with research_scheduler.research_lane(
         "run", enabled=True, mode="auto", purpose="auto", needs_model=True
@@ -30,7 +30,7 @@ def test_200_foreground_admissions_stay_under_wait_limit_when_research_is_denied
     tmp_path, monkeypatch
 ) -> None:
     _paths(tmp_path, monkeypatch)
-    monkeypatch.delenv("LLM_WIKI_RESEARCH_CAPACITY_PROVEN", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_RESEARCH_CAPACITY_PROVEN", raising=False)
     waits = []
     for index in range(200):
         with research_scheduler.research_lane(

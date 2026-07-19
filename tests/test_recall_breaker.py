@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from llm_wiki_mcp import recall_breaker
+from chronovisor import recall_breaker
 
 
 def test_breaker_opens_after_threshold_and_closes_after_cooldown(tmp_path) -> None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM Wiki に既存ページのリンクをバックフィル。
+"""Chronovisor に既存ページのリンクをバックフィル。
 
 古いシステムから取り込んだ orphan ページに対して機械的に「## 関連」セクションを追加する。
 Phase 2 (機械バックフィル) の本体。Phase 3 (Sonnet 精査) の前段。
@@ -15,7 +15,7 @@ Codex レビュー対応:
 
 実行:
 - python3 backfill_links.py --dry-run    # プレビュー
-- llm-wiki-sleep                         # frontier 審査後に自動適用
+- chronovisor-sleep                         # frontier 審査後に自動適用
 
 この旧スクリプトの直接書き込み関数は fail-closed。
 """
@@ -32,16 +32,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+from chronovisor.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
 
-# llm-wiki-mcp パッケージから既存定数を import
+# chronovisor パッケージから既存定数を import
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from llm_wiki_mcp.wiki import PAGES_DIR  # noqa: E402
+from chronovisor.store import PAGES_DIR  # noqa: E402
 
-WIKI_ROOT = Path.home() / ".wiki"
-BACKUPS_DIR = WIKI_ROOT / "backups"
+CHRONOVISOR_ROOT = Path.home() / ".chronovisor"
+BACKUPS_DIR = CHRONOVISOR_ROOT / "backups"
 
 # サイズ閾値 (バイト)
 SIZE_MED = 30_000     # 30KB 未満は全文
@@ -412,7 +412,7 @@ def atomic_write(path: Path, content: str) -> None:
     """tempfile + os.replace で atomic 書き込み。"""
     block_legacy_semantic_mutation(
         tool="backfill_links.py",
-        replacement="llm-wiki-sleep",
+        replacement="chronovisor-sleep",
     )
     tmp = tempfile.NamedTemporaryFile(
         mode="w",

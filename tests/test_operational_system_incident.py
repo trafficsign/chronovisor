@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp.frontier_guard import EvidenceValidationError
-from llm_wiki_mcp.system_incident_supervisor import (
+from chronovisor.frontier_guard import EvidenceValidationError
+from chronovisor.system_incident_supervisor import (
     IncidentStateError,
     SystemIncidentSupervisor,
 )
@@ -258,7 +258,7 @@ def test_incident_sync_rereads_status_after_source_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import system_incident_supervisor as incident_module
+    from chronovisor import system_incident_supervisor as incident_module
 
     supervisor, source_path, _state_path, _enqueued = _fixture(
         tmp_path,
@@ -337,7 +337,7 @@ def test_legacy_incident_without_epoch_remains_valid_but_partial_epoch_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import system_incident_supervisor as incident_module
+    from chronovisor import system_incident_supervisor as incident_module
 
     supervisor, source_path, _state_path, enqueued = _fixture(
         tmp_path,
@@ -690,8 +690,8 @@ def test_operational_incident_enqueue_contract_accepts_only_bound_producer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import background_jobs, self_heal
-    from llm_wiki_mcp import system_incident_supervisor as incident_module
+    from chronovisor import background_jobs, self_heal
+    from chronovisor import system_incident_supervisor as incident_module
 
     supervisor, source_path, _state_path, _enqueued = _fixture(
         tmp_path,
@@ -746,11 +746,11 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import background_jobs, runtime_status, self_heal, wiki
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor import background_jobs, runtime_status, self_heal, store
+    from chronovisor.local_repair import LocalRepairDecision
 
-    wiki_root = tmp_path / "wiki"
-    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
+    chronovisor_root = tmp_path / "wiki"
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(
         runtime_status, "safe_append_event", lambda *_args, **_kwargs: None
     )
@@ -773,7 +773,7 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
             jobs.append(kwargs) or {"job_id": "repair-1", "enqueued": True}
         ),
     )
-    packet_path = wiki_root / "runtime" / "failures" / "packets" / "source.json"
+    packet_path = chronovisor_root / "runtime" / "failures" / "packets" / "source.json"
     _write_json(
         packet_path,
         {
@@ -786,7 +786,7 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
         },
     )
     _write_json(
-        wiki_root / "runtime" / "failures" / "state.json",
+        chronovisor_root / "runtime" / "failures" / "state.json",
         {
             "failures": {
                 raw_file: {
@@ -824,7 +824,7 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
     assert jobs == [
         {
             "name": "system-code-repair",
-            "module": "llm_wiki_mcp.self_heal",
+            "module": "chronovisor.self_heal",
             "args": [
                 "--packet",
                 str(incident_path.resolve()),

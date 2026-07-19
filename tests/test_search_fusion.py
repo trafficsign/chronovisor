@@ -5,11 +5,11 @@ import json
 
 import pytest
 
-from llm_wiki_mcp import search
-from llm_wiki_mcp import ollama
-from llm_wiki_mcp import index_store as index_store_mod
-from llm_wiki_mcp.runtime_config import EmbeddingConfig
-from llm_wiki_mcp.search import (
+from chronovisor import search
+from chronovisor import ollama
+from chronovisor import index_store as index_store_mod
+from chronovisor.runtime_config import EmbeddingConfig
+from chronovisor.search import (
     ScoredPage,
     apply_filters,
     fuse_results,
@@ -56,7 +56,7 @@ def test_read_only_embedding_probe_does_not_create_missing_database(
     monkeypatch.setattr(search, "EMBEDDINGS_DB", database)
     monkeypatch.setattr(search, "LEGACY_EMBEDDINGS_FILE", tmp_path / "missing.json")
     monkeypatch.setattr(search, "_legacy_migration_done", False)
-    monkeypatch.setenv("LLM_WIKI_READ_ONLY", "1")
+    monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
 
     assert search._embedding_count() == 0
     assert not database.exists()
@@ -98,13 +98,13 @@ def test_bm25_read_only_refresh_persists_dirty_cache_on_next_normal_build(
     cache_path = tmp_path / ".index" / "bm25.json"
     monkeypatch.setattr(search, "_BM25_CACHE_FILE", cache_path)
     monkeypatch.setattr(search, "searchable_pages", lambda: [page_path])
-    monkeypatch.setenv("LLM_WIKI_READ_ONLY", "1")
+    monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
     index = search.BM25Index()
 
     index.build()
 
     assert not cache_path.exists()
-    monkeypatch.delenv("LLM_WIKI_READ_ONLY")
+    monkeypatch.delenv("CHRONOVISOR_READ_ONLY")
     index.build()
     assert cache_path.exists()
 
@@ -248,10 +248,10 @@ def test_fusion_preserves_lifecycle_status_for_filtering() -> None:
 def test_update_embeddings_rebuilds_when_model_profile_changes(
     tmp_path, monkeypatch
 ) -> None:
-    wiki_root = tmp_path / "wiki"
-    pages_dir = wiki_root / "pages"
-    system_dir = wiki_root / "system"
-    index_dir = wiki_root / ".index"
+    chronovisor_root = tmp_path / "wiki"
+    pages_dir = chronovisor_root / "pages"
+    system_dir = chronovisor_root / "system"
+    index_dir = chronovisor_root / ".index"
     pages_dir.mkdir(parents=True)
     system_dir.mkdir(parents=True)
     index_dir.mkdir(parents=True)
@@ -266,7 +266,7 @@ def test_update_embeddings_rebuilds_when_model_profile_changes(
     monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
     monkeypatch.setattr(
-        search, "LEGACY_EMBEDDINGS_FILE", wiki_root / ".embeddings.json"
+        search, "LEGACY_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
     )
     monkeypatch.setattr(search, "all_pages", lambda: [page_path])
     monkeypatch.setattr(search, "_legacy_migration_done", True)
@@ -309,10 +309,10 @@ def test_update_embeddings_rebuilds_when_model_profile_changes(
 
 
 def test_update_embeddings_stores_markdown_chunks(tmp_path, monkeypatch) -> None:
-    wiki_root = tmp_path / "wiki"
-    pages_dir = wiki_root / "pages"
-    system_dir = wiki_root / "system"
-    index_dir = wiki_root / ".index"
+    chronovisor_root = tmp_path / "wiki"
+    pages_dir = chronovisor_root / "pages"
+    system_dir = chronovisor_root / "system"
+    index_dir = chronovisor_root / ".index"
     pages_dir.mkdir(parents=True)
     system_dir.mkdir(parents=True)
     index_dir.mkdir(parents=True)
@@ -331,7 +331,7 @@ def test_update_embeddings_stores_markdown_chunks(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
     monkeypatch.setattr(
-        search, "LEGACY_EMBEDDINGS_FILE", wiki_root / ".embeddings.json"
+        search, "LEGACY_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
     )
     monkeypatch.setattr(search, "all_pages", lambda: [page_path])
     monkeypatch.setattr(search, "_legacy_migration_done", True)
@@ -496,8 +496,8 @@ def test_semantic_search_skips_chunks_for_confident_page_hits(
 
 
 def test_usage_prior_applies_recency_decay_and_cap(tmp_path, monkeypatch) -> None:
-    wiki_root = tmp_path / "wiki"
-    recall_dir = wiki_root / "recall"
+    chronovisor_root = tmp_path / "wiki"
+    recall_dir = chronovisor_root / "recall"
     recall_dir.mkdir(parents=True)
     rows = [
         {"kind": "injection_used", "expected_pages": ["p"]},
@@ -522,7 +522,7 @@ def test_usage_prior_applies_recency_decay_and_cap(tmp_path, monkeypatch) -> Non
                 "superseded_by": "",
             }
 
-    monkeypatch.setattr(search, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(search, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(index_store_mod, "get_store", lambda: FakeStore())
 
     results = usage_prior_results({"p"}, decay=0.5, cap=1.2)

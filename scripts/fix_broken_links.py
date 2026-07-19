@@ -4,12 +4,12 @@
 lint が検出した broken_link について、以下を試行:
 1. fuzzy match (difflib ratio >= 0.7) で近い page_id が見つかれば → 置換
 2. マッチしなかったら → `[[link]]` を `link` (プレーンテキスト) に変換
-3. `system/` 配下のページへの参照 (例: [[claude-code]] → ~/.wiki/system/claude-code.md)
+3. `system/` 配下のページへの参照 (例: [[claude-code]] → ~/.chronovisor/system/claude-code.md)
    は system パス経由で存在するので、プレーンテキスト化で妥協する
 
 実行:
     python3 fix_broken_links.py --dry-run   # プレビュー
-    llm-wiki-sleep                          # frontier 審査後に自動適用
+    chronovisor-sleep                          # frontier 審査後に自動適用
 
 この旧スクリプトの直接書き込み関数は fail-closed。
 """
@@ -24,13 +24,13 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from llm_wiki_mcp.wiki import PAGES_DIR, WIKI_ROOT  # noqa: E402
-from llm_wiki_mcp.lint import check  # noqa: E402
-from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+from chronovisor.store import PAGES_DIR, CHRONOVISOR_ROOT  # noqa: E402
+from chronovisor.lint import check  # noqa: E402
+from chronovisor.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
 
-SYSTEM_DIR = WIKI_ROOT / "system"
+SYSTEM_DIR = CHRONOVISOR_ROOT / "system"
 
 # fuzzy match threshold (0.0-1.0)
 FUZZY_THRESHOLD = 0.70
@@ -85,7 +85,7 @@ def find_fuzzy_match(
 def atomic_write(path: Path, content: str) -> None:
     block_legacy_semantic_mutation(
         tool="fix_broken_links.py",
-        replacement="llm-wiki-sleep",
+        replacement="chronovisor-sleep",
     )
     tmp = tempfile.NamedTemporaryFile(
         mode="w",

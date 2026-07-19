@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp.canonical_json import (
+from chronovisor.canonical_json import (
     canonical_json_bytes_stringifying,
     canonical_json_bytes_strict,
     canonical_json_line_bytes_strict,

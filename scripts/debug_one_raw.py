@@ -3,7 +3,7 @@
 Usage:
     uv run python scripts/debug_one_raw.py <raw-filename-or-path>
 
-Wraps `llm_wiki_mcp.ingest.generate` so every LLM call's full prompt + output
+Wraps `chronovisor.ingest.generate` so every LLM call's full prompt + output
 is dumped to /tmp/wiki-debug/<raw-stem>/. We then call `_triage` and
 `_generate_one` directly and report which parser stage failed.
 """
@@ -14,8 +14,8 @@ import argparse
 import sys
 from pathlib import Path
 
-import llm_wiki_mcp.ingest as ingest
-from llm_wiki_mcp.ingest import (
+import chronovisor.ingest as ingest
+from chronovisor.ingest import (
     _triage,
     _generate_one,
     _extract_json_array,
@@ -24,7 +24,7 @@ from llm_wiki_mcp.ingest import (
 )
 
 
-WIKI_RAW = Path.home() / ".wiki" / "raw"
+WIKI_RAW = Path.home() / ".chronovisor" / "raw"
 DEBUG_OUT = Path("/tmp/wiki-debug")
 
 

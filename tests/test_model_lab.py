@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from llm_wiki_mcp import model_lab
+from chronovisor import model_lab
 
 
 def _isolate(monkeypatch, tmp_path: Path) -> None:
@@ -93,7 +93,7 @@ def test_replay_record_marks_prompt_truncation_explicitly(
     tmp_path: Path,
 ) -> None:
     _isolate(monkeypatch, tmp_path)
-    monkeypatch.delenv("LLM_WIKI_MODEL_LAB_REPLAY", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_MODEL_LAB_REPLAY", raising=False)
 
     model_lab.record_replay_case(
         role="code_repair",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from llm_wiki_mcp import semantic_hold
+from chronovisor import semantic_hold
 
 
 def semantic_authority(

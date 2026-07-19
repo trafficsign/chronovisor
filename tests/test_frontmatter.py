@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from llm_wiki_mcp.frontmatter import parse, patch
+from chronovisor.frontmatter import parse, patch
 
 
 # ---------------------------------------------------------------------------

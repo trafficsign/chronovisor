@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from llm_wiki_mcp import recall_eval
-from llm_wiki_mcp.feedback_ledger import feedback_row_sha256
-from llm_wiki_mcp.recall_runtime import ContextItem, RecallPolicy, RecallResult
+from chronovisor import recall_eval
+from chronovisor.feedback_ledger import feedback_row_sha256
+from chronovisor.recall_runtime import ContextItem, RecallPolicy, RecallResult
 
 
 def test_build_dataset_uses_feedback_and_snapshot(tmp_path) -> None:

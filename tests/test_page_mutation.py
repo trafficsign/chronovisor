@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import page_mutation
+from chronovisor import page_mutation
 
 
 def _page(path: Path, *, title: str, body: str) -> None:
@@ -20,7 +20,7 @@ def _patch_pages(monkeypatch, pages: Path) -> None:
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
     monkeypatch.setattr(
         page_mutation,
-        "WIKI_MUTATION_LOCK",
+        "CHRONOVISOR_MUTATION_LOCK",
         pages.parent / "wiki-mutation.lock",
     )
     monkeypatch.setattr(
@@ -35,7 +35,7 @@ def _patch_pages(monkeypatch, pages: Path) -> None:
 @pytest.mark.parametrize(
     ("lock_name", "path_name"),
     [
-        ("wiki_mutation_lock", "wiki.lock"),
+        ("chronovisor_mutation_lock", "wiki.lock"),
         ("decision_authority_lock", "authority.lock"),
     ],
 )
@@ -569,7 +569,7 @@ def test_lock_failure_returns_retry_without_touching_page(
         raise OSError("lock unavailable")
         yield
 
-    monkeypatch.setattr(page_mutation, "wiki_mutation_lock", fail_lock)
+    monkeypatch.setattr(page_mutation, "chronovisor_mutation_lock", fail_lock)
 
     result = page_mutation.apply_prepared_mutations([prepared])
 

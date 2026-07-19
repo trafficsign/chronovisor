@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import embedding as emb_mod
-from llm_wiki_mcp.embedding import cosine, embed_text, embed_texts, most_similar
+from chronovisor import embedding as emb_mod
+from chronovisor.embedding import cosine, embed_text, embed_texts, most_similar
 
 
 @pytest.fixture()

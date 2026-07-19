@@ -8,14 +8,14 @@ from typing import Any
 
 import pytest
 
-from llm_wiki_mcp import ollama
-from llm_wiki_mcp.decision_router import DecisionRouter, decision_context_buckets
-from llm_wiki_mcp.local_structured import (
+from chronovisor import ollama
+from chronovisor.decision_router import DecisionRouter, decision_context_buckets
+from chronovisor.local_structured import (
     MAX_REPAIR_TURNS,
     ChatRequest,
     required_structured_context_tokens,
 )
-from llm_wiki_mcp.runtime_config import DecisionRouterConfig, IngestConfig
+from chronovisor.runtime_config import DecisionRouterConfig, IngestConfig
 
 
 PRIMARY = "primary:test"
@@ -450,7 +450,7 @@ def test_router_production_reuses_an_ingest_sized_resident_context(
     observed: list[tuple[int, dict[str, int]]] = []
 
     monkeypatch.setattr(
-        "llm_wiki_mcp.decision_router.load_ingest_config",
+        "chronovisor.decision_router.load_ingest_config",
         lambda: IngestConfig(model=PRIMARY, max_num_ctx=262_144),
     )
 
@@ -498,7 +498,7 @@ def test_router_does_not_share_ingest_ceiling_with_a_different_primary(
 ) -> None:
     observed: dict[str, int] = {}
     monkeypatch.setattr(
-        "llm_wiki_mcp.decision_router.load_ingest_config",
+        "chronovisor.decision_router.load_ingest_config",
         lambda: IngestConfig(model="other:test", max_num_ctx=262_144),
     )
 
@@ -525,7 +525,7 @@ def test_router_duplicate_model_keeps_the_largest_role_reuse_ceiling(
 ) -> None:
     observed: dict[str, int] = {}
     monkeypatch.setattr(
-        "llm_wiki_mcp.decision_router.load_ingest_config",
+        "chronovisor.decision_router.load_ingest_config",
         lambda: IngestConfig(model=PRIMARY, max_num_ctx=262_144),
     )
 
@@ -552,7 +552,7 @@ def test_router_preserves_legacy_exact_signature_residency_planner(
 ) -> None:
     observed: list[tuple[int, int, bool]] = []
     monkeypatch.setattr(
-        "llm_wiki_mcp.decision_router.load_ingest_config",
+        "chronovisor.decision_router.load_ingest_config",
         lambda: IngestConfig(model=PRIMARY, max_num_ctx=262_144),
     )
 

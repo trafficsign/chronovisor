@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from llm_wiki_mcp.research_store import ResearchStore, compact_event_context, reduce_events
+from chronovisor.research_store import ResearchStore, compact_event_context, reduce_events
 
 
 def test_evidence_cas_round_trip_and_checksum(tmp_path) -> None:
@@ -58,7 +58,7 @@ def test_microcompaction_never_splits_action_observation_pair() -> None:
 def test_event_reducer_exposes_orphans_and_terminal_state() -> None:
     state = reduce_events(
         [
-            {"kind": "action", "epoch": 0, "iteration": 1, "action": {"type": "wiki_search"}},
+            {"kind": "action", "epoch": 0, "iteration": 1, "action": {"type": "chronovisor_search"}},
             {"kind": "stop", "epoch": 1, "stop_reason": "interrupted"},
         ]
     )

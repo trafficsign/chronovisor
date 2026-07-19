@@ -3,14 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from llm_wiki_mcp.evidence_bundle import (
+from chronovisor.evidence_bundle import (
     build_bundle,
     classify_claim,
     deterministic_citations,
     simple_assess_claims,
 )
-from llm_wiki_mcp.research_store import ResearchStore
-from llm_wiki_mcp.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
+from chronovisor.research_store import ResearchStore
+from chronovisor.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
 
 
 def _artifact(
@@ -18,7 +18,7 @@ def _artifact(
 ) -> EvidenceArtifact:
     return EvidenceArtifact(
         artifact_id=artifact_id,
-        source_type="wiki_read",
+        source_type="chronovisor_read",
         source_uri="wiki:fact",
         retrieved_at=datetime.now(timezone.utc).isoformat(),
         sha256=artifact_id.removeprefix("sha256:"),
@@ -65,7 +65,7 @@ def test_unrelated_negation_does_not_contradict_identifier_claim() -> None:
         "MCP wiki tools are listed here. Old conversations are not updated.",
     )
     rows = simple_assess_claims(
-        [("wiki_research is published by MCP", False)],
+        [("chronovisor_research is published by MCP", False)],
         [artifact],
     )
 
@@ -73,13 +73,13 @@ def test_unrelated_negation_does_not_contradict_identifier_claim() -> None:
 
 
 def test_bundle_is_durable_and_rebuildable(tmp_path: Path, monkeypatch) -> None:
-    from llm_wiki_mcp import research_store
+    from chronovisor import research_store
 
-    monkeypatch.setattr(research_store, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runtime")
     artifact = store.put_artifact(
         "evidence",
-        source_type="wiki_read",
+        source_type="chronovisor_read",
         source_uri="wiki:fact",
         durable=True,
     )

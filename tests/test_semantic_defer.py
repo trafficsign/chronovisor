@@ -14,18 +14,18 @@ def semantic_defer_wiki(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, Path]:
-    from llm_wiki_mcp import decision_router, runtime_config, runtime_status, wiki
+    from chronovisor import decision_router, runtime_config, runtime_status, store
 
-    wiki_root = tmp_path / "wiki"
-    raw_dir = wiki_root / "raw"
-    runtime_dir = wiki_root / "runtime"
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    runtime_dir = chronovisor_root / "runtime"
     raw_dir.mkdir(parents=True)
     runtime_dir.mkdir(parents=True)
     artifact = tmp_path / "adoption.json"
     artifact.write_bytes(b'{"epoch":1}\n')
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", wiki_root)
-    monkeypatch.setattr(wiki, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(store, "RAW_DIR", raw_dir)
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
@@ -58,7 +58,7 @@ def semantic_defer_wiki(
         "resolve_router_policy",
         resolve_test_artifact,
     )
-    return wiki_root, artifact
+    return chronovisor_root, artifact
 
 
 def _sha256(path: Path) -> str:
@@ -73,7 +73,7 @@ def _no_quorum_error(authority_sha256: str) -> str:
 
 
 def test_classifies_only_explicit_authority_bound_semantic_no_quorum() -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
     authority_sha256 = "a" * 64
     semantic = failure_supervisor.classify_failure(_no_quorum_error(authority_sha256))
@@ -103,10 +103,10 @@ def test_terminal_semantic_defer_preserves_raw_and_never_starts_self_heal(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
+    from chronovisor import failure_supervisor, self_heal
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "semantic.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "semantic.md"
     original = "---\ntitle: Semantic\n---\nbyte exact 日本語\n".encode()
     raw_path.write_bytes(original)
     starts: list[Path] = []
@@ -125,7 +125,7 @@ def test_terminal_semantic_defer_preserves_raw_and_never_starts_self_heal(
     assert result_to_dict["terminal_deferred"] is True
     assert starts == []
     assert raw_path.read_bytes() == original
-    assert not (wiki_root / "runtime" / "failures" / "quarantined-raw").exists()
+    assert not (chronovisor_root / "runtime" / "failures" / "quarantined-raw").exists()
 
     packet_path = Path(str(result.packet_path))
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -143,7 +143,7 @@ def test_terminal_semantic_defer_preserves_raw_and_never_starts_self_heal(
             "sha256": hashlib.sha256(original).hexdigest(),
         }
     ]
-    state = json.loads((wiki_root / "runtime" / "failures" / "state.json").read_text())
+    state = json.loads((chronovisor_root / "runtime" / "failures" / "state.json").read_text())
     entry = state["failures"][raw_path.name]
     assert entry["terminal_deferred"] is True
     assert entry["self_heal_queued"] is False
@@ -157,11 +157,11 @@ def test_terminal_semantic_defer_preserves_raw_and_never_starts_self_heal(
 def test_related_raws_share_one_idempotent_terminal_packet_and_reset_together(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    first = wiki_root / "raw" / "fragment-1.md"
-    second = wiki_root / "raw" / "fragment-2.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    first = chronovisor_root / "raw" / "fragment-1.md"
+    second = chronovisor_root / "raw" / "fragment-2.md"
     first_bytes = b"fragment one\n"
     second_bytes = b"fragment two\n"
     first.write_bytes(first_bytes)
@@ -180,11 +180,11 @@ def test_related_raws_share_one_idempotent_terminal_packet_and_reset_together(
     )
 
     assert repeated.packet_path == initial.packet_path
-    packets = list((wiki_root / "runtime" / "failures" / "packets").glob("*.json"))
+    packets = list((chronovisor_root / "runtime" / "failures" / "packets").glob("*.json"))
     assert packets == [Path(str(initial.packet_path))]
     assert first.read_bytes() == first_bytes
     assert second.read_bytes() == second_bytes
-    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state_path = chronovisor_root / "runtime" / "failures" / "state.json"
     failures = json.loads(state_path.read_text())["failures"]
     assert set(failures) == {first.name, second.name}
     assert {entry["packet_path"] for entry in failures.values()} == {
@@ -209,12 +209,12 @@ def test_defer_reconciliation_shares_one_raw_snapshot_across_packets(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, raw_store
+    from chronovisor import failure_supervisor, raw_store
 
-    wiki_root, artifact = semantic_defer_wiki
+    chronovisor_root, artifact = semantic_defer_wiki
     error = _no_quorum_error(_sha256(artifact))
-    first = wiki_root / "raw" / "first.md"
-    second = wiki_root / "raw" / "second.md"
+    first = chronovisor_root / "raw" / "first.md"
+    second = chronovisor_root / "raw" / "second.md"
     first.write_text("first source\n")
     second.write_text("second source\n")
     failure_supervisor.record_semantic_no_quorum_defer(
@@ -249,10 +249,10 @@ def test_guarded_semantic_publish_keeps_newer_operational_hold_atomic(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "operational-wins.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "operational-wins.md"
     raw_path.write_text("immutable source\n", encoding="utf-8")
     observed_paths: list[tuple[Path, ...]] = []
 
@@ -281,7 +281,7 @@ def test_guarded_semantic_publish_keeps_newer_operational_hold_atomic(
 
     assert result is None
     assert observed_paths == [(raw_path,)]
-    assert not (wiki_root / "runtime" / "failures" / "packets").exists()
+    assert not (chronovisor_root / "runtime" / "failures" / "packets").exists()
 
     accepted = SimpleNamespace(terminal_deferred=True)
     monkeypatch.setattr(
@@ -309,10 +309,10 @@ def test_guarded_semantic_publish_keeps_newer_operational_hold_atomic(
 def test_authority_artifact_change_reopens_and_unreadable_artifact_fails_closed(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "epoch.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "epoch.md"
     raw_path.write_text("epoch-bound source\n", encoding="utf-8")
     original_sha256 = _sha256(artifact)
     failure_supervisor.record_raw_failure(
@@ -359,10 +359,10 @@ def test_authority_change_releases_only_a_valid_adopted_artifact(
     error: str | None,
     artifact_sha256: str | None,
 ) -> None:
-    from llm_wiki_mcp import decision_router, failure_supervisor
+    from chronovisor import decision_router, failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "validated-authority.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "validated-authority.md"
     raw_path.write_text("authority-gated source\n", encoding="utf-8")
     original_sha256 = _sha256(artifact)
     failure_supervisor.record_raw_failure(
@@ -409,17 +409,17 @@ def test_packet_reconstructs_semantic_hold_after_state_publish_crash(
     semantic_defer_wiki: tuple[Path, Path],
     state_loss: str,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / f"crash-{state_loss}.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / f"crash-{state_loss}.md"
     raw_path.write_bytes(f"crash evidence {state_loss}\n".encode())
     authority_sha256 = _sha256(artifact)
     failure_supervisor.record_raw_failure(
         raw_path=raw_path,
         error=_no_quorum_error(authority_sha256),
     )
-    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state_path = chronovisor_root / "runtime" / "failures" / "state.json"
     if state_loss == "missing":
         state_path.unlink()
     elif state_loss == "corrupt":
@@ -444,17 +444,17 @@ def test_packet_reconstructs_semantic_hold_after_state_publish_crash(
 def test_packet_reconstruction_requires_matching_raw_evidence_and_active_status(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "evidence.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "evidence.md"
     original = b"packet-bound raw\n"
     raw_path.write_bytes(original)
     result = failure_supervisor.record_raw_failure(
         raw_path=raw_path,
         error=_no_quorum_error(_sha256(artifact)),
     )
-    (wiki_root / "runtime" / "failures" / "state.json").unlink()
+    (chronovisor_root / "runtime" / "failures" / "state.json").unlink()
 
     raw_path.write_bytes(b"changed bytes\n")
     assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
@@ -475,16 +475,16 @@ def test_packet_reconstruction_requires_matching_raw_evidence_and_active_status(
 def test_reset_releases_orphan_semantic_packet_before_state_cleanup(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "orphan-reset.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "orphan-reset.md"
     raw_path.write_text("orphan packet evidence\n", encoding="utf-8")
     result = failure_supervisor.record_raw_failure(
         raw_path=raw_path,
         error=_no_quorum_error(_sha256(artifact)),
     )
-    (wiki_root / "runtime" / "failures" / "state.json").unlink()
+    (chronovisor_root / "runtime" / "failures" / "state.json").unlink()
     assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
         raw_path.name: "semantic_no_quorum"
     }
@@ -506,10 +506,10 @@ def test_released_packet_overrides_stale_terminal_state_entry(
     semantic_defer_wiki: tuple[Path, Path],
     packet_status: str,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / f"stale-state-{packet_status}.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / f"stale-state-{packet_status}.md"
     raw_path.write_text("stale state evidence\n", encoding="utf-8")
     result = failure_supervisor.record_raw_failure(
         raw_path=raw_path,
@@ -529,10 +529,10 @@ def test_semantic_defer_supersedes_unshared_operational_packet(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "upgrade.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "upgrade.md"
     raw_path.write_text("upgrade source\n", encoding="utf-8")
     starts: list[Path] = []
     monkeypatch.setattr(failure_supervisor, "_launch_self_heal", starts.append)
@@ -541,7 +541,7 @@ def test_semantic_defer_supersedes_unshared_operational_packet(
         raw_path=raw_path,
         error="local consensus semantic no quorum: authority marker missing",
     )
-    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state_path = chronovisor_root / "runtime" / "failures" / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["failures"][raw_path.name].pop("self_heal_queued")
     state["failures"][raw_path.name].pop("packet_path")
@@ -558,7 +558,7 @@ def test_semantic_defer_supersedes_unshared_operational_packet(
     assert old_packet["self_heal_queued"] is False
     assert old_packet["superseded_at"]
     assert old_packet["superseded_by_packet"] == semantic.packet_path
-    state = json.loads((wiki_root / "runtime" / "failures" / "state.json").read_text())
+    state = json.loads((chronovisor_root / "runtime" / "failures" / "state.json").read_text())
     assert state["operational_failures"] == {}
     assert state["failures"][raw_path.name]["packet_path"] == semantic.packet_path
 
@@ -567,17 +567,17 @@ def test_semantic_defer_preserves_replaced_terminal_packet(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "terminal-upgrade.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "terminal-upgrade.md"
     raw_path.write_text("terminal source\n", encoding="utf-8")
     monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
     operational = failure_supervisor.record_raw_failure(
         raw_path=raw_path,
         error="local consensus semantic no quorum: authority marker missing",
     )
-    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state_path = chronovisor_root / "runtime" / "failures" / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["failures"][raw_path.name].pop("self_heal_queued")
     state["failures"][raw_path.name].pop("packet_path")
@@ -607,11 +607,11 @@ def test_in_flight_operational_worker_observes_semantic_defer_cancellation(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
-    from llm_wiki_mcp.local_repair import LocalRepairDecision
+    from chronovisor import failure_supervisor, self_heal
+    from chronovisor.local_repair import LocalRepairDecision
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "in-flight-upgrade.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "in-flight-upgrade.md"
     raw_path.write_text("in-flight source\n", encoding="utf-8")
     monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
     operational = failure_supervisor.record_raw_failure(
@@ -642,7 +642,7 @@ def test_in_flight_operational_worker_observes_semantic_defer_cancellation(
     def record_effect(name: str):
         def inner(*_args: object, **_kwargs: object) -> object:
             forbidden_effects.append(name)
-            return wiki_root / f"unexpected-{name}.json"
+            return chronovisor_root / f"unexpected-{name}.json"
 
         return inner
 
@@ -709,10 +709,10 @@ def test_cancellation_dry_run_is_byte_for_byte_read_only(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
+    from chronovisor import failure_supervisor, self_heal
 
-    wiki_root, _artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "dry-run-cancel.md"
+    chronovisor_root, _artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "dry-run-cancel.md"
     raw_path.write_text("dry run source\n", encoding="utf-8")
     monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
     operational = failure_supervisor.record_raw_failure(
@@ -723,7 +723,7 @@ def test_cancellation_dry_run_is_byte_for_byte_read_only(
     cancellation = self_heal.request_packet_cancellation(
         packet_path,
         reason="test_dry_run",
-        superseded_by_packet=wiki_root / "runtime" / "semantic.json",
+        superseded_by_packet=chronovisor_root / "runtime" / "semantic.json",
     )
     cancellation_path = Path(str(cancellation["cancellation_path"]))
     packet_before = packet_path.read_bytes()
@@ -744,10 +744,10 @@ def test_semantic_defer_survives_unreadable_packet_during_cancellation_publish(
     monkeypatch: pytest.MonkeyPatch,
     reader_mode: str,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor, self_heal
+    from chronovisor import failure_supervisor, self_heal
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / f"cancel-{reader_mode}.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / f"cancel-{reader_mode}.md"
     raw_path.write_text("cancellation fail-closed source\n", encoding="utf-8")
     monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
     operational = failure_supervisor.record_raw_failure(
@@ -782,11 +782,11 @@ def test_semantic_defer_keeps_operational_packet_shared_by_another_raw(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    first = wiki_root / "raw" / "shared-first.md"
-    second = wiki_root / "raw" / "shared-second.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    first = chronovisor_root / "raw" / "shared-first.md"
+    second = chronovisor_root / "raw" / "shared-second.md"
     first.write_text("first\n", encoding="utf-8")
     second.write_text("second\n", encoding="utf-8")
     monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
@@ -800,7 +800,7 @@ def test_semantic_defer_keeps_operational_packet_shared_by_another_raw(
         error=missing_authority,
     )
     assert second_operational.packet_path == first_operational.packet_path
-    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state_path = chronovisor_root / "runtime" / "failures" / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["failures"][first.name].pop("self_heal_queued")
     state["failures"][second.name].pop("self_heal_queued")
@@ -816,7 +816,7 @@ def test_semantic_defer_keeps_operational_packet_shared_by_another_raw(
     old_packet = json.loads(Path(str(first_operational.packet_path)).read_text())
     assert old_packet["status"] == "pending_local_repair"
     assert "superseded_by_packet" not in old_packet
-    state = json.loads((wiki_root / "runtime" / "failures" / "state.json").read_text())
+    state = json.loads((chronovisor_root / "runtime" / "failures" / "state.json").read_text())
     assert state["failures"][first.name]["packet_path"] == semantic.packet_path
     assert "packet_path" not in state["failures"][second.name]
     [registry] = state["operational_failures"].values()
@@ -828,11 +828,11 @@ def test_semantic_defer_cancels_legacy_packet_when_every_shared_raw_is_replaced(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    first = wiki_root / "raw" / "legacy-bundle-first.md"
-    second = wiki_root / "raw" / "legacy-bundle-second.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    first = chronovisor_root / "raw" / "legacy-bundle-first.md"
+    second = chronovisor_root / "raw" / "legacy-bundle-second.md"
     first.write_text("first\n", encoding="utf-8")
     second.write_text("second\n", encoding="utf-8")
     monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
@@ -847,7 +847,7 @@ def test_semantic_defer_cancels_legacy_packet_when_every_shared_raw_is_replaced(
     )
     assert shared.packet_path == operational.packet_path
 
-    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state_path = chronovisor_root / "runtime" / "failures" / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["failures"][first.name].pop("packet_path")
     state["failures"][second.name].pop("packet_path")
@@ -874,10 +874,10 @@ def test_semantic_defer_does_not_trust_mismatched_legacy_registry_binding(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    raw_path = wiki_root / "raw" / "legacy-registry-mismatch.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    raw_path = chronovisor_root / "raw" / "legacy-registry-mismatch.md"
     raw_path.write_text("source\n", encoding="utf-8")
     monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
     operational = failure_supervisor.record_raw_failure(
@@ -886,7 +886,7 @@ def test_semantic_defer_does_not_trust_mismatched_legacy_registry_binding(
     )
     packet_path = Path(str(operational.packet_path))
     packet_before = packet_path.read_bytes()
-    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state_path = chronovisor_root / "runtime" / "failures" / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     entry = state["failures"][raw_path.name]
     fingerprint = entry["fingerprint"]
@@ -909,11 +909,11 @@ def test_semantic_defer_preserves_direct_packet_reference_with_mismatched_finger
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import failure_supervisor
+    from chronovisor import failure_supervisor
 
-    wiki_root, artifact = semantic_defer_wiki
-    first = wiki_root / "raw" / "mismatch-shared-first.md"
-    second = wiki_root / "raw" / "mismatch-shared-second.md"
+    chronovisor_root, artifact = semantic_defer_wiki
+    first = chronovisor_root / "raw" / "mismatch-shared-first.md"
+    second = chronovisor_root / "raw" / "mismatch-shared-second.md"
     first.write_text("first\n", encoding="utf-8")
     second.write_text("second\n", encoding="utf-8")
     monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
@@ -928,7 +928,7 @@ def test_semantic_defer_preserves_direct_packet_reference_with_mismatched_finger
     )
     assert shared.packet_path == operational.packet_path
 
-    state_path = wiki_root / "runtime" / "failures" / "state.json"
+    state_path = chronovisor_root / "runtime" / "failures" / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["failures"][second.name]["fingerprint"] = "inconsistent:fingerprint"
     state_path.write_text(json.dumps(state), encoding="utf-8")

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp import semantic_hold
+from chronovisor import semantic_hold
 from tests.semantic_hold_support import (
     semantic_authority as _authority,
     semantic_review as _semantic_review,
@@ -72,7 +72,7 @@ def test_authority_observation_detects_a_b_a_file_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import local_model_eval, runtime_config
+    from chronovisor import local_model_eval, runtime_config
 
     config_path = tmp_path / "config.toml"
     legacy_path = tmp_path / "recall.toml"

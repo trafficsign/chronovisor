@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from llm_wiki_mcp.recall_policy_store import append_live_episode, apply_policy_overrides, normalize_policy_overrides
-from llm_wiki_mcp.recall_runtime import RecallPolicy
+from chronovisor.recall_policy_store import append_live_episode, apply_policy_overrides, normalize_policy_overrides
+from chronovisor.recall_runtime import RecallPolicy
 
 
 def test_normalize_policy_overrides_keeps_allowed_fields_only() -> None:
@@ -44,7 +44,7 @@ def test_append_live_episode_writes_unlabeled_quality_record(tmp_path) -> None:
             "decision": "read",
             "queries": ["llm wiki recall"],
             "pages": ["page-a"],
-            "prompt_preview": "LLM Wiki recall",
+            "prompt_preview": "Chronovisor recall",
         },
         path=path,
     )

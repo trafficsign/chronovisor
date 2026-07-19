@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import threading
 
-from llm_wiki_mcp import reranker, server
-from llm_wiki_mcp.reranker import RerankOutcome, rerank_results
-from llm_wiki_mcp.runtime_config import RerankerConfig
-from llm_wiki_mcp.search import ScoredPage
+from chronovisor import reranker, server
+from chronovisor.reranker import RerankOutcome, rerank_results
+from chronovisor.runtime_config import RerankerConfig
+from chronovisor.search import ScoredPage
 
 
 def page(page_id: str, score: float = 1.0) -> ScoredPage:
@@ -161,7 +161,7 @@ def test_start_reranker_warmup_is_single_daemon(monkeypatch) -> None:
     assert started == [config.model]
 
 
-def test_wiki_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
+def test_chronovisor_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
     class FakeStore:
         def refresh(self) -> None:
             pass
@@ -191,8 +191,8 @@ def test_wiki_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
             },
         )
 
-    from llm_wiki_mcp import search as search_mod
-    from llm_wiki_mcp import runtime_config
+    from chronovisor import search as search_mod
+    from chronovisor import runtime_config
 
     monkeypatch.setattr(search_mod, "search", fake_search)
     monkeypatch.setattr(
@@ -203,9 +203,9 @@ def test_wiki_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
     monkeypatch.setattr(server, "find_page", lambda _page_id: None)
 
     tool_fn = (
-        server.wiki_search.fn
-        if hasattr(server.wiki_search, "fn")
-        else server.wiki_search
+        server.chronovisor_search.fn
+        if hasattr(server.chronovisor_search, "fn")
+        else server.chronovisor_search
     )
     payload = json.loads(tool_fn("needle", depth=0))
 
@@ -214,7 +214,7 @@ def test_wiki_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
     assert [hit["page_id"] for hit in payload["direct_hits"]] == ["b", "a"]
 
 
-def test_wiki_search_reranks_after_tag_filter(monkeypatch) -> None:
+def test_chronovisor_search_reranks_after_tag_filter(monkeypatch) -> None:
     class FakeStore:
         def refresh(self) -> None:
             pass
@@ -245,8 +245,8 @@ def test_wiki_search_reranks_after_tag_filter(monkeypatch) -> None:
             },
         )
 
-    from llm_wiki_mcp import search as search_mod
-    from llm_wiki_mcp import runtime_config
+    from chronovisor import search as search_mod
+    from chronovisor import runtime_config
 
     monkeypatch.setattr(search_mod, "search", fake_search)
     monkeypatch.setattr(
@@ -257,9 +257,9 @@ def test_wiki_search_reranks_after_tag_filter(monkeypatch) -> None:
     monkeypatch.setattr(server, "find_page", lambda _page_id: None)
 
     tool_fn = (
-        server.wiki_search.fn
-        if hasattr(server.wiki_search, "fn")
-        else server.wiki_search
+        server.chronovisor_search.fn
+        if hasattr(server.chronovisor_search, "fn")
+        else server.chronovisor_search
     )
     payload = json.loads(tool_fn("needle", depth=0, tags=["d/keep"]))
 

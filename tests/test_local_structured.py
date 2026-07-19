@@ -12,8 +12,8 @@ from typing import Any, Iterator
 import httpx
 import pytest
 
-from llm_wiki_mcp import ollama
-from llm_wiki_mcp.local_structured import (
+from chronovisor import ollama
+from chronovisor.local_structured import (
     ChatRequest,
     LocalConsensusAuditStore,
     LocalStructuredSession,
@@ -100,9 +100,9 @@ def test_transport_format_schema_does_not_weaken_client_validation() -> None:
 def _isolate_default_audit_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_wiki_mcp import wiki
+    from chronovisor import store
 
-    monkeypatch.setattr(wiki, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
 
 
 def _session(transport: QueueTransport, **overrides: Any) -> LocalStructuredSession:
@@ -754,7 +754,7 @@ def test_output_limit_on_every_turn_fails_operationally_after_bounded_repairs() 
 def test_default_transport_reuses_larger_resident_context_without_eviction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
     planner_calls: list[dict[str, Any]] = []
     chat_contexts: list[int] = []
 
@@ -811,7 +811,7 @@ def test_default_transport_reuses_larger_resident_context_without_eviction(
 def test_default_transport_oversize_input_has_no_runner_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
     planner_calls: list[object] = []
     unload_calls: list[object] = []
     chat_calls: list[object] = []
@@ -888,7 +888,7 @@ def test_default_transport_maps_resource_lease_timeout_to_capacity_unavailable(
 def test_default_transport_holds_exclusive_lease_across_all_repair_turns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LLM_WIKI_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
     large_entered = threading.Event()
     release_large = threading.Event()
     small_entered = threading.Event()

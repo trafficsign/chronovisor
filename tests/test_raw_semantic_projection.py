@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp.raw_semantic_projection import (
+from chronovisor.raw_semantic_projection import (
     PROJECTION_BUNDLE_RECEIPT_SCHEMA,
     PROJECTION_CHILD_SCHEMA,
     ProjectionConflictError,
@@ -17,7 +17,7 @@ from llm_wiki_mcp.raw_semantic_projection import (
     projection_bundle_state_for_parent,
     verify_projection_bundle,
 )
-from llm_wiki_mcp.save_transaction import (
+from chronovisor.save_transaction import (
     attach_save_transaction_marker,
     make_save_transaction,
 )
@@ -427,7 +427,7 @@ def test_partial_child_fault_resumes_existing_intent_under_new_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import raw_semantic_projection as projection_mod
+    from chronovisor import raw_semantic_projection as projection_mod
 
     path = _transcript_raw(
         tmp_path,
@@ -483,7 +483,7 @@ def test_directory_fsync_failure_propagates_and_retry_resyncs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp import raw_semantic_projection as projection_mod
+    from chronovisor import raw_semantic_projection as projection_mod
 
     path = _transcript_raw(
         tmp_path,
@@ -634,7 +634,7 @@ def _fragment_raws(tmp_path: Path, record_bytes: bytes) -> list[Path]:
             until_line=9,
         )
         payload = {
-            "schema": "llm-wiki.raw-capture-fragment.v1",
+            "schema": "chronovisor.raw-capture-fragment.v1",
             "host": "codex",
             "session_id": "source-session",
             "session_file": str(session_file),

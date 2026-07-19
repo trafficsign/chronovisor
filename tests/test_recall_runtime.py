@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_wiki_mcp.recall_runtime import (
+from chronovisor.recall_runtime import (
     ContextItem,
     RecallPolicy,
     RecallBudgetExhausted,
@@ -29,12 +29,12 @@ from llm_wiki_mcp.recall_runtime import (
     search_candidates,
     warm_recall_model,
 )
-from llm_wiki_mcp.search import ScoredPage
+from chronovisor.search import ScoredPage
 
 
 @pytest.fixture(autouse=True)
 def disable_live_recall_policy(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LLM_WIKI_RECALL_IMPROVEMENT_POLICY", "0")
+    monkeypatch.setenv("CHRONOVISOR_RECALL_IMPROVEMENT_POLICY", "0")
 
 
 def test_explicit_past_project_prompt_crosses_read_threshold() -> None:
@@ -42,8 +42,8 @@ def test_explicit_past_project_prompt_crosses_read_threshold() -> None:
     request = RecallRequest(
         host="test",
         event="UserPromptSubmit",
-        prompt="昨日LLM Wikiのフック直したやつ、Claude Codeにも入れられる?",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        prompt="昨日Chronovisorのフック直したやつ、Claude Codeにも入れられる?",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     score, reasons, matched = evaluate_heuristic(request, policy)
@@ -58,13 +58,13 @@ def test_ascii_term_matching_uses_word_boundaries() -> None:
     request = RecallRequest(
         host="test",
         event="UserPromptSubmit",
-        prompt="LLM Wiki runtime と uvx cache の注意点",
+        prompt="Chronovisor runtime と uvx cache の注意点",
     )
 
     _score, _reasons, matched = evaluate_heuristic(request, policy)
 
     assert "me " not in matched["ownership"]
-    assert "llm wiki" in matched["project"]
+    assert "chronovisor" in matched["project"]
     assert "uvx" in matched["project"]
 
 
@@ -89,7 +89,7 @@ def test_build_queries_does_not_add_single_generic_decision_term() -> None:
 
 
 def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     def fake_search(
         *,
@@ -110,7 +110,7 @@ def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
 
 
 def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     def fake_search(
         *,
@@ -146,7 +146,7 @@ def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) 
 def test_search_candidates_allows_sensitive_pages_when_prompt_requests_it(
     monkeypatch,
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     def fake_search(
         *,
@@ -180,11 +180,11 @@ def test_search_candidates_allows_sensitive_pages_when_prompt_requests_it(
 
 def test_best_excerpt_index_prefers_dense_query_terms() -> None:
     body = (
-        "LLM Wiki was mentioned near the top.\n"
+        "Chronovisor was mentioned near the top.\n"
         "Some unrelated changelog text follows.\n"
         "Deployment note: git push plus uvx cache refresh is required before restart.\n"
     ).lower()
-    terms = excerpt_terms(["LLM Wiki GitHub runtime uvx cache push"])
+    terms = excerpt_terms(["Chronovisor GitHub runtime uvx cache push"])
 
     idx = best_excerpt_index(body, terms, max_chars=80)
 
@@ -212,7 +212,7 @@ def test_run_recall_without_search_returns_queries_for_gate_hit() -> None:
         host="test",
         event="UserPromptSubmit",
         prompt="前回のCodex hook設定の続き、どう実装する?",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = run_recall(request, policy, perform_search=False)
@@ -223,7 +223,7 @@ def test_run_recall_without_search_returns_queries_for_gate_hit() -> None:
 
 
 def test_judge_timeout_fails_silent_in_search_zone(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     def timeout_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
         return None, [], "judge unavailable: ReadTimeout"
@@ -233,8 +233,8 @@ def test_judge_timeout_fails_silent_in_search_zone(monkeypatch) -> None:
     request = RecallRequest(
         host="test",
         event="UserPromptSubmit",
-        prompt="LLM Wiki の運用どうする?",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        prompt="Chronovisor の運用どうする?",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = recall_runtime.run_recall(request, policy, perform_search=False)
@@ -248,7 +248,7 @@ def test_judge_timeout_fails_silent_in_search_zone(monkeypatch) -> None:
 
 
 def test_judge_timeout_can_fall_back_when_fail_silent_disabled(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     def timeout_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
         return None, [], "judge unavailable: ReadTimeout"
@@ -262,8 +262,8 @@ def test_judge_timeout_can_fall_back_when_fail_silent_disabled(monkeypatch) -> N
     request = RecallRequest(
         host="test",
         event="UserPromptSubmit",
-        prompt="LLM Wiki の運用どうする?",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        prompt="Chronovisor の運用どうする?",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = recall_runtime.run_recall(request, policy, perform_search=False)
@@ -274,7 +274,7 @@ def test_judge_timeout_can_fall_back_when_fail_silent_disabled(monkeypatch) -> N
 
 
 def test_judge_resource_contention_uses_deterministic_evidence(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     def busy_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
         return None, [], "judge unavailable: capacity_unavailable"
@@ -288,8 +288,8 @@ def test_judge_resource_contention_uses_deterministic_evidence(monkeypatch) -> N
     request = RecallRequest(
         host="test",
         event="UserPromptSubmit",
-        prompt="LLM Wiki の運用どうする?",
-        cwd="/tmp/llm-wiki-mcp",
+        prompt="Chronovisor の運用どうする?",
+        cwd="/tmp/chronovisor",
     )
 
     result = recall_runtime.run_recall(request, policy, perform_search=False)
@@ -303,7 +303,7 @@ def test_judge_resource_contention_uses_deterministic_evidence(monkeypatch) -> N
 
 
 def test_judge_can_lower_search_zone_to_none(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     def no_recall_judge(
         *_args: object, **_kwargs: object
@@ -315,8 +315,8 @@ def test_judge_can_lower_search_zone_to_none(monkeypatch) -> None:
     request = RecallRequest(
         host="test",
         event="UserPromptSubmit",
-        prompt="LLM Wiki の運用どうする?",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        prompt="Chronovisor の運用どうする?",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = recall_runtime.run_recall(request, policy, perform_search=False)
@@ -328,7 +328,7 @@ def test_judge_can_lower_search_zone_to_none(monkeypatch) -> None:
 
 
 def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     def unexpected_judge(
         *_args: object, **_kwargs: object
@@ -340,8 +340,8 @@ def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
     request = RecallRequest(
         host="test",
         event="UserPromptSubmit",
-        prompt="昨日LLM Wikiのフック直したやつ、Claude Codeにも入れられる?",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        prompt="昨日Chronovisorのフック直したやつ、Claude Codeにも入れられる?",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = recall_runtime.run_recall(request, policy, perform_search=False)
@@ -518,7 +518,7 @@ semantic_low_confidence_weight = 0.25
 
 
 def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     captured: dict[str, object] = {}
 
@@ -558,7 +558,7 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
 
     score, queries, reason = run_local_judge(
         RecallRequest(
-            host="test", event="UserPromptSubmit", prompt="LLM Wiki の運用どうする?"
+            host="test", event="UserPromptSubmit", prompt="Chronovisor の運用どうする?"
         ),
         0.5,
         policy,
@@ -578,7 +578,7 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
 
 
 def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     class FakeSession:
         def __init__(self, **_kwargs: object) -> None:
@@ -596,7 +596,7 @@ def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
 
     score, _queries, reason = run_local_judge(
         RecallRequest(
-            host="test", event="UserPromptSubmit", prompt="LLM Wiki の運用どうする?"
+            host="test", event="UserPromptSubmit", prompt="Chronovisor の運用どうする?"
         ),
         0.5,
         policy,
@@ -607,7 +607,7 @@ def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
 
 
 def test_query_rewriter_timeout_falls_back_with_reason(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     captured: dict[str, object] = {}
 
@@ -639,7 +639,7 @@ def test_query_rewriter_timeout_falls_back_with_reason(monkeypatch) -> None:
 
 
 def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     captured: list[dict[str, object]] = []
     real_session = recall_runtime.LocalStructuredSession
@@ -679,7 +679,7 @@ def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
 
 
 def test_run_recall_records_rewrite_fallback_metrics(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     def fake_search(**_kwargs: object) -> tuple[list[ScoredPage], str]:
         return [], "bm25"
@@ -696,8 +696,8 @@ def test_run_recall_records_rewrite_fallback_metrics(monkeypatch) -> None:
         RecallRequest(
             host="test",
             event="UserPromptSubmit",
-            prompt="前のあれ、LLM Wikiでどう直すんだっけ?",
-            cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+            prompt="前のあれ、Chronovisorでどう直すんだっけ?",
+            cwd="/Users/trafficsign/projects/personal/chronovisor",
         ),
         RecallPolicy(judge_mode="off", log_decisions=False),
         perform_search=True,
@@ -715,8 +715,8 @@ def test_system_task_notification_skips_recall() -> None:
     request = RecallRequest(
         host="test",
         event="UserPromptSubmit",
-        prompt="<task-notification>Codex hook task completed for yesterday's LLM Wiki work.</task-notification>",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        prompt="<task-notification>Codex hook task completed for yesterday's Chronovisor work.</task-notification>",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = run_recall(request, policy, perform_search=False)
@@ -733,7 +733,7 @@ def test_recall_context_injection_skips_recall() -> None:
         host="test",
         event="UserPromptSubmit",
         prompt="[RECALL_CONTEXT]\npages:\n- systemheadertemplate\n[/RECALL_CONTEXT]",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = run_recall(request, policy, perform_search=False)
@@ -771,7 +771,7 @@ def test_user_discussing_task_notification_is_not_filtered() -> None:
         host="test",
         event="UserPromptSubmit",
         prompt="さっきの <task-notification> の recall 誤発火をどう直す?",
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = run_recall(request, policy, perform_search=False)
@@ -786,12 +786,12 @@ def test_trailing_system_block_is_stripped_before_recall_gate() -> None:
         host="test",
         event="UserPromptSubmit",
         prompt=(
-            "昨日LLM Wikiの recall hook の続き、どう直す?\n"
+            "昨日Chronovisorの recall hook の続き、どう直す?\n"
             "<task-notification>\n"
             "<summary>sdksintro systemheadertemplate internal-model-paradox</summary>\n"
             "</task-notification>"
         ),
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = run_recall(request, policy, perform_search=False)
@@ -809,14 +809,14 @@ def test_middle_recall_context_block_is_stripped_before_recall_gate() -> None:
         host="test",
         event="UserPromptSubmit",
         prompt=(
-            "昨日LLM Wikiの recall hook の続き。\n"
+            "昨日Chronovisorの recall hook の続き。\n"
             "[RECALL_CONTEXT]\n"
             "pages:\n"
             "- systemheadertemplate\n"
             "[/RECALL_CONTEXT]\n"
             "この誤発火をどう直す?"
         ),
-        cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
     )
 
     result = run_recall(request, policy, perform_search=False)
@@ -829,11 +829,11 @@ def test_middle_recall_context_block_is_stripped_before_recall_gate() -> None:
 
 
 def test_feedback_exact_false_positive_suppresses_repeat(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
-    prompt = "昨日LLM Wikiの recall hook が誤発火した内部通知"
+    prompt = "昨日Chronovisorの recall hook が誤発火した内部通知"
     append_feedback(
         "false-positive", "exact repeat should not recall", prompt=prompt, host="test"
     )
@@ -851,7 +851,7 @@ def test_feedback_exact_false_positive_suppresses_repeat(tmp_path, monkeypatch) 
 
 
 def test_feedback_machine_tag_suppresses_same_tag(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -867,7 +867,7 @@ def test_feedback_machine_tag_suppresses_same_tag(tmp_path, monkeypatch) -> None
         RecallRequest(
             host="test",
             event="UserPromptSubmit",
-            prompt="<tool-result>new noisy result about yesterday LLM Wiki</tool-result>",
+            prompt="<tool-result>new noisy result about yesterday Chronovisor</tool-result>",
         ),
         policy,
         perform_search=False,
@@ -903,7 +903,7 @@ def test_codex_output_uses_hook_json_when_context_exists() -> None:
     request = RecallRequest(
         host="test",
         event="UserPromptSubmit",
-        prompt="前回のLLM Wiki設計の続き",
+        prompt="前回のChronovisor設計の続き",
     )
     result = run_recall(request, policy, perform_search=False)
     result.context = "[RECALL_CONTEXT]\nhello\n[/RECALL_CONTEXT]"
@@ -920,14 +920,14 @@ def test_recall_context_includes_decision_id() -> None:
         status="ok",
         decision="read",
         confidence=0.8,
-        queries=["昨日のLLM Wiki"],
+        queries=["昨日のChronovisor"],
         reasons=["past reference term"],
         matched_terms={},
         decision_id="20260602T120000-deadbeef",
         context_items=[
             ContextItem(
-                page_id="llm-wiki-recall-configuration",
-                title="LLM Wiki Recall Configuration",
+                page_id="chronovisor-recall-configuration",
+                title="Chronovisor Recall Configuration",
                 updated="2026-06-02",
                 score=1.0,
                 sensitivity="high",
@@ -986,7 +986,7 @@ def test_context_layers_are_kept_as_whole_blocks() -> None:
 
 
 def test_recall_budget_exhaustion_uses_deterministic_fallback(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     monkeypatch.setattr(
         recall_runtime,
@@ -1013,7 +1013,7 @@ def test_recall_budget_exhaustion_uses_deterministic_fallback(monkeypatch) -> No
         RecallRequest(
             host="codex",
             event="UserPromptSubmit",
-            prompt="昨日のLLM Wikiの続き",
+            prompt="昨日のChronovisorの続き",
             session_id="s1",
         ),
         RecallPolicy(judge_mode="off", log_decisions=False),
@@ -1026,7 +1026,7 @@ def test_recall_budget_exhaustion_uses_deterministic_fallback(monkeypatch) -> No
 
 
 def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     seen: dict[str, object] = {}
 
@@ -1065,7 +1065,7 @@ def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> 
 
 
 def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     log_file = tmp_path / "recall-log.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
@@ -1074,8 +1074,8 @@ def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None
         RecallRequest(
             host="test",
             event="UserPromptSubmit",
-            prompt="昨日LLM Wikiのフック直したやつ、Claude Codeにも入れられる?",
-            cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+            prompt="昨日Chronovisorのフック直したやつ、Claude Codeにも入れられる?",
+            cwd="/Users/trafficsign/projects/personal/chronovisor",
         ),
         RecallPolicy(judge_mode="off", log_decisions=True),
         perform_search=False,
@@ -1092,10 +1092,10 @@ def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None
 
 
 def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
-    wiki_root = tmp_path / "wiki"
-    log_file = wiki_root / "recall" / "recall-log.jsonl"
+    chronovisor_root = tmp_path / "wiki"
+    log_file = chronovisor_root / "recall" / "recall-log.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
     result = RecallResult(
         status="ok",
@@ -1119,14 +1119,14 @@ def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> 
         RecallRequest(
             host="codex",
             event="UserPromptSubmit",
-            prompt="LLM Wiki recall",
+            prompt="Chronovisor recall",
             cwd="/repo",
             session_id="s1",
         ),
         result,
     )
 
-    live_file = wiki_root / "runtime" / "recall-improvement" / "live-episodes.jsonl"
+    live_file = chronovisor_root / "runtime" / "recall-improvement" / "live-episodes.jsonl"
     live = json.loads(live_file.read_text(encoding="utf-8"))
     assert live["decision_id"] == "d1"
     assert live["quality"]["usefulness"] == "unknown"
@@ -1134,7 +1134,7 @@ def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> 
 
 
 def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -1149,7 +1149,7 @@ def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
 def test_missed_feedback_prompt_only_records_without_expected(
     tmp_path, monkeypatch
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -1168,7 +1168,7 @@ def test_missed_feedback_prompt_only_records_without_expected(
 def test_page_ignored_feedback_records_explicit_negative_pages(
     tmp_path, monkeypatch
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -1187,7 +1187,7 @@ def test_page_ignored_feedback_records_explicit_negative_pages(
 def test_recent_cli_lists_latest_recall_decisions(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     log_file = tmp_path / "recall-log.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
@@ -1235,7 +1235,7 @@ def test_recent_cli_lists_latest_recall_decisions(
 
 
 def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     log_file = tmp_path / "recall-log.jsonl"
     feedback_file = tmp_path / "feedback.jsonl"
@@ -1276,7 +1276,7 @@ def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> N
                 "--prompt",
                 "前に話した recall gate",
                 "--expected-page",
-                "llm-wiki-recall-configuration",
+                "chronovisor-recall-configuration",
                 "--expected-query",
                 "recall gate model",
                 "--ref",
@@ -1290,7 +1290,7 @@ def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> N
 
     assert output["status"] == "recorded"
     assert record["kind"] == "missed"
-    assert record["expected_pages"] == ["llm-wiki-recall-configuration"]
+    assert record["expected_pages"] == ["chronovisor-recall-configuration"]
     assert record["expected_queries"] == ["recall gate model"]
     assert record["snapshot"]["decision_id"] == "20260602T100000-deadbeef"
     assert record["snapshot"]["score"] == 0.34
@@ -1300,11 +1300,11 @@ def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> N
 def test_missed_candidate_feedback_does_not_suppress_runtime(
     tmp_path, monkeypatch
 ) -> None:
-    from llm_wiki_mcp import recall_runtime
+    from chronovisor import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
-    prompt = "昨日LLM Wikiのフック直したやつ、Claude Codeにも入れられる?"
+    prompt = "昨日Chronovisorのフック直したやつ、Claude Codeにも入れられる?"
     append_feedback("missed_candidate", prompt=prompt, extra={"source": "auditor"})
 
     result = run_recall(
@@ -1312,7 +1312,7 @@ def test_missed_candidate_feedback_does_not_suppress_runtime(
             host="test",
             event="UserPromptSubmit",
             prompt=prompt,
-            cwd="/Users/trafficsign/projects/personal/llm-wiki-mcp",
+            cwd="/Users/trafficsign/projects/personal/chronovisor",
         ),
         RecallPolicy(judge_mode="off", log_decisions=False),
         perform_search=False,

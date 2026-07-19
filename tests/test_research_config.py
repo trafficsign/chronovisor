@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from llm_wiki_mcp.research_config import load_research_config
-from llm_wiki_mcp.research_consolidation import run_consolidation
+from chronovisor.research_config import load_research_config
+from chronovisor.research_consolidation import run_consolidation
 
 
 def test_research_config_defaults_fail_closed(tmp_path) -> None:

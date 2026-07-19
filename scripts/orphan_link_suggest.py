@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dry-run orphan link suggestion (plan-2).
 
-Generates ``~/.wiki/system/orphan-link-suggestions-{date}.md`` listing,
+Generates ``~/.chronovisor/system/orphan-link-suggestions-{date}.md`` listing,
 for each orphan page, the existing pages most likely to benefit from
 gaining an inbound link to that orphan.
 
@@ -26,8 +26,8 @@ from pathlib import Path
 # Make the package importable when run from the repo root.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from llm_wiki_mcp.orphan_link import run_dry_run  # noqa: E402
-from llm_wiki_mcp.wiki import SYSTEM_DIR  # noqa: E402
+from chronovisor.orphan_link import run_dry_run  # noqa: E402
+from chronovisor.store import SYSTEM_DIR  # noqa: E402
 
 
 def main() -> int:
@@ -36,7 +36,7 @@ def main() -> int:
         "--output",
         type=Path,
         default=None,
-        help="Output Markdown path. Default: ~/.wiki/system/orphan-link-suggestions-{today}.md",
+        help="Output Markdown path. Default: ~/.chronovisor/system/orphan-link-suggestions-{today}.md",
     )
     parser.add_argument(
         "--max-candidates",

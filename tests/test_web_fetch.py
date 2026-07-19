@@ -3,8 +3,8 @@ from __future__ import annotations
 import httpx
 import gzip
 
-from llm_wiki_mcp.research_config import WebConfig
-from llm_wiki_mcp.web_fetch import fetch_web
+from chronovisor.research_config import WebConfig
+from chronovisor.web_fetch import fetch_web
 
 
 PUBLIC = lambda _host, _port: ["93.184.216.34"]

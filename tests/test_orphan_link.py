@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_mcp import orphan_link as ol_mod
-from llm_wiki_mcp.orphan_link import (
+from chronovisor import orphan_link as ol_mod
+from chronovisor.orphan_link import (
     OrphanReport,
     Suggestion,
     format_report,
@@ -124,7 +124,7 @@ def test_apply_suggestion_preserves_correction_that_lands_before_locked_cas(
         source.write_text(corrected, encoding="utf-8")
         yield
 
-    monkeypatch.setattr(ol_mod, "wiki_mutation_lock", correction_wins)
+    monkeypatch.setattr(ol_mod, "chronovisor_mutation_lock", correction_wins)
     suggestion = Suggestion(
         source_page_id="source",
         confidence=0.9,
@@ -178,7 +178,7 @@ def test_apply_suggestion_rolls_back_only_its_owned_write_under_lock(
 def test_autonomous_orphan_lane_applies_once(
     tmp_path: Path, isolated_pages: Path
 ) -> None:
-    from llm_wiki_mcp.convergence import ConvergenceStore, RetryPolicy
+    from chronovisor.convergence import ConvergenceStore, RetryPolicy
 
     _seed_page(isolated_pages, "source", "durable anchor")
     _seed_page(isolated_pages, "target", "target topic")
@@ -233,7 +233,7 @@ def test_orphan_no_quorum_is_cached_until_authority_epoch_changes(
     isolated_pages: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from llm_wiki_mcp.convergence import ConvergenceStore, RetryPolicy
+    from chronovisor.convergence import ConvergenceStore, RetryPolicy
 
     _seed_page(isolated_pages, "source", "durable anchor")
     _seed_page(isolated_pages, "target", "target topic")
@@ -317,7 +317,7 @@ def isolated_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         cand = pages_dir / f"{page_id}.md"
         return cand if cand.exists() else None
 
-    from llm_wiki_mcp import page_mutation
+    from chronovisor import page_mutation
 
     monkeypatch.setattr(
         page_mutation,
@@ -734,7 +734,7 @@ def test_apply_suggestion_never_nests_inside_existing_wiki_link(
 
 
 def _autonomous_state(tmp_path: Path, *, max_local_attempts: int = 2):
-    from llm_wiki_mcp.convergence import ConvergenceStore, RetryPolicy
+    from chronovisor.convergence import ConvergenceStore, RetryPolicy
 
     return ConvergenceStore(
         tmp_path / "state.json",
@@ -1122,7 +1122,7 @@ def test_frontier_retry_keeps_durable_local_suggestion(
     tmp_path: Path,
     isolated_pages: Path,
 ) -> None:
-    from llm_wiki_mcp.convergence import CycleBudget
+    from chronovisor.convergence import CycleBudget
 
     store, semantic = _autonomous_fixture(isolated_pages)
     state = _autonomous_state(tmp_path)

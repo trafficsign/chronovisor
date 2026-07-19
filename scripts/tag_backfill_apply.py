@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Obsolete local-model tag backfill (semantic writes disabled).
 
-Walks every untagged page in ``~/.wiki/pages/``, asks the LLM for tags
+Walks every untagged page in ``~/.chronovisor/pages/``, asks the LLM for tags
 under the v2 prompt (TAG_REPORT_SYSTEM_PROMPT), and writes the result
 to a per-page progress log. When a page produces a non-empty tag set,
 the page's frontmatter is patched in place.
 
-Resumable: every page is logged to ``~/.wiki/.tag-backfill-progress.jsonl``
+Resumable: every page is logged to ``~/.chronovisor/.tag-backfill-progress.jsonl``
 with status ``applied`` / ``skipped`` / ``error``. Re-running the script
 skips any page already present in the progress log.
 
 Failure-tolerant: a single LLM error or parse failure does NOT abort the
 sweep; it logs ``error`` and moves on.
 
-Use ``llm-wiki-sleep`` instead. This module remains only so historical logs and
+Use ``chronovisor-sleep`` instead. This module remains only so historical logs and
 diagnostic helpers can be read; every mutation entry point fails closed.
 """
 
@@ -28,21 +28,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from llm_wiki_mcp.frontmatter import parse as fm_parse, patch as fm_patch  # noqa: E402
-from llm_wiki_mcp.index_store import get_store  # noqa: E402
-from llm_wiki_mcp.legacy_semantic_write import (  # noqa: E402
+from chronovisor.frontmatter import parse as fm_parse, patch as fm_patch  # noqa: E402
+from chronovisor.index_store import get_store  # noqa: E402
+from chronovisor.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
-from llm_wiki_mcp.ollama import generate as _ollama_generate  # noqa: E402
-from llm_wiki_mcp.tag_distribution import (  # noqa: E402
+from chronovisor.ollama import generate as _ollama_generate  # noqa: E402
+from chronovisor.tag_distribution import (  # noqa: E402
     TAG_REPORT_SYSTEM_PROMPT,
     parse_llm_response,
 )
-from llm_wiki_mcp.tags import SEED_TAGS  # noqa: E402
-from llm_wiki_mcp.wiki import find_page  # noqa: E402
+from chronovisor.tags import SEED_TAGS  # noqa: E402
+from chronovisor.store import find_page  # noqa: E402
 
 
-PROGRESS_FILE = Path.home() / ".wiki" / ".tag-backfill-progress.jsonl"
+PROGRESS_FILE = Path.home() / ".chronovisor" / ".tag-backfill-progress.jsonl"
 PLAN_INBOX = Path.home() / "projects" / "plan" / "inbox"
 
 # tag_status frontmatter values for pages where the LLM gave up.
@@ -117,7 +117,7 @@ def _mark_unfit(path: Path, status_value: str) -> None:
     """
     block_legacy_semantic_mutation(
         tool="tag_backfill_apply.py",
-        replacement="llm-wiki-sleep",
+        replacement="chronovisor-sleep",
     )
     try:
         original = path.read_text()
@@ -205,7 +205,7 @@ def _process_one(page_id: str, master: list[str]) -> dict:
     patched = fm_patch(original, {"tags": tags}, deletes=["tag_status"])
     block_legacy_semantic_mutation(
         tool="tag_backfill_apply.py",
-        replacement="llm-wiki-sleep",
+        replacement="chronovisor-sleep",
     )
     path.write_text(patched)
 
@@ -330,7 +330,7 @@ def main() -> int:
 
     block_legacy_semantic_mutation(
         tool="tag_backfill_apply.py",
-        replacement="llm-wiki-sleep",
+        replacement="chronovisor-sleep",
     )
 
     store = get_store()

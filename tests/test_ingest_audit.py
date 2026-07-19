@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_wiki_mcp.ingest_audit import (
+from chronovisor.ingest_audit import (
     decide_ingest_audit,
     record_frontier_audit_outcome,
 )
-from llm_wiki_mcp.runtime_config import IngestAuditConfig
+from chronovisor.runtime_config import IngestAuditConfig
 
 
 def _decision(
@@ -60,7 +60,7 @@ def test_correction_and_incomplete_generation_are_mandatory(tmp_path: Path) -> N
 def test_operational_policy_target_is_mandatory(tmp_path: Path) -> None:
     decision = _decision(
         tmp_path,
-        operations=[{"type": "update", "filename": "llm-wiki-security-policy.md"}],
+        operations=[{"type": "update", "filename": "chronovisor-security-policy.md"}],
     )
 
     assert decision.required is True

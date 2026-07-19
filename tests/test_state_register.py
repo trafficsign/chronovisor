@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from llm_wiki_mcp import recall_runtime
-from llm_wiki_mcp.recall_runtime import (
+from chronovisor import recall_runtime
+from chronovisor.recall_runtime import (
     RecallPolicy,
     RecallRequest,
     render_output,
     run_recall,
 )
-from llm_wiki_mcp import page_mutation, state_register
+from chronovisor import page_mutation, state_register
 
 
 def test_state_register_context_is_injected_for_codex(monkeypatch) -> None:
@@ -103,7 +103,7 @@ def test_refresh_state_register_writes_recent_pages(
         def all_pages_meta(self, include_system: bool = False):
             return []
 
-    monkeypatch.setattr("llm_wiki_mcp.index_store.get_store", lambda: FakeStore())
+    monkeypatch.setattr("chronovisor.index_store.get_store", lambda: FakeStore())
 
     payload = state_register.refresh_state_register(["recent-page"], path=path)
 
@@ -131,7 +131,7 @@ def test_refresh_preserves_approved_current_state_correction(
     monkeypatch.setattr(page_mutation, "SYSTEM_DIR", system)
     monkeypatch.setattr(
         page_mutation,
-        "WIKI_MUTATION_LOCK",
+        "CHRONOVISOR_MUTATION_LOCK",
         tmp_path / "runtime" / "wiki-mutation.lock",
     )
     monkeypatch.setattr(page_mutation, "find_page", lambda _page_id: None)
@@ -165,7 +165,7 @@ def test_refresh_preserves_approved_current_state_correction(
         def all_pages_meta(self, include_system: bool = False):
             return []
 
-    monkeypatch.setattr("llm_wiki_mcp.index_store.get_store", lambda: FakeStore())
+    monkeypatch.setattr("chronovisor.index_store.get_store", lambda: FakeStore())
     payload = state_register.refresh_state_register(["machine"], path=path)
     written = path.read_text(encoding="utf-8")
 
@@ -217,7 +217,7 @@ def test_refresh_state_register_skips_placeholder_pages(
         def all_pages_meta(self, include_system: bool = False):
             return [{"page_id": "baz"}, {"page_id": "real"}]
 
-    monkeypatch.setattr("llm_wiki_mcp.index_store.get_store", lambda: FakeStore())
+    monkeypatch.setattr("chronovisor.index_store.get_store", lambda: FakeStore())
 
     payload = state_register.refresh_state_register(path=path)
 
@@ -266,7 +266,7 @@ def test_refresh_state_register_skips_deprecated_pages(
         def all_pages_meta(self, include_system: bool = False):
             return [{"page_id": "old"}, {"page_id": "active"}]
 
-    monkeypatch.setattr("llm_wiki_mcp.index_store.get_store", lambda: FakeStore())
+    monkeypatch.setattr("chronovisor.index_store.get_store", lambda: FakeStore())
 
     payload = state_register.refresh_state_register(path=path)
 

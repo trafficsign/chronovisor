@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from llm_wiki_mcp.server import _validate_raw_keyword
+from chronovisor.server import _validate_raw_keyword
 
 
 def test_accepts_basic_keywords():

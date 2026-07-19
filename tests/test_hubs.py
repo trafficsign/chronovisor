@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llm_wiki_mcp import hubs
+from chronovisor import hubs
 
 
 class FakeStore:
@@ -41,7 +41,7 @@ def test_build_hub_pages_updates_existing_page_id_without_relocation(
     monkeypatch,
 ) -> None:
     pages_dir = tmp_path / "pages"
-    legacy_dir = pages_dir / "llm-wiki"
+    legacy_dir = pages_dir / "chronovisor"
     output_dir = pages_dir / "hubs"
     legacy_dir.mkdir(parents=True)
     output_dir.mkdir()

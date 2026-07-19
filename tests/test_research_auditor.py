@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llm_wiki_mcp.evidence_bundle import build_bundle, simple_assess_claims
-from llm_wiki_mcp.research_auditor import audit_research_run
-from llm_wiki_mcp.research_store import ResearchStore
+from chronovisor.evidence_bundle import build_bundle, simple_assess_claims
+from chronovisor.research_auditor import audit_research_run
+from chronovisor.research_store import ResearchStore
 
 
 def test_auditor_records_missing_evidence_without_mutation(tmp_path: Path, monkeypatch) -> None:
-    from llm_wiki_mcp import research_store
+    from chronovisor import research_store
 
-    monkeypatch.setattr(research_store, "WIKI_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "research")
     bundle = build_bundle(
         run_id="run",
