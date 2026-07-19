@@ -147,11 +147,18 @@ def save_enabled(host: str, explicit_config: Path | None = None) -> bool:
     if not policy.stop_save:
         return False
     env_name = (
+        "CODEX_CHRONOVISOR_RECORD_ENABLED"
+        if host == "codex"
+        else "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED"
+    )
+    legacy_env_name = (
         "CODEX_WIKI_SAVE_ENABLED"
         if host == "codex"
         else "CLAUDE_CODE_WIKI_SAVE_ENABLED"
     )
     flag = env_flag(env_name)
+    if flag is None:
+        flag = env_flag(legacy_env_name)
     if flag is not None:
         return flag
     return active_config_file(explicit_config).name == "config.toml"
@@ -352,7 +359,7 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                     name="codex-save",
                     module="chronovisor.codex_record",
                     args=["--hook", "--save"],
-                    env={"CODEX_WIKI_SAVE_ENABLED": "1"},
+                    env={"CODEX_CHRONOVISOR_RECORD_ENABLED": "1"},
                     log_prefix="codex-save",
                     on_success=[
                         {
@@ -371,7 +378,7 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                     name="claude-code-save",
                     module="chronovisor.claude_code_record",
                     args=["--hook", "--save"],
-                    env={"CLAUDE_CODE_WIKI_SAVE_ENABLED": "1"},
+                    env={"CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED": "1"},
                     log_prefix="claude-code-save",
                     on_success=[
                         {

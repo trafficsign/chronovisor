@@ -335,7 +335,7 @@ def test_stop_dispatch_full_entrypoint_enqueues_only_capture_work(
         "recall_improve = true\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("CLAUDE_CODE_WIKI_SAVE_ENABLED", "1")
+    monkeypatch.setenv("CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED", "1")
     monkeypatch.setenv("CHRONOVISOR_RECALL_AUDIT_ENABLED", "1")
     monkeypatch.setenv("CHRONOVISOR_CONTENT_CORRECTION_ENABLED", "1")
     monkeypatch.setenv("CHRONOVISOR_RECALL_IMPROVE_ENABLED", "1")
@@ -573,7 +573,7 @@ def test_spawn_task_only_enqueues_without_process(monkeypatch) -> None:
         name="codex-save",
         module="chronovisor.codex_record",
         args=["--hook", "--save"],
-        env={"CODEX_WIKI_SAVE_ENABLED": "1"},
+        env={"CODEX_CHRONOVISOR_RECORD_ENABLED": "1"},
     )
 
     result = hook_dispatcher.spawn_task(task, '{"session_id":"session-1"}')
@@ -593,6 +593,7 @@ def test_stop_dispatch_requires_env_without_unified_config(
     legacy = tmp_path / "recall.toml"
     legacy.write_text("enabled = true\n", encoding="utf-8")
     monkeypatch.delenv("CODEX_WIKI_SAVE_ENABLED", raising=False)
+    monkeypatch.delenv("CODEX_CHRONOVISOR_RECORD_ENABLED", raising=False)
     monkeypatch.delenv("CHRONOVISOR_RECALL_AUDIT_ENABLED", raising=False)
     monkeypatch.delenv("CHRONOVISOR_RECALL_IMPROVE_ENABLED", raising=False)
     monkeypatch.delenv("CHRONOVISOR_CONTENT_CORRECTION_ENABLED", raising=False)

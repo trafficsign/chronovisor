@@ -364,8 +364,9 @@ remain supported.
 ## Environment Overrides
 
 - `CHRONOVISOR_RECALL_ENABLED=0`: disable synchronous recall.
-- `CODEX_WIKI_SAVE_ENABLED=1`: enable Codex save hook.
-- `CLAUDE_CODE_WIKI_SAVE_ENABLED=1`: enable Claude Code save hook.
+- `CODEX_CHRONOVISOR_RECORD_ENABLED=1`: enable the Codex record hook.
+- `CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED=1`: enable the Claude Code record hook.
+- Legacy `*_WIKI_SAVE_ENABLED` names remain read-only compatibility aliases.
 - `CHRONOVISOR_RECALL_AUDIT_ENABLED` and
   `CHRONOVISOR_CONTENT_CORRECTION_ENABLED`: legacy compatibility switches. The
   Stop dispatcher is save-only and does not schedule those lanes.

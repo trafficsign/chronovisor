@@ -256,7 +256,7 @@ def test_frontier_env_marks_internal_children_and_disables_stop_work(
     env = frontier_review._frontier_env()
 
     assert env["CHRONOVISOR_INTERNAL_FRONTIER"] == "1"
-    assert env["CODEX_WIKI_SAVE_ENABLED"] == "0"
+    assert env["CODEX_CHRONOVISOR_RECORD_ENABLED"] == "0"
     assert env["CHRONOVISOR_CONTENT_CORRECTION_ENABLED"] == "0"
 
 

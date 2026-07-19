@@ -1248,8 +1248,8 @@ def _frontier_env(*, codex_home: Path | None = None) -> dict[str, str]:
     env["CHRONOVISOR_CONTENT_CORRECTION_ENABLED"] = "0"
     env["CHRONOVISOR_RECALL_AUDIT_ENABLED"] = "0"
     env["CHRONOVISOR_RECALL_IMPROVE_ENABLED"] = "0"
-    env["CODEX_WIKI_SAVE_ENABLED"] = "0"
-    env["CLAUDE_CODE_WIKI_SAVE_ENABLED"] = "0"
+    env["CODEX_CHRONOVISOR_RECORD_ENABLED"] = "0"
+    env["CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED"] = "0"
     return env
 
 
