@@ -101,6 +101,66 @@ def test_server_read_path_resolves_durable_previous_page_alias(
     assert server._find_page_with_alias("llm-wiki-mcp") == target
 
 
+def test_server_alias_read_returns_and_traces_only_canonical_page_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor import alias_store, server
+
+    target = tmp_path / "pages" / "chronovisor" / "chronovisor-system.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Chronovisor\n", encoding="utf-8")
+    calls: list[tuple[str, str]] = []
+    pull_rows: list[dict] = []
+
+    class FakeStore:
+        def refresh(self) -> None:
+            return None
+
+        def outlinks(self, page_id: str) -> list[str]:
+            calls.append(("outlinks", page_id))
+            return ["canonical-outlink"]
+
+        def backlinks(self, page_id: str) -> list[str]:
+            calls.append(("backlinks", page_id))
+            return ["canonical-backlink"]
+
+    monkeypatch.setattr(server, "get_store", FakeStore)
+    monkeypatch.setattr(server, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(alias_store, "resolve_alias_path", lambda _page_id: target)
+    monkeypatch.setattr(server, "_append_pull_log", pull_rows.append)
+
+    read_tool = getattr(server.chronovisor_read, "fn", server.chronovisor_read)
+    result = json.loads(
+        read_tool(
+            "llm-wiki-mcp",
+            session_id="session-1",
+            decision_id="decision-1",
+        )
+    )
+
+    assert result["page_id"] == "chronovisor-system"
+    assert result["alias"] == {
+        "requested": "llm-wiki-mcp",
+        "target": "chronovisor-system",
+    }
+    assert result["outlinks"] == ["canonical-outlink"]
+    assert result["backlinks"] == ["canonical-backlink"]
+    assert calls == [
+        ("outlinks", "chronovisor-system"),
+        ("backlinks", "chronovisor-system"),
+    ]
+    assert pull_rows == [
+        {
+            "type": "read",
+            "stage": "read",
+            "session_id": "session-1",
+            "decision_id": "decision-1",
+            "page_id": "chronovisor-system",
+            "requested_page_id": "llm-wiki-mcp",
+        }
+    ]
+
+
 def test_contract_audit_has_no_unclassified_previous_tokens() -> None:
     repo_root = Path(__file__).resolve().parents[1]
 

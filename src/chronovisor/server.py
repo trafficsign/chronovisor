@@ -118,21 +118,32 @@ def chronovisor_read(
     if not path or not path.exists():
         return json.dumps({"error": f"Page '{page}' not found"})
 
+    canonical_page_id = path.stem
     content = path.read_text()
-    outlinks = store.outlinks(page) or _extract_wiki_links(content)
-    backlinks = store.backlinks(page)
+    outlinks = store.outlinks(canonical_page_id) or _extract_wiki_links(content)
+    backlinks = store.backlinks(canonical_page_id)
     _append_pull_log(
         {
             "type": "read",
             "stage": "read",
             "session_id": session_id or "",
             "decision_id": decision_id or "",
-            "page_id": page,
+            "page_id": canonical_page_id,
+            **(
+                {"requested_page_id": page}
+                if canonical_page_id != page
+                else {}
+            ),
         }
     )
 
     return json.dumps({
-        "page_id": page,
+        "page_id": canonical_page_id,
+        **(
+            {"alias": {"requested": page, "target": canonical_page_id}}
+            if canonical_page_id != page
+            else {}
+        ),
         "content": content,
         "outlinks": outlinks,
         "backlinks": backlinks,
