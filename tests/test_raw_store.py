@@ -91,6 +91,27 @@ def test_logical_reference_survives_raw_root_relocation(tmp_path: Path) -> None:
     assert relocated_store.read_bytes("save-shared.md") == payload
 
 
+def test_existing_legacy_schema_reference_remains_readable(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    payload = b'{"source":"legacy-reference"}\n'
+    source.write_bytes(payload)
+    _append(raw_dir, source, payload)
+    store = RawStore(raw_dir, mode="v2")
+    unit = store.resolve_segment("save-shared.md")
+    assert unit is not None
+    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
+    reference_payload = json.loads(reference.read_text(encoding="utf-8"))
+    reference_payload["schema"] = "llm-wiki.raw-reference.v1"
+    reference.write_text(
+        json.dumps(reference_payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    assert store.resolve_reference(reference) == unit
+    assert store.materialize_ingest(unit, reference.parent) == reference
+
+
 def test_store_includes_flat_and_date_partitioned_manual_markdown(
     tmp_path: Path,
 ) -> None:

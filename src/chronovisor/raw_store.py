@@ -372,7 +372,17 @@ class RawStore:
             + "\n"
         ).encode("utf-8")
         if path.exists():
-            if path.is_symlink() or path.read_bytes() != encoded:
+            if path.is_symlink():
+                raise RawSegmentCorrupt(
+                    f"logical Raw reference conflicts with segment: {unit.raw_id}"
+                )
+            if path.read_bytes() == encoded:
+                return path
+            existing = self.resolve_reference(path)
+            if (
+                existing is None
+                or self.reference_payload(existing) != self.reference_payload(unit)
+            ):
                 raise RawSegmentCorrupt(
                     f"logical Raw reference conflicts with segment: {unit.raw_id}"
                 )
@@ -400,7 +410,9 @@ class RawStore:
             if isinstance(payload.get("commit"), dict)
             else self.resolve(raw_id)
         )
-        if unit is None or payload != self.reference_payload(unit):
+        normalized_payload = dict(payload)
+        normalized_payload["schema"] = RAW_REFERENCE_SCHEMA
+        if unit is None or normalized_payload != self.reference_payload(unit):
             raise RawSegmentCorrupt("logical Raw reference does not match its segment")
         return unit
 
