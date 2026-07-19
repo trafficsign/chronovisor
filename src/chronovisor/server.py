@@ -77,6 +77,22 @@ def _page_metadata(path: Path) -> dict:
     }
 
 
+def _find_page_with_alias(page_id: str) -> Path | None:
+    """Resolve a canonical page or a durable legacy page-id alias."""
+
+    path = find_page(page_id)
+    if path is not None:
+        return path
+    try:
+        from chronovisor.alias_store import resolve_alias_path
+
+        return resolve_alias_path(page_id)
+    except Exception:
+        # Read paths remain fail-closed to a normal not-found result when the
+        # optional alias ledger is absent or malformed.
+        return None
+
+
 @mcp.tool()
 def chronovisor_read(
     page: str,
@@ -95,7 +111,7 @@ def chronovisor_read(
     store = get_store()
     store.refresh()
 
-    path = find_page(page)
+    path = _find_page_with_alias(page)
     if not path:
         # Check system/ directory
         path = SYSTEM_DIR / f"{page}.md"
@@ -1193,7 +1209,7 @@ def chronovisor_provenance(page: str) -> str:
     Args:
         page: Page ID to trace
     """
-    page_path = find_page(page)
+    page_path = _find_page_with_alias(page)
     if not page_path:
         return json.dumps({"error": f"Page '{page}' not found"})
 

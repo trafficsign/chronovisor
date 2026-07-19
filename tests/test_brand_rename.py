@@ -191,6 +191,20 @@ def test_public_mcp_surface_contains_only_chronovisor_tools() -> None:
     assert all(not name.startswith("wiki_") for name in names)
 
 
+def test_server_read_path_resolves_durable_legacy_page_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor import alias_store, server
+
+    target = tmp_path / "pages" / "chronovisor" / "chronovisor-system.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Chronovisor\n", encoding="utf-8")
+    monkeypatch.setattr(server, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(alias_store, "resolve_alias_path", lambda _page_id: target)
+
+    assert server._find_page_with_alias("llm-wiki-mcp") == target
+
+
 def test_brand_audit_has_no_unclassified_legacy_tokens() -> None:
     repo_root = Path(__file__).resolve().parents[1]
 
