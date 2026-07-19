@@ -107,7 +107,7 @@ OWNERSHIP_TERMS = [
 ]
 
 PROJECT_TERMS = [
-    "llm wiki",
+    "chronovisor",
     "chronovisor",
     "wiki",
     "ウィキ",

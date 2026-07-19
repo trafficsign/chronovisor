@@ -22,7 +22,6 @@ from typing import Any
 
 
 SCHEMA = "chronovisor.deadman-heartbeat.v1"
-SEALED_PREVIOUS_SCHEMA = "llm-wiki.deadman-heartbeat.v1"
 THRESHOLD_POLICY = {
     "version": 1,
     "minimum_failure_samples": 2,
@@ -93,9 +92,7 @@ def inspect(
         return {"status": "missing"}
     except Exception as exc:
         return {"status": "invalid", "error": str(exc)}
-    if payload.get("schema") not in {SCHEMA, SEALED_PREVIOUS_SCHEMA} or payload.get(
-        "role"
-    ) != "main_watchdog":
+    if payload.get("schema") != SCHEMA or payload.get("role") != "main_watchdog":
         return {"status": "invalid", "error": "unexpected heartbeat identity"}
     wall_time = payload.get("wall_time")
     sequence = payload.get("sequence")

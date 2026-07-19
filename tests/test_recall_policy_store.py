@@ -42,7 +42,7 @@ def test_append_live_episode_writes_unlabeled_quality_record(tmp_path) -> None:
             "decision_id": "d1",
             "host": "codex",
             "decision": "read",
-            "queries": ["llm wiki recall"],
+            "queries": ["chronovisor recall"],
             "pages": ["page-a"],
             "prompt_preview": "Chronovisor recall",
         },

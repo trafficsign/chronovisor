@@ -29,7 +29,7 @@ def audit(repo_root: Path) -> dict[str, Any]:
             continue
         scanned += 1
         if not _allowed(relative, policy["allowlisted_paths"]):
-            for token in (*policy["forbidden"], *policy["compatibility_tokens"]):
+            for token in policy["forbidden"]:
                 if token in text:
                     violations.append({"path": relative, "token": token})
     return {

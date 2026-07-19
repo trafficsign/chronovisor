@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import raw_semantic_projection
 from chronovisor.raw_semantic_projection import (
     PROJECTION_BUNDLE_RECEIPT_SCHEMA,
     PROJECTION_CHILD_SCHEMA,
@@ -22,7 +21,6 @@ from chronovisor.save_transaction import (
     attach_save_transaction_marker,
     make_save_transaction,
 )
-from chronovisor.sealed_artifact_decoder import previous_schema
 
 
 def _transcript_raw(
@@ -562,47 +560,6 @@ def test_child_reprocessing_validates_identity_then_passthrough(tmp_path: Path) 
             output_dir=tmp_path / "unused",
             max_child_bytes=2_000,
         )
-
-
-def test_sealed_previous_schema_projection_keeps_its_original_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = _transcript_raw(
-        tmp_path,
-        [{"line": 1, "role": "user", "text": "sealed before rename"}],
-    )
-    current_schemas = {
-        "PROJECTION_MANIFEST_SCHEMA": raw_semantic_projection.PROJECTION_MANIFEST_SCHEMA,
-        "PROJECTION_CHILD_SCHEMA": raw_semantic_projection.PROJECTION_CHILD_SCHEMA,
-        "PROJECTION_NOOP_SCHEMA": raw_semantic_projection.PROJECTION_NOOP_SCHEMA,
-        "PROJECTION_BUNDLE_RECEIPT_SCHEMA": (
-            raw_semantic_projection.PROJECTION_BUNDLE_RECEIPT_SCHEMA
-        ),
-    }
-    for name, value in current_schemas.items():
-        monkeypatch.setattr(
-            raw_semantic_projection,
-            name,
-            previous_schema(value),
-        )
-    output = tmp_path / "projection"
-    projected = project_parent_raw(path, output_dir=output, max_child_bytes=2_000)
-
-    for name, value in current_schemas.items():
-        monkeypatch.setattr(raw_semantic_projection, name, value)
-
-    passthrough = project_parent_raw(
-        projected.child_paths[0],
-        output_dir=tmp_path / "unused",
-        max_child_bytes=2_000,
-    )
-
-    assert passthrough.kind == "passthrough"
-    assert passthrough.manifest_path == projected.manifest_path
-    assert projection_bundle_state_for_parent(path, projection_dir=output) == (
-        "completed"
-    )
 
 
 def test_orphan_child_without_delegation_manifest_fails_closed(tmp_path: Path) -> None:

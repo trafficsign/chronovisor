@@ -26,7 +26,7 @@ DEFAULT_QUERIES = (
     "uvx GitHub runtime cache",
     "recall audit missed_candidate",
     "search golden frontier review",
-    "Claude Code memory llm wiki",
+    "Claude Code memory Chronovisor",
     "semantic search bge-m3",
     "BM25 CJK bigram",
     "usage prior injection_used",
@@ -38,7 +38,7 @@ DEFAULT_QUERIES = (
     "MCP chronovisor_search tag filter rerank",
     "ollama embeddings sqlite",
     "frontier labels confidence votes",
-    "plan inbox llm wiki",
+    "plan inbox Chronovisor",
     "runtime config search reranker",
 )
 

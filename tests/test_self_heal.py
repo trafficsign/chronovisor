@@ -810,7 +810,7 @@ def test_local_repair_semantic_hold_never_opens_live_authority_lock(
         monkeypatch,
         cache_root=isolated_wiki / "runtime" / "structured-review-holds",
     )
-    live_lock = (Path.home() / ".wiki" / "runtime" / "decision-authority.lock").resolve(
+    live_lock = (Path.home() / ".chronovisor" / "runtime" / "decision-authority.lock").resolve(
         strict=False
     )
     isolated_lock = (isolated_wiki / "runtime" / "decision-authority.lock").resolve(

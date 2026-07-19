@@ -3637,7 +3637,7 @@ def run_pending_queue(
             )
             for row in ordinary_rows
         )
-        # Persist history reconciliation, duplicate collapse and legacy schema
+        # Persist history reconciliation, duplicate collapse and schema
         # normalization before running any expensive candidate.  A call whose
         # exact semantic scope was rejected solely by budget is intentionally
         # byte-for-byte read-only; normalization must not smuggle a queue write

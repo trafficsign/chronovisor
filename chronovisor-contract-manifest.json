@@ -1,5 +1,5 @@
 {
-  "schema": "chronovisor.contract-manifest.v2",
+  "schema": "chronovisor.contract-manifest.v3",
   "canonical": {
     "product": "Chronovisor",
     "distribution": "chronovisor",
@@ -10,14 +10,11 @@
     "launchd_prefix": "com.trafficsign.chronovisor-",
     "github": "trafficsign/chronovisor"
   },
-  "sealed_artifact_decoder": {
-    "schema_prefix": "llm-wiki.",
-    "write_policy": "forbidden"
-  },
-  "immutable_history": [
+  "durable_history": [
     "~/.chronovisor/raw/**",
-    "~/.chronovisor/runtime/**",
-    "~/.chronovisor/logs/**",
+    "~/.chronovisor/research/**",
+    "~/.chronovisor/eval/**",
+    "~/.chronovisor-archive/**",
     "/Users/trafficsign/projects/plan/**"
   ],
   "generic_terms": ["wiki", "page", "raw", "recall"],
@@ -25,6 +22,7 @@
     "forbidden": [
       "llm-wiki-mcp",
       "llm_wiki_mcp",
+      "llm-wiki.",
       "LLM Wiki",
       "mcp__llm-wiki__",
       "LLM_WIKI_",
@@ -33,12 +31,7 @@
       "recall.toml",
       "--only"
     ],
-    "compatibility_tokens": ["llm-wiki."],
     "allowlisted_paths": [
-      "src/chronovisor/sealed_artifact_decoder.py",
-      "src/chronovisor/deadman_observer.py",
-      "tests/test_chronovisor_contract.py",
-      "tests/test_raw_store.py",
       "_handoff/**",
       "chronovisor-contract-manifest.json"
     ]

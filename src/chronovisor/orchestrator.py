@@ -310,6 +310,7 @@ def get_pending_raw_files() -> list[Path]:
             else unit.path
         )
         for unit in raw_store.iter_units()
+        if unit.raw_id not in processed
     )
     artifact_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "artifacts"
     if artifact_dir.exists():

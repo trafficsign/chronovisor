@@ -1101,7 +1101,7 @@ def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> 
         status="ok",
         decision="read",
         confidence=0.8,
-        queries=["llm wiki recall"],
+        queries=["chronovisor recall"],
         reasons=["test"],
         matched_terms={},
         decision_id="d1",
