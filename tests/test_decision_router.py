@@ -32,6 +32,7 @@ from chronovisor.decision_router import (
     default_agreement_value,
     _decision_value_validator,
     _ingest_reconciliation_value_validator,
+    _paths_resolve_to_same_file,
     _prompt_json_block,
 )
 from chronovisor.decision_schema_manifest import (
@@ -1555,6 +1556,19 @@ def test_duplicate_model_roles_fail_closed_before_any_call() -> None:
     assert result.failure_class == "local_consensus_failed"
     assert result.quarantine_reason.startswith("router_config_invalid:")
     assert transport.requests == []
+
+
+def test_adoption_source_path_accepts_a_compatibility_symlink(tmp_path: Path) -> None:
+    source = tmp_path / "chronovisor" / "corpus.jsonl"
+    source.parent.mkdir()
+    source.write_text("{}\n", encoding="utf-8")
+    legacy_root = tmp_path / "wiki"
+    legacy_root.symlink_to(source.parent, target_is_directory=True)
+
+    assert _paths_resolve_to_same_file(
+        str(legacy_root / source.name),
+        str(source),
+    )
 
 
 def test_runtime_switches_all_roles_only_from_a_valid_adopted_artifact(

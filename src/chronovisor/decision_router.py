@@ -1411,6 +1411,13 @@ def _candidate_config(value: Any) -> DecisionRouterConfig:
     return candidate
 
 
+def _paths_resolve_to_same_file(left: str, right: str) -> bool:
+    try:
+        return Path(left).resolve(strict=True) == Path(right).resolve(strict=True)
+    except OSError:
+        return False
+
+
 def _validated_adoption_artifact(
     path: Path,
 ) -> tuple[DecisionRouterConfig, str, dict[str, Any]]:
@@ -1556,6 +1563,21 @@ def _validated_adoption_artifact(
             "adoption source contains self-labeled local consensus evidence"
         )
     authoritative_source = authoritative_corpus.inspection(include_cases=False)
+    authoritative_source_path = authoritative_source.get("source_path")
+    if (
+        not isinstance(authoritative_source_path, str)
+        or not _paths_resolve_to_same_file(
+            source_path_value,
+            authoritative_source_path,
+        )
+    ):
+        raise ValueError("adoption artifact source path no longer resolves")
+    # Preserve the sealed spelling for the identity comparison. The corpus
+    # loader resolves symlinks so a compatibility alias such as ~/.wiki ->
+    # ~/.chronovisor would otherwise invalidate byte-identical adopted
+    # evidence solely because its absolute path spelling changed.
+    authoritative_source = dict(authoritative_source)
+    authoritative_source["source_path"] = source_path_value
     source_identity_fields = {
         "source_path",
         "source_sha256",
