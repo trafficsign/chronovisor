@@ -173,6 +173,37 @@ def test_save_load_shard_continuation_is_pending_not_failed(
     assert dashboard._drain_history(limit=10)[0]["files_continued"] == 1
 
 
+def test_metric_history_deduplicates_runtime_and_drain_records_for_same_batch() -> None:
+    from chronovisor import dashboard
+
+    result = {
+        "pending_before": 113,
+        "pending_after": 103,
+        "files_attempted": 10,
+        "files_processed": 0,
+        "files_deferred": 0,
+        "files_continued": 0,
+        "files_failed": 10,
+        "elapsed_seconds": 94.57,
+    }
+    runtime = {
+        **result,
+        "timestamp": "2026-07-19T22:26:15",
+        "kind": "batch",
+        "processor": "ollama",
+    }
+    drain = {
+        **result,
+        "timestamp": "2026-07-19T22:26:26",
+        "kind": "drain_batch",
+        "batch": 5,
+    }
+
+    merged = dashboard._merge_metric_history([runtime], [drain], limit=240)
+
+    assert merged == [runtime]
+
+
 def test_save_load_attributes_held_projection_child_to_saved_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

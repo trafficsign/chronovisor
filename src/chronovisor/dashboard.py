@@ -735,6 +735,56 @@ def _drain_history(limit: int = 200) -> list[dict[str, Any]]:
     return records[-limit:]
 
 
+def _batch_metric_identity(row: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Identify one batch emitted to both runtime metrics and drain history."""
+
+    if row.get("kind") not in {"batch", "drain_batch"}:
+        return None
+    return tuple(
+        row.get(key)
+        for key in (
+            "pending_before",
+            "pending_after",
+            "files_attempted",
+            "files_processed",
+            "files_deferred",
+            "files_continued",
+            "files_failed",
+            "elapsed_seconds",
+        )
+    )
+
+
+def _merge_metric_history(
+    runtime_metrics: list[dict[str, Any]],
+    drain_metrics: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Merge metric sources without counting the same completed batch twice.
+
+    The orchestrator writes the canonical runtime metric first.  The drain
+    wrapper records the same result a few seconds later, so timestamp-only UI
+    deduplication cannot reliably recognize the duplicate.
+    """
+
+    runtime_batch_identities = {
+        identity
+        for row in runtime_metrics
+        if (identity := _batch_metric_identity(row)) is not None
+    }
+    unique_drain_metrics = [
+        row
+        for row in drain_metrics
+        if _batch_metric_identity(row) not in runtime_batch_identities
+    ]
+    merged = sorted(
+        runtime_metrics + unique_drain_metrics,
+        key=lambda item: str(item.get("timestamp") or ""),
+    )
+    return merged[-limit:]
+
+
 def _recent_log_events(limit: int = 80) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for line in runtime_status.tail_text_lines(LOG_FILE, limit=limit):
@@ -3447,10 +3497,7 @@ def build_snapshot() -> dict[str, Any]:
 
     runtime_metrics = runtime_status.read_metrics(limit=240)
     drain_metrics = _drain_history(limit=240)
-    metrics = sorted(
-        runtime_metrics + drain_metrics,
-        key=lambda row: str(row.get("timestamp") or ""),
-    )[-240:]
+    metrics = _merge_metric_history(runtime_metrics, drain_metrics, limit=240)
     metrics.append(
         {
             "timestamp": runtime_status.now_iso(),

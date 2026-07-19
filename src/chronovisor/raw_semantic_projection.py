@@ -262,11 +262,22 @@ def _source_sha256(source: Mapping[str, Any]) -> str:
     return _sha256(_canonical_bytes(_source_identity(source)))
 
 
-def _projection_id(source: Mapping[str, Any]) -> str:
+def _projection_id(
+    source: Mapping[str, Any],
+    *,
+    manifest_schema: str | None = None,
+) -> str:
+    schema = manifest_schema or PROJECTION_MANIFEST_SCHEMA
+    if not schema_matches(schema, PROJECTION_MANIFEST_SCHEMA):
+        raise RawSemanticProjectionError("projection manifest schema is unsupported")
     return _sha256(
         _canonical_bytes(
             {
-                "schema": PROJECTION_MANIFEST_SCHEMA,
+                # The schema spelling is part of the sealed projection ID.
+                # Artifacts published before the Chronovisor rename therefore
+                # have to retain the previous spelling when their ID is
+                # recomputed for read-only verification.
+                "schema": schema,
                 "projection_policy_version": PROJECTION_POLICY_VERSION,
                 "source": _source_identity(source),
             }
@@ -1460,7 +1471,10 @@ def verify_projection_bundle(manifest_path: Path) -> dict[str, Any]:
         raise RawSemanticProjectionError(
             "projection manifest child byte envelope is invalid"
         )
-    projection_id = _projection_id(source)
+    observed_schema = manifest.get("schema")
+    if not isinstance(observed_schema, str):
+        raise RawSemanticProjectionError("projection manifest schema is malformed")
+    projection_id = _projection_id(source, manifest_schema=observed_schema)
     source_sha256 = _source_sha256(source)
     if (
         manifest_path.name != f"semantic-{projection_id}.manifest.json"
@@ -1626,7 +1640,15 @@ def projection_bundle_state_for_parent(
             continue
 
         try:
-            projection_id = _projection_id(source)
+            observed_schema = manifest.get("schema")
+            if not isinstance(observed_schema, str):
+                raise RawSemanticProjectionError(
+                    "projection manifest schema is malformed"
+                )
+            projection_id = _projection_id(
+                source,
+                manifest_schema=observed_schema,
+            )
             source_sha256 = _source_sha256(source)
         except (RawSemanticProjectionError, TypeError, ValueError):
             observed.append("invalid")
