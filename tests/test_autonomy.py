@@ -2486,6 +2486,7 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     )
     assert "chronovisor-burn-monitor" in soak_wrapper["command"]
     assert "--expected-commit" in soak_wrapper["command"]
+    assert "--output" not in soak_wrapper["command"]
 
 
 def test_uninstall_launchd_dry_run_lists_all_generated_artifacts() -> None:

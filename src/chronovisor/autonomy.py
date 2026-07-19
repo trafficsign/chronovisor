@@ -4035,8 +4035,6 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "1800",
         "--expected-commit",
         expected_commit,
-        "--output",
-        str(CHRONOVISOR_ROOT / "runtime" / "burn-ins" / "soak-7d-current.jsonl"),
     ]
     sleep_plist = _plist(
         SLEEP_LABEL,
