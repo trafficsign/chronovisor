@@ -1230,6 +1230,100 @@ def test_fast_snapshot_reads_status_without_building_archive_components(
     assert snapshot["_dashboard"] == {"detail_state": "loading"}
 
 
+def test_materialized_component_survives_process_memory_reset_and_rejects_tamper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    monkeypatch.setattr(dashboard.time, "time", lambda: 100.0)
+    calls = 0
+
+    def build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {"serial": calls}
+
+    assert dashboard._materialized_component(
+        "test-view",
+        fingerprint="a" * 64,
+        builder=build,
+        audit_seconds=60,
+    ) == {"serial": 1}
+    cache_key = (str(wiki_root), "test-view")
+    dashboard._MATERIALIZED_COMPONENTS.pop(cache_key, None)
+
+    assert dashboard._materialized_component(
+        "test-view",
+        fingerprint="a" * 64,
+        builder=build,
+        audit_seconds=60,
+    ) == {"serial": 1}
+    assert calls == 1
+
+    cache_path = dashboard._materialized_component_path("test-view")
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    payload["value"]["serial"] = 999
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+    dashboard._MATERIALIZED_COMPONENTS.pop(cache_key, None)
+
+    assert dashboard._materialized_component(
+        "test-view",
+        fingerprint="a" * 64,
+        builder=build,
+        audit_seconds=60,
+    ) == {"serial": 2}
+    assert calls == 2
+
+
+def test_materialized_component_returns_stale_while_audit_refreshes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    monkeypatch.setattr(dashboard, "WIKI_ROOT", wiki_root)
+    clock = [100.0]
+    monkeypatch.setattr(dashboard.time, "time", lambda: clock[0])
+    calls = 0
+
+    def build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {"serial": calls}
+
+    class ImmediateThread:
+        def __init__(self, *, target, args=(), kwargs=None, **_options) -> None:
+            self.target = target
+            self.args = args
+            self.kwargs = kwargs or {}
+
+        def start(self) -> None:
+            self.target(*self.args, **self.kwargs)
+
+    monkeypatch.setattr(dashboard.threading, "Thread", ImmediateThread)
+    assert dashboard._materialized_component(
+        "audit-view",
+        fingerprint="a" * 64,
+        builder=build,
+        audit_seconds=60,
+    ) == {"serial": 1}
+
+    clock[0] += 61
+    stale = dashboard._materialized_component(
+        "audit-view",
+        fingerprint="a" * 64,
+        builder=build,
+        audit_seconds=60,
+    )
+
+    assert stale == {"serial": 1}
+    assert dashboard._materialized_component(
+        "audit-view",
+        fingerprint="a" * 64,
+        builder=build,
+        audit_seconds=60,
+    ) == {"serial": 2}
+    assert calls == 2
+
+
 def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
     tmp_path: Path, monkeypatch
 ) -> None:

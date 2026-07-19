@@ -100,6 +100,10 @@ SNAPSHOT_ACTIVE_CACHE_SECONDS = 5.0
 SNAPSHOT_IDLE_CACHE_SECONDS = 60.0
 SAVE_HISTORY_SEGMENT_DETAIL_DAYS = 30
 SAVE_HISTORY_MAX_SEGMENTS_PER_DAY = 64
+DASHBOARD_MATERIALIZED_SCHEMA = "llm-wiki.dashboard-component.v1"
+DASHBOARD_COMPONENT_AUDIT_SECONDS = 300.0
+DASHBOARD_HEALTH_AUDIT_SECONDS = 60.0
+DASHBOARD_LOCAL_CONSENSUS_AUDIT_SECONDS = 300.0
 _PROCESS_IDENTITY_MATCH = "match"
 _PROCESS_IDENTITY_MISMATCH = "mismatch"
 _PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
@@ -117,12 +121,216 @@ _SNAPSHOT_CACHE: dict[str, Any] = {
     "snapshot": None,
     "refreshing": False,
 }
+_MATERIALIZED_COMPONENT_LOCK = threading.RLock()
+_MATERIALIZED_COMPONENTS: dict[tuple[str, str], dict[str, Any]] = {}
+_MATERIALIZED_COMPONENT_REFRESHING: set[tuple[str, str]] = set()
 
 
 def _send_security_headers(handler: BaseHTTPRequestHandler) -> None:
     handler.send_header("X-Content-Type-Options", "nosniff")
     handler.send_header("Referrer-Policy", "no-referrer")
     handler.send_header("X-Frame-Options", "DENY")
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+
+
+def _materialized_component_path(name: str) -> Path:
+    if re.fullmatch(r"[a-z0-9-]+", name) is None:
+        raise ValueError("dashboard component name is invalid")
+    return WIKI_ROOT / "runtime" / "dashboard-materialized" / f"{name}.json"
+
+
+def _path_identity(path: Path) -> tuple[Any, ...]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), "missing")
+    return (str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _component_source_fingerprint(
+    name: str,
+    paths: list[Path],
+    *,
+    identities: list[str] | None = None,
+) -> str:
+    payload = {
+        "schema": DASHBOARD_MATERIALIZED_SCHEMA,
+        "component": name,
+        "paths": [_path_identity(path) for path in sorted(set(paths))],
+        "identities": sorted(set(identities or [])),
+    }
+    return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+
+
+def _read_materialized_component(name: str) -> dict[str, Any] | None:
+    path = _materialized_component_path(name)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != DASHBOARD_MATERIALIZED_SCHEMA
+        or not isinstance(payload.get("fingerprint"), str)
+        or isinstance(payload.get("built_at_epoch"), bool)
+        or not isinstance(payload.get("built_at_epoch"), (int, float))
+        or not isinstance(payload.get("value"), dict)
+        or not isinstance(payload.get("value_sha256"), str)
+    ):
+        return None
+    observed = hashlib.sha256(_canonical_json_bytes(payload["value"])).hexdigest()
+    return payload if hmac.compare_digest(observed, payload["value_sha256"]) else None
+
+
+def _write_materialized_component(
+    name: str,
+    *,
+    fingerprint: str,
+    value: dict[str, Any],
+    built_at_epoch: float,
+) -> dict[str, Any]:
+    from llm_wiki_mcp.link_fix import atomic_write
+
+    path = _materialized_component_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": DASHBOARD_MATERIALIZED_SCHEMA,
+        "component": name,
+        "fingerprint": fingerprint,
+        "built_at_epoch": built_at_epoch,
+        "value_sha256": hashlib.sha256(_canonical_json_bytes(value)).hexdigest(),
+        "value": value,
+    }
+    atomic_write(path, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return payload
+
+
+def _materialized_component(
+    name: str,
+    *,
+    fingerprint: str,
+    builder: Any,
+    audit_seconds: float = DASHBOARD_COMPONENT_AUDIT_SECONDS,
+) -> dict[str, Any]:
+    """Reuse an integrity-bound derived view until inputs change or audit is due."""
+
+    cache_key = (str(WIKI_ROOT), name)
+    now = time.time()
+    stale_value: dict[str, Any] | None = None
+    start_refresh = False
+    with _MATERIALIZED_COMPONENT_LOCK:
+        payload = _MATERIALIZED_COMPONENTS.get(cache_key)
+        if payload is None:
+            payload = _read_materialized_component(name)
+            if payload is not None:
+                _MATERIALIZED_COMPONENTS[cache_key] = payload
+        if payload is not None:
+            age = max(0.0, now - float(payload.get("built_at_epoch") or 0.0))
+            if payload.get("fingerprint") == fingerprint and age < audit_seconds:
+                value = payload.get("value")
+                if isinstance(value, dict):
+                    return value
+            value = payload.get("value")
+            if isinstance(value, dict):
+                stale_value = value
+                start_refresh = cache_key not in _MATERIALIZED_COMPONENT_REFRESHING
+                if start_refresh:
+                    _MATERIALIZED_COMPONENT_REFRESHING.add(cache_key)
+
+        if stale_value is not None:
+            if start_refresh:
+                threading.Thread(
+                    target=_refresh_materialized_component,
+                    kwargs={
+                        "name": name,
+                        "cache_key": cache_key,
+                        "fingerprint": fingerprint,
+                        "builder": builder,
+                    },
+                    name=f"llm-wiki-dashboard-{name}",
+                    daemon=True,
+                ).start()
+            return stale_value
+
+        value = builder()
+        if not isinstance(value, dict):
+            raise TypeError(
+                f"dashboard component {name} returned {type(value).__name__}"
+            )
+        try:
+            payload = _write_materialized_component(
+                name,
+                fingerprint=fingerprint,
+                value=value,
+                built_at_epoch=now,
+            )
+        except OSError:
+            payload = {
+                "schema": DASHBOARD_MATERIALIZED_SCHEMA,
+                "fingerprint": fingerprint,
+                "built_at_epoch": now,
+                "value_sha256": hashlib.sha256(
+                    _canonical_json_bytes(value)
+                ).hexdigest(),
+                "value": value,
+            }
+        _MATERIALIZED_COMPONENTS[cache_key] = payload
+        return value
+
+
+def _refresh_materialized_component(
+    *,
+    name: str,
+    cache_key: tuple[str, str],
+    fingerprint: str,
+    builder: Any,
+) -> None:
+    try:
+        value = builder()
+        if not isinstance(value, dict):
+            raise TypeError(
+                f"dashboard component {name} returned {type(value).__name__}"
+            )
+        now = time.time()
+        try:
+            payload = _write_materialized_component(
+                name,
+                fingerprint=fingerprint,
+                value=value,
+                built_at_epoch=now,
+            )
+        except OSError:
+            payload = {
+                "schema": DASHBOARD_MATERIALIZED_SCHEMA,
+                "fingerprint": fingerprint,
+                "built_at_epoch": now,
+                "value_sha256": hashlib.sha256(
+                    _canonical_json_bytes(value)
+                ).hexdigest(),
+                "value": value,
+            }
+        with _MATERIALIZED_COMPONENT_LOCK:
+            _MATERIALIZED_COMPONENTS[cache_key] = payload
+        with _SNAPSHOT_CACHE_LOCK:
+            _SNAPSHOT_CACHE["fingerprint"] = None
+    except Exception:
+        pass
+    finally:
+        with _MATERIALIZED_COMPONENT_LOCK:
+            _MATERIALIZED_COMPONENT_REFRESHING.discard(cache_key)
 
 
 def _json_response(
@@ -2908,6 +3116,157 @@ def _safe_snapshot_component(
         }
 
 
+def _dashboard_glob_files(patterns: list[Path], *, limit: int = 0) -> list[Path]:
+    files: list[Path] = []
+    for pattern in patterns:
+        try:
+            matches = sorted(pattern.parent.glob(pattern.name))
+        except OSError:
+            continue
+        files.extend(path for path in matches if path.is_file())
+    if limit > 0:
+        return files[-limit:]
+    return files
+
+
+def _dashboard_rglob_files(
+    root: Path, pattern: str, *, limit: int = 0
+) -> list[Path]:
+    try:
+        files = sorted(path for path in root.rglob(pattern) if path.is_file())
+    except OSError:
+        return []
+    if limit > 0:
+        return files[-limit:]
+    return files
+
+
+def _deferred_materialization_fingerprint(raw_paths: list[Path]) -> str:
+    failure_root = WIKI_ROOT / "runtime" / "failures"
+    paths = [
+        WIKI_ROOT / "config.toml",
+        failure_root / "state.json",
+        WIKI_ROOT / "runtime" / "model-lab" / "active-policy.json",
+        WIKI_ROOT / "runtime" / "model-lab" / "state.json",
+    ]
+    paths.extend(_dashboard_glob_files([failure_root / "packets" / "*.json"]))
+    paths.extend(
+        _dashboard_rglob_files(
+            WIKI_ROOT / "runtime" / "decision-artifacts", "*.json"
+        )
+    )
+    return _component_source_fingerprint(
+        "deferred-statuses",
+        paths,
+        identities=[path.name for path in raw_paths],
+    )
+
+
+def _local_consensus_materialization_fingerprint() -> str:
+    root = WIKI_ROOT / "runtime" / "local-consensus"
+    paths = [
+        WIKI_ROOT / "config.toml",
+        root / "summary.json",
+        root / "audit.jsonl",
+        WIKI_ROOT / "runtime" / "model-lab" / "active-policy.json",
+    ]
+    paths.extend(_dashboard_glob_files([root / "active" / "*.json"]))
+    paths.extend(
+        _dashboard_rglob_files(
+            WIKI_ROOT / "runtime" / "decision-artifacts", "*.json", limit=32
+        )
+    )
+    return _component_source_fingerprint("local-consensus", paths)
+
+
+def _save_history_materialization_fingerprint(raw_paths: list[Path]) -> str:
+    paths = [
+        LOG_FILE,
+        orchestrator.STATE_FILE,
+        WIKI_ROOT / "runtime" / "failures" / "state.json",
+    ]
+    paths.extend(
+        _dashboard_glob_files(
+            [
+                WIKI_ROOT / "logs" / "ingest-drain-*.jsonl",
+                WIKI_ROOT / "runtime" / "failures" / "packets" / "*.json",
+                WIKI_ROOT
+                / "runtime"
+                / "raw-projections"
+                / "artifacts"
+                / "semantic-*.manifest.json",
+            ]
+        )
+    )
+    return _component_source_fingerprint(
+        "save-history",
+        paths,
+        identities=[path.name for path in raw_paths],
+    )
+
+
+def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
+    paths = [
+        WIKI_ROOT / "config.toml",
+        WIKI_ROOT / "recall.toml",
+        WIKI_ROOT / "pages",
+        WIKI_ROOT / "claims",
+        WIKI_ROOT / "recall",
+        WIKI_ROOT / "review",
+        WIKI_ROOT / "eval",
+        WIKI_ROOT / "distill",
+        WIKI_ROOT / "autonomy",
+        WIKI_ROOT / "runtime" / "managed-holds" / "state.json",
+        WIKI_ROOT / "runtime" / "provisional-recall" / "index.json",
+        WIKI_ROOT / "runtime" / "quality" / "probe-latest.json",
+        WIKI_ROOT / "runtime" / "ingest-read-back-runs.jsonl",
+        WIKI_ROOT / "runtime" / "ingest-read-back-failures.jsonl",
+        WIKI_ROOT / "runtime" / "ingest-read-back-repair.json",
+    ]
+    paths.extend(
+        _dashboard_glob_files(
+            [
+                WIKI_ROOT / "claims" / "*.jsonl",
+                WIKI_ROOT / "recall" / "*.json",
+                WIKI_ROOT / "recall" / "*.jsonl",
+                WIKI_ROOT / "review" / "*.jsonl",
+                WIKI_ROOT / "eval" / "*.json",
+                WIKI_ROOT / "distill" / "*.jsonl",
+                WIKI_ROOT / "autonomy" / "*.json",
+            ]
+        )
+    )
+    paths.extend(
+        _dashboard_rglob_files(
+            WIKI_ROOT / "runtime" / "research" / "runs",
+            "summary.json",
+            limit=50,
+        )
+    )
+    return _component_source_fingerprint(
+        "health",
+        paths,
+        identities=[path.name for path in raw_paths],
+    )
+
+
+def _model_status_materialization_fingerprint(ollama: dict[str, Any]) -> str:
+    paths = [
+        WIKI_ROOT / "config.toml",
+        WIKI_ROOT / "recall.toml",
+        WIKI_ROOT / "runtime" / "model-lab" / "active-policy.json",
+        WIKI_ROOT / "runtime" / "model-lab" / "state.json",
+    ]
+    model_identity = hashlib.sha256(
+        _canonical_json_bytes(ollama.get("models") or [])
+    ).hexdigest()
+    return _component_source_fingerprint(
+        "model-status",
+        paths,
+        identities=[model_identity],
+    )
+
+
 def build_fast_snapshot() -> dict[str, Any]:
     """Return the live status shell without scanning Raw or audit history."""
 
@@ -2959,7 +3318,23 @@ def build_snapshot() -> dict[str, Any]:
             {path.name: path for path in sorted(artifact_dir.glob("*.md"))}
         )
         raw_paths = sorted(paths_by_raw_id.values(), key=lambda path: path.name)
-    deferred_statuses = _operational_deferred_raw_statuses(raw_paths)
+    deferred_view = _materialized_component(
+        "deferred-statuses",
+        fingerprint=_deferred_materialization_fingerprint(raw_paths),
+        builder=lambda: {
+            "statuses": _operational_deferred_raw_statuses(raw_paths),
+        },
+    )
+    cached_deferred = deferred_view.get("statuses")
+    deferred_statuses = (
+        {
+            str(name): str(reason)
+            for name, reason in cached_deferred.items()
+            if isinstance(name, str) and isinstance(reason, str)
+        }
+        if isinstance(cached_deferred, dict)
+        else _operational_deferred_raw_statuses(raw_paths)
+    )
     processed_raw_files = orch_state.get("processed_raw_files")
     processed_raw_names = (
         {name for name in processed_raw_files if isinstance(name, str)}
@@ -2998,7 +3373,12 @@ def build_snapshot() -> dict[str, Any]:
 
     local_consensus = _safe_snapshot_component(
         "local_consensus",
-        _local_consensus_snapshot,
+        lambda: _materialized_component(
+            "local-consensus",
+            fingerprint=_local_consensus_materialization_fingerprint(),
+            builder=_local_consensus_snapshot,
+            audit_seconds=DASHBOARD_LOCAL_CONSENSUS_AUDIT_SECONDS,
+        ),
         {
             "active": False,
             "count": 0,
@@ -3089,7 +3469,12 @@ def build_snapshot() -> dict[str, Any]:
     ollama = _ollama_snapshot()
     model_status = _safe_snapshot_component(
         "model_status",
-        lambda: _model_status_snapshot(ollama),
+        lambda: _materialized_component(
+            "model-status",
+            fingerprint=_model_status_materialization_fingerprint(ollama),
+            builder=lambda: _model_status_snapshot(ollama),
+            audit_seconds=DASHBOARD_HEALTH_AUDIT_SECONDS,
+        ),
         {"available": False, "models": [], "summary": {}},
     )
     from llm_wiki_mcp.runtime_config import runtime_identity
@@ -3154,9 +3539,13 @@ def build_snapshot() -> dict[str, Any]:
         ),
         "save_history": _safe_snapshot_component(
             "save_history",
-            lambda: _save_history_snapshot(
-                raw_paths=raw_paths,
-                deferred_statuses=deferred_statuses,
+            lambda: _materialized_component(
+                "save-history",
+                fingerprint=_save_history_materialization_fingerprint(raw_paths),
+                builder=lambda: _save_history_snapshot(
+                    raw_paths=raw_paths,
+                    deferred_statuses=deferred_statuses,
+                ),
             ),
             {"days": [], "recent": [], "totals": {}, "sources": []},
         ),
@@ -3165,7 +3554,15 @@ def build_snapshot() -> dict[str, Any]:
             _knowledge_mix_snapshot,
             {"total_pages": 0, "total_bytes": 0, "categories": [], "top": []},
         ),
-        "health": _safe_snapshot_component("health", health_snapshot),
+        "health": _safe_snapshot_component(
+            "health",
+            lambda: _materialized_component(
+                "health",
+                fingerprint=_health_materialization_fingerprint(raw_paths),
+                builder=health_snapshot,
+                audit_seconds=DASHBOARD_HEALTH_AUDIT_SECONDS,
+            ),
+        ),
         "paths": {
             "wiki_root": str(WIKI_ROOT),
             "status_file": str(runtime_status.STATUS_FILE),
