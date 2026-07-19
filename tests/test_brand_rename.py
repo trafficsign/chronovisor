@@ -140,6 +140,31 @@ def test_brand_migration_preflight_rejects_a_live_writer_lock(
         os.close(descriptor)
 
 
+def test_brand_migration_reconciles_empty_transition_lock_duplicates(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / ".wiki"
+    canonical = tmp_path / ".chronovisor"
+    runtime = legacy / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "wiki-mutation.lock").touch()
+    (runtime / "chronovisor-mutation.lock").touch()
+
+    preflight = brand_migration.preflight(
+        legacy_root=legacy, canonical_root=canonical
+    )
+    applied = brand_migration.apply(
+        legacy_root=legacy, canonical_root=canonical
+    )
+
+    assert preflight["duplicate_internal_paths"] == [
+        "runtime/chronovisor-mutation.lock"
+    ]
+    assert applied["status"] == "applied"
+    assert (canonical / "runtime" / "chronovisor-mutation.lock").exists()
+    assert not (canonical / "runtime" / "wiki-mutation.lock").exists()
+
+
 def test_public_mcp_surface_contains_only_chronovisor_tools() -> None:
     from chronovisor.server import mcp
 

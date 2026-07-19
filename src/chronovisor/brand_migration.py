@@ -91,9 +91,28 @@ def _assert_quiescent(root: Path) -> list[str]:
     """Fail when any persistent writer lock is currently held."""
 
     acquired: list[tuple[int, Path]] = []
+    lock_patterns = (
+        "*.lock",
+        "autonomy/*.lock",
+        "recall/*.lock",
+        "review/*.lock",
+        "runtime/*.lock",
+        "runtime/background-jobs/*.lock",
+        "runtime/content-correction/*.lock",
+        "runtime/convergence/*.lock",
+        "runtime/ingest-review/*.lock",
+        "runtime/provisional-recall/*.lock",
+    )
+    paths = sorted(
+        {
+            path
+            for pattern in lock_patterns
+            for path in root.glob(pattern)
+            if path.is_file()
+        }
+    )
     try:
-        runtime = root / "runtime"
-        for path in sorted(runtime.rglob("*.lock")) if runtime.exists() else []:
+        for path in paths:
             descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -122,19 +141,29 @@ def preflight(
         raise BrandMigrationError(f"data-root migration is not ready: {status['state']}")
     if legacy_root.stat().st_dev != canonical_root.parent.stat().st_dev:
         raise BrandMigrationError("data-root migration must remain on one filesystem")
+    checked_locks = _assert_quiescent(legacy_root)
+    duplicate_internal_paths: list[str] = []
     for old_relative, new_relative in INTERNAL_PATH_RENAMES:
-        if (legacy_root / old_relative).exists() and (
-            legacy_root / new_relative
-        ).exists():
+        old_path = legacy_root / old_relative
+        new_path = legacy_root / new_relative
+        if not old_path.exists() or not new_path.exists():
+            continue
+        if (
+            not old_path.is_file()
+            or not new_path.is_file()
+            or old_path.stat().st_size != 0
+            or new_path.stat().st_size != 0
+        ):
             raise BrandMigrationError(
                 f"internal path split-brain: {old_relative} and {new_relative}"
             )
-    checked_locks = _assert_quiescent(legacy_root)
+        duplicate_internal_paths.append(new_relative.as_posix())
     return {
         **status,
         "status": "ready",
         "quiescent": True,
         "checked_locks": checked_locks,
+        "duplicate_internal_paths": duplicate_internal_paths,
         "inventory": _inventory(legacy_root),
     }
 
@@ -203,11 +232,18 @@ def apply(
     )
 
     before = _inventory(legacy_root)
+    duplicate_internal_paths = [
+        Path(value) for value in preflight_status["duplicate_internal_paths"]
+    ]
+    for relative in duplicate_internal_paths:
+        (legacy_root / relative).unlink()
     os.replace(legacy_root, canonical_root)
     try:
         legacy_root.symlink_to(canonical_root.name, target_is_directory=True)
     except Exception:
         os.replace(canonical_root, legacy_root)
+        for relative in duplicate_internal_paths:
+            (legacy_root / relative).touch(exist_ok=True)
         raise
     internal_renames: list[str] = []
     rewritten: list[str] = []
@@ -228,6 +264,8 @@ def apply(
             _rename_internal_paths(canonical_root, reverse=True)
         legacy_root.unlink(missing_ok=True)
         os.replace(canonical_root, legacy_root)
+        for relative in duplicate_internal_paths:
+            (legacy_root / relative).touch(exist_ok=True)
         raise
 
     manifest = {
