@@ -1,31 +1,31 @@
-# LLM Wiki MCP
+# Chronovisor MCP
 
-LLM Wiki MCP is a local-first memory runtime for LLM agents. It stores durable
-conversation knowledge under `~/.wiki`, serves it through an MCP server, and can
+Chronovisor MCP is a local-first memory runtime for LLM agents. It stores durable
+conversation knowledge under `~/.chronovisor`, serves it through an MCP server, and can
 wire host hooks for automatic recall and lossless transcript capture. Routine
 semantic decisions stay on local Ollama models; a frontier model is reserved for
 exceptional, repeatedly reproduced system-code repair incidents.
 
 ## Core Pieces
 
-- `llm-wiki-mcp`: MCP server.
-- `llm-wiki-hook`: single hook dispatcher for Codex, Claude Code, and future hosts.
-- `llm-wiki`: operational CLI (`status`, `doctor`, `hooks inspect`, `hooks install`).
-- `llm-wiki-recall`: synchronous recall gate.
-- `llm-wiki-recall-audit`: asynchronous missed-recall auditor.
-- `llm-wiki-recall-auto-apply`: applies safe auto-lane recall improvements.
-- `llm-wiki-content-correction`: compatibility CLI for binding explicit user
+- `chronovisor-mcp`: MCP server.
+- `chronovisor-hook`: single hook dispatcher for Codex, Claude Code, and future hosts.
+- `chronovisor`: operational CLI (`status`, `doctor`, `hooks inspect`, `hooks install`).
+- `chronovisor-recall`: synchronous recall gate.
+- `chronovisor-recall-audit`: asynchronous missed-recall auditor.
+- `chronovisor-recall-auto-apply`: applies safe auto-lane recall improvements.
+- `chronovisor-content-correction`: compatibility CLI for binding explicit user
   corrections to exact-turn recall provenance. Structured decisions use local
   consensus and fail closed when the local quorum cannot be reached.
-- `llm-wiki-codex-save` / `llm-wiki-claude-code-save`: deterministic, lossless
+- `chronovisor-codex-record` / `chronovisor-claude-code-record`: deterministic, lossless
   host transcript-delta capture. The save path does not call an LLM.
-- `llm-wiki-local-model-eval`: read-only, full-corpus replay gate for measuring
+- `chronovisor-local-model-eval`: read-only, full-corpus replay gate for measuring
   the local decision fleet before an artifact-backed atomic policy adoption.
-- `wiki_research` / `llm-wiki-research`: asynchronous-by-default, bounded
+- `chronovisor_research` / `chronovisor-research`: asynchronous-by-default, bounded
   evidence research through MCP or CLI. It
   follows Wiki -> verified claims -> Raw -> Web, persists source-backed
   Evidence Bundles, and challenges accepted evidence locally.
-- `llm-wiki-research-verify`: temp-only adversarial verification with explicit
+- `chronovisor-research-verify`: temp-only adversarial verification with explicit
   PASS/FAIL commands.
 
 The routine decision fleet is:
@@ -49,7 +49,7 @@ their separate repair queue.
 ## Storage Layout
 
 ```text
-~/.wiki/
+~/.chronovisor/
   raw/       # durable raw session captures
   pages/     # structured wiki pages
   system/    # privileged user/profile/state pages
@@ -63,10 +63,10 @@ their separate repair queue.
 Host-specific scripts are compatibility wrappers. New integrations should call:
 
 ```sh
-llm-wiki-hook --host codex --event UserPromptSubmit --hook
-llm-wiki-hook --host codex --event Stop --hook
-llm-wiki-hook --host claude-code --event UserPromptSubmit --hook
-llm-wiki-hook --host claude-code --event Stop --hook
+chronovisor-hook --host codex --event UserPromptSubmit --hook
+chronovisor-hook --host codex --event Stop --hook
+chronovisor-hook --host claude-code --event UserPromptSubmit --hook
+chronovisor-hook --host claude-code --event Stop --hook
 ```
 
 `UserPromptSubmit` runs synchronous recall. `Stop` durably enqueues the
@@ -79,7 +79,7 @@ later by local convergence.
 To update local Codex and Claude Code settings in one pass:
 
 ```sh
-llm-wiki hooks install --host all
+chronovisor hooks install --host all
 ```
 
 See `docs/architecture.md`, `docs/config.md`, `docs/hooks.md`,

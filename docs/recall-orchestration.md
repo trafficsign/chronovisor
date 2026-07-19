@@ -1,6 +1,6 @@
 # Recall Orchestration
 
-LLM Wiki uses a layered Recall path. The layers increase cost and authority;
+Chronovisor uses a layered Recall path. The layers increase cost and authority;
 they do not weaken the store's provenance, review, or adoption gates.
 
 ## Layers
@@ -10,9 +10,9 @@ they do not weaken the store's provenance, review, or adoption gates.
 2. **Automatic Recall (L2)** searches before the answer and injects only
    high-confidence page cards. It is bounded by the synchronous hook deadline
    and a separate context budget.
-3. **Model-directed Recall (L3)** uses `wiki_search` and `wiki_read` when the
+3. **Model-directed Recall (L3)** uses `chronovisor_search` and `chronovisor_read` when the
    initial context is insufficient. The model should forward the injected
-   `decision_id` and `session_id`, then call `wiki_recall_used` only for pages
+   `decision_id` and `session_id`, then call `chronovisor_recall_used` only for pages
    that materially influenced the answer.
 4. **Deep Recall (L4)** is an explicit, asynchronous investigation across
    related pages, prior conversations, and lossless Raw evidence. It is not
@@ -47,7 +47,7 @@ Recall telemetry uses four different stages:
 - `read`: the model fetched a page.
 - `injected`: the automatic hook included a page card.
 - `used`: the model explicitly reported that a page materially informed the
-  answer through `wiki_recall_used`.
+  answer through `chronovisor_recall_used`.
 
 Only `used` is positive supervision. Search and read activity alone never teach
 the system that a page was helpful. Exact `decision_id` matching is preferred;

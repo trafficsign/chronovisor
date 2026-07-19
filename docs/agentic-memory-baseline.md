@@ -5,7 +5,7 @@ Frozen before the research-lane implementation on 2026-07-18 (JST), at
 
 ## Storage and regression baseline
 
-- `llm-wiki raw verify --full --json`: status `ok`, 10,848 logical units,
+- `chronovisor raw verify --full --json`: status `ok`, 10,848 logical units,
   62 open segments, 75 legacy archives, zero errors.
 - Full pytest: 2,391 passed and four pre-existing failures in
   `test_semantic_defer_replay.py` after 666.85 seconds.
@@ -46,7 +46,7 @@ must not be substituted into the baseline after implementation begins.
 - Rebuilt co-fire v2: 3,145 exposure episodes, zero promoted positive-used
   episodes, strict join accepted/rejected 0/0.
 - Positive promotion remains intentionally held until a production
-  `wiki_recall_used` durable receipt joins exactly to one decision/session.
+  `chronovisor_recall_used` durable receipt joins exactly to one decision/session.
 
 ## Phase 9 locked adoption results
 

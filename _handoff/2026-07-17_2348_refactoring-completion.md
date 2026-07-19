@@ -7,7 +7,7 @@ baseline_commit: 0f6dd7b
 final_commit_before_handoff: 9db9caf
 ---
 
-# LLM Wiki MCP refactoring completion
+# Chronovisor MCP refactoring completion
 
 ## Completed campaigns
 

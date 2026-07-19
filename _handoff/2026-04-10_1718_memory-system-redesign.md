@@ -27,7 +27,7 @@ created_at: 2026-04-10T17:18:31+09:00
   - セキュリティ・プライバシー上、外に出せないデータ
   - フロンティア AI が代替できない領域。ここが自分で構築する価値がある
 
-**アーキテクチャ方針: カーパシー LLM Wiki パターン + ローカル LLM / Sonnet フォールバック**
+**アーキテクチャ方針: カーパシー Chronovisor パターン + ローカル LLM / Sonnet フォールバック**
 
 ```
 [Claude Code セッション（Opus）]
@@ -179,7 +179,7 @@ updated: 2026-04-10
 
 **スケーリング:** ページ数が1000超えたらセマンティック検索を検討（現時点では YAGNI）
 
-### 必須機能（カーパシー LLM Wiki パターンより）
+### 必須機能（カーパシー Chronovisor パターンより）
 1. **全データ蓄積（Ingest）** — 会話・Web検索・コード・判断、全部取りこぼさない
 2. **構造化（Schema）** — 何をどこにどういう粒度で保存するかのルール
 3. **品質管理（Lint）** — 古い情報・矛盾・重複の検出と安全な自動修正
@@ -206,13 +206,13 @@ updated: 2026-04-10
 - ユーザーが意識的にアクセスしなきゃいけないツールは結局使わなくなる（Letta の教訓）
 
 ### 参考資料
-- [Karpathy LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
-- [LLM Wiki vs Wikidata: ナラティブ×セマンティック](https://zenn.dev/knowledge_graph/articles/llm-wiki-wikidata-narrative-semantic)
+- [Karpathy Chronovisor gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
+- [Chronovisor vs Wikidata: ナラティブ×セマンティック](https://zenn.dev/knowledge_graph/articles/chronovisor-wikidata-narrative-semantic)
 - [Karpathy LLM Knowledge Base — クラスメソッド](https://dev.classmethod.jp/articles/karpathy-llm-knowledge-base/)
 - [A-MEM (NeurIPS 2025)](https://arxiv.org/abs/2502.12110)
 - [TiMem](https://arxiv.org/abs/2601.02845)
 - [PersistBench](https://arxiv.org/abs/2602.01146)
-- [MehmetGoekce/llm-wiki](https://github.com/MehmetGoekce/llm-wiki)
+- [MehmetGoekce/chronovisor](https://github.com/MehmetGoekce/chronovisor)
 - [Gemma 4 — Google DeepMind](https://deepmind.google/models/gemma/gemma-4/)
 
 ### 制約・環境
@@ -326,7 +326,7 @@ updated: 2026-04-10
 - 2026-04-10 20:45 実装計画確定: Python、4 Phase 16 ステップ。状態を ready に移行
 - 2026-04-10 21:00 Phase 1 完了: MCP サーバー全12エンドポイント実装・テスト済み。初回コミット
 - 2026-04-10 21:15 Phase 2 完了: オーケストレーター（閾値ベース Ingest + 24h Lint）実装・テスト済み
-- 2026-04-10 21:30 Phase 3 進行中: claude_desktop_config.json に llm-wiki MCP 登録済み。hooks 書き換え・CLAUDE.md 更新は残
+- 2026-04-10 21:30 Phase 3 進行中: claude_desktop_config.json に chronovisor MCP 登録済み。hooks 書き換え・CLAUDE.md 更新は残
 - 2026-04-10 21:45 Phase 3 完了: wiki-save.py hook 作成、CLAUDE.md/rules/memory.md 更新、settings.json 更新
 - 2026-04-10 22:00 Phase 4-1 完了: Basic Memory 1369ファイル→pages/、Vestige 356ノード→raw/ 移行。index 再構築（1373ページ）
 - 2026-04-10 22:10 Phase 4-2 完了: Vestige/Basic Memory を MCP 設定から削除。データは保持（ロールバック可能）

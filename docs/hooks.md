@@ -1,12 +1,12 @@
 # Hooks
 
-`llm-wiki-hook` is the public hook entry point.
+`chronovisor-hook` is the public hook entry point.
 
 ## User Prompt
 
 ```sh
-llm-wiki-hook --host codex --event UserPromptSubmit --hook
-llm-wiki-hook --host claude-code --event UserPromptSubmit --hook
+chronovisor-hook --host codex --event UserPromptSubmit --hook
+chronovisor-hook --host claude-code --event UserPromptSubmit --hook
 ```
 
 This runs the recall gate synchronously and prints host-native hook output. The
@@ -35,7 +35,7 @@ After two degraded or failed Recall runs, the default circuit breaker disables
 rewrite, semantic search, and the local judge for 60 seconds while BM25 remains
 available. A successful normal run resets the breaker.
 
-The synchronous hook never starts `wiki_research`, Deep Recall, Web search,
+The synchronous hook never starts `chronovisor_research`, Deep Recall, Web search,
 Web fetch, the 35B planner, or the cross-encoder reranker. Those lanes are
 explicit/background or Sleep work. Foreground Recall announces a short-lived
 sync marker before local inference; a running research child observes that
@@ -59,8 +59,8 @@ omitted rather than cut into ambiguous partial syntax. See
 ## Stop
 
 ```sh
-llm-wiki-hook --host codex --event Stop --hook
-llm-wiki-hook --host claude-code --event Stop --hook
+chronovisor-hook --host codex --event Stop --hook
+chronovisor-hook --host claude-code --event Stop --hook
 ```
 
 Stop durably enqueues a host save job and, when
@@ -99,7 +99,7 @@ Classification and resolution happen later in the bounded local sleep worker.
 Detection quality is measured with a versioned golden/holdout corpus:
 
 ```sh
-llm-wiki-content-correction-eval
+chronovisor-content-correction-eval
 ```
 
 Semantic work is handled later by bounded convergence workers. When a routine
@@ -119,10 +119,10 @@ repair queue.
 These scripts remain for existing host settings:
 
 - `scripts/codex_recall_hook.sh`
-- `scripts/codex_wiki_save_hook.sh`
+- `scripts/codex_chronovisor_record_hook.sh`
 - `scripts/codex_recall_audit_hook.sh`
 - `scripts/claude_code_recall_hook.sh`
-- `scripts/claude_code_wiki_save_hook.sh`
+- `scripts/claude_code_chronovisor_record_hook.sh`
 - `scripts/claude_code_recall_audit_hook.sh`
 
 Wrappers may still call the dispatcher with `--only save`, `--only audit`,
@@ -136,16 +136,16 @@ after 2026-10-01. No selection starts semantic review in the Stop process.
 ## Install
 
 ```sh
-llm-wiki hooks install --host codex
-llm-wiki hooks install --host claude-code
-llm-wiki hooks install --host all
-llm-wiki hooks install --host all --dry-run --json
+chronovisor hooks install --host codex
+chronovisor hooks install --host claude-code
+chronovisor hooks install --host all
+chronovisor hooks install --host all --dry-run --json
 ```
 
-The installer replaces only existing LLM Wiki hook commands, preserves unrelated
-host hooks, and writes direct `llm-wiki-hook` entries. For Codex it also updates
+The installer replaces only existing Chronovisor hook commands, preserves unrelated
+host hooks, and writes direct `chronovisor-hook` entries. For Codex it also updates
 the matching trusted hash entries in `~/.config/codex/config.toml` and removes
-stale LLM Wiki trust entries from the old split Stop hooks.
+stale Chronovisor trust entries from the old split Stop hooks.
 
 Names containing `frontier` in older hook settings or queued artifacts are
 compatibility names, not proof that a frontier model is running. Actual Codex
@@ -155,8 +155,8 @@ incident evidence passes its durable guard; a Stop hook can never enter it.
 ## Inspect
 
 ```sh
-llm-wiki hooks inspect
-llm-wiki hooks inspect --json
+chronovisor hooks inspect
+chronovisor hooks inspect --json
 ```
 
 This lists detected Codex and Claude Code hook entries, labels current,

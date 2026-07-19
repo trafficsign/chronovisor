@@ -28,7 +28,7 @@ branch: codex/refactor-campaign-a-safety
 | Item | Baseline |
 |---|---|
 | HEAD / origin/main | `5d54bc7b744e53a758a7e254e9fef4a3c42a7671` |
-| Isolated worktree | `/Users/trafficsign/projects/personal/llm-wiki-mcp-refactor-a` |
+| Isolated worktree | `/Users/trafficsign/projects/personal/chronovisor-refactor-a` |
 | Branch | `codex/refactor-campaign-a-safety` |
 | Original worktree | user-owned untracked `_handoff/2026-06-11_0042_recall-redesign.md` and `logs/`; untouched |
 | Baseline full suite | 2,328 passed / 1 failed in 928.87s。casefold result identityの既存bugを検出 |
@@ -40,12 +40,12 @@ branch: codex/refactor-campaign-a-safety
 再生成コマンド:
 
 ```bash
-uv run python scripts/refactor_inventory.py --output /tmp/llm-wiki-refactor-inventory.json
+uv run python scripts/refactor_inventory.py --output /tmp/chronovisor-refactor-inventory.json
 ```
 
 | Metric | Count |
 |---|---:|
-| Python modules under `src/llm_wiki_mcp` | 115 |
+| Python modules under `src/chronovisor` | 115 |
 | Python lines | 116,779 |
 | Function / method definitions | 2,875 |
 | Functions >= 200 lines | 63 |
@@ -100,9 +100,9 @@ uv run python scripts/refactor_inventory.py --output /tmp/llm-wiki-refactor-inve
 |---|---|---|
 | Live dashboard | GitHub uvx archive; commit `5d54bc7`; drift false; PID 72629 | long-lived。package変更後はkickstartとarchive commit確認 |
 | Live ingest-drain | GitHub uvx archive; commit `5d54bc7`; drift false; PID 72631; state idle / active batch false | `current_job_pid=null` / `current_raw=null` を確認してからのみkickstart |
-| Codex MCP | GitHub `llm-wiki-mcp[reranker]` | fresh host / MCP canaryで確認 |
-| Claude Code MCP | GitHub `llm-wiki-mcp[reranker]` | fresh host / MCP canaryで確認 |
-| Claude Desktop MCP | GitHub `llm-wiki-mcp[reranker]`; commit `5d54bc7`; archive `Wq4ID0BlUuVhsfNl0TTIV`; PID 22065 | local processを停止しfresh appでGitHub sourceを再検証。torch / transformers present |
+| Codex MCP | GitHub `chronovisor[reranker]` | fresh host / MCP canaryで確認 |
+| Claude Code MCP | GitHub `chronovisor[reranker]` | fresh host / MCP canaryで確認 |
+| Claude Desktop MCP | GitHub `chronovisor[reranker]`; commit `5d54bc7`; archive `Wq4ID0BlUuVhsfNl0TTIV`; PID 22065 | local processを停止しfresh appでGitHub sourceを再検証。torch / transformers present |
 | dashboard launcher | local repo script SHA `1027c10e5f6312eab4004330668d7f3a5253c64bce8b862d18ace94c0488f9f9` | package archiveとは別にSHA確認 |
 | ingest-drain launcher | local repo script SHA `c32c24c0fdf5e769d522f1a3e8a9375ad2d93bffb668b7774e66ecd13a5cd8cc` | package archiveとは別にSHA確認 |
 | watchdog / converge / sleep | scheduled; last exit 0 | 強制通常runをしない。fresh import/helpと次回自然runを確認 |

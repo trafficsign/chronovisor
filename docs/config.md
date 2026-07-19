@@ -1,7 +1,7 @@
 # Configuration
 
-The preferred runtime config is `~/.wiki/config.toml`. If it does not exist,
-LLM Wiki falls back to the legacy `~/.wiki/recall.toml` shape.
+The preferred runtime config is `~/.chronovisor/config.toml`. If it does not exist,
+Chronovisor falls back to the legacy `~/.chronovisor/recall.toml` shape.
 
 ## Raw Archive rollout
 
@@ -13,15 +13,15 @@ ingest, sleep, and dashboard processes cannot drift onto different layouts:
 layout = "legacy" # legacy | shadow | v2
 ```
 
-`LLM_WIKI_RAW_LAYOUT` remains an emergency per-process override:
+`CHRONOVISOR_RAW_LAYOUT` remains an emergency per-process override:
 
 ```sh
-LLM_WIKI_RAW_LAYOUT=legacy  # default; flat Markdown authority
-LLM_WIKI_RAW_LAYOUT=shadow  # flat authority plus source-native v2 mirror
-LLM_WIKI_RAW_LAYOUT=v2      # source-native date-partitioned authority
+CHRONOVISOR_RAW_LAYOUT=legacy  # default; flat Markdown authority
+CHRONOVISOR_RAW_LAYOUT=shadow  # flat authority plus source-native v2 mirror
+CHRONOVISOR_RAW_LAYOUT=v2      # source-native date-partitioned authority
 ```
 
-An unknown value fails before capture. `wiki_save_raw` remains the compatible
+An unknown value fails before capture. `chronovisor_record` remains the compatible
 manual UTF-8/Markdown API in every mode; only the Codex and Claude transcript
 savers use source-native segments. Compression is never performed by Stop or
 the save worker. The sleep cycle seals at most four eligible segments per run.
@@ -110,7 +110,7 @@ max_resident_models = 3
 # engine/model-drifted artifacts make enabled semantic lanes quarantine before
 # inference. Set this to "" and keep the 19 model-backed lanes in shadow only
 # while compiling and evaluating a replacement candidate.
-adoption_artifact = "~/.wiki/runtime/model-lab/local-eval/adoption-v56-evaluator20.json"
+adoption_artifact = "~/.chronovisor/runtime/model-lab/local-eval/adoption-v56-evaluator20.json"
 
 [decision_policies]
 # Deterministic/non-model lanes and the guarded repair-only lane are live
@@ -180,7 +180,7 @@ max_age_days = 180
 max_entries = 500
 
 [search.reranker]
-# Optional. Used by MCP wiki.search and the search-eval hybrid-rerank variant;
+# Optional. Used by MCP chronovisor_search and the search-eval hybrid-rerank variant;
 # synchronous recall hooks keep using the faster BM25/dense fusion path.
 enabled = false
 backend = "transformers"
@@ -268,7 +268,7 @@ include_queries = false
 # How long ollama keeps the gate/rewrite model resident after a call.
 # Default "24h" avoids cold-start timeouts on the synchronous recall path.
 keep_alive = "24h"
-# Used by `llm-wiki-recall --warmup` before hook sessions.
+# Used by `chronovisor-recall --warmup` before hook sessions.
 warmup_timeout_ms = 15000
 
 [recall.budgets]
@@ -363,47 +363,47 @@ remain supported.
 
 ## Environment Overrides
 
-- `LLM_WIKI_RECALL_ENABLED=0`: disable synchronous recall.
+- `CHRONOVISOR_RECALL_ENABLED=0`: disable synchronous recall.
 - `CODEX_WIKI_SAVE_ENABLED=1`: enable Codex save hook.
 - `CLAUDE_CODE_WIKI_SAVE_ENABLED=1`: enable Claude Code save hook.
-- `LLM_WIKI_RECALL_AUDIT_ENABLED` and
-  `LLM_WIKI_CONTENT_CORRECTION_ENABLED`: legacy compatibility switches. The
+- `CHRONOVISOR_RECALL_AUDIT_ENABLED` and
+  `CHRONOVISOR_CONTENT_CORRECTION_ENABLED`: legacy compatibility switches. The
   Stop dispatcher is save-only and does not schedule those lanes.
-- `LLM_WIKI_RECALL_AUTO_APPLY_FRONTIER_TIMEOUT`: legacy name for the timeout
+- `CHRONOVISOR_RECALL_AUTO_APPLY_FRONTIER_TIMEOUT`: legacy name for the timeout
   passed by auto-apply to the local structured-review compatibility boundary.
   It does not enable a frontier call.
-- `LLM_WIKI_CONTENT_CORRECTION_QUARANTINE_RETRY_SECONDS`: cooldown before an
+- `CHRONOVISOR_CONTENT_CORRECTION_QUARANTINE_RETRY_SECONDS`: cooldown before an
   autonomous content-correction quarantine is reopened (default: `21600`).
-- `LLM_WIKI_CONVERGENCE_QUARANTINE_RETRY_SECONDS`: cooldown before autonomous
+- `CHRONOVISOR_CONVERGENCE_QUARANTINE_RETRY_SECONDS`: cooldown before autonomous
   recall, replay, repair, and self-heal quarantines are reopened (default:
   `21600`).
-- `LLM_WIKI_HUMAN_REQUIRED_RECHECK_SECONDS`: interval for automatically
+- `CHRONOVISOR_HUMAN_REQUIRED_RECHECK_SECONDS`: interval for automatically
   rechecking external-authority failures such as expired authentication,
   billing/quota, or keychain access (default: `3600`).
-- `LLM_WIKI_RUNTIME_SOURCE`: explicit override for the production `uvx`
+- `CHRONOVISOR_RUNTIME_SOURCE`: explicit override for the production `uvx`
   package source. The default is the pushed GitHub repository; local worktrees
   are never selected implicitly.
-- `LLM_WIKI_REPO_ROOT`: checkout used only as exceptional system-code-repair
+- `CHRONOVISOR_REPO_ROOT`: checkout used only as exceptional system-code-repair
   context and as the target of an approved repair patch. It does not control
   imported runtime code.
-- `LLM_WIKI_FRONTIER_MODEL`, `LLM_WIKI_FRONTIER_REASONING_EFFORT`, and
-  `LLM_WIKI_FRONTIER_TIMEOUT_SECONDS`: exceptional
+- `CHRONOVISOR_FRONTIER_MODEL`, `CHRONOVISOR_FRONTIER_REASONING_EFFORT`, and
+  `CHRONOVISOR_FRONTIER_TIMEOUT_SECONDS`: exceptional
   code-repair settings. They are read only after validated
   `RepairIncidentEvidence` passes the durable single-flight/24-hour guard; none
   of them can turn a routine review into a frontier call.
-- Arbitrary `LLM_WIKI_FRONTIER_CMD` execution is intentionally unsupported;
+- Arbitrary `CHRONOVISOR_FRONTIER_CMD` execution is intentionally unsupported;
   one admitted incident can start only the built-in single Codex process.
 
 Older settings may still expose `frontier_mode`, `frontier_*`, or
-`LLM_WIKI_*FRONTIER*` names. They are schema and artifact compatibility names
+`CHRONOVISOR_*FRONTIER*` names. They are schema and artifact compatibility names
 unless they belong to the guarded code-repair settings listed above. Routine
 `run_structured_review()` calls always use `[decision_router]`.
 
 The compatibility wrappers preserve old command-line and environment parsing,
 but they do not weaken the capture-only Stop invariant. `--only audit` and
-`--only improve` are deprecated no-ops; `llm-wiki hooks inspect` labels them and
+`--only improve` are deprecated no-ops; `chronovisor hooks inspect` labels them and
 emits a migration warning. They are scheduled for removal after 2026-10-01.
-Direct `llm-wiki-hook --event Stop` deployments may enable save and
+Direct `chronovisor-hook --event Stop` deployments may enable save and
 deterministic correction capture, but never semantic work.
 
 ## Optional Reranker
@@ -412,7 +412,7 @@ Install the optional local reranker dependencies with `uv sync --extra reranker`
 before enabling `[search.reranker]`. The production profile keeps it disabled:
 BM25 + semantic fusion is the default ranking path, and the synchronous recall
 hook never calls the reranker. If enabled, the Hugging Face Transformers backend
-uses `BAAI/bge-reranker-v2-m3` only for MCP `wiki.search` top candidates and
+uses `BAAI/bge-reranker-v2-m3` only for MCP `chronovisor_search` top candidates and
 explicit search-eval reranker experiments.
 
 The tuned local profile reranks only the first 10 fused candidates with a 384

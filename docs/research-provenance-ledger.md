@@ -6,7 +6,7 @@ future visibility or licensing change requires a fresh source/provenance audit.
 
 ## Implementation sources
 
-- Existing LLM Wiki contracts, runtime measurements, Replay/Holdout fixtures,
+- Existing Chronovisor contracts, runtime measurements, Replay/Holdout fixtures,
   and independently written tests are the primary specification.
 - SearXNG's public Search API documentation informed the provider-neutral JSON
   search contract: <https://docs.searxng.org/dev/search_api.html>.

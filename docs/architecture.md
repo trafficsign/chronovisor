@@ -1,11 +1,11 @@
 # Architecture
 
-LLM Wiki has three routine loops and one exceptional repair plane around one
+Chronovisor has three routine loops and one exceptional repair plane around one
 wiki store.
 
 ```text
 UserPromptSubmit
-  -> llm-wiki-hook
+  -> chronovisor-hook
   -> inject bounded allowlisted core memory as non-executable JSON
   -> strip non-user blocks and trivial prompts
   -> load recall/sessions/<session_id>.json
@@ -17,7 +17,7 @@ UserPromptSubmit
   -> fail open to the host; breaker preserves BM25 degradation
 
 Stop
-  -> llm-wiki-hook
+  -> chronovisor-hook
   -> durably enqueue one coalesced save job for the session
   -> optionally enqueue one coalesced correction-capture job for the session
   -> return immediately; no model, ingest, mutation, audit, or improvement
@@ -47,7 +47,7 @@ Exceptional system repair
 
 ## Store
 
-`~/.wiki` is the source of memory truth.
+`~/.chronovisor` is the source of memory truth.
 
 - `raw/`: immutable Raw archive. Legacy flat Markdown remains readable during
   rollout. Native transcript capture is stored directly under
@@ -176,7 +176,7 @@ Exceptional system repair
 - **Auditor**: heavy asynchronous judge that looks for missed Recall. It is
   queued only after a successful durable save receipt. Search `returned` and
   page `read` events are telemetry, not positive supervision; only an explicit
-  `wiki_recall_used` event says a page influenced the answer.
+  `chronovisor_recall_used` event says a page influenced the answer.
 - **Auto-apply**: applies additive actions only (`query_hint`, `alias`, `page_tag`).
 - **Calibration**: pure-Python logistic calibration on recall-log features and
   feedback labels, applied only after a time-ordered holdout and local consensus.
@@ -195,8 +195,8 @@ Exceptional system repair
   semantic defers are reported separately from pending and failed work. A dead
   worker PID is rendered as idle rather than as live work.
 
-Production entry points load `llm-wiki-mcp` from the pushed GitHub source via
-`uvx`. The checkout selected by `LLM_WIKI_REPO_ROOT` is only exceptional
+Production entry points load `chronovisor` from the pushed GitHub source via
+`uvx`. The checkout selected by `CHRONOVISOR_REPO_ROOT` is only exceptional
 code-repair context and the destination for an approved patch, so an unpushed
 worktree cannot silently become the running memory policy.
 
@@ -224,7 +224,7 @@ system code repair.
 
 ## Search Pipeline
 
-`llm_wiki_mcp.pipeline` owns the shared ranking orchestration. Production
+`chronovisor.pipeline` owns the shared ranking orchestration. Production
 `search.search()`, search evaluation variants, and self-tune weight trials all
 enter through `run_search_pipeline()` with different `PipelineConfig` values:
 
@@ -238,7 +238,7 @@ BM25
   -> filter / sort / truncate
 ```
 
-The MCP `wiki.search` tool adds one post-search stage: exact tag filtering,
+The MCP `chronovisor_search` tool adds one post-search stage: exact tag filtering,
 then `apply_rerank_stage()` only when the optional reranker is enabled for
 relevance-sorted queries. The synchronous recall hook keeps using the faster
 fused search path and does not call the reranker.
@@ -248,7 +248,7 @@ in [Recall Orchestration](recall-orchestration.md).
 
 ## Host Boundary
 
-Codex and Claude Code enter through `llm-wiki-hook`. Legacy scripts remain as
+Codex and Claude Code enter through `chronovisor-hook`. Legacy scripts remain as
 wrappers so existing hook settings continue to work while new deployments use
 the single dispatcher directly. The Stop dispatcher schedules deterministic
 save/correction capture only; successful save completion can enqueue an audit

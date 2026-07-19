@@ -3,9 +3,9 @@
 ## Status
 
 ```sh
-llm-wiki status
-llm-wiki status --json
-llm-wiki health
+chronovisor status
+chronovisor status --json
+chronovisor health
 ```
 
 Shows wiki counts, active config, recall decision counts, feedback counts, and
@@ -21,8 +21,8 @@ Trace coverage. The same fields appear in the dashboard Memory Health panel.
 ## Doctor
 
 ```sh
-llm-wiki doctor
-llm-wiki doctor --json
+chronovisor doctor
+chronovisor doctor --json
 ```
 
 Runs lightweight operational checks for wiki directories, config, and detected
@@ -31,7 +31,7 @@ host hooks.
 ## Dashboard
 
 ```sh
-llm-wiki-dashboard --host 127.0.0.1 --port 8765
+chronovisor-dashboard --host 127.0.0.1 --port 8765
 ```
 
 The local dashboard is the primary live operations view. `Current Work` shows
@@ -48,18 +48,18 @@ view. A missing or dead worker PID is idle, not live work.
 
 ## Evidence Research
 
-`wiki_research` is an MCP tool and is asynchronous by default. Inspect the
-returned durable job with `wiki_jobs(job_id)`:
+`chronovisor_research` is an MCP tool and is asynchronous by default. Inspect the
+returned durable job with `chronovisor_jobs(job_id)`:
 
 ```text
-wiki_research(query="current status of the target", claims=["..."])
-wiki_jobs(job_id="...")
+chronovisor_research(query="current status of the target", claims=["..."])
+chronovisor_jobs(job_id="...")
 ```
 
 MCP hosts freeze their tool schema when a conversation is created. If
-`wiki_research` was added after that conversation started, reconnecting only
+`chronovisor_research` was added after that conversation started, reconnecting only
 the process is insufficient in some hosts: start a new conversation and verify
-that `wiki_research` appears in the advertised tool list. The server publishes
+that `chronovisor_research` appears in the advertised tool list. The server publishes
 it unconditionally; a publication regression is covered by the test suite.
 
 When the optional reranker is enabled, the MCP process warms its locally cached
@@ -72,9 +72,9 @@ The GitHub-installed package exposes the same background-first contract for
 deployment canaries and shell use:
 
 ```sh
-llm-wiki-research "current status of the target" --claim "..." --json
+chronovisor-research "current status of the target" --claim "..." --json
 # Explicit live diagnostic only; normal use stays queued.
-llm-wiki-research "current status of the target" --sync --no-challenge --json
+chronovisor-research "current status of the target" --sync --no-challenge --json
 ```
 
 The tool follows Wiki -> verified claims -> Raw -> Web. Web search and fetch
@@ -88,7 +88,7 @@ Run the mutation-free adversarial verifier before rollout or after changing
 budgets/providers:
 
 ```sh
-llm-wiki-research-verify --json
+chronovisor-research-verify --json
 ```
 
 Research, Web, checkpoint compaction, and Sleep consolidation are separately
@@ -99,21 +99,21 @@ protected 9B/embedding residency and foreground latency gate are proven.
 ## Hook Install
 
 ```sh
-llm-wiki hooks install --host all
-llm-wiki hooks inspect --json
+chronovisor hooks install --host all
+chronovisor hooks inspect --json
 ```
 
 Use the installer after changing host hook topology. It keeps non-wiki hooks in
-place, replaces legacy LLM Wiki script wrappers with direct dispatcher commands,
+place, replaces legacy Chronovisor script wrappers with direct dispatcher commands,
 and refreshes Codex trusted hashes.
 
 ## Recall Logs
 
 ```sh
-llm-wiki-recall --recent 20
-llm-wiki-recall --feedback missed --prompt "..." --note "..." --ref <decision_id>
-llm-wiki recall-eval --json
-llm-wiki recall-eval --save-baseline
+chronovisor-recall --recent 20
+chronovisor-recall --feedback missed --prompt "..." --note "..." --ref <decision_id>
+chronovisor recall-eval --json
+chronovisor recall-eval --save-baseline
 ```
 
 Explicit feedback is an optional diagnostic input, not an operating gate. The
@@ -130,43 +130,43 @@ weights, rewrite settings, or context style.
 ```sh
 # Make one immutable candidate config first. Its [decision_router] section
 # must contain the intended production values and adoption_artifact = "".
-CANDIDATE_CONFIG="$HOME/.wiki/runtime/model-lab/decision-router-candidate.toml"
-CORPUS="$HOME/.wiki/runtime/model-lab/adoption-corpus-v56.jsonl"
-ARTIFACT="$HOME/.wiki/runtime/model-lab/local-eval/adoption-v56-evaluator20.json"
+CANDIDATE_CONFIG="$HOME/.chronovisor/runtime/model-lab/decision-router-candidate.toml"
+CORPUS="$HOME/.chronovisor/runtime/model-lab/adoption-corpus-v56.jsonl"
+ARTIFACT="$HOME/.chronovisor/runtime/model-lab/local-eval/adoption-v56-evaluator20.json"
 chmod 600 "$CANDIDATE_CONFIG"
 
 # Preflight the deterministic selection without replacing the durable corpus.
-llm-wiki-adoption-corpus \
+chronovisor-adoption-corpus \
   --config "$CANDIDATE_CONFIG" \
   --output "$CORPUS" \
   --dry-run
 
 # Freeze the production-representative corpus at an explicit durable path.
-llm-wiki-adoption-corpus \
+chronovisor-adoption-corpus \
   --config "$CANDIDATE_CONFIG" \
   --output "$CORPUS"
 chmod 600 "$CORPUS"
 
 # Read-only inspection performs no inference.
-llm-wiki-local-model-eval \
+chronovisor-local-model-eval \
   --input "$CORPUS" \
   --config "$CANDIDATE_CONFIG" \
   --dry-run
-llm-wiki-local-model-eval \
+chronovisor-local-model-eval \
   --input "$CORPUS" \
   --config "$CANDIDATE_CONFIG" \
   --list \
   --limit 20
 
 # A full run evaluates every exact context bucket in ascending order.
-llm-wiki-local-model-eval \
+chronovisor-local-model-eval \
   --input "$CORPUS" \
   --config "$CANDIDATE_CONFIG" \
   --output "$ARTIFACT"
 chmod 600 "$ARTIFACT"
 
 # Resume only with the exact same candidate config, corpus, and output path.
-llm-wiki-local-model-eval \
+chronovisor-local-model-eval \
   --input "$CORPUS" \
   --config "$CANDIDATE_CONFIG" \
   --output "$ARTIFACT" \
@@ -174,7 +174,7 @@ llm-wiki-local-model-eval \
 ```
 
 The compiler reads the append-only
-`~/.wiki/runtime/model-lab/replay.jsonl` without modifying it, adds only
+`~/.chronovisor/runtime/model-lab/replay.jsonl` without modifying it, adds only
 deterministic production-contract cases needed for complete schema and context
 coverage, validates the exact output bytes, and atomically installs the frozen
 corpus with mode `0600`. Use a new versioned corpus path whenever replay source
@@ -250,7 +250,7 @@ copying the same context into every selectable repair.
 If this complete deterministic projection still exceeds the fixed input or
 context ceiling, the request fails closed before inference.
 
-`llm-wiki-local-model-eval --dry-run` validates and counts the compiled cases,
+`chronovisor-local-model-eval --dry-run` validates and counts the compiled cases,
 while `--list` prints redacted case metadata; neither performs inference. A
 full evaluation uses the candidate local decision router and atomically
 checkpoints a resumable, redacted artifact containing hashes, labels,
@@ -359,7 +359,7 @@ lanes quarantine before inference rather than falling back to bootstrap models.
 
 ## Ingest Model
 
-The page-generation path reads `[ingest]` from `~/.wiki/config.toml`. The
+The page-generation path reads `[ingest]` from `~/.chronovisor/config.toml`. The
 production profile selects the smallest safe 32K/64K/128K/256K context bucket
 for the complete request envelope. A compatible larger resident Ornith 35B
 runner is reused, so backlog processing grows monotonically rather than
@@ -417,10 +417,10 @@ update targets.
 
 After apply and embedding refresh, ingest read-backs changed pages with their
 `recall_questions`, `summary`, or title. Failures are non-fatal and are logged
-to `~/.wiki/runtime/ingest-read-back-failures.jsonl`.
+to `~/.chronovisor/runtime/ingest-read-back-failures.jsonl`.
 
 Successful ingest also appends a lightweight claim seed to
-`~/.wiki/claims/claims.jsonl`. The current page files remain the source of
+`~/.chronovisor/claims/claims.jsonl`. The current page files remain the source of
 truth, but the append-only ledger gives future event-sourced memory work a
 machine-checkable trail.
 
@@ -443,7 +443,7 @@ recovery transition before automatically draining the backlog.
 
 Pages can set `sensitivity: high` in frontmatter. Career-folder pages infer
 `high` in the index even before frontmatter is backfilled. Recall cards show
-the sensitivity annotation next to the freshness annotation, and `llm-wiki
+the sensitivity annotation next to the freshness annotation, and `chronovisor
 health` reports the tier distribution. In work-project CWDs, high-sensitivity
 pages are filtered unless the prompt explicitly asks for career/interview style
 context.
@@ -451,12 +451,12 @@ context.
 ## Entity Registry
 
 ```sh
-llm-wiki entities init
-llm-wiki entities backfill --dry-run
-llm-wiki entities backfill --limit 100
+chronovisor entities init
+chronovisor entities backfill --dry-run
+chronovisor entities backfill --limit 100
 ```
 
-The registry lives at `~/.wiki/entities/registry.json`. Ingest patches
+The registry lives at `~/.chronovisor/entities/registry.json`. Ingest patches
 `entities: [...]` frontmatter on created/updated knowledge pages using known
 aliases such as MHI/三菱重工, KHI/川崎重工, Codex, Ollama, Qwen, and Gemma.
 Entity backfill skips reference pages by default.
@@ -464,9 +464,9 @@ Entity backfill skips reference pages by default.
 ## Knowledge Quality Queues
 
 ```sh
-llm-wiki-duplicate-review --write
-wiki_check
-wiki_apply
+chronovisor-duplicate-review --write
+chronovisor_check
+chronovisor_apply
 ```
 
 Pages with `type: reference` are excluded from default search, lint, duplicate
@@ -474,13 +474,13 @@ review, and recall metadata backfill. `car-spec/` pages infer this type even if
 older files are missing the field; explicit `folder="car-spec"` searches still
 include them.
 
-`wiki_check` returns a compact issue summary plus a bounded sample instead of
-dumping every issue. `wiki_apply` writes remaining non-auto-fixable lint work to
-`~/.wiki/review/lint-repair-queue.jsonl`, split into safe-auto-fix,
+`chronovisor_check` returns a compact issue summary plus a bounded sample instead of
+dumping every issue. `chronovisor_apply` writes remaining non-auto-fixable lint work to
+`~/.chronovisor/review/lint-repair-queue.jsonl`, split into safe-auto-fix,
 heavy-model-batch, review, and monitor lanes.
 
-`llm-wiki-duplicate-review --write` builds
-`~/.wiki/review/duplicate-candidates.jsonl` from title and embedding similarity.
+`chronovisor-duplicate-review --write` builds
+`~/.chronovisor/review/duplicate-candidates.jsonl` from title and embedding similarity.
 The file is an observable candidate ledger. Sleep first handles deterministic
 safe cases, then sends ambiguous pairs to the local decision router; agreed
 supersession atomically marks the loser `status: deprecated` with
@@ -490,11 +490,11 @@ review queue or frontier fallback is required.
 ## Raw Replay
 
 ```sh
-llm-wiki raw-replay --since 2026-07-01 --limit 100
-llm-wiki raw-replay --since 2026-07-01 --limit 1 --run
+chronovisor raw-replay --since 2026-07-01 --limit 100
+chronovisor raw-replay --since 2026-07-01 --limit 1 --run
 ```
 
-Without `--run`, replay writes `~/.wiki/review/raw-replay-queue.jsonl`.
+Without `--run`, replay writes `~/.chronovisor/review/raw-replay-queue.jsonl`.
 With `--run`, selected raw files go back through the normal ingest path, so
 search-before-create and read-back verification still apply.
 Active artifact-bound semantic defers are excluded from explicit replay,
@@ -527,18 +527,18 @@ search path. The archive has one date-based hierarchy and no hot/archive tier.
 
 ```sh
 # Cheap inventory; reports logical/stored bytes and open/sealed counts
-llm-wiki raw status --json
+chronovisor raw status --json
 
 # Commit/range verification; --full streams every sealed byte back
-llm-wiki raw verify --full --json
+chronovisor raw verify --full --json
 
 # Preview yesterday-and-older v2 segments, then seal a bounded batch
-llm-wiki raw seal --limit 4 --json
-llm-wiki raw seal --limit 4 --apply --json
+chronovisor raw seal --limit 4 --json
+chronovisor raw seal --limit 4 --apply --json
 
 # Restore one logical Raw or a whole sealed segment without mutating the store
-llm-wiki raw export save-<transaction>.md /safe/output/raw.jsonl
-llm-wiki raw restore ~/.wiki/raw/YYYY/MM/DD/<segment>.manifest.json /safe/output/segment.jsonl
+chronovisor raw export save-<transaction>.md /safe/output/raw.jsonl
+chronovisor raw restore ~/.chronovisor/raw/YYYY/MM/DD/<segment>.manifest.json /safe/output/segment.jsonl
 ```
 
 Existing flat transcript Raw uses a separate two-step migration. Eligibility
@@ -547,16 +547,16 @@ date to be older than today. The first apply is shadow-only and retains every
 flat source:
 
 ```sh
-llm-wiki raw migrate --json
-llm-wiki raw migrate --shadow --json
-llm-wiki raw verify --full --json
+chronovisor raw migrate --json
+chronovisor raw migrate --shadow --json
+chronovisor raw verify --full --json
 ```
 
 After an observation window and restore drill, the same command may remove
 only sources already reproduced byte-for-byte from a verified archive:
 
 ```sh
-llm-wiki raw migrate --apply --remove-source --json
+chronovisor raw migrate --apply --remove-source --json
 ```
 
 Never use `--remove-source` as a backup substitute. The zstd object and the
@@ -568,39 +568,39 @@ after any move.
 ## Memory Integrity Eval
 
 ```sh
-llm-wiki memory-integrity --limit 100
-llm-wiki-memory-integrity --limit 100 --json
+chronovisor memory-integrity --limit 100
+chronovisor-memory-integrity --limit 100 --json
 ```
 
 This is the first E1/W7 write-side eval. It samples raw captures, derives a
 deterministic expected-term query, checks the claim ledger and search footprint,
-and writes `~/.wiki/eval/memory-integrity-latest.json`. The dashboard health
+and writes `~/.chronovisor/eval/memory-integrity-latest.json`. The dashboard health
 panel uses this when available.
 
 ## Cofire Graph
 
 ```sh
-llm-wiki cofire --limit 5000
-llm-wiki-cofire --min-count 2 --json
-llm-wiki prefetch --limit 5000
+chronovisor cofire --limit 5000
+chronovisor-cofire --min-count 2 --json
+chronovisor prefetch --limit 5000
 ```
 
-Recall logs now build a co-fire graph at `~/.wiki/recall/cofire.json`.
+Recall logs now build a co-fire graph at `~/.chronovisor/recall/cofire.json`.
 Search graph expansion consumes those edges alongside wikilinks/backlinks, so
 pages that repeatedly appear together can reinforce each other before a
 human-curated graph exists. Prefetch cache writes
-`~/.wiki/recall/prefetch.json` from recent recall episodes and is checked
+`~/.chronovisor/recall/prefetch.json` from recent recall episodes and is checked
 before normal search context assembly.
 
 ## Sleep Cycle
 
 ```sh
-llm-wiki sleep --dry-run --json
-llm-wiki-sleep --raw-limit 100 --eval-limit 100
+chronovisor sleep --dry-run --json
+chronovisor-sleep --raw-limit 100 --eval-limit 100
 ```
 
 The sleep cycle is the single bounded convergence driver. It snapshots
-`~/.wiki`, rebuilds co-fire/prefetch/retention artifacts, runs memory integrity,
+`~/.chronovisor`, rebuilds co-fire/prefetch/retention artifacts, runs memory integrity,
 and then drains small batches from lint repair, raw replay, read-back repair,
 search-label review, recall auto-apply/self-heal, duplicate, and orphan-link
 lanes. Weekly calibration and search self-tune also run here. Every decision or
@@ -633,20 +633,20 @@ pages directly.
 ## Wiki Snapshots
 
 ```sh
-llm-wiki wiki-snapshot "before manual repair"
-llm-wiki-snapshot "before manual repair"
+chronovisor chronovisor-snapshot "before manual repair"
+chronovisor-snapshot "before manual repair"
 ```
 
-`~/.wiki` is initialized as its own git repository on first snapshot. Scheduled
-lint auto-fix and MCP `wiki_apply` snapshot before changing files, giving
+`~/.chronovisor` is initialized as its own git repository on first snapshot. Scheduled
+lint auto-fix and MCP `chronovisor_apply` snapshot before changing files, giving
 self-heal and repair work a rollback point independent of the code repository.
 
 ## User Content Corrections
 
 ```sh
-llm-wiki-content-correction --host codex --session-file /path/to/session.jsonl --capture --run-due
-llm-wiki-content-correction --host claude-code --session-file /path/to/session.jsonl --capture --run-due
-llm-wiki-content-correction --host codex --hook --capture-only
+chronovisor-content-correction --host codex --session-file /path/to/session.jsonl --capture --run-due
+chronovisor-content-correction --host claude-code --session-file /path/to/session.jsonl --capture --run-due
+chronovisor-content-correction --host codex --hook --capture-only
 ```
 
 When enabled, the Stop hook durably enqueues the dedicated `--capture-only`
@@ -714,9 +714,9 @@ automatic replay signals, and already-queued replay all exclude it.
 ## Audit and Auto-Apply
 
 ```sh
-llm-wiki-recall-audit --host codex --hook --audit-read
-llm-wiki-recall-auto-apply --dry-run
-llm-wiki-self-heal --auto-apply-errors --auto-apply-error-threshold 3 --dry-run
+chronovisor-recall-audit --host codex --hook --audit-read
+chronovisor-recall-auto-apply --dry-run
+chronovisor-self-heal --auto-apply-errors --auto-apply-error-threshold 3 --dry-run
 ```
 
 Auditor feedback uses `kind = "missed_candidate"` and source `auditor` for
@@ -743,10 +743,10 @@ packets or state.
 ## Search Ranking Review
 
 ```sh
-llm-wiki-eval --build-label-queue
-llm-wiki-eval --report --failure-index
-llm-wiki-eval --self-tune
-llm-wiki-eval --ci --ci-variant hybrid-current --min-recall-at-5 0.80
+chronovisor-eval --build-label-queue
+chronovisor-eval --report --failure-index
+chronovisor-eval --self-tune
+chronovisor-eval --ci --ci-variant hybrid-current --min-recall-at-5 0.80
 ```
 
 `--build-label-queue` writes auditor/search candidates to
@@ -764,16 +764,16 @@ writes `recall/search-policy.json` only after both gates pass.
 
 The optional Hugging Face reranker is disabled in the normal local profile.
 Ranking still runs through BM25 + semantic fusion; enable `[search.reranker]`
-only for explicit MCP `wiki.search` after a reviewed locked-holdout experiment.
+only for explicit MCP `chronovisor_search` after a reviewed locked-holdout experiment.
 The tuned starting point is `top_n = 10`, `max_length = 384`,
 `batch_size = 10`, and `weight = 1.0`; the hook path remains unchanged.
 
 ## Calibration
 
 ```sh
-llm-wiki-recall-calibrate --dry-run
-llm-wiki-recall-calibrate
-llm-wiki-recall-calibrate --rollback
+chronovisor-recall-calibrate --dry-run
+chronovisor-recall-calibrate
+chronovisor-recall-calibrate --rollback
 ```
 
 Calibration trains on older labeled rows and validates on the newest holdout
@@ -821,7 +821,7 @@ deterministic reproduction receipt. Packet, supervisor state, artifact, command,
 failing test, and reproduction digest are cross-bound before the repair job can
 enter the frontier guard.
 
-`llm-wiki-self-heal` additionally requires the explicit
+`chronovisor-self-heal` additionally requires the explicit
 `--enable-frontier-repair` capability. `RepairIncidentEvidence` then passes a
 durable, process-wide single-flight guard with fingerprint cooldown and a
 default global limit of one started attempt per 24 hours. Only after that guard
@@ -833,7 +833,7 @@ rescue fan-out and no second remote attempt.
 
 ```sh
 scripts/backfill_recall_questions.py --dry-run
-llm-wiki-sleep --raw-limit 100 --eval-limit 100
+chronovisor-sleep --raw-limit 100 --eval-limit 100
 ```
 
 The legacy script is diagnostic-only. Recall-metadata proposals now enter the

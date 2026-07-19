@@ -23,7 +23,7 @@ ingestのproduction authorityとtest/evaluation reviewer境界を、callableの`
 
 ## Verified contracts
 
-- `rg "__module__" src/llm_wiki_mcp/ingest.py`: authority logicは0件
+- `rg "__module__" src/chronovisor/ingest.py`: authority logicは0件
 - invalid production authorityはtriage / generation / reviewより前にfail closed
 - foreign-module callableはproduction authorityのまま
 - explicit reviewerだけがinjected boundaryを得る

@@ -1,16 +1,16 @@
 # Agentic Evidence and Memory Orchestration
 
-LLM Wiki keeps its existing safety layers and adds a bounded, read-only
+Chronovisor keeps its existing safety layers and adds a bounded, read-only
 research plane. This is an orchestration layer, not a second memory authority.
 
 ## Authority and call hierarchy
 
 1. L1 core memory and L2 automatic Recall remain on the synchronous prompt
    path with the existing four-second, fail-open contract.
-2. L3 explicit `wiki_search`, `wiki_read`, and `wiki_recall_used` remain the
+2. L3 explicit `chronovisor_search`, `chronovisor_read`, and `chronovisor_recall_used` remain the
    normal interactive tools.
-3. `wiki_deep_dive` v2 uses the finite research kernel but is Wiki-only.
-4. `wiki_research` follows Wiki -> verified claims -> Raw/prior conversation ->
+3. `chronovisor_deep_dive` v2 uses the finite research kernel but is Wiki-only.
+4. `chronovisor_research` follows Wiki -> verified claims -> Raw/prior conversation ->
    Web. Raw and Web are permitted only after local evidence access. A fetch URL
    must have appeared in the run's Web search result.
 5. After a durable Evidence Bundle receipt, the auditor can feed proposal-only
@@ -19,7 +19,7 @@ research plane. This is an orchestration layer, not a second memory authority.
 Raw remains the lossless rebuild authority. Pages remain reviewed semantic
 memory. Research event logs and checkpoints are rebuildable derived state.
 Evidence Artifacts and Bundles adopted by a run are durable, content-addressed
-records under `~/.wiki/research`.
+records under `~/.chronovisor/research`.
 
 ## Scheduler and budgets
 
@@ -27,7 +27,7 @@ The local planner, challenger, tie-breaker, and repair calls all use the same
 cross-process sync-first scheduler. At most one research generation runs. A
 foreground marker prevents new research admission and cancels a running model
 subprocess within the configured grace period. Automatic/shadow model research
-fails closed unless `LLM_WIKI_RESEARCH_CAPACITY_PROVEN=1`; explicit and Sleep
+fails closed unless `CHRONOVISOR_RESEARCH_CAPACITY_PROVEN=1`; explicit and Sleep
 work remain available with fixed per-call and total wall deadlines.
 
 Budgets are separate for planner, challenge, tie-break, repair, total model
