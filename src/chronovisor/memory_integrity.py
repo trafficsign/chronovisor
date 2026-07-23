@@ -17,6 +17,7 @@ from typing import Any
 
 from chronovisor.frontmatter import parse as parse_frontmatter
 from chronovisor.raw_replay import raw_date, select_raws
+from chronovisor.raw_store import RawStore
 from chronovisor.search import search as run_search
 from chronovisor.store import CHRONOVISOR_ROOT
 
@@ -46,6 +47,9 @@ GENERIC_TERMS = {
     "した",
     "ある",
 }
+SOURCE_RAW_FIELD_RE = re.compile(
+    rb'(?:^|[,{])\s*"source_raw"\s*:\s*("(?:[^"\\]|\\.)*")'
+)
 
 
 def raw_host(path: Path) -> str:
@@ -73,19 +77,26 @@ def _tokens(text: str, *, limit: int = 12) -> list[str]:
     return out
 
 
-def expected_terms_from_raw(path: Path, *, limit: int = 10) -> list[str]:
+def expected_terms_from_raw(
+    path: Path,
+    *,
+    limit: int = 10,
+    store: RawStore | None = None,
+) -> list[str]:
+    raw_store = store or RawStore(CHRONOVISOR_ROOT / "raw")
     try:
-        from chronovisor.raw_store import RawStore
-
-        store = RawStore(CHRONOVISOR_ROOT / "raw")
-        unit = store.resolve_reference(path) or store.resolve(path.name)
-        text = store.read_text(unit) if unit is not None else path.read_text(encoding="utf-8")
+        unit = raw_store.resolve_reference(path) or raw_store.resolve(path.name)
+        text = (
+            raw_store.read_text(unit)
+            if unit is not None
+            else path.read_text(encoding="utf-8")
+        )
     except (OSError, UnicodeError):
         return _tokens(path.stem, limit=limit)
     try:
-        meta, body = parse_frontmatter(text)
+        _meta, body = parse_frontmatter(text)
     except Exception:
-        meta, body = {}, text
+        _meta, body = {}, text
     seeds: list[str] = []
     # Do not use frontmatter keywords/raw_keywords/entities here: those are
     # produced by the same ingest path we are trying to audit, so they make the
@@ -106,33 +117,34 @@ def expected_terms_from_raw(path: Path, *, limit: int = 10) -> list[str]:
     return deduped
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    try:
-        lines = path.read_text(encoding="utf-8").split("\n")
-    except OSError:
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+def claimed_raw_names(*, path: Path | None = None) -> set[str]:
+    """Read only raw-source identities from the append-only claim ledger.
 
+    The ledger can grow past hundreds of megabytes. Materializing every full
+    JSON record just to read one scalar field caused gigabyte-scale transient
+    memory use and multi-minute sleep cycles.
+    """
 
-def claimed_raw_names() -> set[str]:
+    target = path or CHRONOVISOR_ROOT / "claims" / "claims.jsonl"
     out: set[str] = set()
-    for row in _read_jsonl(CHRONOVISOR_ROOT / "claims" / "claims.jsonl"):
-        source = row.get("source_raw")
-        if not isinstance(source, str) or not source.strip():
-            continue
-        name = source.removeprefix("replay:").strip()
-        if name:
-            out.add(Path(name).name)
+    try:
+        handle = target.open("rb")
+    except OSError:
+        return out
+    with handle:
+        for line in handle:
+            match = SOURCE_RAW_FIELD_RE.search(line)
+            if match is None:
+                continue
+            try:
+                source = json.loads(match.group(1))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(source, str) or not source.strip():
+                continue
+            name = source.removeprefix("replay:").strip()
+            if name:
+                out.add(Path(name).name)
     return out
 
 
@@ -153,19 +165,22 @@ def search_evidence(query: str, *, top_n: int = 5) -> list[dict[str, Any]]:
     ]
 
 
-def evaluate_raw(path: Path, *, claimed: set[str] | None = None) -> dict[str, Any]:
+def evaluate_raw(
+    path: Path,
+    *,
+    claimed: set[str] | None = None,
+    store: RawStore | None = None,
+) -> dict[str, Any]:
     claimed = claimed if claimed is not None else claimed_raw_names()
-    terms = expected_terms_from_raw(path)
+    raw_store = store or RawStore(CHRONOVISOR_ROOT / "raw")
+    terms = expected_terms_from_raw(path, store=raw_store)
     query = " ".join(terms[:8])
     evidence = search_evidence(query)
     claim_present = path.name in claimed
     top_score = max((float(item.get("score") or 0.0) for item in evidence), default=0.0)
     search_present = top_score >= SEARCH_PASS_THRESHOLD
     status = "pass" if search_present else "miss"
-    from chronovisor.raw_store import RawStore
-
-    store = RawStore(CHRONOVISOR_ROOT / "raw")
-    unit = store.resolve_reference(path) or store.resolve(path.name)
+    unit = raw_store.resolve_reference(path) or raw_store.resolve(path.name)
     logical_bytes = unit.length if unit is not None else path.stat().st_size
     logical_date = (
         unit.captured_at[:10].replace("-", "")
@@ -196,9 +211,17 @@ def run_eval(
     limit: int = 100,
     write: bool = True,
 ) -> dict[str, Any]:
-    raws = select_raws(since=since, limit=max(0, limit))
+    raw_store = RawStore(CHRONOVISOR_ROOT / "raw")
+    raws = select_raws(
+        since=since,
+        limit=max(0, limit),
+        store=raw_store,
+    )
     claimed = claimed_raw_names()
-    rows = [evaluate_raw(path, claimed=claimed) for path in raws]
+    rows = [
+        evaluate_raw(path, claimed=claimed, store=raw_store)
+        for path in raws
+    ]
     total = len(rows)
     passed = sum(1 for row in rows if row["status"] == "pass")
     by_host: dict[str, dict[str, int]] = {}

@@ -52,3 +52,16 @@ def test_claimed_raw_names_strips_replay_prefix(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(memory_integrity, "CHRONOVISOR_ROOT", chronovisor_root)
 
     assert memory_integrity.claimed_raw_names() == {"20260706-codex-a.md"}
+
+
+def test_claimed_raw_names_streams_escaped_values_and_skips_bad_rows(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / "claims.jsonl"
+    ledger.write_bytes(
+        b'{"source_raw":"replay:folder\\\\raw-a.md","value":"ok"}\n'
+        b'{"source_raw":broken}\n'
+        b'{"source_raw":"","value":"empty"}\n'
+    )
+
+    assert memory_integrity.claimed_raw_names(path=ledger) == {"folder\\raw-a.md"}

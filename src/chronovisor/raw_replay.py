@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from chronovisor.convergence import is_human_required_result
 from chronovisor.decision_authority import (
@@ -34,6 +34,7 @@ from chronovisor.durable_state import sidecar_exclusive_lock as _queue_lock
 from chronovisor.frontmatter import parse as parse_frontmatter
 from chronovisor.jobs import JobStatus, job_store
 from chronovisor.page_mutation import decision_authority_lock
+from chronovisor.raw_store import RawStore
 from chronovisor.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -319,26 +320,16 @@ def raw_date(path: Path) -> str:
     )
 
 
-def select_raws(*, since: str = "", limit: int = 0) -> list[Path]:
-    from chronovisor.raw_store import RawStore
-
-    store = RawStore(RAW_DIR)
+def select_raws(
+    *,
+    since: str = "",
+    limit: int = 0,
+    store: RawStore | None = None,
+) -> list[Path]:
+    raw_store = store or RawStore(RAW_DIR)
     reference_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
-    candidates_with_dates: list[tuple[str, Path]] = []
-    for unit in store.iter_units():
-        try:
-            text = store.read_text(unit)
-        except (OSError, UnicodeError):
-            continue
-        meta, _body = parse_frontmatter(text)
-        status = meta.get("raw_status")
-        if isinstance(status, str) and status.strip().casefold() == "retracted":
-            continue
-        path = (
-            unit.path
-            if unit.storage == "legacy_file"
-            else store.materialize_ingest(unit, reference_dir)
-        )
+    candidates_with_dates: list[tuple[str, str, Any]] = []
+    for unit in raw_store.iter_units():
         if unit.captured_at:
             date_key = unit.captured_at[:10].replace("-", "")
         else:
@@ -350,16 +341,36 @@ def select_raws(*, since: str = "", limit: int = 0) -> list[Path]:
                     "%Y%m%d"
                 )
             )
-        candidates_with_dates.append((date_key, path))
-    candidates_with_dates.sort(key=lambda row: (row[0], row[1].name))
-    candidates = [path for _date, path in candidates_with_dates]
+        candidates_with_dates.append((date_key, unit.raw_id, unit))
+    candidates_with_dates.sort(key=lambda row: (row[0], row[1]))
     if since:
         normalized = since.replace("-", "")
-        candidates = [
-            path for date_key, path in candidates_with_dates if date_key >= normalized
+        candidates_with_dates = [
+            row for row in candidates_with_dates if row[0] >= normalized
         ]
-    if limit:
-        candidates = candidates[:limit]
+
+    # Retraction is content metadata, but ``limit`` is an output bound. Inspect
+    # bodies only in sorted order until enough active raws have been found.
+    # The previous implementation decoded every archived raw before applying
+    # the bound, turning a 150-row integrity sample into a full archive scan.
+    candidates: list[Path] = []
+    for _date_key, _raw_id, unit in candidates_with_dates:
+        if limit and len(candidates) >= limit:
+            break
+        try:
+            text = raw_store.read_text(unit)
+        except (OSError, UnicodeError):
+            continue
+        meta, _body = parse_frontmatter(text)
+        status = meta.get("raw_status")
+        if isinstance(status, str) and status.strip().casefold() == "retracted":
+            continue
+        path = (
+            unit.path
+            if unit.storage == "legacy_file"
+            else raw_store.materialize_ingest(unit, reference_dir)
+        )
+        candidates.append(path)
     return candidates
 
 

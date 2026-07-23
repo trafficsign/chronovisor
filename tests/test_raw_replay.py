@@ -361,6 +361,35 @@ def test_select_raws_skips_retracted_before_limit_and_preserves_body(
     assert retracted.read_text(encoding="utf-8") == retracted_text
 
 
+def test_select_raws_stops_reading_bodies_after_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from chronovisor.raw_store import RawStore
+
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    first = paths["raw"] / "20260701-codex-first.md"
+    first.write_text("first", encoding="utf-8")
+    (paths["raw"] / "20260702-codex-second.md").write_text(
+        "second",
+        encoding="utf-8",
+    )
+    store = RawStore(paths["raw"])
+    original_read_text = store.read_text
+    reads: list[str] = []
+
+    def tracked_read_text(unit):
+        reads.append(unit.raw_id)
+        return original_read_text(unit)
+
+    monkeypatch.setattr(store, "read_text", tracked_read_text)
+
+    selected = raw_replay.select_raws(limit=1, store=store)
+
+    assert selected == [first]
+    assert reads == [first.name]
+
+
 def test_auto_signal_does_not_create_candidate_for_retracted_raw(
     tmp_path: Path, monkeypatch
 ) -> None:
