@@ -24,7 +24,9 @@ def audit_research_run(
     store = store or ResearchStore()
     path = path or AUDIT_LOG
     events = store.events(bundle.research_run_id)
-    unknown = [claim.claim for claim in bundle.claims if claim.status.value == "unknown"]
+    unknown = [
+        claim.claim for claim in bundle.claims if claim.status.value == "unknown"
+    ]
     unsupported = [
         claim.claim
         for claim in bundle.claims
@@ -52,9 +54,29 @@ def audit_research_run(
         (row.get("action") or {}).get("type")
         for row in events
         if row.get("kind") == "action"
-        and (row.get("action") or {}).get("type") in {"raw_search", "web_search", "web_fetch"}
+        and (row.get("action") or {}).get("type")
+        in {"raw_search", "web_search", "web_fetch"}
     ]
-    avoidable_deep = bool(deep and not unknown and not unsupported)
+    local_source_types = {"chronovisor_read", "verified_claims"}
+    artifact_source_types = {
+        artifact.artifact_id: artifact.source_type for artifact in bundle.artifacts
+    }
+    resolved_claims = [
+        claim
+        for claim in bundle.claims
+        if claim.status.value in {"supported", "contradicted"}
+    ]
+    avoidable_deep = bool(
+        deep
+        and resolved_claims
+        and all(
+            any(
+                artifact_source_types.get(artifact_id) in local_source_types
+                for artifact_id in (*claim.evidence_ids, *claim.contradiction_ids)
+            )
+            for claim in resolved_claims
+        )
+    )
     record = {
         "schema_version": 1,
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -66,7 +88,9 @@ def audit_research_run(
         "avoidable_deep": avoidable_deep,
         "deep_actions": deep,
         "stop_reason": str(summary.get("stop_reason") or ""),
-        "status": "attention" if unknown or unsupported or wasted or avoidable_deep else "ok",
+        "status": "attention"
+        if unknown or unsupported or wasted or avoidable_deep
+        else "ok",
     }
     append_jsonl_durable(path, [record], sort_keys=True)
     store.append_event(
