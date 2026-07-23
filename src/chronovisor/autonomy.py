@@ -3628,9 +3628,26 @@ def watchdog_snapshot(
                 "value": _queue_value(health, "duplicate_candidates"),
             }
         )
-    if _queue_value(health, "lint_repair") > 250:
+    queues = health.get("queues") if isinstance(health.get("queues"), dict) else {}
+    lint_total = _queue_value(health, "lint_repair")
+    # Once a lint candidate is represented in the convergence ledger it is
+    # durably owned by the bounded repair worker.  Alerting on that managed
+    # catch-up work duplicates the convergence SLO below and makes every
+    # healthy drain cycle look broken.  Keep the legacy total fallback for
+    # older health payloads that do not expose the managed/untracked split.
+    lint_untracked = (
+        _queue_value(health, "lint_repair_untracked")
+        if "lint_repair_untracked" in queues
+        else lint_total
+    )
+    if lint_untracked > 250:
         alerts.append(
-            {"type": "lint_backlog_high", "value": _queue_value(health, "lint_repair")}
+            {
+                "type": "lint_backlog_high",
+                "value": lint_untracked,
+                "total": lint_total,
+                "managed": max(0, lint_total - lint_untracked),
+            }
         )
     convergence = (
         health.get("convergence") if isinstance(health.get("convergence"), dict) else {}

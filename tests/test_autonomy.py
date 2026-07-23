@@ -2184,6 +2184,85 @@ def test_watchdog_does_not_alert_on_convergence_semantic_defer(monkeypatch) -> N
     )
 
 
+def test_watchdog_does_not_alert_on_managed_lint_catch_up(monkeypatch) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    monkeypatch.setattr(
+        "chronovisor.health.health_snapshot",
+        lambda: {
+            "memory_integrity": {"capture_rate": 0.95},
+            "queues": {
+                "duplicate_candidates": 0,
+                "lint_repair": 334,
+                "lint_repair_active": 334,
+                "lint_repair_untracked": 0,
+            },
+            "convergence": {
+                "quarantined": 0,
+                "expired_running": 0,
+                "oldest_actionable_age_hours": 6,
+            },
+            "capture_pipeline": {
+                "background_jobs": {"by_status": {"completed": 1}},
+                "session_sweeper": {"status": "ok"},
+            },
+            "runtime": {"commit_id": "abc123", "drift": False},
+        },
+    )
+    monkeypatch.setattr(
+        autonomy,
+        "_latest_jsonl",
+        lambda _path: {"status": "ok", "started_at": now},
+    )
+
+    payload = autonomy.watchdog_snapshot(write=False)
+
+    assert payload["status"] == "ok"
+    assert payload["alerts"] == []
+
+
+def test_watchdog_alerts_on_unmanaged_lint_backlog(monkeypatch) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    monkeypatch.setattr(
+        "chronovisor.health.health_snapshot",
+        lambda: {
+            "memory_integrity": {"capture_rate": 0.95},
+            "queues": {
+                "duplicate_candidates": 0,
+                "lint_repair": 700,
+                "lint_repair_active": 100,
+                "lint_repair_untracked": 600,
+            },
+            "convergence": {
+                "quarantined": 0,
+                "expired_running": 0,
+                "oldest_actionable_age_hours": 0,
+            },
+            "capture_pipeline": {
+                "background_jobs": {"by_status": {"completed": 1}},
+                "session_sweeper": {"status": "ok"},
+            },
+            "runtime": {"commit_id": "abc123", "drift": False},
+        },
+    )
+    monkeypatch.setattr(
+        autonomy,
+        "_latest_jsonl",
+        lambda _path: {"status": "ok", "started_at": now},
+    )
+
+    payload = autonomy.watchdog_snapshot(write=False)
+
+    assert payload["status"] == "alert"
+    assert payload["alerts"] == [
+        {
+            "type": "lint_backlog_high",
+            "value": 600,
+            "total": 700,
+            "managed": 100,
+        }
+    ]
+
+
 def test_watchdog_alerts_on_operational_convergence_quarantine(monkeypatch) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(

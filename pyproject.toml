@@ -1,6 +1,6 @@
 [project]
 name = "chronovisor"
-version = "0.1.7"
+version = "0.1.8"
 description = "Chronovisor - provenance-first agentic memory for local AI systems"
 requires-python = ">=3.11"
 dependencies = [
