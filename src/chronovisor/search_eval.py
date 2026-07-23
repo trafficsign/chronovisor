@@ -76,6 +76,7 @@ LABEL_QUEUE_FILE = RECALL_DIR / "search-label-queue.jsonl"
 FAILURE_INDEX_FILE = RECALL_DIR / "search-failures.jsonl"
 BASELINE_DIR = CHRONOVISOR_ROOT / "runtime" / "search-eval"
 SELF_TUNE_HISTORY_FILE = BASELINE_DIR / "self-tune-history.jsonl"
+SELF_TUNE_ATTEMPT_FILE = BASELINE_DIR / "self-tune-attempt.json"
 
 DEFAULT_VARIANTS = (
     "bm25",
@@ -2639,10 +2640,14 @@ def self_tune(
         items: list[SearchExample], weights: dict[str, float]
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for offset in range(0, len(items), 10):
+        # A ten-example batch can take several minutes and prevented the
+        # deadline from being observed until the whole batch returned. Keep
+        # the expensive unit to one query so the overrun is bounded by one
+        # search rather than an entire evaluation shard.
+        for item in items:
             if time.monotonic() >= deadline:
                 raise TimeoutError("search self-tune runtime budget exhausted")
-            rows.extend(_rows_for_weight_eval(items[offset : offset + 10], weights))
+            rows.extend(_rows_for_weight_eval([item], weights))
         return rows
 
     baseline_weights = load_active_fusion_weights(policy_file)
@@ -3146,6 +3151,7 @@ def run_self_tune_due(
     *,
     golden_file: Path = GOLDEN_FILE,
     history_file: Path = SELF_TUNE_HISTORY_FILE,
+    attempt_file: Path = SELF_TUNE_ATTEMPT_FILE,
     policy_file: Path = ACTIVE_SEARCH_POLICY_FILE,
     min_interval_hours: float = 7 * 24,
     apply: bool = True,
@@ -3155,6 +3161,27 @@ def run_self_tune_due(
     max_examples: int = 200,
     max_elapsed_seconds: float = 10 * 60,
 ) -> dict[str, Any]:
+    attempt: dict[str, Any] = {}
+    try:
+        loaded_attempt = json.loads(attempt_file.read_text(encoding="utf-8"))
+        if isinstance(loaded_attempt, dict):
+            attempt = loaded_attempt
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        pass
+    next_attempt_at = str(attempt.get("next_attempt_at") or "")
+    if next_attempt_at:
+        try:
+            next_attempt = datetime.fromisoformat(next_attempt_at)
+            if datetime.now(next_attempt.tzinfo) < next_attempt:
+                return {
+                    "status": "skipped",
+                    "reason": "budget_backoff",
+                    "last_attempt_at": attempt.get("ts"),
+                    "next_attempt_at": next_attempt_at,
+                }
+        except ValueError:
+            pass
+
     history = read_jsonl(history_file)
     latest = history[-1] if history else {}
     last_ts = str(latest.get("ts") or "")
@@ -3179,7 +3206,7 @@ def run_self_tune_due(
             "reason": "interval_not_due",
             "last_run_at": last_ts,
         }
-    return self_tune(
+    result = self_tune(
         golden_file=golden_file,
         history_file=history_file,
         policy_file=policy_file,
@@ -3190,6 +3217,23 @@ def run_self_tune_due(
         max_examples=max_examples,
         max_elapsed_seconds=max_elapsed_seconds,
     )
+    if not dry_run:
+        now = datetime.now()
+        attempt_record = {
+            "ts": now.isoformat(timespec="seconds"),
+            "status": result.get("status"),
+            "next_attempt_at": (
+                now + timedelta(hours=max(0.0, min_interval_hours))
+            ).isoformat(timespec="seconds")
+            if result.get("status") == "budget_deferred"
+            else None,
+        }
+        _atomic_write_text(
+            attempt_file,
+            json.dumps(attempt_record, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+        )
+    return result
 
 
 def run_report(

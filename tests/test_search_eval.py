@@ -1339,6 +1339,35 @@ def test_self_tune_runtime_budget_defers_without_history_mutation(
     assert not history_file.exists()
 
 
+def test_run_self_tune_due_persists_budget_backoff(tmp_path, monkeypatch) -> None:
+    history_file = tmp_path / "history.jsonl"
+    attempt_file = tmp_path / "attempt.json"
+    calls = 0
+
+    def fake_self_tune(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"status": "budget_deferred", "reason": "runtime budget exhausted"}
+
+    monkeypatch.setattr(search_eval, "self_tune", fake_self_tune)
+    first = search_eval.run_self_tune_due(
+        history_file=history_file,
+        attempt_file=attempt_file,
+        min_interval_hours=24,
+    )
+    second = search_eval.run_self_tune_due(
+        history_file=history_file,
+        attempt_file=attempt_file,
+        min_interval_hours=24,
+    )
+
+    assert first["status"] == "budget_deferred"
+    assert second["status"] == "skipped"
+    assert second["reason"] == "budget_backoff"
+    assert calls == 1
+    assert json.loads(attempt_file.read_text())["next_attempt_at"]
+
+
 def test_build_label_queue_reopens_unsealed_terminal_decisions(tmp_path) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     log_file = tmp_path / "log.jsonl"
