@@ -1099,6 +1099,7 @@ def run_autonomous(
         if eligible is None or str(item.get("key") or "") in eligible
     ]
     active_sources: dict[str, str] = {}
+    active_status_by_source: dict[str, str] = {}
     for item in sorted(
         active_items,
         key=lambda row: (
@@ -1109,6 +1110,7 @@ def run_autonomous(
         source = str(item.get("source_id") or "").removeprefix("orphan:")
         if source:
             active_sources.setdefault(source, str(item.get("created_at") or ""))
+            active_status_by_source.setdefault(source, str(item.get("status") or ""))
     if eligible_keys is not None:
         eligible_sources = {
             str(item.get("source_id") or "").removeprefix("orphan:")
@@ -1159,6 +1161,20 @@ def run_autonomous(
     for orphan_id in orphans:
         if cycle_budget.remaining_elapsed_seconds <= 0:
             stop_reason = "elapsed_budget_exhausted"
+            break
+        active_status = active_status_by_source.get(orphan_id)
+        remaining = cycle_budget.snapshot()["remaining"]
+        if (
+            active_status in {"pending_local", "local_retry", "local_running"}
+            and int(remaining["local"]) <= 0
+        ):
+            stop_reason = "local_lane_budget_exhausted"
+            break
+        if (
+            active_status in {"pending_frontier", "frontier_retry", "frontier_running"}
+            and int(remaining["frontier"]) <= 0
+        ):
+            stop_reason = "frontier_lane_budget_exhausted"
             break
         scanned += 1
         discovery_error: str | None = None

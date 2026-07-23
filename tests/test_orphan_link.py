@@ -1253,6 +1253,41 @@ def test_elapsed_budget_stops_before_candidate_discovery(
     assert result["work_items"] == 0
 
 
+def test_exhausted_local_lane_stops_before_active_candidate_discovery(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.convergence import CycleBudget
+
+    store = _FakeStore()
+    store.add_page("orphan", body="Target")
+    state = _autonomous_state(tmp_path)
+    state.merge_item(
+        lane="orphan_link",
+        source_id="orphan:orphan",
+        input_data={"orphan": "orphan"},
+        resolver_version=ol_mod.RESOLVER_VERSION,
+    )
+    budget = CycleBudget(
+        max_local_calls=0,
+        max_frontier_calls=1,
+        max_mutations=1,
+        max_elapsed_seconds=60,
+    )
+
+    result = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        semantic_search_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate discovery must not start without local budget")
+        ),
+        convergence_store=state,
+        budget=budget,
+    )
+
+    assert result["stop_reason"] == "local_lane_budget_exhausted"
+    assert result["orphans_seen"] == 0
+
+
 def test_no_candidate_terminal_decision_is_durable(
     tmp_path: Path,
     isolated_pages: Path,
