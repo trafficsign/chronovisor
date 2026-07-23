@@ -950,6 +950,16 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(index_store, "_store", None)
     monkeypatch.setattr(ollama, "is_available", lambda: False)
     monkeypatch.setattr(search, "update_embeddings", lambda page_ids=None: 0)
+    from chronovisor.runtime_config import DecisionRouterConfig
+
+    # Review planning must not inherit the operator's live adoption artifact.
+    # A production artifact can legitimately become stale after a lane-contract
+    # change; isolated tests still need a deterministic bootstrap policy.
+    monkeypatch.setattr(
+        ingest,
+        "_ingest_review_router_config",
+        lambda: DecisionRouterConfig(adoption_artifact=""),
+    )
 
     def isolated_frontier_review(proposal, *, reviewer=None):
         if reviewer is not None:
@@ -5346,7 +5356,10 @@ class TestRunIngestPartialFailure:
             / "claude-code-vs-claude-code-structural-analysis.md"
         )
         assert page.exists()
-        assert "raw_keywords: [Claude Code, Cursor, Mac Studio]" in page.read_text()
+        assert (
+            'raw_keywords: ["Claude Code", Cursor, "Mac Studio"]'
+            in page.read_text()
+        )
 
 
 class TestRunIngestFrontierDisposition:

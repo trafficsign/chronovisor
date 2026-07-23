@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from chronovisor.frontmatter import parse, patch
+from chronovisor.frontmatter import canonicalize, parse, patch
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +158,53 @@ def test_patch_add_to_empty():
     text = "body only\n"
     out = patch(text, {"title": "New"})
     assert out == "---\ntitle: New\n---\nbody only\n"
+
+
+def test_patch_quotes_yaml_unsafe_scalars_and_flow_items():
+    text = "---\ntitle: Old\n---\nbody\n"
+
+    out = patch(
+        text,
+        {
+            "title": "Agents-A1: Model Analysis",
+            "recall_questions": [
+                "What changed?",
+                "Which value contains a comma, and why?",
+            ],
+        },
+    )
+
+    assert 'title: "Agents-A1: Model Analysis"' in out
+    assert (
+        'recall_questions: ["What changed?", '
+        '"Which value contains a comma, and why?"]'
+    ) in out
+    meta, body = parse(out)
+    assert meta["title"] == "Agents-A1: Model Analysis"
+    assert meta["recall_questions"] == [
+        "What changed?",
+        "Which value contains a comma, and why?",
+    ]
+    assert body == "body\n"
+
+
+def test_canonicalize_preserves_body_and_quotes_legacy_unsafe_yaml():
+    body = "# Heading\n\nUnchanged body.\n"
+    legacy = (
+        "---\n"
+        "title: Agents-A1: Model Analysis\n"
+        "recall_questions: [What changed?, Why now?]\n"
+        "---\n"
+        + body
+    )
+
+    normalized = canonicalize(legacy)
+
+    assert normalized.startswith(
+        '---\ntitle: "Agents-A1: Model Analysis"\n'
+        'recall_questions: ["What changed?", "Why now?"]\n---\n'
+    )
+    assert parse(normalized)[1] == body
 
 
 def test_patch_replace_existing():

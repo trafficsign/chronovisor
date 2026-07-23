@@ -100,6 +100,14 @@ def parse(text: str) -> tuple[dict[str, Any], str]:
 
         # Inline list: [a, b, c]
         if value.startswith("[") and value.endswith("]"):
+            try:
+                decoded = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                decoded = None
+            if isinstance(decoded, list):
+                meta[key] = [str(item) for item in decoded]
+                i += 1
+                continue
             inner = value[1:-1].strip()
             if inner == "":
                 meta[key] = []
@@ -232,7 +240,13 @@ def _review_value(value: Any) -> Any:
 def _unquote(value: str) -> str:
     """Strip a matching pair of outer quotes (double or single) from a scalar."""
     value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value[1:-1]
+        return decoded if isinstance(decoded, str) else str(decoded)
+    if len(value) >= 2 and value[0] == value[-1] == "'":
         return value[1:-1]
     return value
 
@@ -269,16 +283,46 @@ def _split_inline_list(inner: str) -> list[str]:
 def _serialize_kv(key: str, value: Any) -> str:
     """Serialize a single key-value pair for the frontmatter region.
 
-    Lists are emitted in inline form. Items are joined with ``, ``; the
-    caller is responsible for ensuring items don't contain characters
-    that would break the inline form (commas, brackets, etc.). For
-    ``raw_keywords`` and similar list fields, the writer at the
-    boundary (``chronovisor_record``) rejects unsafe characters before they
-    reach this layer.
+    Lists are emitted in inline form. Scalars that are unsafe as YAML plain
+    values are JSON-quoted (JSON strings are valid YAML double-quoted
+    scalars), while ordinary values retain the compact legacy representation.
     """
     if isinstance(value, list):
         if not value:
             return f"{key}: []"
-        items = ", ".join(str(v) for v in value)
+        items = ", ".join(_serialize_scalar(v, flow=True) for v in value)
         return f"{key}: [{items}]"
-    return f"{key}: {value}"
+    return f"{key}: {_serialize_scalar(value)}"
+
+
+def _serialize_scalar(value: Any, *, flow: bool = False) -> str:
+    text = str(value)
+    yaml_indicator = "-?:,[]{}#&*!|>'\"%@`"
+    unsafe = (
+        not text
+        or text != text.strip()
+        or any(char in text for char in "\n\r\t")
+        or text[0] in yaml_indicator
+        or ":" in text
+        or " #" in text
+        or (
+            flow
+            and (
+                any(char.isspace() for char in text)
+                or any(char in text for char in ",[]{}#?")
+            )
+        )
+    )
+    return json.dumps(text, ensure_ascii=False) if unsafe else text
+
+
+def canonicalize(text: str) -> str:
+    """Serialize supported frontmatter as strict YAML without touching the body."""
+
+    meta, body = parse(text)
+    if not meta:
+        return text
+    rendered = [_FM_DELIM]
+    rendered.extend(_serialize_kv(key, value) for key, value in meta.items())
+    rendered.append(_FM_DELIM)
+    return "\n".join(rendered) + "\n" + body

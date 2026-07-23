@@ -8,7 +8,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from chronovisor.frontmatter import normalize_nested, propose_nested_resolution
+from chronovisor.frontmatter import (
+    canonicalize,
+    normalize_nested,
+    propose_nested_resolution,
+)
 from chronovisor.link_fix import atomic_write
 from chronovisor.page_mutation import chronovisor_mutation_lock
 from chronovisor.store import PAGES_DIR, page_id_from_path, CHRONOVISOR_ROOT
@@ -160,6 +164,7 @@ def normalize_pages(
                                     atomic_write(path, proposed)
                                     resolved_conflicts.append(str(path))
             continue
+        updated = canonicalize(updated)
         if updated == original:
             continue
         changed.append(str(path))
@@ -167,7 +172,10 @@ def normalize_pages(
             with chronovisor_mutation_lock():
                 current = path.read_text(encoding="utf-8")
                 normalized, retry = normalize_nested(current)
-                if retry.get("changed"):
+                if retry.get("reason") == "conflicting_nested_frontmatter":
+                    continue
+                normalized = canonicalize(normalized)
+                if normalized != current:
                     atomic_write(path, normalized)
     return {
         "status": "ok",

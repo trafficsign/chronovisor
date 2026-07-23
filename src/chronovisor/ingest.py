@@ -2600,7 +2600,7 @@ def _ensure_page_metadata_frontmatter(
     allow_local_model: bool = True,
     force_deterministic_rebuild: bool = False,
 ) -> str:
-    from chronovisor.frontmatter import normalize_nested
+    from chronovisor.frontmatter import canonicalize, normalize_nested
 
     text, _normalization = normalize_nested(text)
     text = _ensure_recall_metadata_frontmatter(
@@ -2611,7 +2611,7 @@ def _ensure_page_metadata_frontmatter(
         allow_local_model=allow_local_model,
         force_deterministic_rebuild=force_deterministic_rebuild,
     )
-    return patch_entities_frontmatter(text)
+    return canonicalize(patch_entities_frontmatter(text))
 
 
 def _prepare_operations(

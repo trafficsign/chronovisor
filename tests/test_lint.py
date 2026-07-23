@@ -1211,6 +1211,38 @@ class TestSafeFixReviewPackets:
 
 
 class TestPageNormalizeIdentityReceipt:
+    def test_normalize_pages_repairs_yaml_without_changing_body(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from chronovisor import page_normalize
+        from chronovisor.frontmatter import parse
+
+        page = _seed(
+            isolated_wiki,
+            "yaml.md",
+            "---\ntitle: Agents-A1: Model Analysis\n"
+            "recall_questions: [What changed?, Why now?]\n---\n"
+            "# Body\n\nKeep this exact.\n",
+        )
+        original_body = parse(page.read_text(encoding="utf-8"))[1]
+
+        preview = page_normalize.normalize_pages(
+            root=isolated_wiki / "pages",
+            write=False,
+        )
+        written = page_normalize.normalize_pages(
+            root=isolated_wiki / "pages",
+            write=True,
+        )
+
+        normalized = page.read_text(encoding="utf-8")
+        assert preview["changed"] == 1
+        assert written["changed"] == 1
+        assert 'title: "Agents-A1: Model Analysis"' in normalized
+        assert 'recall_questions: ["What changed?", "Why now?"]' in normalized
+        assert parse(normalized)[1] == original_body
+
     def test_permalink_conflict_builds_durable_identity_quarantine(
         self,
         isolated_wiki: Path,

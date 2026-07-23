@@ -18,7 +18,7 @@ def test_ensure_recall_metadata_frontmatter_adds_summary_and_questions(monkeypat
     out = ingest._ensure_recall_metadata_frontmatter(text, "sample", parse, patch)
 
     assert "summary: short summary" in out
-    assert "recall_questions: [What was decided?, How to continue?]" in out
+    assert 'recall_questions: ["What was decided?", "How to continue?"]' in out
 
 
 def test_recall_question_sanitizer_removes_inline_list_breakers() -> None:

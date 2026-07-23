@@ -6,6 +6,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -2128,6 +2129,10 @@ def test_watchdog_alerts_when_sleep_never_ran(monkeypatch, tmp_path: Path) -> No
         },
     )
     monkeypatch.setattr(autonomy, "_latest_jsonl", lambda path: {})
+    monkeypatch.setattr(
+        "chronovisor.runtime_config.load_decision_router_config",
+        lambda: SimpleNamespace(adoption_artifact=""),
+    )
     writes: list[tuple[Path, dict]] = []
     history: list[dict] = []
     monkeypatch.setattr(
