@@ -1023,6 +1023,43 @@ def test_max_items_bounds_queue_work(tmp_path: Path, monkeypatch) -> None:
     assert len(store.list_items()) == 2
 
 
+def test_deterministic_rows_run_before_model_backed_rows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page_path = tmp_path / "pages" / "heavy.md"
+    _page(page_path)
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(
+        queue_path,
+        [
+            _row("heavy"),
+            _row("stale", lane="monitor", issue_type="stale"),
+            _row("orphan", lane="review", issue_type="orphan"),
+        ],
+    )
+    monkeypatch.setattr(
+        lint_repair.chronovisor_store,
+        "find_page",
+        lambda page_id: page_path if page_id == "heavy" else None,
+    )
+    store = _store(tmp_path)
+
+    result = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=_budget(),
+        max_items=2,
+        local_reviewer=_never,
+        frontier_reviewer=_never,
+        now=NOW,
+    )
+
+    assert result["processed"] == 2
+    assert result["observed"] == 1
+    assert result["routed"] == 1
+    assert [row["status"] for row in result["results"]] == ["observed", "routed"]
+
+
 def test_cas_conflict_quarantines_without_overwriting_concurrent_change(
     tmp_path: Path,
     monkeypatch,
@@ -1081,7 +1118,7 @@ def test_backoff_row_does_not_starve_later_actionable_row(
         queue_path,
         [
             _row("retrying"),
-            _row("later", lane="monitor", issue_type="stale"),
+            _row("later", lane="unsupported", issue_type="unknown"),
         ],
     )
     monkeypatch.setattr(
@@ -1121,10 +1158,10 @@ def test_backoff_row_does_not_starve_later_actionable_row(
     assert second["rows_scanned"] == 2
     assert second["processed"] == 1
     assert second["deferred"] == 1
-    assert second["observed"] == 1
+    assert second["quarantined"] == 1
     assert [result["status"] for result in second["results"]] == [
         "deferred",
-        "observed",
+        "quarantined",
     ]
 
 

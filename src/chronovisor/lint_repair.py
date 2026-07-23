@@ -1370,6 +1370,24 @@ def run_lint_repair(
     frontier = frontier_reviewer or _default_frontier_reviewer
     injected_frontier_reviewer = frontier_reviewer is not None
     rows, invalid_rows = _read_jsonl(path)
+    # Clear deterministic observations/routing before spending scarce model
+    # budget on semantic tag repair.  The detector emits rows in page order,
+    # so a cluster of tag violations near the head used to make hundreds of
+    # cheap monitor/review rows wait behind frontier calls.
+    rows.sort(
+        key=lambda row: (
+            0
+            if (
+                (str(row.get("lane") or "") == "monitor"
+                 and str(row.get("issue_type") or "") == "stale")
+                or (
+                    str(row.get("lane") or "") == "review"
+                    and _route_target(str(row.get("issue_type") or ""))
+                )
+            )
+            else 1,
+        )
+    )
     work_limit = max(0, max_items)
     work_items = 0
     rows_scanned = 0

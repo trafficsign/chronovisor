@@ -90,19 +90,8 @@ def run_maintenance_batch(
             dry_run=False,
         ),
     )
-    payload["lint_repair"] = lane(
-        "lint_repair",
-        lambda: run_lint_repair(
-            store=state,
-            max_items=max(0, int(lint_limit)),
-            budget=budget.slice(
-                max_local_calls=12,
-                max_frontier_calls=8,
-                max_mutations=20,
-            ),
-            dry_run=False,
-        ),
-    )
+    # Oldest durable orphan work has a 24-hour convergence SLO.  Run it before
+    # model-backed lint so frontier latency in the lint lane cannot starve it.
     payload["orphan_links"] = lane(
         "orphan_links",
         lambda: run_autonomous(
@@ -113,6 +102,19 @@ def run_maintenance_batch(
                 max_local_calls=12,
                 max_frontier_calls=8,
                 max_mutations=8,
+            ),
+            dry_run=False,
+        ),
+    )
+    payload["lint_repair"] = lane(
+        "lint_repair",
+        lambda: run_lint_repair(
+            store=state,
+            max_items=max(0, int(lint_limit)),
+            budget=budget.slice(
+                max_local_calls=12,
+                max_frontier_calls=8,
+                max_mutations=20,
             ),
             dry_run=False,
         ),
