@@ -156,8 +156,8 @@ weights, rewrite settings, or context style.
 # Make one immutable candidate config first. Its [decision_router] section
 # must contain the intended production values and adoption_artifact = "".
 CANDIDATE_CONFIG="$HOME/.chronovisor/runtime/model-lab/decision-router-candidate.toml"
-CORPUS="$HOME/.chronovisor/runtime/model-lab/adoption-corpus-v64.jsonl"
-ARTIFACT="$HOME/.chronovisor/runtime/model-lab/local-eval/adoption-v64-evaluator21.json"
+CORPUS="$HOME/.chronovisor/runtime/model-lab/adoption-corpus-v64-lane26-20260723.jsonl"
+ARTIFACT="$HOME/.chronovisor/runtime/model-lab/local-eval/adoption-v64-evaluator21-20260723.json"
 chmod 600 "$CANDIDATE_CONFIG"
 
 # Preflight the deterministic selection without replacing the durable corpus.

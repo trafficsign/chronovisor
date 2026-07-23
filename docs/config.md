@@ -110,7 +110,7 @@ max_resident_models = 3
 # engine/model-drifted artifacts make enabled semantic lanes quarantine before
 # inference. Set this to "" and keep the 19 model-backed lanes in shadow only
 # while compiling and evaluating a replacement candidate.
-adoption_artifact = "~/.chronovisor/runtime/model-lab/local-eval/adoption-v64-evaluator21.json"
+adoption_artifact = "~/.chronovisor/runtime/model-lab/local-eval/adoption-v64-evaluator21-20260723.json"
 
 [decision_policies]
 # Deterministic/non-model lanes and the guarded repair-only lane are live
