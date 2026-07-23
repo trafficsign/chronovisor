@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
-import math
 import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterable
+
+import numpy as np
 
 from chronovisor.index_store import get_store
 from chronovisor.search import _iter_all_embeddings
@@ -69,6 +72,59 @@ def _temporal_family(page_id: str) -> str | None:
     )
 
 
+def _title_grams(title: str, *, width: int = 3) -> set[str]:
+    if len(title) <= width:
+        return {title}
+    return {title[index : index + width] for index in range(len(title) - width + 1)}
+
+
+def _blocked_title_pairs(
+    titles: list[str],
+    *,
+    max_posting: int = 96,
+    signatures_per_title: int = 8,
+    max_pairs: int = 100_000,
+) -> list[tuple[int, int]]:
+    """Return deterministic, bounded candidates for a large title corpus.
+
+    A full title cross-product made every sleep cycle quadratic in the number
+    of pages. Near-identical titles share several character trigrams, so rare
+    trigrams provide a high-recall blocking key while common trigrams are
+    deliberately capped. Embedding candidates remain the independent fallback
+    for reordered or otherwise lexically unusual duplicates.
+    """
+
+    grams_by_index = [_title_grams(title) for title in titles]
+    frequencies = Counter(gram for grams in grams_by_index for gram in grams if gram)
+    exact_titles: dict[str, list[int]] = defaultdict(list)
+    for index, title in enumerate(titles):
+        if title:
+            exact_titles[title].append(index)
+    pairs: set[tuple[int, int]] = {
+        (left_index, right_index)
+        for indices in exact_titles.values()
+        for left_index, right_index in zip(indices, indices[1:], strict=False)
+    }
+
+    postings: dict[str, list[int]] = defaultdict(list)
+    for index, grams in enumerate(grams_by_index):
+        signatures = sorted(
+            (gram for gram in grams if frequencies[gram] <= max_posting),
+            key=lambda gram: (frequencies[gram], gram),
+        )[:signatures_per_title]
+        for gram in signatures:
+            postings[gram].append(index)
+
+    for gram in sorted(postings, key=lambda value: (frequencies[value], value)):
+        indices = postings[gram]
+        for offset, left_index in enumerate(indices):
+            for right_index in indices[offset + 1 :]:
+                pairs.add((left_index, right_index))
+                if len(pairs) >= max_pairs:
+                    return sorted(pairs)
+    return sorted(pairs)
+
+
 def _knowledge_metas() -> list[dict]:
     store = get_store()
     store.refresh()
@@ -90,27 +146,40 @@ def title_duplicate_candidates(
     threshold: float = 0.90,
 ) -> list[DuplicateCandidate]:
     records = list(metas)
+    normalized_titles = [_normalize_text(record.get("title")) for record in records]
+    if len(records) <= 500:
+        pairs = [
+            (left_index, right_index)
+            for left_index in range(len(records))
+            for right_index in range(left_index + 1, len(records))
+        ]
+    else:
+        pairs = _blocked_title_pairs(normalized_titles)
     out: list[DuplicateCandidate] = []
-    for idx, left in enumerate(records):
-        left_title = _normalize_text(left.get("title"))
-        if not left_title:
+    for left_index, right_index in pairs:
+        left = records[left_index]
+        right = records[right_index]
+        left_title = normalized_titles[left_index]
+        right_title = normalized_titles[right_index]
+        if not left_title or not right_title:
             continue
-        for right in records[idx + 1 :]:
-            right_title = _normalize_text(right.get("title"))
-            if not right_title:
-                continue
-            score = SequenceMatcher(None, left_title, right_title).ratio()
-            if score >= threshold:
-                out.append(
-                    DuplicateCandidate(
-                        left=str(left.get("page_id", "")),
-                        right=str(right.get("page_id", "")),
-                        score=score,
-                        method="title",
-                        left_title=str(left.get("title", "")),
-                        right_title=str(right.get("title", "")),
-                    )
+        # SequenceMatcher cannot exceed this length-only upper bound.
+        if (2 * min(len(left_title), len(right_title))) / (
+            len(left_title) + len(right_title)
+        ) < threshold:
+            continue
+        score = SequenceMatcher(None, left_title, right_title).ratio()
+        if score >= threshold:
+            out.append(
+                DuplicateCandidate(
+                    left=str(left.get("page_id", "")),
+                    right=str(right.get("page_id", "")),
+                    score=score,
+                    method="title",
+                    left_title=str(left.get("title", "")),
+                    right_title=str(right.get("title", "")),
                 )
+            )
     return out
 
 
@@ -126,26 +195,51 @@ def embedding_duplicate_candidates(
         for pid, vec, _mtime, norm in _iter_all_embeddings()
         if pid in meta_by_id and norm > 0
     ]
+    if not rows or limit <= 0:
+        return []
+    dimensions = Counter(len(vector) for _pid, vector, _norm in rows)
+    dimension = dimensions.most_common(1)[0][0]
+    rows = [row for row in rows if len(row[1]) == dimension]
+    matrix = np.asarray([row[1] for row in rows], dtype=np.float64)
+    norms = np.asarray([row[2] for row in rows], dtype=np.float64)
+    matrix /= norms[:, np.newaxis]
+
+    # Exact cosine search remains deterministic, but BLAS evaluates it in
+    # bounded blocks instead of millions of Python-level vector loops.
+    heap: list[tuple[float, int, int]] = []
+    block_size = 256
+    for start in range(0, len(rows), block_size):
+        stop = min(start + block_size, len(rows))
+        scores = matrix[start:stop] @ matrix.T
+        for local_left, right_index in np.argwhere(scores >= threshold):
+            left_index = start + int(local_left)
+            right_index = int(right_index)
+            if right_index <= left_index:
+                continue
+            score = float(scores[local_left, right_index])
+            item = (score, left_index, right_index)
+            if len(heap) < limit:
+                heapq.heappush(heap, item)
+            elif score > heap[0][0]:
+                heapq.heapreplace(heap, item)
+
     out: list[DuplicateCandidate] = []
-    for idx, (left_id, left_vec, left_norm) in enumerate(rows):
-        for right_id, right_vec, right_norm in rows[idx + 1 :]:
-            dot = math.sumprod(left_vec, right_vec)
-            score = dot / (left_norm * right_norm)
-            if score >= threshold:
-                left = meta_by_id[left_id]
-                right = meta_by_id[right_id]
-                out.append(
-                    DuplicateCandidate(
-                        left=left_id,
-                        right=right_id,
-                        score=score,
-                        method="embedding",
-                        left_title=str(left.get("title", "")),
-                        right_title=str(right.get("title", "")),
-                    )
-                )
-    out.sort(key=lambda candidate: candidate.score, reverse=True)
-    return out[:limit]
+    for score, left_index, right_index in sorted(heap, reverse=True):
+        left_id = rows[left_index][0]
+        right_id = rows[right_index][0]
+        left = meta_by_id[left_id]
+        right = meta_by_id[right_id]
+        out.append(
+            DuplicateCandidate(
+                left=left_id,
+                right=right_id,
+                score=score,
+                method="embedding",
+                left_title=str(left.get("title", "")),
+                right_title=str(right.get("title", "")),
+            )
+        )
+    return out
 
 
 def build_duplicate_review_queue(
