@@ -1222,6 +1222,37 @@ def test_frontier_retry_keeps_durable_local_suggestion(
     assert "[[target" in (isolated_pages / "source.md").read_text(encoding="utf-8")
 
 
+def test_elapsed_budget_stops_before_candidate_discovery(
+    tmp_path: Path,
+    isolated_pages: Path,
+) -> None:
+    from chronovisor.convergence import CycleBudget
+
+    store = _FakeStore()
+    store.add_page("orphan", body="Target")
+    state = _autonomous_state(tmp_path)
+    ticks = [0.0, 61.0]
+
+    def clock() -> float:
+        return ticks.pop(0) if len(ticks) > 1 else ticks[0]
+
+    budget = CycleBudget(max_elapsed_seconds=60, clock=clock)
+
+    result = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        semantic_search_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate discovery must not start after the deadline")
+        ),
+        convergence_store=state,
+        budget=budget,
+    )
+
+    assert result["stop_reason"] == "elapsed_budget_exhausted"
+    assert result["orphans_seen"] == 0
+    assert result["work_items"] == 0
+
+
 def test_no_candidate_terminal_decision_is_durable(
     tmp_path: Path,
     isolated_pages: Path,

@@ -1154,8 +1154,12 @@ def run_autonomous(
     results: list[dict[str, Any]] = list(recovered)
     work_items = 0
     scanned = 0
+    stop_reason: str | None = None
 
     for orphan_id in orphans:
+        if cycle_budget.remaining_elapsed_seconds <= 0:
+            stop_reason = "elapsed_budget_exhausted"
+            break
         scanned += 1
         discovery_error: str | None = None
         try:
@@ -1865,6 +1869,7 @@ def run_autonomous(
         "orphans_seen": scanned,
         "orphans_total": len(orphans),
         "work_items": work_items,
+        "stop_reason": stop_reason,
         "results": results,
         "retired": sorted(
             set(retired_absent.get("retired", []))
