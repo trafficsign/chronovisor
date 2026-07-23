@@ -771,6 +771,64 @@ def _high_local_suggestion() -> str:
     )
 
 
+def test_autonomous_drain_prioritizes_oldest_pending_orphan(
+    tmp_path: Path,
+    isolated_pages: Path,
+) -> None:
+    store = _FakeStore()
+    store.add_page("target-one")
+    store.add_page("target-two")
+    store.add_page("source")
+    store.add_page("other")
+    store.link("other", "source")
+    store.link("source", "other")
+    for page_id in ("target-one", "target-two", "source", "other"):
+        _seed_page(isolated_pages, page_id, f"{page_id} body")
+    state = _autonomous_state(tmp_path)
+    authority, error = ol_mod.current_semantic_authority(
+        ol_mod.DECISION_LANE,
+        injected_reviewer=True,
+    )
+    assert error is None
+    state.merge_item(
+        lane=ol_mod.DECISION_LANE,
+        source_id="orphan:target-two",
+        input_data={
+            "orphan": "target-two",
+            "orphan_hash": ol_mod._content_hash("target-two"),
+            "decision_authority": authority,
+            "candidates": [
+                {
+                    "source": "source",
+                    "source_hash": ol_mod._content_hash("source"),
+                }
+            ],
+        },
+        resolver_version=ol_mod.RESOLVER_VERSION,
+        metadata={
+            "orphan": "target-two",
+            "source": "source",
+            "candidate_discovery_error": None,
+        },
+    )
+
+    result = run_autonomous(
+        orphan_limit=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: _high_local_suggestion(),
+        semantic_search_fn=lambda _query, _top_n: [_ScoredPage("source", 0.9)],
+        reviewer=lambda _candidate: {
+            "decision": "rejected",
+            "confidence": 0.95,
+            "summary": "keep separate",
+        },
+        convergence_store=state,
+    )
+
+    assert result["results"][0]["orphan"] == "target-two"
+    assert state.list_items(lane=ol_mod.DECISION_LANE)[0]["status"] == "rejected"
+
+
 def test_frontier_approval_is_not_overridden_by_confidence_metadata(
     tmp_path: Path,
     isolated_pages: Path,

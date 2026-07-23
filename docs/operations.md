@@ -640,6 +640,21 @@ read-only, including search indexes and caches, and does not invoke model
 reviewers. A zero `--eval-limit` skips integrity and label evaluation instead
 of expanding to an unbounded corpus scan.
 
+The daily Sleep LaunchAgent also runs once when it is newly loaded, so an
+installation or product rename after the calendar boundary cannot leave the
+watchdog without an execution receipt until the following day. The compact
+sleep history row is operational state rather than a page mutation and is
+always written even when semantic/artifact mutation budgets are exhausted.
+
+The 30-minute `chronovisor-converge` worker remains lighter than Sleep: it does
+not rebuild derived artifacts, run broad evaluation, or seal Raw. It drains
+bounded existing correction, duplicate, lint, and orphan-link work under a
+shared 15-minute local-model budget. Durable orphan work is ordered oldest
+first, preventing terminal items at the front of the corpus from collapsing
+throughput. Watchdog lint backlog counts unresolved detector `issue_key`
+values; completed append-only convergence history is reported separately and
+does not keep the alert permanently active.
+
 Installed MCP, hook, dashboard, ingest-drain, sleep, and watchdog entry points
 resolve the pushed GitHub package through `uvx`; the local checkout remains the
 explicit code-repair target, not an implicit production import path. Long-lived

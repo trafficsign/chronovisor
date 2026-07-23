@@ -182,6 +182,32 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     assert payload["snapshot_after"]["status"] == "clean"
 
 
+def test_sleep_cycle_always_writes_watchdog_receipt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    append_history = sleep_cycle._append_history
+    _patch_sleep_dependencies(monkeypatch)
+    history = tmp_path / "sleep-cycle-history.jsonl"
+    monkeypatch.setattr(sleep_cycle, "HISTORY_FILE", history)
+    monkeypatch.setattr(sleep_cycle, "_append_history", append_history)
+
+    payload = sleep_cycle.run_sleep_cycle(
+        raw_limit=0,
+        eval_limit=0,
+        duplicate_limit=0,
+    )
+
+    rows = [
+        json.loads(line)
+        for line in history.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert payload["history"] == {"status": "ok"}
+    assert rows[-1]["run_id"] == payload["run_id"]
+    assert rows[-1]["status"] == payload["status"]
+
+
 def test_sleep_lane_error_isolated_as_partial(monkeypatch) -> None:
     _patch_sleep_dependencies(monkeypatch)
     monkeypatch.setattr(

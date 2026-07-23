@@ -703,6 +703,77 @@ def _queue_status_counts(path: Path, field: str) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+_LINT_ACTIVE_STATUSES = {
+    "pending_local",
+    "local_retry",
+    "pending_frontier",
+    "frontier_retry",
+    "local_running",
+    "frontier_running",
+}
+
+
+def _lint_queue_kpi(queue_path: Path, convergence_path: Path) -> dict[str, int]:
+    """Count current unresolved lint issues instead of append-only history.
+
+    The lint queue is a current detector snapshot, but a row remains present
+    after the convergence lane has observed, routed, rejected, or applied it.
+    Counting every JSONL row therefore turns completed monitor/review work into
+    a permanent backlog alert.  ``issue_key`` is the detector's stable
+    identity, so active convergence wins, a terminal convergence record marks
+    the issue handled, and a row with no state is still genuinely unprocessed.
+    """
+
+    rows = _read_jsonl(queue_path, limit=100000)
+    issue_keys: set[str] = set()
+    missing_identity = 0
+    for row in rows:
+        issue_key = str(row.get("issue_key") or "")
+        if issue_key:
+            issue_keys.add(issue_key)
+        else:
+            missing_identity += 1
+
+    statuses: dict[str, set[str]] = {}
+    try:
+        payload = json.loads(convergence_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if isinstance(items, dict):
+        for item in items.values():
+            if not isinstance(item, dict) or item.get("lane") != "lint_repair":
+                continue
+            metadata = (
+                item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            )
+            issue_key = str(metadata.get("issue_key") or "")
+            if issue_key:
+                statuses.setdefault(issue_key, set()).add(
+                    str(item.get("status") or "unknown")
+                )
+
+    active = 0
+    handled = 0
+    untracked = missing_identity
+    for issue_key in issue_keys:
+        issue_statuses = statuses.get(issue_key, set())
+        if issue_statuses & _LINT_ACTIVE_STATUSES:
+            active += 1
+        elif issue_statuses:
+            handled += 1
+        else:
+            untracked += 1
+    return {
+        "total": len(rows),
+        "unique": len(issue_keys) + missing_identity,
+        "actionable": active + untracked,
+        "active": active,
+        "untracked": untracked,
+        "handled": handled,
+    }
+
+
 def health_snapshot() -> dict[str, Any]:
     from chronovisor.runtime_config import runtime_identity
 
@@ -714,6 +785,10 @@ def health_snapshot() -> dict[str, Any]:
     raw_replay_queue = CHRONOVISOR_ROOT / "review" / "raw-replay-queue.jsonl"
     label_statuses = _queue_status_counts(label_queue, "queue_status")
     replay_statuses = _queue_status_counts(raw_replay_queue, "status")
+    lint_queue_status = _lint_queue_kpi(
+        lint_queue,
+        CHRONOVISOR_ROOT / "runtime" / "convergence" / "state.json",
+    )
     ingest_liveness = ingest_liveness_kpi()
     return {
         "status": "alert" if ingest_liveness.get("alert") else "ok",
@@ -733,7 +808,11 @@ def health_snapshot() -> dict[str, Any]:
         "research": research_kpi(),
         "queues": {
             "duplicate_candidates": _jsonl_count(duplicate_queue),
-            "lint_repair": _jsonl_count(lint_queue),
+            "lint_repair": lint_queue_status["actionable"],
+            "lint_repair_total": lint_queue_status["total"],
+            "lint_repair_active": lint_queue_status["active"],
+            "lint_repair_untracked": lint_queue_status["untracked"],
+            "lint_repair_handled": lint_queue_status["handled"],
             "search_golden": _jsonl_count(golden),
             "search_labels": _jsonl_count(label_queue),
             "search_labels_pending": sum(

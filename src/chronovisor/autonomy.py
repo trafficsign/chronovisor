@@ -4011,6 +4011,12 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "8",
         "--job-limit",
         "8",
+        "--lint-limit",
+        "50",
+        "--orphan-limit",
+        "8",
+        "--maintenance-max-elapsed-seconds",
+        "900",
         "--no-sleep",
     ]
     deadman_command = [
@@ -4043,6 +4049,10 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         stderr=logs / "sleep-cycle.launchd.err.log",
         calendar={"Hour": 3, "Minute": 40},
     )
+    # A newly installed or renamed agent may be loaded after today's calendar
+    # boundary.  Run once at bootstrap so the watchdog always gets a durable
+    # sleep receipt instead of reporting ``sleep_never_ran`` until tomorrow.
+    sleep_plist["RunAtLoad"] = True
     watchdog_plist = _plist(
         WATCHDOG_LABEL,
         [str(watchdog_wrapper)],
@@ -4084,6 +4094,7 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
                 "path": str(sleep_path),
                 "program": sleep_plist["ProgramArguments"],
                 "stdout": sleep_plist["StandardOutPath"],
+                "run_at_load": bool(sleep_plist.get("RunAtLoad")),
             },
             {
                 "label": CONVERGE_LABEL,

@@ -2454,6 +2454,10 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     programs = {item["label"]: item["program"] for item in payload["plists"]}
     assert Path(programs[autonomy.SLEEP_LABEL][0]).name == "chronovisor-sleep"
     assert Path(programs[autonomy.WATCHDOG_LABEL][0]).name == "chronovisor-watchdog"
+    sleep_plist = next(
+        item for item in payload["plists"] if item["label"] == autonomy.SLEEP_LABEL
+    )
+    assert sleep_plist["run_at_load"] is True
     assert (
         Path(programs[autonomy.DEADMAN_LABEL][0]).name
         == "chronovisor-deadman-observer"

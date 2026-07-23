@@ -892,16 +892,26 @@ def _run_sleep_cycle(
         payload["lane_errors"] = lane_errors
     payload["finished_at"] = datetime.now().isoformat(timespec="seconds")
     if not dry_run:
-        history_allowed, history_reason = artifact_budget.consume("mutation")
+        # The history row is the durable execution receipt consumed by the
+        # watchdog.  It is bounded operational state, not a semantic/page
+        # mutation, so it must not compete with artifact work for the last
+        # mutation token.  Otherwise a completely successful cycle can spend
+        # its artifact allowance and be reported forever as
+        # ``sleep_never_ran``.
         payload["convergence_budget"] = cycle_budget.snapshot()
-        if history_allowed:
+        try:
             _append_history(payload)
-        else:
+            payload["history"] = {"status": "ok"}
+        except OSError as exc:
             payload["history"] = {
-                "status": "budget_deferred",
+                "status": "error",
                 "lane": "sleep_history",
-                "reason": history_reason,
+                "error": f"{exc.__class__.__name__}: {exc}",
             }
+            payload["status"] = "partial"
+            lane_errors = payload.setdefault("lane_errors", [])
+            if "sleep_history" not in lane_errors:
+                lane_errors.append("sleep_history")
     else:
         payload["convergence_budget"] = cycle_budget.snapshot()
     return payload

@@ -1082,6 +1082,33 @@ def run_autonomous(
         max_mutations=2,
     )
     orphans = store.orphans(include_system=False)
+    active_statuses = {
+        "pending_local",
+        "local_retry",
+        "pending_frontier",
+        "frontier_retry",
+        "local_running",
+        "frontier_running",
+    }
+    eligible = (
+        {str(key) for key in eligible_keys} if eligible_keys is not None else None
+    )
+    active_items = [
+        item
+        for item in state.list_items(lane=DECISION_LANE, statuses=active_statuses)
+        if eligible is None or str(item.get("key") or "") in eligible
+    ]
+    active_sources: dict[str, str] = {}
+    for item in sorted(
+        active_items,
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            str(row.get("key") or ""),
+        ),
+    ):
+        source = str(item.get("source_id") or "").removeprefix("orphan:")
+        if source:
+            active_sources.setdefault(source, str(item.get("created_at") or ""))
     if eligible_keys is not None:
         eligible_sources = {
             str(item.get("source_id") or "").removeprefix("orphan:")
@@ -1090,6 +1117,18 @@ def run_autonomous(
             and item.get("lane") == DECISION_LANE
         }
         orphans = [page_id for page_id in orphans if page_id in eligible_sources]
+    # Drain durable work oldest-first.  Previously the producer's page order
+    # forced every pass to re-embed and skip a growing prefix of terminal
+    # orphans before reaching pending items, making throughput collapse as the
+    # queue converged.
+    original_order = {page_id: index for index, page_id in enumerate(orphans)}
+    orphans.sort(
+        key=lambda page_id: (
+            0 if page_id in active_sources else 1,
+            active_sources.get(page_id, ""),
+            original_order[page_id],
+        )
+    )
     if eligible_keys is None:
         retired_absent = state.retire_absent_sources(
             lane="orphan_link",

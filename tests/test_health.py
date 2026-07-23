@@ -6,6 +6,56 @@ from pathlib import Path
 from chronovisor import autonomy, health
 
 
+def test_lint_queue_kpi_counts_only_unresolved_issue_keys(tmp_path: Path) -> None:
+    queue = tmp_path / "lint-repair-queue.jsonl"
+    convergence = tmp_path / "state.json"
+    rows = [
+        {"issue_key": "handled", "page": "a"},
+        {"issue_key": "active", "page": "b"},
+        {"issue_key": "new", "page": "c"},
+        {"page": "missing-key"},
+    ]
+    queue.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    convergence.write_text(
+        json.dumps(
+            {
+                "items": {
+                    "handled": {
+                        "lane": "lint_repair",
+                        "status": "rejected",
+                        "metadata": {"issue_key": "handled"},
+                    },
+                    "active": {
+                        "lane": "lint_repair",
+                        "status": "pending_local",
+                        "metadata": {"issue_key": "active"},
+                    },
+                    "other-lane": {
+                        "lane": "orphan_link",
+                        "status": "pending_local",
+                        "metadata": {"issue_key": "new"},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = health._lint_queue_kpi(queue, convergence)
+
+    assert payload == {
+        "total": 4,
+        "unique": 4,
+        "actionable": 3,
+        "active": 1,
+        "untracked": 2,
+        "handled": 1,
+    }
+
+
 def test_capture_kpi_counts_raw_claim_coverage(tmp_path: Path, monkeypatch) -> None:
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"

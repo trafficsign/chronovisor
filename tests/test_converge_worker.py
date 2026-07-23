@@ -32,6 +32,11 @@ def test_converge_default_is_lightweight_and_never_runs_sleep(monkeypatch) -> No
             AssertionError("default converge must not run the full sleep cycle")
         ),
     )
+    monkeypatch.setattr(
+        converge_worker,
+        "run_maintenance_batch",
+        lambda **kwargs: {"status": "ok", **kwargs},
+    )
 
     result = converge_worker.run_converge(session_limit=2, job_limit=3)
 
@@ -39,6 +44,8 @@ def test_converge_default_is_lightweight_and_never_runs_sleep(monkeypatch) -> No
     assert result["background_jobs"]["limit"] == 3
     assert result["system_repairs"]["limit"] == 2
     assert result["session_sweeper"]["limit"] == 2
+    assert result["maintenance"]["lint_limit"] == 50
+    assert result["maintenance"]["orphan_limit"] == 8
     assert "sleep_cycle" not in result
 
 
@@ -57,6 +64,11 @@ def test_converge_full_sleep_requires_explicit_opt_in(monkeypatch) -> None:
         self_heal,
         "enqueue_due_system_repairs",
         lambda *, limit: {"status": "ok", "limit": limit},
+    )
+    monkeypatch.setattr(
+        converge_worker,
+        "run_maintenance_batch",
+        lambda **_kwargs: {"status": "ok"},
     )
     calls: list[dict[str, object]] = []
 
@@ -97,6 +109,11 @@ def test_converge_can_disable_system_repair_enqueue(monkeypatch) -> None:
             AssertionError("system repair enqueue must be disabled")
         ),
     )
+    monkeypatch.setattr(
+        converge_worker,
+        "run_maintenance_batch",
+        lambda **_kwargs: {"status": "ok"},
+    )
 
     result = converge_worker.run_converge(
         session_limit=0,
@@ -106,6 +123,38 @@ def test_converge_can_disable_system_repair_enqueue(monkeypatch) -> None:
 
     assert result["status"] == "ok"
     assert result["system_repairs"] == {
+        "status": "skipped",
+        "reason": "disabled_by_cli",
+    }
+
+
+def test_converge_can_disable_maintenance(monkeypatch) -> None:
+    monkeypatch.setattr(
+        background_jobs,
+        "retry_due",
+        lambda *, limit: {"status": "ok", "limit": limit},
+    )
+    monkeypatch.setattr(
+        session_sweeper,
+        "run_sweeper",
+        lambda *, limit: {"status": "ok", "limit": limit},
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "enqueue_due_system_repairs",
+        lambda *, limit: {"status": "ok", "limit": limit},
+    )
+    monkeypatch.setattr(
+        converge_worker,
+        "run_maintenance_batch",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("maintenance must be disabled")
+        ),
+    )
+
+    result = converge_worker.run_converge(run_maintenance=False)
+
+    assert result["maintenance"] == {
         "status": "skipped",
         "reason": "disabled_by_cli",
     }
