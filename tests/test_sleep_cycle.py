@@ -34,9 +34,7 @@ def test_sleep_history_compacts_recursive_rows_and_bounds_file(
             "started_at": f"2026-07-{(index % 9) + 1:02d}T03:40:00",
             "autonomy": {
                 "watchdog": {
-                    "latest_sleep": {
-                        "autonomy": {"watchdog": {"blob": "x" * 1000}}
-                    }
+                    "latest_sleep": {"autonomy": {"watchdog": {"blob": "x" * 1000}}}
                 }
             },
         }
@@ -64,7 +62,9 @@ def test_sleep_history_compacts_recursive_rows_and_bounds_file(
         max_lines=10,
     )
 
-    rows = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines()]
+    rows = [
+        json.loads(line) for line in history.read_text(encoding="utf-8").splitlines()
+    ]
     assert len(rows) == 10
     assert all("autonomy" not in row for row in rows)
     assert rows[-1]["run_id"] == "run-11"
@@ -98,47 +98,219 @@ def test_atomic_sleep_history_failure_preserves_previous_file(
     assert list(tmp_path.glob(".sleep-cycle-history.jsonl.*.tmp")) == []
 
 
+def test_run_lane_interrupts_at_lane_runtime_budget(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        sleep_cycle,
+        "ACTIVE_LANE_FILE",
+        tmp_path / "sleep-cycle-active-lane.json",
+    )
+
+    payload = sleep_cycle._run_lane(
+        "slow",
+        lambda: sleep_cycle.time.sleep(0.2),
+        max_elapsed_seconds=0.02,
+    )
+
+    assert payload["status"] == "budget_deferred"
+    assert payload["lane"] == "slow"
+    assert payload["reason"] == "lane runtime budget exhausted"
+    assert payload["elapsed_ms"] < 150
+    active = json.loads(sleep_cycle.ACTIVE_LANE_FILE.read_text(encoding="utf-8"))
+    assert active["lane"] == "slow"
+    assert active["status"] == "budget_deferred"
+
+
+def test_run_lane_defers_before_cycle_finalization_reserve(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "CHRONOVISOR_CYCLE_DEADLINE_MONOTONIC",
+        str(sleep_cycle.time.monotonic() + 5),
+    )
+    called = False
+
+    def should_not_run():
+        nonlocal called
+        called = True
+
+    payload = sleep_cycle._run_lane("late", should_not_run)
+
+    assert payload["status"] == "budget_deferred"
+    assert payload["reason"] == "sleep cycle runtime budget exhausted"
+    assert called is False
+
+
 def _patch_sleep_dependencies(monkeypatch) -> None:
-    monkeypatch.setattr("chronovisor.snapshot.snapshot_chronovisor", lambda reason: {"status": "clean", "reason": reason})
-    monkeypatch.setattr("chronovisor.health.health_snapshot", lambda: {"memory_integrity": {"capture_rate": 0.5}, "queues": {}})
-    monkeypatch.setattr("chronovisor.cofire.build_cofire_graph", lambda write=True: {"edges": 2, "nodes": 2, "graph": {}})
-    monkeypatch.setattr("chronovisor.prefetch.build_prefetch_cache", lambda write=True: {"status": "ok", "episodes": 1, "buckets": {"a": []}, "tokens": {"b": []}})
-    monkeypatch.setattr("chronovisor.retention.build_retention_scores", lambda write=True: {"counts": {"pages": 2}, "pages": {}})
-    monkeypatch.setattr("chronovisor.claims.rebuild_claim_index", lambda write=True: {"claims": 3})
-    monkeypatch.setattr("chronovisor.claims.review_claim_conflicts", lambda **kwargs: {"status": "ok", "write": kwargs["write"]})
-    monkeypatch.setattr("chronovisor.page_normalize.normalize_pages", lambda **kwargs: {"status": "ok", "write": kwargs["write"]})
-    monkeypatch.setattr("chronovisor.metadata_backfill.backfill_metadata", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.entities.backfill_entities", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.content_correction.run_pending_corrections", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.frontier_review.run_frontier_preflight", lambda: {"ok": True})
-    monkeypatch.setattr("chronovisor.capability_recovery.resume_external_queues", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.convergence.ConvergenceStore.resume_due_quarantined", lambda self, **kwargs: {"status": "ok"})
-    monkeypatch.setattr("chronovisor.convergence.ConvergenceStore.resume_due_human_required", lambda self, **kwargs: {"status": "ok"})
-    monkeypatch.setattr("chronovisor.convergence.ConvergenceStore.reap_expired_leases", lambda self, **kwargs: {"status": "ok"})
-    monkeypatch.setattr("chronovisor.golden_expand.expand_golden_from_recall_questions", lambda limit=0, write=True: {"added": 4})
-    monkeypatch.setattr("chronovisor.distill.export_distill_dataset", lambda write=True: {"rows": 5})
-    monkeypatch.setattr("chronovisor.hubs.build_hub_pages", lambda write=True: {"hubs": 6, "paths": []})
-    monkeypatch.setattr("chronovisor.reflection.write_reflection_page", lambda write=True: {"path": "/tmp/reflection.md"})
-    monkeypatch.setattr("chronovisor.state_register.refresh_state_register", lambda write=True: {"pages": ["p"]})
-    monkeypatch.setattr("chronovisor.memory_integrity.run_eval", lambda limit, write=True: {"capture_rate": 0.5, "rows": []})
-    monkeypatch.setattr("chronovisor.raw_replay.build_queue", lambda **kwargs: {"count": kwargs["limit"], "status": "ok"})
-    monkeypatch.setattr("chronovisor.raw_replay.run_pending_queue", lambda **kwargs: {"count": kwargs["max_runs"], "status": "ok"})
-    monkeypatch.setattr("chronovisor.orchestrator.run_lint_if_due", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.lint_repair.run_lint_repair", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.search_eval.build_label_queue", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.search_eval.review_label_queue_with_frontier", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.search_eval.run_self_tune_due", lambda **kwargs: {"status": "skipped", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.recall_auto_apply.apply_feedback_file", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.read_back_repair.run_read_back_repair", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.self_heal.run_pending", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.recall_calibration.run_due", lambda **kwargs: {"status": "skipped", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.duplicate_review.build_duplicate_review_queue", lambda limit: [{"id": "a"}])
-    monkeypatch.setattr("chronovisor.duplicate_review.write_review_queue", lambda records: "/tmp/dupes.jsonl")
-    monkeypatch.setattr("chronovisor.recall_improvement.run_due", lambda **kwargs: {"status": "skipped", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.research_consolidation.run_consolidation", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"], "mutation_mode": "proposal_only"})
-    monkeypatch.setattr("chronovisor.autonomy.run_autonomy_cycle", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.autonomy.resolve_deferred_duplicates_with_frontier", lambda records, **kwargs: {"status": "ok", "seen": len(records), "dry_run": kwargs["dry_run"]})
-    monkeypatch.setattr("chronovisor.orphan_link.run_autonomous", lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]})
+    monkeypatch.setattr(
+        "chronovisor.snapshot.snapshot_chronovisor",
+        lambda reason: {"status": "clean", "reason": reason},
+    )
+    monkeypatch.setattr(
+        "chronovisor.health.health_snapshot",
+        lambda: {"memory_integrity": {"capture_rate": 0.5}, "queues": {}},
+    )
+    monkeypatch.setattr(
+        "chronovisor.cofire.build_cofire_graph",
+        lambda write=True: {"edges": 2, "nodes": 2, "graph": {}},
+    )
+    monkeypatch.setattr(
+        "chronovisor.prefetch.build_prefetch_cache",
+        lambda write=True: {
+            "status": "ok",
+            "episodes": 1,
+            "buckets": {"a": []},
+            "tokens": {"b": []},
+        },
+    )
+    monkeypatch.setattr(
+        "chronovisor.retention.build_retention_scores",
+        lambda write=True: {"counts": {"pages": 2}, "pages": {}},
+    )
+    monkeypatch.setattr(
+        "chronovisor.claims.rebuild_claim_index", lambda write=True: {"claims": 3}
+    )
+    monkeypatch.setattr(
+        "chronovisor.claims.review_claim_conflicts",
+        lambda **kwargs: {"status": "ok", "write": kwargs["write"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.page_normalize.normalize_pages",
+        lambda **kwargs: {"status": "ok", "write": kwargs["write"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.metadata_backfill.backfill_metadata",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.entities.backfill_entities",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.content_correction.run_pending_corrections",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.frontier_review.run_frontier_preflight", lambda: {"ok": True}
+    )
+    monkeypatch.setattr(
+        "chronovisor.capability_recovery.resume_external_queues",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.convergence.ConvergenceStore.resume_due_quarantined",
+        lambda self, **kwargs: {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        "chronovisor.convergence.ConvergenceStore.resume_due_human_required",
+        lambda self, **kwargs: {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        "chronovisor.convergence.ConvergenceStore.reap_expired_leases",
+        lambda self, **kwargs: {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        "chronovisor.golden_expand.expand_golden_from_recall_questions",
+        lambda limit=0, write=True: {"added": 4},
+    )
+    monkeypatch.setattr(
+        "chronovisor.distill.export_distill_dataset", lambda write=True: {"rows": 5}
+    )
+    monkeypatch.setattr(
+        "chronovisor.hubs.build_hub_pages", lambda write=True: {"hubs": 6, "paths": []}
+    )
+    monkeypatch.setattr(
+        "chronovisor.reflection.write_reflection_page",
+        lambda write=True: {"path": "/tmp/reflection.md"},
+    )
+    monkeypatch.setattr(
+        "chronovisor.state_register.refresh_state_register",
+        lambda write=True: {"pages": ["p"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.memory_integrity.run_eval",
+        lambda limit, write=True: {"capture_rate": 0.5, "rows": []},
+    )
+    monkeypatch.setattr(
+        "chronovisor.raw_replay.build_queue",
+        lambda **kwargs: {"count": kwargs["limit"], "status": "ok"},
+    )
+    monkeypatch.setattr(
+        "chronovisor.raw_replay.run_pending_queue",
+        lambda **kwargs: {"count": kwargs["max_runs"], "status": "ok"},
+    )
+    monkeypatch.setattr(
+        "chronovisor.orchestrator.run_lint_if_due",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.lint_repair.run_lint_repair",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.search_eval.build_label_queue",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.search_eval.review_label_queue_with_frontier",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.search_eval.run_self_tune_due",
+        lambda **kwargs: {"status": "skipped", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall_auto_apply.apply_feedback_file",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.read_back_repair.run_read_back_repair",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.self_heal.run_pending",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall_calibration.run_due",
+        lambda **kwargs: {"status": "skipped", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.duplicate_review.build_duplicate_review_queue",
+        lambda limit: [{"id": "a"}],
+    )
+    monkeypatch.setattr(
+        "chronovisor.duplicate_review.write_review_queue",
+        lambda records: "/tmp/dupes.jsonl",
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall_improvement.run_due",
+        lambda **kwargs: {"status": "skipped", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.research_consolidation.run_consolidation",
+        lambda **kwargs: {
+            "status": "ok",
+            "dry_run": kwargs["dry_run"],
+            "mutation_mode": "proposal_only",
+        },
+    )
+    monkeypatch.setattr(
+        "chronovisor.autonomy.run_autonomy_cycle",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.autonomy.resolve_deferred_duplicates_with_frontier",
+        lambda records, **kwargs: {
+            "status": "ok",
+            "seen": len(records),
+            "dry_run": kwargs["dry_run"],
+        },
+    )
+    monkeypatch.setattr(
+        "chronovisor.orphan_link.run_autonomous",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
     monkeypatch.setattr(sleep_cycle, "_append_history", lambda row: None)
 
 
@@ -238,7 +410,9 @@ def test_sleep_artifact_lane_error_does_not_block_consumers(monkeypatch) -> None
     assert payload["orphan_links"]["status"] == "ok"
 
 
-def test_non_json_cli_renders_partial_cycle_without_key_error(monkeypatch, capsys) -> None:
+def test_non_json_cli_renders_partial_cycle_without_key_error(
+    monkeypatch, capsys
+) -> None:
     monkeypatch.setattr(
         sleep_cycle,
         "run_sleep_cycle",
@@ -324,7 +498,9 @@ def test_sleep_dry_run_does_not_snapshot_or_write_history(monkeypatch) -> None:
         lambda _reason: (_ for _ in ()).throw(AssertionError("snapshot must not run")),
     )
 
-    payload = sleep_cycle.run_sleep_cycle(raw_limit=1, eval_limit=1, duplicate_limit=1, dry_run=True)
+    payload = sleep_cycle.run_sleep_cycle(
+        raw_limit=1, eval_limit=1, duplicate_limit=1, dry_run=True
+    )
 
     assert payload["status"] == "ok"
     assert payload["snapshot"] == {"status": "skipped", "reason": "dry_run"}
@@ -344,7 +520,9 @@ def test_sleep_dry_run_sets_and_restores_process_read_only_guard(monkeypatch) ->
         ),
     )
 
-    sleep_cycle.run_sleep_cycle(raw_limit=0, eval_limit=0, duplicate_limit=0, dry_run=True)
+    sleep_cycle.run_sleep_cycle(
+        raw_limit=0, eval_limit=0, duplicate_limit=0, dry_run=True
+    )
 
     assert observed == ["1"]
     assert "CHRONOVISOR_READ_ONLY" not in os.environ

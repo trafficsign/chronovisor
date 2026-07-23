@@ -10,9 +10,12 @@ import argparse
 import fcntl
 import json
 import os
+import signal
 import tempfile
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,8 +24,94 @@ from chronovisor.store import CHRONOVISOR_ROOT
 
 HISTORY_FILE = CHRONOVISOR_ROOT / "runtime" / "sleep-cycle-history.jsonl"
 LOCK_FILE = CHRONOVISOR_ROOT / "runtime" / "sleep-cycle.lock"
+ACTIVE_LANE_FILE = CHRONOVISOR_ROOT / "runtime" / "sleep-cycle-active-lane.json"
 HISTORY_SCHEMA_VERSION = 1
 HISTORY_MAX_LINES = 1000
+DEFAULT_LANE_MAX_ELAPSED_SECONDS = 5 * 60
+FINALIZATION_RESERVE_SECONDS = 30
+
+
+class _LaneRuntimeBudgetExceeded(BaseException):
+    """Interrupt a maintenance lane without being swallowed by broad catches."""
+
+
+def _cycle_remaining_seconds() -> float | None:
+    raw = os.environ.get("CHRONOVISOR_CYCLE_DEADLINE_MONOTONIC")
+    if not raw:
+        return None
+    try:
+        return float(raw) - time.monotonic()
+    except ValueError:
+        return None
+
+
+def _lane_timeout_seconds(max_elapsed_seconds: float) -> float:
+    requested = max(0.0, float(max_elapsed_seconds))
+    remaining = _cycle_remaining_seconds()
+    if remaining is None:
+        return requested
+    return max(
+        0.0,
+        min(requested, remaining - FINALIZATION_RESERVE_SECONDS),
+    )
+
+
+@contextmanager
+def _lane_runtime_timer(seconds: float):
+    """Raise at a hard lane boundary while preserving any caller timer."""
+
+    if (
+        seconds <= 0
+        or threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "setitimer")
+    ):
+        yield
+        return
+
+    started = time.monotonic()
+    prior_handler = signal.getsignal(signal.SIGALRM)
+    prior_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def interrupt(_signum, _frame) -> None:
+        raise _LaneRuntimeBudgetExceeded
+
+    signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, prior_handler)
+        if prior_timer[0] > 0:
+            elapsed = time.monotonic() - started
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(0.000001, prior_timer[0] - elapsed),
+                prior_timer[1],
+            )
+
+
+def _write_active_lane(payload: dict[str, Any]) -> None:
+    """Keep one bounded diagnostic receipt for the currently active lane."""
+
+    if os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+        return
+    ACTIVE_LANE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{ACTIVE_LANE_FILE.name}.",
+        suffix=".tmp",
+        dir=ACTIVE_LANE_FILE.parent,
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, ACTIVE_LANE_FILE)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _compact_scalar(value: object, *, limit: int = 200) -> object:
@@ -230,23 +319,67 @@ def _try_acquire_read_lock():
     return handle
 
 
-def _run_lane(name: str, fn) -> dict[str, Any]:
+def _run_lane(
+    name: str,
+    fn,
+    *,
+    max_elapsed_seconds: float = DEFAULT_LANE_MAX_ELAPSED_SECONDS,
+) -> dict[str, Any]:
     """Isolate one maintenance lane so the remaining queues still drain."""
-    try:
-        result = fn()
-    except Exception as exc:
+    started_at = datetime.now().isoformat(timespec="seconds")
+    started = time.monotonic()
+    timeout_seconds = _lane_timeout_seconds(max_elapsed_seconds)
+    if timeout_seconds <= 0:
         return {
+            "status": "budget_deferred",
+            "lane": name,
+            "reason": "sleep cycle runtime budget exhausted",
+            "elapsed_ms": 0,
+        }
+    _write_active_lane(
+        {
+            "schema_version": 1,
+            "lane": name,
+            "status": "running",
+            "started_at": started_at,
+            "timeout_seconds": round(timeout_seconds, 3),
+        }
+    )
+    try:
+        with _lane_runtime_timer(timeout_seconds):
+            result = fn()
+    except _LaneRuntimeBudgetExceeded:
+        result = {
+            "status": "budget_deferred",
+            "lane": name,
+            "reason": "lane runtime budget exhausted",
+        }
+    except Exception as exc:
+        result = {
             "status": "error",
             "lane": name,
             "error": f"{exc.__class__.__name__}: {exc}",
         }
-    if isinstance(result, dict):
-        return result
-    return {
-        "status": "error",
-        "lane": name,
-        "error": "lane returned a non-object result",
-    }
+    if not isinstance(result, dict):
+        result = {
+            "status": "error",
+            "lane": name,
+            "error": "lane returned a non-object result",
+        }
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    result.setdefault("elapsed_ms", elapsed_ms)
+    _write_active_lane(
+        {
+            "schema_version": 1,
+            "lane": name,
+            "status": str(result.get("status") or "unknown"),
+            "started_at": started_at,
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+            "elapsed_ms": elapsed_ms,
+            "timeout_seconds": round(timeout_seconds, 3),
+        }
+    )
+    return result
 
 
 def render_summary(payload: dict[str, Any]) -> str:
@@ -714,6 +847,7 @@ def _run_sleep_cycle(
             dry_run=dry_run,
             frontier_budget=lane_budgets["self_heal"],
         ),
+        max_elapsed_seconds=2 * 60,
     )
     duplicate_build = _run_lane(
         "duplicates",
@@ -721,6 +855,7 @@ def _run_sleep_cycle(
             "status": "ok",
             "records": build_duplicate_review_queue(limit=max(0, duplicate_limit)),
         },
+        max_elapsed_seconds=60,
     )
     duplicates = (
         duplicate_build.get("records", [])
@@ -752,6 +887,7 @@ def _run_sleep_cycle(
             frontier_budget=lane_budgets["recall_improve"],
             dry_run=dry_run,
         ),
+        max_elapsed_seconds=15 * 60,
     )
     model_lab = _run_lane(
         "model_lab",
@@ -786,6 +922,7 @@ def _run_sleep_cycle(
             max_examples=40,
             max_elapsed_seconds=120,
         ),
+        max_elapsed_seconds=125,
     )
     research_consolidation = _run_lane(
         "research_consolidation",
