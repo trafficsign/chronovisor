@@ -88,6 +88,7 @@ def run_maintenance_batch(
             convergence_store=state,
             budget=budget.slice(max_frontier_calls=6, max_mutations=6),
             dry_run=False,
+            inventory_complete=len(records) < 300,
         ),
     )
     # Oldest durable orphan work has a 24-hour convergence SLO.  Run it before

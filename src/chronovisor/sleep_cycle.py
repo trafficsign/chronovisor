@@ -864,6 +864,7 @@ def _run_sleep_cycle(
             duplicates,
             budget=lane_budgets["duplicates"],
             dry_run=dry_run,
+            inventory_complete=len(duplicates) < duplicate_limit,
         ),
     )
     payload["orphan_links"] = _run_lane(

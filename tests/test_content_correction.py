@@ -68,25 +68,37 @@ def test_local_proposer_repairs_invalid_json_in_same_session(tmp_path: Path) -> 
     assert "Validator errors" in prompts[1]
 
 
-def test_local_proposer_rejects_oversized_input_before_transport(
+def test_local_proposer_bounds_oversized_event_before_transport(
     tmp_path: Path,
 ) -> None:
-    calls = 0
+    prompts: list[str] = []
 
-    def unexpected_generate(*_args, **_kwargs) -> str:
-        nonlocal calls
-        calls += 1
-        raise AssertionError("transport must not start")
-
-    with pytest.raises(ValueError, match="input_too_large|context_window_exceeded"):
-        content_correction.run_local_proposer(
-            {"correction_text": "x" * 80_000},
-            [],
-            generate_fn=unexpected_generate,
-            audit_root=tmp_path / "audit",
+    def generate(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return json.dumps(
+            {
+                "decision": "ambiguous",
+                "confidence": 0.5,
+                "reason": "The bounded evidence is insufficient.",
+                "proposals": [],
+            }
         )
 
-    assert calls == 0
+    proposal = content_correction.run_local_proposer(
+        {
+            "source_prompt": "x" * 80_000,
+            "source_assistant_response": "y" * 80_000,
+            "correction_prompt": "z" * 80_000,
+        },
+        [],
+        generate_fn=generate,
+        audit_root=tmp_path / "audit",
+    )
+
+    assert proposal["decision"] == "ambiguous"
+    assert len(prompts) == 1
+    assert len(prompts[0].encode("utf-8")) < 65_536
+    assert "[... trimmed ...]" in prompts[0]
 
 
 def test_injected_local_proposer_does_not_pollute_production_audit(

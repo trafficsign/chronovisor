@@ -714,6 +714,36 @@ def test_duplicate_reuses_durable_frontier_approval_for_mutation_retry(
     assert body == "Loser\n"
 
 
+def test_duplicate_complete_inventory_retires_absent_pending_pair(tmp_path: Path) -> None:
+    store = _convergence_store(tmp_path)
+    merged = store.merge_item(
+        lane=autonomy.DUPLICATE_FRONTIER_LANE,
+        source_id="old-left<->old-right",
+        input_data={"pair": ["old-left", "old-right"]},
+        resolver_version=autonomy.DUPLICATE_FRONTIER_RESOLVER_VERSION,
+    )
+    key = merged["item"]["key"]
+
+    partial = autonomy.resolve_deferred_duplicates_with_frontier(
+        [],
+        convergence_store=store,
+        inventory_complete=False,
+        now=NOW,
+    )
+    assert partial["retired_absent"] == []
+    assert store.get(key)["status"] == "pending_local"
+
+    complete = autonomy.resolve_deferred_duplicates_with_frontier(
+        [],
+        convergence_store=store,
+        inventory_complete=True,
+        now=NOW,
+    )
+    assert complete["retired_absent"] == [key]
+    assert complete["retired"] == [key]
+    assert store.get(key)["status"] == "rejected"
+
+
 def test_duplicate_stale_approval_cannot_cross_adoption_epoch(
     monkeypatch,
     tmp_path: Path,

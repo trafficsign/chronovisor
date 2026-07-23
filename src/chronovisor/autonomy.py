@@ -1722,6 +1722,7 @@ def resolve_deferred_duplicates_with_frontier(
     dry_run: bool = False,
     write: bool = True,
     eligible_keys: set[str] | None = None,
+    inventory_complete: bool = False,
 ) -> dict[str, Any]:
     """Boundedly converge deterministic duplicate deferrals via a frontier judge."""
     state = convergence_store or ConvergenceStore()
@@ -1741,6 +1742,22 @@ def resolve_deferred_duplicates_with_frontier(
         )
         if eligible_keys is None
         else {"status": "skipped", "reason": "targeted_allowlist", "retired": []}
+    )
+    active_source_ids = {
+        f"{candidate['left']}<->{candidate['right']}"
+        for record in records
+        if (candidate := _canonical_duplicate_record(record)) is not None
+    }
+    retired_absent = (
+        state.retire_absent_sources(
+            lane=DUPLICATE_FRONTIER_LANE,
+            active_source_ids=active_source_ids,
+            reason="duplicate_pair_no_longer_detected",
+            now=now,
+            dry_run=dry_run,
+        )
+        if inventory_complete and eligible_keys is None
+        else {"status": "skipped", "reason": "partial_inventory", "retired": []}
     )
     frontier_remaining = int(cycle_budget.snapshot()["remaining"]["frontier"])
     seen_keys: set[str] = set()
@@ -2380,7 +2397,13 @@ def resolve_deferred_duplicates_with_frontier(
         "frontier_calls": frontier_calls,
         "applied": applied,
         "kept_both": kept_both,
-        "retired": retired_stale.get("retired", []),
+        "retired": sorted(
+            {
+                *retired_stale.get("retired", []),
+                *retired_absent.get("retired", []),
+            }
+        ),
+        "retired_absent": retired_absent.get("retired", []),
         "status_counts": dict(sorted(status_counts.items())),
         "budget": cycle_budget.snapshot(),
         "results": results,

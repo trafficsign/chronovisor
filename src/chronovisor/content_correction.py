@@ -463,6 +463,20 @@ def _trim(text: str, limit: int) -> str:
     return text[:half] + "\n\n[... trimmed ...]\n\n" + text[-half:]
 
 
+def _trim_utf8(text: object, limit: int) -> str:
+    """Bound untrusted prompt evidence by encoded bytes, preserving both ends."""
+
+    value = str(text or "")
+    raw = value.encode("utf-8")
+    if len(raw) <= limit:
+        return value
+    marker = b"\n\n[... trimmed ...]\n\n"
+    remaining = max(2, limit - len(marker))
+    head = raw[: remaining // 2].decode("utf-8", errors="ignore")
+    tail = raw[-(remaining - remaining // 2) :].decode("utf-8", errors="ignore")
+    return head + marker.decode("ascii") + tail
+
+
 def is_non_user_transport_envelope(prompt: str) -> bool:
     """Recognize only the exact Claude teammate transport wrapper."""
 
@@ -1129,12 +1143,14 @@ def capture_session_corrections(
 
 def _page_evidence(page_ids: Iterable[str], context: str) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
+    selected_page_ids = list(page_ids)[:MAX_CANDIDATE_PAGES]
+    excerpt_bytes = max(650, 4_000 // max(1, len(selected_page_ids)))
     terms = list(
         dict.fromkeys(
             re.findall(r"[A-Za-z0-9_.+-]{3,}|[\u3040-\u30ff\u3400-\u9fff]{3,}", context)
         )
     )[:40]
-    for page_id in list(page_ids)[:MAX_CANDIDATE_PAGES]:
+    for page_id in selected_page_ids:
         path = _find_correctable_page(page_id)
         if path is None:
             continue
@@ -1144,20 +1160,21 @@ def _page_evidence(page_ids: Iterable[str], context: str) -> list[dict[str, Any]
         except (OSError, UnicodeDecodeError):
             continue
         excerpt = text
-        if len(text) > 45_000:
+        if len(text.encode("utf-8")) > excerpt_bytes:
             chunks: list[str] = []
             lower = text.casefold()
             for term in terms:
                 idx = lower.find(term.casefold())
                 if idx >= 0:
-                    chunks.append(text[max(0, idx - 2_500) : idx + 5_000])
-                if sum(len(chunk) for chunk in chunks) >= 38_000:
+                    chunks.append(text[max(0, idx - 500) : idx + 1_000])
+                if len("\n\n".join(chunks).encode("utf-8")) >= excerpt_bytes:
                     break
             excerpt = (
                 "\n\n[... contextual excerpt ...]\n\n".join(chunks)
                 if chunks
-                else _trim(text, 40_000)
+                else text
             )
+            excerpt = _trim_utf8(excerpt, excerpt_bytes)
         meta, _body = parse_frontmatter(text)
         evidence.append(
             {
@@ -1177,6 +1194,37 @@ def _local_proposal_prompt(
     *,
     required_classification: str = "",
 ) -> str:
+    prompt_event = {
+        key: event[key]
+        for key in (
+            "schema_version",
+            "kind",
+            "host",
+            "session_id",
+            "source_turn_ref",
+            "correction_turn_ref",
+            "source_decision_id",
+            "candidate_pages",
+            "candidate_page_hashes",
+            "revision",
+            "attribution",
+        )
+        if key in event
+    }
+    prompt_event.update(
+        {
+            "source_prompt": _trim_utf8(event.get("source_prompt"), 300),
+            "source_assistant_response": _trim_utf8(
+                event.get("source_assistant_response"), 700
+            ),
+            "correction_prompt": _trim_utf8(
+                event.get("correction_prompt"), 1_400
+            ),
+            "correction_assistant_response": _trim_utf8(
+                event.get("correction_assistant_response"), 200
+            ),
+        }
+    )
     trusted_directive = (
         "The frontier triage has already made the authoritative classification: "
         f"{required_classification}. You MUST return that decision and provide its "
@@ -1210,7 +1258,7 @@ text. Do not invent a corrected fact from assistant prose. Return strict JSON
 only.
 
 <CORRECTION_EVENT_UNTRUSTED_JSON>
-{json.dumps(event, ensure_ascii=False, indent=2)}
+{json.dumps(prompt_event, ensure_ascii=False, indent=2)}
 </CORRECTION_EVENT_UNTRUSTED_JSON>
 
 <CANDIDATE_PAGES_UNTRUSTED_JSON>
@@ -3876,7 +3924,7 @@ def _process_local_item(
         )
     context = " ".join(
         str(event.get(field) or "")
-        for field in ("source_prompt", "source_assistant_response", "correction_prompt")
+        for field in ("correction_prompt", "source_prompt", "source_assistant_response")
     )
     pages = _page_evidence(page_ids, context)
     try:
