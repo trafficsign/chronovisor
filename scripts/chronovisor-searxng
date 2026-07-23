@@ -1,0 +1,35 @@
+#!/bin/zsh
+set -euo pipefail
+
+readonly RUNTIME_ROOT="${CHRONOVISOR_SEARXNG_ROOT:-$HOME/.local/share/chronovisor/searxng}"
+readonly VENV="$RUNTIME_ROOT/.venv"
+readonly CONFIG_ROOT="$HOME/.chronovisor/runtime/searxng"
+readonly SETTINGS="$CONFIG_ROOT/settings.yml"
+readonly SECRET_FILE="$CONFIG_ROOT/secret"
+
+if [[ ! -x "$VENV/bin/granian" || ! -f "$SETTINGS" ]]; then
+  print -u2 "Chronovisor SearXNG is not installed; run scripts/install-searxng"
+  exit 66
+fi
+
+mkdir -p "$CONFIG_ROOT"
+if [[ ! -s "$SECRET_FILE" ]]; then
+  umask 077
+  /usr/bin/openssl rand -hex 32 > "$SECRET_FILE"
+fi
+
+export SEARXNG_SETTINGS_PATH="$SETTINGS"
+export SEARXNG_SECRET="$(<"$SECRET_FILE")"
+export SEARXNG_BIND_ADDRESS="127.0.0.1"
+export SEARXNG_PORT="8888"
+export SEARXNG_BASE_URL="http://127.0.0.1:8888/"
+export SEARXNG_LIMITER="false"
+export SEARXNG_PUBLIC_INSTANCE="false"
+
+cd "$RUNTIME_ROOT/source"
+exec "$VENV/bin/granian" \
+  --interface wsgi \
+  --host 127.0.0.1 \
+  --port 8888 \
+  --workers 1 \
+  searx.webapp:app

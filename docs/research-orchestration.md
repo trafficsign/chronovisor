@@ -70,9 +70,20 @@ local/metadata IPs, DNS rebinding, cross-host redirects, redirect loops,
 unsupported MIME types, and declared/streamed oversized bodies. Provider
 outages degrade to Wiki-only research.
 
-Supported search adapters are Brave, Tavily, SearXNG, and the keyless MediaWiki
-Action API fallback. Cached Web bodies are TTL-bound derived data; durable
-Evidence is stored only when adopted by a research run.
+The production Web path is a bounded federation of four adopted source packs:
+general Web through local SearXNG, code and releases through GitHub, academic
+metadata through arXiv and Crossref, and encyclopedic knowledge through
+MediaWiki. A deterministic router selects at most four upstream calls and
+round-robin merges specialist-first results while removing duplicate URLs.
+Unknown source-pack names fail closed instead of silently growing the provider
+surface. Brave and Tavily remain supported as optional single-provider
+adapters, but are not required by the production federation.
+
+The local SearXNG endpoint is the only loopback exception in the search egress
+guard. Normal Web fetches retain the public-address-only SSRF policy. Install or
+refresh the pinned local service with `scripts/install-searxng`. Cached Web
+bodies are TTL-bound derived data; durable Evidence is stored only when adopted
+by a research run.
 
 ## Checkpoints and consolidation
 
@@ -101,8 +112,12 @@ tie_break_model = "gemma4:26b"
 [research.web]
 adapter_enabled = true
 live_egress_enabled = true
-provider = "mediawiki"
-endpoint = "https://ja.wikipedia.org/w/api.php"
+provider = "federated"
+source_packs = ["general", "code", "academic", "encyclopedia"]
+searxng_endpoint = "http://127.0.0.1:8888"
+allow_local_search_backend = true
+max_provider_calls = 4
+per_provider_limit = 3
 
 [research.compaction]
 enabled = true

@@ -12,6 +12,11 @@ future visibility or licensing change requires a fresh source/provenance audit.
   search contract: <https://docs.searxng.org/dev/search_api.html>.
 - MediaWiki's public Action API search documentation informed the keyless
   official fallback: <https://www.mediawiki.org/wiki/API:Search>.
+- GitHub's public repository Search API informed the code source pack:
+  <https://docs.github.com/en/rest/search/search>.
+- arXiv's public API and Crossref's REST API informed the academic source pack:
+  <https://info.arxiv.org/help/api/> and
+  <https://api.crossref.org/swagger-ui/index.html>.
 - Python `httpx`, standard URL parsing, IP classification, and project-local
   security fixtures informed the fetch boundary.
 

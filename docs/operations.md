@@ -93,6 +93,22 @@ untrusted data, never instructions. Supported claims receive citations derived
 from immutable Evidence Artifacts; contradicted and unknown claims remain
 explicit.
 
+Production Web search uses four adopted source packs rather than an open-ended
+provider list: local SearXNG for general discovery, GitHub for code/releases,
+arXiv plus Crossref for academic metadata, and MediaWiki for encyclopedic
+queries or bounded fallback. Install the pinned loopback-only SearXNG service
+before enabling the federation:
+
+```sh
+scripts/install-searxng
+curl --fail --silent \
+  'http://127.0.0.1:8888/search?q=Chronovisor&format=json'
+```
+
+GitHub works without a token at the public unauthenticated rate limit. Set
+`GITHUB_TOKEN` in the MCP process only if a higher authenticated limit is
+needed; the token is never written to research traces.
+
 Run the mutation-free adversarial verifier before rollout or after changing
 budgets/providers:
 

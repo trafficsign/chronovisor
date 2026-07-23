@@ -1,0 +1,56 @@
+#!/bin/zsh
+set -euo pipefail
+
+readonly SCRIPT_DIR="${0:A:h}"
+readonly PROJECT_ROOT="${SCRIPT_DIR:h}"
+readonly RUNTIME_ROOT="${CHRONOVISOR_SEARXNG_ROOT:-$HOME/.local/share/chronovisor/searxng}"
+readonly SOURCE_ROOT="$RUNTIME_ROOT/source"
+readonly VENV="$RUNTIME_ROOT/.venv"
+readonly CONFIG_ROOT="$HOME/.chronovisor/runtime/searxng"
+readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-searxng.plist"
+readonly LABEL="com.trafficsign.chronovisor-searxng"
+readonly REVISION="ef8f6470e0473a1548f175217aaa7b9346ce6973"
+readonly DOMAIN="gui/$(/usr/bin/id -u)"
+
+mkdir -p "$RUNTIME_ROOT" "$CONFIG_ROOT" "$HOME/.chronovisor/logs" "${LAUNCH_AGENT:h}"
+
+if [[ ! -d "$SOURCE_ROOT/.git" ]]; then
+  /usr/bin/git clone https://github.com/searxng/searxng.git "$SOURCE_ROOT"
+else
+  /usr/bin/git -C "$SOURCE_ROOT" fetch --prune origin
+fi
+/usr/bin/git -C "$SOURCE_ROOT" checkout --detach "$REVISION"
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+  /Users/trafficsign/.local/bin/uv venv --python 3.13 "$VENV"
+fi
+/Users/trafficsign/.local/bin/uv pip install \
+  --python "$VENV/bin/python" \
+  setuptools pyyaml msgspec typing-extensions pybind11 granian
+/Users/trafficsign/.local/bin/uv pip install \
+  --python "$VENV/bin/python" \
+  --no-build-isolation \
+  --editable "$SOURCE_ROOT"
+
+/usr/bin/install -m 0600 \
+  "$PROJECT_ROOT/deploy/searxng/settings.yml" \
+  "$CONFIG_ROOT/settings.yml"
+/usr/bin/install -m 0644 \
+  "$PROJECT_ROOT/launchd/com.trafficsign.chronovisor-searxng.plist" \
+  "$LAUNCH_AGENT"
+
+/bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+/bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"
+/bin/launchctl kickstart -k "$DOMAIN/$LABEL"
+
+for _attempt in {1..20}; do
+  if /usr/bin/curl --fail --silent --max-time 2 \
+    "http://127.0.0.1:8888/search?q=Chronovisor&format=json" >/dev/null; then
+    print "Chronovisor SearXNG is ready at http://127.0.0.1:8888"
+    exit 0
+  fi
+  /bin/sleep 0.5
+done
+
+print -u2 "SearXNG did not become ready; inspect ~/.chronovisor/logs/searxng.launchd.err.log"
+exit 1
