@@ -56,7 +56,10 @@ SUPPORTED_LANES = (
 LANE_LIMITS = {
     "content_correction": 6,
     "autonomy_duplicate_resolution": 3,
-    "lint_repair": 5,
+    # Deterministic observations and orphan routing do not consume model-call
+    # or mutation authority. Keep their throughput separate from the bounded
+    # semantic tag-review budget so cheap rows cannot accumulate forever.
+    "lint_repair": 200,
     "orphan_link": 2,
     "autonomy_retention": 3,
 }

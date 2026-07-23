@@ -182,7 +182,9 @@ def test_dry_run_writes_neither_manifest_nor_convergence(
     assert result["items"][0]["key"] == item["key"]
     assert store.state_file.read_bytes() == state_before
     assert store.events_file.read_bytes() == events_before
-    assert not (chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "convergence" / "drains").exists()
+    assert not (
+        chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "convergence" / "drains"
+    ).exists()
     assert "CHRONOVISOR_READ_ONLY" not in os.environ
 
 
@@ -652,14 +654,18 @@ def test_start_rejects_existing_frontier_activity_before_manifest(
         "_build_inventory",
         lambda items: _inventory(list(items)),
     )
-    active = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active"
+    active = (
+        chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active"
+    )
     active.mkdir(parents=True)
     (active / "already-running.json").write_text("{}\n", encoding="utf-8")
 
     with pytest.raises(convergence_drain.DrainError, match="already_active"):
         convergence_drain.start(store=store, run_once=False)
 
-    assert not (chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "convergence" / "drains").exists()
+    assert not (
+        chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "convergence" / "drains"
+    ).exists()
 
 
 def test_start_rechecks_frontier_immediately_before_manifest_persistence(
@@ -685,7 +691,9 @@ def test_start_rechecks_frontier_immediately_before_manifest_persistence(
     with pytest.raises(convergence_drain.DrainError, match="before manifest"):
         convergence_drain.start(store=store, run_once=False)
 
-    drain_dir = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "convergence" / "drains"
+    drain_dir = (
+        chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "convergence" / "drains"
+    )
     assert not list(drain_dir.glob("*.json"))
 
 
@@ -1819,7 +1827,7 @@ def test_lane_dispatch_passes_exact_per_lane_allowlists(tmp_path, monkeypatch) -
     for lane, item in items.items():
         assert calls[lane]["eligible_keys"] == {item["key"]}
     assert calls["content_correction"]["max_items"] == 6
-    assert calls["lint_repair"]["max_items"] == 5
+    assert calls["lint_repair"]["max_items"] == 200
     assert calls["orphan_link"]["orphan_limit"] == 2
     assert calls["autonomy_retention"]["limit"] == 3
 
