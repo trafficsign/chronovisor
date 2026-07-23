@@ -330,6 +330,61 @@ def test_audit_store_keeps_a_bounded_tail_and_refreshes_summary(tmp_path: Path) 
     }
 
 
+def test_trace_store_keeps_ordered_redacted_bounded_transitions(tmp_path: Path) -> None:
+    store = LocalConsensusAuditStore(
+        tmp_path / "audit",
+        max_records=2,
+        max_trace_records=3,
+    )
+    secret = "never-copy-this-prompt"
+
+    for index, phase in enumerate(("trigger", "context", "generate", "validate")):
+        store.record_transition(
+            request_sha256="a" * 64,
+            role="ingest_review:primary",
+            model="local:test",
+            phase=phase,
+            attempt=index,
+        )
+
+    rows = [
+        json.loads(line)
+        for line in store.trace_file.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in rows] == ["context", "generate", "validate"]
+    assert len({row["event_id"] for row in rows}) == 3
+    assert all(row["kind"] == "phase" for row in rows)
+    assert secret not in store.trace_file.read_text(encoding="utf-8")
+    assert not any("prompt" in row or "raw_output" in row for row in rows)
+
+
+def test_session_trace_records_real_phases_and_terminal_result(tmp_path: Path) -> None:
+    audit_root = tmp_path / "local-consensus"
+    result = _session(
+        QueueTransport('{"decision":"apply","summary":"ok"}'),
+        audit_root=audit_root,
+    ).run("private prompt", SCHEMA)
+
+    rows = [
+        json.loads(line)
+        for line in (audit_root / "trace-events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert result.ok is True
+    assert [row["phase"] for row in rows] == [
+        "trigger",
+        "context",
+        "generate",
+        "validate",
+        "vote",
+        "vote",
+    ]
+    assert rows[-1]["kind"] == "session"
+    assert rows[-1]["status"] == "done"
+    assert "private prompt" not in json.dumps(rows)
+
+
 def test_audit_quarantine_is_compare_and_swap_guarded(tmp_path: Path) -> None:
     store = LocalConsensusAuditStore(tmp_path / "local-consensus")
     store.append({"kind": "session", "role": "test", "model": "fake"})
@@ -346,6 +401,11 @@ def test_audit_quarantine_is_compare_and_swap_guarded(tmp_path: Path) -> None:
     assert result["records"] == 2
     assert Path(result["archive"]).read_bytes() == original
     assert store.audit_file.read_bytes() == b""
+    trace_archive = Path(result["archive"]).with_name(
+        f"{Path(result['archive']).stem}-trace.jsonl"
+    )
+    assert trace_archive.exists()
+    assert store.trace_file.read_bytes() == b""
     summary = json.loads(store.summary_file.read_text(encoding="utf-8"))
     assert summary["retained_records"] == 0
     with pytest.raises(RuntimeError, match="changed before quarantine"):

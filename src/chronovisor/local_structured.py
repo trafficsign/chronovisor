@@ -31,6 +31,7 @@ from chronovisor.canonical_json import canonical_json_strict as _canonical_json
 MAX_REPAIR_TURNS = 2
 MAX_RESPONSES = 1 + MAX_REPAIR_TURNS
 MAX_AUDIT_RECORDS = 512
+MAX_TRACE_RECORDS = 2048
 CONTEXT_SAFETY_TOKENS = 256
 SAFE_ACTIVITY_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
@@ -764,6 +765,7 @@ class LocalConsensusAuditStore:
         root: Path | None = None,
         *,
         max_records: int = MAX_AUDIT_RECORDS,
+        max_trace_records: int = MAX_TRACE_RECORDS,
     ) -> None:
         if (
             isinstance(max_records, bool)
@@ -771,6 +773,12 @@ class LocalConsensusAuditStore:
             or max_records < 1
         ):
             raise ValueError("max_records must be a positive integer")
+        if (
+            isinstance(max_trace_records, bool)
+            or not isinstance(max_trace_records, int)
+            or max_trace_records < 1
+        ):
+            raise ValueError("max_trace_records must be a positive integer")
         from chronovisor.store import CHRONOVISOR_ROOT
 
         self.root = (
@@ -780,9 +788,11 @@ class LocalConsensusAuditStore:
         )
         self.active_dir = self.root / "active"
         self.audit_file = self.root / "audit.jsonl"
+        self.trace_file = self.root / "trace-events.jsonl"
         self.summary_file = self.root / "summary.json"
         self.lock_file = self.root / "audit.lock"
         self.max_records = max_records
+        self.max_trace_records = max_trace_records
 
     @staticmethod
     def _atomic_write(path: Path, text: str) -> None:
@@ -830,6 +840,66 @@ class LocalConsensusAuditStore:
                 rows.append(row)
         return rows
 
+    def _read_trace_rows(self) -> list[dict[str, Any]]:
+        try:
+            lines = self.trace_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in lines[-self.max_trace_records :]:
+            try:
+                row = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
+
+    def _write_trace_rows_locked(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._atomic_write(
+            self.trace_file,
+            "".join(
+                json.dumps(
+                    dict(item),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                + "\n"
+                for item in rows[-self.max_trace_records :]
+            ),
+        )
+
+    @staticmethod
+    def _trace_event_from_audit(row: Mapping[str, Any]) -> dict[str, Any] | None:
+        kind = str(row.get("kind") or "")
+        if kind not in {"session", "decision", "decision_artifact_replay"}:
+            return None
+        status = "done"
+        if kind == "session" and not bool(row.get("ok")):
+            status = "error"
+        elif kind == "decision" and row.get("status") != "agreed":
+            status = "error"
+        repair_turns = row.get("repair_turns")
+        return {
+            "schema_version": 1,
+            "event_id": uuid4().hex,
+            "kind": kind,
+            "timestamp": str(row.get("timestamp") or _utc_timestamp()),
+            "request_sha256": str(row.get("request_sha256") or ""),
+            "role": str(row.get("role") or "structured"),
+            "model": str(row.get("model") or ""),
+            "phase": "vote" if kind == "session" else "decision",
+            "attempt": (
+                int(repair_turns)
+                if isinstance(repair_turns, int)
+                and not isinstance(repair_turns, bool)
+                else 0
+            ),
+            "status": status,
+        }
+
     def append(self, record: Mapping[str, Any]) -> None:
         """Append one redacted record and atomically refresh the bounded summary."""
 
@@ -842,6 +912,7 @@ class LocalConsensusAuditStore:
             separators=(",", ":"),
             allow_nan=False,
         )
+        trace_event = self._trace_event_from_audit(row)
         with self._lock():
             rows = [*self._read_rows(), json.loads(encoded)][-self.max_records :]
             self._atomic_write(
@@ -868,6 +939,41 @@ class LocalConsensusAuditStore:
                 )
                 + "\n",
             )
+            if trace_event is not None:
+                trace_rows = [
+                    *self._read_trace_rows(),
+                    trace_event,
+                ][-self.max_trace_records :]
+                self._write_trace_rows_locked(trace_rows)
+
+    def record_transition(
+        self,
+        *,
+        request_sha256: str,
+        role: str,
+        model: str,
+        phase: str,
+        attempt: int,
+    ) -> None:
+        """Persist one redacted real phase transition for dashboard replay."""
+
+        if phase not in LOCAL_ACTIVITY_PHASES:
+            return
+        row = {
+            "schema_version": 1,
+            "event_id": uuid4().hex,
+            "kind": "phase",
+            "timestamp": _utc_timestamp(),
+            "request_sha256": request_sha256,
+            "role": role,
+            "model": model,
+            "phase": phase,
+            "attempt": attempt,
+            "status": "active",
+        }
+        with self._lock():
+            rows = [*self._read_trace_rows(), row][-self.max_trace_records :]
+            self._write_trace_rows_locked(rows)
 
     def quarantine_records(
         self,
@@ -909,6 +1015,14 @@ class LocalConsensusAuditStore:
                 )
                 + "\n",
             )
+            try:
+                trace_raw = self.trace_file.read_bytes()
+            except FileNotFoundError:
+                trace_raw = b""
+            if trace_raw:
+                trace_archive = archive.with_name(f"{archive.stem}-trace.jsonl")
+                self._atomic_write(trace_archive, trace_raw.decode("utf-8"))
+                self._atomic_write(self.trace_file, "")
         return {
             "status": "quarantined",
             "records": len(raw.splitlines()),
@@ -928,8 +1042,10 @@ class LocalConsensusAuditStore:
 
         path: Path | None = None
         record: dict[str, Any] = {}
+        last_transition: tuple[str, int] | None = None
 
         def update(phase: str, attempt: int | None = None) -> None:
+            nonlocal last_transition
             if path is None or phase not in LOCAL_ACTIVITY_PHASES:
                 return
             if attempt is not None and (
@@ -937,10 +1053,17 @@ class LocalConsensusAuditStore:
             ):
                 return
             try:
+                normalized_attempt = (
+                    int(attempt)
+                    if attempt is not None
+                    else int(record.get("attempt") or 0)
+                )
+                current = (phase, normalized_attempt)
+                if last_transition == current:
+                    return
                 record["phase"] = phase
                 record["updated_at"] = _utc_timestamp()
-                if attempt is not None:
-                    record["attempt"] = attempt
+                record["attempt"] = normalized_attempt
                 self._atomic_write(
                     path,
                     json.dumps(
@@ -951,6 +1074,14 @@ class LocalConsensusAuditStore:
                     )
                     + "\n",
                 )
+                self.record_transition(
+                    request_sha256=request_sha256,
+                    role=role,
+                    model=model,
+                    phase=phase,
+                    attempt=normalized_attempt,
+                )
+                last_transition = current
             except Exception:
                 # Progress telemetry must never affect the local decision.
                 return

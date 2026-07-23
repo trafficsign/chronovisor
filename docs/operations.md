@@ -46,6 +46,15 @@ Batch Yield render artifact-bound ingest semantic defers separately from
 pending and failed work. Guarded Codex repair has a separate incident/budget
 view. A missing or dead worker PID is idle, not live work.
 
+Dashboard Decision Trace is event-backed, not a simulated progress animation.
+Each local structured session writes redacted phase transitions to the bounded
+`runtime/local-consensus/trace-events.jsonl` journal. The dashboard reads only
+the current request through `/api/local-consensus`, polls that lightweight view
+independently of the full snapshot, and replays unseen event IDs in durable
+order. The journal never contains prompts, schemas, raw model output, or vote
+payloads. Reduced-motion and background tabs skip animation and render the
+latest authoritative state immediately.
+
 ## Evidence Research
 
 `chronovisor_research` is an MCP tool and is asynchronous by default. Inspect the

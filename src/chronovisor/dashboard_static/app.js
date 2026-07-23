@@ -25,6 +25,8 @@ const els = {
   decisionOutcomeNext: document.getElementById("decision-outcome-next"),
   decisionTraceCaption: document.getElementById("decision-trace-caption"),
   decisionOverallSteps: document.getElementById("decision-overall-steps"),
+  decisionTransitionState: document.getElementById("decision-transition-state"),
+  decisionTransitionFeed: document.getElementById("decision-transition-feed"),
   decisionLanes: document.querySelectorAll("[data-decision-lane]"),
   currentRaw: document.getElementById("current-raw"),
   currentOp: document.getElementById("current-op"),
@@ -427,8 +429,191 @@ function renderWorkStatus(status) {
   setWorkState(stateKind);
 }
 
-function renderDecisionTrace(consensus) {
-  const trace = consensus?.decision_trace || {};
+const DECISION_LANE_PHASES = [
+  "trigger",
+  "load",
+  "context",
+  "generate",
+  "validate",
+  "vote",
+];
+const decisionTracePlayback = {
+  initialized: false,
+  request: "",
+  seen: new Set(),
+  queue: [],
+  playing: false,
+  timer: null,
+  target: null,
+  current: null,
+  focus: null,
+};
+
+const decisionReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+function cloneDecisionTrace(trace) {
+  return JSON.parse(JSON.stringify(trace || {}));
+}
+
+function reconcileDecisionSteps(container, steps, className, focusKey = "") {
+  const existing = new Map(
+    [...container.querySelectorAll(`.${className}`)].map((node) => [
+      node.dataset.traceKey,
+      node,
+    ])
+  );
+  (Array.isArray(steps) ? steps : []).forEach((step) => {
+    const key = fmt(step.key, "step");
+    const item = existing.get(key) || document.createElement("span");
+    item.dataset.traceKey = key;
+    if (className === "decision-step") item.dataset.decisionOverallStep = key;
+    if (className === "decision-lane-step") item.dataset.decisionLaneStep = key;
+    item.className = `${className} ${fmt(step.status, "pending")}`;
+    item.classList.toggle("trace-focus", key === focusKey);
+    let label = item.querySelector("span");
+    if (!label) {
+      label = document.createElement("span");
+      item.appendChild(label);
+    }
+    label.textContent = fmt(step.label, "Step");
+    container.appendChild(item);
+    existing.delete(key);
+  });
+  existing.forEach((node) => node.remove());
+}
+
+function decisionEventText(event) {
+  const lane = event?.lane
+    ? event.lane === "tie_break"
+      ? "Tie-break"
+      : `${event.lane.charAt(0).toUpperCase()}${event.lane.slice(1)}`
+    : "System";
+  const attempt = Number(event?.attempt || 0);
+  const suffix = event?.phase === "repair" ? ` · retry ${attempt}` : "";
+  return `${lane} · ${fmt(event?.label, event?.phase || "transition")}${suffix}`;
+}
+
+function renderDecisionTransitionFeed(events, focusEvent = null) {
+  const rows = Array.isArray(events) ? events : [];
+  const visible = rows.slice(-5);
+  if (
+    focusEvent
+    && !visible.some((event) => event.event_id === focusEvent.event_id)
+  ) {
+    visible.unshift(focusEvent);
+  }
+  els.decisionTransitionFeed.textContent = "";
+  visible.slice(-6).forEach((event) => {
+    const item = document.createElement("li");
+    item.className = "decision-transition-event";
+    item.classList.toggle(
+      "current",
+      Boolean(focusEvent && event.event_id === focusEvent.event_id)
+    );
+    item.textContent = decisionEventText(event);
+    item.title = `${timeLabel(event.timestamp)} · ${decisionEventText(event)}`;
+    els.decisionTransitionFeed.appendChild(item);
+  });
+}
+
+function decisionTraceBlank(target) {
+  const trace = cloneDecisionTrace(target);
+  trace.state = "active";
+  trace.active = true;
+  trace.summary = "Observed transition replay";
+  trace.overall = (trace.overall || []).map((step) => ({
+    ...step,
+    status: "pending",
+  }));
+  trace.lanes = (trace.lanes || []).map((lane) => ({
+    ...lane,
+    state: "pending",
+    result: "Waiting",
+    detail: "Not started",
+    phase: null,
+    steps: (lane.steps || []).map((step) => ({ ...step, status: "pending" })),
+  }));
+  return trace;
+}
+
+function applyDecisionTransition(current, target, event) {
+  if (!event || event.phase === "decision") return cloneDecisionTrace(target);
+  const frame = cloneDecisionTrace(current || decisionTraceBlank(target));
+  frame.state = "active";
+  frame.active = true;
+  frame.request_sha256 = target.request_sha256;
+  frame.task_role = target.task_role;
+  frame.started_at = target.started_at || frame.started_at;
+  frame.updated_at = event.timestamp || target.updated_at;
+  frame.context_tokens = target.context_tokens;
+  frame.quorum_flow = target.quorum_flow;
+  frame.artifact_replay = target.artifact_replay;
+  frame.outcome = {
+    kind: "active",
+    reason: "Replaying observed local transition",
+    data: "No synthetic progress",
+    next: "Mutation stays locked",
+    code: "observed_transition_replay",
+  };
+
+  const targetLane = (target.lanes || []).find((lane) => lane.key === event.lane);
+  const lane = (frame.lanes || []).find((item) => item.key === event.lane);
+  if (!lane || !targetLane) return frame;
+  Object.assign(lane, {
+    label: targetLane.label,
+    model: targetLane.model,
+    phase: event.phase,
+  });
+
+  if (event.kind === "session") {
+    const failed = event.status === "error";
+    lane.state = failed ? "error" : "done";
+    lane.result = failed ? "Invalid vote" : "Valid vote";
+    lane.detail = failed ? "Validation failed" : "Observed session complete";
+    lane.steps = (targetLane.steps || []).map((step) => ({
+      ...step,
+      status:
+        failed && step.key === "validate"
+          ? "error"
+          : failed && step.key === "vote"
+            ? "skipped"
+            : "done",
+    }));
+  } else {
+    const phase = event.phase === "repair" ? "generate" : event.phase;
+    const index = Math.max(0, DECISION_LANE_PHASES.indexOf(phase));
+    lane.state = "active";
+    lane.result = fmt(event.label, phase);
+    lane.detail = event.phase === "repair"
+      ? `JSON repair · attempt ${Number(event.attempt || 0) + 1}`
+      : "Observed live transition";
+    lane.steps = (targetLane.steps || []).map((step, stepIndex) => ({
+      ...step,
+      status: stepIndex < index ? "done" : stepIndex === index ? "active" : "pending",
+    }));
+  }
+
+  const overallKey = fmt(event.overall_key, "");
+  const overallIndex = (target.overall || []).findIndex(
+    (step) => step.key === overallKey
+  );
+  frame.overall = (target.overall || []).map((step, index) => ({
+    ...step,
+    status:
+      event.kind === "session" && step.key === "quorum"
+        ? "active"
+        : index < overallIndex
+          ? "done"
+          : index === overallIndex
+            ? "active"
+            : "pending",
+  }));
+  frame.summary = decisionEventText(event);
+  return frame;
+}
+
+function renderDecisionTraceFrame(trace, focusEvent = null) {
+  trace = trace || {};
   const outcome = trace.outcome || {};
   const traceState = String(trace.state || "idle");
   const request = String(trace.request_sha256 || "");
@@ -442,17 +627,13 @@ function renderDecisionTrace(consensus) {
     ? `Context ${Math.round(contextTokens / 1024)}K`
     : "Context --";
 
-  els.decisionOverallSteps.innerHTML = "";
   const overall = Array.isArray(trace.overall) ? trace.overall : [];
-  overall.forEach((step) => {
-    const item = document.createElement("span");
-    item.className = `decision-step ${fmt(step.status, "pending")}`;
-    item.dataset.decisionOverallStep = fmt(step.key, "step");
-    const label = document.createElement("span");
-    label.textContent = fmt(step.label, "Step");
-    item.appendChild(label);
-    els.decisionOverallSteps.appendChild(item);
-  });
+  reconcileDecisionSteps(
+    els.decisionOverallSteps,
+    overall,
+    "decision-step",
+    fmt(focusEvent?.overall_key, "")
+  );
 
   const activeOverallIndex = overall.findIndex((step) => step.status === "active");
   const doneOverallCount = overall.filter((step) => step.status === "done").length;
@@ -474,17 +655,22 @@ function renderDecisionTrace(consensus) {
     const model = element.querySelector(".decision-model");
     const steps = element.querySelector(".decision-lane-steps");
     const result = element.querySelector(".decision-lane-result");
+    element.classList.toggle(
+      "event-focus",
+      Boolean(focusEvent && focusEvent.lane === element.dataset.decisionLane)
+    );
     role.textContent = fmt(lane.label, element.dataset.decisionLane);
     model.textContent = fmt(lane.model, "not configured");
-    steps.innerHTML = "";
-    (Array.isArray(lane.steps) ? lane.steps : []).forEach((step) => {
-      const item = document.createElement("span");
-      item.className = `decision-lane-step ${fmt(step.status, "pending")}`;
-      const label = document.createElement("span");
-      label.textContent = fmt(step.label, "Step");
-      item.appendChild(label);
-      steps.appendChild(item);
-    });
+    reconcileDecisionSteps(
+      steps,
+      lane.steps,
+      "decision-lane-step",
+      focusEvent?.lane === element.dataset.decisionLane
+        ? focusEvent.phase === "repair"
+          ? "generate"
+          : fmt(focusEvent.phase, "")
+        : ""
+    );
     const resultLabel =
       laneState === "pending"
         ? "WAITING"
@@ -555,6 +741,124 @@ function renderDecisionTrace(consensus) {
     els.decisionOutcomeReason.textContent = "Waiting for local work";
     els.decisionOutcomeData.textContent = "No active decision";
     els.decisionOutcomeNext.textContent = "Starts automatically";
+  }
+}
+
+function setDecisionTransitionState(trace, mode = "steady") {
+  const events = Array.isArray(trace?.events) ? trace.events : [];
+  const latest = events[events.length - 1];
+  els.decisionTransitionState.classList.toggle(
+    "catching-up",
+    mode === "catching-up"
+  );
+  if (mode === "catching-up") {
+    els.decisionTransitionState.textContent = `Catching up · ${decisionTracePlayback.queue.length + 1}`;
+  } else if (trace?.active) {
+    els.decisionTransitionState.textContent = latest
+      ? `Live · ${fmt(latest.label, latest.phase)}`
+      : "Live · observing";
+  } else if (trace?.request_sha256) {
+    els.decisionTransitionState.textContent = `Sealed · ${events.length} events`;
+  } else {
+    els.decisionTransitionState.textContent = "Live · waiting";
+  }
+}
+
+function finishDecisionTracePlayback() {
+  decisionTracePlayback.playing = false;
+  decisionTracePlayback.focus = null;
+  decisionTracePlayback.current = cloneDecisionTrace(decisionTracePlayback.target);
+  renderDecisionTraceFrame(decisionTracePlayback.current);
+  renderDecisionTransitionFeed(decisionTracePlayback.target?.events);
+  setDecisionTransitionState(decisionTracePlayback.target);
+}
+
+function playNextDecisionTransition() {
+  if (
+    decisionReducedMotion.matches
+    || document.visibilityState === "hidden"
+    || decisionTracePlayback.queue.length === 0
+  ) {
+    decisionTracePlayback.queue = [];
+    finishDecisionTracePlayback();
+    return;
+  }
+
+  decisionTracePlayback.playing = true;
+  const event = decisionTracePlayback.queue.shift();
+  decisionTracePlayback.focus = event;
+  decisionTracePlayback.current = applyDecisionTransition(
+    decisionTracePlayback.current,
+    decisionTracePlayback.target,
+    event
+  );
+  renderDecisionTraceFrame(decisionTracePlayback.current, event);
+  renderDecisionTransitionFeed(decisionTracePlayback.target?.events, event);
+  setDecisionTransitionState(decisionTracePlayback.target, "catching-up");
+  const backlog = decisionTracePlayback.queue.length;
+  const delay = backlog > 8 ? 90 : backlog > 4 ? 160 : 420;
+  decisionTracePlayback.timer = window.setTimeout(playNextDecisionTransition, delay);
+}
+
+function renderDecisionTrace(consensus) {
+  const target = cloneDecisionTrace(consensus?.decision_trace || {});
+  const request = String(target.request_sha256 || "");
+  const events = (Array.isArray(target.events) ? target.events : []).filter(
+    (event) => event && event.event_id
+  );
+  target.events = events;
+
+  if (!decisionTracePlayback.initialized) {
+    decisionTracePlayback.initialized = true;
+    decisionTracePlayback.request = request;
+    decisionTracePlayback.target = target;
+    decisionTracePlayback.current = cloneDecisionTrace(target);
+    events.forEach((event) => decisionTracePlayback.seen.add(event.event_id));
+    renderDecisionTraceFrame(target);
+    renderDecisionTransitionFeed(events);
+    setDecisionTransitionState(target);
+    return;
+  }
+
+  if (request !== decisionTracePlayback.request) {
+    if (decisionTracePlayback.timer !== null) {
+      window.clearTimeout(decisionTracePlayback.timer);
+      decisionTracePlayback.timer = null;
+    }
+    decisionTracePlayback.request = request;
+    decisionTracePlayback.target = target;
+    decisionTracePlayback.seen = new Set(events.map((event) => event.event_id));
+    decisionTracePlayback.queue = [...events];
+    decisionTracePlayback.playing = false;
+    decisionTracePlayback.current = decisionTraceBlank(target);
+    if (
+      request
+      && events.length
+      && !decisionReducedMotion.matches
+      && document.visibilityState !== "hidden"
+    ) {
+      renderDecisionTraceFrame(decisionTracePlayback.current);
+      renderDecisionTransitionFeed(events);
+      playNextDecisionTransition();
+    } else {
+      finishDecisionTracePlayback();
+    }
+    return;
+  }
+
+  decisionTracePlayback.target = target;
+  const unseen = events.filter(
+    (event) => !decisionTracePlayback.seen.has(event.event_id)
+  );
+  unseen.forEach((event) => decisionTracePlayback.seen.add(event.event_id));
+  decisionTracePlayback.queue.push(...unseen);
+  if (decisionTracePlayback.queue.length && !decisionTracePlayback.playing) {
+    playNextDecisionTransition();
+  } else if (!decisionTracePlayback.playing) {
+    decisionTracePlayback.current = cloneDecisionTrace(target);
+    renderDecisionTraceFrame(target);
+    renderDecisionTransitionFeed(events);
+    setDecisionTransitionState(target);
   }
 }
 
@@ -2186,7 +2490,12 @@ const FAST_SNAPSHOT_TIMEOUT_MS = 3000;
 const ACTIVE_REFRESH_DELAY_MS = 5000;
 const IDLE_REFRESH_DELAY_MS = 10000;
 const ERROR_REFRESH_DELAY_MS = 5000;
+const DECISION_REFRESH_TIMEOUT_MS = 2500;
+const ACTIVE_DECISION_REFRESH_DELAY_MS = 800;
+const IDLE_DECISION_REFRESH_DELAY_MS = 2500;
 let nextRefreshDelayMs = IDLE_REFRESH_DELAY_MS;
+let decisionRefreshInFlight = false;
+let nextDecisionRefreshDelayMs = IDLE_DECISION_REFRESH_DELAY_MS;
 
 async function refreshFast() {
   const controller = new AbortController();
@@ -2262,6 +2571,41 @@ async function refreshLoop() {
   }
 }
 
+async function refreshDecisionTrace() {
+  if (decisionRefreshInFlight) return;
+  decisionRefreshInFlight = true;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    DECISION_REFRESH_TIMEOUT_MS
+  );
+  try {
+    const response = await fetch("/api/local-consensus", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const consensus = (await response.json()).local_consensus || {};
+    renderDecisionTrace(consensus);
+    nextDecisionRefreshDelayMs = consensus.active
+      ? ACTIVE_DECISION_REFRESH_DELAY_MS
+      : IDLE_DECISION_REFRESH_DELAY_MS;
+  } catch {
+    nextDecisionRefreshDelayMs = IDLE_DECISION_REFRESH_DELAY_MS;
+  } finally {
+    window.clearTimeout(timeoutId);
+    decisionRefreshInFlight = false;
+  }
+}
+
+async function decisionTraceRefreshLoop() {
+  try {
+    await refreshDecisionTrace();
+  } finally {
+    window.setTimeout(decisionTraceRefreshLoop, nextDecisionRefreshDelayMs);
+  }
+}
+
 els.saveModeButtons.forEach((button) => {
   button.addEventListener("click", () => {
     saveHistoryMode = button.dataset.saveMode || "daily";
@@ -2313,4 +2657,5 @@ async function copyLanLink() {
 els.lanShareButton.addEventListener("click", copyLanLink);
 
 void refreshLoop();
+void decisionTraceRefreshLoop();
 window.addEventListener("resize", refresh);

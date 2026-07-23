@@ -329,6 +329,84 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     assert trace["overall"][4]["status"] == "pending"
 
 
+def test_decision_trace_exposes_only_ordered_events_for_current_request(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_decision_trace_models",
+        lambda: {
+            "primary": "primary:model",
+            "challenger": "challenger:model",
+            "tie_break": "tie:model",
+        },
+    )
+    request = "c" * 64
+    other_request = "d" * 64
+    rows = [
+        {
+            "event_id": "event-other",
+            "kind": "phase",
+            "timestamp": "2026-07-15T11:59:59Z",
+            "request_sha256": other_request,
+            "role": "ingest_review:primary",
+            "model": "other:model",
+            "phase": "generate",
+            "attempt": 0,
+            "status": "active",
+            "prompt": "must not escape",
+        },
+        {
+            "event_id": "event-1",
+            "kind": "phase",
+            "timestamp": "2026-07-15T12:00:00Z",
+            "request_sha256": request,
+            "role": "ingest_review:primary",
+            "model": "primary:model",
+            "phase": "generate",
+            "attempt": 0,
+            "status": "active",
+            "raw_output": "must not escape",
+        },
+        {
+            "event_id": "event-2",
+            "kind": "session",
+            "timestamp": "2026-07-15T12:00:01Z",
+            "request_sha256": request,
+            "role": "ingest_review:primary",
+            "model": "primary:model",
+            "phase": "vote",
+            "attempt": 0,
+            "status": "done",
+        },
+    ]
+    trace = dashboard._decision_trace_snapshot(
+        [
+            {
+                "request_sha256": request,
+                "role": "ingest_review:challenger",
+                "model": "challenger:model",
+                "phase": "context",
+                "attempt": 0,
+            }
+        ],
+        [],
+        None,
+        rows,
+    )
+
+    assert [event["event_id"] for event in trace["events"]] == [
+        "event-1",
+        "event-2",
+    ]
+    assert trace["event_count"] == 2
+    assert trace["events"][0]["lane"] == "primary"
+    assert trace["events"][0]["overall_key"] == "generate"
+    assert trace["events"][1]["label"] == "Vote accepted"
+    assert "prompt" not in trace["events"][0]
+    assert "raw_output" not in trace["events"][0]
+
+
 def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
@@ -682,6 +760,8 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'id="decision-outcome-reason"' in page
     assert 'id="decision-outcome-data"' in page
     assert 'id="decision-outcome-next"' in page
+    assert 'id="decision-transition-state"' in page
+    assert 'id="decision-transition-feed"' in page
     assert 'id="lan-share-button"' in page
     assert "<span>Page changes</span>" in page
     assert "${pageChanges} changes" in app
@@ -698,6 +778,12 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "text-overflow: ellipsis;" in style
     assert "white-space: nowrap;" in style
     assert ".decision-outcome-facts" in style
+    assert ".decision-transition-event.current" in style
+    assert "function reconcileDecisionSteps" in app
+    assert "const decisionTracePlayback" in app
+    assert "const ACTIVE_DECISION_REFRESH_DELAY_MS = 800" in app
+    assert 'fetch("/api/local-consensus"' in app
+    assert "No synthetic progress" in app
     assert ".decision-trace-panel" in style
 
 

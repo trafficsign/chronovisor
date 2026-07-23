@@ -1820,6 +1820,7 @@ def _empty_local_consensus_summary() -> dict[str, Any]:
 
 _DECISION_TRACE_ROLES = ("primary", "challenger", "tie_break")
 _DECISION_TRACE_PHASES = ("trigger", "load", "context", "generate", "validate", "vote")
+_DECISION_TRACE_EVENT_LIMIT = 64
 
 
 def _decision_trace_role(value: object) -> tuple[str, str, bool]:
@@ -1889,6 +1890,87 @@ def _decision_trace_steps(
             status = "pending"
         steps.append({"key": key, "label": labels[key], "status": status})
     return steps
+
+
+def _decision_trace_events(
+    rows: list[dict[str, Any]],
+    *,
+    request_sha256: str,
+) -> list[dict[str, Any]]:
+    """Return a bounded, redacted, ordered transition stream for one request."""
+
+    phase_labels = {
+        "trigger": "Triggered",
+        "load": "Loading model",
+        "context": "Building context",
+        "generate": "Generating",
+        "repair": "Repairing JSON",
+        "validate": "Validating",
+        "vote": "Vote ready",
+        "decision": "Decision sealed",
+    }
+    overall_keys = {
+        "trigger": "dispatch",
+        "load": "dispatch",
+        "context": "generate",
+        "generate": "generate",
+        "repair": "generate",
+        "validate": "validate",
+        "vote": "quorum",
+        "decision": "decision",
+    }
+    events: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if str(row.get("request_sha256") or "") != request_sha256:
+            continue
+        event_id = str(row.get("event_id") or "")
+        timestamp = str(row.get("timestamp") or "")
+        phase = str(row.get("phase") or "")
+        kind = str(row.get("kind") or "phase")
+        status = str(row.get("status") or "active")
+        if (
+            not event_id
+            or event_id in seen
+            or phase not in {*_DECISION_TRACE_PHASES, "repair", "decision"}
+            or kind not in {"phase", "session", "decision", "decision_artifact_replay"}
+            or status not in {"active", "done", "error"}
+        ):
+            continue
+        seen.add(event_id)
+        role = str(row.get("role") or "structured")
+        _base, lane, explicit_lane = _decision_trace_role(role)
+        if phase == "decision" and not explicit_lane:
+            lane_value: str | None = None
+        else:
+            lane_value = lane
+        label = phase_labels[phase]
+        if kind == "session":
+            label = "Vote accepted" if status == "done" else "Vote rejected"
+        elif kind == "decision_artifact_replay":
+            label = "Artifact replayed"
+        elif kind == "decision":
+            label = "Decision approved" if status == "done" else "Decision held"
+        attempt = row.get("attempt")
+        events.append(
+            {
+                "event_id": event_id[:80],
+                "timestamp": timestamp[:64],
+                "kind": kind,
+                "lane": lane_value,
+                "model": str(row.get("model") or "")[:160],
+                "phase": phase,
+                "status": status,
+                "attempt": (
+                    int(attempt)
+                    if isinstance(attempt, int) and not isinstance(attempt, bool)
+                    else 0
+                ),
+                "label": label,
+                "overall_key": overall_keys[phase],
+            }
+        )
+    return events[-_DECISION_TRACE_EVENT_LIMIT:]
 
 
 def _decision_trace_outcome(
@@ -2005,6 +2087,7 @@ def _decision_trace_snapshot(
     activities: list[dict[str, Any]],
     history: list[dict[str, Any]],
     latest_decision: dict[str, Any] | None,
+    trace_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Project redacted consensus telemetry into a stable three-lane trace."""
 
@@ -2016,10 +2099,12 @@ def _decision_trace_snapshot(
         (row for row in reversed(history) if row.get("kind") == "session"),
         None,
     )
+    latest_event = (trace_events or [])[-1] if trace_events else None
     request_sha256 = (
         active_request
         or decision_request
         or str((latest_session or {}).get("request_sha256") or "")
+        or str((latest_event or {}).get("request_sha256") or "")
     )
     related = [row for row in history if row.get("request_sha256") == request_sha256]
     decision = next(
@@ -2258,6 +2343,10 @@ def _decision_trace_snapshot(
         trace_state=trace_state,
         task_role=task_role,
     )
+    events = _decision_trace_events(
+        trace_events or [],
+        request_sha256=request_sha256,
+    )
     return {
         "state": trace_state,
         "active": bool(active_rows),
@@ -2272,6 +2361,8 @@ def _decision_trace_snapshot(
         "outcome": outcome,
         "overall": overall,
         "lanes": lanes,
+        "events": events,
+        "event_count": len(events),
     }
 
 
@@ -2377,6 +2468,10 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
                     )
                 }
             )
+    trace_events = _read_jsonl_file(
+        root / "trace-events.jsonl",
+        limit=max(_DECISION_TRACE_EVENT_LIMIT * 4, limit * 4),
+    )
     latest_decision = next(
         (
             row
@@ -2385,7 +2480,12 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
         ),
         None,
     )
-    decision_trace = _decision_trace_snapshot(activities, history, latest_decision)
+    decision_trace = _decision_trace_snapshot(
+        activities,
+        history,
+        latest_decision,
+        trace_events,
+    )
     return {
         "active": bool(activities),
         "count": len(activities),
@@ -3220,6 +3320,7 @@ def _local_consensus_materialization_fingerprint() -> str:
         CHRONOVISOR_ROOT / "config.toml",
         root / "summary.json",
         root / "audit.jsonl",
+        root / "trace-events.jsonl",
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "active-policy.json",
     ]
     paths.extend(_dashboard_glob_files([root / "active" / "*.json"]))
@@ -4280,9 +4381,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 _json_response(
                     self,
                     {
-                        "local_consensus": _cached_snapshot(allow_stale=True)[
-                            "local_consensus"
-                        ]
+                        # Decision Trace is latency-sensitive and cheap to build.
+                        # Never make it wait for the full dashboard materialization.
+                        "local_consensus": _local_consensus_snapshot()
                     },
                 )
             elif path == "/api/frontier-repair":
