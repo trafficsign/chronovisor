@@ -1361,6 +1361,28 @@ def test_materialized_component_survives_process_memory_reset_and_rejects_tamper
     assert calls == 2
 
 
+def test_health_materialization_fingerprint_changes_with_runtime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    chronovisor_root.mkdir()
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    runtime = {
+        "commit_id": "a" * 40,
+        "module_path": "/archive/a/chronovisor/runtime_config.py",
+        "package_version": "0.1.1",
+    }
+    monkeypatch.setattr(dashboard, "runtime_identity", lambda: dict(runtime))
+
+    before = dashboard._health_materialization_fingerprint([])
+    runtime["commit_id"] = "b" * 40
+    runtime["module_path"] = "/archive/b/chronovisor/runtime_config.py"
+    after = dashboard._health_materialization_fingerprint([])
+
+    assert before != after
+
+
 def test_materialized_component_returns_stale_while_audit_refreshes(
     tmp_path: Path, monkeypatch
 ) -> None:

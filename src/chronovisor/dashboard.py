@@ -38,6 +38,7 @@ from chronovisor.recall_improvement import configured_models
 from chronovisor.runtime_config import (
     load_decision_router_config,
     load_reranker_config,
+    runtime_identity,
 )
 from chronovisor.sealed_artifact_decoder import schema_matches
 from chronovisor.store import LOG_FILE, CHRONOVISOR_ROOT, init_chronovisor
@@ -3395,10 +3396,20 @@ def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
             limit=50,
         )
     )
+    runtime = runtime_identity()
+    runtime_cache_identity = hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "commit_id": runtime.get("commit_id"),
+                "module_path": runtime.get("module_path"),
+                "package_version": runtime.get("package_version"),
+            }
+        )
+    ).hexdigest()
     return _component_source_fingerprint(
         "health",
         paths,
-        identities=[path.name for path in raw_paths],
+        identities=[runtime_cache_identity, *(path.name for path in raw_paths)],
     )
 
 
