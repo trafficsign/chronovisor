@@ -115,14 +115,20 @@ def build_dataset(
         }:
             continue
         ref = str(feedback.get("ref", ""))
-        snapshot = feedback.get("snapshot") if isinstance(feedback.get("snapshot"), dict) else None
+        snapshot = (
+            feedback.get("snapshot")
+            if isinstance(feedback.get("snapshot"), dict)
+            else None
+        )
         record = logs_by_id.get(ref) or snapshot or {}
         prompt = str(feedback.get("prompt") or record.get("prompt_preview") or "")
         if not prompt:
             continue
         expected = _str_tuple(feedback.get("expected_pages"))
         negative = _str_tuple(feedback.get("negative_pages"))
-        injected = _str_tuple(record.get("pages")) or _str_tuple(feedback.get("injected_pages"))
+        injected = _str_tuple(record.get("pages")) or _str_tuple(
+            feedback.get("injected_pages")
+        )
         if kind == "injection_used" and not expected:
             expected = injected
         key = (kind, prompt, expected, negative, ref)
@@ -183,7 +189,9 @@ def percentile(values: list[int], pct: float) -> float:
     return float(ordered[max(0, min(idx, len(ordered) - 1))])
 
 
-def select_examples(examples: list[RecallExample], *, limit: int = 0) -> list[RecallExample]:
+def select_examples(
+    examples: list[RecallExample], *, limit: int = 0
+) -> list[RecallExample]:
     """Select a stable kind-balanced paired corpus instead of log-order rows."""
 
     if limit <= 0 or len(examples) <= limit:
@@ -195,7 +203,13 @@ def select_examples(examples: list[RecallExample], *, limit: int = 0) -> list[Re
         rows.sort(
             key=lambda item: hashlib.sha256(
                 json.dumps(
-                    [item.kind, item.prompt, list(item.expected_pages), list(item.negative_pages), item.ref],
+                    [
+                        item.kind,
+                        item.prompt,
+                        list(item.expected_pages),
+                        list(item.negative_pages),
+                        item.ref,
+                    ],
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).encode("utf-8")
@@ -222,6 +236,7 @@ def evaluate_examples(
     policy: RecallPolicy,
     replay: bool = True,
     k_values: tuple[int, ...] = (1, 3),
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     decision_counts: dict[str, int] = {}
     latencies: list[int] = []
@@ -235,6 +250,8 @@ def evaluate_examples(
 
     eval_policy = RecallPolicy(**{**policy.__dict__, "log_decisions": False})
     for example in examples:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("recall evaluation runtime budget exhausted")
         if replay:
             request = RecallRequest(
                 host=example.host,
@@ -284,7 +301,9 @@ def evaluate_examples(
             for k in k_values:
                 if expected & set(pages[:k]):
                     hits[k] += 1
-            rank = next((idx + 1 for idx, page in enumerate(pages) if page in expected), 0)
+            rank = next(
+                (idx + 1 for idx, page in enumerate(pages) if page in expected), 0
+            )
             reciprocal_ranks.append((1.0 / rank) if rank else 0.0)
         if example.is_false_positive:
             false_positives += 1
@@ -321,11 +340,16 @@ def evaluate_examples(
     return {"metrics": asdict(metrics), "rows": replay_rows}
 
 
-def save_baseline(payload: dict[str, Any], *, baseline_dir: Path = BASELINE_DIR) -> Path:
+def save_baseline(
+    payload: dict[str, Any], *, baseline_dir: Path = BASELINE_DIR
+) -> Path:
     baseline_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d")
     path = baseline_dir / f"baseline-{stamp}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -349,7 +373,9 @@ def run_eval(
         "dataset": {
             "examples": len(examples),
             "available_examples": len(all_examples),
-            "selection": "stable-kind-balanced" if len(examples) < len(all_examples) else "all",
+            "selection": "stable-kind-balanced"
+            if len(examples) < len(all_examples)
+            else "all",
             "selection_sha256": hashlib.sha256(
                 json.dumps(
                     [[row.kind, row.prompt, row.ref] for row in examples],
@@ -375,7 +401,9 @@ def run_eval(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Replay-evaluate Chronovisor recall decisions.")
+    parser = argparse.ArgumentParser(
+        description="Replay-evaluate Chronovisor recall decisions."
+    )
     parser.add_argument("--config", help="Config TOML path.")
     parser.add_argument("--log-file", default=str(RECALL_LOG_FILE))
     parser.add_argument("--feedback-file", default=str(RECALL_FEEDBACK_FILE))

@@ -304,6 +304,41 @@ def _write_feedback(log_file, feedback_file) -> None:
     )
 
 
+def test_run_improvement_persists_runtime_budget_deferred(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    log_file = tmp_path / "recall-log.jsonl"
+    feedback_file = tmp_path / "feedback.jsonl"
+    _write_feedback(log_file, feedback_file)
+
+    def exhaust_budget(*_args, **_kwargs):
+        raise TimeoutError("recall evaluation runtime budget exhausted")
+
+    monkeypatch.setattr(recall_improvement, "_evaluate_cached", exhaust_budget)
+    runs_dir = tmp_path / "runs"
+    registry_file = tmp_path / "policy-registry.jsonl"
+
+    payload = recall_improvement.run_improvement(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=(),
+        include_heuristic=False,
+        registry_file=registry_file,
+        runs_dir=runs_dir,
+        episodes_file=tmp_path / "episodes.jsonl",
+        live_episodes_file=tmp_path / "live-episodes.jsonl",
+        max_elapsed_seconds=0.001,
+    )
+
+    assert payload["status"] == "budget_deferred"
+    assert payload["applied"] is False
+    assert payload["reason"] == "recall evaluation runtime budget exhausted"
+    assert payload["dataset"] == {"examples": 1, "dev": 1, "holdout": 1}
+    assert len(list(runs_dir.glob("*.json"))) == 1
+    assert "budget_deferred" in registry_file.read_text(encoding="utf-8")
+
+
 def test_policy_verdict_artifact_is_bound_to_current_adopted_authority(
     tmp_path,
     monkeypatch,
@@ -563,7 +598,8 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
             )
         ]
 
-    def fake_evaluate(examples, *, policy, replay):
+    def fake_evaluate(examples, *, policy, replay, deadline=None):
+        del deadline
         improved = policy.max_pages == 4
         return {
             "metrics": {
@@ -696,7 +732,8 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
             )
         ]
 
-    def fake_evaluate(examples, *, policy, replay):
+    def fake_evaluate(examples, *, policy, replay, deadline=None):
+        del deadline
         improved = policy.max_pages == 4
         return {
             "metrics": {

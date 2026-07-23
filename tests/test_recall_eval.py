@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
+
+import pytest
 
 from chronovisor import recall_eval
 from chronovisor.feedback_ledger import feedback_row_sha256
@@ -89,8 +90,12 @@ def test_build_dataset_excludes_only_exactly_retracted_page_feedback(tmp_path) -
 
 def test_replay_metrics_are_deterministic(monkeypatch) -> None:
     examples = [
-        recall_eval.RecallExample(prompt="p1", expected_pages=("a",), kind="missed_candidate"),
-        recall_eval.RecallExample(prompt="p2", injected_pages=("b",), kind="false-positive"),
+        recall_eval.RecallExample(
+            prompt="p1", expected_pages=("a",), kind="missed_candidate"
+        ),
+        recall_eval.RecallExample(
+            prompt="p2", injected_pages=("b",), kind="false-positive"
+        ),
     ]
 
     def fake_run_recall(request, policy, *, perform_search):
@@ -102,20 +107,37 @@ def test_replay_metrics_are_deterministic(monkeypatch) -> None:
             queries=[request.prompt],
             reasons=[],
             matched_terms={},
-            context_items=[ContextItem(page_id=page, title=page, updated="", score=1.0)],
+            context_items=[
+                ContextItem(page_id=page, title=page, updated="", score=1.0)
+            ],
             latency_ms=5,
         )
 
     monkeypatch.setattr(recall_eval, "run_recall", fake_run_recall)
 
-    payload = recall_eval.evaluate_examples(examples, policy=RecallPolicy(log_decisions=False))
+    payload = recall_eval.evaluate_examples(
+        examples, policy=RecallPolicy(log_decisions=False)
+    )
 
     assert payload["metrics"]["recall_at_3"] == 1.0
     assert payload["metrics"]["waste_injection_rate"] == 1.0
     assert payload["metrics"]["latency_ms"]["p95"] == 5.0
 
 
-def test_page_ignored_is_neither_positive_nor_prompt_false_positive(monkeypatch) -> None:
+def test_evaluate_examples_honors_runtime_deadline(monkeypatch) -> None:
+    monkeypatch.setattr(recall_eval.time, "monotonic", lambda: 10.0)
+
+    with pytest.raises(TimeoutError, match="runtime budget exhausted"):
+        recall_eval.evaluate_examples(
+            [recall_eval.RecallExample(prompt="deadline")],
+            policy=RecallPolicy(log_decisions=False),
+            deadline=10.0,
+        )
+
+
+def test_page_ignored_is_neither_positive_nor_prompt_false_positive(
+    monkeypatch,
+) -> None:
     examples = [
         recall_eval.RecallExample(
             prompt="mixed recall",
@@ -140,13 +162,17 @@ def test_page_ignored_is_neither_positive_nor_prompt_false_positive(monkeypatch)
             queries=[request.prompt],
             reasons=[],
             matched_terms={},
-            context_items=[ContextItem(page_id=page_id, title=page_id, updated="", score=1.0)],
+            context_items=[
+                ContextItem(page_id=page_id, title=page_id, updated="", score=1.0)
+            ],
             latency_ms=1,
         )
 
     monkeypatch.setattr(recall_eval, "run_recall", fake_run_recall)
 
-    payload = recall_eval.evaluate_examples(examples, policy=RecallPolicy(log_decisions=False))
+    payload = recall_eval.evaluate_examples(
+        examples, policy=RecallPolicy(log_decisions=False)
+    )
 
     assert payload["metrics"]["positives"] == 0
     # Neither page-level ignore nor lack of an explicit usage receipt is a

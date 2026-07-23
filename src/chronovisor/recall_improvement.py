@@ -226,8 +226,14 @@ def _evaluate(
     examples: list[RecallExample],
     *,
     policy: RecallPolicy,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
-    payload = evaluate_examples(examples, policy=policy, replay=True)
+    payload = evaluate_examples(
+        examples,
+        policy=policy,
+        replay=True,
+        deadline=deadline,
+    )
     payload["score"] = metric_score(payload.get("metrics", {}))
     return payload
 
@@ -265,10 +271,11 @@ def _evaluate_cached(
     *,
     policy: RecallPolicy,
     cache: dict[tuple[str, str], dict[str, Any]],
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     key = (_policy_hash(policy), _examples_hash(examples))
     if key not in cache:
-        cache[key] = _evaluate(examples, policy=policy)
+        cache[key] = _evaluate(examples, policy=policy, deadline=deadline)
     return cache[key]
 
 
@@ -998,6 +1005,7 @@ def _proposal_record(
     baseline_holdout: dict[str, Any],
     min_improvement: float,
     eval_cache: dict[tuple[str, str], dict[str, Any]],
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     candidate_policy = _clone_policy(baseline_policy)
     applied_fields = apply_policy_overrides(candidate_policy, proposal.overrides)
@@ -1008,10 +1016,16 @@ def _proposal_record(
             "reason": "no valid policy fields",
         }
     candidate_dev = _evaluate_cached(
-        dev_examples, policy=candidate_policy, cache=eval_cache
+        dev_examples,
+        policy=candidate_policy,
+        cache=eval_cache,
+        deadline=deadline,
     )
     candidate_holdout = _evaluate_cached(
-        holdout_examples, policy=candidate_policy, cache=eval_cache
+        holdout_examples,
+        policy=candidate_policy,
+        cache=eval_cache,
+        deadline=deadline,
     )
     return build_recall_improvement_candidate_record(
         proposal,
@@ -1478,6 +1492,7 @@ def run_improvement(
     include_heuristic: bool = True,
     min_improvement: float = 0.05,
     max_examples: int = 120,
+    max_elapsed_seconds: float = 15 * 60,
     frontier_mode: str = "auto",
     frontier_timeout: int | None = None,
     active_file: Path = ACTIVE_POLICY_FILE,
@@ -1491,6 +1506,11 @@ def run_improvement(
 ) -> dict[str, Any]:
     run_id = _run_id()
     started = _now_iso()
+    deadline = (
+        time.monotonic() + max(0.0, float(max_elapsed_seconds))
+        if max_elapsed_seconds > 0
+        else None
+    )
     examples = [
         example
         for example in build_dataset(log_file=log_file, feedback_file=feedback_file)
@@ -1524,15 +1544,59 @@ def run_improvement(
     dev_examples, holdout_examples = split_examples(examples)
     baseline_policy = load_policy(config_file) if config_file else load_policy()
     eval_cache: dict[tuple[str, str], dict[str, Any]] = {}
-    baseline_dev = _evaluate_cached(
-        dev_examples, policy=baseline_policy, cache=eval_cache
-    )
-    baseline_holdout = _evaluate_cached(
-        holdout_examples, policy=baseline_policy, cache=eval_cache
-    )
+    try:
+        baseline_dev = _evaluate_cached(
+            dev_examples,
+            policy=baseline_policy,
+            cache=eval_cache,
+            deadline=deadline,
+        )
+        baseline_holdout = _evaluate_cached(
+            holdout_examples,
+            policy=baseline_policy,
+            cache=eval_cache,
+            deadline=deadline,
+        )
+    except TimeoutError as exc:
+        record = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "ts": started,
+            "status": "budget_deferred",
+            "applied": False,
+            "reason": str(exc),
+            "dataset": {
+                "examples": len(examples),
+                "dev": len(dev_examples),
+                "holdout": len(holdout_examples),
+            },
+            "eval_cache_entries": len(eval_cache),
+            "models": list(model_list),
+        }
+        _persist_run(record, runs_dir=runs_dir, registry_file=registry_file)
+        return record
     failures = _failure_samples(baseline_dev)
     recent_blockers = _recent_rejection_blockers(runs_dir=runs_dir)
     proposer_blockers = _proposer_visible_rejection_blockers(recent_blockers)
+
+    if deadline is not None and time.monotonic() >= deadline:
+        record = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "ts": started,
+            "status": "budget_deferred",
+            "applied": False,
+            "reason": "recall improvement runtime budget exhausted",
+            "dataset": {
+                "examples": len(examples),
+                "dev": len(dev_examples),
+                "holdout": len(holdout_examples),
+            },
+            "eval_cache_entries": len(eval_cache),
+            "models": list(model_list),
+        }
+        _persist_run(record, runs_dir=runs_dir, registry_file=registry_file)
+        return record
 
     proposals = propose_with_models(
         models=model_list,
@@ -1551,20 +1615,40 @@ def run_improvement(
             )
         )
 
-    candidates = [
-        _proposal_record(
-            proposal,
-            baseline_policy=baseline_policy,
-            dev_examples=dev_examples,
-            holdout_examples=holdout_examples,
-            baseline_dev=baseline_dev,
-            baseline_holdout=baseline_holdout,
-            min_improvement=min_improvement,
-            eval_cache=eval_cache,
-        )
-        for proposal in proposals
-        if proposal.overrides
-    ]
+    try:
+        candidates = [
+            _proposal_record(
+                proposal,
+                baseline_policy=baseline_policy,
+                dev_examples=dev_examples,
+                holdout_examples=holdout_examples,
+                baseline_dev=baseline_dev,
+                baseline_holdout=baseline_holdout,
+                min_improvement=min_improvement,
+                eval_cache=eval_cache,
+                deadline=deadline,
+            )
+            for proposal in proposals
+            if proposal.overrides
+        ]
+    except TimeoutError as exc:
+        record = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "ts": started,
+            "status": "budget_deferred",
+            "applied": False,
+            "reason": str(exc),
+            "dataset": {
+                "examples": len(examples),
+                "dev": len(dev_examples),
+                "holdout": len(holdout_examples),
+            },
+            "eval_cache_entries": len(eval_cache),
+            "models": list(model_list),
+        }
+        _persist_run(record, runs_dir=runs_dir, registry_file=registry_file)
+        return record
     blocker_summary = _candidate_blocker_summary(candidates)
     best = _best_candidate(candidates)
     active_policy: dict[str, Any] | None = None
@@ -2052,6 +2136,7 @@ def run_due(
     include_heuristic: bool = True,
     min_improvement: float = 0.05,
     max_examples: int = 80,
+    max_elapsed_seconds: float = 15 * 60,
     min_interval_hours: float = 24.0,
     min_new_feedback: int = 5,
     min_total_feedback: int = 3,
@@ -2085,6 +2170,7 @@ def run_due(
             include_heuristic=include_heuristic,
             min_improvement=min_improvement,
             max_examples=max_examples,
+            max_elapsed_seconds=max_elapsed_seconds,
             min_interval_hours=min_interval_hours,
             min_new_feedback=min_new_feedback,
             min_total_feedback=min_total_feedback,
@@ -2112,6 +2198,7 @@ def _run_due_locked(
     include_heuristic: bool = True,
     min_improvement: float = 0.05,
     max_examples: int = 80,
+    max_elapsed_seconds: float = 15 * 60,
     min_interval_hours: float = 24.0,
     min_new_feedback: int = 5,
     min_total_feedback: int = 3,
@@ -2285,6 +2372,7 @@ def _run_due_locked(
         include_heuristic=include_heuristic,
         min_improvement=min_improvement,
         max_examples=max_examples,
+        max_elapsed_seconds=max_elapsed_seconds,
         frontier_mode=frontier_mode,
         frontier_timeout=frontier_timeout,
         frontier_budget=frontier_budget,

@@ -410,7 +410,9 @@ def _run_sleep_cycle(
     snapshot = (
         {"status": "skipped", "reason": "dry_run"}
         if dry_run
-        else artifact_lane("snapshot", lambda: snapshot_chronovisor("before sleep cycle"))
+        else artifact_lane(
+            "snapshot", lambda: snapshot_chronovisor("before sleep cycle")
+        )
     )
     try:
         quarantine_cooldown = max(
@@ -744,7 +746,8 @@ def _run_sleep_cycle(
             min_interval_hours=24.0,
             min_new_feedback=5,
             min_total_feedback=3,
-            max_examples=80,
+            max_examples=40,
+            max_elapsed_seconds=15 * 60,
             frontier_mode="auto",
             frontier_budget=lane_budgets["recall_improve"],
             dry_run=dry_run,
