@@ -180,14 +180,14 @@ let latestKnowledgeMix = null;
 let saveLoadHitRegions = [];
 
 const KNOWLEDGE_COLORS = [
-  "#66d9e8",
-  "#8fd694",
-  "#f0bc62",
-  "#c792ea",
-  "#ff8a80",
-  "#82aaff",
-  "#ffd166",
-  "#7bdcb5",
+  "#828fff",
+  "#3dd68c",
+  "#e8b04b",
+  "#c983f7",
+  "#ff7e79",
+  "#56a8ff",
+  "#e0cd6d",
+  "#4fc8b4",
 ];
 
 function fmt(value, fallback = "--") {
@@ -435,8 +435,8 @@ function renderDecisionTrace(consensus) {
   const active = trace.active === true;
   els.decisionTraceCaption.textContent = request ? `Job ${request.slice(0, 8)}` : "Job --";
   els.decisionElapsed.textContent = trace.started_at
-    ? `経過 ${compactDuration(Math.max(0, (Date.now() - parseMs(trace.started_at)) / 1000))}`
-    : "経過 --";
+    ? `Elapsed ${compactDuration(Math.max(0, (Date.now() - parseMs(trace.started_at)) / 1000))}`
+    : "Elapsed --";
   const contextTokens = Number(trace.context_tokens || 0);
   els.decisionContext.textContent = contextTokens
     ? `Context ${Math.round(contextTokens / 1024)}K`
@@ -747,7 +747,7 @@ function drawStackSegment(ctx, x, baseY, width, height, color, options = {}) {
   }
   if (options.dashed) {
     ctx.save();
-    ctx.strokeStyle = options.stroke || "rgba(102,217,232,0.72)";
+    ctx.strokeStyle = options.stroke || "rgba(130,143,255,0.72)";
     ctx.lineWidth = 1.4;
     ctx.setLineDash([4, 4]);
     ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1, width - 1), Math.max(1, height - 1));
@@ -836,73 +836,78 @@ function drawLineChart(canvas, saveHistory, status = {}) {
   const plotHeight = height - pad.top - pad.bottom;
 
   if (!rows.length) {
-    ctx.fillStyle = "rgba(169,164,148,0.85)";
-    ctx.font = "14px system-ui";
+    ctx.fillStyle = "rgba(138,143,152,0.85)";
+    ctx.font = "14px 'Geist Mono', ui-monospace, monospace";
     ctx.fillText("Waiting for save history", pad.left, height / 2);
     return;
   }
 
   const maxTotal = Math.max(1, ...rows.map((row) => row.total));
   const maxSegmentBytes = Math.max(1, ...rows.flatMap((row) => row.segments.map((segment) => segment.bytes)));
-  const ticks = [0, maxTotal / 2, maxTotal];
+  // sqrt scale keeps spike days from flattening every other bar.
+  const yScale = (bytes) => Math.sqrt(Math.max(0, bytes) / maxTotal) * plotHeight;
+  const ticks = [0, maxTotal / 4, maxTotal];
   const slot = plotWidth / rows.length;
   const barWidth = Math.max(5, Math.min(18, slot * 0.62));
   const baseline = pad.top + plotHeight;
 
   ctx.save();
-  ctx.font = "11px system-ui";
+  ctx.font = "11px 'Geist Mono', ui-monospace, monospace";
   ctx.textBaseline = "middle";
   ticks.forEach((tick) => {
-    const y = baseline - (tick / maxTotal) * plotHeight;
-    ctx.strokeStyle = tick === 0 ? "rgba(242,239,229,0.2)" : "rgba(242,239,229,0.1)";
+    const y = baseline - yScale(tick);
+    ctx.strokeStyle = tick === 0 ? "rgba(247,248,248,0.2)" : "rgba(247,248,248,0.1)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.left, y);
     ctx.lineTo(width - pad.right, y);
     ctx.stroke();
-    ctx.fillStyle = "rgba(169,164,148,0.9)";
+    ctx.fillStyle = "rgba(138,143,152,0.9)";
     ctx.textAlign = "right";
     ctx.fillText(formatBytes(tick), pad.left - 10, y);
   });
 
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillStyle = "#8fd694";
+  ctx.fillStyle = "#3dd68c";
   roundRect(ctx, pad.left, 9, 16, 8, 4);
   ctx.fill();
-  ctx.fillStyle = "rgba(169,164,148,0.9)";
+  ctx.fillStyle = "rgba(138,143,152,0.9)";
   ctx.fillText("processed", pad.left + 22, 13);
-  ctx.fillStyle = "rgba(102,217,232,0.34)";
+  ctx.fillStyle = "rgba(130,143,255,0.34)";
   roundRect(ctx, pad.left + 92, 9, 16, 8, 4);
   ctx.fill();
-  ctx.strokeStyle = "rgba(102,217,232,0.72)";
+  ctx.strokeStyle = "rgba(130,143,255,0.72)";
   ctx.setLineDash([4, 4]);
   roundRect(ctx, pad.left + 92, 9, 16, 8, 4);
   ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = "rgba(169,164,148,0.9)";
+  ctx.fillStyle = "rgba(138,143,152,0.9)";
   ctx.fillText("pending", pad.left + 114, 13);
-  ctx.fillStyle = "#b986dc";
+  ctx.fillStyle = "#b490f5";
   roundRect(ctx, pad.left + 176, 9, 16, 8, 4);
   ctx.fill();
-  ctx.fillStyle = "rgba(169,164,148,0.9)";
+  ctx.fillStyle = "rgba(138,143,152,0.9)";
   ctx.fillText("deferred", pad.left + 198, 13);
-  ctx.fillStyle = "#f0bc62";
+  ctx.fillStyle = "#e8b04b";
   roundRect(ctx, pad.left + 268, 9, 16, 8, 4);
   ctx.fill();
-  ctx.fillStyle = "rgba(169,164,148,0.9)";
+  ctx.fillStyle = "rgba(138,143,152,0.9)";
   ctx.fillText("failed", pad.left + 290, 13);
 
   const pulse = 0.48 + 0.32 * Math.sin(Date.now() / 170);
   rows.forEach((row, index) => {
     const barX = pad.left + index * slot + (slot - barWidth) / 2;
-    const fullHeight = row.total ? Math.max(2, (row.total / maxTotal) * plotHeight) : 0;
+    const fullHeight = row.total ? Math.max(2, yScale(row.total)) : 0;
     let y = baseline;
-    ctx.fillStyle = "rgba(242,239,229,0.055)";
+    let cumulativeBytes = 0;
+    ctx.fillStyle = "rgba(247,248,248,0.055)";
     roundRect(ctx, barX, baseline - Math.max(2, fullHeight), barWidth, Math.max(2, fullHeight), Math.min(5, barWidth / 2));
     ctx.fill();
     row.segments.forEach((segment, segmentIndex) => {
-      const segmentHeight = (segment.bytes / maxTotal) * plotHeight;
+      const previousBytes = cumulativeBytes;
+      cumulativeBytes += segment.bytes;
+      const segmentHeight = yScale(cumulativeBytes) - yScale(previousBytes);
       const segmentTop = y - segmentHeight;
       y = drawStackSegment(
         ctx,
@@ -931,7 +936,7 @@ function drawLineChart(canvas, saveHistory, status = {}) {
     if (row.active && fullHeight > 0) {
       ctx.save();
       ctx.globalAlpha = pulse;
-      ctx.strokeStyle = "#66d9e8";
+      ctx.strokeStyle = "#828fff";
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 4]);
       roundRect(ctx, barX - 3, baseline - fullHeight - 4, barWidth + 6, fullHeight + 8, 7);
@@ -942,8 +947,8 @@ function drawLineChart(canvas, saveHistory, status = {}) {
     const showLabel = index === 0 || index === rows.length - 1 || index % 5 === 4 || row.active;
     if (showLabel) {
       const x = barX + barWidth / 2;
-      ctx.fillStyle = row.active ? "#66d9e8" : "rgba(169,164,148,0.86)";
-      ctx.font = row.active ? "700 10px system-ui" : "10px system-ui";
+      ctx.fillStyle = row.active ? "#828fff" : "rgba(138,143,152,0.86)";
+      ctx.font = row.active ? "700 10px 'Geist Mono', ui-monospace, monospace" : "10px 'Geist Mono', ui-monospace, monospace";
       ctx.textAlign = "center";
       ctx.textBaseline = "alphabetic";
       ctx.fillText(dateKeyLabel(row.date), x, height - 14);
@@ -1016,8 +1021,8 @@ function drawBatchChart(canvas, rows, status) {
   els.batchCaption.textContent = data.length ? `${Math.max(0, data.length - (batch.active === true ? 1 : 0))} batches` : "waiting";
 
   if (!data.length) {
-    ctx.fillStyle = "rgba(169,164,148,0.85)";
-    ctx.font = "14px system-ui";
+    ctx.fillStyle = "rgba(138,143,152,0.85)";
+    ctx.font = "14px 'Geist Mono', ui-monospace, monospace";
     ctx.fillText("No batch yield yet", 24, height / 2);
     return;
   }
@@ -1030,33 +1035,33 @@ function drawBatchChart(canvas, rows, status) {
   const maxTotal = Math.max(1, ...data.map((row) => row.attempted || row.processed + row.deferred + row.continued + row.failed));
 
   ctx.save();
-  ctx.font = "11px system-ui";
+  ctx.font = "11px 'Geist Mono', ui-monospace, monospace";
   ctx.textBaseline = "middle";
-  ctx.fillStyle = "rgba(169,164,148,0.88)";
+  ctx.fillStyle = "rgba(138,143,152,0.88)";
   ctx.textAlign = "left";
   ctx.fillText("ok", pad.left, 14);
-  ctx.fillStyle = "#8fd694";
+  ctx.fillStyle = "#3dd68c";
   roundRect(ctx, pad.left + 18, 8, 16, 8, 4);
   ctx.fill();
-  ctx.fillStyle = "rgba(169,164,148,0.88)";
+  ctx.fillStyle = "rgba(138,143,152,0.88)";
   ctx.fillText("deferred", pad.left + 44, 14);
-  ctx.fillStyle = "#b986dc";
+  ctx.fillStyle = "#b490f5";
   roundRect(ctx, pad.left + 94, 8, 16, 8, 4);
   ctx.fill();
-  ctx.fillStyle = "rgba(169,164,148,0.88)";
+  ctx.fillStyle = "rgba(138,143,152,0.88)";
   ctx.fillText("continued", pad.left + 120, 14);
-  ctx.fillStyle = "#66d9e8";
+  ctx.fillStyle = "#828fff";
   roundRect(ctx, pad.left + 176, 8, 16, 8, 4);
   ctx.fill();
-  ctx.fillStyle = "rgba(169,164,148,0.88)";
+  ctx.fillStyle = "rgba(138,143,152,0.88)";
   ctx.fillText("failed", pad.left + 202, 14);
-  ctx.fillStyle = "#f0bc62";
+  ctx.fillStyle = "#e8b04b";
   roundRect(ctx, pad.left + 246, 8, 16, 8, 4);
   ctx.fill();
 
   for (let i = 0; i <= 2; i += 1) {
     const x = pad.left + (barWidth * i) / 2;
-    ctx.strokeStyle = "rgba(242,239,229,0.08)";
+    ctx.strokeStyle = "rgba(247,248,248,0.08)";
     ctx.beginPath();
     ctx.moveTo(x, pad.top - 2);
     ctx.lineTo(x, height - pad.bottom + 2);
@@ -1072,32 +1077,32 @@ function drawBatchChart(canvas, rows, status) {
     const failedWidth = (barWidth * row.failed) / maxTotal;
     const attemptedWidth = (barWidth * (row.attempted || row.processed + row.deferred + row.continued + row.failed)) / maxTotal;
 
-    ctx.fillStyle = row.live ? "rgba(102,217,232,0.13)" : "rgba(242,239,229,0.08)";
+    ctx.fillStyle = row.live ? "rgba(130,143,255,0.13)" : "rgba(247,248,248,0.08)";
     roundRect(ctx, pad.left, barY, Math.max(2, attemptedWidth), barHeight, 7);
     ctx.fill();
 
     if (row.processed) {
-      ctx.fillStyle = "#8fd694";
+      ctx.fillStyle = "#3dd68c";
       roundRect(ctx, pad.left, barY, Math.max(2, processedWidth), barHeight, 7);
       ctx.fill();
     }
     if (row.failed) {
-      ctx.fillStyle = "#f0bc62";
+      ctx.fillStyle = "#e8b04b";
       roundRect(ctx, pad.left + processedWidth + deferredWidth + continuedWidth, barY, Math.max(2, failedWidth), barHeight, 7);
       ctx.fill();
     }
     if (row.deferred) {
-      ctx.fillStyle = "#b986dc";
+      ctx.fillStyle = "#b490f5";
       roundRect(ctx, pad.left + processedWidth, barY, Math.max(2, deferredWidth), barHeight, 7);
       ctx.fill();
     }
     if (row.continued) {
-      ctx.fillStyle = "#66d9e8";
+      ctx.fillStyle = "#828fff";
       roundRect(ctx, pad.left + processedWidth + deferredWidth, barY, Math.max(2, continuedWidth), barHeight, 7);
       ctx.fill();
     }
     if (row.live) {
-      ctx.strokeStyle = "rgba(102,217,232,0.72)";
+      ctx.strokeStyle = "rgba(130,143,255,0.72)";
       ctx.lineWidth = 1.5;
       ctx.setLineDash([4, 4]);
       roundRect(ctx, pad.left, barY - 2, Math.max(4, attemptedWidth), barHeight + 4, 9);
@@ -1105,12 +1110,12 @@ function drawBatchChart(canvas, rows, status) {
       ctx.setLineDash([]);
     }
 
-    ctx.fillStyle = row.live ? "#66d9e8" : "rgba(242,239,229,0.88)";
-    ctx.font = row.live ? "700 12px system-ui" : "12px system-ui";
+    ctx.fillStyle = row.live ? "#828fff" : "rgba(247,248,248,0.88)";
+    ctx.font = row.live ? "700 12px 'Geist Mono', ui-monospace, monospace" : "12px 'Geist Mono', ui-monospace, monospace";
     ctx.textAlign = "right";
     ctx.fillText(row.label, pad.left - 12, y + rowHeight * 0.36);
-    ctx.fillStyle = "rgba(112,109,99,0.95)";
-    ctx.font = "10px system-ui";
+    ctx.fillStyle = "rgba(90,95,104,0.95)";
+    ctx.font = "10px 'Geist Mono', ui-monospace, monospace";
     ctx.fillText(row.sub, pad.left - 12, y + rowHeight * 0.74);
 
     const countParts = [`${row.processed} ok`];
@@ -1118,8 +1123,8 @@ function drawBatchChart(canvas, rows, status) {
     if (row.continued) countParts.push(`${row.continued} continue`);
     if (row.failed) countParts.push(`${row.failed} fail`);
     const count = countParts.join(" ");
-    ctx.fillStyle = row.failed ? "#f0bc62" : row.deferred ? "#b986dc" : row.continued ? "#66d9e8" : "rgba(242,239,229,0.9)";
-    ctx.font = "700 12px system-ui";
+    ctx.fillStyle = row.failed ? "#e8b04b" : row.deferred ? "#b490f5" : row.continued ? "#828fff" : "rgba(247,248,248,0.9)";
+    ctx.font = "700 12px 'Geist Mono', ui-monospace, monospace";
     ctx.textAlign = "left";
     ctx.fillText(count, pad.left + barWidth + 10, barY + barHeight / 2);
   });
@@ -1332,12 +1337,19 @@ function buildSaveModeValues(days) {
   });
 }
 
-function heatLevel(value, maxValue) {
-  if (!value || !maxValue) return 0;
-  const ratio = value / maxValue;
-  if (ratio >= 0.75) return 4;
-  if (ratio >= 0.45) return 3;
-  if (ratio >= 0.2) return 2;
+function heatThresholds(values) {
+  const active = values.filter((value) => value > 0).sort((a, b) => a - b);
+  if (!active.length) return [1, 1, 1, 1];
+  const quantile = (p) => active[Math.min(active.length - 1, Math.floor(p * active.length))];
+  return [quantile(0.25), quantile(0.5), quantile(0.75), quantile(0.95)];
+}
+
+function heatLevel(value, thresholds) {
+  // Quantile buckets keep one spike day from washing out the rest of the map.
+  if (!value) return 0;
+  if (value >= thresholds[3]) return 4;
+  if (value >= thresholds[2]) return 3;
+  if (value >= thresholds[1]) return 2;
   return 1;
 }
 
@@ -1368,6 +1380,7 @@ function renderSaveMonths(days, startPad, columnCount) {
   els.saveMonths.innerHTML = "";
   els.saveMonths.style.gridTemplateColumns = `repeat(${columnCount}, 12px)`;
   const labelsByColumn = new Map();
+  let lastLabelColumn = -Infinity;
   days.forEach((day, index) => {
     const date = parseDateKey(day.date);
     if (!date) return;
@@ -1376,7 +1389,10 @@ function renderSaveMonths(days, startPad, columnCount) {
     const previousMonthKey = previous ? `${previous.getFullYear()}-${previous.getMonth()}` : null;
     if (monthKey === previousMonthKey) return;
     const column = Math.floor((index + startPad) / 7) + 1;
+    // Keep labels from crowding when a month owns fewer than three columns.
+    if (column - lastLabelColumn < 3) return;
     labelsByColumn.set(column, date.toLocaleDateString("ja-JP", { month: "short" }));
+    lastLabelColumn = column;
   });
   labelsByColumn.forEach((month, column) => {
     const label = document.createElement("span");
@@ -1472,7 +1488,16 @@ function renderSaveFeed(recent) {
 function renderSaveHistory(saveHistory) {
   const data = saveHistory || {};
   latestSaveHistory = data;
-  const days = Array.isArray(data.days) ? data.days : [];
+  const allDays = Array.isArray(data.days) ? data.days : [];
+  // Trim the leading dead period so the heatmap starts where activity does.
+  const firstActive = allDays.findIndex((day) =>
+    intValue(day.raw_saved)
+    || intValue(day.processed)
+    || intValue(day.pages_created)
+    || intValue(day.pages_updated)
+    || intValue(day.failed)
+  );
+  const days = firstActive > 0 ? allDays.slice(firstActive) : allDays;
   const totals = data.totals || {};
   const pageChanges = intValue(totals.pages_created) + intValue(totals.pages_updated);
 
@@ -1495,7 +1520,7 @@ function renderSaveHistory(saveHistory) {
   const firstDate = parseDateKey(days[0].date);
   const startPad = firstDate ? firstDate.getDay() : 0;
   const values = buildSaveModeValues(days);
-  const maxValue = Math.max(1, ...values);
+  const thresholds = heatThresholds(values);
   const cellCount = startPad + days.length;
   const columnCount = Math.ceil(cellCount / 7);
   els.saveHeatmap.style.gridTemplateColumns = `repeat(${columnCount}, 12px)`;
@@ -1510,7 +1535,7 @@ function renderSaveHistory(saveHistory) {
   const selectedDay = selectSaveDay(days);
   days.forEach((day, index) => {
     const value = values[index];
-    const level = heatLevel(value, maxValue);
+    const level = heatLevel(value, thresholds);
     const cell = document.createElement("button");
     cell.type = "button";
     cell.className = `save-cell level-${level}`;
@@ -1562,7 +1587,7 @@ function donutSegments(categories, totalValue, mode = knowledgeMixMode) {
       label: "Other",
       value: otherValue,
       share: otherValue / totalValue,
-      color: "rgba(169,164,148,0.72)",
+      color: "rgba(138,143,152,0.72)",
     });
   }
   return segments;
@@ -1588,7 +1613,7 @@ function drawKnowledgeDonut(canvas, categories, totalValue, mode = knowledgeMixM
   ctx.save();
   ctx.lineWidth = lineWidth;
   ctx.lineCap = "butt";
-  ctx.strokeStyle = "rgba(242,239,229,0.08)";
+  ctx.strokeStyle = "rgba(247,248,248,0.08)";
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI * 2);
   ctx.stroke();

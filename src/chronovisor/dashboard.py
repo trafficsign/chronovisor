@@ -356,6 +356,7 @@ def _file_response(handler: BaseHTTPRequestHandler, path: Path) -> None:
         ".css": "text/css; charset=utf-8",
         ".js": "application/javascript; charset=utf-8",
         ".svg": "image/svg+xml",
+        ".woff2": "font/woff2",
     }.get(path.suffix, "application/octet-stream")
     body = path.read_bytes()
     handler.send_response(HTTPStatus.OK)

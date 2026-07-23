@@ -9,9 +9,12 @@
 <body>
   <main class="shell">
     <header class="topbar">
-      <div>
-        <p class="eyebrow">Local memory pipeline</p>
-        <h1>Chronovisor Observatory</h1>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <h1>Chronovisor Observatory</h1>
+          <p class="eyebrow">Local memory pipeline</p>
+        </div>
       </div>
       <div class="topbar-actions">
         <button class="lan-share-button" id="lan-share-button" type="button">Recovery link</button>
@@ -104,7 +107,7 @@
         <div class="panel-head">
           <div>
             <h2>Save Load</h2>
-            <p>Daily saved size by processing state.</p>
+            <p>Daily saved size by processing state · √ scale.</p>
           </div>
           <span id="trend-caption">waiting for data</span>
         </div>
@@ -182,79 +185,104 @@
           </div>
           <span id="health-caption">waiting</span>
         </div>
-        <div class="chart-summary compact health-summary" aria-label="Memory health summary">
-          <div class="chart-stat">
-            <span>Summary</span>
-            <strong id="health-summary-coverage">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Capture</span>
-            <strong id="health-capture">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Read Back</span>
-            <strong id="health-readback">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Sensitive</span>
-            <strong id="health-sensitive">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Dupes</span>
-            <strong id="health-dupes">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Claims</span>
-            <strong id="health-golden">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Golden</span>
-            <strong id="health-golden-set">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Retention</span>
-            <strong id="health-retention">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Distill</span>
-            <strong id="health-distill">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Replay</span>
-            <strong id="health-replay">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Dead-man</span>
-            <strong id="health-deadman">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Quality</span>
-            <strong id="health-quality">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Holds</span>
-            <strong id="health-holds">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Provisional</span>
-            <strong id="health-provisional">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Ledger</span>
-            <strong id="health-ledger">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Research</span>
-            <strong id="health-research-runs">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Claims</span>
-            <strong id="health-research-claims">--</strong>
-          </div>
-          <div class="chart-stat">
-            <span>Trace</span>
-            <strong id="health-research-trace">--</strong>
-          </div>
+        <div class="health-groups" aria-label="Memory health summary">
+          <section class="health-group">
+            <h3>Coverage</h3>
+            <div class="health-group-grid">
+              <div class="chart-stat">
+                <span>Summary</span>
+                <strong id="health-summary-coverage">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Capture</span>
+                <strong id="health-capture">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Read Back</span>
+                <strong id="health-readback">--</strong>
+              </div>
+            </div>
+          </section>
+          <section class="health-group">
+            <h3>Integrity</h3>
+            <div class="health-group-grid">
+              <div class="chart-stat">
+                <span>Sensitive</span>
+                <strong id="health-sensitive">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Dupes</span>
+                <strong id="health-dupes">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Claims</span>
+                <strong id="health-golden">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Golden</span>
+                <strong id="health-golden-set">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Ledger</span>
+                <strong id="health-ledger">--</strong>
+              </div>
+            </div>
+          </section>
+          <section class="health-group">
+            <h3>Lifecycle</h3>
+            <div class="health-group-grid">
+              <div class="chart-stat">
+                <span>Retention</span>
+                <strong id="health-retention">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Distill</span>
+                <strong id="health-distill">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Replay</span>
+                <strong id="health-replay">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Quality</span>
+                <strong id="health-quality">--</strong>
+              </div>
+            </div>
+          </section>
+          <section class="health-group">
+            <h3>Ops</h3>
+            <div class="health-group-grid">
+              <div class="chart-stat">
+                <span>Dead-man</span>
+                <strong id="health-deadman">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Holds</span>
+                <strong id="health-holds">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Provisional</span>
+                <strong id="health-provisional">--</strong>
+              </div>
+            </div>
+          </section>
+          <section class="health-group">
+            <h3>Research</h3>
+            <div class="health-group-grid">
+              <div class="chart-stat">
+                <span>Runs</span>
+                <strong id="health-research-runs">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Claims</span>
+                <strong id="health-research-claims">--</strong>
+              </div>
+              <div class="chart-stat">
+                <span>Trace</span>
+                <strong id="health-research-trace">--</strong>
+              </div>
+            </div>
+          </section>
         </div>
       </article>
 
@@ -314,7 +342,7 @@
             </div>
           </div>
           <div class="decision-trace-meta" aria-label="Current decision metadata">
-            <span id="decision-elapsed">経過 --</span>
+            <span id="decision-elapsed">Elapsed --</span>
             <span id="decision-context">Context --</span>
             <span id="decision-trace-caption">Job --</span>
           </div>

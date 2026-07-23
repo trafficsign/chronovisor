@@ -1,0 +1,7 @@
+# This is the official list of project authors for copyright purposes.
+# This file is distinct from the CONTRIBUTORS.txt file.
+
+Andrés Briganti <info@briganti.works>
+Mateo Zaragoza <mateo@basement.studio>
+Basement.studio <hello@basement.studio>
+Vercel <contactus@vercel.com>
