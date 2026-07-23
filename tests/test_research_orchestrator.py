@@ -241,7 +241,9 @@ def test_duplicate_search_recovers_by_reading_best_unseen_page(
                 return PlannerResponse(
                     {"type": "chronovisor_search", "arguments": {"query": "topic"}}
                 )
-            if not any(action.type.value == "chronovisor_read" for action in state.actions):
+            if not any(
+                action.type.value == "chronovisor_read" for action in state.actions
+            ):
                 return PlannerResponse(
                     {"type": "chronovisor_search", "arguments": {"query": "topic"}}
                 )
@@ -281,6 +283,61 @@ def test_duplicate_search_recovers_by_reading_best_unseen_page(
         "finish",
     ]
     assert any(row.get("kind") == "duplicate_action_recovered" for row in events)
+
+
+def test_completed_local_prefetch_unlocks_first_planned_web_action(
+    tmp_path, monkeypatch
+) -> None:
+    _isolate_scheduler(tmp_path, monkeypatch)
+    prefetch_complete = research_orchestrator.threading.Event()
+
+    class FreshnessPlanner:
+        needs_model = False
+
+        def plan(self, state, **_kwargs):
+            if not state.actions:
+                assert prefetch_complete.wait(timeout=1)
+                return PlannerResponse(
+                    {
+                        "type": "web_search",
+                        "arguments": {"query": "current topic"},
+                    }
+                )
+            return PlannerResponse(
+                {"type": "finish", "arguments": {"answer": "current evidence"}}
+            )
+
+    def tool(action, _context):
+        if action.type.value == "chronovisor_search":
+            prefetch_complete.set()
+            return {"status": "ok", "results": []}
+        if action.type.value == "web_search":
+            return {
+                "status": "ok",
+                "provider": "fixture",
+                "results": [{"url": "https://example.test/current"}],
+            }
+        raise AssertionError(f"unexpected tool: {action.type.value}")
+
+    monkeypatch.setattr(research_orchestrator, "execute_tool", tool)
+    store = ResearchStore(tmp_path / "store")
+    result = research_orchestrator.run_research(
+        "current topic",
+        config=ResearchConfig(enabled=True, mode="trace"),
+        planner=FreshnessPlanner(),
+        store=store,
+    )
+    events = store.events(result["research_run_id"])
+
+    assert result["stop_reason"] == "completed"
+    assert result["answer"] == "current evidence"
+    assert any(row.get("kind") == "prefetch_observation" for row in events)
+    assert [
+        (row.get("action") or {}).get("type")
+        for row in events
+        if row.get("kind") == "action"
+    ] == ["web_search", "finish"]
+    assert not any(row.get("kind") == "action_rejected" for row in events)
 
 
 def test_restart_terminalizes_orphan_action_and_advances_epoch(

@@ -379,6 +379,32 @@ def run_research(
             except Exception:
                 pass
 
+    prefetch_consumed = False
+
+    def consume_prefetch(iteration: int) -> bool:
+        """Adopt a completed zero-wait local lookup without ever blocking."""
+
+        nonlocal prefetch_consumed
+        if prefetch_consumed:
+            return True
+        try:
+            prefetched = prefetch_queue.get_nowait()
+        except Empty:
+            return False
+        event = store.append_event(
+            run_id,
+            {
+                "kind": "prefetch_observation",
+                "epoch": state.epoch,
+                "iteration": iteration,
+                "status": str(prefetched.get("status") or "ok"),
+                "preview": _observation_preview(prefetched),
+            },
+        )
+        events.append(event)
+        prefetch_consumed = True
+        return True
+
     with research_lane(
         run_id,
         enabled=config.enabled,
@@ -425,21 +451,7 @@ def run_research(
                     stop_reason = StopReason.BUDGET_EXHAUSTED
                     break
                 if iteration > 1:
-                    try:
-                        prefetched = prefetch_queue.get_nowait()
-                    except Empty:
-                        prefetched = None
-                    if prefetched is not None:
-                        event = store.append_event(
-                            run_id,
-                            {
-                                "kind": "prefetch_observation",
-                                "epoch": state.epoch,
-                                "iteration": iteration,
-                                "preview": _observation_preview(prefetched),
-                            },
-                        )
-                        events.append(event)
+                    consume_prefetch(iteration)
 
                 if not state.usage.consume(budget, "planner_calls"):
                     stop_reason = StopReason.BUDGET_EXHAUSTED
@@ -447,6 +459,11 @@ def run_research(
                 response = planner.plan(
                     state, lease=lease, budget=budget, events=events
                 )
+                # A model call normally gives the concurrent local prefetch time
+                # to finish. Adopt it before enforcing the authority ladder so a
+                # freshness-first plan can continue to Web without bypassing
+                # the required local evidence access.
+                consume_prefetch(iteration)
                 if (
                     response.status in {"completed", "malformed"}
                     and not response.first_pass_valid
@@ -525,7 +542,7 @@ def run_research(
                     break
                 prior_types = {item.type for item in state.actions}
                 if enforce_authority_ladder:
-                    local_started = bool(
+                    local_started = prefetch_consumed or bool(
                         prior_types
                         & {
                             ActionType.WIKI_SEARCH,

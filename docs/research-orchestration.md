@@ -21,6 +21,11 @@ memory. Research event logs and checkpoints are rebuildable derived state.
 Evidence Artifacts and Bundles adopted by a run are durable, content-addressed
 records under `~/.chronovisor/research`.
 
+The zero-wait local prefetch counts as the first authority rung only after its
+completed result has been durably added to the run trace. The host never waits
+for it. If it is not ready, Raw and Web actions remain rejected rather than
+bypassing local evidence access.
+
 ## Scheduler and budgets
 
 The local planner, challenger, tie-breaker, and repair calls all use the same
