@@ -24,7 +24,7 @@ def run_maintenance_batch(
 
     state = ConvergenceStore()
     budget = CycleBudget(
-        max_local_calls=30,
+        max_local_calls=48,
         max_frontier_calls=28,
         max_mutations=60,
         max_elapsed_seconds=max(1.0, float(max_elapsed_seconds)),
@@ -100,9 +100,9 @@ def run_maintenance_batch(
             max_candidates=3,
             convergence_store=state,
             budget=budget.slice(
-                max_local_calls=12,
-                max_frontier_calls=8,
-                max_mutations=8,
+                max_local_calls=min(24, max(0, int(orphan_limit)) * 3),
+                max_frontier_calls=min(8, max(0, int(orphan_limit))),
+                max_mutations=min(8, max(0, int(orphan_limit))),
             ),
             dry_run=False,
         ),
