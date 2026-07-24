@@ -212,7 +212,9 @@ class SemanticServiceState:
         self._active_signature: tuple[int, int] | None = None
         self._status_lock = threading.Lock()
         self._last_status_publish = 0.0
+        self._query_path_self_test: dict[str, object] = {}
         self.reload()
+        self._query_path_self_test = self._warm_query_path()
         self._batcher = QueryBatcher(
             encode=self._encode_queries,
             search=self._search_vector,
@@ -236,6 +238,25 @@ class SemanticServiceState:
 
     def _query_available(self) -> bool:
         return self._generation is not None and not self._maintenance.is_set()
+
+    def _warm_query_path(self) -> dict[str, object]:
+        """Exercise model and ANN search before the service advertises ready."""
+
+        started = time.monotonic()
+        queries = [
+            "Chronovisorの記憶検索",
+            "関連ページを思い出す",
+            "semantic recall warmup",
+        ]
+        vectors = self._encode_queries(queries, len(queries))
+        hits = sum(bool(self._search_vector(vector, 1)) for vector in vectors)
+        if hits != len(queries):
+            raise ServiceBusy("semantic query-path warmup returned no result")
+        return {
+            "queries": len(queries),
+            "hits": hits,
+            "latency_ms": round((time.monotonic() - started) * 1_000, 3),
+        }
 
     def reload(self, *, verify_checksums: bool = True) -> dict[str, Any]:
         try:
@@ -295,6 +316,7 @@ class SemanticServiceState:
             "revision": self.config.revision,
             "device": self.config.query_device,
             "self_test": self._self_test,
+            "query_path_self_test": self._query_path_self_test,
             "runtime_versions": semantic_runtime_versions(),
             "index": semantic_index_status(root=self.root),
             "jobs": job_status(),

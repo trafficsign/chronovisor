@@ -98,3 +98,22 @@ def test_search_reuses_cached_query_vector_without_batcher() -> None:
 
     assert response["cache_hit"] is True
     assert response["results"] == [{"page_id": "page", "score": 4.0}]
+
+
+def test_query_path_warmup_exercises_three_queries_and_ann_search() -> None:
+    state = object.__new__(SemanticServiceState)
+    encoded: list[list[str]] = []
+    searched: list[np.ndarray] = []
+    state._encode_queries = lambda queries, _batch: (
+        encoded.append(list(queries))
+        or np.asarray([[1.0, float(index)] for index in range(len(queries))])
+    )
+    state._search_vector = lambda vector, _top_n: (
+        searched.append(vector) or [("page", 1.0)]
+    )
+
+    result = state._warm_query_path()
+
+    assert len(encoded[0]) == 3
+    assert len(searched) == 3
+    assert result["hits"] == 3
