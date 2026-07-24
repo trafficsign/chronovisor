@@ -93,6 +93,74 @@ query_prefix = "検索クエリ: "
     assert cfg.query_prefix == "検索クエリ: "
 
 
+def test_search_embedding_config_is_independent_from_utility_embedding(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[embedding]
+model = "bge-m3"
+document_prefix = ""
+query_prefix = ""
+
+[search.embedding]
+enabled = true
+backend = "nemotron_service"
+model = "nvidia/Nemotron-3-Embed-1B-BF16"
+revision = "abc123"
+dimensions = 2048
+storage_dtype = "float32"
+query_prefix = "query: "
+document_prefix = "passage: "
+fallback = "bm25"
+
+[search.embedding.service]
+socket = "~/.chronovisor/runtime/test-semantic.sock"
+query_device = "mps"
+query_replicas = 7
+foreground_batch_window_ms = 2
+foreground_max_batch = 8
+incremental_device = "cpu"
+incremental_enabled = true
+incremental_max_batch = 9
+incremental_pause_during_research = true
+incremental_pause_during_ingest_generation = true
+incremental_idle_unload_seconds = 600
+maintenance_max_batch = 32
+offline = true
+query_timeout_ms = 300
+
+[search.embedding.rollout]
+mode = "canary"
+canary_percent = 25
+sync_recall = false
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
+
+    utility = runtime_config.load_embedding_config()
+    search = runtime_config.load_search_embedding_config()
+
+    assert utility.model == "bge-m3"
+    assert utility.query_prefix == ""
+    assert search.backend == "nemotron_service"
+    assert search.revision == "abc123"
+    assert search.dimensions == 2048
+    assert search.query_prefix == "query: "
+    assert search.document_prefix == "passage: "
+    assert search.query_replicas == 1
+    assert search.foreground_max_batch == 8
+    assert search.incremental_enabled is True
+    assert search.incremental_max_batch == 1
+    assert search.maintenance_max_batch == 32
+    assert search.rollout_mode == "canary"
+    assert search.canary_percent == 25
+    assert search.sync_recall is False
+    assert search.query_timeout_ms == 300
+
+
 def test_ingest_config_reads_ollama_generation_knobs(
     tmp_path: Path, monkeypatch
 ) -> None:

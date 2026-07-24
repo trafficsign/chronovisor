@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ from chronovisor.semantic_hold import (
     canonical_sha256,
     persisted_semantic_no_quorum_hold,
 )
-from chronovisor.store import RAW_DIR, CHRONOVISOR_ROOT
+from chronovisor.store import CHRONOVISOR_ROOT, RAW_DIR
 
 
 def _jsonl_count(path: Path) -> int:
@@ -57,6 +58,84 @@ def summary_coverage() -> dict[str, Any]:
         "recall_question_coverage": (with_questions / total) if total else 0.0,
         "page_types": typed,
         "sensitivity": sensitivity,
+    }
+
+
+def semantic_index_kpi() -> dict[str, Any]:
+    """Report search-index coverage without loading the model or scanning vectors."""
+
+    from chronovisor.runtime_config import load_search_embedding_config
+
+    config = load_search_embedding_config()
+    if (
+        not config.enabled
+        or config.backend != "nemotron_service"
+        or config.rollout_mode == "off"
+    ):
+        return {
+            "status": "inactive",
+            "backend": config.backend,
+            "rollout_mode": config.rollout_mode,
+            "enabled": config.enabled,
+        }
+    from chronovisor.semantic_index import semantic_index_status
+    from chronovisor.semantic_jobs import job_status
+
+    index = semantic_index_status()
+    jobs = job_status()
+    coverage = float(index.get("coverage") or 0.0)
+    dead = int((jobs.get("counts") or {}).get("dead") or 0)
+    socket_ready = Path(config.socket).expanduser().is_socket()
+    service_file = CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json"
+    try:
+        service = json.loads(service_file.read_text(encoding="utf-8"))
+        if not isinstance(service, dict):
+            service = {}
+    except (OSError, json.JSONDecodeError):
+        service = {}
+    service_age = max(
+        0.0, datetime.now(timezone.utc).timestamp()
+        - float(service.get("observed_at_epoch") or 0.0)
+    )
+    service_fresh = bool(service) and service_age <= 30
+    service_pid = int(service.get("pid") or 0)
+    service_process_alive = False
+    if service_pid > 0:
+        try:
+            os.kill(service_pid, 0)
+            service_process_alive = True
+        except OSError:
+            pass
+    generation_matches = (
+        bool(index.get("generation_id"))
+        and service.get("generation_id") == index.get("generation_id")
+    )
+    ready = (
+        index.get("status") == "ok"
+        and coverage >= 0.999
+        and dead == 0
+        and socket_ready
+        and service_fresh
+        and service_process_alive
+        and generation_matches
+        and service.get("ready") is True
+    )
+    return {
+        "status": "ok" if ready else "alert",
+        "enabled": True,
+        "backend": config.backend,
+        "rollout_mode": config.rollout_mode,
+        "model": config.model,
+        "revision": config.revision,
+        "socket_ready": socket_ready,
+        "service_fresh": service_fresh,
+        "service_process_alive": service_process_alive,
+        "generation_matches": generation_matches,
+        "service_age_seconds": round(service_age, 3) if service else None,
+        "service": service,
+        "coverage": coverage,
+        "index": index,
+        "jobs": jobs,
     }
 
 
@@ -635,7 +714,13 @@ def research_kpi(*, limit: int = 200) -> dict[str, Any]:
         totals["runs"] += 1
         status = str(summary.get("status") or "terminal")
         totals["completed" if status == "completed" else "terminal"] += 1
-        for key in ("first_pass_malformed", "repair_turns", "invalid_action_executions", "actions", "observations"):
+        for key in (
+            "first_pass_malformed",
+            "repair_turns",
+            "invalid_action_executions",
+            "actions",
+            "observations",
+        ):
             totals[key] += int(summary.get(key) or 0)
         usage = summary.get("usage") if isinstance(summary.get("usage"), dict) else {}
         totals["observation_bytes"] += int(usage.get("observation_bytes") or 0)
@@ -654,7 +739,11 @@ def research_kpi(*, limit: int = 200) -> dict[str, Any]:
                 traced_actions += 1
             elif event.get("kind") == "observation":
                 traced_observations += 1
-                metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+                metadata = (
+                    event.get("metadata")
+                    if isinstance(event.get("metadata"), dict)
+                    else {}
+                )
                 provider = str(metadata.get("provider") or "")
                 cache = str(metadata.get("cache") or "")
                 if provider:
@@ -673,7 +762,11 @@ def research_kpi(*, limit: int = 200) -> dict[str, Any]:
             }
         )
     config = load_research_config()
-    claim_total = totals["supported_claims"] + totals["contradicted_claims"] + totals["unknown_claims"]
+    claim_total = (
+        totals["supported_claims"]
+        + totals["contradicted_claims"]
+        + totals["unknown_claims"]
+    )
     return {
         "status": "ok",
         "enabled": config.enabled,
@@ -685,8 +778,14 @@ def research_kpi(*, limit: int = 200) -> dict[str, Any]:
             "consolidation": not config.consolidation_enabled,
         },
         "totals": totals,
-        "claim_coverage": (totals["supported_claims"] / claim_total) if claim_total else 0.0,
-        "decision_trace_coverage": min(1.0, traced_observations / traced_actions) if traced_actions else 1.0,
+        "claim_coverage": (
+            totals["supported_claims"] / claim_total if claim_total else 0.0
+        ),
+        "decision_trace_coverage": (
+            min(1.0, traced_observations / traced_actions)
+            if traced_actions
+            else 1.0
+        ),
         "stop_reasons": dict(sorted(stop_reasons.items())),
         "providers": dict(sorted(provider_counts.items())),
         "cache": dict(sorted(cache_counts.items())),
@@ -790,8 +889,12 @@ def health_snapshot() -> dict[str, Any]:
         CHRONOVISOR_ROOT / "runtime" / "convergence" / "state.json",
     )
     ingest_liveness = ingest_liveness_kpi()
+    semantic_index = semantic_index_kpi()
+    overall_alert = bool(ingest_liveness.get("alert")) or (
+        semantic_index.get("status") == "alert"
+    )
     return {
-        "status": "alert" if ingest_liveness.get("alert") else "ok",
+        "status": "alert" if overall_alert else "ok",
         "runtime": runtime_identity(),
         "coverage": coverage,
         "capture": capture_kpi(),
@@ -805,6 +908,7 @@ def health_snapshot() -> dict[str, Any]:
         "convergence": convergence_kpi(),
         "capture_pipeline": capture_pipeline_kpi(),
         "ingest_liveness": ingest_liveness,
+        "semantic_index": semantic_index,
         "research": research_kpi(),
         "queues": {
             "duplicate_candidates": _jsonl_count(duplicate_queue),

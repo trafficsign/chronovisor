@@ -3962,8 +3962,8 @@ def _refresh_ingest_derived_artifacts(
             from chronovisor.search import update_embeddings
 
             update_embeddings(page_ids=changed_pages)
-        except Exception:
-            pass
+        except Exception as exc:
+            _safe_log(f"ingest | semantic index enqueue failed: {exc}")
         try:
             from chronovisor.claims import append_page_claims
 

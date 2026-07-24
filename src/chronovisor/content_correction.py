@@ -3182,11 +3182,15 @@ def _refresh_after_apply(page_ids: list[str]) -> dict[str, Any]:
         result["bm25"] = f"error:{exc.__class__.__name__}"
         result["errors"].append(f"bm25:{exc}")
     try:
-        from chronovisor.ollama import is_available
+        from chronovisor.runtime_config import load_search_embedding_config
         from chronovisor.search import update_embeddings
 
-        if not is_available():
-            raise RuntimeError("embedding runtime unavailable")
+        search_embedding = load_search_embedding_config()
+        if search_embedding.backend == "legacy_ollama":
+            from chronovisor.ollama import is_available
+
+            if not is_available():
+                raise RuntimeError("embedding runtime unavailable")
         expected_count = len(set(page_ids))
         updated_count = update_embeddings(page_ids=page_ids, strict=True)
         if updated_count != expected_count:

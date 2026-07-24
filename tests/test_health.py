@@ -1,9 +1,77 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 from chronovisor import autonomy, health
+from chronovisor.runtime_config import SearchEmbeddingConfig
+
+
+def test_semantic_index_kpi_is_inactive_when_rollout_is_off(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "chronovisor.runtime_config.load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(
+            backend="nemotron_service",
+            rollout_mode="off",
+        ),
+    )
+
+    assert health.semantic_index_kpi()["status"] == "inactive"
+
+
+def test_semantic_index_kpi_requires_matching_live_service(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    runtime = chronovisor_root / "runtime"
+    runtime.mkdir(parents=True)
+    socket_path = runtime / "semantic.sock"
+    (runtime / "semantic-service-status.json").write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "pid": os.getpid(),
+                "generation_id": "generation-a",
+                "observed_at_epoch": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        Path,
+        "is_socket",
+        lambda path: path == socket_path,
+    )
+    monkeypatch.setattr(
+        "chronovisor.runtime_config.load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(
+            backend="nemotron_service",
+            rollout_mode="on",
+            socket=str(socket_path),
+        ),
+    )
+    monkeypatch.setattr(
+        "chronovisor.semantic_index.semantic_index_status",
+        lambda: {
+            "status": "ok",
+            "coverage": 1.0,
+            "generation_id": "generation-a",
+        },
+    )
+    monkeypatch.setattr(
+        "chronovisor.semantic_jobs.job_status",
+        lambda: {"status": "ok", "counts": {}},
+    )
+    payload = health.semantic_index_kpi()
+
+    assert payload["status"] == "ok"
+    assert payload["service_process_alive"] is True
+    assert payload["generation_matches"] is True
 
 
 def test_lint_queue_kpi_counts_only_unresolved_issue_keys(tmp_path: Path) -> None:
@@ -149,7 +217,9 @@ def test_derived_memory_kpi_counts_generated_artifacts(
     (chronovisor_root / "claims" / "claims-index.jsonl").write_text(
         "{}\n{}\n", encoding="utf-8"
     )
-    (chronovisor_root / "recall" / "search-golden.jsonl").write_text("{}\n", encoding="utf-8")
+    (chronovisor_root / "recall" / "search-golden.jsonl").write_text(
+        "{}\n", encoding="utf-8"
+    )
     (chronovisor_root / "recall" / "retention.json").write_text(
         json.dumps({"counts": {"pages": 5, "archive_candidates": 1}}),
         encoding="utf-8",
@@ -157,7 +227,9 @@ def test_derived_memory_kpi_counts_generated_artifacts(
     (chronovisor_root / "distill" / "wiki-qa.jsonl").write_text(
         "{}\n{}\n{}\n", encoding="utf-8"
     )
-    (chronovisor_root / "pages" / "hubs" / "ai-hub.md").write_text("hub", encoding="utf-8")
+    (chronovisor_root / "pages" / "hubs" / "ai-hub.md").write_text(
+        "hub", encoding="utf-8"
+    )
     monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
 
     payload = health.derived_memory_kpi()

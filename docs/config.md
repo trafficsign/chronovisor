@@ -409,11 +409,10 @@ deterministic correction capture, but never semantic work.
 ## Optional Reranker
 
 Install the optional local reranker dependencies with `uv sync --extra reranker`
-before enabling `[search.reranker]`. The production profile keeps it disabled:
-BM25 + semantic fusion is the default ranking path, and the synchronous recall
-hook never calls the reranker. If enabled, the Hugging Face Transformers backend
-uses `BAAI/bge-reranker-v2-m3` only for MCP `chronovisor_search` top candidates and
-explicit search-eval reranker experiments.
+before enabling `[search.reranker]`. The production profile enables the
+Hugging Face `BAAI/bge-reranker-v2-m3` cross-encoder for the first 10 MCP
+`chronovisor_search` candidates. The synchronous recall hook never calls the
+reranker.
 
 The tuned local profile reranks only the first 10 fused candidates with a 384
 token passage ceiling and equal reciprocal-rank weight (`weight = 1.0`). Keep
@@ -428,8 +427,65 @@ The production recall profile uses `gate_mode = "evidence"`,
 `judge_mode = "auto"`, and calibration enabled. Semantic fusion still serves
 normal MCP search and explicit/deep research; it is excluded from production L2
 because the fixed paired Recall gate showed no quality gain within the four-
-second envelope. The complete synchronous path has a 4000 ms wall-clock
+second envelope. Nemotron L2 remains independently gated by
+`[search.embedding.rollout].sync_recall`; L3 can be active while the hook stays
+lexical-only. The complete synchronous path has a 4000 ms wall-clock
 deadline, reserves 600 ms for allowlisted L1 memory plus BM25 fallback, and
 remains fail-open for the host. BM25 still runs without Ollama; after two
 degraded or failed runs the breaker temporarily disables rewrite, semantic
 search, and judge while keeping BM25 available.
+
+## Search embeddings
+
+The search encoder is independent from the utility `[embedding]` model used
+for duplicate and tag workflows. Nemotron runs in a dedicated local service;
+query failure returns an empty semantic lane so the shared pipeline continues
+with BM25.
+
+```toml
+[search.embedding]
+enabled = true
+backend = "nemotron_service"
+model = "nvidia/Nemotron-3-Embed-1B-BF16"
+revision = "a5e0f804b9e90a1ca6784ecbf6e41595774fc834"
+dimensions = 2048
+storage_dtype = "float32"
+query_prefix = "query: "
+document_prefix = "passage: "
+fallback = "bm25"
+fusion_weight = 0.6
+min_top_score = 0.20
+min_margin = 0.001
+low_confidence_weight = 0.25
+
+[search.embedding.service]
+socket = "~/.chronovisor/runtime/semantic.sock"
+query_device = "mps"
+query_replicas = 1
+foreground_batch_window_ms = 2
+foreground_max_batch = 4
+incremental_device = "cpu"
+incremental_enabled = true
+incremental_max_batch = 1
+incremental_pause_during_research = true
+incremental_pause_during_ingest_generation = true
+incremental_idle_unload_seconds = 300
+maintenance_max_batch = 32
+offline = true
+query_timeout_ms = 250
+interactive_timeout_ms = 1000
+
+[search.embedding.rollout]
+mode = "on"
+canary_percent = 0
+sync_recall = false
+```
+
+The service stores immutable generations below
+`~/.chronovisor/.index/semantic/`. `active.json` is the atomic generation
+pointer; incremental updates live in a generation-scoped delta database.
+`chronovisor-semantic-service rebuild` queues a full rebuild and
+`chronovisor-semantic-service rollback` atomically returns to the previous
+complete generation. Keep the last two generations; do not use the old BGE
+SQLite file as a runtime fallback after migration. Enable `sync_recall` only
+after the separate idle/35B-load paired latency gate passes.

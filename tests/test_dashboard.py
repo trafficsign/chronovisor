@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from chronovisor import dashboard, orchestrator, runtime_status
+from chronovisor.runtime_config import SearchEmbeddingConfig
 
 
 def test_mark_batch_activity_requires_a_running_batch_job() -> None:
@@ -1631,6 +1632,11 @@ def test_build_snapshot_surfaces_frontier_human_required(
 
 
 def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(enabled=False),
+    )
     monkeypatch.setattr(dashboard, "ingest_model", lambda: "qwen3.6:35b-a3b-mxfp8")
     monkeypatch.setattr(
         dashboard,
@@ -1765,6 +1771,11 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
 
 
 def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(enabled=False),
+    )
     bootstrap = SimpleNamespace(
         primary_model="bootstrap-primary",
         challenger_model="bootstrap-challenger",

@@ -53,6 +53,7 @@ from chronovisor.pipeline import (
 from chronovisor.runtime_config import (
     load_negative_feedback_config,
     load_reranker_config,
+    load_search_embedding_config,
     runtime_repo_root,
 )
 from chronovisor.store import SYSTEM_DIR, CHRONOVISOR_ROOT, find_page
@@ -666,7 +667,23 @@ def _pipeline_dependencies() -> PipelineDependencies:
 def _variant_pipeline_config(
     variant: str, *, top_n: int
 ) -> tuple[PipelineConfig, bool]:
-    weights = dict(DEFAULT_FUSION_WEIGHTS)
+    weights = dict(load_active_fusion_weights())
+    search_embedding = load_search_embedding_config()
+    if (
+        search_embedding.enabled
+        and search_embedding.backend == "nemotron_service"
+        and search_embedding.rollout_mode in {"canary", "on"}
+    ):
+        weights.update(
+            {
+                "semantic": search_embedding.fusion_weight,
+                "semantic_min_top_score": search_embedding.min_top_score,
+                "semantic_min_margin": search_embedding.min_margin,
+                "semantic_low_confidence_weight": (
+                    search_embedding.low_confidence_weight
+                ),
+            }
+        )
     if variant == "bm25":
         return (
             PipelineConfig(

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import sqlite3
 import json
+import sqlite3
 
 import pytest
 
-from chronovisor import search
-from chronovisor import ollama
 from chronovisor import index_store as index_store_mod
-from chronovisor.runtime_config import EmbeddingConfig
+from chronovisor import ollama, search
+from chronovisor.runtime_config import EmbeddingConfig, SearchEmbeddingConfig
 from chronovisor.search import (
     ScoredPage,
     apply_filters,
@@ -271,6 +270,11 @@ def test_update_embeddings_rebuilds_when_model_profile_changes(
     monkeypatch.setattr(search, "all_pages", lambda: [page_path])
     monkeypatch.setattr(search, "_json_import_done", True)
     monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(
+        search,
+        "load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(backend="legacy_ollama"),
+    )
 
     profile = {
         "value": EmbeddingConfig(model="m1", document_prefix="D1:", query_prefix="Q1:")
@@ -301,7 +305,8 @@ def test_update_embeddings_rebuilds_when_model_profile_changes(
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT model, text_prefix, COUNT(*) FROM embeddings GROUP BY model, text_prefix"
+            "SELECT model, text_prefix, COUNT(*) "
+            "FROM embeddings GROUP BY model, text_prefix"
         ).fetchall()
     finally:
         conn.close()
@@ -336,6 +341,11 @@ def test_update_embeddings_stores_markdown_chunks(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(search, "all_pages", lambda: [page_path])
     monkeypatch.setattr(search, "_json_import_done", True)
     monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(
+        search,
+        "load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(backend="legacy_ollama"),
+    )
     monkeypatch.setattr(
         search,
         "load_embedding_config",
@@ -382,6 +392,11 @@ def test_update_embeddings_prunes_rows_for_deleted_pages(tmp_path, monkeypatch) 
     monkeypatch.setattr(search, "all_pages", lambda: [page_path])
     monkeypatch.setattr(search, "_json_import_done", True)
     monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(
+        search,
+        "load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(backend="legacy_ollama"),
+    )
     monkeypatch.setattr(
         search,
         "load_embedding_config",

@@ -15,6 +15,7 @@ from chronovisor.runtime_config import (
     DEFAULT_EMBEDDING_MODEL,
     load_embedding_config,
     load_negative_feedback_config,
+    load_search_embedding_config,
 )
 from chronovisor.negative_feedback import apply_penalties, penalties_for_query
 from chronovisor.pipeline import (
@@ -1038,7 +1039,7 @@ def _should_scan_chunks(page_scores: list[float]) -> bool:
     return top1 < CHUNK_SEARCH_MIN_TOP_SCORE or (top1 - top2) < CHUNK_SEARCH_MIN_MARGIN
 
 
-def update_embeddings(
+def _legacy_update_embeddings(
     page_ids: list[str] | None = None, *, strict: bool = False
 ) -> int:
     """Update embeddings for pages. Returns count of updated pages.
@@ -1168,7 +1169,7 @@ def update_embeddings(
     return updated_count
 
 
-def semantic_search(
+def _legacy_semantic_search(
     query: str,
     top_n: int = 20,
     *,
@@ -1319,6 +1320,110 @@ def semantic_search(
     results = list(by_page.values())
     results.sort(key=lambda x: x.score, reverse=True)
     return results[:top_n]
+
+
+def update_embeddings(
+    page_ids: list[str] | None = None, *, strict: bool = False
+) -> int:
+    """Refresh the configured search embedding backend.
+
+    Nemotron writes are durable jobs.  Correctness-critical callers may use
+    ``strict=True`` to wait for generation-scoped delta publication.
+    """
+
+    config = load_search_embedding_config()
+    if not config.enabled or config.backend == "legacy_ollama":
+        return _legacy_update_embeddings(page_ids=page_ids, strict=strict)
+
+    from chronovisor.semantic_jobs import enqueue_pages, enqueue_rebuild
+
+    if page_ids is None:
+        enqueue_rebuild()
+        return 0
+    unique = sorted({page_id for page_id in page_ids if page_id})
+    if strict:
+        from chronovisor.semantic_client import index_pages
+
+        response = index_pages(unique, config, wait=True)
+        return int(response.get("pages_updated") or 0)
+
+    from chronovisor.semantic_index import extract_page_documents
+    from chronovisor.store import SYSTEM_DIR, find_page
+
+    hashes: dict[str, str] = {}
+    for page_id in unique:
+        path = find_page(page_id)
+        if path is None:
+            system_path = SYSTEM_DIR / f"{page_id}.md"
+            path = system_path if system_path.is_file() else None
+        documents = extract_page_documents(path) if path is not None else []
+        hashes[page_id] = documents[0].source_sha256 if documents else ""
+    enqueue_pages(unique, source_hashes=hashes)
+    return len(unique)
+
+
+def semantic_search(
+    query: str,
+    top_n: int = 20,
+    *,
+    include_reference: bool = False,
+    strict: bool = False,
+    timeout_ms: int | None = None,
+) -> list[ScoredPage]:
+    """Search through the selected backend and fail open to lexical search."""
+
+    config = load_search_embedding_config()
+    if not config.enabled or config.backend == "legacy_ollama":
+        return _legacy_semantic_search(
+            query,
+            top_n,
+            include_reference=include_reference,
+            strict=strict,
+            timeout_ms=timeout_ms,
+        )
+
+    from chronovisor import semantic_client
+
+    use_new = semantic_client.selected_for_rollout(query, config)
+    if config.rollout_mode == "shadow":
+        try:
+            semantic_client.search(
+                query,
+                top_n,
+                include_reference=include_reference,
+                config=config,
+                timeout_ms=timeout_ms,
+            )
+        except Exception:
+            pass
+        return _legacy_semantic_search(
+            query,
+            top_n,
+            include_reference=include_reference,
+            strict=strict,
+            timeout_ms=timeout_ms,
+        )
+    if not use_new:
+        return _legacy_semantic_search(
+            query,
+            top_n,
+            include_reference=include_reference,
+            strict=strict,
+            timeout_ms=timeout_ms,
+        )
+    try:
+        return semantic_client.search(
+            query,
+            top_n,
+            include_reference=include_reference,
+            config=config,
+            timeout_ms=timeout_ms,
+        )
+    except Exception as exc:
+        if strict:
+            raise RuntimeError("Nemotron semantic search unavailable") from exc
+        # Empty semantic results make the shared pipeline continue on BM25.
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -1680,6 +1785,25 @@ def search(
         if fusion_weights is not None
         else load_active_fusion_weights()
     )
+    search_embedding = load_search_embedding_config()
+    if (
+        fusion_weights is None
+        and search_embedding.enabled
+        and search_embedding.backend == "nemotron_service"
+    ):
+        from chronovisor.semantic_client import selected_for_rollout
+
+        if selected_for_rollout(query, search_embedding):
+            weights.update(
+                {
+                    "semantic": search_embedding.fusion_weight,
+                    "semantic_min_top_score": search_embedding.min_top_score,
+                    "semantic_min_margin": search_embedding.min_margin,
+                    "semantic_low_confidence_weight": (
+                        search_embedding.low_confidence_weight
+                    ),
+                }
+            )
     result = run_search_pipeline(
         query,
         config=production_pipeline_config(

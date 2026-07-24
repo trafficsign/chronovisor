@@ -34,6 +34,28 @@ host hooks.
 chronovisor-dashboard --host 127.0.0.1 --port 8765
 ```
 
+### Semantic retrieval service
+
+Install the pinned Nemotron service after its model snapshot is present in the
+local Hugging Face cache:
+
+```sh
+scripts/install-semantic-service
+chronovisor-semantic-service status
+chronovisor-semantic-service rebuild
+chronovisor-semantic-service archive-legacy
+```
+
+The service listens only on the mode-0600 Unix socket
+`~/.chronovisor/runtime/semantic.sock`. Rebuilds publish an immutable
+generation atomically; query errors and rebuild windows return the search
+pipeline to BM25 rather than starting Ollama BGE on the synchronous path.
+`chronovisor-semantic-service rollback` switches to the previous verified
+generation without re-embedding. Run `archive-legacy` only after the new
+runtime is active: it refuses incomplete/stale coverage, writes a mode-0600
+zstd archive, verifies a decompression checksum, and then removes the mutable
+BGE SQLite file. The service deletes that retirement archive after 14 days.
+
 The local dashboard is the primary live operations view. `Current Work` shows
 the active ingest stage (`Raw -> Triage -> Generate -> Apply -> Index`), the
 current raw/job if one is running, and the last completed raw while idle. `Model

@@ -38,6 +38,7 @@ from chronovisor.recall_improvement import configured_models
 from chronovisor.runtime_config import (
     load_decision_router_config,
     load_reranker_config,
+    load_search_embedding_config,
     runtime_identity,
 )
 from chronovisor.sealed_artifact_decoder import schema_matches
@@ -517,6 +518,13 @@ def _configured_model_roles() -> dict[str, set[str]]:
         pass
 
     try:
+        search_embedding = load_search_embedding_config()
+        if search_embedding.enabled and search_embedding.backend == "nemotron_service":
+            _add_model_role(roles, search_embedding.model, "search-embed")
+    except Exception:
+        pass
+
+    try:
         reranker = load_reranker_config()
         if reranker.enabled:
             _add_model_role(roles, reranker.model, "rerank")
@@ -537,7 +545,8 @@ def _role_sort_key(role: str) -> int:
         "decision-challenger": 6,
         "decision-tie-break": 7,
         "embed": 8,
-        "rerank": 9,
+        "search-embed": 9,
+        "rerank": 10,
     }
     return order.get(role, 99)
 
@@ -559,7 +568,12 @@ def _resolve_model_name(
 
 
 def _external_configured_model(name: str, roles: set[str]) -> bool:
-    if roles == {"rerank"} and "/" in name and not name.startswith("hf.co/"):
+    if (
+        roles <= {"rerank", "search-embed"}
+        and roles
+        and "/" in name
+        and not name.startswith("hf.co/")
+    ):
         return True
     return False
 

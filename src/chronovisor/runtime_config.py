@@ -116,9 +116,54 @@ class HookPolicy:
 
 @dataclass(frozen=True)
 class EmbeddingConfig:
+    """Utility embedding profile used by tags and duplicate review."""
+
     model: str = DEFAULT_EMBEDDING_MODEL
     document_prefix: str = ""
     query_prefix: str = ""
+
+
+@dataclass(frozen=True)
+class SearchEmbeddingConfig:
+    """Search-only semantic retrieval profile.
+
+    The legacy Ollama backend remains the default for configurations that
+    predate the dedicated semantic service.  This keeps tag/duplicate utility
+    embeddings independent from the asymmetric query/document encoder used by
+    Nemotron.
+    """
+
+    enabled: bool = True
+    backend: str = "legacy_ollama"
+    model: str = "nvidia/Nemotron-3-Embed-1B-BF16"
+    revision: str = "a5e0f804b9e90a1ca6784ecbf6e41595774fc834"
+    dimensions: int = 2_048
+    storage_dtype: str = "float32"
+    query_prefix: str = "query: "
+    document_prefix: str = "passage: "
+    fallback: str = "bm25"
+    fusion_weight: float = 0.6
+    min_top_score: float = 0.20
+    min_margin: float = 0.001
+    low_confidence_weight: float = 0.25
+    socket: str = "~/.chronovisor/runtime/semantic.sock"
+    query_device: str = "mps"
+    query_replicas: int = 1
+    foreground_batch_window_ms: int = 2
+    foreground_max_batch: int = 4
+    incremental_device: str = "cpu"
+    incremental_enabled: bool = False
+    incremental_max_batch: int = 1
+    incremental_pause_during_research: bool = True
+    incremental_pause_during_ingest_generation: bool = True
+    incremental_idle_unload_seconds: int = 300
+    maintenance_max_batch: int = 32
+    offline: bool = True
+    rollout_mode: str = "off"
+    canary_percent: int = 0
+    sync_recall: bool = False
+    query_timeout_ms: int = 250
+    interactive_timeout_ms: int = 1_000
 
 
 @dataclass(frozen=True)
@@ -264,6 +309,201 @@ def load_embedding_config(path: Path | str | None = None) -> EmbeddingConfig:
         else DEFAULT_EMBEDDING_MODEL,
         document_prefix=document_prefix if isinstance(document_prefix, str) else "",
         query_prefix=query_prefix if isinstance(query_prefix, str) else "",
+    )
+
+
+def load_search_embedding_config(
+    path: Path | str | None = None,
+) -> SearchEmbeddingConfig:
+    data = load_toml_file(path)
+    search = data.get("search")
+    section = search.get("embedding") if isinstance(search, dict) else None
+    if not isinstance(section, dict):
+        return SearchEmbeddingConfig()
+    service = section.get("service")
+    if not isinstance(service, dict):
+        service = {}
+    rollout = section.get("rollout")
+    if not isinstance(rollout, dict):
+        rollout = {}
+
+    def text(
+        source: dict[str, Any], name: str, default: str, *, choices: set[str] | None = None
+    ) -> str:
+        value = source.get(name)
+        if not isinstance(value, str) or not value.strip():
+            return default
+        normalized = value.strip()
+        if choices is not None and normalized not in choices:
+            return default
+        return normalized
+
+    return SearchEmbeddingConfig(
+        enabled=(
+            section["enabled"]
+            if isinstance(section.get("enabled"), bool)
+            else SearchEmbeddingConfig.enabled
+        ),
+        backend=text(
+            section,
+            "backend",
+            SearchEmbeddingConfig.backend,
+            choices={"legacy_ollama", "nemotron_service"},
+        ),
+        model=text(section, "model", SearchEmbeddingConfig.model),
+        revision=text(section, "revision", SearchEmbeddingConfig.revision),
+        dimensions=_bounded_int(
+            section.get("dimensions"),
+            SearchEmbeddingConfig.dimensions,
+            minimum=128,
+            maximum=4_096,
+        ),
+        storage_dtype=text(
+            section,
+            "storage_dtype",
+            SearchEmbeddingConfig.storage_dtype,
+            choices={"float32"},
+        ),
+        query_prefix=(
+            section["query_prefix"]
+            if isinstance(section.get("query_prefix"), str)
+            else SearchEmbeddingConfig.query_prefix
+        ),
+        document_prefix=(
+            section["document_prefix"]
+            if isinstance(section.get("document_prefix"), str)
+            else SearchEmbeddingConfig.document_prefix
+        ),
+        fallback=text(
+            section,
+            "fallback",
+            SearchEmbeddingConfig.fallback,
+            choices={"bm25"},
+        ),
+        fusion_weight=_bounded_float(
+            section.get("fusion_weight"),
+            SearchEmbeddingConfig.fusion_weight,
+            minimum=0.0,
+            maximum=2.0,
+        ),
+        min_top_score=_bounded_float(
+            section.get("min_top_score"),
+            SearchEmbeddingConfig.min_top_score,
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        min_margin=_bounded_float(
+            section.get("min_margin"),
+            SearchEmbeddingConfig.min_margin,
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        low_confidence_weight=_bounded_float(
+            section.get("low_confidence_weight"),
+            SearchEmbeddingConfig.low_confidence_weight,
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        socket=text(service, "socket", SearchEmbeddingConfig.socket),
+        query_device=text(
+            service,
+            "query_device",
+            SearchEmbeddingConfig.query_device,
+            choices={"mps", "cpu"},
+        ),
+        query_replicas=_bounded_int(
+            service.get("query_replicas"),
+            SearchEmbeddingConfig.query_replicas,
+            minimum=1,
+            maximum=1,
+        ),
+        foreground_batch_window_ms=_bounded_int(
+            service.get("foreground_batch_window_ms"),
+            SearchEmbeddingConfig.foreground_batch_window_ms,
+            minimum=0,
+            maximum=5,
+        ),
+        foreground_max_batch=_bounded_int(
+            service.get("foreground_max_batch"),
+            SearchEmbeddingConfig.foreground_max_batch,
+            minimum=1,
+            maximum=8,
+        ),
+        incremental_device=text(
+            service,
+            "incremental_device",
+            SearchEmbeddingConfig.incremental_device,
+            choices={"cpu"},
+        ),
+        incremental_enabled=(
+            service["incremental_enabled"]
+            if isinstance(service.get("incremental_enabled"), bool)
+            else SearchEmbeddingConfig.incremental_enabled
+        ),
+        incremental_max_batch=_bounded_int(
+            service.get("incremental_max_batch"),
+            SearchEmbeddingConfig.incremental_max_batch,
+            minimum=1,
+            maximum=1,
+        ),
+        incremental_pause_during_research=(
+            service["incremental_pause_during_research"]
+            if isinstance(service.get("incremental_pause_during_research"), bool)
+            else SearchEmbeddingConfig.incremental_pause_during_research
+        ),
+        incremental_pause_during_ingest_generation=(
+            service["incremental_pause_during_ingest_generation"]
+            if isinstance(
+                service.get("incremental_pause_during_ingest_generation"), bool
+            )
+            else SearchEmbeddingConfig.incremental_pause_during_ingest_generation
+        ),
+        incremental_idle_unload_seconds=_bounded_int(
+            service.get("incremental_idle_unload_seconds"),
+            SearchEmbeddingConfig.incremental_idle_unload_seconds,
+            minimum=30,
+            maximum=3_600,
+        ),
+        maintenance_max_batch=_bounded_int(
+            service.get("maintenance_max_batch"),
+            SearchEmbeddingConfig.maintenance_max_batch,
+            minimum=1,
+            maximum=64,
+        ),
+        offline=(
+            service["offline"]
+            if isinstance(service.get("offline"), bool)
+            else SearchEmbeddingConfig.offline
+        ),
+        rollout_mode=text(
+            rollout,
+            "mode",
+            SearchEmbeddingConfig.rollout_mode,
+            choices={"off", "shadow", "canary", "on"},
+        ),
+        canary_percent=_bounded_int(
+            rollout.get("canary_percent"),
+            SearchEmbeddingConfig.canary_percent,
+            minimum=0,
+            maximum=100,
+        ),
+        sync_recall=(
+            rollout["sync_recall"]
+            if isinstance(rollout.get("sync_recall"), bool)
+            else SearchEmbeddingConfig.sync_recall
+        ),
+        query_timeout_ms=_bounded_int(
+            service.get("query_timeout_ms"),
+            SearchEmbeddingConfig.query_timeout_ms,
+            minimum=25,
+            maximum=1_000,
+        ),
+        interactive_timeout_ms=_bounded_int(
+            service.get("interactive_timeout_ms"),
+            SearchEmbeddingConfig.interactive_timeout_ms,
+            minimum=250,
+            maximum=5_000,
+        ),
     )
 
 

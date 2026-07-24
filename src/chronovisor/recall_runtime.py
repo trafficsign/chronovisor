@@ -359,6 +359,21 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
 
     if isinstance(recall_root.get("semantic"), bool):
         policy.semantic = recall_root["semantic"]
+    # Dedicated search rollout and the synchronous hook are separate safety
+    # boundaries. L3 can use Nemotron while L2 remains lexical-only.
+    search_embedding = None
+    try:
+        from chronovisor.runtime_config import load_search_embedding_config
+
+        search_embedding = load_search_embedding_config()
+        if (
+            search_embedding.enabled
+            and search_embedding.backend == "nemotron_service"
+            and not search_embedding.sync_recall
+        ):
+            policy.semantic = False
+    except Exception:
+        policy.semantic = False
     if isinstance(recall_root.get("gate_mode"), str):
         policy.gate_mode = recall_root["gate_mode"]
     if isinstance(recall_root.get("context_style"), str):
@@ -428,6 +443,19 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             value = fusion.get(key)
             if isinstance(value, int | float):
                 setattr(policy, attr, max(0.0, float(value)))
+
+    if (
+        search_embedding is not None
+        and search_embedding.enabled
+        and search_embedding.backend == "nemotron_service"
+        and search_embedding.sync_recall
+    ):
+        policy.fusion_semantic = search_embedding.fusion_weight
+        policy.fusion_semantic_min_top_score = search_embedding.min_top_score
+        policy.fusion_semantic_min_margin = search_embedding.min_margin
+        policy.fusion_semantic_low_confidence_weight = (
+            search_embedding.low_confidence_weight
+        )
 
     calibration = section("calibration")
     if calibration:

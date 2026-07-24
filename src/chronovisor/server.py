@@ -633,8 +633,19 @@ def chronovisor_reindex() -> str:
 
     Call this after bulk changes or to initialize semantic search.
     """
+    from chronovisor.runtime_config import load_search_embedding_config
     from chronovisor.search import update_embeddings
+
+    config = load_search_embedding_config()
     count = update_embeddings()
+    if config.enabled and config.backend == "nemotron_service":
+        return json.dumps(
+            {
+                "status": "queued",
+                "backend": config.backend,
+                "message": "immutable semantic generation rebuild queued",
+            }
+        )
     if count == 0:
         return json.dumps({"status": "skipped", "message": "Ollama not available or no pages to update"})
     return json.dumps({"status": "ok", "pages_updated": count})
