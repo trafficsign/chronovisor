@@ -19,6 +19,7 @@ semantic = [
     "torch==2.13.0",
     "transformers==5.14.1",
     "sentence-transformers==5.6.1",
+    "usearch>=2.20.0",
 ]
 
 [project.scripts]

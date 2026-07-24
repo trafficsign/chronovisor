@@ -42,6 +42,7 @@ local Hugging Face cache:
 ```sh
 scripts/install-semantic-service
 chronovisor-semantic-service status
+chronovisor-semantic-service upgrade-ann
 chronovisor-semantic-service rebuild
 chronovisor-semantic-service archive-legacy
 ```
@@ -50,6 +51,8 @@ The service listens only on the mode-0600 Unix socket
 `~/.chronovisor/runtime/semantic.sock`. Rebuilds publish an immutable
 generation atomically; query errors and rebuild windows return the search
 pipeline to BM25 rather than starting Ollama BGE on the synchronous path.
+`upgrade-ann` reuses a complete generation's full vectors, creates a sealed
+512-dimensional HNSW candidate index, and activates it without re-embedding.
 `chronovisor-semantic-service rollback` switches to the previous verified
 generation without re-embedding. Run `archive-legacy` only after the new
 runtime is active: it refuses incomplete/stale coverage, writes a mode-0600

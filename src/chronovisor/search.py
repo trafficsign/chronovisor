@@ -1,5 +1,6 @@
 """Search engine — BM25 + semantic search with RRF fusion."""
 
+import heapq
 import json
 import math
 import os
@@ -11,19 +12,19 @@ from collections import Counter, deque
 from pathlib import Path
 
 from chronovisor.frontmatter import parse as parse_frontmatter
-from chronovisor.runtime_config import (
-    DEFAULT_EMBEDDING_MODEL,
-    load_embedding_config,
-    load_negative_feedback_config,
-    load_search_embedding_config,
-)
 from chronovisor.negative_feedback import apply_penalties, penalties_for_query
 from chronovisor.pipeline import (
     PipelineDependencies,
     production_pipeline_config,
     run_search_pipeline,
 )
-from chronovisor.search_types import ScoredPage, _FRONTMATTER_RE, tokenize
+from chronovisor.runtime_config import (
+    DEFAULT_EMBEDDING_MODEL,
+    load_embedding_config,
+    load_negative_feedback_config,
+    load_search_embedding_config,
+)
+from chronovisor.search_types import _FRONTMATTER_RE, ScoredPage
 from chronovisor.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
@@ -31,7 +32,6 @@ from chronovisor.store import (
     all_pages,
     page_id_from_path,
 )
-from chronovisor.link_fix import atomic_write
 
 
 def searchable_pages() -> list[Path]:
@@ -43,8 +43,8 @@ def searchable_pages() -> list[Path]:
 # BM25
 # ---------------------------------------------------------------------------
 
-_BM25_CACHE_FILE = CHRONOVISOR_ROOT / ".index" / "bm25.json"
-_BM25_CACHE_SCHEMA = 4
+_BM25_CACHE_FILE = CHRONOVISOR_ROOT / ".index" / "lexical.sqlite"
+_LEGACY_BM25_CACHE_FILE = CHRONOVISOR_ROOT / ".index" / "bm25.json"
 _ACTIVE_STATUS = "active"
 _VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
 _REFERENCE_PAGE_TYPE = "reference"
@@ -119,295 +119,35 @@ def _meta_sensitivity(meta: dict, *, folder: str = "") -> str:
     return _normalize_sensitivity(meta.get("sensitivity"), folder=folder)
 
 
-class BM25Index:
-    """BM25 index with persistent per-page caching.
-
-    Per-page tokenization output (`tf_map`, `doc_len`, frontmatter
-    fields) is cached on disk keyed by `(mtime_ns, size)`. On subsequent
-    builds, only added/changed/removed pages touch the tokenizer; the
-    global `df` table is maintained incrementally and `avgdl` is
-    recomputed in O(N) over cached `doc_len` values.
-
-    Query-time scoring reads `tf_map` directly instead of recounting
-    tokens from a stored token list, eliminating the per-query
-    O(total_tokens) scan that the previous in-memory build incurred.
-    """
-
-    def __init__(self, k1: float = 1.5, b: float = 0.75):
-        self.k1 = k1
-        self.b = b
-        self._df: dict[str, int] = {}
-        self._avgdl: float = 0.0
-        self._n: int = 0
-        # `_cache` doubles as the on-disk persistent state and the in-memory
-        # query view — query iterates `_cache.items()` directly.
-        self._cache: dict[str, dict] = {}
-        self._cache_loaded: bool = False
-        self._persistence_dirty: bool = False
-        # Reentrant lock so the BM25 singleton can be safely shared between
-        # the FastMCP main thread and ingest's background thread. `build`
-        # mutates internal state; `query` iterates `_cache.items()`. Without
-        # this lock a concurrent build during a query raises
-        # "dictionary changed size during iteration" and `_df` can drift
-        # via interleaved subtract/add pairs.
-        self._lock = threading.RLock()
-
-    # -- persistence ------------------------------------------------------
-
-    def _load_cache(self) -> None:
-        if not _BM25_CACHE_FILE.exists():
-            return
-        try:
-            doc = json.loads(_BM25_CACHE_FILE.read_text())
-        except (OSError, json.JSONDecodeError):
-            return
-        if doc.get("schema_version") != _BM25_CACHE_SCHEMA:
-            return
-        # Parameter change invalidates the cache (`tf` weights stay the
-        # same but `df`/`avgdl` are tied to the corpus, and we want to
-        # rebuild defensively if k1/b were tweaked between runs).
-        if doc.get("k1") != self.k1 or doc.get("b") != self.b:
-            return
-
-        # Validate shape before adopting any of the loaded state — a
-        # malformed-but-JSON-valid cache file would otherwise poison the
-        # singleton until the next manual rebuild.
-        try:
-            raw_docs = doc.get("docs", {})
-            if not isinstance(raw_docs, dict):
-                raise ValueError("docs must be a dict")
-            for pid, entry in raw_docs.items():
-                if not isinstance(entry, dict):
-                    raise ValueError(f"entry {pid!r} not a dict")
-                tf_map = entry.get("tf_map")
-                if not isinstance(tf_map, dict):
-                    raise ValueError(f"entry {pid!r} missing tf_map dict")
-                if not isinstance(entry.get("doc_len"), int):
-                    raise ValueError(f"entry {pid!r} missing int doc_len")
-                if not isinstance(entry.get("mtime_ns"), int):
-                    raise ValueError(f"entry {pid!r} missing int mtime_ns")
-                if not isinstance(entry.get("size"), int):
-                    raise ValueError(f"entry {pid!r} missing int size")
-            global_state = doc.get("global", {})
-            df = dict(global_state.get("df", {}))
-            n = int(global_state.get("n", 0))
-            avgdl = float(global_state.get("avgdl", 0.0))
-        except (KeyError, TypeError, ValueError):
-            return  # Leave the singleton in its empty state and rebuild fresh.
-
-        self._cache = raw_docs
-        self._df = df
-        self._n = n
-        self._avgdl = avgdl
-
-    def _persist_cache(self) -> None:
-        if os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
-            return
-        _BM25_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        doc = {
-            "schema_version": _BM25_CACHE_SCHEMA,
-            "k1": self.k1,
-            "b": self.b,
-            "global": {
-                "n": self._n,
-                "avgdl": self._avgdl,
-                "df": self._df,
-            },
-            "docs": self._cache,
-        }
-        atomic_write(_BM25_CACHE_FILE, json.dumps(doc, ensure_ascii=False))
-
-    # -- build ------------------------------------------------------------
-
-    def build(self) -> None:
-        """Sync cache with disk and rebuild the in-memory query view.
-
-        Cheap on warm runs: O(N) stat calls + zero parsing if nothing
-        changed. Mutated pages are re-tokenized and the `df` table is
-        updated incrementally (subtract old contributions, add new).
-        """
-        with self._lock:
-            self._build_locked()
-
-    def _build_locked(self) -> None:
-        if not self._cache_loaded:
-            self._load_cache()
-            self._cache_loaded = True
-
-        # Snapshot disk state.
-        current: dict[str, tuple[Path, int, int]] = {}
-        for path in searchable_pages():
-            try:
-                st = path.stat()
-            except OSError:
-                continue
-            pid = page_id_from_path(path)
-            current[pid] = (path, st.st_mtime_ns, st.st_size)
-
-        old_ids = set(self._cache.keys())
-        new_ids = set(current.keys())
-        removed = old_ids - new_ids
-        changed = False
-
-        # Removed pages: subtract from df
-        for pid in removed:
-            old = self._cache.pop(pid)
-            self._subtract_from_df(old.get("tf_map", {}))
-            changed = True
-
-        # New / modified pages
-        for pid, (path, mtime_ns, size) in current.items():
-            old = self._cache.get(pid)
-            if old and old.get("mtime_ns") == mtime_ns and old.get("size") == size:
-                continue  # unchanged
-            if old:
-                self._subtract_from_df(old.get("tf_map", {}))
-            try:
-                content = path.read_text()
-            except (OSError, UnicodeDecodeError):
-                # Drop the cache entry entirely so we don't keep stale stats.
-                self._cache.pop(pid, None)
-                changed = True
-                continue
-            fm, _body = parse_frontmatter(content)
-            title = (
-                fm.get("title", pid) if isinstance(fm.get("title", pid), str) else pid
-            )
-            updated = (
-                fm.get("updated", "") if isinstance(fm.get("updated", ""), str) else ""
-            )
-            status = _normalize_lifecycle_status(fm.get("status"))
-            superseded_by = (
-                fm.get("superseded_by", "")
-                if isinstance(fm.get("superseded_by", ""), str)
-                else ""
-            )
-            folder = path.parent.name if path.parent != PAGES_DIR else ""
-            page_type = _normalize_page_type(fm.get("type"), folder=folder)
-            sensitivity = _normalize_sensitivity(fm.get("sensitivity"), folder=folder)
-
-            title_tokens = tokenize(title) * 3
-            body_tokens = tokenize(content)
-            tokens = title_tokens + body_tokens
-            tf_map: dict[str, int] = {}
-            for tok in tokens:
-                tf_map[tok] = tf_map.get(tok, 0) + 1
-            doc_len = len(tokens)
-
-            self._add_to_df(tf_map)
-
-            self._cache[pid] = {
-                "mtime_ns": mtime_ns,
-                "size": size,
-                "title": title,
-                "folder": folder,
-                "updated": updated,
-                "status": status,
-                "superseded_by": superseded_by,
-                "page_type": page_type,
-                "sensitivity": sensitivity,
-                "doc_len": doc_len,
-                "tf_map": tf_map,
-            }
-            changed = True
-
-        # Recompute globals only if the corpus changed; otherwise the
-        # n/avgdl loaded from the cache are still authoritative.
-        if changed:
-            self._n = len(self._cache)
-            total_len = sum(d.get("doc_len", 0) for d in self._cache.values())
-            self._avgdl = total_len / self._n if self._n else 1.0
-            self._persistence_dirty = True
-        if self._persistence_dirty and os.environ.get("CHRONOVISOR_READ_ONLY") != "1":
-            try:
-                self._persist_cache()
-            except OSError:
-                pass
-            else:
-                self._persistence_dirty = False
-
-    def _subtract_from_df(self, tf_map: dict) -> None:
-        for tok in tf_map.keys():
-            current = self._df.get(tok, 0)
-            if current <= 1:
-                self._df.pop(tok, None)
-            else:
-                self._df[tok] = current - 1
-
-    def _add_to_df(self, tf_map: dict) -> None:
-        for tok in tf_map.keys():
-            self._df[tok] = self._df.get(tok, 0) + 1
-
-    # -- query ------------------------------------------------------------
-
-    def query(
-        self,
-        query_text: str,
-        top_n: int = 20,
-        *,
-        include_reference: bool = False,
-    ) -> list[ScoredPage]:
-        """Search the index."""
-        with self._lock:
-            if not self._cache:
-                self._build_locked()
-
-            q_tokens = tokenize(query_text)
-            if not q_tokens:
-                return []
-
-            # Hoist hot constants out of the inner loop.
-            n = self._n
-            avgdl = self._avgdl
-            k1 = self.k1
-            b = self.b
-            df = self._df
-
-            results = []
-            for pid, doc in self._cache.items():
-                page_type = _normalize_page_type(
-                    doc.get("page_type"), folder=doc.get("folder", "")
-                )
-                if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
-                    continue
-                tf_map = doc["tf_map"]
-                dl = doc["doc_len"]
-                score = 0.0
-                for qt in q_tokens:
-                    tf = tf_map.get(qt, 0)
-                    if tf == 0:
-                        continue
-                    d = df.get(qt, 0)
-                    idf = math.log((n - d + 0.5) / (d + 0.5) + 1)
-                    tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl))
-                    score += idf * tf_norm
-
-                if score > 0:
-                    results.append(
-                        ScoredPage(
-                            page_id=pid,
-                            title=doc["title"],
-                            folder=doc["folder"],
-                            updated=doc["updated"],
-                            score=score,
-                            status=_normalize_lifecycle_status(doc.get("status")),
-                            superseded_by=doc.get("superseded_by", "")
-                            if isinstance(doc.get("superseded_by", ""), str)
-                            else "",
-                            page_type=page_type,
-                            sensitivity=_normalize_sensitivity(
-                                doc.get("sensitivity"), folder=doc.get("folder", "")
-                            ),
-                        )
-                    )
-
-            results.sort(key=lambda x: x.score, reverse=True)
-            return results[:top_n]
-
-
 # ---------------------------------------------------------------------------
 # BM25 singleton — shared across `search()` and `ingest._search_related_pages`
 # ---------------------------------------------------------------------------
+
+from chronovisor.lexical_index import LexicalIndex
+
+
+class BM25Index(LexicalIndex):
+    """Compatibility name for the adopted SQLite inverted lexical index."""
+
+    def __init__(self, k1: float = 1.5, b: float = 0.75):
+        # k1/b remain accepted so older debug/test callers do not break.
+        del k1, b
+        super().__init__(path=_BM25_CACHE_FILE, pages=searchable_pages)
+
+    def build(self, *, force: bool = False) -> None:
+        super().build(force=force)
+        if os.environ.get("CHRONOVISOR_READ_ONLY") != "1":
+            _LEGACY_BM25_CACHE_FILE.unlink(missing_ok=True)
+
+
+def lexical_cache_paths() -> tuple[Path, ...]:
+    return (
+        _BM25_CACHE_FILE,
+        Path(f"{_BM25_CACHE_FILE}-wal"),
+        Path(f"{_BM25_CACHE_FILE}-shm"),
+        _LEGACY_BM25_CACHE_FILE,
+    )
+
 
 _BM25_LOCK = threading.Lock()
 _BM25_SINGLETON: BM25Index | None = None
@@ -1183,8 +923,8 @@ def _legacy_semantic_search(
     each stored vector carries a precomputed `norm`, and the query norm
     is computed once. Inner loop is therefore one dot product per page.
     """
-    from chronovisor.ollama import embed, is_available
     from chronovisor.index_store import get_store
+    from chronovisor.ollama import embed, is_available
 
     if not is_available():
         if strict:
@@ -1426,14 +1166,91 @@ def semantic_search(
         return []
 
 
+def semantic_verify(
+    query: str,
+    page_ids: list[str],
+    *,
+    timeout_ms: int | None = None,
+) -> list[ScoredPage]:
+    """Fail-open full-dimensional verification of graph-generated candidates."""
+
+    config = load_search_embedding_config()
+    if not page_ids or not config.enabled or config.backend != "nemotron_service":
+        return []
+    from chronovisor import semantic_client
+
+    if not semantic_client.selected_for_rollout(query, config):
+        return []
+    try:
+        rows = semantic_client.verify(
+            query,
+            page_ids,
+            config=config,
+            timeout_ms=timeout_ms,
+        )
+    except Exception:
+        return []
+    return [page for page in rows if float(page.score) >= float(config.min_top_score)]
+
+
+def context_seed_results(query: str, *, limit: int = 4) -> list[ScoredPage]:
+    """Use only explicit recall-used evidence as a weak independent entrance."""
+
+    try:
+        from chronovisor.index_store import get_store
+        from chronovisor.prefetch import prefetch_page_ids
+
+        page_ids = prefetch_page_ids(
+            host="",
+            cwd="",
+            queries=[query],
+            prompt=query,
+            limit=max(1, min(8, limit)),
+            positive_weight=1,
+            exposure_weight=0,
+        )
+        if not page_ids:
+            return []
+        store = get_store()
+        store.refresh()
+    except Exception:
+        return []
+    out: list[ScoredPage] = []
+    for rank, page_id in enumerate(page_ids):
+        meta = store.meta(page_id)
+        if meta is None:
+            continue
+        folder = _folder_from_meta(meta)
+        out.append(
+            ScoredPage(
+                page_id=page_id,
+                title=str(meta.get("title") or page_id),
+                folder=folder,
+                updated=str(meta.get("updated") or ""),
+                score=1.0 / (1.0 + rank),
+                status=_normalize_lifecycle_status(meta.get("status")),
+                superseded_by=(
+                    str(meta.get("superseded_by") or "")
+                    if isinstance(meta.get("superseded_by"), str)
+                    else ""
+                ),
+                page_type=_meta_page_type(meta, folder=folder),
+                sensitivity=_meta_sensitivity(meta, folder=folder),
+            )
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # RRF Fusion + Filter + Sort
 # ---------------------------------------------------------------------------
 
 DEFAULT_FUSION_WEIGHTS: dict[str, float] = {
+    "anchor": 0.9,
     "bm25": 1.0,
     "semantic": 0.6,
-    "graph": 0.0,
+    "graph": 0.3,
+    "context": 0.25,
     "usage_prior": 0.0,
     "bm25_score_bonus": 0.005,
     "bm25_rank_bonus": 0.006,
@@ -1483,7 +1300,15 @@ def load_active_fusion_weights(path: Path | None = None) -> dict[str, float]:
             return dict(DEFAULT_FUSION_WEIGHTS)
         weights[key] = numeric
     if not any(
-        weights[channel] > 0 for channel in ("bm25", "semantic", "graph", "usage_prior")
+        weights[channel] > 0
+        for channel in (
+            "anchor",
+            "bm25",
+            "semantic",
+            "graph",
+            "context",
+            "usage_prior",
+        )
     ):
         return dict(DEFAULT_FUSION_WEIGHTS)
     for bounded in (
@@ -1522,6 +1347,9 @@ def fuse_results(
     usage_results: list[ScoredPage] | None = None,
     k: int = 60,
     weights: dict[str, float] | None = None,
+    *,
+    anchor_results: list[ScoredPage] | None = None,
+    context_results: list[ScoredPage] | None = None,
 ) -> list[ScoredPage]:
     """Weighted Reciprocal Rank Fusion of result lists."""
     scores: dict[str, float] = {}
@@ -1550,9 +1378,11 @@ def fuse_results(
             if page.page_id not in meta:
                 meta[page.page_id] = page
 
+    add_results(anchor_results or [], "anchor")
     add_results(bm25_results, "bm25")
     add_results(semantic_results, "semantic")
     add_results(graph_results or [], "graph")
+    add_results(context_results or [], "context")
     add_results(usage_results or [], "usage_prior")
 
     retention_weight = max(0.0, float(weights.get("retention_prior", 0.0)))
@@ -1590,65 +1420,158 @@ def fuse_results(
     return fused
 
 
+_GRAPH_TRACE = threading.local()
+
+
+def graph_expansion_trace() -> dict[str, dict[str, object]]:
+    return dict(getattr(_GRAPH_TRACE, "paths", {}))
+
+
 def graph_expand_results(
     results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50
 ) -> list[ScoredPage]:
+    """Bounded two-hop associative spreading from independently found seeds."""
+
+    _GRAPH_TRACE.paths = {}
     if decay <= 0 or not results:
         return []
     from chronovisor.index_store import get_store
 
     store = get_store()
     store.refresh()
-    seen = {result.page_id for result in results}
+    seeds = results[:20]
+    seed_ids = {result.page_id for result in seeds}
+    output_limit = min(max(1, limit), 50)
+    best_activation: dict[str, float] = {
+        result.page_id: 1.0 / (1.0 + (rank * 0.25)) for rank, result in enumerate(seeds)
+    }
+    frontier: list[tuple[float, int, str, tuple[str, ...], str]] = []
+    for rank, result in enumerate(seeds):
+        activation = best_activation[result.page_id]
+        heapq.heappush(
+            frontier,
+            (-activation, 0, result.page_id, (result.page_id,), "seed"),
+        )
+
     expanded: dict[str, ScoredPage] = {}
-    for result in results[:10]:
-        linked: list[tuple[str, float]] = [
-            (page_id, 1.0)
-            for page_id in (
-                store.outlinks(result.page_id) + store.backlinks(result.page_id)
-            )
-        ]
+    trace: dict[str, dict[str, object]] = {}
+    visited_states = 0
+
+    def neighbors(page_id: str) -> list[tuple[str, float, str]]:
+        edges: dict[str, tuple[float, str]] = {}
+
+        def add(target: str, weight: float, signal: str) -> None:
+            if not target or target == page_id:
+                return
+            current = edges.get(target)
+            if current is None or weight > current[0]:
+                edges[target] = (max(0.0, min(1.0, weight)), signal)
+
+        for target in store.outlinks(page_id):
+            add(target, 1.0, "wikilink")
+        for target in store.backlinks(page_id):
+            add(target, 0.85, "backlink")
+        for tag in store.tags(page_id):
+            related = store.pages_for_tag(tag)
+            degree = max(1, len(related) - 1)
+            weight = 0.55 / math.sqrt(max(1.0, degree / 4.0))
+            for target in related[:12]:
+                add(target, weight, f"tag:{tag}")
+        meta = store.meta(page_id) or {}
+        for entity in meta.get("entities", []):
+            related = store.pages_for_entity(str(entity))
+            degree = max(1, len(related) - 1)
+            weight = 0.75 / math.sqrt(max(1.0, degree / 4.0))
+            for target in related[:12]:
+                add(target, weight, f"entity:{entity}")
         try:
             from chronovisor.cofire import neighbors as cofire_neighbors
 
-            linked.extend(
-                (
-                    str(edge["page_id"]),
-                    max(0.05, min(1.0, float(edge.get("weight") or 0.0))),
+            for edge in cofire_neighbors(
+                page_id,
+                limit=8,
+                positive_weight=1.0,
+                exposure_weight=0.05,
+            ):
+                signals = edge.get("signals")
+                signal = (
+                    "cofire:positive_used"
+                    if isinstance(signals, list) and "positive_used" in signals
+                    else "cofire:exposure"
                 )
-                for edge in cofire_neighbors(result.page_id, limit=8)
-            )
+                add(
+                    str(edge.get("page_id") or ""),
+                    float(edge.get("weight") or 0.0),
+                    signal,
+                )
         except Exception:
             pass
-        for page_id, edge_weight in linked:
-            if page_id in seen:
+        ranked = [
+            (target, weight, signal)
+            for target, (weight, signal) in edges.items()
+            if weight > 0
+        ]
+        ranked.sort(key=lambda edge: edge[1], reverse=True)
+        return ranked[:12]
+
+    while frontier and visited_states < 200:
+        negative, hop, page_id, path, incoming_signal = heapq.heappop(frontier)
+        activation = -negative
+        if activation + 1e-12 < best_activation.get(page_id, 0.0):
+            continue
+        visited_states += 1
+        if hop >= 2:
+            continue
+        for target, edge_weight, signal in neighbors(page_id):
+            next_hop = hop + 1
+            next_activation = activation * edge_weight * (0.72**next_hop)
+            if next_activation < 0.005:
                 continue
-            meta = store.meta(page_id)
+            if next_activation <= best_activation.get(target, 0.0):
+                continue
+            if (
+                target not in seed_ids
+                and target not in expanded
+                and len(expanded) >= output_limit
+            ):
+                continue
+            meta = store.meta(target)
             if meta is None:
                 continue
-            score = result.score * decay * edge_weight
-            existing = expanded.get(page_id)
-            if existing is not None and existing.score >= score:
+            best_activation[target] = next_activation
+            next_path = (*path, target)
+            heapq.heappush(
+                frontier,
+                (-next_activation, next_hop, target, next_path, signal),
+            )
+            if target in seed_ids:
                 continue
             folder = _folder_from_meta(meta)
-            expanded[page_id] = ScoredPage(
-                page_id=page_id,
-                title=meta["title"],
+            expanded[target] = ScoredPage(
+                page_id=target,
+                title=str(meta.get("title") or target),
                 folder=folder,
-                updated=meta["updated"],
-                score=score,
+                updated=str(meta.get("updated") or ""),
+                score=next_activation * decay,
                 status=_normalize_lifecycle_status(meta.get("status")),
-                superseded_by=meta.get("superseded_by", "")
-                if isinstance(meta.get("superseded_by", ""), str)
-                else "",
+                superseded_by=(
+                    str(meta.get("superseded_by") or "")
+                    if isinstance(meta.get("superseded_by"), str)
+                    else ""
+                ),
                 page_type=_meta_page_type(meta, folder=folder),
                 sensitivity=_meta_sensitivity(meta, folder=folder),
             )
-            if len(expanded) >= limit:
-                break
-        if len(expanded) >= limit:
-            break
-    return sorted(expanded.values(), key=lambda page: page.score, reverse=True)
+            trace[target] = {
+                "path": list(next_path),
+                "hops": next_hop,
+                "signal": signal or incoming_signal,
+                "activation": round(next_activation, 6),
+            }
+    _GRAPH_TRACE.paths = trace
+    return sorted(expanded.values(), key=lambda page: page.score, reverse=True)[
+        :output_limit
+    ]
 
 
 def usage_prior_results(
@@ -1752,11 +1675,19 @@ def apply_sort(
 # Public search API
 # ---------------------------------------------------------------------------
 
+_SEARCH_TRACE = threading.local()
+
+
+def last_search_trace() -> dict[str, object]:
+    return dict(getattr(_SEARCH_TRACE, "value", {}))
+
 
 def _pipeline_dependencies() -> PipelineDependencies:
     return PipelineDependencies(
         get_bm25=get_bm25,
+        context_seed_results=context_seed_results,
         semantic_search=semantic_search,
+        semantic_verify=semantic_verify,
         graph_expand_results=graph_expand_results,
         usage_prior_results=usage_prior_results,
         fuse_results=fuse_results,
@@ -1819,4 +1750,26 @@ def search(
         ),
         deps=_pipeline_dependencies(),
     )
+    graph_ids = {page.page_id for page in result.graph_results}
+    semantic_ids = {page.page_id for page in result.semantic_results}
+    _SEARCH_TRACE.value = {
+        "strategy": "multi_seed_associative",
+        "budgets": {
+            "anchor": 20,
+            "lexical": max(top_n * 5, 100),
+            "semantic": max(top_n * 5, 100),
+            "context": 4,
+            "graph_hops": 2,
+            "graph_nodes": 50,
+        },
+        "channels": {
+            "anchor": [page.page_id for page in result.anchor_results],
+            "lexical": [page.page_id for page in result.bm25_results],
+            "semantic": [page.page_id for page in result.semantic_results],
+            "context": [page.page_id for page in result.context_results],
+            "graph": [page.page_id for page in result.graph_results],
+        },
+        "verified_graph": sorted(graph_ids & semantic_ids),
+        "paths": graph_expansion_trace(),
+    }
     return result.results, result.search_mode

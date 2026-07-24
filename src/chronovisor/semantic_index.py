@@ -19,7 +19,7 @@ import sqlite3
 import tempfile
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -34,7 +34,10 @@ DELTAS_DIR = SEMANTIC_ROOT / "deltas"
 ACTIVE_FILE = SEMANTIC_ROOT / "active.json"
 ACTIVATION_LOCK = SEMANTIC_ROOT / "activation.lock"
 EXTRACTOR_SCHEMA_VERSION = 1
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
+SUPPORTED_INDEX_SCHEMA_VERSIONS = {1, INDEX_SCHEMA_VERSION}
+DEFAULT_COARSE_DIMENSIONS = 512
+ANN_FILENAME = "coarse.usearch"
 LEGACY_EMBEDDINGS_DB = CHRONOVISOR_ROOT / ".index" / "embeddings.sqlite"
 LEGACY_ARCHIVE_DIR = CHRONOVISOR_ROOT / ".index" / "archive"
 
@@ -75,6 +78,9 @@ class GenerationManifest:
     kind_counts: dict[str, int]
     metadata_sha256: str
     vectors_sha256: str
+    ann_kind: str = ""
+    ann_dimensions: int = 0
+    ann_sha256: str = ""
 
 
 def _utc_now() -> str:
@@ -232,9 +238,7 @@ def _corpus_fingerprint(documents: Sequence[SemanticDocument]) -> str:
     for document in documents:
         existing = pages.setdefault(document.page_id, document.source_sha256)
         if existing != document.source_sha256:
-            raise SemanticIndexError(
-                f"page {document.page_id} has mixed source hashes"
-            )
+            raise SemanticIndexError(f"page {document.page_id} has mixed source hashes")
     encoded = "\n".join(f"{page_id}:{pages[page_id]}" for page_id in sorted(pages))
     return _sha256_bytes(encoded.encode("utf-8"))
 
@@ -287,6 +291,44 @@ def _write_metadata(path: Path, documents: Sequence[SemanticDocument]) -> None:
     finally:
         connection.close()
     os.chmod(path, 0o600)
+
+
+def _build_ann_index(path: Path, vectors: np.ndarray) -> tuple[str, int, str]:
+    """Build a persistent Matryoshka-prefix HNSW candidate index.
+
+    The full 2048-dimensional vectors remain authoritative.  HNSW only
+    proposes row ids; every returned row is scored again with the full vector
+    before it can reach fusion.
+    """
+
+    if len(vectors) < 64:
+        return "", 0, ""
+    try:
+        from usearch.index import Index
+    except ImportError:
+        return "", 0, ""
+    dimensions = min(DEFAULT_COARSE_DIMENSIONS, int(vectors.shape[1]))
+    coarse = np.ascontiguousarray(vectors[:, :dimensions], dtype=np.float32)
+    norms = np.linalg.norm(coarse, axis=1, keepdims=True)
+    if np.any(norms <= 1e-12):
+        raise SemanticIndexError("coarse ANN vectors contain zero norms")
+    coarse /= norms
+    index = Index(
+        ndim=dimensions,
+        metric="cos",
+        dtype="f16",
+        connectivity=16,
+        expansion_add=128,
+        expansion_search=96,
+    )
+    index.add(
+        np.arange(len(coarse), dtype=np.uint64),
+        coarse,
+        threads=0,
+    )
+    index.save(path)
+    os.chmod(path, 0o600)
+    return "usearch_hnsw_f16", dimensions, _sha256_file(path)
 
 
 def build_generation(
@@ -355,6 +397,10 @@ def build_generation(
             np.save(handle, vectors, allow_pickle=False)
             handle.flush()
             os.fsync(handle.fileno())
+        ann_kind, ann_dimensions, ann_sha256 = _build_ann_index(
+            staging / ANN_FILENAME,
+            vectors,
+        )
         kind_counts: dict[str, int] = {}
         for document in documents:
             kind_counts[document.kind] = kind_counts.get(document.kind, 0) + 1
@@ -377,6 +423,9 @@ def build_generation(
             kind_counts=kind_counts,
             metadata_sha256=_sha256_file(metadata_path),
             vectors_sha256=_sha256_file(vectors_path),
+            ann_kind=ann_kind,
+            ann_dimensions=ann_dimensions,
+            ann_sha256=ann_sha256,
         )
         _atomic_json(staging / "manifest.json", asdict(manifest))
         complete_payload = {
@@ -385,6 +434,70 @@ def build_generation(
             "completed_at": _utc_now(),
         }
         _atomic_json(staging / "COMPLETE", complete_payload)
+        _fsync_directory(staging)
+        os.replace(staging, final)
+        _fsync_directory(generations)
+        return manifest
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def upgrade_generation_with_ann(
+    generation_id: str,
+    *,
+    root: Path = SEMANTIC_ROOT,
+    repo_commit: str | None = None,
+) -> GenerationManifest:
+    """Clone an immutable flat generation and seal it with a coarse HNSW."""
+
+    source = validate_generation(generation_id, root=root)
+    if source.ann_kind:
+        return source
+    source_dir = generation_dir(generation_id, root=root)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    upgraded_id = f"{timestamp}-ann-{uuid.uuid4().hex[:8]}"
+    generations = root / "generations"
+    staging = generations / f".staging-{upgraded_id}"
+    final = generations / upgraded_id
+    _secure_directory(generations)
+    _secure_directory(staging)
+    try:
+        metadata_path = staging / "metadata.sqlite"
+        vectors_path = staging / "vectors.npy"
+        shutil.copy2(source_dir / "metadata.sqlite", metadata_path)
+        shutil.copy2(source_dir / "vectors.npy", vectors_path)
+        os.chmod(metadata_path, 0o600)
+        os.chmod(vectors_path, 0o600)
+        vectors = np.load(vectors_path, mmap_mode="r", allow_pickle=False)
+        ann_kind, ann_dimensions, ann_sha256 = _build_ann_index(
+            staging / ANN_FILENAME,
+            vectors,
+        )
+        if not ann_kind:
+            raise SemanticIndexError("usearch is required for ANN generation upgrade")
+        manifest = replace(
+            source,
+            schema_version=INDEX_SCHEMA_VERSION,
+            generation_id=upgraded_id,
+            created_at=_utc_now(),
+            repo_commit=repo_commit if repo_commit is not None else _repo_commit(),
+            metadata_sha256=_sha256_file(metadata_path),
+            vectors_sha256=_sha256_file(vectors_path),
+            ann_kind=ann_kind,
+            ann_dimensions=ann_dimensions,
+            ann_sha256=ann_sha256,
+        )
+        _atomic_json(staging / "manifest.json", asdict(manifest))
+        _atomic_json(
+            staging / "COMPLETE",
+            {
+                "generation_id": upgraded_id,
+                "manifest_sha256": _sha256_file(staging / "manifest.json"),
+                "completed_at": _utc_now(),
+                "upgraded_from": generation_id,
+            },
+        )
         _fsync_directory(staging)
         os.replace(staging, final)
         _fsync_directory(generations)
@@ -416,7 +529,7 @@ def read_manifest(
         raise SemanticIndexError(
             f"invalid generation manifest: {generation_id}"
         ) from exc
-    if manifest.schema_version != INDEX_SCHEMA_VERSION:
+    if manifest.schema_version not in SUPPORTED_INDEX_SCHEMA_VERSIONS:
         raise SemanticIndexError(
             f"unsupported generation schema: {manifest.schema_version}"
         )
@@ -437,16 +550,22 @@ def validate_generation(
     manifest = read_manifest(generation_id, root=root)
     metadata = directory / "metadata.sqlite"
     vectors = directory / "vectors.npy"
+    ann = directory / ANN_FILENAME
     if verify_checksums:
         if _sha256_file(metadata) != manifest.metadata_sha256:
             raise SemanticIndexError("semantic metadata checksum mismatch")
         if _sha256_file(vectors) != manifest.vectors_sha256:
             raise SemanticIndexError("semantic vectors checksum mismatch")
+        if manifest.ann_sha256:
+            if not ann.is_file() or _sha256_file(ann) != manifest.ann_sha256:
+                raise SemanticIndexError("semantic ANN checksum mismatch")
+    if bool(manifest.ann_kind) != bool(manifest.ann_sha256):
+        raise SemanticIndexError("semantic ANN manifest is incomplete")
+    if manifest.ann_kind and not (1 <= manifest.ann_dimensions <= manifest.dimensions):
+        raise SemanticIndexError("semantic ANN dimensions are invalid")
     matrix = np.load(vectors, mmap_mode="r", allow_pickle=False)
     if matrix.shape != (manifest.document_count, manifest.dimensions):
-        raise SemanticIndexError(
-            f"semantic vectors shape mismatch: {matrix.shape}"
-        )
+        raise SemanticIndexError(f"semantic vectors shape mismatch: {matrix.shape}")
     if matrix.dtype != np.float32:
         raise SemanticIndexError(f"semantic vectors dtype mismatch: {matrix.dtype}")
     connection = sqlite3.connect(f"file:{metadata}?mode=ro", uri=True)
@@ -549,51 +668,114 @@ class LoadedGeneration:
     delta_vectors: np.ndarray
     delta_page_ids: list[str]
     delta_kinds: list[str]
+    page_rows: dict[str, list[int]]
+    ann_index: Any | None = None
 
-    def search(
-        self, query_vector: Sequence[float], *, top_n: int
-    ) -> list[tuple[str, float]]:
+    def _normalized_query(self, query_vector: Sequence[float]) -> np.ndarray:
         vector = np.asarray(query_vector, dtype=np.float32)
         if vector.shape != (self.manifest.dimensions,) or not np.isfinite(vector).all():
             raise SemanticIndexError("query vector shape/value mismatch")
         norm = float(np.linalg.norm(vector))
         if not math.isfinite(norm) or norm <= 1e-12:
             raise SemanticIndexError("query vector has zero/invalid norm")
-        vector = vector / norm
+        return np.ascontiguousarray(vector / norm, dtype=np.float32)
+
+    def _candidate_rows(self, vector: np.ndarray, *, top_n: int) -> np.ndarray:
+        if self.ann_index is None or not self.manifest.ann_dimensions:
+            return np.arange(len(self.vectors), dtype=np.int64)
+        dimensions = self.manifest.ann_dimensions
+        coarse = np.ascontiguousarray(vector[:dimensions], dtype=np.float32)
+        norm = float(np.linalg.norm(coarse))
+        if not math.isfinite(norm) or norm <= 1e-12:
+            return np.arange(len(self.vectors), dtype=np.int64)
+        coarse /= norm
+        candidate_count = min(
+            len(self.vectors),
+            max(512, max(1, top_n) * 16),
+        )
+        matches = self.ann_index.search(coarse, count=candidate_count)
+        return np.asarray(matches.keys, dtype=np.int64)
+
+    def _score_base_rows(
+        self,
+        vector: np.ndarray,
+        rows: Sequence[int],
+        *,
+        page_filter: set[str] | None = None,
+    ) -> dict[str, float]:
+        selected = np.asarray(rows, dtype=np.int64)
+        if not len(selected):
+            return {}
+        scores = np.asarray(self.vectors[selected] @ vector, dtype=np.float32)
         by_page: dict[str, float] = {}
-        if len(self.vectors):
-            scores = self.vectors @ vector
-            scores = np.asarray(scores, dtype=np.float32)
-            if self.kinds:
-                chunk_mask = np.fromiter(
-                    (kind == "chunk" for kind in self.kinds),
-                    dtype=np.bool_,
-                    count=len(self.kinds),
-                )
-                scores[chunk_mask] *= 0.92
-            for row in np.argsort(-scores):
-                page_id = self.page_ids[int(row)]
-                if page_id in self.overridden_pages or page_id in by_page:
-                    continue
-                by_page[page_id] = float(scores[int(row)])
-                if len(by_page) >= max(top_n * 4, top_n):
-                    break
-        if len(self.delta_vectors):
-            scores = self.delta_vectors @ vector
-            scores = np.asarray(scores, dtype=np.float32)
-            if self.delta_kinds:
-                chunk_mask = np.fromiter(
-                    (kind == "chunk" for kind in self.delta_kinds),
-                    dtype=np.bool_,
-                    count=len(self.delta_kinds),
-                )
-                scores[chunk_mask] *= 0.92
-            for row in np.argsort(-scores):
-                page_id = self.delta_page_ids[int(row)]
-                score = float(scores[int(row)])
-                if score > by_page.get(page_id, float("-inf")):
-                    by_page[page_id] = score
+        for offset, raw_row in enumerate(selected):
+            row = int(raw_row)
+            page_id = self.page_ids[row]
+            if page_id in self.overridden_pages:
+                continue
+            if page_filter is not None and page_id not in page_filter:
+                continue
+            score = float(scores[offset])
+            if self.kinds and self.kinds[row] == "chunk":
+                score *= 0.92
+            if score > by_page.get(page_id, float("-inf")):
+                by_page[page_id] = score
+        return by_page
+
+    def _score_delta(
+        self,
+        vector: np.ndarray,
+        *,
+        page_filter: set[str] | None = None,
+    ) -> dict[str, float]:
+        if not len(self.delta_vectors):
+            return {}
+        scores = np.asarray(self.delta_vectors @ vector, dtype=np.float32)
+        by_page: dict[str, float] = {}
+        for row, raw_score in enumerate(scores):
+            page_id = self.delta_page_ids[row]
+            if page_filter is not None and page_id not in page_filter:
+                continue
+            score = float(raw_score)
+            if self.delta_kinds and self.delta_kinds[row] == "chunk":
+                score *= 0.92
+            if score > by_page.get(page_id, float("-inf")):
+                by_page[page_id] = score
+        return by_page
+
+    def search(
+        self, query_vector: Sequence[float], *, top_n: int
+    ) -> list[tuple[str, float]]:
+        vector = self._normalized_query(query_vector)
+        by_page = self._score_base_rows(
+            vector,
+            self._candidate_rows(vector, top_n=top_n),
+        )
+        for page_id, score in self._score_delta(vector).items():
+            if score > by_page.get(page_id, float("-inf")):
+                by_page[page_id] = score
         return sorted(by_page.items(), key=lambda item: item[1], reverse=True)[:top_n]
+
+    def score_pages(
+        self,
+        query_vector: Sequence[float],
+        page_ids: Sequence[str],
+    ) -> list[tuple[str, float]]:
+        """Exactly score a bounded page set with authoritative full vectors."""
+
+        targets = {str(page_id) for page_id in page_ids if page_id}
+        if not targets:
+            return []
+        vector = self._normalized_query(query_vector)
+        rows = [row for page_id in targets for row in self.page_rows.get(page_id, ())]
+        by_page = self._score_base_rows(vector, rows, page_filter=targets)
+        for page_id, score in self._score_delta(
+            vector,
+            page_filter=targets,
+        ).items():
+            if score > by_page.get(page_id, float("-inf")):
+                by_page[page_id] = score
+        return sorted(by_page.items(), key=lambda item: item[1], reverse=True)
 
 
 def _delta_db(generation_id: str, *, root: Path) -> Path:
@@ -748,9 +930,24 @@ def load_generation(
     directory = generation_dir(generation_id, root=root)
     rows = _metadata_rows(directory / "metadata.sqlite")
     vectors = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
+    ann_index: Any | None = None
+    if manifest.ann_kind:
+        try:
+            from usearch.index import Index
+        except ImportError as exc:
+            raise SemanticIndexError(
+                "active semantic generation requires the usearch runtime"
+            ) from exc
+        try:
+            ann_index = Index.restore(directory / ANN_FILENAME, view=True)
+        except Exception as exc:
+            raise SemanticIndexError("semantic ANN index could not be loaded") from exc
     overridden, delta_vectors, delta_page_ids, delta_kinds = _load_delta(
         generation_id, dimensions=manifest.dimensions, root=root
     )
+    page_rows: dict[str, list[int]] = {}
+    for row in rows:
+        page_rows.setdefault(str(row[2]), []).append(int(row[0]))
     return LoadedGeneration(
         manifest=manifest,
         vectors=vectors,
@@ -762,6 +959,8 @@ def load_generation(
         delta_vectors=delta_vectors,
         delta_page_ids=delta_page_ids,
         delta_kinds=delta_kinds,
+        page_rows=page_rows,
+        ann_index=ann_index,
     )
 
 
@@ -776,9 +975,7 @@ def load_active_generation(
     path = generation_dir(generation_id, root=root) / "manifest.json"
     if manifest_sha != _sha256_file(path):
         raise SemanticIndexError("active semantic manifest pointer mismatch")
-    return load_generation(
-        generation_id, root=root, verify_checksums=verify_checksums
-    )
+    return load_generation(generation_id, root=root, verify_checksums=verify_checksums)
 
 
 def semantic_index_status(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
@@ -792,9 +989,7 @@ def semantic_index_status(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
             "coverage": 0.0,
         }
     try:
-        manifest = validate_generation(
-            generation_id, root=root, verify_checksums=False
-        )
+        manifest = validate_generation(generation_id, root=root, verify_checksums=False)
         delta_path = root / "deltas" / f"{generation_id}.sqlite"
         delta_pages = 0
         indexed_mtimes: dict[str, int] = {}
@@ -851,6 +1046,8 @@ def semantic_index_status(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
             "model": manifest.model,
             "revision": manifest.revision,
             "dimensions": manifest.dimensions,
+            "ann_kind": manifest.ann_kind or "flat",
+            "ann_dimensions": manifest.ann_dimensions,
             "page_count": manifest.page_count,
             "document_count": manifest.document_count,
             "kind_counts": manifest.kind_counts,
@@ -996,9 +1193,8 @@ def prune_expired_legacy_archives(
             if expires.tzinfo is None:
                 continue
             archive = Path(str(manifest["archive"])).resolve()
-            if (
-                archive.parent != archive_root
-                or not archive.name.endswith(".sqlite.zst")
+            if archive.parent != archive_root or not archive.name.endswith(
+                ".sqlite.zst"
             ):
                 continue
         except (OSError, KeyError, ValueError, json.JSONDecodeError):

@@ -17,7 +17,7 @@ import signal
 import socketserver
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, Callable
@@ -43,6 +43,7 @@ from chronovisor.semantic_index import (
     read_active,
     rollback_generation,
     semantic_index_status,
+    upgrade_generation_with_ann,
     write_page_delta,
 )
 from chronovisor.semantic_jobs import (
@@ -133,9 +134,7 @@ class QueryBatcher:
                     future.set_exception(error)
                 continue
             try:
-                vectors = self._encode(
-                    [item[0] for item in batch], self._max_batch
-                )
+                vectors = self._encode([item[0] for item in batch], self._max_batch)
                 for vector, (_query, top_n, future) in zip(vectors, batch):
                     future.set_result(self._search(vector, top_n))
             except BaseException as exc:
@@ -203,6 +202,10 @@ class SemanticServiceState:
         self._last_job_prune = 0.0
         self._last_drift_scan = 0.0
         self._metrics_lock = threading.Lock()
+        self._query_cache_lock = threading.Lock()
+        self._query_vector_cache: OrderedDict[str, tuple[float, np.ndarray]] = (
+            OrderedDict()
+        )
         self._query_latencies_ms: deque[float] = deque(maxlen=2_000)
         self._query_errors = 0
         self._active_signature: tuple[int, int] | None = None
@@ -329,11 +332,31 @@ class SemanticServiceState:
 
     def _encode_queries(self, queries: list[str], batch_size: int) -> np.ndarray:
         with self._model_lock:
-            return self._foreground.encode_queries(queries, batch_size)
+            vectors = self._foreground.encode_queries(queries, batch_size)
+        now = time.monotonic()
+        with self._query_cache_lock:
+            for query, vector in zip(queries, vectors):
+                self._query_vector_cache[query] = (
+                    now,
+                    np.ascontiguousarray(vector, dtype=np.float32),
+                )
+                self._query_vector_cache.move_to_end(query)
+            while len(self._query_vector_cache) > 64:
+                self._query_vector_cache.popitem(last=False)
+        return vectors
 
-    def _search_vector(
-        self, vector: np.ndarray, top_n: int
-    ) -> list[tuple[str, float]]:
+    def _cached_query_vector(self, query: str) -> tuple[np.ndarray, bool]:
+        now = time.monotonic()
+        with self._query_cache_lock:
+            cached = self._query_vector_cache.get(query)
+            if cached is not None and now - cached[0] <= 10.0:
+                self._query_vector_cache.move_to_end(query)
+                return cached[1], True
+            if cached is not None:
+                self._query_vector_cache.pop(query, None)
+        return self._encode_queries([query], 1)[0], False
+
+    def _search_vector(self, vector: np.ndarray, top_n: int) -> list[tuple[str, float]]:
         with self._generation_lock:
             generation = self._generation
             if generation is None:
@@ -365,8 +388,29 @@ class SemanticServiceState:
             ),
             "latency_ms": round(latency_ms, 3),
             "results": [
-                {"page_id": page_id, "score": score}
-                for page_id, score in results
+                {"page_id": page_id, "score": score} for page_id, score in results
+            ],
+        }
+
+    def verify(self, query: str, page_ids: list[str]) -> dict[str, Any]:
+        """Exactly verify graph candidates without a second model inference."""
+
+        self._reload_if_pointer_changed()
+        unique = list(dict.fromkeys(page_id for page_id in page_ids if page_id))[:100]
+        if not unique:
+            return {"status": "ok", "cache_hit": False, "results": []}
+        vector, cache_hit = self._cached_query_vector(query)
+        with self._generation_lock:
+            generation = self._generation
+            if generation is None:
+                raise ServiceBusy("no active semantic generation")
+            rows = generation.score_pages(vector, unique)
+        return {
+            "status": "ok",
+            "generation_id": generation.manifest.generation_id,
+            "cache_hit": cache_hit,
+            "results": [
+                {"page_id": page_id, "score": score} for page_id, score in rows
             ],
         }
 
@@ -511,8 +555,7 @@ class SemanticServiceState:
                 enqueue_pages(
                     changed,
                     source_hashes={
-                        page_id: current_hashes.get(page_id, "")
-                        for page_id in changed
+                        page_id: current_hashes.get(page_id, "") for page_id in changed
                     },
                 )
         finally:
@@ -540,9 +583,7 @@ class SemanticServiceState:
             if self._pause_background_work() or self._maintenance.is_set():
                 continue
             kinds = (
-                ("page", "rebuild")
-                if self.config.incremental_enabled
-                else ("rebuild",)
+                ("page", "rebuild") if self.config.incremental_enabled else ("rebuild",)
             )
             job = claim_next(kinds=kinds)
             if job is None:
@@ -572,6 +613,14 @@ class SemanticServiceState:
                 int(payload.get("top_n") or 20),
                 timeout_ms=int(payload.get("timeout_ms") or 0) or None,
             )
+        if method == "verify":
+            query = str(payload.get("query") or "").strip()
+            raw_ids = payload.get("page_ids")
+            if not query:
+                raise ValueError("query is required")
+            if not isinstance(raw_ids, list):
+                raise ValueError("page_ids must be a list")
+            return self.verify(query, [str(item) for item in raw_ids])
         if method == "reload":
             return self.reload()
         if method == "rebuild":
@@ -606,9 +655,7 @@ class _Handler(socketserver.StreamRequestHandler):
             }
         try:
             self.wfile.write(
-                json.dumps(
-                    response, ensure_ascii=False, separators=(",", ":")
-                ).encode()
+                json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode()
                 + b"\n"
             )
         except OSError:
@@ -649,7 +696,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="chronovisor-semantic-service")
     parser.add_argument(
         "command",
-        choices=("serve", "status", "rebuild", "rollback", "archive-legacy"),
+        choices=(
+            "serve",
+            "status",
+            "rebuild",
+            "rollback",
+            "upgrade-ann",
+            "archive-legacy",
+        ),
         nargs="?",
         default="serve",
     )
@@ -662,6 +716,16 @@ def main() -> None:
 
     if args.command == "archive-legacy":
         result = archive_legacy_search_index()
+    elif args.command == "upgrade-ann":
+        active = read_active()
+        current = str(active.get("generation_id") or "")
+        if not current:
+            raise SystemExit("no active semantic generation")
+        manifest = upgrade_generation_with_ann(current)
+        result = activate_generation(
+            manifest.generation_id,
+            expected_current=current,
+        )
     elif args.command == "status":
         result = semantic_client.health(config)
     elif args.command == "rebuild":

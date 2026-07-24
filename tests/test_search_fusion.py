@@ -61,9 +61,7 @@ def test_read_only_embedding_probe_does_not_create_missing_database(
     assert not database.exists()
 
 
-def test_json_embedding_import_uses_raw_connection_once(
-    tmp_path, monkeypatch
-) -> None:
+def test_json_embedding_import_uses_raw_connection_once(tmp_path, monkeypatch) -> None:
     database = tmp_path / ".index" / "embeddings.sqlite"
     legacy = tmp_path / ".embeddings.json"
     legacy.write_text(
@@ -134,6 +132,58 @@ def test_fusion_keeps_strong_bm25_match_ahead_of_semantic_only_neighbor() -> Non
     )
 
     assert [result.page_id for result in results[:2]] == ["exact", "neighbor"]
+
+
+def test_associative_graph_reaches_two_hops_with_path_trace(monkeypatch) -> None:
+    class FakeStore:
+        def refresh(self):
+            return None
+
+        def outlinks(self, page_id):
+            return {"seed": ["middle"], "middle": ["target"]}.get(page_id, [])
+
+        def backlinks(self, _page_id):
+            return []
+
+        def tags(self, _page_id):
+            return []
+
+        def pages_for_tag(self, _tag):
+            return []
+
+        def pages_for_entity(self, _entity):
+            return []
+
+        def meta(self, page_id):
+            if page_id not in {"seed", "middle", "target"}:
+                return None
+            return {
+                "page_id": page_id,
+                "title": page_id,
+                "updated": "2026-07-24",
+                "path": f"/tmp/pages/topic/{page_id}.md",
+                "status": "active",
+                "entities": [],
+            }
+
+    from chronovisor import index_store
+
+    monkeypatch.setattr(index_store, "get_store", lambda: FakeStore())
+    monkeypatch.setattr(
+        "chronovisor.cofire.neighbors",
+        lambda *_args, **_kwargs: [],
+    )
+
+    expanded = search.graph_expand_results(
+        [page("seed", 1.0)],
+        decay=0.3,
+        limit=50,
+    )
+    paths = search.graph_expansion_trace()
+
+    assert [result.page_id for result in expanded] == ["middle", "target"]
+    assert paths["target"]["path"] == ["seed", "middle", "target"]
+    assert paths["target"]["hops"] == 2
 
 
 def test_fusion_bm25_bonus_is_parameterized() -> None:
@@ -456,15 +506,24 @@ def test_update_embeddings_prunes_rows_for_deleted_pages(tmp_path, monkeypatch) 
     assert search.update_embeddings() == 0
     conn = sqlite3.connect(db_path)
     try:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM embeddings WHERE page_id = 'retired-page'"
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM question_embeddings WHERE page_id = 'retired-page'"
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM chunk_embeddings WHERE page_id = 'retired-page'"
-        ).fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM embeddings WHERE page_id = 'retired-page'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM question_embeddings WHERE page_id = 'retired-page'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM chunk_embeddings WHERE page_id = 'retired-page'"
+            ).fetchone()[0]
+            == 0
+        )
     finally:
         conn.close()
 
@@ -678,9 +737,11 @@ def test_active_fusion_policy_rejects_all_zero_retrieval_channels(tmp_path) -> N
     policy = tmp_path / "search-policy.json"
     weights = {
         **search.DEFAULT_FUSION_WEIGHTS,
+        "anchor": 0.0,
         "bm25": 0.0,
         "semantic": 0.0,
         "graph": 0.0,
+        "context": 0.0,
         "usage_prior": 0.0,
     }
     policy.write_text(

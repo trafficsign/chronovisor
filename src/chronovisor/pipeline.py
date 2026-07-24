@@ -31,12 +31,17 @@ class PipelineConfig:
     truncate_results: bool = True
     include_reference: bool = False
     semantic_timeout_ms: int | None = None
+    anchor_seed: bool = True
+    context_seed: bool = True
+    verify_graph: bool = True
 
 
 @dataclass(frozen=True)
 class PipelineDependencies:
     get_bm25: Callable[[], Any]
+    context_seed_results: Callable[..., list[ScoredPage]]
     semantic_search: Callable[..., list[ScoredPage]]
+    semantic_verify: Callable[..., list[ScoredPage]]
     graph_expand_results: Callable[..., list[ScoredPage]]
     usage_prior_results: Callable[..., list[ScoredPage]]
     fuse_results: Callable[..., list[ScoredPage]]
@@ -51,9 +56,11 @@ class PipelineDependencies:
 class PipelineResult:
     results: list[ScoredPage]
     search_mode: str
+    anchor_results: list[ScoredPage]
     bm25_results: list[ScoredPage]
     semantic_results: list[ScoredPage]
     graph_results: list[ScoredPage]
+    context_results: list[ScoredPage]
     usage_results: list[ScoredPage]
     negative_feedback: dict[str, Any]
 
@@ -177,8 +184,10 @@ def apply_rerank_stage(
 
 
 def _graph_results(
+    anchor_results: list[ScoredPage],
     bm25_results: list[ScoredPage],
     sem_results: list[ScoredPage],
+    context_results: list[ScoredPage],
     *,
     config: PipelineConfig,
     deps: PipelineDependencies,
@@ -191,17 +200,28 @@ def _graph_results(
         if config.graph_decay is not None
         else float(config.fusion_weights.get("graph", 0.0) or 0.0)
     )
+    seeds = plain_rrf(
+        [
+            ("anchor", anchor_results),
+            ("bm25", bm25_results),
+            ("semantic", sem_results),
+            ("context", context_results),
+        ],
+        weights=config.fusion_weights,
+    )[:20]
     return deps.graph_expand_results(
-        bm25_results + sem_results,
+        seeds,
         decay=decay,
         limit=fetch_n,
     )
 
 
 def _usage_results(
+    anchor_results: list[ScoredPage],
     bm25_results: list[ScoredPage],
     sem_results: list[ScoredPage],
     graph_results: list[ScoredPage],
+    context_results: list[ScoredPage],
     *,
     config: PipelineConfig,
     deps: PipelineDependencies,
@@ -209,7 +229,7 @@ def _usage_results(
 ) -> list[ScoredPage]:
     if config.usage_strategy == "disabled":
         return []
-    candidates = bm25_results + sem_results
+    candidates = anchor_results + bm25_results + sem_results + context_results
     if config.usage_include_graph:
         candidates += graph_results
     candidate_ids = {page.page_id for page in candidates}
@@ -228,9 +248,11 @@ def _usage_results(
 
 
 def _select_results(
+    anchor_results: list[ScoredPage],
     bm25_results: list[ScoredPage],
     sem_results: list[ScoredPage],
     graph_results: list[ScoredPage],
+    context_results: list[ScoredPage],
     usage_results: list[ScoredPage],
     *,
     config: PipelineConfig,
@@ -252,6 +274,8 @@ def _select_results(
             graph_results,
             usage_results,
             weights=config.fusion_weights,
+            anchor_results=anchor_results,
+            context_results=context_results,
         )
     if config.result_strategy != "production":
         raise ValueError(f"unknown result strategy: {config.result_strategy}")
@@ -262,14 +286,18 @@ def _select_results(
             graph_results,
             usage_results,
             weights=config.fusion_weights,
+            anchor_results=anchor_results,
+            context_results=context_results,
         )
-    if graph_results or usage_results:
+    if anchor_results or graph_results or context_results or usage_results:
         return deps.fuse_results(
             bm25_results,
             [],
             graph_results,
             usage_results,
             weights=config.fusion_weights,
+            anchor_results=anchor_results,
+            context_results=context_results,
         )
     return bm25_results
 
@@ -285,6 +313,18 @@ def run_search_pipeline(
 
     bm25 = deps.get_bm25()
     bm25.build()
+    anchor_results: list[ScoredPage] = []
+    if config.anchor_seed:
+        anchor_query = getattr(bm25, "anchor_query", None)
+        if callable(anchor_query):
+            try:
+                anchor_results = anchor_query(
+                    query,
+                    top_n=min(fetch_n, 20),
+                    include_reference=config.include_reference,
+                )
+            except TypeError:
+                anchor_results = anchor_query(query, top_n=min(fetch_n, 20))
     try:
         bm25_results = bm25.query(
             query,
@@ -293,6 +333,10 @@ def run_search_pipeline(
         )
     except TypeError:
         bm25_results = bm25.query(query, top_n=fetch_n)
+
+    context_results: list[ScoredPage] = []
+    if config.context_seed:
+        context_results = deps.context_seed_results(query, limit=4)
 
     search_mode = "bm25"
     sem_results: list[ScoredPage] = []
@@ -310,16 +354,42 @@ def run_search_pipeline(
             search_mode = "hybrid"
 
     graph_results = _graph_results(
+        anchor_results,
         bm25_results,
         sem_results,
+        context_results,
         config=config,
         deps=deps,
         fetch_n=fetch_n,
     )
+    if config.verify_graph and sem_results and graph_results:
+        try:
+            verified = deps.semantic_verify(
+                query,
+                [page.page_id for page in graph_results],
+                timeout_ms=config.semantic_timeout_ms,
+            )
+        except TypeError:
+            verified = deps.semantic_verify(
+                query,
+                [page.page_id for page in graph_results],
+            )
+        semantic_by_page = {page.page_id: page for page in sem_results}
+        for page in verified:
+            current = semantic_by_page.get(page.page_id)
+            if current is None or page.score > current.score:
+                semantic_by_page[page.page_id] = page
+        sem_results = sorted(
+            semantic_by_page.values(),
+            key=lambda page: page.score,
+            reverse=True,
+        )[:fetch_n]
     usage_results = _usage_results(
+        anchor_results,
         bm25_results,
         sem_results,
         graph_results,
+        context_results,
         config=config,
         deps=deps,
         fetch_n=fetch_n,
@@ -327,9 +397,11 @@ def run_search_pipeline(
     if graph_results and search_mode == "bm25":
         search_mode = "bm25+graph"
     results = _select_results(
+        anchor_results,
         bm25_results,
         sem_results,
         graph_results,
+        context_results,
         usage_results,
         config=config,
         deps=deps,
@@ -337,7 +409,9 @@ def run_search_pipeline(
 
     negative_meta: dict[str, Any] = {"status": "disabled"}
     if config.apply_negative_feedback:
-        results, negative_meta = apply_negative_feedback_stage(query, results, deps=deps)
+        results, negative_meta = apply_negative_feedback_stage(
+            query, results, deps=deps
+        )
 
     if config.filter_results:
         results = deps.apply_filters(
@@ -353,9 +427,11 @@ def run_search_pipeline(
     return PipelineResult(
         results=results,
         search_mode=search_mode,
+        anchor_results=anchor_results,
         bm25_results=bm25_results,
         semantic_results=sem_results,
         graph_results=graph_results,
+        context_results=context_results,
         usage_results=usage_results,
         negative_feedback=negative_meta,
     )

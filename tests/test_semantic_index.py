@@ -92,6 +92,9 @@ def test_build_validate_activate_and_search_generation(tmp_path: Path) -> None:
 
     assert pointer["generation_id"] == manifest.generation_id
     assert loaded.search([1.0, 0.0, 0.0], top_n=2)[0][0] == "alpha"
+    assert loaded.score_pages([1.0, 0.0, 0.0], ["alpha"]) == [
+        ("alpha", pytest.approx(1.0))
+    ]
     generation = tmp_path / "generations" / manifest.generation_id
     assert tmp_path.stat().st_mode & 0o777 == 0o700
     assert generation.stat().st_mode & 0o777 == 0o700
@@ -101,6 +104,48 @@ def test_build_validate_activate_and_search_generation(tmp_path: Path) -> None:
     assert status["status"] == "ok"
     assert status["page_count"] == 2
     assert status["document_count"] == 3
+
+
+def test_hnsw_generation_proposes_then_full_vector_rescores(tmp_path: Path) -> None:
+    pytest.importorskip("usearch")
+    rng = np.random.default_rng(42)
+    vectors = rng.normal(size=(96, 32)).astype(np.float32)
+    documents = [
+        SemanticDocument(
+            doc_id=f"page-{index}",
+            page_id=f"page-{index}",
+            kind="page",
+            ordinal=-1,
+            text=f"page {index}",
+            source_path=f"/pages/page-{index}.md",
+            source_sha256=f"{index:064x}",
+            source_mtime_ns=index,
+        )
+        for index in range(len(vectors))
+    ]
+
+    manifest = build_generation(
+        documents,
+        encode_documents=lambda _texts, _batch_size: vectors,
+        model="test-model",
+        revision="test-revision",
+        dimensions=32,
+        query_prefix="query: ",
+        document_prefix="passage: ",
+        batch_size=16,
+        root=tmp_path,
+        repo_commit="deadbeef",
+    )
+    activate_generation(manifest.generation_id, root=tmp_path)
+    loaded = load_active_generation(root=tmp_path)
+
+    assert manifest.ann_kind == "usearch_hnsw_f16"
+    assert manifest.ann_dimensions == 32
+    assert loaded.search(vectors[37], top_n=5)[0][0] == "page-37"
+    assert loaded.score_pages(vectors[37], ["page-37"])[0] == (
+        "page-37",
+        pytest.approx(1.0),
+    )
 
 
 def test_active_pointer_uses_compare_and_swap_and_rolls_back(tmp_path: Path) -> None:
@@ -157,9 +202,7 @@ def test_delta_shadows_all_base_documents_for_updated_page(tmp_path: Path) -> No
 
 def test_corrupt_generation_is_rejected_before_activation(tmp_path: Path) -> None:
     manifest = _build(tmp_path)
-    vectors = (
-        tmp_path / "generations" / manifest.generation_id / "vectors.npy"
-    )
+    vectors = tmp_path / "generations" / manifest.generation_id / "vectors.npy"
     vectors.write_bytes(vectors.read_bytes() + b"corrupt")
 
     with pytest.raises(SemanticIndexError, match="checksum"):

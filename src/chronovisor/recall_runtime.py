@@ -197,9 +197,11 @@ class RecallPolicy:
     rewrite_enabled: bool = True
     rewrite_model: str = "ornith:9b-q4_K_M"
     rewrite_timeout_ms: int = 3000
+    fusion_anchor: float = 0.9
     fusion_bm25: float = 1.0
     fusion_semantic: float = 0.6
-    fusion_graph: float = 0.0
+    fusion_graph: float = 0.3
+    fusion_context: float = 0.25
     fusion_usage_prior: float = 0.0
     fusion_bm25_score_bonus: float = 0.005
     fusion_bm25_rank_bonus: float = 0.006
@@ -437,9 +439,11 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
     fusion = section("fusion")
     if fusion:
         for key, attr in (
+            ("anchor", "fusion_anchor"),
             ("bm25", "fusion_bm25"),
             ("semantic", "fusion_semantic"),
             ("graph", "fusion_graph"),
+            ("context", "fusion_context"),
             ("usage_prior", "fusion_usage_prior"),
             ("bm25_score_bonus", "fusion_bm25_score_bonus"),
             ("bm25_rank_bonus", "fusion_bm25_rank_bonus"),
@@ -1184,9 +1188,11 @@ def search_candidates(
             "top_n": max(policy.max_pages * 3, 8),
             "semantic": policy.semantic,
             "fusion_weights": {
+                "anchor": policy.fusion_anchor,
                 "bm25": policy.fusion_bm25,
                 "semantic": policy.fusion_semantic,
                 "graph": policy.fusion_graph,
+                "context": policy.fusion_context,
                 "usage_prior": policy.fusion_usage_prior,
                 "bm25_score_bonus": policy.fusion_bm25_score_bonus,
                 "bm25_rank_bonus": policy.fusion_bm25_rank_bonus,

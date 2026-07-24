@@ -21,27 +21,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from chronovisor import decision_authority
 from chronovisor.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
-
 from chronovisor.convergence import is_human_required_result
-from chronovisor import decision_authority
 from chronovisor.feedback_ledger import active_feedback_rows
-from chronovisor.page_mutation import decision_authority_lock
-from chronovisor.search import (
-    ACTIVE_SEARCH_POLICY_FILE,
-    DEFAULT_FUSION_WEIGHTS,
-    apply_filters,
-    fuse_results,
-    get_bm25,
-    graph_expand_results,
-    semantic_search,
-    usage_prior_results,
-    load_active_fusion_weights,
-)
-from chronovisor.reranker import rerank_results
 from chronovisor.negative_feedback import apply_penalties, penalties_for_query
+from chronovisor.page_mutation import decision_authority_lock
 from chronovisor.pipeline import (
     PipelineConfig,
     PipelineDependencies,
@@ -50,13 +37,26 @@ from chronovisor.pipeline import (
     production_pipeline_config,
     run_search_pipeline,
 )
+from chronovisor.reranker import rerank_results
 from chronovisor.runtime_config import (
     load_negative_feedback_config,
     load_reranker_config,
     load_search_embedding_config,
     runtime_repo_root,
 )
-from chronovisor.store import SYSTEM_DIR, CHRONOVISOR_ROOT, find_page
+from chronovisor.search import (
+    ACTIVE_SEARCH_POLICY_FILE,
+    DEFAULT_FUSION_WEIGHTS as DEFAULT_FUSION_WEIGHTS,
+    apply_filters,
+    context_seed_results,
+    fuse_results,
+    get_bm25,
+    graph_expand_results,
+    load_active_fusion_weights,
+    semantic_search,
+    semantic_verify,
+    usage_prior_results,
+)
 from chronovisor.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -66,7 +66,7 @@ from chronovisor.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-
+from chronovisor.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 
 REPO_ROOT = runtime_repo_root()
 RECALL_DIR = CHRONOVISOR_ROOT / "recall"
@@ -652,7 +652,9 @@ def examples_to_rows(examples: list[SearchExample]) -> list[dict[str, Any]]:
 def _pipeline_dependencies() -> PipelineDependencies:
     return PipelineDependencies(
         get_bm25=get_bm25,
+        context_seed_results=context_seed_results,
         semantic_search=semantic_search,
+        semantic_verify=semantic_verify,
         graph_expand_results=graph_expand_results,
         usage_prior_results=usage_prior_results,
         fuse_results=fuse_results,
@@ -794,11 +796,15 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
         "results": out,
         "latency_ms": elapsed_ms,
         "channels": {
+            "anchor": [page.page_id for page in pipeline_result.anchor_results[:top_n]],
             "bm25": [page.page_id for page in pipeline_result.bm25_results[:top_n]],
             "semantic": [
                 page.page_id for page in pipeline_result.semantic_results[:top_n]
             ],
             "graph": [page.page_id for page in pipeline_result.graph_results[:top_n]],
+            "context": [
+                page.page_id for page in pipeline_result.context_results[:top_n]
+            ],
             "usage_prior": [
                 page.page_id for page in pipeline_result.usage_results[:top_n]
             ],

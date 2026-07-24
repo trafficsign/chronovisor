@@ -313,9 +313,11 @@ model = "ornith:9b-q4_K_M"
 timeout_ms = 3000
 
 [recall.fusion]
+anchor = 0.9
 bm25 = 1.0
 semantic = 0.6
-graph = 0.0
+graph = 0.3
+context = 0.25
 usage_prior = 0.0
 bm25_score_bonus = 0.005
 bm25_rank_bonus = 0.006
@@ -489,9 +491,25 @@ sync_recall = true
 The service stores immutable generations below
 `~/.chronovisor/.index/semantic/`. `active.json` is the atomic generation
 pointer; incremental updates live in a generation-scoped delta database.
+Each complete generation contains a 512-dimensional float16 HNSW candidate
+index when `usearch` is available. HNSW rows are never authoritative: candidates
+are rescored with the complete 2048-dimensional vectors before fusion. Graph
+candidates are verified through the same full-dimensional scorer using the
+10-second bounded query-vector cache, so verification does not trigger a second
+model inference.
 `chronovisor-semantic-service rebuild` queues a full rebuild and
+`chronovisor-semantic-service upgrade-ann` clones a complete flat generation
+into a sealed HNSW generation without re-embedding.
 `chronovisor-semantic-service rollback` atomically returns to the previous
 complete generation. Keep the last two generations; do not use the old BGE
 SQLite file as a runtime fallback after migration. New installations should
 keep `sync_recall = false` until the same idle, CPU-indexing, and 35B-load
 paired latency gate passes on their hardware.
+
+Lexical retrieval is stored separately in
+`~/.chronovisor/.index/lexical.sqlite`. It uses a persistent SQLite inverted
+index that preserves the previous BM25 formula without scanning every page,
+with integer term/page keys and Chronovisor's Japanese CJK-bigram
+pre-tokenization. An exact anchor table covers page IDs, titles, tags,
+entities, and raw keywords. The old `bm25.json` projection is deleted after
+the SQLite projection is built successfully.

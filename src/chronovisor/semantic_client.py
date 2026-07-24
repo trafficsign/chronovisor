@@ -102,9 +102,12 @@ def selected_for_rollout(query: str, config: SearchEmbeddingConfig) -> bool:
         return True
     if config.rollout_mode != "canary" or config.canary_percent <= 0:
         return False
-    bucket = int.from_bytes(
-        hashlib.blake2s(query.encode("utf-8"), digest_size=4).digest(), "big"
-    ) % 100
+    bucket = (
+        int.from_bytes(
+            hashlib.blake2s(query.encode("utf-8"), digest_size=4).digest(), "big"
+        )
+        % 100
+    )
     return bucket < config.canary_percent
 
 
@@ -173,6 +176,73 @@ def search(
                     else ""
                 ),
                 page_type=page_type,
+                sensitivity=_meta_sensitivity(meta, folder=folder),
+            )
+        )
+    return results
+
+
+def verify(
+    query: str,
+    page_ids: list[str],
+    *,
+    config: SearchEmbeddingConfig,
+    timeout_ms: int | None = None,
+) -> list[ScoredPage]:
+    """Return full-dimensional scores for a bounded candidate page set."""
+
+    if not page_ids:
+        return []
+    effective_timeout = min(
+        int(timeout_ms or config.interactive_timeout_ms),
+        config.query_timeout_ms,
+    )
+    response = request(
+        {
+            "method": "verify",
+            "query": query,
+            "page_ids": page_ids[:100],
+        },
+        config,
+        timeout_ms=effective_timeout,
+    )
+    rows = response.get("results")
+    if not isinstance(rows, list):
+        return []
+
+    from chronovisor.index_store import get_store
+    from chronovisor.search import (
+        _folder_from_meta,
+        _meta_page_type,
+        _meta_sensitivity,
+        _normalize_lifecycle_status,
+    )
+
+    store = get_store()
+    store.refresh()
+    results: list[ScoredPage] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        page_id = str(row.get("page_id") or "")
+        meta = store.meta(page_id)
+        if meta is None:
+            continue
+        folder = _folder_from_meta(meta)
+        results.append(
+            ScoredPage(
+                page_id=page_id,
+                title=str(meta.get("title") or page_id),
+                folder=folder,
+                updated=str(meta.get("updated") or ""),
+                score=float(row.get("score") or 0.0),
+                status=_normalize_lifecycle_status(meta.get("status")),
+                superseded_by=(
+                    str(meta.get("superseded_by") or "")
+                    if isinstance(meta.get("superseded_by"), str)
+                    else ""
+                ),
+                page_type=_meta_page_type(meta, folder=folder),
                 sensitivity=_meta_sensitivity(meta, folder=folder),
             )
         )

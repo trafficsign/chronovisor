@@ -534,7 +534,7 @@ def _default_health_repair(attempt: int, *, dry_run: bool) -> Mapping[str, Any]:
     cache_paths = (
         index_store.PAGES_INDEX_FILE,
         index_store.BACKLINKS_INDEX_FILE,
-        search._BM25_CACHE_FILE,
+        *search.lexical_cache_paths(),
     )
     existing = [path for path in cache_paths if path.exists()]
     if not dry_run:

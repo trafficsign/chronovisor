@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import sqlite3
+import tempfile
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
@@ -25,12 +28,127 @@ from chronovisor.recall_runtime_paths import RECALL_DIR
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_PULL_LOG_FILE = RECALL_DIR / "pull-log.jsonl"
 PREFETCH_FILE = RECALL_DIR / "prefetch.json"
+PREFETCH_DB_FILE = RECALL_DIR / "prefetch.sqlite"
+
+
+def _write_prefetch_db(payload: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".prefetch-", dir=path.parent)
+    os.close(descriptor)
+    temporary_path = Path(temporary)
+    try:
+        connection = sqlite3.connect(temporary_path)
+        try:
+            connection.executescript(
+                """
+                PRAGMA journal_mode=DELETE;
+                PRAGMA synchronous=FULL;
+                CREATE TABLE buckets (
+                    supervision TEXT NOT NULL,
+                    bucket TEXT NOT NULL,
+                    page_id TEXT NOT NULL,
+                    count INTEGER NOT NULL,
+                    PRIMARY KEY (supervision, bucket, page_id)
+                ) WITHOUT ROWID;
+                CREATE TABLE tokens (
+                    supervision TEXT NOT NULL,
+                    token TEXT NOT NULL,
+                    page_id TEXT NOT NULL,
+                    count INTEGER NOT NULL,
+                    PRIMARY KEY (supervision, token, page_id)
+                ) WITHOUT ROWID;
+                """
+            )
+            features = payload.get("features")
+            if isinstance(features, dict):
+                for supervision in ("positive_used", "exposure"):
+                    feature = features.get(supervision)
+                    if not isinstance(feature, dict):
+                        continue
+                    for bucket, rows in (feature.get("buckets") or {}).items():
+                        connection.executemany(
+                            "INSERT INTO buckets VALUES (?, ?, ?, ?)",
+                            (
+                                (
+                                    supervision,
+                                    str(bucket),
+                                    str(row["page_id"]),
+                                    int(row.get("count") or 1),
+                                )
+                                for row in rows
+                                if isinstance(row, dict) and row.get("page_id")
+                            ),
+                        )
+                    for token, rows in (feature.get("tokens") or {}).items():
+                        connection.executemany(
+                            "INSERT INTO tokens VALUES (?, ?, ?, ?)",
+                            (
+                                (
+                                    supervision,
+                                    str(token),
+                                    str(row["page_id"]),
+                                    int(row.get("count") or 1),
+                                )
+                                for row in rows
+                                if isinstance(row, dict) and row.get("page_id")
+                            ),
+                        )
+            connection.commit()
+        finally:
+            connection.close()
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _prefetch_from_db(
+    *,
+    host: str,
+    cwd: str,
+    queries: list[str],
+    prompt: str,
+    path: Path,
+    limit: int,
+    positive_weight: int,
+    exposure_weight: int,
+) -> list[str]:
+    scores: Counter[str] = Counter()
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        bucket = f"{host}|{Path(cwd).name if cwd else ''}"
+        query_tokens = sorted(_tokens(" ".join(queries) + " " + prompt))
+        for supervision, weight in (
+            ("positive_used", positive_weight),
+            ("exposure", exposure_weight),
+        ):
+            if weight <= 0:
+                continue
+            for page_id, count in connection.execute(
+                "SELECT page_id, count FROM buckets "
+                "WHERE supervision = ? AND bucket = ?",
+                (supervision, bucket),
+            ):
+                scores[str(page_id)] += weight * int(count)
+            if query_tokens:
+                placeholders = ",".join("?" for _ in query_tokens)
+                for page_id, count in connection.execute(
+                    f"SELECT page_id, count FROM tokens "
+                    f"WHERE supervision = ? AND token IN ({placeholders})",
+                    (supervision, *query_tokens),
+                ):
+                    scores[str(page_id)] += weight * int(count)
+    finally:
+        connection.close()
+    return [page_id for page_id, _count in scores.most_common(limit)]
 
 
 def _tokens(text: str) -> set[str]:
     return {
         token.lower()
-        for token in re.findall(r"[a-z0-9][a-z0-9_.+-]{2,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", text.lower())
+        for token in re.findall(
+            r"[a-z0-9][a-z0-9_.+-]{2,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", text.lower()
+        )
         if token not in {"codex", "claude", "wiki", "llm", "project", "memory"}
     }
 
@@ -121,12 +239,8 @@ def build_prefetch_cache(
         )
         for episode in joined["episodes"]
     ]
-    exposure_buckets, exposure_tokens, exposure_episodes = compile_rows(
-        exposure_rows
-    )
-    positive_buckets, positive_tokens, positive_episodes = compile_rows(
-        positive_rows
-    )
+    exposure_buckets, exposure_tokens, exposure_episodes = compile_rows(exposure_rows)
+    positive_buckets, positive_tokens, positive_episodes = compile_rows(positive_rows)
 
     payload = {
         "schema_version": 2,
@@ -154,7 +268,37 @@ def build_prefetch_cache(
     }
     if write:
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if output_file == PREFETCH_FILE:
+            _write_prefetch_db(payload, PREFETCH_DB_FILE)
+            persisted = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"features", "buckets", "tokens"}
+            }
+            persisted.update(
+                {
+                    "storage": "sqlite",
+                    "database": str(PREFETCH_DB_FILE),
+                    "bucket_count": len(payload.get("buckets", {})),
+                    "token_count": len(payload.get("tokens", {})),
+                    "positive_bucket_count": len(
+                        payload.get("features", {})
+                        .get("positive_used", {})
+                        .get("buckets", {})
+                    ),
+                    "positive_token_count": len(
+                        payload.get("features", {})
+                        .get("positive_used", {})
+                        .get("tokens", {})
+                    ),
+                }
+            )
+        else:
+            persisted = payload
+        output_file.write_text(
+            json.dumps(persisted, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return payload
 
 
@@ -169,11 +313,26 @@ def prefetch_page_ids(
     positive_weight: int = 4,
     exposure_weight: int = 1,
 ) -> list[str]:
+    if path == PREFETCH_FILE and PREFETCH_DB_FILE.is_file():
+        try:
+            return _prefetch_from_db(
+                host=host,
+                cwd=cwd,
+                queries=queries,
+                prompt=prompt,
+                path=PREFETCH_DB_FILE,
+                limit=limit,
+                positive_weight=positive_weight,
+                exposure_weight=exposure_weight,
+            )
+        except (OSError, sqlite3.DatabaseError):
+            pass
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
     scores: Counter[str] = Counter()
+
     def score_feature(feature: Any, *, weight: int) -> None:
         if weight <= 0 or not isinstance(feature, dict):
             return
@@ -181,7 +340,9 @@ def prefetch_page_ids(
         tokens = feature.get("tokens")
         if isinstance(buckets, dict):
             key = f"{host}|{Path(cwd).name if cwd else ''}"
-            for row in buckets.get(key, []) if isinstance(buckets.get(key), list) else []:
+            for row in (
+                buckets.get(key, []) if isinstance(buckets.get(key), list) else []
+            ):
                 if isinstance(row, dict) and isinstance(row.get("page_id"), str):
                     scores[row["page_id"]] += weight * int(row.get("count") or 1)
         if isinstance(tokens, dict):
@@ -206,7 +367,9 @@ def prefetch_page_ids(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build speculative recall prefetch cache.")
+    parser = argparse.ArgumentParser(
+        description="Build speculative recall prefetch cache."
+    )
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")

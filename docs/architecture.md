@@ -10,7 +10,8 @@ UserPromptSubmit
   -> strip non-user blocks and trivial prompts
   -> load recall/sessions/<session_id>.json
   -> build queries, rewriting ambiguous references when needed
-  -> BM25 + semantic + graph-expanded search
+  -> exact anchors + inverted BM25 + semantic ANN + positive-use context seeds
+  -> bounded two-hop associative expansion and full-vector verification
   -> evidence gate (features -> none/cards/read)
   -> optional bounded RECALL_CONTEXT as untrusted JSON
   -> reserve a final model-free BM25 fallback inside the total deadline
@@ -229,9 +230,13 @@ system code repair.
 enter through `run_search_pipeline()` with different `PipelineConfig` values:
 
 ```text
-BM25
-  -> optional semantic search
-  -> graph expansion (production config calls it even when graph weight is 0)
+exact page/title/tag/entity anchors + SQLite inverted BM25
+  -> optional 512d HNSW semantic candidates, exactly rescored at 2048d
+  -> explicit-used context seeds
+  -> weighted seed merge
+  -> typed graph expansion (links, backlinks, entities, tags, positive co-fire)
+     with at most 2 hops and 50 output nodes
+  -> cached full-vector verification of graph candidates
   -> usage prior (production config only when usage_prior weight > 0)
   -> weighted fusion or plain RRF
   -> negative feedback demotion
@@ -241,7 +246,9 @@ BM25
 The MCP `chronovisor_search` tool adds one post-search stage: exact tag filtering,
 then `apply_rerank_stage()` only when the optional reranker is enabled for
 relevance-sorted queries. The synchronous recall hook keeps using the faster
-fused search path and does not call the reranker.
+fused search path and does not call the reranker. Folder/tag classification is
+a soft ranking signal; it never hard-routes the query away from the global
+lexical and semantic indexes.
 
 The five Recall layers, their budgets, and decision-trace semantics are defined
 in [Recall Orchestration](recall-orchestration.md).

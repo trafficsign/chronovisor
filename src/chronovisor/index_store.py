@@ -20,12 +20,10 @@ import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from chronovisor.frontmatter import parse as _frontmatter_parse
 from chronovisor.link_fix import atomic_write, extract_targets
-from chronovisor.store import PAGES_DIR, SYSTEM_DIR, CHRONOVISOR_ROOT
-
+from chronovisor.store import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR
 
 SCHEMA_VERSION = 9  # bumped for canonical alias targets
 INDEX_DIR = CHRONOVISOR_ROOT / ".index"
@@ -147,13 +145,15 @@ def _read_text_stable(path: Path, retries: int = 1) -> str | None:
 @dataclass
 class PageEntry:
     page_id: str
-    path: str          # absolute path string for stable comparison
+    path: str  # absolute path string for stable comparison
     is_system: bool
     mtime_ns: int
     size: int
     title: str
     updated: str
-    outlinks: list[str] = field(default_factory=list)  # raw, preserves duplicates + order
+    outlinks: list[str] = field(
+        default_factory=list
+    )  # raw, preserves duplicates + order
     raw_keywords: list[str] = field(default_factory=list)
     """Frontmatter ``raw_keywords`` lifted from disk. Internal-only — not
     surfaced via ``meta()`` / ``all_pages_meta()`` yet (that decision is
@@ -216,10 +216,14 @@ class PageEntry:
             outlinks=list(d.get("outlinks", [])),
             raw_keywords=_coerce_str_list(d.get("raw_keywords")),
             tags=_coerce_str_list(d.get("tags")),
-            summary=d.get("summary", "") if isinstance(d.get("summary", ""), str) else "",
+            summary=d.get("summary", "")
+            if isinstance(d.get("summary", ""), str)
+            else "",
             recall_questions=_coerce_str_list(d.get("recall_questions")),
             status=_normalize_lifecycle_status(d.get("status")),
-            superseded_by=d.get("superseded_by", "") if isinstance(d.get("superseded_by", ""), str) else "",
+            superseded_by=d.get("superseded_by", "")
+            if isinstance(d.get("superseded_by", ""), str)
+            else "",
             page_type=_normalize_page_type(d.get("page_type")),
             entities=_coerce_str_list(d.get("entities")),
             sensitivity=_normalize_sensitivity(d.get("sensitivity")),
@@ -247,6 +251,8 @@ class IndexStore:
         self._entries: dict[str, PageEntry] = {}
         self._page_order: list[str] = []  # rglob scan order, preserved for parity
         self._backlinks: dict[str, list[str]] = {}
+        self._tag_pages: dict[str, list[str]] = {}
+        self._entity_pages: dict[str, list[str]] = {}
         self._loaded = False
         self._persistence_dirty = False
         self._alias_sha256 = ""
@@ -285,6 +291,7 @@ class IndexStore:
         self._entries = entries
         self._page_order = [pid for pid in order if pid in entries]
         self._backlinks = backlinks
+        self._rebuild_associations()
         self._alias_sha256 = str(pages_doc.get("alias_sha256") or "")
 
     def _persist(self, generation: int) -> None:
@@ -306,7 +313,9 @@ class IndexStore:
         # shared `generation` field — readers that see mismatched generations
         # discard both and rebuild.
         atomic_write(PAGES_INDEX_FILE, json.dumps(pages_doc, ensure_ascii=False))
-        atomic_write(BACKLINKS_INDEX_FILE, json.dumps(backlinks_doc, ensure_ascii=False))
+        atomic_write(
+            BACKLINKS_INDEX_FILE, json.dumps(backlinks_doc, ensure_ascii=False)
+        )
 
     # -- refresh ----------------------------------------------------------
 
@@ -415,8 +424,12 @@ class IndexStore:
 
             if changed:
                 self._rebuild_backlinks()
+                self._rebuild_associations()
                 self._persistence_dirty = True
-            if self._persistence_dirty and os.environ.get("CHRONOVISOR_READ_ONLY") != "1":
+            if (
+                self._persistence_dirty
+                and os.environ.get("CHRONOVISOR_READ_ONLY") != "1"
+            ):
                 generation = self._next_generation()
                 try:
                     self._persist(generation)
@@ -449,6 +462,7 @@ class IndexStore:
             _canonical_page_id(target, canonical_aliases)
             for target in extract_targets(text, strip=True)
         ]
+
         # raw_keywords / tags: trust the frontmatter only when it's an
         # actual ``list[str]``. Anything else (scalar string, missing,
         # broken cache from a manual edit) collapses to an empty list so
@@ -470,7 +484,9 @@ class IndexStore:
             outlinks=outlinks,
             raw_keywords=_coerce_str_list(fm.get("raw_keywords")),
             tags=_coerce_str_list(fm.get("tags")),
-            summary=fm.get("summary", "") if isinstance(fm.get("summary", ""), str) else "",
+            summary=fm.get("summary", "")
+            if isinstance(fm.get("summary", ""), str)
+            else "",
             recall_questions=_coerce_str_list(fm.get("recall_questions")),
             status=_normalize_lifecycle_status(fm.get("status")),
             superseded_by=_canonical_page_id(
@@ -512,6 +528,20 @@ class IndexStore:
                 src_set.add(source_pid)
                 backlinks.setdefault(target, []).append(source_pid)
         self._backlinks = backlinks
+
+    def _rebuild_associations(self) -> None:
+        tag_pages: dict[str, list[str]] = {}
+        entity_pages: dict[str, list[str]] = {}
+        for page_id in self._page_order:
+            entry = self._entries.get(page_id)
+            if entry is None:
+                continue
+            for tag in dict.fromkeys(entry.tags):
+                tag_pages.setdefault(tag, []).append(page_id)
+            for entity in dict.fromkeys(entry.entities):
+                entity_pages.setdefault(entity.casefold(), []).append(page_id)
+        self._tag_pages = tag_pages
+        self._entity_pages = entity_pages
 
     def _next_generation(self) -> int:
         # Use mtime-of-process-clock surrogate via a monotonically increasing
@@ -593,6 +623,14 @@ class IndexStore:
         with self._lock:
             return list(self._backlinks.get(page_id, []))
 
+    def pages_for_tag(self, tag: str) -> list[str]:
+        with self._lock:
+            return list(self._tag_pages.get(tag, []))
+
+    def pages_for_entity(self, entity: str) -> list[str]:
+        with self._lock:
+            return list(self._entity_pages.get(entity.casefold(), []))
+
     def all_page_ids(self, include_system: bool = True) -> set[str]:
         with self._lock:
             if include_system:
@@ -609,8 +647,7 @@ class IndexStore:
         """
         with self._lock:
             items = [
-                e for e in self._entries.values()
-                if include_system or not e.is_system
+                e for e in self._entries.values() if include_system or not e.is_system
             ]
             items.sort(key=lambda e: e.mtime_ns, reverse=True)
             return [
@@ -673,8 +710,7 @@ class IndexStore:
 
         with self._lock:
             items = sorted(
-                (pid, e.mtime_ns, int(e.is_system))
-                for pid, e in self._entries.items()
+                (pid, e.mtime_ns, int(e.is_system)) for pid, e in self._entries.items()
             )
         h = hashlib.sha256()
         for pid, mt, sysflag in items:

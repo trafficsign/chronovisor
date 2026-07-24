@@ -238,8 +238,16 @@ def prefetch_kpi() -> dict[str, Any]:
         "path": str(path),
         "generated_at": payload.get("generated_at"),
         "episodes": payload.get("episodes", 0),
-        "buckets": len(buckets) if isinstance(buckets, dict) else 0,
-        "tokens": len(tokens) if isinstance(tokens, dict) else 0,
+        "buckets": (
+            int(payload.get("bucket_count") or 0)
+            if payload.get("storage") == "sqlite"
+            else len(buckets) if isinstance(buckets, dict) else 0
+        ),
+        "tokens": (
+            int(payload.get("token_count") or 0)
+            if payload.get("storage") == "sqlite"
+            else len(tokens) if isinstance(tokens, dict) else 0
+        ),
     }
 
 

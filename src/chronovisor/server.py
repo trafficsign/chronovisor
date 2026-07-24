@@ -3,22 +3,27 @@
 import json
 import os
 import re
-import uuid
 import secrets
-from datetime import datetime, date, timedelta
+import uuid
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from chronovisor.store import (
-    CHRONOVISOR_ROOT, RAW_DIR, PAGES_DIR, SYSTEM_DIR, INDEX_FILE, LOG_FILE, SCHEMA_FILE,
-    init_chronovisor, all_pages, find_page, page_id_from_path,
-)
-from chronovisor.link_fix import extract_targets as _extract_targets
-from chronovisor.index_store import get_store
-from chronovisor.frontmatter import parse as _frontmatter_parse, patch as _frontmatter_patch
-from chronovisor.save_transaction import parse_save_transaction_receipt
 from chronovisor.durable_state import fsync_directory as _fsync_directory
+from chronovisor.frontmatter import parse as _frontmatter_parse
+from chronovisor.frontmatter import patch as _frontmatter_patch
+from chronovisor.index_store import get_store
+from chronovisor.link_fix import extract_targets as _extract_targets
+from chronovisor.save_transaction import parse_save_transaction_receipt
+from chronovisor.store import (
+    CHRONOVISOR_ROOT,
+    LOG_FILE,
+    RAW_DIR,
+    SYSTEM_DIR,
+    find_page,
+    init_chronovisor,
+)
 
 mcp = FastMCP(
     "chronovisor",
@@ -129,25 +134,24 @@ def chronovisor_read(
             "session_id": session_id or "",
             "decision_id": decision_id or "",
             "page_id": canonical_page_id,
-            **(
-                {"requested_page_id": page}
-                if canonical_page_id != page
-                else {}
-            ),
+            **({"requested_page_id": page} if canonical_page_id != page else {}),
         }
     )
 
-    return json.dumps({
-        "page_id": canonical_page_id,
-        **(
-            {"alias": {"requested": page, "target": canonical_page_id}}
-            if canonical_page_id != page
-            else {}
-        ),
-        "content": content,
-        "outlinks": outlinks,
-        "backlinks": backlinks,
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "page_id": canonical_page_id,
+            **(
+                {"alias": {"requested": page, "target": canonical_page_id}}
+                if canonical_page_id != page
+                else {}
+            ),
+            "content": content,
+            "outlinks": outlinks,
+            "backlinks": backlinks,
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -162,15 +166,18 @@ def chronovisor_index(limit: int = 50, cursor: int = 0) -> str:
     store.refresh()
     entries = store.all_pages_meta(include_system=False)
     total = len(entries)
-    sliced = entries[cursor:cursor + limit]
+    sliced = entries[cursor : cursor + limit]
 
-    return json.dumps({
-        "total": total,
-        "cursor": cursor,
-        "limit": limit,
-        "has_more": cursor + limit < total,
-        "pages": sliced,
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "total": total,
+            "cursor": cursor,
+            "limit": limit,
+            "has_more": cursor + limit < total,
+            "pages": sliced,
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -197,7 +204,6 @@ def _raw_defer_counts() -> tuple[int, int, int]:
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         operational_deferred_raw_files,
     )
-
     from chronovisor.raw_store import RawStore
 
     raw_store = RawStore(RAW_DIR)
@@ -239,6 +245,7 @@ def chronovisor_status() -> str:
     ollama_status = "unknown"
     try:
         from chronovisor.ollama import _client
+
         resp = _client().get("/api/tags", timeout=3)
         if resp.status_code == 200:
             ollama_status = "running"
@@ -260,25 +267,29 @@ def chronovisor_status() -> str:
         page_types[page_type] = page_types.get(page_type, 0) + 1
     try:
         from chronovisor.health import health_snapshot
+
         health = health_snapshot()
     except Exception:
         health = {}
 
-    return json.dumps({
-        "page_count": page_count,
-        "raw_total": raw_total,
-        "raw_pending": raw_pending,
-        "semantic_deferred": semantic_deferred,
-        "operational_deferred": operational_deferred,
-        "raw_outstanding": raw_pending + semantic_deferred + operational_deferred,
-        "orphan_count": orphan_count,
-        "page_types": page_types,
-        "health": health,
-        "ollama_status": ollama_status,
-        "oldest_page": oldest,
-        "newest_page": newest,
-        "chronovisor_root": str(CHRONOVISOR_ROOT),
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "page_count": page_count,
+            "raw_total": raw_total,
+            "raw_pending": raw_pending,
+            "semantic_deferred": semantic_deferred,
+            "operational_deferred": operational_deferred,
+            "raw_outstanding": raw_pending + semantic_deferred + operational_deferred,
+            "orphan_count": orphan_count,
+            "page_types": page_types,
+            "health": health,
+            "ollama_status": ollama_status,
+            "oldest_page": oldest,
+            "newest_page": newest,
+            "chronovisor_root": str(CHRONOVISOR_ROOT),
+        },
+        ensure_ascii=False,
+    )
 
 
 def _append_log(message: str) -> None:
@@ -318,6 +329,7 @@ def chronovisor_init() -> str:
     Returns user-profile, current-state, lessons-learned, and basic wiki stats.
     """
     from concurrent.futures import ThreadPoolExecutor
+
     from chronovisor.ollama import is_available
     from chronovisor.orchestrator import get_pending_raw_files
 
@@ -351,21 +363,24 @@ def chronovisor_init() -> str:
             "backlinks": store.backlinks(page_id),
         }
 
-    return json.dumps({
-        "status": {
-            "page_count": page_count,
-            "raw_total": raw_total,
-            "raw_pending": raw_pending,
-            "semantic_deferred": semantic_deferred,
-            "operational_deferred": operational_deferred,
-            "raw_outstanding": (
-                raw_pending + semantic_deferred + operational_deferred
-            ),
-            "ollama_status": ollama_status,
-            "chronovisor_root": str(CHRONOVISOR_ROOT),
+    return json.dumps(
+        {
+            "status": {
+                "page_count": page_count,
+                "raw_total": raw_total,
+                "raw_pending": raw_pending,
+                "semantic_deferred": semantic_deferred,
+                "operational_deferred": operational_deferred,
+                "raw_outstanding": (
+                    raw_pending + semantic_deferred + operational_deferred
+                ),
+                "ollama_status": ollama_status,
+                "chronovisor_root": str(CHRONOVISOR_ROOT),
+            },
+            "system_pages": system_pages,
         },
-        "system_pages": system_pages,
-    }, ensure_ascii=False)
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -403,10 +418,11 @@ def chronovisor_search(
         session_id: Optional session id for recall pull feedback.
         decision_id: Optional automatic-Recall decision id for turn tracing.
     """
-    from chronovisor.search import search as run_search
-    from chronovisor.reranker import rerank_results
     from chronovisor.pipeline import apply_rerank_stage
+    from chronovisor.reranker import rerank_results
     from chronovisor.runtime_config import load_reranker_config
+    from chronovisor.search import last_search_trace
+    from chronovisor.search import search as run_search
 
     store = get_store()
     store.refresh()
@@ -415,11 +431,15 @@ def chronovisor_search(
     search_top_n = max(10, reranker_cfg.top_n) if rerank_allowed else 10
 
     results, search_mode = run_search(
-        query=query, top_n=search_top_n,
-        folder=folder, updated_after=updated_after,
-        updated_before=updated_before, sort_by=sort_by,
+        query=query,
+        top_n=search_top_n,
+        folder=folder,
+        updated_after=updated_after,
+        updated_before=updated_before,
+        sort_by=sort_by,
         semantic=semantic,
     )
+    retrieval_trace = last_search_trace()
 
     # Tag filter: post-process search results so the tag axis composes
     # with relevance / date / folder cleanly. Done in Python rather than
@@ -457,15 +477,19 @@ def chronovisor_search(
     for r in results:
         path = find_page(r.page_id)
         content = path.read_text() if path else None
-        snippet = _extract_snippet(content, query_terms) if content is not None else None
-        direct_hits.append({
-            "page_id": r.page_id,
-            "title": r.title,
-            "updated": r.updated,
-            "score": round(r.score, 4),
-            "snippets": [snippet] if snippet else [],
-            "tags": store.tags(r.page_id),
-        })
+        snippet = (
+            _extract_snippet(content, query_terms) if content is not None else None
+        )
+        direct_hits.append(
+            {
+                "page_id": r.page_id,
+                "title": r.title,
+                "updated": r.updated,
+                "score": round(r.score, 4),
+                "snippets": [snippet] if snippet else [],
+                "tags": store.tags(r.page_id),
+            }
+        )
 
     # Fail-closed semantic holds remain visible only through a separate,
     # projection-only namespace. They never compete as normal wiki pages and
@@ -481,7 +505,9 @@ def chronovisor_search(
         try:
             from chronovisor.provisional_recall import search_provisional
 
-            provisional_hits = search_provisional(query, chronovisor_root=CHRONOVISOR_ROOT)
+            provisional_hits = search_provisional(
+                query, chronovisor_root=CHRONOVISOR_ROOT
+            )
         except Exception:
             provisional_hits = []
 
@@ -513,21 +539,25 @@ def chronovisor_search(
                         if not set(tag_filter).issubset(link_tags):
                             continue
                 seen.add(link)
-                expanded_hits.append({
-                    "page_id": link,
-                    "title": meta["title"],
-                    "updated": meta["updated"],
-                    "distance": 1,
-                    "via": [hit["page_id"]],
-                    "score": round(hit["score"] * 0.5, 4),
-                    "reason": "linked from direct hit",
-                    "tags": store.tags(link),
-                })
-                edges.append({
-                    "from": hit["page_id"],
-                    "to": link,
-                    "type": "wikilink",
-                })
+                expanded_hits.append(
+                    {
+                        "page_id": link,
+                        "title": meta["title"],
+                        "updated": meta["updated"],
+                        "distance": 1,
+                        "via": [hit["page_id"]],
+                        "score": round(hit["score"] * 0.5, 4),
+                        "reason": "linked from direct hit",
+                        "tags": store.tags(link),
+                    }
+                )
+                edges.append(
+                    {
+                        "from": hit["page_id"],
+                        "to": link,
+                        "type": "wikilink",
+                    }
+                )
 
     filters_applied = {}
     if folder:
@@ -538,7 +568,9 @@ def chronovisor_search(
         filters_applied["updated_before"] = updated_before
     if tag_filter:
         filters_applied["tags"] = tag_filter
-        filters_applied["tag_match"] = tag_match if tag_match in ("all", "any") else "all"
+        filters_applied["tag_match"] = (
+            tag_match if tag_match in ("all", "any") else "all"
+        )
     _append_pull_log(
         {
             "type": "search",
@@ -551,23 +583,26 @@ def chronovisor_search(
             "returned_pages": [
                 hit["page_id"] for hit in [*direct_hits, *expanded_hits]
             ],
-            "provisional_ids": [
-                hit["provisional_id"] for hit in provisional_hits
-            ],
+            "provisional_ids": [hit["provisional_id"] for hit in provisional_hits],
+            "retrieval": retrieval_trace,
         }
     )
 
-    return json.dumps({
-        "query": query,
-        "depth": depth,
-        "search_mode": search_mode,
-        "filters_applied": filters_applied,
-        "reranker": reranker_meta,
-        "direct_hits": direct_hits,
-        "provisional_hits": provisional_hits,
-        "expanded_hits": expanded_hits,
-        "edges": edges,
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "query": query,
+            "depth": depth,
+            "search_mode": search_mode,
+            "filters_applied": filters_applied,
+            "reranker": reranker_meta,
+            "retrieval": retrieval_trace,
+            "direct_hits": direct_hits,
+            "provisional_hits": provisional_hits,
+            "expanded_hits": expanded_hits,
+            "edges": edges,
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -588,9 +623,7 @@ def chronovisor_recall_used(
         return json.dumps({"status": "error", "error": "decision_id is required"})
     pages = list(
         dict.fromkeys(
-            page.strip()
-            for page in page_ids
-            if isinstance(page, str) and page.strip()
+            page.strip() for page in page_ids if isinstance(page, str) and page.strip()
         )
     )[:20]
     if not pages:
@@ -647,7 +680,12 @@ def chronovisor_reindex() -> str:
             }
         )
     if count == 0:
-        return json.dumps({"status": "skipped", "message": "Ollama not available or no pages to update"})
+        return json.dumps(
+            {
+                "status": "skipped",
+                "message": "Ollama not available or no pages to update",
+            }
+        )
     return json.dumps({"status": "ok", "pages_updated": count})
 
 
@@ -658,7 +696,7 @@ def _extract_snippet(content: str, terms: list[str], max_len: int = 150) -> str 
     if content.startswith("---"):
         end = content.find("---", 3)
         if end != -1:
-            body = content[end + 3:].strip()
+            body = content[end + 3 :].strip()
 
     body_lower = body.lower()
     for term in terms:
@@ -724,7 +762,9 @@ def _raw_source_label(session_id: str | None) -> str:
     return cleaned[:28].strip("-_")
 
 
-def _raw_topic_slug(content: str, keywords: list[str] | None = None, *, max_len: int = 56) -> str:
+def _raw_topic_slug(
+    content: str, keywords: list[str] | None = None, *, max_len: int = 56
+) -> str:
     """Create a readable raw filename slug while keeping ASCII-only safety."""
 
     parts: list[str] = []
@@ -732,7 +772,11 @@ def _raw_topic_slug(content: str, keywords: list[str] | None = None, *, max_len:
         for keyword in keywords:
             for match in _RAW_SLUG_TOKEN_RE.finditer(keyword.lower()):
                 token = match.group(0)
-                if len(token) < 2 or token in _RAW_TOPIC_STOPWORDS or _RAW_UUIDISH_RE.match(token):
+                if (
+                    len(token) < 2
+                    or token in _RAW_TOPIC_STOPWORDS
+                    or _RAW_UUIDISH_RE.match(token)
+                ):
                     continue
                 parts.append(token)
                 slug = "-".join(parts)
@@ -755,16 +799,18 @@ def _raw_topic_slug(content: str, keywords: list[str] | None = None, *, max_len:
             "rejected keywords",
         }:
             continue
-        if lower.startswith((
-            "source:",
-            "session id:",
-            "cwd:",
-            "session file:",
-            "lines:",
-            "memory writer model:",
-            "generated at:",
-            "raw_keywords:",
-        )):
+        if lower.startswith(
+            (
+                "source:",
+                "session id:",
+                "cwd:",
+                "session file:",
+                "lines:",
+                "memory writer model:",
+                "generated at:",
+                "raw_keywords:",
+            )
+        ):
             continue
         candidates.append(stripped)
         break
@@ -772,7 +818,11 @@ def _raw_topic_slug(content: str, keywords: list[str] | None = None, *, max_len:
     for candidate in candidates:
         for match in _RAW_SLUG_TOKEN_RE.finditer(candidate.lower()):
             token = match.group(0)
-            if len(token) < 2 or token in _RAW_TOPIC_STOPWORDS or _RAW_UUIDISH_RE.match(token):
+            if (
+                len(token) < 2
+                or token in _RAW_TOPIC_STOPWORDS
+                or _RAW_UUIDISH_RE.match(token)
+            ):
                 continue
             parts.append(token)
             slug = "-".join(parts)
@@ -973,6 +1023,7 @@ def chronovisor_check() -> str:
     Does NOT auto-fix anything.
     """
     from chronovisor.lint import check, issue_lane, summarize_issues
+
     issues = check()
     issue_limit = 40
 
@@ -989,13 +1040,16 @@ def chronovisor_check() -> str:
             "auto_fixable": bool(issue.get("auto_fixable")),
         }
 
-    return json.dumps({
-        "total_issues": len(issues),
-        "summary": summarize_issues(issues),
-        "issues": [compact(issue) for issue in issues[:issue_limit]],
-        "omitted_issues": max(0, len(issues) - issue_limit),
-        "output_budget": {"issue_limit": issue_limit, "detail_chars": 180},
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "total_issues": len(issues),
+            "summary": summarize_issues(issues),
+            "issues": [compact(issue) for issue in issues[:issue_limit]],
+            "omitted_issues": max(0, len(issues) - issue_limit),
+            "output_budget": {"issue_limit": issue_limit, "detail_chars": 180},
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -1018,11 +1072,13 @@ def chronovisor_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
         summarize_issues,
         write_repair_queue,
     )
+
     issues = check()
     snapshot = {"status": "skipped", "reason": "dry_run"} if dry_run else None
     if snapshot is None:
         try:
             from chronovisor.snapshot import snapshot_chronovisor
+
             snapshot = snapshot_chronovisor("before chronovisor_apply")
         except Exception as exc:
             snapshot = {"status": "error", "error": str(exc)}
@@ -1047,17 +1103,20 @@ def chronovisor_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
             "auto_fixable": bool(issue.get("auto_fixable")),
         }
 
-    return json.dumps({
-        "actions_taken": actions,
-        "snapshot": snapshot,
-        "summary": summarize_issues(remaining),
-        "remaining_issues": [compact(issue) for issue in remaining[:issue_limit]],
-        "omitted_remaining_issues": max(0, len(remaining) - issue_limit),
-        "output_budget": {"issue_limit": issue_limit, "detail_chars": 180},
-        "repair_queue": repair_queue,
-        "dry_run": dry_run,
-        "fuzzy": fuzzy,
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "actions_taken": actions,
+            "snapshot": snapshot,
+            "summary": summarize_issues(remaining),
+            "remaining_issues": [compact(issue) for issue in remaining[:issue_limit]],
+            "omitted_remaining_issues": max(0, len(remaining) - issue_limit),
+            "output_budget": {"issue_limit": issue_limit, "detail_chars": 180},
+            "repair_queue": repair_queue,
+            "dry_run": dry_run,
+            "fuzzy": fuzzy,
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -1095,33 +1154,39 @@ def chronovisor_jobs(job_id: str | None = None) -> str:
                 },
                 ensure_ascii=False,
             )
-        return json.dumps({
-            "job_id": job.job_id,
-            "status": job.status.value,
-            "processor": job.processor,
-            "stage": job.stage,
-            "total_ops": job.total_ops,
-            "completed_ops": job.completed_ops,
-            "created_at": job.created_at,
-            "completed_at": job.completed_at,
-            "pages_created": job.pages_created,
-            "pages_updated": job.pages_updated,
-            "result": job.result,
-            "error": job.error,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "job_id": job.job_id,
+                "status": job.status.value,
+                "processor": job.processor,
+                "stage": job.stage,
+                "total_ops": job.total_ops,
+                "completed_ops": job.completed_ops,
+                "created_at": job.created_at,
+                "completed_at": job.completed_at,
+                "pages_created": job.pages_created,
+                "pages_updated": job.pages_updated,
+                "result": job.result,
+                "error": job.error,
+            },
+            ensure_ascii=False,
+        )
 
     jobs = job_store.recent()
-    return json.dumps({
-        "jobs": [
-            {
-                "job_id": j.job_id,
-                "status": j.status.value,
-                "processor": j.processor,
-                "created_at": j.created_at,
-            }
-            for j in jobs
-        ]
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "jobs": [
+                {
+                    "job_id": j.job_id,
+                    "status": j.status.value,
+                    "processor": j.processor,
+                    "created_at": j.created_at,
+                }
+                for j in jobs
+            ]
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -1210,7 +1275,9 @@ def chronovisor_research(
         job = enqueue_evidence_research(query, claims=claims, challenge=challenge)
         return json.dumps(
             {
-                "status": "started" if job.get("status") in {"queued", "running"} else job.get("status"),
+                "status": "started"
+                if job.get("status") in {"queued", "running"}
+                else job.get("status"),
                 "job_id": job.get("job_id"),
                 "processor": "research",
                 "query": query,
@@ -1269,11 +1336,13 @@ def chronovisor_provenance(page: str) -> str:
             continue
         raw_lower = raw_content.lower()
         if page_dehyphen in raw_lower or page_title_lower in raw_lower:
-            raw_candidates.append({
-                "raw_file": unit.raw_id,
-                "created": raw_mtime.isoformat(),
-                "preview": raw_content[:200].strip(),
-            })
+            raw_candidates.append(
+                {
+                    "raw_file": unit.raw_id,
+                    "created": raw_mtime.isoformat(),
+                    "preview": raw_content[:200].strip(),
+                }
+            )
 
     # Check log for ingest records
     log_entries = []
@@ -1282,13 +1351,16 @@ def chronovisor_provenance(page: str) -> str:
             if page in line and "ingest" in line:
                 log_entries.append(line.strip())
 
-    return json.dumps({
-        "page_id": page,
-        "page_updated": page_updated,
-        "page_mtime": page_mtime.isoformat(),
-        "raw_sources": raw_candidates[:5],
-        "log_entries": log_entries,
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "page_id": page,
+            "page_updated": page_updated,
+            "page_mtime": page_mtime.isoformat(),
+            "raw_sources": raw_candidates[:5],
+            "log_entries": log_entries,
+        },
+        ensure_ascii=False,
+    )
 
 
 # Characters that would break the inline-list serialization or carry
@@ -1367,7 +1439,8 @@ def chronovisor_record(
     filename = path.name
 
     # Check if orchestrator should trigger ingest
-    from chronovisor.orchestrator import should_ingest, run_pending_ingest
+    from chronovisor.orchestrator import run_pending_ingest, should_ingest
+
     should, reason = should_ingest()
 
     result: dict = {
@@ -1398,6 +1471,7 @@ def chronovisor_tick() -> str:
     Call this periodically or at session boundaries.
     """
     from chronovisor.orchestrator import tick
+
     result = tick()
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -1420,6 +1494,7 @@ def main():
     # doesn't permanently lock out run_pending_ingest.
     try:
         from chronovisor.orchestrator import reset_stale_lock
+
         reset_stale_lock()
     except Exception:
         pass
@@ -1432,6 +1507,7 @@ def main():
         pass
     try:
         from chronovisor.search import get_bm25
+
         get_bm25().build()
     except Exception:
         pass
