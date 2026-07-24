@@ -62,7 +62,7 @@ from chronovisor.semantic_model import (
 from chronovisor.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json"
-QUERY_CACHE_TTL_SECONDS = 60.0
+QUERY_CACHE_TTL_SECONDS = 600.0
 
 
 class ServiceBusy(RuntimeError):
