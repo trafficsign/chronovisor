@@ -119,6 +119,17 @@ def _meta_sensitivity(meta: dict, *, folder: str = "") -> str:
     return _normalize_sensitivity(meta.get("sensitivity"), folder=folder)
 
 
+def _refresh_store_for_search(store: object) -> None:
+    """Share a short read snapshot while preserving injected-store compatibility."""
+
+    refresh_if_stale = getattr(store, "refresh_if_stale", None)
+    if callable(refresh_if_stale):
+        refresh_if_stale()
+        return
+    refresh = getattr(store, "refresh")
+    refresh()
+
+
 # ---------------------------------------------------------------------------
 # BM25 singleton — shared across `search()` and `ingest._search_related_pages`
 # ---------------------------------------------------------------------------
@@ -960,7 +971,7 @@ def _legacy_semantic_search(
         return []
 
     store = get_store()
-    store.refresh_if_stale()
+    _refresh_store_for_search(store)
 
     by_page: dict[str, ScoredPage] = {}
     for pid, vec, _mtime, norm in _iter_all_embeddings():
@@ -1212,7 +1223,7 @@ def context_seed_results(query: str, *, limit: int = 4) -> list[ScoredPage]:
         if not page_ids:
             return []
         store = get_store()
-        store.refresh_if_stale()
+        _refresh_store_for_search(store)
     except Exception:
         return []
     out: list[ScoredPage] = []
@@ -1438,7 +1449,7 @@ def graph_expand_results(
     from chronovisor.index_store import get_store
 
     store = get_store()
-    store.refresh_if_stale()
+    _refresh_store_for_search(store)
     seeds = results[:20]
     seed_ids = {result.page_id for result in seeds}
     output_limit = min(max(1, limit), 50)
@@ -1610,7 +1621,7 @@ def usage_prior_results(
     from chronovisor.index_store import get_store
 
     store = get_store()
-    store.refresh_if_stale()
+    _refresh_store_for_search(store)
     out: list[ScoredPage] = []
     for page_id, score in scores.most_common(limit):
         meta = store.meta(page_id)
