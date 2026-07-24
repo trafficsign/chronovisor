@@ -25,12 +25,11 @@ from typing import Any
 from chronovisor.index_store import get_store
 from chronovisor.jsonl_write import append_jsonl_durable
 from chronovisor.local_structured import LocalStructuredSession
-from chronovisor.runtime_config import active_config_file
 from chronovisor.recall_runtime_paths import RECALL_DIR
+from chronovisor.runtime_config import active_config_file
 from chronovisor.search import search as run_search
 from chronovisor.state_register import format_state_context, should_inject_state
 from chronovisor.store import SYSTEM_DIR, find_page, init_chronovisor
-
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
@@ -281,6 +280,8 @@ def load_policy(path: Path = RECALL_CONFIG_FILE) -> RecallPolicy:
     except Exception:
         pass
 
+    _apply_search_embedding_boundary(policy, path)
+
     policy.max_total_context_chars = max(
         policy.max_total_context_chars,
         policy.max_state_context_chars + policy.max_context_chars + 2,
@@ -299,6 +300,30 @@ def new_decision_id() -> str:
 
 def stable_prompt_hash(text: str) -> str:
     return hashlib.sha1(_feedback_key(text).encode("utf-8")).hexdigest()[:16]
+
+
+def _apply_search_embedding_boundary(policy: RecallPolicy, path: Path) -> None:
+    """Apply the independent L2 semantic rollout after learned overrides."""
+
+    try:
+        from chronovisor.runtime_config import load_search_embedding_config
+
+        search_embedding = load_search_embedding_config(path)
+    except Exception:
+        policy.semantic = False
+        return
+    if search_embedding.backend != "nemotron_service":
+        return
+    if not search_embedding.enabled or not search_embedding.sync_recall:
+        policy.semantic = False
+        return
+    policy.semantic = True
+    policy.fusion_semantic = search_embedding.fusion_weight
+    policy.fusion_semantic_min_top_score = search_embedding.min_top_score
+    policy.fusion_semantic_min_margin = search_embedding.min_margin
+    policy.fusion_semantic_low_confidence_weight = (
+        search_embedding.low_confidence_weight
+    )
 
 
 def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
@@ -359,21 +384,6 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
 
     if isinstance(recall_root.get("semantic"), bool):
         policy.semantic = recall_root["semantic"]
-    # Dedicated search rollout and the synchronous hook are separate safety
-    # boundaries. L3 can use Nemotron while L2 remains lexical-only.
-    search_embedding = None
-    try:
-        from chronovisor.runtime_config import load_search_embedding_config
-
-        search_embedding = load_search_embedding_config()
-        if (
-            search_embedding.enabled
-            and search_embedding.backend == "nemotron_service"
-            and not search_embedding.sync_recall
-        ):
-            policy.semantic = False
-    except Exception:
-        policy.semantic = False
     if isinstance(recall_root.get("gate_mode"), str):
         policy.gate_mode = recall_root["gate_mode"]
     if isinstance(recall_root.get("context_style"), str):
@@ -443,19 +453,6 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             value = fusion.get(key)
             if isinstance(value, int | float):
                 setattr(policy, attr, max(0.0, float(value)))
-
-    if (
-        search_embedding is not None
-        and search_embedding.enabled
-        and search_embedding.backend == "nemotron_service"
-        and search_embedding.sync_recall
-    ):
-        policy.fusion_semantic = search_embedding.fusion_weight
-        policy.fusion_semantic_min_top_score = search_embedding.min_top_score
-        policy.fusion_semantic_min_margin = search_embedding.min_margin
-        policy.fusion_semantic_low_confidence_weight = (
-            search_embedding.low_confidence_weight
-        )
 
     calibration = section("calibration")
     if calibration:

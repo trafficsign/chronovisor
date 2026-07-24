@@ -423,17 +423,22 @@ of this adoption.
 ## Recall Defaults
 
 The production recall profile uses `gate_mode = "evidence"`,
-`context_style = "cards"`, synchronous `semantic = false`, rewrite disabled,
-`judge_mode = "auto"`, and calibration enabled. Semantic fusion still serves
-normal MCP search and explicit/deep research; it is excluded from production L2
-because the fixed paired Recall gate showed no quality gain within the four-
-second envelope. Nemotron L2 remains independently gated by
-`[search.embedding.rollout].sync_recall`; L3 can be active while the hook stays
-lexical-only. The complete synchronous path has a 4000 ms wall-clock
-deadline, reserves 600 ms for allowlisted L1 memory plus BM25 fallback, and
-remains fail-open for the host. BM25 still runs without Ollama; after two
-degraded or failed runs the breaker temporarily disables rewrite, semantic
-search, and judge while keeping BM25 available.
+`context_style = "cards"`, rewrite disabled, `judge_mode = "auto"`, and
+calibration enabled. The `[recall].semantic` value remains the conservative
+default, while `[search.embedding.rollout].sync_recall` is the authoritative
+Nemotron L2 safety boundary applied after learned policy overrides. L3 can
+therefore remain active independently of the hook.
+
+The production host enabled synchronous Nemotron Recall on 2026-07-24 after
+three counterbalanced 200-pair gates: idle, concurrent CPU indexing, and
+concurrent Ornith 35B generation. All 600 candidate calls returned `hybrid`
+results, had zero errors and zero four-second violations, and kept
+`resource_wait_ms` p95 at 0 ms. Candidate wall-clock p95 was 1.13 s, 1.30 s,
+and 1.30 s respectively. The complete synchronous path still has a 4000 ms
+wall-clock deadline, reserves 600 ms for allowlisted L1 memory plus BM25
+fallback, and remains fail-open for the host. BM25 still runs without the
+semantic service; after two degraded or failed runs the breaker temporarily
+disables rewrite, semantic search, and judge while keeping BM25 available.
 
 ## Search embeddings
 
@@ -478,7 +483,7 @@ interactive_timeout_ms = 1000
 [search.embedding.rollout]
 mode = "on"
 canary_percent = 0
-sync_recall = false
+sync_recall = true
 ```
 
 The service stores immutable generations below
@@ -487,5 +492,6 @@ pointer; incremental updates live in a generation-scoped delta database.
 `chronovisor-semantic-service rebuild` queues a full rebuild and
 `chronovisor-semantic-service rollback` atomically returns to the previous
 complete generation. Keep the last two generations; do not use the old BGE
-SQLite file as a runtime fallback after migration. Enable `sync_recall` only
-after the separate idle/35B-load paired latency gate passes.
+SQLite file as a runtime fallback after migration. New installations should
+keep `sync_recall = false` until the same idle, CPU-indexing, and 35B-load
+paired latency gate passes on their hardware.

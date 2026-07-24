@@ -7,7 +7,10 @@ import pytest
 
 from chronovisor import negative_feedback
 from chronovisor.feedback_ledger import feedback_row_sha256
-from chronovisor.runtime_config import NegativeFeedbackConfig, load_negative_feedback_config
+from chronovisor.runtime_config import (
+    NegativeFeedbackConfig,
+    load_negative_feedback_config,
+)
 from chronovisor.search import ScoredPage
 
 
@@ -322,6 +325,38 @@ def test_disabled_config_is_noop(feedback_file) -> None:
     assert negative_feedback.penalties_for_query(
         "メニューバーにショートカットを置く設定の話", config
     ) == {}
+
+
+def test_default_feedback_uses_process_shared_derived_cache(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    feedback = tmp_path / "feedback.jsonl"
+    cache = tmp_path / "negative-feedback-cache.json"
+    row = {
+        "ts": "2026-06-11T10:23:35",
+        "kind": "injection_ignored",
+        "prompt": "Chronovisor sync recall",
+        "expected_pages": ["recall-page"],
+    }
+    write_feedback(feedback, [row])
+    monkeypatch.setattr(negative_feedback, "FEEDBACK_FILE_OVERRIDE", None)
+    monkeypatch.setattr(negative_feedback, "PERSISTENT_CACHE_FILE", cache)
+    monkeypatch.setattr(negative_feedback, "_feedback_file", lambda: feedback)
+    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+
+    expected = negative_feedback._load_entries(CONFIG)
+    assert len(expected) == 1
+    assert cache.exists()
+
+    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+    monkeypatch.setattr(
+        negative_feedback,
+        "active_feedback_rows",
+        lambda _path: pytest.fail("persistent cache should avoid ledger scan"),
+    )
+
+    assert negative_feedback._load_entries(CONFIG) == expected
 
 
 def test_reviewed_positive_protects_page_from_penalty(feedback_file, tmp_path) -> None:

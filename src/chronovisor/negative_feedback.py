@@ -18,19 +18,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from chronovisor.feedback_ledger import active_feedback_rows
-from chronovisor.runtime_config import NegativeFeedbackConfig, load_negative_feedback_config
+from chronovisor.link_fix import atomic_write
 from chronovisor.page_mutation import find_mutation_page
+from chronovisor.runtime_config import (
+    NegativeFeedbackConfig,
+    load_negative_feedback_config,
+)
 from chronovisor.search_types import ScoredPage, tokenize
+from chronovisor.store import CHRONOVISOR_ROOT
 
 # Test seams: when set, bypass the recall_runtime/golden default paths.
 FEEDBACK_FILE_OVERRIDE: Path | None = None
 GOLDEN_FILE_OVERRIDE: Path | None = None
+PERSISTENT_CACHE_FILE = (
+    CHRONOVISOR_ROOT / "runtime" / "search" / "negative-feedback-cache.json"
+)
+PERSISTENT_CACHE_SCHEMA = 1
 
 
 @dataclass(frozen=True)
@@ -92,6 +102,115 @@ def _ts_rank(value: datetime | None) -> float:
     return value.timestamp() if value is not None else float("-inf")
 
 
+def _persistent_key(
+    path: Path,
+    *,
+    mtime_ns: int,
+    size: int,
+    config: NegativeFeedbackConfig,
+) -> dict[str, object]:
+    return {
+        "path": str(path),
+        "mtime_ns": mtime_ns,
+        "size": size,
+        "kinds": list(config.kinds),
+        "max_age_days": config.max_age_days,
+        "max_entries": config.max_entries,
+        "utc_date": (
+            datetime.now(timezone.utc).date().isoformat()
+            if config.max_age_days > 0
+            else ""
+        ),
+    }
+
+
+def _entry_payload(entry: _FeedbackEntry) -> dict[str, object]:
+    return {
+        "tokens": sorted(entry.tokens),
+        "pages": list(entry.pages),
+        "ts": entry.ts.isoformat() if entry.ts is not None else None,
+        "kind": entry.kind,
+        "frontier_confirmed": entry.frontier_confirmed,
+        "page_hashes": [list(item) for item in entry.page_hashes],
+    }
+
+
+def _entry_from_payload(value: object) -> _FeedbackEntry | None:
+    if not isinstance(value, dict):
+        return None
+    tokens = value.get("tokens")
+    pages = value.get("pages")
+    hashes = value.get("page_hashes")
+    if not isinstance(tokens, list) or not isinstance(pages, list):
+        return None
+    page_hashes: list[tuple[str, str]] = []
+    if isinstance(hashes, list):
+        for item in hashes:
+            if (
+                isinstance(item, list)
+                and len(item) == 2
+                and all(isinstance(part, str) for part in item)
+            ):
+                page_hashes.append((item[0], item[1]))
+    return _FeedbackEntry(
+        tokens=frozenset(str(token) for token in tokens if isinstance(token, str)),
+        pages=tuple(str(page) for page in pages if isinstance(page, str)),
+        ts=_parse_ts(value.get("ts")),
+        kind=str(value.get("kind") or ""),
+        frontier_confirmed=value.get("frontier_confirmed") is True,
+        page_hashes=tuple(page_hashes),
+    )
+
+
+def _read_persistent_entries(key: dict[str, object]) -> list[_FeedbackEntry] | None:
+    if FEEDBACK_FILE_OVERRIDE is not None:
+        return None
+    try:
+        payload = json.loads(PERSISTENT_CACHE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != PERSISTENT_CACHE_SCHEMA
+        or payload.get("source") != key
+    ):
+        return None
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list):
+        return None
+    entries = [_entry_from_payload(value) for value in raw_entries]
+    if any(entry is None for entry in entries):
+        return None
+    return [entry for entry in entries if entry is not None]
+
+
+def _write_persistent_entries(
+    key: dict[str, object],
+    entries: list[_FeedbackEntry],
+) -> None:
+    if FEEDBACK_FILE_OVERRIDE is not None:
+        return
+    try:
+        PERSISTENT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(
+            PERSISTENT_CACHE_FILE,
+            json.dumps(
+                {
+                    "schema_version": PERSISTENT_CACHE_SCHEMA,
+                    "source": key,
+                    "entries": [_entry_payload(entry) for entry in entries],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        os.chmod(PERSISTENT_CACHE_FILE, 0o600)
+    except OSError:
+        pass
+
+
 def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
     path = _feedback_file()
     try:
@@ -105,10 +224,27 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         config.kinds,
         config.max_age_days,
         config.max_entries,
+        (
+            datetime.now(timezone.utc).date().isoformat()
+            if config.max_age_days > 0
+            else ""
+        ),
     )
     with _CACHE_LOCK:
         if _CACHE.key == cache_key:
             return _CACHE.entries
+    persistent_key = _persistent_key(
+        path,
+        mtime_ns=stat.st_mtime_ns,
+        size=stat.st_size,
+        config=config,
+    )
+    persisted = _read_persistent_entries(persistent_key)
+    if persisted is not None:
+        with _CACHE_LOCK:
+            _CACHE.key = cache_key
+            _CACHE.entries = persisted
+        return persisted
 
     cutoff = (
         datetime.now(timezone.utc) - timedelta(days=config.max_age_days)
@@ -183,6 +319,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
     with _CACHE_LOCK:
         _CACHE.key = cache_key
         _CACHE.entries = entries
+    _write_persistent_entries(persistent_key, entries)
     return entries
 
 

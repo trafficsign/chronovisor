@@ -8,8 +8,8 @@ import pytest
 
 from chronovisor.recall_runtime import (
     ContextItem,
-    RecallPolicy,
     RecallBudgetExhausted,
+    RecallPolicy,
     RecallRequest,
     RecallResult,
     append_feedback,
@@ -19,8 +19,8 @@ from chronovisor.recall_runtime import (
     excerpt_terms,
     format_recall_context,
     load_policy,
-    merge_context_blocks,
     main,
+    merge_context_blocks,
     render_output,
     request_from_hook_payload,
     run_local_judge,
@@ -515,6 +515,58 @@ semantic_low_confidence_weight = 0.25
     assert policy.fusion_semantic_min_top_score == 0.45
     assert policy.fusion_semantic_min_margin == 0.002
     assert policy.fusion_semantic_low_confidence_weight == 0.25
+
+
+def test_nemotron_sync_recall_override_enables_semantic_lane(tmp_path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[recall]
+semantic = false
+
+[search.embedding]
+enabled = true
+backend = "nemotron_service"
+fusion_weight = 0.7
+min_top_score = 0.2
+min_margin = 0.001
+low_confidence_weight = 0.3
+
+[search.embedding.rollout]
+mode = "on"
+sync_recall = true
+""",
+        encoding="utf-8",
+    )
+
+    policy = load_policy(config)
+
+    assert policy.semantic is True
+    assert policy.fusion_semantic == 0.7
+    assert policy.fusion_semantic_min_top_score == 0.2
+    assert policy.fusion_semantic_min_margin == 0.001
+    assert policy.fusion_semantic_low_confidence_weight == 0.3
+
+
+def test_nemotron_sync_recall_override_disables_semantic_lane(tmp_path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[recall]
+semantic = true
+
+[search.embedding]
+enabled = true
+backend = "nemotron_service"
+
+[search.embedding.rollout]
+mode = "on"
+sync_recall = false
+""",
+        encoding="utf-8",
+    )
+
+    assert load_policy(config).semantic is False
 
 
 def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:

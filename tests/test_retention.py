@@ -57,3 +57,29 @@ def test_build_retention_scores_strengthens_used_pages(tmp_path: Path, monkeypat
     assert "linked" not in payload["archive_candidates"]
     assert payload["pages"]["ref"]["score"] == 0.0
     assert retention.retention_score("used", path=output) > 0
+
+
+def test_retention_score_caches_one_snapshot_and_invalidates_on_change(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "retention.json"
+    path.write_text(
+        json.dumps({"pages": {"page": {"score": 0.25}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(retention, "_RETENTION_CACHE_KEY", None)
+    monkeypatch.setattr(retention, "_RETENTION_CACHE_SCORES", {})
+
+    first = retention._retention_scores(path)
+    second = retention._retention_scores(path)
+
+    assert first is second
+    assert retention.retention_score("page", path=path) == 0.25
+
+    path.write_text(
+        json.dumps({"pages": {"page": {"score": 0.75}, "new": {"score": 0.5}}}),
+        encoding="utf-8",
+    )
+
+    assert retention.retention_score("page", path=path) == 0.75

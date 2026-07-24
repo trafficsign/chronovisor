@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""Paired end-to-end latency gate for synchronous semantic Recall."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import statistics
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Self
+
+import httpx
+
+from chronovisor import recall_breaker, semantic_client
+from chronovisor.runtime_config import load_search_embedding_config
+from chronovisor.store import CHRONOVISOR_ROOT
+
+PROMPTS = (
+    "Chronovisorの同期RecallとNemotron検索の設計を思い出して。",
+    "Chronovisorへの完全改名時に行った本番切替を確認したい。",
+    "Raw archiveを年月日フォルダと圧縮形式へ移行した理由は何だった？",
+    "Decision Traceの表示を滑らかにした変更内容を教えて。",
+    "同期Recallの4秒契約とfail-openの関係を確認して。",
+    "semantic projectionの採用ゲートとholdの扱いを思い出して。",
+    "GitHub由来のuvx runtimeへ固定した理由は何だった？",
+    "Ollamaの35B負荷から同期用9Bを守る仕組みを確認したい。",
+    "Chronovisorダッシュボードの集計高速化について思い出して。",
+    "LettaからRecall階層だけ借りる設計判断を確認して。",
+)
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * percentile
+    lower = int(position)
+    upper = min(len(ordered) - 1, lower + 1)
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    wall = [float(row["wall_ms"]) for row in rows]
+    inner = [float(row.get("latency_ms") or 0.0) for row in rows]
+    waits = [float(row.get("resource_wait_ms") or 0.0) for row in rows]
+    modes = Counter(str(row.get("search_mode") or "") for row in rows)
+    statuses = Counter(str(row.get("status") or "") for row in rows)
+    return {
+        "samples": len(rows),
+        "wall_ms": {
+            "p50": round(_percentile(wall, 0.50), 3),
+            "p95": round(_percentile(wall, 0.95), 3),
+            "p99": round(_percentile(wall, 0.99), 3),
+            "max": round(max(wall), 3) if wall else 0.0,
+        },
+        "inner_ms": {
+            "p50": round(_percentile(inner, 0.50), 3),
+            "p95": round(_percentile(inner, 0.95), 3),
+            "p99": round(_percentile(inner, 0.99), 3),
+            "max": round(max(inner), 3) if inner else 0.0,
+        },
+        "resource_wait_ms": {
+            "p50": round(_percentile(waits, 0.50), 3),
+            "p95": round(_percentile(waits, 0.95), 3),
+            "max": round(max(waits), 3) if waits else 0.0,
+        },
+        "wall_over_4000": sum(value > 4_000 for value in wall),
+        "inner_over_4000": sum(value > 4_000 for value in inner),
+        "search_modes": dict(sorted(modes.items())),
+        "statuses": dict(sorted(statuses.items())),
+        "errors": sum(bool(row.get("error")) for row in rows),
+        "breaker_open": sum(bool(row.get("breaker_open")) for row in rows),
+    }
+
+
+def _replace_once(text: str, old: str, new: str) -> str:
+    if text.count(old) != 1:
+        raise RuntimeError(f"expected exactly one config occurrence: {old!r}")
+    return text.replace(old, new, 1)
+
+
+def _config_variant(source: str, *, semantic: bool) -> str:
+    false_count = source.count("sync_recall = false")
+    true_count = source.count("sync_recall = true")
+    if false_count + true_count != 1:
+        raise RuntimeError("expected exactly one sync_recall setting")
+    current = "sync_recall = true" if true_count else "sync_recall = false"
+    value = source.replace(
+        current,
+        f"sync_recall = {'true' if semantic else 'false'}",
+        1,
+    )
+    value = _replace_once(value, "log_decisions = true", "log_decisions = false")
+    return value
+
+
+def _run_hook(config: Path, prompt: str, session_id: str) -> dict[str, Any]:
+    command = [
+        sys.executable,
+        "-m",
+        "chronovisor.hook_dispatcher",
+        "--host",
+        "codex",
+        "--event",
+        "UserPromptSubmit",
+        "--config",
+        str(config),
+        "--prompt",
+        prompt,
+        "--cwd",
+        str(Path.cwd()),
+        "--session-id",
+        session_id,
+        "--format",
+        "json",
+    ]
+    started = time.perf_counter()
+    completed = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        timeout=6,
+        check=False,
+    )
+    wall_ms = (time.perf_counter() - started) * 1_000
+    try:
+        payload = json.loads(completed.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        payload = {
+            "status": "invalid_output",
+            "error": completed.stdout[-500:],
+        }
+    if not isinstance(payload, dict):
+        payload = {"status": "invalid_output", "error": repr(payload)}
+    scheduler = payload.get("evidence_features")
+    scheduler = scheduler.get("scheduler") if isinstance(scheduler, dict) else {}
+    reasons = payload.get("reasons")
+    reasons = reasons if isinstance(reasons, list) else []
+    return {
+        "wall_ms": round(wall_ms, 3),
+        "latency_ms": payload.get("latency_ms", 0),
+        "resource_wait_ms": (
+            scheduler.get("resource_wait_ms", 0)
+            if isinstance(scheduler, dict)
+            else 0
+        ),
+        "status": payload.get("status", ""),
+        "decision": payload.get("decision", ""),
+        "search_mode": payload.get("search_mode", ""),
+        "pages": len(payload.get("context_items") or []),
+        "reasons": [str(reason) for reason in reasons],
+        "error": payload.get("error", "")
+        or (completed.stderr[-500:] if completed.returncode else ""),
+        "returncode": completed.returncode,
+        "breaker_open": any(
+            "circuit breaker open" in str(reason) for reason in reasons
+        ),
+    }
+
+
+class LoadGenerator:
+    def __init__(self, cohort: str, config_path: Path) -> None:
+        self.cohort = cohort
+        self.config_path = config_path
+        self.stop = threading.Event()
+        self.started = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.errors: list[str] = []
+        self.cycles = 0
+
+    def __enter__(self) -> Self:
+        if self.cohort == "idle":
+            self.started.set()
+            return self
+        target = (
+            self._cpu_indexing
+            if self.cohort == "cpu-indexing"
+            else self._ornith_35b
+        )
+        self.thread = threading.Thread(target=target, daemon=True)
+        self.thread.start()
+        if not self.started.wait(timeout=30):
+            raise RuntimeError(f"{self.cohort} load did not start")
+        time.sleep(1.0)
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=15)
+
+    def _cpu_indexing(self) -> None:
+        config = load_search_embedding_config(self.config_path)
+        self.started.set()
+        while not self.stop.is_set():
+            try:
+                semantic_client.index_pages(["current-state"], config, wait=True)
+                self.cycles += 1
+            except Exception as exc:  # noqa: BLE001  # pragma: no cover
+                if self.stop.is_set():
+                    return
+                self.errors.append(f"{exc.__class__.__name__}: {exc}")
+                self.stop.wait(0.25)
+
+    def _ornith_35b(self) -> None:
+        request = {
+            "model": "maxwell1500/ornith-35b:Q5_K_M",
+            "prompt": (
+                "Chronovisorの記憶検索設計について、同期経路の安全性、"
+                "検索品質、障害時縮退、運用監査の観点から詳細に分析せよ。"
+            ),
+            "stream": True,
+            "keep_alive": "20m",
+            "options": {
+                "num_ctx": 32768,
+                "num_predict": 2048,
+                "temperature": 0.2,
+            },
+        }
+        while not self.stop.is_set():
+            try:
+                with httpx.stream(
+                    "POST",
+                    "http://127.0.0.1:11434/api/generate",
+                    json=request,
+                    timeout=httpx.Timeout(15.0, read=660.0),
+                ) as response:
+                    response.raise_for_status()
+                    self.started.set()
+                    for _chunk in response.iter_bytes():
+                        if self.stop.is_set():
+                            break
+                self.cycles += 1
+            except httpx.HTTPError as exc:  # pragma: no cover - live load evidence
+                if self.stop.is_set():
+                    return
+                self.errors.append(f"{exc.__class__.__name__}: {exc}")
+                self.stop.wait(0.25)
+
+
+def _restore_breaker(snapshot: bytes | None) -> None:
+    path = recall_breaker.BREAKER_FILE
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(snapshot)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--cohort",
+        choices=("idle", "cpu-indexing", "ornith-35b"),
+        required=True,
+    )
+    parser.add_argument("--pairs", type=int, default=200)
+    parser.add_argument("--config", type=Path, default=CHRONOVISOR_ROOT / "config.toml")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    if args.pairs < 1:
+        raise SystemExit("--pairs must be positive")
+
+    source = args.config.expanduser().read_text(encoding="utf-8")
+    output = args.output or (
+        CHRONOVISOR_ROOT
+        / "runtime"
+        / "semantic-eval"
+        / (
+            "sync-recall-"
+            + args.cohort
+            + "-"
+            + datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
+            + ".json"
+        )
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    breaker_snapshot = (
+        recall_breaker.BREAKER_FILE.read_bytes()
+        if recall_breaker.BREAKER_FILE.exists()
+        else None
+    )
+    baseline_rows: list[dict[str, Any]] = []
+    candidate_rows: list[dict[str, Any]] = []
+    pairs: list[dict[str, Any]] = []
+    load: LoadGenerator | None = None
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="chronovisor-sync-recall-") as temp:
+            temp_dir = Path(temp)
+            baseline = temp_dir / "baseline.toml"
+            candidate = temp_dir / "candidate.toml"
+            baseline.write_text(
+                _config_variant(source, semantic=False),
+                encoding="utf-8",
+            )
+            candidate.write_text(
+                _config_variant(source, semantic=True),
+                encoding="utf-8",
+            )
+            with LoadGenerator(args.cohort, candidate) as load:
+                for index in range(args.pairs):
+                    prompt_index = index % len(PROMPTS)
+                    prompt = PROMPTS[prompt_index]
+                    pair_id = f"{args.cohort}-{index:04d}"
+                    order = (
+                        (("baseline", baseline), ("candidate", candidate))
+                        if index % 2 == 0
+                        else (("candidate", candidate), ("baseline", baseline))
+                    )
+                    observed: dict[str, dict[str, Any]] = {}
+                    for label, config in order:
+                        row = _run_hook(config, prompt, f"{pair_id}-{label}")
+                        row.update(
+                            {
+                                "pair": index,
+                                "prompt_index": prompt_index,
+                                "prompt_hash": hashlib.sha256(
+                                    prompt.encode("utf-8")
+                                ).hexdigest()[:16],
+                            }
+                        )
+                        observed[label] = row
+                        target_rows = (
+                            baseline_rows if label == "baseline" else candidate_rows
+                        )
+                        target_rows.append(row)
+                    pairs.append(
+                        {
+                            "pair": index,
+                            "prompt_index": prompt_index,
+                            "candidate_minus_baseline_wall_ms": round(
+                                observed["candidate"]["wall_ms"]
+                                - observed["baseline"]["wall_ms"],
+                                3,
+                            ),
+                        }
+                    )
+                    if (index + 1) % 10 == 0 or index + 1 == args.pairs:
+                        print(
+                            json.dumps(
+                                {
+                                    "cohort": args.cohort,
+                                    "completed_pairs": index + 1,
+                                    "baseline_p95_ms": round(
+                                        _percentile(
+                                            [
+                                                float(row["wall_ms"])
+                                                for row in baseline_rows
+                                            ],
+                                            0.95,
+                                        ),
+                                        1,
+                                    ),
+                                    "candidate_p95_ms": round(
+                                        _percentile(
+                                            [
+                                                float(row["wall_ms"])
+                                                for row in candidate_rows
+                                            ],
+                                            0.95,
+                                        ),
+                                        1,
+                                    ),
+                                },
+                                ensure_ascii=False,
+                            ),
+                            flush=True,
+                        )
+    finally:
+        _restore_breaker(breaker_snapshot)
+
+    baseline_metrics = _metrics(baseline_rows)
+    candidate_metrics = _metrics(candidate_rows)
+    deltas = [
+        float(pair["candidate_minus_baseline_wall_ms"])
+        for pair in pairs
+    ]
+    gate = {
+        "candidate_wall_over_4000": candidate_metrics["wall_over_4000"] == 0,
+        "candidate_inner_over_4000": candidate_metrics["inner_over_4000"] == 0,
+        "candidate_no_errors": (
+            candidate_metrics["errors"] == 0
+            and candidate_metrics["breaker_open"] == 0
+            and candidate_metrics["statuses"].get("timeout", 0) == 0
+        ),
+        "candidate_all_ok": candidate_metrics["statuses"] == {"ok": args.pairs},
+        "candidate_all_hybrid": (
+            candidate_metrics["search_modes"] == {"hybrid": args.pairs}
+        ),
+        "resource_wait_p95_le_50ms": (
+            candidate_metrics["resource_wait_ms"]["p95"] <= 50
+        ),
+        "p50_noninferior": (
+            candidate_metrics["wall_ms"]["p50"]
+            <= baseline_metrics["wall_ms"]["p50"] + 100
+        ),
+        "p95_noninferior": (
+            candidate_metrics["wall_ms"]["p95"]
+            <= baseline_metrics["wall_ms"]["p95"] * 1.05
+        ),
+    }
+    report = {
+        "schema_version": 1,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "cohort": args.cohort,
+        "pairs": args.pairs,
+        "baseline": baseline_metrics,
+        "candidate": candidate_metrics,
+        "paired_delta_wall_ms": {
+            "mean": round(statistics.fmean(deltas), 3),
+            "p50": round(_percentile(deltas, 0.50), 3),
+            "p95": round(_percentile(deltas, 0.95), 3),
+            "max": round(max(deltas), 3),
+        },
+        "load": {
+            "cycles": load.cycles if load is not None else 0,
+            "errors": load.errors if load is not None else [],
+        },
+        "gate": gate,
+        "passed": all(gate.values()) and not (load.errors if load is not None else []),
+        "records": {
+            "baseline": baseline_rows,
+            "candidate": candidate_rows,
+            "pairs": pairs,
+        },
+    }
+    output.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(output, 0o600)
+    public_report = {key: value for key, value in report.items() if key != "records"}
+    print(json.dumps({"output": str(output), **public_report}, ensure_ascii=False))
+    return 0 if report["passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

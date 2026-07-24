@@ -5,16 +5,23 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import threading
 from collections import Counter, deque
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from chronovisor.index_store import get_store
+from chronovisor.link_fix import atomic_write
 from chronovisor.recall_log_schema import canonicalize_page_ids, page_ids_from_record
 from chronovisor.recall_runtime_paths import RECALL_DIR
+from chronovisor.store import CHRONOVISOR_ROOT
 
 RETENTION_FILE = RECALL_DIR / "retention.json"
+RETENTION_SCORE_CACHE_FILE = (
+    CHRONOVISOR_ROOT / "runtime" / "search" / "retention-scores.json"
+)
 FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 
@@ -28,6 +35,10 @@ TYPE_DECAY_DAYS = {
     "knowledge": 120.0,
     "reference": 9999.0,
 }
+
+_RETENTION_CACHE_LOCK = threading.Lock()
+_RETENTION_CACHE_KEY: tuple[str, int, int] | None = None
+_RETENTION_CACHE_SCORES: dict[str, float] = {}
 
 
 def _read_recent_jsonl(path: Path, *, limit: int) -> list[dict[str, Any]]:
@@ -179,21 +190,101 @@ def build_retention_scores(
     return payload
 
 
-def retention_score(page_id: str, *, path: Path = RETENTION_FILE) -> float:
+def _read_retention_score_cache(
+    key: tuple[str, int, int],
+    *,
+    path: Path,
+) -> dict[str, float] | None:
+    if path != RETENTION_FILE:
+        return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(
+            RETENTION_SCORE_CACHE_FILE.read_text(encoding="utf-8")
+        )
     except (OSError, json.JSONDecodeError):
-        return 0.0
-    pages = payload.get("pages")
-    if not isinstance(pages, dict):
-        return 0.0
-    row = pages.get(page_id)
-    if not isinstance(row, dict):
-        return 0.0
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or payload.get("source") != list(key)
+    ):
+        return None
+    scores = payload.get("scores")
+    if not isinstance(scores, dict):
+        return None
     try:
-        return float(row.get("score") or 0.0)
+        return {
+            str(page_id): float(score)
+            for page_id, score in scores.items()
+            if isinstance(page_id, str)
+        }
     except (TypeError, ValueError):
-        return 0.0
+        return None
+
+
+def _write_retention_score_cache(
+    key: tuple[str, int, int],
+    scores: dict[str, float],
+    *,
+    path: Path,
+) -> None:
+    if path != RETENTION_FILE:
+        return
+    try:
+        RETENTION_SCORE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(
+            RETENTION_SCORE_CACHE_FILE,
+            json.dumps(
+                {"schema_version": 1, "source": list(key), "scores": scores},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        os.chmod(RETENTION_SCORE_CACHE_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def _retention_scores(path: Path) -> dict[str, float]:
+    global _RETENTION_CACHE_KEY, _RETENTION_CACHE_SCORES
+    try:
+        stat = path.stat()
+    except OSError:
+        return {}
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    with _RETENTION_CACHE_LOCK:
+        if _RETENTION_CACHE_KEY == key:
+            return _RETENTION_CACHE_SCORES
+        persisted = _read_retention_score_cache(key, path=path)
+        if persisted is not None:
+            _RETENTION_CACHE_KEY = key
+            _RETENTION_CACHE_SCORES = persisted
+            return persisted
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        pages = payload.get("pages")
+        if not isinstance(pages, dict):
+            pages = {}
+        scores: dict[str, float] = {}
+        for page_id, row in pages.items():
+            if not isinstance(page_id, str) or not isinstance(row, dict):
+                continue
+            try:
+                scores[page_id] = float(row.get("score") or 0.0)
+            except (TypeError, ValueError):
+                continue
+        _RETENTION_CACHE_KEY = key
+        _RETENTION_CACHE_SCORES = scores
+        _write_retention_score_cache(key, scores, path=path)
+        return scores
+
+
+def retention_score(page_id: str, *, path: Path = RETENTION_FILE) -> float:
+    return _retention_scores(path).get(page_id, 0.0)
 
 
 def main(argv: list[str] | None = None) -> int:
