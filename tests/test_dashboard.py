@@ -771,10 +771,14 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "grid-template-columns: repeat(6, minmax(50px, 1fr));" in style
     assert "height: var(--panel-height);" in style
     assert "#model-lab-panel" in style
-    assert "#model-panel .model-grid" in style
-    assert "height: 500px;" in style
-    assert "height: 764px;" in style
-    assert "height: 1084px;" in style
+    assert "#model-panel {\n  height: auto;\n  min-height: 500px;" in style
+    assert (
+        "#model-panel .model-grid {\n"
+        "  flex: 0 0 auto;\n"
+        "  overflow: visible;"
+    ) in style
+    assert "min-height: 764px;" in style
+    assert "min-height: 1084px;" in style
     assert "#stage-value" in style
     assert "text-overflow: ellipsis;" in style
     assert "white-space: nowrap;" in style

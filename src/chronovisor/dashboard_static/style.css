@@ -773,8 +773,9 @@ canvas {
 
 /* ---------- model fleet ---------- */
 
-.model-panel {
-  height: 500px;
+#model-panel {
+  height: auto;
+  min-height: 500px;
 }
 
 #model-lab-panel {
@@ -796,7 +797,8 @@ canvas {
 }
 
 #model-panel .model-grid {
-  overflow: hidden;
+  flex: 0 0 auto;
+  overflow: visible;
   padding-right: 0;
 }
 
@@ -2521,8 +2523,10 @@ canvas {
     height: 480px;
   }
 
-  .model-panel {
-    height: 764px;
+  #model-panel {
+    height: auto;
+    min-height: 764px;
+    overflow: visible;
   }
 
   .decision-trace-panel {
@@ -2578,7 +2582,8 @@ canvas {
   }
 
   #model-panel {
-    height: 1084px;
+    height: auto;
+    min-height: 1084px;
   }
 
   .decision-trace-panel {
