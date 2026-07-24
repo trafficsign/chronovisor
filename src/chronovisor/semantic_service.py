@@ -396,7 +396,6 @@ class SemanticServiceState:
         latency_ms = (time.monotonic() - started) * 1_000
         with self._metrics_lock:
             self._query_latencies_ms.append(latency_ms)
-        self._publish_status()
         return {
             "status": "ok",
             "generation_id": (

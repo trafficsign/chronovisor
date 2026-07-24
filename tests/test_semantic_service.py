@@ -84,7 +84,9 @@ def test_search_reuses_cached_query_vector_without_batcher() -> None:
     state._metrics_lock = threading.Lock()
     state._query_latencies_ms = deque(maxlen=10)
     state._reload_if_pointer_changed = lambda: None
-    state._publish_status = lambda: None
+    state._publish_status = lambda: pytest.fail(
+        "status publication must stay off the foreground path"
+    )
     state._search_vector = lambda cached, top_n: [
         ("page", float(cached[0]) + top_n)
     ]
