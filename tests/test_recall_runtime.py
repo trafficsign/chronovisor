@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -107,6 +108,30 @@ def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
     results, _mode = search_candidates(["specific", "generic"], RecallPolicy())
 
     assert [result.page_id for result in results[:2]] == ["target", "generic"]
+
+
+def test_search_candidates_runs_query_entrances_concurrently(monkeypatch) -> None:
+    from chronovisor import recall_runtime
+
+    barrier = threading.Barrier(3, timeout=1)
+
+    def fake_search(
+        *,
+        query: str,
+        top_n: int,
+        semantic: bool,
+        fusion_weights: dict[str, float],
+    ) -> tuple[list[ScoredPage], str]:
+        del top_n, semantic, fusion_weights
+        barrier.wait()
+        return [ScoredPage(query, query, "", "", 1.0)], "hybrid"
+
+    monkeypatch.setattr(recall_runtime, "run_search", fake_search)
+
+    results, mode = search_candidates(["first", "second", "third"], RecallPolicy())
+
+    assert [result.page_id for result in results] == ["first", "second", "third"]
+    assert mode == "hybrid"
 
 
 def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) -> None:

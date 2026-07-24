@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -256,6 +257,7 @@ class IndexStore:
         self._loaded = False
         self._persistence_dirty = False
         self._alias_sha256 = ""
+        self._last_refresh_monotonic = 0.0
 
     # -- persistence ------------------------------------------------------
 
@@ -440,6 +442,26 @@ class IndexStore:
                     pass
                 else:
                     self._persistence_dirty = False
+            self._last_refresh_monotonic = time.monotonic()
+
+    def refresh_if_stale(self, max_age_seconds: float = 2.0) -> None:
+        """Refresh at most once per short read transaction window.
+
+        A recall request consults metadata through several independent
+        retrieval channels. They must share one coherent snapshot instead of
+        each walking every page on disk. Explicit ``refresh()`` calls retain
+        their immediate semantics for mutation and administrative paths.
+        """
+
+        with self._lock:
+            if (
+                self._loaded
+                and self._last_refresh_monotonic
+                and time.monotonic() - self._last_refresh_monotonic
+                < max(0.0, max_age_seconds)
+            ):
+                return
+            self.refresh()
 
     @staticmethod
     def _build_entry(

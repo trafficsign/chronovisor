@@ -149,7 +149,7 @@ def search(
     )
 
     store = get_store()
-    store.refresh()
+    store.refresh_if_stale()
     results: list[ScoredPage] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -219,7 +219,7 @@ def verify(
     )
 
     store = get_store()
-    store.refresh()
+    store.refresh_if_stale()
     results: list[ScoredPage] = []
     for row in rows:
         if not isinstance(row, dict):

@@ -377,6 +377,28 @@ class TestRawKeywordsAccessor:
         assert store.sensitivity("interview") == "high"
 
 
+class TestRefreshWindow:
+    def test_cached_refresh_shares_snapshot_but_explicit_refresh_is_immediate(
+        self, isolated_index: Path
+    ) -> None:
+        path = _seed(
+            isolated_index,
+            "p.md",
+            "---\ntitle: Before\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        store = IndexStore()
+        store.refresh()
+
+        path.write_text(
+            "---\ntitle: After\nupdated: 2026-01-02\n---\nlonger body\n"
+        )
+        store.refresh_if_stale(max_age_seconds=60)
+        assert store.meta("p")["title"] == "Before"
+
+        store.refresh()
+        assert store.meta("p")["title"] == "After"
+
+
 # ---------------------------------------------------------------------------
 # Schema migration: v1 cache must invalidate and rebuild on first refresh
 # ---------------------------------------------------------------------------

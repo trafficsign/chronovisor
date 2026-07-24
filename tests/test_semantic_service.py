@@ -1,9 +1,15 @@
 
+import threading
+import time
+from collections import OrderedDict, deque
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from chronovisor.semantic_service import (
     QueryBatcher,
+    SemanticServiceState,
     ServiceBusy,
     _drifted_page_ids,
 )
@@ -61,3 +67,32 @@ def test_query_batcher_rejects_when_generation_is_unavailable() -> None:
             batcher.submit("query", 1, 1.0)
     finally:
         batcher.close()
+
+
+def test_search_reuses_cached_query_vector_without_batcher() -> None:
+    state = object.__new__(SemanticServiceState)
+    vector = np.asarray([1.0, 0.0], dtype=np.float32)
+    state.config = SimpleNamespace(interactive_timeout_ms=500)
+    state._query_cache_lock = threading.Lock()
+    state._query_vector_cache = OrderedDict(
+        {"repeated query": (time.monotonic(), vector)}
+    )
+    state._generation_lock = threading.RLock()
+    state._generation = SimpleNamespace(
+        manifest=SimpleNamespace(generation_id="test-generation")
+    )
+    state._metrics_lock = threading.Lock()
+    state._query_latencies_ms = deque(maxlen=10)
+    state._reload_if_pointer_changed = lambda: None
+    state._publish_status = lambda: None
+    state._search_vector = lambda cached, top_n: [
+        ("page", float(cached[0]) + top_n)
+    ]
+    state._batcher = SimpleNamespace(
+        submit=lambda *_args, **_kwargs: pytest.fail("batcher was called")
+    )
+
+    response = state.search("repeated query", 3)
+
+    assert response["cache_hit"] is True
+    assert response["results"] == [{"page_id": "page", "score": 4.0}]

@@ -309,6 +309,19 @@ def main() -> int:
                 encoding="utf-8",
             )
             with LoadGenerator(args.cohort, candidate) as load:
+                warmup_rows: list[dict[str, Any]] = []
+                for prompt_index, prompt in enumerate(PROMPTS):
+                    for label, config in (
+                        ("baseline", baseline),
+                        ("candidate", candidate),
+                    ):
+                        row = _run_hook(
+                            config,
+                            prompt,
+                            f"{args.cohort}-warmup-{prompt_index:02d}-{label}",
+                        )
+                        row["label"] = label
+                        warmup_rows.append(row)
                 for index in range(args.pairs):
                     prompt_index = index % len(PROMPTS)
                     prompt = PROMPTS[prompt_index]
@@ -387,6 +400,11 @@ def main() -> int:
         for pair in pairs
     ]
     gate = {
+        "warmup_all_ok": (
+            len(warmup_rows) == len(PROMPTS) * 2
+            and all(row.get("status") == "ok" for row in warmup_rows)
+            and not any(row.get("error") for row in warmup_rows)
+        ),
         "candidate_wall_over_4000": candidate_metrics["wall_over_4000"] == 0,
         "candidate_inner_over_4000": candidate_metrics["inner_over_4000"] == 0,
         "candidate_no_errors": (
@@ -426,6 +444,18 @@ def main() -> int:
         "load": {
             "cycles": load.cycles if load is not None else 0,
             "errors": load.errors if load is not None else [],
+        },
+        "warmup": {
+            "samples": len(warmup_rows),
+            "errors": sum(bool(row.get("error")) for row in warmup_rows),
+            "statuses": dict(
+                sorted(
+                    Counter(
+                        str(row.get("status") or "unknown")
+                        for row in warmup_rows
+                    ).items()
+                )
+            ),
         },
         "gate": gate,
         "passed": all(gate.values()) and not (load.errors if load is not None else []),

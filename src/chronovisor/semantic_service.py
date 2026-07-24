@@ -62,6 +62,7 @@ from chronovisor.semantic_model import (
 from chronovisor.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json"
+QUERY_CACHE_TTL_SECONDS = 60.0
 
 
 class ServiceBusy(RuntimeError):
@@ -345,15 +346,24 @@ class SemanticServiceState:
                 self._query_vector_cache.popitem(last=False)
         return vectors
 
-    def _cached_query_vector(self, query: str) -> tuple[np.ndarray, bool]:
+    def _query_vector_from_cache(self, query: str) -> np.ndarray | None:
         now = time.monotonic()
         with self._query_cache_lock:
             cached = self._query_vector_cache.get(query)
-            if cached is not None and now - cached[0] <= 10.0:
+            if (
+                cached is not None
+                and now - cached[0] <= QUERY_CACHE_TTL_SECONDS
+            ):
                 self._query_vector_cache.move_to_end(query)
-                return cached[1], True
+                return cached[1]
             if cached is not None:
                 self._query_vector_cache.pop(query, None)
+        return None
+
+    def _cached_query_vector(self, query: str) -> tuple[np.ndarray, bool]:
+        cached = self._query_vector_from_cache(query)
+        if cached is not None:
+            return cached, True
         return self._encode_queries([query], 1)[0], False
 
     def _search_vector(self, vector: np.ndarray, top_n: int) -> list[tuple[str, float]]:
@@ -368,14 +378,20 @@ class SemanticServiceState:
     ) -> dict[str, Any]:
         self._reload_if_pointer_changed()
         started = time.monotonic()
-        results = self._batcher.submit(
-            query,
-            max(1, min(100, top_n)),
-            max(
-                0.025,
-                float(timeout_ms or self.config.interactive_timeout_ms) / 1_000,
-            ),
-        )
+        bounded_top_n = max(1, min(100, top_n))
+        cached = self._query_vector_from_cache(query)
+        cache_hit = cached is not None
+        if cached is None:
+            results = self._batcher.submit(
+                query,
+                bounded_top_n,
+                max(
+                    0.025,
+                    float(timeout_ms or self.config.interactive_timeout_ms) / 1_000,
+                ),
+            )
+        else:
+            results = self._search_vector(cached, bounded_top_n)
         generation = self._generation
         latency_ms = (time.monotonic() - started) * 1_000
         with self._metrics_lock:
@@ -386,6 +402,7 @@ class SemanticServiceState:
             "generation_id": (
                 generation.manifest.generation_id if generation is not None else ""
             ),
+            "cache_hit": cache_hit,
             "latency_ms": round(latency_ms, 3),
             "results": [
                 {"page_id": page_id, "score": score} for page_id, score in results

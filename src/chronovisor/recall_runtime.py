@@ -17,6 +17,7 @@ import time
 import tomllib
 import uuid
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -1177,12 +1178,11 @@ def search_candidates(
 ) -> tuple[list[Any], str]:
     if not queries:
         return [], ""
-    merged: dict[str, Any] = {}
-    mode = "bm25"
-    for query_index, query in enumerate(queries):
-        remaining_ms = _remaining_budget_ms(deadline_at)
-        if remaining_ms is not None and remaining_ms <= 0:
-            raise RecallBudgetExhausted("recall search budget exhausted")
+    remaining_ms = _remaining_budget_ms(deadline_at)
+    if remaining_ms is not None and remaining_ms <= 0:
+        raise RecallBudgetExhausted("recall search budget exhausted")
+
+    def search_one(query: str) -> tuple[list[Any], str]:
         search_kwargs: dict[str, Any] = {
             "query": query,
             "top_n": max(policy.max_pages * 3, 8),
@@ -1199,14 +1199,32 @@ def search_candidates(
                 "bm25_rank_decay": policy.fusion_bm25_rank_decay,
                 "semantic_min_top_score": policy.fusion_semantic_min_top_score,
                 "semantic_min_margin": policy.fusion_semantic_min_margin,
-                "semantic_low_confidence_weight": policy.fusion_semantic_low_confidence_weight,
+                "semantic_low_confidence_weight": (
+                    policy.fusion_semantic_low_confidence_weight
+                ),
                 "usage_prior_decay": policy.fusion_usage_prior_decay,
                 "usage_prior_cap": policy.fusion_usage_prior_cap,
             },
         }
         if remaining_ms is not None:
             search_kwargs["semantic_timeout_ms"] = remaining_ms
-        results, search_mode = run_search(**search_kwargs)
+        return run_search(**search_kwargs)
+
+    # Recall rewrites produce up to three independent entrances. Run them
+    # together so the semantic service can embed them as one micro-batch while
+    # preserving query-order weights when the results are merged below.
+    if len(queries) == 1:
+        searched = [search_one(queries[0])]
+    else:
+        with ThreadPoolExecutor(
+            max_workers=min(len(queries), policy.max_queries),
+            thread_name_prefix="recall-search",
+        ) as executor:
+            searched = list(executor.map(search_one, queries))
+
+    merged: dict[str, Any] = {}
+    mode = "bm25"
+    for query_index, (results, search_mode) in enumerate(searched):
         if search_mode != "bm25":
             mode = search_mode
         query_weight = max(0.50, 1.0 - (0.25 * query_index))
@@ -1241,7 +1259,7 @@ def collect_context(
 
     init_chronovisor()
     store = get_store()
-    store.refresh()
+    store.refresh_if_stale()
 
     items: list[ContextItem] = []
     seen: set[str] = set()
