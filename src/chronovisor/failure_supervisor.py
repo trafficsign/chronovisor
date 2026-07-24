@@ -118,6 +118,13 @@ REPAIR_SUCCESS_PACKET_STATUSES = {
     "frontier_approved",
 }
 
+LOCAL_CONSENSUS_AUTHORITY_FAILURE_CLASS = (
+    "ingest.runtime_local_consensus_authority_unavailable"
+)
+ADOPTION_ARTIFACT_INVALID_FINGERPRINT = (
+    f"{LOCAL_CONSENSUS_AUTHORITY_FAILURE_CLASS}:adoption_artifact_invalid"
+)
+
 # These failures already exhausted a bounded convergence loop inside one
 # ingest job. Replaying the raw through three more jobs only burns local and
 # frontier tokens while reproducing the same control-path defect.
@@ -481,7 +488,7 @@ def classify_failure(message: str | None) -> FailureRecord:
         detail = authority_unavailable.group(1).strip().casefold()
         reason_match = re.match(r"([a-z][a-z0-9_.-]{0,127})\s*:", detail)
         reason_code = reason_match.group(1) if reason_match else "unknown"
-        failure_class = "ingest.runtime_local_consensus_authority_unavailable"
+        failure_class = LOCAL_CONSENSUS_AUTHORITY_FAILURE_CLASS
         return FailureRecord(
             failure_class=failure_class,
             # Bind the control-plane cause, not the raw filename or prose, so
@@ -1732,6 +1739,17 @@ def _operational_deferred_raw_files_unlocked(
             and value.get("self_heal_queued") is not True
         ):
             continue
+        if value.get("fingerprint") == ADOPTION_ARTIFACT_INVALID_FINGERPRINT:
+            if not authority_sha256_loaded:
+                current_authority_sha256 = _current_adopted_authority_sha256()
+                authority_sha256_loaded = True
+            if current_authority_sha256 is not None:
+                # This control-plane failure is bound to the invalid
+                # nomination, not to the immutable raw. A newly validated
+                # adopted artifact proves that condition has cleared, so the
+                # raw can automatically re-enter ingest. Successful ingest
+                # then removes the historical failure-state row normally.
+                continue
         raw_path = available_paths.get(raw_file)
         if raw_path is None:
             from chronovisor.raw_store import RawStore

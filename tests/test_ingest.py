@@ -8341,6 +8341,39 @@ class TestPerRawOrchestrator:
             [first_raw, second_raw, recurring_raw]
         ) == {recurring_raw.name: "pending_local_repair"}
 
+    def test_valid_adopted_authority_releases_invalid_artifact_hold(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor import failure_supervisor, self_heal
+
+        raw_path = isolated_wiki / "raw" / "authority-recovered.md"
+        raw_path.write_text("grounded source", encoding="utf-8")
+        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+
+        result = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=(
+                "local consensus authority unavailable: "
+                "adoption_artifact_invalid:evaluation evidence is inconsistent"
+            ),
+            raw_text="grounded source",
+        )
+
+        assert result.fingerprint == (
+            failure_supervisor.ADOPTION_ARTIFACT_INVALID_FINGERPRINT
+        )
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
+            raw_path.name: "pending_local_repair"
+        }
+
+        monkeypatch.setattr(
+            failure_supervisor,
+            "_current_adopted_authority_sha256",
+            lambda: "a" * 64,
+        )
+
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
+
     def test_generation_repair_exhaustion_is_operational_not_bad_raw(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
