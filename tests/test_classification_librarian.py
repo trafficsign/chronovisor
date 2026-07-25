@@ -224,3 +224,27 @@ def test_model_worker_splits_a_truncated_json_batch(monkeypatch) -> None:
     assert [row["uid"] for row in decisions] == ["uid-0", "uid-1"]
     assert model_calls == 3
     assert calls == [2, 1, 1]
+
+
+def test_tie_break_candidates_are_limited_to_independent_proposals() -> None:
+    pages = [
+        {
+            "uid": "uid-1",
+            "candidates": [
+                {"notation": "004.8"},
+                {"notation": "51"},
+                {"notation": "62"},
+            ],
+        }
+    ]
+
+    narrowed = classification_model_worker._tie_candidate_pages(
+        pages,
+        [{"primary_notation": "004.8"}],
+        [{"primary_notation": "51"}],
+    )
+
+    assert [row["notation"] for row in narrowed[0]["candidates"]] == [
+        "004.8",
+        "51",
+    ]

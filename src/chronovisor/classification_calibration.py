@@ -82,6 +82,23 @@ def adjudicate(root: Path, *, batch_size: int) -> dict[str, Any]:
         timeout_seconds=1_800,
         run_namespace="legacy",
     )
+    initial_by_uid = {str(row["uid"]): row for row in decisions}
+    refinement_rows = [
+        row
+        for row in rows
+        if int(initial_by_uid[str(row["uid"])].get("quorum") or 0) < 2
+    ]
+    if refinement_rows:
+        refined = run_consensus_batches(
+            refinement_rows,
+            root=root,
+            batch_size=batch_size,
+            purpose="explicit",
+            timeout_seconds=1_800,
+            run_namespace="adjudication-tie-policy-v2",
+        )
+        initial_by_uid.update({str(row["uid"]): row for row in refined})
+        decisions = [initial_by_uid[str(row["uid"])] for row in rows]
     by_uid = {str(row["uid"]): row for row in decisions}
     output = []
     holds = []
@@ -130,6 +147,7 @@ def adjudicate(root: Path, *, batch_size: int) -> dict[str, Any]:
             "as expected-hold safety cases"
         ),
         "model_calls_are_local_only": True,
+        "refined_no_quorum_count": len(refinement_rows),
     }
 
 

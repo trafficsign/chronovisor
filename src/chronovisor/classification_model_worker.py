@@ -99,10 +99,18 @@ def _call(
     }
     if prior is not None:
         prompt["proposal_to_audit"] = list(prior)
-        prompt["audit_instruction"] = (
-            "Independently verify every proposal. Return your corrected complete "
-            "decision list; do not merely approve or comment."
-        )
+        if role == "tie-break-adjudicator":
+            prompt["audit_instruction"] = (
+                "Resolve each disagreement by choosing primary_notation strictly "
+                "from primary_proposal.primary_notation or "
+                "challenger_proposal.primary_notation. Return the complete "
+                "decision list; a third primary notation is forbidden."
+            )
+        else:
+            prompt["audit_instruction"] = (
+                "Independently verify every proposal. Return your corrected "
+                "complete decision list; do not merely approve or comment."
+            )
     response = ollama.chat(
         [
             {
@@ -193,6 +201,34 @@ def _call(
     return ordered, 1
 
 
+def _tie_candidate_pages(
+    pages: Sequence[Mapping[str, Any]],
+    primary: Sequence[Mapping[str, Any]],
+    challenger: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Limit tie-break primary choices to the two independently proposed classes."""
+
+    output: list[dict[str, Any]] = []
+    for page, left, right in zip(pages, primary, challenger, strict=True):
+        choices = {
+            str(left.get("primary_notation") or ""),
+            str(right.get("primary_notation") or ""),
+        }
+        candidates = [
+            dict(candidate)
+            for candidate in page.get("candidates") or []
+            if str(candidate.get("notation") or "") in choices
+        ]
+        output.append(
+            {
+                **dict(page),
+                "candidates": candidates
+                or [dict(candidate) for candidate in page.get("candidates") or []],
+            }
+        )
+    return output
+
+
 def _decision_digest(
     uid: str,
     primary: Mapping[str, Any],
@@ -247,7 +283,14 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     tie_by_uid: dict[str, dict[str, Any]] = {}
     model_calls = primary_calls + challenger_calls
     if disagreements:
-        tie_pages = [pages[index] for index in disagreements]
+        disputed_pages = [pages[index] for index in disagreements]
+        disputed_primary = [primary[index] for index in disagreements]
+        disputed_challenger = [challenger[index] for index in disagreements]
+        tie_pages = _tie_candidate_pages(
+            disputed_pages,
+            disputed_primary,
+            disputed_challenger,
+        )
         paired_prior = [
             {
                 "uid": str(pages[index]["uid"]),
