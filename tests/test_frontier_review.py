@@ -56,6 +56,31 @@ def _local_router_config() -> DecisionRouterConfig:
     )
 
 
+def _one_runner_residency_plan(
+    models,
+    *,
+    num_ctx: int,
+    reserve_bytes: int,
+    **_kwargs,
+) -> ollama.ModelResidencyPlan:
+    model = tuple(models)[0]
+    capacity = 64 * ollama.GIB
+    estimate = 4 * ollama.GIB
+    return ollama.ModelResidencyPlan(
+        num_ctx=num_ctx,
+        max_resident_models=1,
+        capacity_bytes=capacity,
+        reserve_bytes=reserve_bytes,
+        available_bytes=capacity + reserve_bytes,
+        total_bytes=capacity + reserve_bytes,
+        estimated_model_bytes=((model, estimate),),
+        role_contexts=((model, num_ctx),),
+        resident_models=(),
+        calibrated_models=(model,),
+        source="test_fixed_capacity",
+    )
+
+
 def _quarantined_router_class(
     *,
     valid: tuple[bool, bool, bool],
@@ -1205,6 +1230,11 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
     )
     monkeypatch.setattr(ollama, "chat", fake_chat)
     monkeypatch.setattr(
+        ollama,
+        "plan_model_residency",
+        _one_runner_residency_plan,
+    )
+    monkeypatch.setattr(
         decision_router,
         "resolve_router_policy",
         lambda config, **_kwargs: decision_router.RouterPolicyResolution(
@@ -1998,6 +2028,11 @@ def test_structured_review_local_model_failures_quarantine_without_tie_or_fronti
         _local_router_config,
     )
     monkeypatch.setattr(ollama, "chat", failed_chat)
+    monkeypatch.setattr(
+        ollama,
+        "plan_model_residency",
+        _one_runner_residency_plan,
+    )
     monkeypatch.setattr(
         frontier_review,
         "_run_codex",

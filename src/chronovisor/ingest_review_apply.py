@@ -68,6 +68,7 @@ _write_ingest_artifact = _runtime_call("_write_ingest_artifact")
 # extraction. Importing here is safe because this module is loaded lazily.
 from chronovisor.ingest import (  # noqa: E402
     IngestApplyError,
+    _FrontierCallBudget,
     _IngestReviewShardContinuation,
 )
 
