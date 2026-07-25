@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -7,7 +9,7 @@ import pytest
 from chronovisor import dashboard
 from chronovisor.durable_state import write_sealed_json
 from chronovisor.librarian import run_shadow
-from chronovisor.librarian_status import _derive_code
+from chronovisor.librarian_status import _derive_code, _soak_status
 
 
 def test_dashboard_static_contract_exposes_librarian_progress() -> None:
@@ -69,6 +71,31 @@ def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> N
         "denominator": 1,
         "scope_generation": status["scope_generation"],
     }
+
+
+def test_dashboard_reports_migration_observation_elapsed_time(
+    tmp_path: Path,
+) -> None:
+    started = datetime(2026, 7, 25, 10, tzinfo=UTC)
+    path = tmp_path / "runtime" / "librarian" / "soak.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "chronovisor.librarian-soak.v2",
+                "status": "running",
+                "observation_mode": "concurrent_migration",
+                "starts_at": started.isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = _soak_status(tmp_path, started + timedelta(hours=3))
+
+    assert status["status"] == "running"
+    assert status["remaining_seconds"] == 0
+    assert status["elapsed_seconds"] == 3 * 3600
 
 
 @pytest.mark.parametrize(

@@ -397,8 +397,9 @@ def cleanup_expired_preimages(
     root: Path,
     *,
     now: datetime | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
-    """Remove only verified transaction preimages whose TTL has expired."""
+    """Remove valid transaction preimages after TTL or verified release."""
 
     current = now or _now()
     if current.tzinfo is None:
@@ -417,7 +418,7 @@ def cleanup_expired_preimages(
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             retained.append(path.name)
             continue
-        if expires <= current:
+        if force or expires <= current:
             shutil.rmtree(path)
             deleted.append(path.name)
         else:

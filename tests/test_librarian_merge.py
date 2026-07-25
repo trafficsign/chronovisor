@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 
 from chronovisor.librarian_merge import prepare_cluster_plan
-from chronovisor.merge_transaction import apply_merge_plan
+from chronovisor.merge_transaction import (
+    apply_merge_plan,
+    cleanup_expired_preimages,
+)
 from chronovisor.page_registry import PageRegistry
 
 
@@ -116,6 +119,10 @@ def test_cluster_plan_and_transaction_preserve_links_provenance_and_sensitivity(
     assert f"[[{loser_page_id}#" not in incoming
     assert "legacy detail" in incoming
     assert Path(result["preimage"]).is_dir()
+    cleanup = cleanup_expired_preimages(tmp_path, force=True)
+    assert cleanup["deleted"] == [plan["transaction_id"]]
+    assert cleanup["retained"] == []
+    assert not Path(result["preimage"]).exists()
 
 
 def test_transaction_restores_owned_pages_when_registry_commit_fails(

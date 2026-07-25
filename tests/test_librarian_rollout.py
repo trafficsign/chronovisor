@@ -11,7 +11,7 @@ def _write(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_rollout_resumes_all_phases_and_starts_soak(
+def test_rollout_observes_migration_and_releases_after_evidence(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -91,10 +91,21 @@ def test_rollout_resumes_all_phases_and_starts_soak(
         return result
 
     def soak(_root, **kwargs):
-        calls.append("soak")
-        result = {"status": "running", "required_days": 7}
+        calls.append("observation")
+        result = {
+            "status": "running",
+            "observation_mode": "concurrent_migration",
+        }
         _write(tmp_path / "runtime" / "librarian" / "soak.json", result)
         return result
+
+    def finalize(_root, **kwargs):
+        calls.append("release")
+        return {"status": "released"}
+
+    def advance(_root, *, stage, **kwargs):
+        calls.append(f"observe:{stage}")
+        return {"status": "running", "observed_through": stage}
 
     monkeypatch.setattr(librarian_rollout, "adjudicate", adjudicate)
     monkeypatch.setattr(
@@ -125,22 +136,34 @@ def test_rollout_resumes_all_phases_and_starts_soak(
         lambda *args, **kwargs: {"status": "ok"},
     )
     monkeypatch.setattr(librarian_rollout, "start_soak", soak)
+    monkeypatch.setattr(
+        librarian_rollout,
+        "advance_migration_observation",
+        advance,
+    )
+    monkeypatch.setattr(librarian_rollout, "finalize_if_ready", finalize)
 
     result = librarian_rollout.run_rollout(tmp_path)
 
-    assert result["status"] == "soaking"
+    assert result["status"] == "released"
     assert calls == [
         "adjudicate:20",
         "lock",
         "phase0",
         "distribution",
         "calibrate",
+        "observation",
         "shadow",
+        "observe:phase5_full_shadow_complete",
         "migration",
+        "observe:phase6_active_metadata_complete",
         "burn",
+        "observe:phase7_preemption_burn_complete",
         "pilot",
+        "observe:phase10_pilot_complete",
         "full",
-        "soak",
+        "observe:phase11_full_migration_complete",
+        "release",
     ]
 
 

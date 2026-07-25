@@ -283,6 +283,18 @@ def _soak_status(root: Path, now: datetime) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return {"status": "not_started", "remaining_seconds": None}
+    if payload.get("observation_mode") == "concurrent_migration":
+        try:
+            starts = datetime.fromisoformat(str(payload["starts_at"]))
+            if starts.tzinfo is None:
+                starts = starts.replace(tzinfo=timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            return {"status": "invalid", "remaining_seconds": None}
+        return {
+            **payload,
+            "remaining_seconds": 0,
+            "elapsed_seconds": max(0, int((now - starts).total_seconds())),
+        }
     try:
         ends = datetime.fromisoformat(str(payload["ends_at"]))
         if ends.tzinfo is None:
@@ -480,7 +492,8 @@ def build_librarian_status(
     elif code == "MIGRATING":
         detail = (
             f"{current_terminal} of {actual_total} pages have terminal "
-            "classification; initial organization and soak are still in progress."
+            "classification; initial organization and concurrent migration "
+            "observation are still in progress."
         )
     dispositions = _migration_dispositions(root)
     soak = _soak_status(root, current)

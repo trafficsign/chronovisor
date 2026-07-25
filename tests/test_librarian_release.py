@@ -1,8 +1,6 @@
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
-
-import pytest
 
 from chronovisor import librarian_release
 
@@ -26,12 +24,31 @@ def _release_state() -> dict:
     }
 
 
-def test_soak_requires_every_release_prerequisite(tmp_path: Path) -> None:
-    with pytest.raises(RuntimeError, match="release prerequisites"):
-        librarian_release.start_soak(tmp_path, now=NOW)
+def test_migration_observation_starts_before_release_prerequisites(
+    tmp_path: Path,
+) -> None:
+    observation = librarian_release.start_soak(tmp_path, now=NOW)
+
+    assert observation["status"] == "running"
+    assert observation["observation_mode"] == "concurrent_migration"
+    assert observation["wall_clock_required_seconds"] == 0
+    advanced = librarian_release.advance_migration_observation(
+        tmp_path,
+        stage="phase5_full_shadow_complete",
+        now=NOW,
+    )
+    repeated = librarian_release.advance_migration_observation(
+        tmp_path,
+        stage="phase5_full_shadow_complete",
+        now=NOW,
+    )
+    assert advanced["observed_through"] == "phase5_full_shadow_complete"
+    assert len(repeated["checkpoints"]) == 2
+    waiting = librarian_release.finalize_if_ready(tmp_path, now=NOW)
+    assert waiting["status"] == "observing"
 
 
-def test_seven_day_soak_is_not_bypassable_and_timewarp_cleanup_is_tested(
+def test_release_uses_migration_evidence_without_post_migration_delay(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -60,17 +77,8 @@ def test_seven_day_soak_is_not_bypassable_and_timewarp_cleanup_is_tested(
         lambda *args, **kwargs: _release_state(),
     )
 
-    soak = librarian_release.start_soak(tmp_path, days=7, now=NOW)
-    assert soak["status"] == "running"
-    assert librarian_release.finalize_if_ready(
-        tmp_path,
-        now=NOW + timedelta(days=1),
-    )["status"] == "running"
-    with pytest.raises(RuntimeError, match="still running"):
-        librarian_release.finalize_release(
-            tmp_path,
-            now=NOW + timedelta(days=6, hours=23),
-        )
+    observation = librarian_release.start_soak(tmp_path, now=NOW)
+    assert observation["status"] == "running"
 
     monkeypatch.setattr(
         librarian_release,
@@ -90,9 +98,11 @@ def test_seven_day_soak_is_not_bypassable_and_timewarp_cleanup_is_tested(
 
     released = librarian_release.finalize_if_ready(
         tmp_path,
-        now=NOW + timedelta(days=7),
+        now=NOW,
     )
 
     assert released["status"] == "released"
+    assert released["observation"]["observation_mode"] == "concurrent_migration"
+    assert released["observation"]["observed_through"] == "phase12_postflight"
     assert released["cleanup"]["restore_points"]["deleted"] == ["restore"]
     assert released["cleanup"]["transaction_preimages"]["deleted"] == ["preimage"]

@@ -25,7 +25,9 @@ from chronovisor.durable_state import file_lock, write_sealed_json
 from chronovisor.librarian_burn import run_burn
 from chronovisor.librarian_merge import run_merge_migration
 from chronovisor.librarian_release import (
+    advance_migration_observation,
     capture_phase0_artifacts,
+    finalize_if_ready,
     reconcile_librarian_state,
     start_soak,
 )
@@ -95,7 +97,7 @@ def run_rollout(
     pilot_limit: int = 3,
     foreground_admissions: int = 200,
 ) -> dict[str, Any]:
-    """Resume every rollout phase until the mandatory seven-day soak begins."""
+    """Resume every rollout phase through evidence-gated release."""
 
     lock_path = root / "runtime" / "librarian" / "rollout.lock"
     with file_lock(lock_path):
@@ -108,14 +110,6 @@ def run_rollout(
                 status="released",
                 stage="complete",
                 detail=release,
-            )
-        soak = _read_json(root / "runtime" / "librarian" / "soak.json")
-        if soak.get("status") == "running":
-            return _write_state(
-                root,
-                status="soaking",
-                stage="phase12_soak",
-                detail=soak,
             )
         try:
             if not adjudication_path(root).is_file():
@@ -154,6 +148,11 @@ def run_rollout(
                 raise RolloutBlocked(
                     "classification authority rejected by locked quality gates"
                 )
+            _run_stage(
+                root,
+                "phase5_migration_observation",
+                lambda: start_soak(root),
+            )
             while not _receipt_ok(root, "phase5-receipt.json", "ok"):
                 shadow = _run_stage(
                     root,
@@ -166,12 +165,20 @@ def run_rollout(
                 )
                 if shadow.get("status") == "ok":
                     break
+            advance_migration_observation(
+                root,
+                stage="phase5_full_shadow_complete",
+            )
             if not _receipt_ok(root, "phase6-receipt.json", "ok"):
                 _run_stage(
                     root,
                     "phase6_active_metadata",
                     lambda: migrate_active_metadata(root, batch_size=100),
                 )
+            advance_migration_observation(
+                root,
+                stage="phase6_active_metadata_complete",
+            )
             if not _receipt_ok(root, "phase7-burn.json", "passed"):
                 burn = _run_stage(
                     root,
@@ -183,6 +190,10 @@ def run_rollout(
                 )
                 if burn.get("status") != "passed":
                     raise RolloutBlocked("P0 preemption burn gate failed")
+            advance_migration_observation(
+                root,
+                stage="phase7_preemption_burn_complete",
+            )
             if not _receipt_ok(root, "phase10-pilot.json", "ok"):
                 _run_stage(
                     root,
@@ -192,27 +203,42 @@ def run_rollout(
                         pilot_limit=max(0, pilot_limit),
                     ),
                 )
+            advance_migration_observation(
+                root,
+                stage="phase10_pilot_complete",
+            )
             if not _receipt_ok(root, "phase11-receipt.json", "ok"):
                 _run_stage(
                     root,
                     "phase11_migration",
                     lambda: run_merge_migration(root, pilot_limit=None),
                 )
+            advance_migration_observation(
+                root,
+                stage="phase11_full_migration_complete",
+            )
             _run_stage(
                 root,
                 "phase12_reconcile",
                 lambda: reconcile_librarian_state(root, mode="active"),
             )
-            soak = _run_stage(
+            release = _run_stage(
                 root,
-                "phase12_soak",
-                lambda: start_soak(root, days=7),
+                "phase12_release",
+                lambda: finalize_if_ready(root),
             )
+            if release.get("status") == "released":
+                return _write_state(
+                    root,
+                    status="released",
+                    stage="complete",
+                    detail=release,
+                )
             return _write_state(
                 root,
-                status="soaking",
-                stage="phase12_soak",
-                detail=soak,
+                status="observing",
+                stage="phase12_release_gates",
+                detail=release,
             )
         except RolloutBlocked as exc:
             return _write_state(
@@ -245,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         foreground_admissions=max(3, args.foreground_admissions),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if result["status"] in {"released", "soaking", "blocked"} else 1
+    return 0 if result["status"] in {"released", "observing", "blocked"} else 1
 
 
 if __name__ == "__main__":

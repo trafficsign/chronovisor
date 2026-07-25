@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from collections import Counter
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +33,20 @@ from chronovisor.store import CHRONOVISOR_ROOT
 from chronovisor.uid_link_index import build_uid_link_index
 
 ADR_SCHEMA = "chronovisor.librarian-adr.v1"
-SOAK_SCHEMA = "chronovisor.librarian-soak.v1"
+SOAK_SCHEMA = "chronovisor.librarian-soak.v2"
 RELEASE_SCHEMA = "chronovisor.librarian-release.v1"
 UDC_RECEIPT_SCHEMA = "chronovisor.udc-package-receipt.v1"
+
+RELEASE_PREREQUISITES = {
+    "phase0-receipt.json": "ok",
+    "phase1-receipt.json": "verified",
+    "phase3-receipt.json": "verified",
+    "phase5-receipt.json": "ok",
+    "phase6-receipt.json": "ok",
+    "phase7-burn.json": "passed",
+    "phase10-pilot.json": "ok",
+    "phase11-receipt.json": "ok",
+}
 
 
 def _now(value: datetime | None = None) -> datetime:
@@ -418,25 +429,12 @@ def reconcile_librarian_state(
     return current
 
 
-def start_soak(
-    root: Path = CHRONOVISOR_ROOT,
-    *,
-    days: int = 7,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    required = {
-        "phase0-receipt.json": "ok",
-        "phase1-receipt.json": "verified",
-        "phase3-receipt.json": "verified",
-        "phase5-receipt.json": "ok",
-        "phase6-receipt.json": "ok",
-        "phase7-burn.json": "passed",
-        "phase10-pilot.json": "ok",
-        "phase11-receipt.json": "ok",
-    }
+def _release_prerequisite_errors(
+    root: Path,
+) -> tuple[list[str], list[str]]:
     missing = []
     invalid = []
-    for filename, expected_status in required.items():
+    for filename, expected_status in RELEASE_PREREQUISITES.items():
         payload = _json(root / "runtime" / "librarian" / filename)
         if not payload:
             missing.append(filename)
@@ -447,33 +445,84 @@ def start_soak(
     calibration = _json(root / "classification" / "calibration.json")
     if calibration.get("status") != "adopted":
         invalid.append("classification/calibration.json:not_adopted")
-    if missing or invalid:
-        raise RuntimeError(
-            f"release prerequisites missing={missing} invalid={invalid}"
-        )
-    state = reconcile_librarian_state(root, mode="active")
-    authority = state.get("authority") or {}
-    progress = state.get("progress") or {}
-    if not authority.get("active"):
-        raise RuntimeError("classification authority is not active")
-    if not (progress.get("full_sweep") or {}).get("current"):
-        raise RuntimeError("full corpus sweep is not current")
+    return missing, invalid
+
+
+def start_soak(
+    root: Path = CHRONOVISOR_ROOT,
+    *,
+    days: int | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Start observation concurrently with full-corpus migration.
+
+    ``days`` remains a compatibility argument for older wrappers. Release is
+    evidence-gated, not wall-clock-gated: Phase 5 through Phase 11 provide the
+    load and transaction observation, followed by the Phase 12 postflight.
+    """
+
+    path = root / "runtime" / "librarian" / "soak.json"
+    existing = _json(path)
+    if (
+        existing.get("schema") == SOAK_SCHEMA
+        and existing.get("status") in {"running", "complete"}
+    ):
+        return existing
+
     current = _now(now)
+    starts_at = str(existing.get("starts_at") or _iso(current))
     payload = {
         "schema": SOAK_SCHEMA,
         "status": "running",
-        "starts_at": _iso(current),
-        "ends_at": _iso(current + timedelta(days=max(0, days))),
-        "required_days": max(0, days),
+        "observation_mode": "concurrent_migration",
+        "starts_at": starts_at,
+        "wall_clock_required_seconds": 0,
+        "required_evidence": list(RELEASE_PREREQUISITES),
+        "observed_through": "phase5_full_shadow_started",
+        "checkpoints": [
+            {
+                "stage": "phase5_full_shadow_started",
+                "observed_at": _iso(current),
+            }
+        ],
+        "legacy_requested_days": days,
         "release_receipt": None,
     }
+    write_sealed_json(path, payload, backup=True)
+    return payload
+
+
+def advance_migration_observation(
+    root: Path,
+    *,
+    stage: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Persist the latest completed migration stage without resetting elapsed time."""
+
+    payload = start_soak(root, now=now)
+    if payload.get("status") != "running":
+        return payload
+    current = _now(now)
+    checkpoints = list(payload.get("checkpoints") or [])
+    if not checkpoints or checkpoints[-1].get("stage") != stage:
+        checkpoints.append({"stage": stage, "observed_at": _iso(current)})
+    payload["observed_through"] = stage
+    payload["checkpoints"] = checkpoints
     write_sealed_json(
         root / "runtime" / "librarian" / "soak.json",
         payload,
         backup=True,
     )
-    reconcile_librarian_state(root, mode="active")
     return payload
+
+
+def _require_release_prerequisites(root: Path) -> None:
+    missing, invalid = _release_prerequisite_errors(root)
+    if missing or invalid:
+        raise RuntimeError(
+            f"release prerequisites missing={missing} invalid={invalid}"
+        )
 
 
 def _restore_all(root: Path) -> list[dict[str, Any]]:
@@ -500,20 +549,27 @@ def finalize_release(
     soak_path = root / "runtime" / "librarian" / "soak.json"
     soak = _json(soak_path)
     if soak.get("schema") != SOAK_SCHEMA:
-        raise RuntimeError("soak has not started")
-    ends = datetime.fromisoformat(str(soak["ends_at"]))
-    if ends.tzinfo is None:
-        ends = ends.replace(tzinfo=UTC)
-    if current < ends:
-        raise RuntimeError(
-            f"live soak is still running until {_iso(ends)}"
-        )
+        raise RuntimeError("migration observation has not started")
+    if soak.get("status") != "running":
+        raise RuntimeError("migration observation is not running")
+    _require_release_prerequisites(root)
+
     state_before = reconcile_librarian_state(root, mode="active")
     progress_before = state_before.get("progress") or {}
     if not (state_before.get("authority") or {}).get("active"):
         raise RuntimeError("classification authority is no longer active")
     if not (progress_before.get("full_sweep") or {}).get("current"):
-        raise RuntimeError("full corpus sweep drifted during soak")
+        raise RuntimeError("full corpus sweep drifted during migration observation")
+    for key in ("classification_terminal", "migration_batch"):
+        row = progress_before.get(key) or {}
+        if row.get("numerator") != row.get("denominator"):
+            raise RuntimeError(f"{key} coverage is incomplete")
+    debts = state_before.get("debts") or {}
+    if int(debts.get("worker_failure") or 0):
+        raise RuntimeError("worker failures remain after migration")
+    if int(debts.get("unresolved_link") or 0):
+        raise RuntimeError("unresolved links remain after migration")
+
     restore_receipts = _restore_all(root)
     if not restore_receipts or any(
         row.get("status") != "verified" for row in restore_receipts
@@ -524,7 +580,10 @@ def finalize_release(
         now=current,
         force=True,
     )
-    preimage_cleanup = cleanup_expired_preimages(root, now=current)
+    preimage_cleanup = cleanup_expired_preimages(root, now=current, force=True)
+    if restore_cleanup.get("retained") or preimage_cleanup.get("retained"):
+        raise RuntimeError("verified migration insurance cleanup is incomplete")
+
     state = reconcile_librarian_state(
         root,
         mode="active",
@@ -542,7 +601,12 @@ def finalize_release(
         "schema": RELEASE_SCHEMA,
         "status": "released",
         "released_at": _iso(current),
-        "soak": soak,
+        "observation": {
+            **soak,
+            "status": "complete",
+            "observed_through": "phase12_postflight",
+            "completed_at": _iso(current),
+        },
         "restore_drills": restore_receipts,
         "cleanup": {
             "restore_points": restore_cleanup,
@@ -558,6 +622,8 @@ def finalize_release(
         backup=True,
     )
     soak["status"] = "complete"
+    soak["observed_through"] = "phase12_postflight"
+    soak["completed_at"] = _iso(current)
     soak["release_receipt"] = str(
         root / "runtime" / "librarian" / "phase12-release.json"
     )
@@ -570,7 +636,7 @@ def finalize_if_ready(
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Autonomously close a completed soak without bypassing its wall clock."""
+    """Close migration observation once every evidence gate is satisfied."""
 
     release_path = root / "runtime" / "librarian" / "phase12-release.json"
     if release_path.is_file():
@@ -581,14 +647,13 @@ def finalize_if_ready(
     soak = _json(root / "runtime" / "librarian" / "soak.json")
     if soak.get("schema") != SOAK_SCHEMA:
         return {"status": "not_started"}
-    try:
-        ends = datetime.fromisoformat(str(soak["ends_at"]))
-        if ends.tzinfo is None:
-            ends = ends.replace(tzinfo=UTC)
-    except (KeyError, TypeError, ValueError):
-        return {"status": "invalid_soak"}
-    if _now(now) < ends:
-        return {"status": "running", "ends_at": _iso(ends)}
+    missing, invalid = _release_prerequisite_errors(root)
+    if missing or invalid:
+        return {
+            "status": "observing",
+            "missing": missing,
+            "invalid": invalid,
+        }
     return finalize_release(root, now=now)
 
 
@@ -612,12 +677,18 @@ def main(argv: list[str] | None = None) -> int:
             "phase1",
             "verify-links",
             "reconcile",
+            "start-observation",
             "start-soak",
             "finalize",
         ),
     )
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
-    parser.add_argument("--days", type=int, default=7)
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Deprecated compatibility option; release is evidence-gated.",
+    )
     args = parser.parse_args(argv)
     if args.command == "phase0":
         result = capture_phase0_artifacts(args.root, repo_root=_git_root())
@@ -627,7 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         result = verify_uid_link_foundation(args.root)
     elif args.command == "reconcile":
         result = reconcile_librarian_state(args.root)
-    elif args.command == "start-soak":
+    elif args.command in {"start-observation", "start-soak"}:
         result = start_soak(args.root, days=args.days)
     else:
         result = finalize_release(args.root)

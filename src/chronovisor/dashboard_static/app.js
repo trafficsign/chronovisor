@@ -2088,8 +2088,13 @@ function renderLibrarian(librarian) {
     ? `Updated ${timeLabel(rollout.updated_at)}`
     : "No rollout receipt yet";
   const remaining = intValue(soak.remaining_seconds);
+  const elapsed = intValue(soak.elapsed_seconds);
+  const observedThrough = fmt(soak.observed_through, "").replaceAll("_", " ");
+  const observationStage = observedThrough ? ` · ${observedThrough}` : "";
   els.librarianSoak.textContent = soak.status === "running"
-    ? `${(remaining / 86400).toFixed(1)}d remaining`
+    ? soak.observation_mode === "concurrent_migration"
+      ? `Running · ${(elapsed / 3600).toFixed(1)}h${observationStage}`
+      : `${(remaining / 86400).toFixed(1)}d remaining`
     : soak.status === "complete"
       ? "Complete"
       : fmt(soak.status, "Not started").replaceAll("_", " ");

@@ -36,8 +36,9 @@ All artifacts are metadata or temporary migration insurance under
 | `state.json` | Sealed `LibrarianStatusSnapshot` source |
 | `events.jsonl` | Bounded-run receipts and 24h/7d flow source |
 | `merge-ledger.jsonl` | Append-only claim/transaction receipts |
-| `migration-restore-points/` | Checksummed, isolated, seven-day migration insurance |
-| `transaction-preimages/` | Exact, isolated, TTL-bound merge rollback bytes |
+| `migration-restore-points/` | Checksummed, isolated migration insurance retained through final postflight |
+| `transaction-preimages/` | Exact, isolated rollback bytes; seven-day TTL is an abnormal-stop upper bound |
+| `soak.json` | Concurrent Phase 5–11 migration-observation state; no wall-clock release delay |
 
 Read-time redirect resolution follows at most eight hops and never writes.
 Redirect mutation eagerly flattens the target and rejects cycles.
@@ -50,6 +51,7 @@ chronovisor-librarian --capture-baseline --repo-root /path/to/chronovisor --json
 chronovisor-librarian --dry-run --limit 100 --json
 chronovisor-librarian --limit 100 --json
 chronovisor-librarian --full-sweep --json
+chronovisor-librarian-release start-observation --json
 ```
 
 The Sleep cycle invokes a bounded 100-page shadow batch. This lane has P3
@@ -71,7 +73,11 @@ support cancellation/requeue, and pass the same deterministic preflight.
 
 A failed CAS restores only bytes owned by that transaction. Ordinary operation
 deletes preimages after postflight; migration pilots may retain them for a
-bounded TTL.
+bounded TTL. During the initial rollout, observation starts with the full-corpus
+shadow and continues through pilot and full migration. Release depends on
+quality receipts, current full-sweep and terminal coverage, zero worker/link
+debt, restore drills, and cleanup receipts—not on an additional fixed-duration
+wait after migration.
 
 ## Dashboard states
 
