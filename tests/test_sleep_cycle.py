@@ -191,6 +191,10 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
+        "chronovisor.librarian_release.finalize_if_ready",
+        lambda _root: {"status": "not_started"},
+    )
+    monkeypatch.setattr(
         "chronovisor.migration_snapshot.cleanup_expired_restore_points",
         lambda _root: {"deleted": [], "retained": []},
     )

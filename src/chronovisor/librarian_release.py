@@ -519,7 +519,11 @@ def finalize_release(
         row.get("status") != "verified" for row in restore_receipts
     ):
         raise RuntimeError("final restore drill did not verify every restore point")
-    restore_cleanup = cleanup_expired_restore_points(root, now=current)
+    restore_cleanup = cleanup_expired_restore_points(
+        root,
+        now=current,
+        force=True,
+    )
     preimage_cleanup = cleanup_expired_preimages(root, now=current)
     state = reconcile_librarian_state(
         root,
@@ -559,6 +563,33 @@ def finalize_release(
     )
     write_sealed_json(soak_path, soak, backup=True)
     return receipt
+
+
+def finalize_if_ready(
+    root: Path = CHRONOVISOR_ROOT,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Autonomously close a completed soak without bypassing its wall clock."""
+
+    release_path = root / "runtime" / "librarian" / "phase12-release.json"
+    if release_path.is_file():
+        return {
+            "status": "already_released",
+            "release": str(release_path),
+        }
+    soak = _json(root / "runtime" / "librarian" / "soak.json")
+    if soak.get("schema") != SOAK_SCHEMA:
+        return {"status": "not_started"}
+    try:
+        ends = datetime.fromisoformat(str(soak["ends_at"]))
+        if ends.tzinfo is None:
+            ends = ends.replace(tzinfo=UTC)
+    except (KeyError, TypeError, ValueError):
+        return {"status": "invalid_soak"}
+    if _now(now) < ends:
+        return {"status": "running", "ends_at": _iso(ends)}
+    return finalize_release(root, now=now)
 
 
 def _git_root() -> Path | None:

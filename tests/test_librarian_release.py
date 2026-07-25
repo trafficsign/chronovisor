@@ -62,6 +62,10 @@ def test_seven_day_soak_is_not_bypassable_and_timewarp_cleanup_is_tested(
 
     soak = librarian_release.start_soak(tmp_path, days=7, now=NOW)
     assert soak["status"] == "running"
+    assert librarian_release.finalize_if_ready(
+        tmp_path,
+        now=NOW + timedelta(days=1),
+    )["status"] == "running"
     with pytest.raises(RuntimeError, match="still running"):
         librarian_release.finalize_release(
             tmp_path,
@@ -84,7 +88,7 @@ def test_seven_day_soak_is_not_bypassable_and_timewarp_cleanup_is_tested(
         lambda *args, **kwargs: {"deleted": ["preimage"], "retained": []},
     )
 
-    released = librarian_release.finalize_release(
+    released = librarian_release.finalize_if_ready(
         tmp_path,
         now=NOW + timedelta(days=7),
     )

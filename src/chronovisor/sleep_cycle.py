@@ -682,6 +682,12 @@ def _run_sleep_cycle(
             "librarian_cleanup",
             lambda: {
                 "status": "ok",
+                "release": __import__(
+                    "chronovisor.librarian_release",
+                    fromlist=["finalize_if_ready"],
+                ).finalize_if_ready(
+                    CHRONOVISOR_ROOT
+                ),
                 "restore_points": __import__(
                     "chronovisor.migration_snapshot",
                     fromlist=["cleanup_expired_restore_points"],

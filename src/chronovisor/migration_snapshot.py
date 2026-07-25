@@ -8,9 +8,10 @@ import os
 import shutil
 import tempfile
 import uuid
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from chronovisor.durable_state import write_sealed_json
 
@@ -18,8 +19,8 @@ SCHEMA = "chronovisor.migration-restore-point.v1"
 
 
 def _utc_now(now: datetime | None = None) -> datetime:
-    value = now or datetime.now(timezone.utc)
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    value = now or datetime.now(UTC)
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 def _sha256(path: Path) -> str:
@@ -223,6 +224,7 @@ def cleanup_expired_restore_points(
     root: Path,
     *,
     now: datetime | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     current = _utc_now(now)
     base = root / "runtime" / "librarian" / "migration-restore-points"
@@ -230,6 +232,19 @@ def cleanup_expired_restore_points(
     retained: list[str] = []
     if not base.exists():
         return {"deleted": deleted, "retained": retained}
+    release_root = root / "runtime" / "librarian"
+    if (
+        not force
+        and (release_root / "phase6-receipt.json").is_file()
+        and not (release_root / "phase12-release.json").is_file()
+    ):
+        return {
+            "deleted": deleted,
+            "retained": sorted(
+                path.name for path in base.iterdir() if path.is_dir()
+            ),
+            "reason": "migration_release_insurance_active",
+        }
     for path in sorted(item for item in base.iterdir() if item.is_dir()):
         try:
             payload = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
