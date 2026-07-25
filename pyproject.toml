@@ -77,6 +77,7 @@ chronovisor-librarian-merge = "chronovisor.librarian_merge:main"
 chronovisor-librarian-release = "chronovisor.librarian_release:main"
 chronovisor-link-anchor-repair = "chronovisor.link_anchor_repair:main"
 chronovisor-librarian-burn = "chronovisor.librarian_burn:main"
+chronovisor-librarian-rollout = "chronovisor.librarian_rollout:main"
 
 [build-system]
 requires = ["hatchling"]
