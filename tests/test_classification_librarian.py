@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from chronovisor import classification_engine
+from chronovisor import classification_model_worker
 from chronovisor.classification import (
     ClassificationError,
     ControlledSubject,
@@ -17,7 +21,6 @@ from chronovisor.classification import (
     validate_controlled_subject,
     validate_record,
 )
-from chronovisor import classification_model_worker
 from chronovisor.librarian import capture_baseline, run_shadow
 from chronovisor.librarian_status import build_librarian_status
 
@@ -248,3 +251,84 @@ def test_tie_break_candidates_are_limited_to_independent_proposals() -> None:
         "004.8",
         "51",
     ]
+
+
+def test_consensus_batch_retries_foreground_preemption(monkeypatch) -> None:
+    class FakeStore:
+        def __init__(self) -> None:
+            self.failures: list[dict] = []
+            self.completed: list[dict] = []
+
+        def merge_item(self, **kwargs):
+            return {"item": {"key": "batch-key", "status": "pending_local"}}
+
+        def claim_attempt(self, *args, **kwargs):
+            return {"claimed": True}
+
+        def fail_attempt(self, *args, **kwargs):
+            self.failures.append(kwargs)
+
+        def complete(self, *args, **kwargs):
+            self.completed.append(kwargs)
+
+    store = FakeStore()
+    results = iter(
+        [
+            SimpleNamespace(
+                status="cancelled",
+                value=None,
+                error="cancelled for foreground sync",
+            ),
+            SimpleNamespace(
+                status="completed",
+                value={
+                    "decisions": [
+                        {
+                            "uid": "uid-1",
+                            "primary_notation": "004.8",
+                            "status": "proposed",
+                        }
+                    ],
+                    "model_calls": 2,
+                },
+                error="",
+            ),
+        ]
+    )
+
+    @contextmanager
+    def fake_lane(*args, **kwargs):
+        yield object()
+
+    monkeypatch.setattr(
+        classification_engine,
+        "librarian_convergence_store",
+        lambda _root: store,
+    )
+    monkeypatch.setattr(
+        classification_engine,
+        "load_udc_package",
+        lambda _root: SimpleNamespace(checksum="sha256:test"),
+    )
+    monkeypatch.setattr(classification_engine, "research_lane", fake_lane)
+    monkeypatch.setattr(
+        classification_engine,
+        "run_cancellable_command",
+        lambda *args, **kwargs: next(results),
+    )
+    monkeypatch.setattr(classification_engine, "sync_pending", lambda: False)
+
+    decisions = classification_engine.run_consensus_batches(
+        [
+            {
+                "uid": "uid-1",
+                "source_sha256": "sha256:source",
+                "candidates": [{"notation": "004.8"}],
+            }
+        ],
+        root=Path("/tmp/test-chronovisor"),
+    )
+
+    assert decisions[0]["uid"] == "uid-1"
+    assert store.failures[0]["consume_attempt"] is False
+    assert len(store.completed) == 1

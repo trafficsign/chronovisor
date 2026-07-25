@@ -14,6 +14,7 @@ import math
 import os
 import re
 import sys
+import time
 import uuid
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -36,7 +37,11 @@ from chronovisor.classification import (
 from chronovisor.convergence import ConvergenceStore, RetryPolicy
 from chronovisor.durable_state import write_sealed_json
 from chronovisor.page_registry import PageRegistry
-from chronovisor.research_scheduler import research_lane, run_cancellable_command
+from chronovisor.research_scheduler import (
+    research_lane,
+    run_cancellable_command,
+    sync_pending,
+)
 from chronovisor.store import CHRONOVISOR_ROOT
 
 ENGINE_VERSION = "1"
@@ -599,82 +604,96 @@ def run_consensus_batches(
                 outputs.extend(dict(value) for value in cached["decisions"])
                 continue
         key = str(item["key"])
-        owner = f"librarian:{os.getpid()}:{uuid.uuid4().hex}"
-        claim = store.claim_attempt(
-            key,
-            "local",
-            owner=owner,
-            lease_seconds=max(30, int(timeout_seconds) + 30),
-        )
-        if not claim["claimed"]:
-            raise ClassificationError(
-                f"classification batch unavailable: {claim['reason']}"
-            )
-        run_id = f"librarian-{key[:16]}-{uuid.uuid4().hex[:8]}"
-        worker_input = json.dumps(
-            {
-                "schema": CONSENSUS_SCHEMA,
-                "root": str(root),
-                "pages": batch,
-            },
-            ensure_ascii=False,
-        )
-        with research_lane(
-            run_id,
-            enabled=True,
-            mode="on" if purpose == "explicit" else "shadow",
-            purpose=purpose,
-            needs_model=True,
-        ) as lease:
-            result = run_cancellable_command(
-                [sys.executable, "-m", "chronovisor.classification_model_worker"],
-                worker_input,
-                lease,
-                timeout_seconds=timeout_seconds,
-            )
-        if result.status == "cancelled":
-            store.fail_attempt(
+        while True:
+            owner = f"librarian:{os.getpid()}:{uuid.uuid4().hex}"
+            claim = store.claim_attempt(
                 key,
                 "local",
                 owner=owner,
-                error=result.error,
-                failure_class="foreground_preempted",
-                allow_frontier=False,
-                consume_attempt=False,
+                lease_seconds=max(30, int(timeout_seconds) + 30),
             )
-            raise ClassificationError("classification cancelled for foreground recall")
-        if result.status != "completed" or not isinstance(result.value, Mapping):
-            store.fail_attempt(
+            if not claim["claimed"]:
+                raise ClassificationError(
+                    f"classification batch unavailable: {claim['reason']}"
+                )
+            run_id = f"librarian-{key[:16]}-{uuid.uuid4().hex[:8]}"
+            worker_input = json.dumps(
+                {
+                    "schema": CONSENSUS_SCHEMA,
+                    "root": str(root),
+                    "pages": batch,
+                },
+                ensure_ascii=False,
+            )
+            with research_lane(
+                run_id,
+                enabled=True,
+                mode="on" if purpose == "explicit" else "shadow",
+                purpose=purpose,
+                needs_model=True,
+            ) as lease:
+                result = run_cancellable_command(
+                    [
+                        sys.executable,
+                        "-m",
+                        "chronovisor.classification_model_worker",
+                    ],
+                    worker_input,
+                    lease,
+                    timeout_seconds=timeout_seconds,
+                )
+            if result.status == "cancelled":
+                store.fail_attempt(
+                    key,
+                    "local",
+                    owner=owner,
+                    error=result.error,
+                    failure_class="foreground_preempted",
+                    allow_frontier=False,
+                    consume_attempt=False,
+                )
+                while sync_pending():
+                    time.sleep(0.05)
+                continue
+            if result.status != "completed" or not isinstance(
+                result.value, Mapping
+            ):
+                store.fail_attempt(
+                    key,
+                    "local",
+                    owner=owner,
+                    error=result.error or "classification worker failed",
+                    failure_class="local_worker_failure",
+                    allow_frontier=False,
+                )
+                raise ClassificationError(
+                    result.error or "classification worker failed"
+                )
+            decisions = result.value.get("decisions")
+            if not isinstance(decisions, list) or len(decisions) != len(batch):
+                store.fail_attempt(
+                    key,
+                    "local",
+                    owner=owner,
+                    error="classification worker returned wrong decision count",
+                    failure_class="local_schema_failure",
+                    allow_frontier=False,
+                )
+                raise ClassificationError(
+                    "classification worker decision count mismatch"
+                )
+            store.complete(
                 key,
-                "local",
+                "applied",
                 owner=owner,
-                error=result.error or "classification worker failed",
-                failure_class="local_worker_failure",
-                allow_frontier=False,
+                result={
+                    "decisions": decisions,
+                    "model_calls": int(result.value.get("model_calls") or 0),
+                    "consensus_schema": CONSENSUS_SCHEMA,
+                },
             )
-            raise ClassificationError(result.error or "classification worker failed")
-        decisions = result.value.get("decisions")
-        if not isinstance(decisions, list) or len(decisions) != len(batch):
-            store.fail_attempt(
-                key,
-                "local",
-                owner=owner,
-                error="classification worker returned wrong decision count",
-                failure_class="local_schema_failure",
-                allow_frontier=False,
-            )
-            raise ClassificationError("classification worker decision count mismatch")
-        store.complete(
-            key,
-            "applied",
-            owner=owner,
-            result={
-                "decisions": decisions,
-                "model_calls": int(result.value.get("model_calls") or 0),
-                "consensus_schema": CONSENSUS_SCHEMA,
-            },
-        )
-        outputs.extend(dict(value) for value in decisions)
+            outputs.extend(dict(value) for value in decisions)
+            break
     return outputs
 
 
