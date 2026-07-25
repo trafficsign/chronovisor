@@ -663,6 +663,40 @@ def _run_sleep_cycle(
             dry_run=dry_run,
         ),
     )
+    librarian_shadow = _run_lane(
+        "librarian_shadow",
+        lambda: __import__(
+            "chronovisor.librarian", fromlist=["run_shadow"]
+        ).run_shadow(
+            root=CHRONOVISOR_ROOT,
+            limit=100,
+            full_sweep=False,
+            dry_run=dry_run,
+        ),
+        max_elapsed_seconds=2 * 60,
+    )
+    librarian_cleanup = (
+        {"status": "skipped", "reason": "dry_run"}
+        if dry_run
+        else _run_lane(
+            "librarian_cleanup",
+            lambda: {
+                "status": "ok",
+                "restore_points": __import__(
+                    "chronovisor.migration_snapshot",
+                    fromlist=["cleanup_expired_restore_points"],
+                ).cleanup_expired_restore_points(
+                    CHRONOVISOR_ROOT
+                ),
+                "transaction_preimages": __import__(
+                    "chronovisor.merge_transaction",
+                    fromlist=["cleanup_expired_preimages"],
+                ).cleanup_expired_preimages(
+                    CHRONOVISOR_ROOT
+                ),
+            },
+        )
+    )
     integrity = (
         artifact_lane(
             "memory_integrity", lambda: run_eval(limit=eval_limit, write=not dry_run)
@@ -962,6 +996,8 @@ def _run_sleep_cycle(
         "page_normalization": page_normalization,
         "metadata_backfill": metadata_backfill,
         "entity_backfill": entity_backfill,
+        "librarian_shadow": librarian_shadow,
+        "librarian_cleanup": librarian_cleanup,
         "raw_replay": raw_replay,
         "raw_archive": raw_archive,
         "lint_due": lint_due,

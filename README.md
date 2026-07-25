@@ -83,5 +83,5 @@ chronovisor hooks install --host all
 ```
 
 See `docs/architecture.md`, `docs/config.md`, `docs/hooks.md`,
-`docs/research-orchestration.md`, and `docs/operations.md` for the operational
-model.
+`docs/librarian.md`, `docs/research-orchestration.md`, and
+`docs/operations.md` for the operational model.

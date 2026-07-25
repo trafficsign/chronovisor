@@ -177,6 +177,65 @@
         </div>
       </article>
 
+      <article class="panel panel-wide librarian-panel" id="librarian-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Librarian</h2>
+            <p>Classification, identity, link integrity, and consolidation progress.</p>
+          </div>
+          <span class="librarian-state" id="librarian-state">NOT_READY</span>
+        </div>
+        <div class="librarian-headline">
+          <div>
+            <strong id="librarian-headline">Shadow migration has not started</strong>
+            <p id="librarian-detail">Waiting for the first bounded sweep.</p>
+          </div>
+          <div class="librarian-generation">
+            <span>Current scope</span>
+            <strong id="librarian-generation">--</strong>
+            <small>last swept <b id="librarian-swept-generation">--</b></small>
+          </div>
+        </div>
+        <div class="librarian-progress-grid" aria-label="Librarian progress">
+          <div class="librarian-progress-card">
+            <span>UID</span>
+            <strong id="librarian-uid">-- / --</strong>
+            <div class="librarian-progress-track"><i id="librarian-uid-bar"></i></div>
+          </div>
+          <div class="librarian-progress-card">
+            <span>Classified (shadow)</span>
+            <strong id="librarian-classification">-- / --</strong>
+            <div class="librarian-progress-track"><i id="librarian-classification-bar"></i></div>
+          </div>
+          <div class="librarian-progress-card">
+            <span>Valid Links</span>
+            <strong id="librarian-links">-- / --</strong>
+            <div class="librarian-progress-track"><i id="librarian-links-bar"></i></div>
+          </div>
+          <div class="librarian-progress-card">
+            <span>Migration</span>
+            <strong id="librarian-migration">-- / --</strong>
+            <div class="librarian-progress-track"><i id="librarian-migration-bar"></i></div>
+          </div>
+          <div class="librarian-progress-card">
+            <span>Full Sweep</span>
+            <strong id="librarian-sweep">-- / --</strong>
+            <div class="librarian-progress-track"><i id="librarian-sweep-bar"></i></div>
+          </div>
+        </div>
+        <div class="librarian-lower">
+          <div>
+            <h3>Queue &amp; debt</h3>
+            <div class="librarian-queue" id="librarian-queue"></div>
+            <p class="librarian-meta" id="librarian-flow">No flow history yet</p>
+          </div>
+          <div>
+            <h3>Recent receipts</h3>
+            <div class="librarian-receipts" id="librarian-receipts"></div>
+          </div>
+        </div>
+      </article>
+
       <article class="panel panel-wide health-panel">
         <div class="panel-head">
           <div>

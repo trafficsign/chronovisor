@@ -1,6 +1,6 @@
 [project]
 name = "chronovisor"
-version = "0.1.9"
+version = "0.2.0"
 description = "Chronovisor - provenance-first agentic memory for local AI systems"
 requires-python = ">=3.11"
 dependencies = [
@@ -70,6 +70,7 @@ chronovisor-research-verify = "chronovisor.research_verification:main"
 chronovisor-research-eval = "chronovisor.research_eval:main"
 chronovisor-research = "chronovisor.research_service:main"
 chronovisor-semantic-service = "chronovisor.semantic_service:main"
+chronovisor-librarian = "chronovisor.librarian:main"
 
 [build-system]
 requires = ["hatchling"]

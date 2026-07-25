@@ -16,6 +16,7 @@ from chronovisor.frontmatter import patch as _frontmatter_patch
 from chronovisor.index_store import get_store
 from chronovisor.link_fix import extract_targets as _extract_targets
 from chronovisor.save_transaction import parse_save_transaction_receipt
+from chronovisor.page_registry import PageRegistry, PageRegistryError
 from chronovisor.store import (
     CHRONOVISOR_ROOT,
     LOG_FILE,
@@ -85,6 +86,16 @@ def _page_metadata(path: Path) -> dict:
 def _find_page_with_alias(page_id: str) -> Path | None:
     """Resolve a canonical page or a durable legacy page-id alias."""
 
+    registry = PageRegistry(CHRONOVISOR_ROOT)
+    try:
+        registry_path = registry.path_for(page_id)
+        if registry_path is not None:
+            return registry_path
+    except PageRegistryError:
+        # Once the registry exists, ambiguous/corrupt identity must fail closed.
+        # Falling back to stem lookup could select an arbitrary duplicate.
+        if registry.path.exists():
+            return None
     path = find_page(page_id)
     if path is not None:
         return path
@@ -124,6 +135,27 @@ def chronovisor_read(
         return json.dumps({"error": f"Page '{page}' not found"})
 
     canonical_page_id = path.stem
+    resolved_identity = None
+    try:
+        resolved_identity = PageRegistry(CHRONOVISOR_ROOT).resolve(page)
+        if resolved_identity is None:
+            resolved_identity = PageRegistry(CHRONOVISOR_ROOT).resolve(
+                canonical_page_id
+            )
+    except PageRegistryError:
+        resolved_identity = None
+    indexed_meta = (
+        store.meta(canonical_page_id)
+        if callable(getattr(store, "meta", None))
+        else None
+    )
+    canonical_uid = (
+        str(resolved_identity.get("uid"))
+        if isinstance(resolved_identity, dict) and resolved_identity.get("uid")
+        else str(indexed_meta.get("uid") or "")
+        if isinstance(indexed_meta, dict)
+        else ""
+    )
     content = path.read_text()
     outlinks = store.outlinks(canonical_page_id) or _extract_wiki_links(content)
     backlinks = store.backlinks(canonical_page_id)
@@ -134,6 +166,7 @@ def chronovisor_read(
             "session_id": session_id or "",
             "decision_id": decision_id or "",
             "page_id": canonical_page_id,
+            **({"page_uid": canonical_uid} if canonical_uid else {}),
             **({"requested_page_id": page} if canonical_page_id != page else {}),
         }
     )
@@ -141,6 +174,7 @@ def chronovisor_read(
     return json.dumps(
         {
             "page_id": canonical_page_id,
+            **({"uid": canonical_uid} if canonical_uid else {}),
             **(
                 {"alias": {"requested": page, "target": canonical_page_id}}
                 if canonical_page_id != page
@@ -165,6 +199,18 @@ def chronovisor_index(limit: int = 50, cursor: int = 0) -> str:
     store = get_store()
     store.refresh()
     entries = store.all_pages_meta(include_system=False)
+    try:
+        registry_state = PageRegistry(CHRONOVISOR_ROOT).load()
+    except PageRegistryError:
+        registry_state = PageRegistry.empty()
+    for entry in entries:
+        if entry.get("uid"):
+            continue
+        uid = registry_state.get("keys", {}).get(
+            str(entry.get("page_id") or "").casefold()
+        )
+        if uid:
+            entry["uid"] = uid
     total = len(entries)
     sliced = entries[cursor : cursor + limit]
 
@@ -271,6 +317,15 @@ def chronovisor_status() -> str:
         health = health_snapshot()
     except Exception:
         health = {}
+    try:
+        from chronovisor.librarian_status import build_librarian_status
+
+        librarian = build_librarian_status(CHRONOVISOR_ROOT)
+    except Exception:
+        librarian = {
+            "state": "BLOCKED",
+            "detail": "librarian status unavailable",
+        }
 
     return json.dumps(
         {
@@ -283,6 +338,7 @@ def chronovisor_status() -> str:
             "orphan_count": orphan_count,
             "page_types": page_types,
             "health": health,
+            "librarian": librarian,
             "ollama_status": ollama_status,
             "oldest_page": oldest,
             "newest_page": newest,
@@ -349,6 +405,15 @@ def chronovisor_init() -> str:
         ollama_status = "running" if f_ollama.result() else "stopped"
 
     page_count = store.page_count(include_system=False)
+    try:
+        from chronovisor.librarian_status import build_librarian_status
+
+        librarian = build_librarian_status(CHRONOVISOR_ROOT)
+    except Exception:
+        librarian = {
+            "state": "BLOCKED",
+            "detail": "librarian status unavailable",
+        }
     system_pages = {}
     for page_id in ("user-profile", "current-state", "lessons-learned"):
         path = SYSTEM_DIR / f"{page_id}.md"
@@ -376,6 +441,7 @@ def chronovisor_init() -> str:
                 ),
                 "ollama_status": ollama_status,
                 "chronovisor_root": str(CHRONOVISOR_ROOT),
+                "librarian": librarian,
             },
             "system_pages": system_pages,
         },
@@ -394,6 +460,8 @@ def chronovisor_search(
     semantic: bool = True,
     tags: list[str] | None = None,
     tag_match: str = "all",
+    classification_notation: str | None = None,
+    classification_status: str | None = None,
     session_id: str | None = None,
     decision_id: str | None = None,
 ) -> str:
@@ -415,6 +483,10 @@ def chronovisor_search(
         tag_match: ``"all"`` (default) requires every tag in ``tags`` to be
             present; ``"any"`` matches if at least one tag overlaps. Ignored
             when ``tags`` is empty / None.
+        classification_notation: Optional exact UDC notation. While the
+            classification authority is inactive this filters shadow proposals
+            and the response explicitly reports that status.
+        classification_status: Optional exact classification disposition.
         session_id: Optional session id for recall pull feedback.
         decision_id: Optional automatic-Recall decision id for turn tracing.
     """
@@ -440,6 +512,27 @@ def chronovisor_search(
         semantic=semantic,
     )
     retrieval_trace = last_search_trace()
+    registry = PageRegistry(CHRONOVISOR_ROOT)
+    try:
+        registry_state = registry.load()
+    except PageRegistryError:
+        registry_state = PageRegistry.empty()
+    try:
+        from chronovisor.classification import classification_authority_status
+
+        classification_authority = classification_authority_status(
+            CHRONOVISOR_ROOT
+        )
+    except Exception:
+        classification_authority = {
+            "active": False,
+            "reason": "classification_authority_unavailable",
+        }
+
+    def registry_row(page_id: str) -> dict:
+        uid = registry_state.get("keys", {}).get(page_id.casefold())
+        row = registry_state.get("pages", {}).get(uid) if uid else None
+        return dict(row) if isinstance(row, dict) else {}
 
     # Tag filter: post-process search results so the tag axis composes
     # with relevance / date / folder cleanly. Done in Python rather than
@@ -457,6 +550,31 @@ def chronovisor_search(
             else:  # any
                 if target & page_tags:
                     kept.append(r)
+        results = kept
+
+    if classification_notation or classification_status:
+        kept = []
+        for result in results:
+            row = registry_row(result.page_id)
+            classification = row.get("classification")
+            classification = (
+                classification if isinstance(classification, dict) else {}
+            )
+            primary = classification.get("primary")
+            primary = primary if isinstance(primary, dict) else {}
+            if (
+                classification_notation
+                and str(primary.get("notation") or "")
+                != classification_notation
+            ):
+                continue
+            if (
+                classification_status
+                and str(row.get("classification_status") or "")
+                != classification_status
+            ):
+                continue
+            kept.append(result)
         results = kept
 
     rerank_stage = apply_rerank_stage(
@@ -480,14 +598,22 @@ def chronovisor_search(
         snippet = (
             _extract_snippet(content, query_terms) if content is not None else None
         )
+        identity = registry_row(r.page_id)
+        classification = identity.get("classification")
         direct_hits.append(
             {
                 "page_id": r.page_id,
+                **({"uid": identity["uid"]} if identity.get("uid") else {}),
                 "title": r.title,
                 "updated": r.updated,
                 "score": round(r.score, 4),
                 "snippets": [snippet] if snippet else [],
                 "tags": store.tags(r.page_id),
+                **(
+                    {"classification": classification}
+                    if isinstance(classification, dict)
+                    else {}
+                ),
             }
         )
 
@@ -542,6 +668,11 @@ def chronovisor_search(
                 expanded_hits.append(
                     {
                         "page_id": link,
+                        **(
+                            {"uid": registry_row(link)["uid"]}
+                            if registry_row(link).get("uid")
+                            else {}
+                        ),
                         "title": meta["title"],
                         "updated": meta["updated"],
                         "distance": 1,
@@ -555,6 +686,8 @@ def chronovisor_search(
                     {
                         "from": hit["page_id"],
                         "to": link,
+                        "from_uid": hit.get("uid"),
+                        "to_uid": registry_row(link).get("uid"),
                         "type": "wikilink",
                     }
                 )
@@ -571,6 +704,10 @@ def chronovisor_search(
         filters_applied["tag_match"] = (
             tag_match if tag_match in ("all", "any") else "all"
         )
+    if classification_notation:
+        filters_applied["classification_notation"] = classification_notation
+    if classification_status:
+        filters_applied["classification_status"] = classification_status
     _append_pull_log(
         {
             "type": "search",
@@ -594,6 +731,20 @@ def chronovisor_search(
             "depth": depth,
             "search_mode": search_mode,
             "filters_applied": filters_applied,
+            "classification_authority": {
+                **classification_authority,
+                "mode": (
+                    "active" if classification_authority.get("active") else "shadow"
+                ),
+                "note": (
+                    "classification authority adopted"
+                    if classification_authority.get("active")
+                    else (
+                        "classification filters use non-authoritative shadow "
+                        "proposals until calibration and activation"
+                    )
+                ),
+            },
             "reranker": reranker_meta,
             "retrieval": retrieval_trace,
             "direct_hits": direct_hits,

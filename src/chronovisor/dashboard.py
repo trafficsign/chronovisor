@@ -3447,6 +3447,8 @@ def build_fast_snapshot() -> dict[str, Any]:
     """Return the live status shell without scanning Raw or audit history."""
 
     init_chronovisor()
+    from chronovisor.librarian_status import build_librarian_status
+
     status = runtime_status.read_status()
     if not isinstance(status, dict):
         status = {}
@@ -3464,6 +3466,18 @@ def build_fast_snapshot() -> dict[str, Any]:
         "model_lab": {},
         "save_history": {},
         "knowledge_mix": {},
+        "librarian": _safe_snapshot_component(
+            "librarian",
+            lambda: build_librarian_status(CHRONOVISOR_ROOT),
+            {
+                "state": "BLOCKED",
+                "detail": "librarian status unavailable",
+                "progress": {},
+                "queue": {},
+                "flow": {},
+                "recent_receipts": [],
+            },
+        ),
         "health": {},
         "_dashboard": {"detail_state": "loading"},
     }
@@ -3471,6 +3485,8 @@ def build_fast_snapshot() -> dict[str, Any]:
 
 def build_snapshot() -> dict[str, Any]:
     init_chronovisor()
+    from chronovisor.librarian_status import build_librarian_status
+
     cached_status = runtime_status.read_status()
     orch_state = orchestrator._load_state()
     from chronovisor.raw_store import RawStore
@@ -3688,6 +3704,18 @@ def build_snapshot() -> dict[str, Any]:
         "raw_archive": raw_archive,
         "ollama": ollama,
         "model_status": model_status,
+        "librarian": _safe_snapshot_component(
+            "librarian",
+            lambda: build_librarian_status(CHRONOVISOR_ROOT),
+            {
+                "state": "BLOCKED",
+                "detail": "librarian status unavailable",
+                "progress": {},
+                "queue": {},
+                "flow": {},
+                "recent_receipts": [],
+            },
+        ),
         "events": events,
         "metrics": metrics,
         "self_heal": _safe_snapshot_component(

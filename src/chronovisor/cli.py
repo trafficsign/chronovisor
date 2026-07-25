@@ -501,6 +501,15 @@ def doctor() -> dict[str, Any]:
         status["recall"]["feedback"].get("missed_candidate", 0) >= 0,
         str(status["recall"]["feedback"]),
     )
+    librarian = status["health"].get("librarian") or {}
+    check(
+        "librarian.state",
+        librarian.get("state") != "BLOCKED",
+        (
+            f"{librarian.get('state', 'unknown')}: "
+            f"{librarian.get('detail', 'no status')}"
+        ),
+    )
     return {
         "status": "ok" if all(item["ok"] for item in checks) else "warn",
         "checks": checks,
@@ -508,6 +517,7 @@ def doctor() -> dict[str, Any]:
             "chronovisor": status["chronovisor"],
             "config": status["config"],
             "recall": status["recall"],
+            "librarian": librarian,
         },
     }
 

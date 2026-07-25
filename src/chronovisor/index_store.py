@@ -26,7 +26,7 @@ from chronovisor.frontmatter import parse as _frontmatter_parse
 from chronovisor.link_fix import atomic_write, extract_targets
 from chronovisor.store import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR
 
-SCHEMA_VERSION = 9  # bumped for canonical alias targets
+SCHEMA_VERSION = 10  # bumped for stable UID and classification projections
 INDEX_DIR = CHRONOVISOR_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
@@ -152,6 +152,10 @@ class PageEntry:
     size: int
     title: str
     updated: str
+    uid: str = ""
+    classification_primary: str = ""
+    classification_notation: str = ""
+    classification_status: str = "unclassified"
     outlinks: list[str] = field(
         default_factory=list
     )  # raw, preserves duplicates + order
@@ -184,6 +188,10 @@ class PageEntry:
             "size": self.size,
             "title": self.title,
             "updated": self.updated,
+            "uid": self.uid,
+            "classification_primary": self.classification_primary,
+            "classification_notation": self.classification_notation,
+            "classification_status": self.classification_status,
             "outlinks": list(self.outlinks),
             "raw_keywords": list(self.raw_keywords),
             "tags": list(self.tags),
@@ -214,6 +222,24 @@ class PageEntry:
             size=int(d["size"]),
             title=d.get("title", d["page_id"]),
             updated=d.get("updated", "unknown"),
+            uid=d.get("uid", "") if isinstance(d.get("uid", ""), str) else "",
+            classification_primary=(
+                d.get("classification_primary", "")
+                if isinstance(d.get("classification_primary", ""), str)
+                else ""
+            ),
+            classification_notation=(
+                d.get("classification_notation", "")
+                if isinstance(d.get("classification_notation", ""), str)
+                else ""
+            ),
+            classification_status=(
+                d.get("classification_status", "unclassified")
+                if isinstance(
+                    d.get("classification_status", "unclassified"), str
+                )
+                else "unclassified"
+            ),
             outlinks=list(d.get("outlinks", [])),
             raw_keywords=_coerce_str_list(d.get("raw_keywords")),
             tags=_coerce_str_list(d.get("tags")),
@@ -503,6 +529,24 @@ class IndexStore:
             size=size,
             title=title,
             updated=updated,
+            uid=fm.get("uid", "") if isinstance(fm.get("uid", ""), str) else "",
+            classification_primary=(
+                fm.get("classification_primary", "")
+                if isinstance(fm.get("classification_primary", ""), str)
+                else ""
+            ),
+            classification_notation=(
+                fm.get("classification_notation", "")
+                if isinstance(fm.get("classification_notation", ""), str)
+                else ""
+            ),
+            classification_status=(
+                fm.get("classification_status", "unclassified")
+                if isinstance(
+                    fm.get("classification_status", "unclassified"), str
+                )
+                else "unclassified"
+            ),
             outlinks=outlinks,
             raw_keywords=_coerce_str_list(fm.get("raw_keywords")),
             tags=_coerce_str_list(fm.get("tags")),
@@ -584,6 +628,10 @@ class IndexStore:
                 "page_id": entry.page_id,
                 "title": entry.title,
                 "updated": entry.updated,
+                "uid": entry.uid,
+                "classification_primary": entry.classification_primary,
+                "classification_notation": entry.classification_notation,
+                "classification_status": entry.classification_status,
                 "path": entry.path,
                 "mtime_ns": entry.mtime_ns,
                 "is_system": entry.is_system,
@@ -677,6 +725,10 @@ class IndexStore:
                     "page_id": e.page_id,
                     "title": e.title,
                     "updated": e.updated,
+                    "uid": e.uid,
+                    "classification_primary": e.classification_primary,
+                    "classification_notation": e.classification_notation,
+                    "classification_status": e.classification_status,
                     "status": e.status,
                     "superseded_by": e.superseded_by,
                     "page_type": e.page_type,

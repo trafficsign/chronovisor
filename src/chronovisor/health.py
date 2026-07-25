@@ -883,6 +883,7 @@ def _lint_queue_kpi(queue_path: Path, convergence_path: Path) -> dict[str, int]:
 
 def health_snapshot() -> dict[str, Any]:
     from chronovisor.runtime_config import runtime_identity
+    from chronovisor.librarian_status import build_librarian_status
 
     coverage = summary_coverage()
     duplicate_queue = CHRONOVISOR_ROOT / "review" / "duplicate-candidates.jsonl"
@@ -917,6 +918,7 @@ def health_snapshot() -> dict[str, Any]:
         "capture_pipeline": capture_pipeline_kpi(),
         "ingest_liveness": ingest_liveness,
         "semantic_index": semantic_index,
+        "librarian": build_librarian_status(CHRONOVISOR_ROOT),
         "research": research_kpi(),
         "queues": {
             "duplicate_candidates": _jsonl_count(duplicate_queue),

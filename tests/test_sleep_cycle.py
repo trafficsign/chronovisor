@@ -187,6 +187,18 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
+        "chronovisor.librarian.run_shadow",
+        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
+    )
+    monkeypatch.setattr(
+        "chronovisor.migration_snapshot.cleanup_expired_restore_points",
+        lambda _root: {"deleted": [], "retained": []},
+    )
+    monkeypatch.setattr(
+        "chronovisor.merge_transaction.cleanup_expired_preimages",
+        lambda _root: {"deleted": [], "retained": []},
+    )
+    monkeypatch.setattr(
         "chronovisor.content_correction.run_pending_corrections",
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )

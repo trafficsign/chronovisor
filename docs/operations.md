@@ -665,6 +665,15 @@ read-only, including search indexes and caches, and does not invoke model
 reviewers. A zero `--eval-limit` skips integrity and label evaluation instead
 of expanding to an unbounded corpus scan.
 
+Sleep also advances at most 100 deterministic Librarian shadow proposals. This
+lane makes no model calls and does not mutate Active Markdown. Inspect it with
+`chronovisor-librarian --status --json`; a `NOT_READY` state is expected until
+the complete UDC package and locked calibration gate have been installed.
+Queue zero alone is never treated as organization complete. The local dashboard
+shows UID/classification/link/full-sweep numerators and denominators, current
+scope generation, queue/Hold debt, flow, restore points, and recent receipts.
+See [Classification and Librarian](librarian.md).
+
 The daily Sleep LaunchAgent also runs once when it is newly loaded, so an
 installation or product rename after the calendar boundary cannot leave the
 watchdog without an execution receipt until the following day. The compact

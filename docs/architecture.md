@@ -195,6 +195,14 @@ Exceptional system repair
   improvement runs, save history, knowledge mix, and model fleet roles. Ingest
   semantic defers are reported separately from pending and failed work. A dead
   worker PID is rendered as idle rather than as live work.
+- **Classification/Librarian plane**: assigns stable UUIDv7 identities in a
+  metadata registry, projects wikilinks to UID edges, and produces bounded
+  local-only shadow classification proposals. The bundled top-level UDC
+  bootstrap cannot become authority; activation is fail-closed until a complete
+  licensed package and locked calibration artifact exist. Merge application is
+  explicit-only and requires deterministic span, fingerprint, provenance,
+  sensitivity, link, redirect, and CAS gates. See
+  [Classification and Librarian](librarian.md).
 
 Production entry points load `chronovisor` from the pushed GitHub source via
 `uvx`. The checkout selected by `CHRONOVISOR_REPO_ROOT` is only exceptional

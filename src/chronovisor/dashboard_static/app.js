@@ -83,6 +83,25 @@ const els = {
   knowledgeSize: document.getElementById("knowledge-size"),
   knowledgeCategories: document.getElementById("knowledge-categories"),
   knowledgeModeButtons: document.querySelectorAll("[data-knowledge-mode]"),
+  librarianPanel: document.getElementById("librarian-panel"),
+  librarianState: document.getElementById("librarian-state"),
+  librarianHeadline: document.getElementById("librarian-headline"),
+  librarianDetail: document.getElementById("librarian-detail"),
+  librarianGeneration: document.getElementById("librarian-generation"),
+  librarianSweptGeneration: document.getElementById("librarian-swept-generation"),
+  librarianUid: document.getElementById("librarian-uid"),
+  librarianUidBar: document.getElementById("librarian-uid-bar"),
+  librarianClassification: document.getElementById("librarian-classification"),
+  librarianClassificationBar: document.getElementById("librarian-classification-bar"),
+  librarianLinks: document.getElementById("librarian-links"),
+  librarianLinksBar: document.getElementById("librarian-links-bar"),
+  librarianMigration: document.getElementById("librarian-migration"),
+  librarianMigrationBar: document.getElementById("librarian-migration-bar"),
+  librarianSweep: document.getElementById("librarian-sweep"),
+  librarianSweepBar: document.getElementById("librarian-sweep-bar"),
+  librarianQueue: document.getElementById("librarian-queue"),
+  librarianFlow: document.getElementById("librarian-flow"),
+  librarianReceipts: document.getElementById("librarian-receipts"),
   healthCaption: document.getElementById("health-caption"),
   healthSummaryCoverage: document.getElementById("health-summary-coverage"),
   healthCapture: document.getElementById("health-capture"),
@@ -1992,6 +2011,95 @@ function renderKnowledgeMix(knowledgeMix) {
   });
 }
 
+function renderLibrarian(librarian) {
+  const data = librarian || {};
+  const state = fmt(data.state, "NOT_READY");
+  const progress = data.progress || {};
+  const queue = data.queue || {};
+  const authority = data.authority || {};
+  const progressRows = [
+    ["uid", els.librarianUid, els.librarianUidBar],
+    ["classification_shadow", els.librarianClassification, els.librarianClassificationBar],
+    ["links", els.librarianLinks, els.librarianLinksBar],
+    ["migration_batch", els.librarianMigration, els.librarianMigrationBar],
+    ["full_sweep", els.librarianSweep, els.librarianSweepBar],
+  ];
+  els.librarianState.textContent = state;
+  els.librarianState.dataset.state = state;
+  els.librarianPanel.dataset.state = state;
+  const classification = progress.classification_shadow || {};
+  const complete = intValue(classification.numerator);
+  const total = intValue(classification.denominator);
+  els.librarianHeadline.textContent = data.initial_organization_complete_at
+    ? "Initial organization complete"
+    : total
+      ? `${complete.toLocaleString()} of ${total.toLocaleString()} pages shadow-classified`
+      : "Shadow migration has not started";
+  els.librarianDetail.textContent = fmt(data.detail, "Waiting for Librarian state.");
+  const generation = String(data.scope_generation || "--");
+  els.librarianGeneration.textContent = generation.startsWith("sha256:")
+    ? generation.slice(7, 19)
+    : generation;
+  const sweptGeneration = String(data.last_swept_generation || "--");
+  els.librarianSweptGeneration.textContent = sweptGeneration.startsWith("sha256:")
+    ? sweptGeneration.slice(7, 19)
+    : sweptGeneration;
+  progressRows.forEach(([key, valueEl, barEl]) => {
+    const row = progress[key] || {};
+    const numerator = intValue(row.numerator);
+    const denominator = intValue(row.denominator);
+    valueEl.textContent = denominator
+      ? `${numerator.toLocaleString()} / ${denominator.toLocaleString()}`
+      : "-- / --";
+    const ratio = denominator ? Math.max(0, Math.min(1, numerator / denominator)) : 0;
+    barEl.style.width = `${Math.round(ratio * 100)}%`;
+  });
+  els.librarianQueue.replaceChildren();
+  [
+    ["queued", "Queued"],
+    ["actionable", "Actionable"],
+    ["running", "Running"],
+    ["held", "Held"],
+    ["quarantined", "Quarantined"],
+    ["completed", "Completed"],
+  ].forEach(([key, label]) => {
+    const chip = document.createElement("span");
+    chip.className = `librarian-queue-chip ${key}`;
+    chip.textContent = `${label} ${intValue(queue[key]).toLocaleString()}`;
+    els.librarianQueue.appendChild(chip);
+  });
+  const flow24 = (data.flow || {})["24h"] || {};
+  const flow7 = (data.flow || {})["7d"] || {};
+  els.librarianFlow.textContent =
+    `24h ${intValue(flow24.completed)} complete / ${intValue(flow24.arrivals)} arrival · ` +
+    `7d ${intValue(flow7.completed)} complete / ${intValue(flow7.arrivals)} arrival · ` +
+    `authority ${authority.active ? "active" : "shadow only"}`;
+  els.librarianReceipts.replaceChildren();
+  const receipts = Array.isArray(data.recent_receipts) ? data.recent_receipts.slice(0, 6) : [];
+  if (!receipts.length) {
+    const empty = document.createElement("p");
+    empty.className = "librarian-empty";
+    empty.textContent = "No receipts yet";
+    els.librarianReceipts.appendChild(empty);
+    return;
+  }
+  receipts.forEach((receipt) => {
+    const row = document.createElement("div");
+    row.className = "librarian-receipt";
+    const event = document.createElement("strong");
+    event.textContent = fmt(receipt.event || receipt.operation || receipt.status, "receipt");
+    const detail = document.createElement("span");
+    const counts = [
+      receipt.classified !== undefined ? `${intValue(receipt.classified)} classified` : "",
+      receipt.held !== undefined ? `${intValue(receipt.held)} held` : "",
+      receipt.transaction_id ? shortName(receipt.transaction_id) : "",
+    ].filter(Boolean);
+    detail.textContent = counts.join(" · ") || timeLabel(receipt.timestamp || receipt.recorded_at);
+    row.append(event, detail);
+    els.librarianReceipts.appendChild(row);
+  });
+}
+
 function healthPercent(value) {
   return numeric(value) ? shareLabel(value) : "--";
 }
@@ -2475,6 +2583,7 @@ function render(snapshot) {
   renderRecallImprovement(snapshot.recall_improvement || {});
   renderSaveHistory(snapshot.save_history || {});
   renderKnowledgeMix(snapshot.knowledge_mix || {});
+  renderLibrarian(snapshot.librarian || {});
   renderHealth(snapshot.health || {});
   renderModelStatus(modelStatus);
   renderModelLab(snapshot.model_lab || {});

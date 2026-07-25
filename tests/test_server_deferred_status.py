@@ -130,7 +130,7 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
     payload = json.loads(server.chronovisor_init())
 
     assert scans == [["operational.md", "pending-a.md", "pending-b.md", "semantic.md"]]
-    assert payload["status"] == {
+    assert payload["status"] | {"librarian": None} == {
         "page_count": 2,
         "raw_total": 4,
         "raw_pending": 2,
@@ -139,7 +139,13 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
         "raw_outstanding": 4,
         "ollama_status": "stopped",
         "chronovisor_root": str(tmp_path),
+        "librarian": None,
     }
+    assert payload["status"]["librarian"]["state"] == "NOT_READY"
+    assert (
+        payload["status"]["librarian"]["authority"]["reason"]
+        == "shadow_state_not_initialized"
+    )
     assert set(payload["system_pages"]) == {
         "user-profile",
         "current-state",

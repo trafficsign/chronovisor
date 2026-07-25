@@ -1,0 +1,20 @@
+{
+  "schema": "chronovisor.udcs-package.v1",
+  "release": "top-level-snapshot-2026-07-25",
+  "source_url": "https://udcsummary.info/",
+  "license": "CC BY-SA 3.0",
+  "attribution": "Universal Decimal Classification Summary, UDC Consortium",
+  "complete": false,
+  "note": "Top-level bootstrap only. The official linked-data service was unavailable during implementation; do not activate classification authority without a complete reviewed export.",
+  "concepts": [
+    {"uri": "urn:chronovisor:udcs:0", "notation": "0", "label_en": "Science and knowledge. Organization. Computer science. Information. Documentation. Librarianship. Institutions. Publications", "broader_uri": null},
+    {"uri": "urn:chronovisor:udcs:1", "notation": "1", "label_en": "Philosophy. Psychology", "broader_uri": null},
+    {"uri": "urn:chronovisor:udcs:2", "notation": "2", "label_en": "Religion. Theology", "broader_uri": null},
+    {"uri": "urn:chronovisor:udcs:3", "notation": "3", "label_en": "Social sciences", "broader_uri": null},
+    {"uri": "urn:chronovisor:udcs:5", "notation": "5", "label_en": "Mathematics. Natural sciences", "broader_uri": null},
+    {"uri": "urn:chronovisor:udcs:6", "notation": "6", "label_en": "Applied sciences. Medicine. Technology", "broader_uri": null},
+    {"uri": "urn:chronovisor:udcs:7", "notation": "7", "label_en": "The arts. Recreation. Entertainment. Sport", "broader_uri": null},
+    {"uri": "urn:chronovisor:udcs:8", "notation": "8", "label_en": "Language. Linguistics. Literature", "broader_uri": null},
+    {"uri": "urn:chronovisor:udcs:9", "notation": "9", "label_en": "Geography. Biography. History", "broader_uri": null}
+  ]
+}
