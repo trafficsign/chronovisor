@@ -125,16 +125,26 @@ def test_merge_transaction_requires_activation_and_redirects_old_uid(
     alpha = registry.resolve("alpha")
     beta = registry.resolve("beta")
     assert alpha and beta
-    combined = alpha_text + "\n" + beta_text
+    combined = (
+        alpha_text
+        + f"\n^chronovisor-source-uid-{alpha['uid']}\n"
+        + beta_text
+        + f"\n^chronovisor-source-uid-{beta['uid']}\n"
+    )
     inventory = build_source_inventory(
         {alpha["uid"]: alpha_text, beta["uid"]: beta_text}
     )
     mappings = [
         {
             "source_uid": uid,
-            "span_sha256": span["sha256"],
-            "action": "output" if span["kind"] == "claim" else "boilerplate",
-            "raw_refs": [f"raw:test#{uid}"],
+                "span_sha256": span["sha256"],
+                "action": "output" if span["kind"] == "claim" else "boilerplate",
+                "output_anchor": (
+                    f"chronovisor-source-uid-{uid}"
+                    if span["kind"] == "claim"
+                    else None
+                ),
+                "raw_refs": [f"raw:test#{uid}"],
         }
         for uid, source in inventory.items()
         for span in source["spans"]

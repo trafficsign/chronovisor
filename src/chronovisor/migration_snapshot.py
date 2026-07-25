@@ -92,6 +92,82 @@ def create_restore_point(
         raise
 
 
+def create_incremental_restore_point(
+    root: Path,
+    *,
+    paths: Iterable[Path],
+    reason: str,
+    ttl_days: int = 7,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Snapshot an explicit bounded mutation set plus authority pointers."""
+
+    selected: dict[str, Path] = {}
+    root_resolved = root.resolve()
+    for value in paths:
+        resolved = value.resolve()
+        if not resolved.is_relative_to(root_resolved):
+            raise ValueError("incremental restore path must be inside Chronovisor root")
+        if resolved.is_file():
+            selected[str(resolved.relative_to(root_resolved))] = resolved
+    for relative in (
+        "runtime/librarian/page-registry.json",
+        ".index/semantic/active.json",
+        ".index/bm25.sqlite",
+    ):
+        path = root / relative
+        if path.is_file():
+            selected[relative] = path
+    if not selected:
+        raise ValueError("incremental restore point requires at least one file")
+
+    current = _utc_now(now)
+    restore_id = (
+        f"{current.strftime('%Y%m%dT%H%M%SZ')}-incremental-{uuid.uuid4().hex[:12]}"
+    )
+    restore_root = root / "runtime" / "librarian" / "migration-restore-points"
+    final_dir = restore_root / restore_id
+    restore_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix=f".{restore_id}.", dir=restore_root))
+    os.chmod(temp_dir, 0o700)
+    rows: list[dict[str, Any]] = []
+    try:
+        payload_dir = temp_dir / "payload"
+        for relative, source in sorted(selected.items()):
+            destination = payload_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            os.chmod(destination, 0o600)
+            rows.append(
+                {
+                    "path": relative,
+                    "size": destination.stat().st_size,
+                    "sha256": _sha256(destination),
+                }
+            )
+        manifest = {
+            "schema": SCHEMA,
+            "restore_id": restore_id,
+            "kind": "incremental",
+            "reason": reason,
+            "created_at": current.isoformat(timespec="seconds"),
+            "expires_at": (
+                current + timedelta(days=max(0, int(ttl_days)))
+            ).isoformat(timespec="seconds"),
+            "file_count": len(rows),
+            "total_bytes": sum(int(row["size"]) for row in rows),
+            "verification_status": "checksum_verified",
+            "restore_drill_at": None,
+            "files": rows,
+        }
+        write_sealed_json(temp_dir / "manifest.json", manifest, backup=False)
+        os.replace(temp_dir, final_dir)
+        return {**manifest, "path": str(final_dir)}
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
 def verify_restore_point(path: Path) -> dict[str, Any]:
     manifest_path = path / "manifest.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))

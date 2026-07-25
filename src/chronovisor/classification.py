@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from chronovisor import frontmatter
+
 CLASSIFICATION_SCHEMA = "chronovisor.classification.v1"
 PACKAGE_SCHEMA = "chronovisor.udcs-package.v1"
 VALID_FORMS = {
@@ -100,13 +102,36 @@ class UDCPackage:
                 raise ClassificationError("UDC concept URI/notation must be unique")
             concepts[uri] = dict(row)
             notation_seen.add(notation)
+        complete = bool(payload.get("complete"))
+        if complete:
+            if len(concepts) < 2_500:
+                raise ClassificationError(
+                    "complete UDC Summary package must contain at least 2,500 concepts"
+                )
+            if str(payload.get("license") or "") != "CC BY-SA 3.0":
+                raise ClassificationError(
+                    "complete UDC Summary package must preserve CC BY-SA 3.0"
+                )
+            missing_parents = sorted(
+                {
+                    str(row.get("broader_uri"))
+                    for row in concepts.values()
+                    if row.get("broader_uri")
+                    and str(row.get("broader_uri")) not in concepts
+                }
+            )
+            if missing_parents:
+                raise ClassificationError(
+                    "complete UDC package has unknown broader concepts: "
+                    + ", ".join(missing_parents[:5])
+                )
         return cls(
             release=str(payload.get("release") or ""),
             checksum="sha256:" + hashlib.sha256(raw).hexdigest(),
             source_url=str(payload.get("source_url") or ""),
             license=str(payload.get("license") or ""),
             attribution=str(payload.get("attribution") or ""),
-            complete=bool(payload.get("complete")),
+            complete=complete,
             concepts=concepts,
         )
 
@@ -138,8 +163,35 @@ class ControlledSubject:
 
 def default_udc_package() -> UDCPackage:
     return UDCPackage.load(
-        Path(__file__).parent / "data" / "udc-summary-top-level.json"
+        Path(__file__).parent / "data" / "udc-summary.json"
     )
+
+
+def classification_source_sha256(text: str) -> str:
+    """Hash only content that can legitimately change classification.
+
+    UID, classification and call-number backfills are deliberately excluded,
+    so adopting metadata cannot make its own evidence stale.
+    """
+
+    meta, body = frontmatter.parse(text)
+    payload = {
+        "title": meta.get("title"),
+        "summary": meta.get("summary"),
+        "tags": meta.get("tags"),
+        "raw_keywords": meta.get("raw_keywords"),
+        "type": meta.get("type"),
+        "status": meta.get("status"),
+        "sensitivity": meta.get("sensitivity"),
+        "body": body,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def load_udc_package(root: Path | None = None) -> UDCPackage:
@@ -190,10 +242,13 @@ def classification_authority_status(
         "active": active,
         "package_complete": package.complete,
         "calibrated": calibrated,
+        "authority_epoch": int(calibration.get("authority_epoch") or 0),
         "release": package.release,
         "checksum": package.checksum,
         "license": package.license,
         "calibration_path": str(calibration_path),
+        "threshold_version": calibration.get("config_digest"),
+        "thresholds": calibration.get("thresholds") or {},
         "reason": ",".join(reasons) if reasons else "adopted",
     }
 

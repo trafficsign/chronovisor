@@ -20,6 +20,7 @@ from chronovisor.recall_log_schema import (
     page_ids_from_record,
 )
 from chronovisor.recall_runtime_paths import RECALL_DIR
+from chronovisor.store import CHRONOVISOR_ROOT
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_PULL_LOG_FILE = RECALL_DIR / "pull-log.jsonl"
@@ -60,6 +61,17 @@ def build_cofire_graph(
     from chronovisor.alias_store import load_aliases
 
     aliases = load_aliases()
+    try:
+        from chronovisor.page_registry import PageRegistry
+
+        registry = PageRegistry(CHRONOVISOR_ROOT)
+        uid_by_page = {
+            page_id: str((registry.resolve(page_id) or {}).get("uid") or "")
+            for row in rows
+            for page_id in page_ids_from_record(row)
+        }
+    except Exception:
+        uid_by_page = {}
 
     def compile_graph(page_sets: list[list[str]]) -> tuple[dict[str, list[dict[str, Any]]], int]:
         pair_counts: Counter[tuple[str, str]] = Counter()
@@ -80,8 +92,20 @@ def build_cofire_graph(
             denom = max(node_counts[left], node_counts[right], 1)
             weight = count / denom
             edge = {"count": count, "weight": round(weight, 4)}
-            graph.setdefault(left, []).append({"page_id": right, **edge})
-            graph.setdefault(right, []).append({"page_id": left, **edge})
+            graph.setdefault(left, []).append(
+                {
+                    "page_id": right,
+                    **({"page_uid": uid_by_page[right]} if uid_by_page.get(right) else {}),
+                    **edge,
+                }
+            )
+            graph.setdefault(right, []).append(
+                {
+                    "page_id": left,
+                    **({"page_uid": uid_by_page[left]} if uid_by_page.get(left) else {}),
+                    **edge,
+                }
+            )
         for page_id, items in graph.items():
             items.sort(
                 key=lambda item: (float(item["weight"]), int(item["count"])),
@@ -112,6 +136,9 @@ def build_cofire_graph(
         "positive_nodes": len(positive_graph),
         "positive_edges": sum(len(items) for items in positive_graph.values()),
         "min_count": min_count,
+        "node_uids": {
+            page_id: uid for page_id, uid in sorted(uid_by_page.items()) if uid
+        },
         "join": {key: value for key, value in joined.items() if key != "episodes"},
         "graphs": {
             "positive_used": {

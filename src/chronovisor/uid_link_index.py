@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,19 @@ def _heading_anchors(text: str) -> set[str]:
         heading = line.lstrip("#").strip().casefold()
         anchors.add(heading)
         anchors.add(heading.replace(" ", "-"))
+        slug = re.sub(
+            r"[^0-9a-z\u3040-\u30ff\u3400-\u9fff]+",
+            "-",
+            heading,
+        ).strip("-")
+        if slug:
+            anchors.add(slug)
+        numbered = re.match(r"^(?:section[- ]*)?(\d+(?:\.\d+)*)", heading)
+        if numbered:
+            section = numbered.group(1)
+            anchors.add(section)
+            anchors.add(f"section-{section}")
+            anchors.add(f"section{section}")
     return anchors
 
 
@@ -67,6 +81,20 @@ def build_uid_link_index(
             target_text = str(raw_target).split("|", 1)[0].strip()
             page_key, _, anchor = target_text.partition("#")
             target_uid = state.get("keys", {}).get(page_key.casefold())
+            if target_uid is None:
+                ambiguous = state.get("ambiguous_keys", {}).get(page_key.casefold())
+                if isinstance(ambiguous, list):
+                    exact = [
+                        uid
+                        for uid in ambiguous
+                        if str(
+                            (state.get("pages", {}).get(uid) or {}).get("page_id")
+                            or ""
+                        ).casefold()
+                        == page_key.casefold()
+                    ]
+                    if len(exact) == 1:
+                        target_uid = exact[0]
             target = (
                 state.get("pages", {}).get(target_uid)
                 if isinstance(target_uid, str)

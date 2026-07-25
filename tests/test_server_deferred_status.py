@@ -144,7 +144,7 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
     assert payload["status"]["librarian"]["state"] == "NOT_READY"
     assert (
         payload["status"]["librarian"]["authority"]["reason"]
-        == "shadow_state_not_initialized"
+        == "locked_calibration_not_adopted"
     )
     assert set(payload["system_pages"]) == {
         "user-profile",

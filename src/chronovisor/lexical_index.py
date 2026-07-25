@@ -21,7 +21,7 @@ from chronovisor.frontmatter import parse as parse_frontmatter
 from chronovisor.search_types import ScoredPage, tokenize
 from chronovisor.store import PAGES_DIR, page_id_from_path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 ACTIVE_STATUS = "active"
 VALID_STATUSES = {"active", "deprecated", "archived"}
 VALID_PAGE_TYPES = {
@@ -89,6 +89,12 @@ def _anchor_terms(
         add(tag, 2.0)
         if "/" in tag:
             add(tag.split("/", 1)[1], 2.5)
+    uid = frontmatter.get("uid")
+    if isinstance(uid, str) and uid:
+        add(uid, 7.0)
+    notation = frontmatter.get("classification_notation")
+    if isinstance(notation, str) and notation:
+        add(notation, 4.0)
     return weighted
 
 
@@ -189,7 +195,11 @@ class LexicalIndex:
                 page_type TEXT NOT NULL,
                 sensitivity TEXT NOT NULL,
                 doc_len INTEGER NOT NULL,
-                ordinal INTEGER NOT NULL UNIQUE
+                ordinal INTEGER NOT NULL UNIQUE,
+                page_uid TEXT NOT NULL,
+                classification_primary TEXT NOT NULL,
+                classification_notation TEXT NOT NULL,
+                classification_status TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS anchors (
                 term TEXT NOT NULL,
@@ -306,6 +316,32 @@ class LexicalIndex:
                         _sensitivity(frontmatter.get("sensitivity"), folder),
                         len(tokens),
                         ordinals.get(page_id, next_ordinal),
+                        (
+                            frontmatter.get("uid")
+                            if isinstance(frontmatter.get("uid"), str)
+                            else ""
+                        ),
+                        (
+                            frontmatter.get("classification_primary")
+                            if isinstance(
+                                frontmatter.get("classification_primary"), str
+                            )
+                            else ""
+                        ),
+                        (
+                            frontmatter.get("classification_notation")
+                            if isinstance(
+                                frontmatter.get("classification_notation"), str
+                            )
+                            else ""
+                        ),
+                        (
+                            frontmatter.get("classification_status")
+                            if isinstance(
+                                frontmatter.get("classification_status"), str
+                            )
+                            else "unclassified"
+                        ),
                     )
                 )
                 if page_id not in ordinals:
@@ -345,8 +381,10 @@ class LexicalIndex:
                     """
                     INSERT INTO pages
                     (page_id, mtime_ns, size, title, folder, updated, status,
-                     superseded_by, page_type, sensitivity, doc_len, ordinal)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     superseded_by, page_type, sensitivity, doc_len, ordinal,
+                     page_uid, classification_primary, classification_notation,
+                     classification_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     prepared_pages,
                 )

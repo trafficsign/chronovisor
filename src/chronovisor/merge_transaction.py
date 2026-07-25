@@ -195,6 +195,10 @@ def _write_preimage(root: Path, plan: Mapping[str, Any], ttl_days: int) -> Path:
         {
             "schema": PREIMAGE_SCHEMA,
             "transaction_id": transaction_id,
+            "input_uids": [
+                str(row.get("uid") or "") for row in plan.get("inputs") or []
+            ],
+            "canonical_uid": str((plan.get("output") or {}).get("uid") or ""),
             "created_at": now.isoformat(timespec="milliseconds"),
             "expires_at": (now + timedelta(days=max(0, ttl_days))).isoformat(
                 timespec="milliseconds"
@@ -246,6 +250,8 @@ def apply_merge_plan(
     )
     original_bytes: dict[Path, bytes] = {}
     owned_bytes: dict[Path, bytes | None] = {}
+    registry_preimage = registry.path.read_bytes()
+    registry_owned: bytes | None = None
     try:
         with chronovisor_mutation_lock():
             for row in plan.get("inputs") or []:
@@ -283,6 +289,40 @@ def apply_merge_plan(
                 [dict(value) for value in plan.get("redirects") or []],
                 expected_generation=int(plan["registry_generation"]),
             )
+            registry_owned = registry.path.read_bytes()
+
+            if output_path.read_bytes() != output_raw:
+                raise RuntimeError("canonical output read-back mismatch")
+            for row in plan.get("link_rewrites") or []:
+                path = root / str(row["path"])
+                if _sha256_bytes(path.read_bytes()) != row["after_sha256"]:
+                    raise RuntimeError(f"link rewrite read-back mismatch: {path}")
+            for row in plan.get("inputs") or []:
+                if str(row["uid"]) == canonical_uid:
+                    continue
+                if (root / str(row["path"])).exists():
+                    raise RuntimeError(
+                        f"superseded source still exists: {row['path']}"
+                    )
+            for redirect in plan.get("redirects") or []:
+                resolved = registry.resolve(str(redirect["from_uid"]))
+                if (
+                    resolved is None
+                    or str(resolved.get("uid") or "") != canonical_uid
+                ):
+                    raise RuntimeError("redirect postflight resolution mismatch")
+            postflight = verify_merge_coverage(
+                inventory=dict(plan.get("inventory") or {}),
+                mappings=list(plan.get("claim_map") or []),
+                output_text=output_raw.decode("utf-8"),
+                ledger_dispositions=list(plan.get("ledger_dispositions") or []),
+                input_sensitivities=[
+                    str(row.get("sensitivity") or "normal")
+                    for row in plan.get("inputs") or []
+                ],
+                output_sensitivity=str(output.get("sensitivity") or "normal"),
+                require_raw_refs=True,
+            )
     except Exception as exc:
         rollback: dict[str, bool] = {}
         with chronovisor_mutation_lock():
@@ -294,6 +334,21 @@ def apply_merge_plan(
                     continue
                 atomic_write(path, original.decode("utf-8"))
                 rollback[str(path)] = path.read_bytes() == original
+            if (
+                registry_owned is not None
+                and registry.path.read_bytes() == registry_owned
+            ):
+                atomic_write_bytes(registry.path, registry_preimage, backup=False)
+                rollback[str(registry.path)] = (
+                    registry.path.read_bytes() == registry_preimage
+                )
+                registry._append_event(
+                    {
+                        "event": "redirect_batch_rolled_back",
+                        "transaction_id": transaction_id,
+                        "restored": rollback[str(registry.path)],
+                    }
+                )
         ledger.append(
             {
                 "transaction_id": transaction_id,
@@ -321,6 +376,7 @@ def apply_merge_plan(
                 for row in plan.get("link_rewrites") or []
             ],
             "verification_receipt": plan.get("verification_receipt"),
+            "postflight_receipt": postflight,
             "registry": registry_result,
             "temporary_preimage": str(preimage),
             "committed_at": _now().isoformat(timespec="milliseconds"),

@@ -99,6 +99,10 @@ const els = {
   librarianMigrationBar: document.getElementById("librarian-migration-bar"),
   librarianSweep: document.getElementById("librarian-sweep"),
   librarianSweepBar: document.getElementById("librarian-sweep-bar"),
+  librarianAuthority: document.getElementById("librarian-authority"),
+  librarianQuality: document.getElementById("librarian-quality"),
+  librarianSoak: document.getElementById("librarian-soak"),
+  librarianRecovery: document.getElementById("librarian-recovery"),
   librarianQueue: document.getElementById("librarian-queue"),
   librarianFlow: document.getElementById("librarian-flow"),
   librarianReceipts: document.getElementById("librarian-receipts"),
@@ -2017,6 +2021,10 @@ function renderLibrarian(librarian) {
   const progress = data.progress || {};
   const queue = data.queue || {};
   const authority = data.authority || {};
+  const quality = data.quality || {};
+  const soak = data.soak || {};
+  const restorePoints = data.restore_points || {};
+  const preimages = data.transaction_preimages || {};
   const progressRows = [
     ["uid", els.librarianUid, els.librarianUidBar],
     ["classification_shadow", els.librarianClassification, els.librarianClassificationBar],
@@ -2054,6 +2062,30 @@ function renderLibrarian(librarian) {
     const ratio = denominator ? Math.max(0, Math.min(1, numerator / denominator)) : 0;
     barEl.style.width = `${Math.round(ratio * 100)}%`;
   });
+  const authorityEpoch = intValue(
+    (quality.holdout_metrics || {}).authority_epoch || authority.authority_epoch,
+  );
+  els.librarianAuthority.textContent = authority.active
+    ? `Active${authorityEpoch ? ` · epoch ${authorityEpoch}` : ""}`
+    : "Shadow only";
+  const holdout = quality.holdout_metrics || {};
+  const exact = numeric(holdout.exact_match_rate)
+    ? `${(holdout.exact_match_rate * 100).toFixed(1)}% exact`
+    : "";
+  const forced = numeric(holdout.forced_misclassification_rate)
+    ? `${(holdout.forced_misclassification_rate * 100).toFixed(1)}% forced`
+    : "";
+  els.librarianQuality.textContent =
+    [exact, forced].filter(Boolean).join(" · ") || fmt(quality.locked_holdout, "Not evaluated");
+  const remaining = intValue(soak.remaining_seconds);
+  els.librarianSoak.textContent = soak.status === "running"
+    ? `${(remaining / 86400).toFixed(1)}d remaining`
+    : soak.status === "complete"
+      ? "Complete"
+      : fmt(soak.status, "Not started").replaceAll("_", " ");
+  els.librarianRecovery.textContent =
+    `${intValue(restorePoints.verified)}/${intValue(restorePoints.count)} verified` +
+    ` · ${intValue(preimages.count)} preimage`;
   els.librarianQueue.replaceChildren();
   [
     ["queued", "Queued"],
@@ -2070,10 +2102,19 @@ function renderLibrarian(librarian) {
   });
   const flow24 = (data.flow || {})["24h"] || {};
   const flow7 = (data.flow || {})["7d"] || {};
+  const eta = data.eta || {};
+  const growth = data.growth || {};
+  const etaText = eta.status === "estimated" && numeric(eta.days)
+    ? ` · ETA ${eta.days.toFixed(1)}d`
+    : eta.status === "falling_behind_or_unstable"
+      ? " · ETA unavailable"
+      : "";
   els.librarianFlow.textContent =
     `24h ${intValue(flow24.completed)} complete / ${intValue(flow24.arrivals)} arrival · ` +
     `7d ${intValue(flow7.completed)} complete / ${intValue(flow7.arrivals)} arrival · ` +
-    `authority ${authority.active ? "active" : "shadow only"}`;
+    `Active ${intValue(growth.active_page_delta) >= 0 ? "+" : ""}${intValue(growth.active_page_delta)} ` +
+    `/ Raw ${intValue(growth.raw_unit_delta) >= 0 ? "+" : ""}${intValue(growth.raw_unit_delta)} · ` +
+    `authority ${authority.active ? "active" : "shadow only"}${etaText}`;
   els.librarianReceipts.replaceChildren();
   const receipts = Array.isArray(data.recent_receipts) ? data.recent_receipts.slice(0, 6) : [];
   if (!receipts.length) {

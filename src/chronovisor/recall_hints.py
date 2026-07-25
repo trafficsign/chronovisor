@@ -209,8 +209,20 @@ def add_query_hint(
             and provenance.get("frontier_approved") is True
             and str(provenance.get("feedback_ref") or "").strip()
         )
+        page_uid = ""
+        try:
+            from chronovisor.page_registry import PageRegistry
+
+            resolved = PageRegistry(chronovisor_store.CHRONOVISOR_ROOT).resolve(
+                page_ref
+            )
+            if isinstance(resolved, dict):
+                page_uid = str(resolved.get("uid") or "")
+        except Exception:
+            pass
         record = {
             "page_id": page_ref,
+            **({"page_uid": page_uid} if page_uid else {}),
             "query": query_text,
             "query_key": key,
             "tokens": sorted(query_tokens(query_text) | query_tokens(signal)),

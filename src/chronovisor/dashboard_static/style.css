@@ -2828,6 +2828,34 @@ canvas {
   transition: width 240ms ease;
 }
 
+.librarian-gate-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.librarian-gate-grid > div {
+  padding: 11px 13px;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.16);
+}
+
+.librarian-gate-grid span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--dim);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.librarian-gate-grid strong {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .librarian-lower {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
@@ -2890,6 +2918,10 @@ canvas {
 
 @media (max-width: 920px) {
   .librarian-progress-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .librarian-gate-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

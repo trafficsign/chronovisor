@@ -720,6 +720,17 @@ def chronovisor_search(
             "returned_pages": [
                 hit["page_id"] for hit in [*direct_hits, *expanded_hits]
             ],
+            "direct_uids": [
+                hit["uid"] for hit in direct_hits if hit.get("uid")
+            ],
+            "expanded_uids": [
+                hit["uid"] for hit in expanded_hits if hit.get("uid")
+            ],
+            "returned_uids": [
+                hit["uid"]
+                for hit in [*direct_hits, *expanded_hits]
+                if hit.get("uid")
+            ],
             "provisional_ids": [hit["provisional_id"] for hit in provisional_hits],
             "retrieval": retrieval_trace,
         }

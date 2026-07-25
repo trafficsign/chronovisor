@@ -235,6 +235,7 @@ class ContextItem:
     title: str
     updated: str
     score: float
+    uid: str = ""
     snippets: list[str] = field(default_factory=list)
     sensitivity: str = "normal"
 
@@ -1324,6 +1325,7 @@ def collect_context(
                 title=result.title,
                 updated=result.updated,
                 score=round(result.score, 4),
+                uid=page_uid_for_id(result.page_id),
                 snippets=snippets,
                 sensitivity=getattr(result, "sensitivity", "normal") or "normal",
             )
@@ -1370,6 +1372,7 @@ def context_item_from_page_id(
     title = page_id
     updated = ""
     sensitivity = "normal"
+    page_uid = ""
     try:
         from chronovisor.frontmatter import parse as parse_frontmatter
 
@@ -1380,6 +1383,8 @@ def context_item_from_page_id(
             updated = meta["updated"]
         if isinstance(meta.get("sensitivity"), str):
             sensitivity = meta["sensitivity"].strip().lower() or "normal"
+        if isinstance(meta.get("uid"), str):
+            page_uid = meta["uid"]
         elif path.parent.name == "career":
             sensitivity = "high"
     except OSError:
@@ -1396,9 +1401,23 @@ def context_item_from_page_id(
         title=title,
         updated=updated,
         score=score,
+        uid=page_uid or page_uid_for_id(page_id),
         snippets=snippets,
         sensitivity=sensitivity,
     )
+
+
+def page_uid_for_id(page_id: str) -> str:
+    """Resolve the durable UID without changing the legacy page-id API."""
+
+    try:
+        from chronovisor.page_registry import PageRegistry
+        from chronovisor.store import CHRONOVISOR_ROOT
+
+        row = PageRegistry(CHRONOVISOR_ROOT).resolve(page_id)
+    except Exception:
+        row = None
+    return str(row.get("uid") or "") if isinstance(row, dict) else ""
 
 
 def should_skip_session_page(
@@ -2149,6 +2168,7 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "confidence": result.confidence,
         "queries": result.queries,
         "pages": [item.page_id for item in result.context_items],
+        "page_uids": [item.uid for item in result.context_items if item.uid],
         "reasons": result.reasons,
         "used_judge": result.used_judge,
         "judge_confidence": result.judge_confidence,
@@ -2192,6 +2212,7 @@ def recall_log_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "score": record.get("confidence", 0.0),
         "queries": record.get("queries", []),
         "pages": record.get("pages", []),
+        "page_uids": record.get("page_uids", []),
         "reasons": record.get("reasons", []),
         "used_judge": record.get("used_judge", False),
         "judge_confidence": record.get("judge_confidence"),

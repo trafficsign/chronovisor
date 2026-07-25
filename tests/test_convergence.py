@@ -218,6 +218,46 @@ def test_local_attempts_back_off_then_escalate(tmp_path: Path) -> None:
     assert escalated["item"]["next_attempt_at"] is None
 
 
+def test_foreground_preemption_requeues_without_consuming_attempt(
+    tmp_path: Path,
+) -> None:
+    store = _store(
+        tmp_path,
+        policy=RetryPolicy(
+            max_local_attempts=1,
+            max_frontier_attempts=1,
+            local_base_delay_seconds=10,
+            lease_seconds=30,
+        ),
+    )
+    key = store.merge_item(
+        lane="librarian_classify",
+        source_id="batch:0",
+        input_data={"sha256": "same"},
+        resolver_version="v1",
+    )["item"]["key"]
+    claim = store.claim_attempt(key, "local", owner="worker", now=NOW)
+    assert claim["item"]["local_attempts"] == 1
+
+    preempted = store.fail_attempt(
+        key,
+        "local",
+        owner="worker",
+        error="foreground recall",
+        failure_class="foreground_preempted",
+        allow_frontier=False,
+        consume_attempt=False,
+        now=NOW,
+    )
+
+    assert preempted["item"]["status"] == "pending_local"
+    assert preempted["item"]["local_attempts"] == 0
+    assert preempted["item"]["next_attempt_at"] is None
+    retried = store.claim_attempt(key, "local", owner="worker-2", now=NOW)
+    assert retried["claimed"] is True
+    assert retried["item"]["local_attempts"] == 1
+
+
 def test_frontier_attempts_are_bounded_and_terminally_quarantined(
     tmp_path: Path,
 ) -> None:

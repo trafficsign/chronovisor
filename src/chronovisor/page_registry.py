@@ -400,10 +400,22 @@ class PageRegistry:
         normalized_key = _normalize_key(key)
         ambiguous = state.get("ambiguous_keys", {}).get(normalized_key)
         if isinstance(ambiguous, list) and ambiguous:
-            raise PageRegistryError(
-                f"ambiguous page key {key!r}; use UID or relative path"
-            )
-        uid = state["keys"].get(normalized_key)
+            raw_key = str(key or "").strip().casefold()
+            exact = [
+                uid
+                for uid in ambiguous
+                if str((state["pages"].get(uid) or {}).get("page_id") or "")
+                .casefold()
+                == raw_key
+            ]
+            if len(exact) == 1:
+                uid = exact[0]
+            else:
+                raise PageRegistryError(
+                    f"ambiguous page key {key!r}; use UID or relative path"
+                )
+        else:
+            uid = state["keys"].get(normalized_key)
         if uid is None:
             try:
                 uid = normalize_page_uid(key)

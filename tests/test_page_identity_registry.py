@@ -116,6 +116,21 @@ def test_duplicate_stem_requires_uid_or_relative_path(tmp_path: Path) -> None:
     assert one["uid"] != two["uid"]
 
 
+def test_exact_page_id_wins_over_normalized_dot_md_collision(
+    tmp_path: Path,
+) -> None:
+    _page(tmp_path / "pages" / "item.md", "Canonical")
+    _page(tmp_path / "pages" / "item.md.md", "Literal dot md")
+    registry = PageRegistry(tmp_path)
+    registry.ensure_manifest()
+
+    canonical = registry.resolve("item")
+    literal = registry.resolve("item.md")
+
+    assert canonical and canonical["page_id"] == "item"
+    assert literal and literal["page_id"] == "item.md"
+
+
 def test_server_does_not_bypass_ambiguous_registry_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -207,6 +207,73 @@ def verify_merge_coverage(
     disposition_text = json.dumps(
         dispositions, ensure_ascii=False, sort_keys=True, default=str
     )
+    missing_output_spans: list[dict[str, Any]] = []
+    missing_output_anchors: list[dict[str, Any]] = []
+    missing_ledger_spans: list[dict[str, Any]] = []
+    for row in mapping_rows:
+        action = str(row.get("action") or "")
+        if action not in {"output", "ledger"}:
+            continue
+        source_uid = str(row.get("source_uid") or "")
+        span_sha256 = str(row.get("span_sha256") or "")
+        candidates = span_lookup.get((source_uid, span_sha256), [])
+        if row.get("span_index") is not None:
+            try:
+                wanted_index = int(row["span_index"])
+            except (TypeError, ValueError):
+                candidates = []
+            else:
+                candidates = [
+                    span
+                    for span in candidates
+                    if int(span.get("index") or 0) == wanted_index
+                ]
+        if len(candidates) != 1:
+            continue
+        span_text = str(candidates[0].get("text") or "")
+        if action == "output" and span_text not in output_text:
+            missing_output_spans.append(
+                {
+                    "source_uid": source_uid,
+                    "span_index": candidates[0].get("index"),
+                    "span_sha256": span_sha256,
+                }
+            )
+        if action == "output" and require_raw_refs:
+            output_anchor = str(row.get("output_anchor") or "").strip()
+            anchor_present = bool(
+                output_anchor
+                and (
+                    f"^{output_anchor}" in output_text
+                    or any(
+                        line.startswith("#")
+                        and line.lstrip("#").strip().casefold().replace(" ", "-")
+                        == output_anchor.casefold().replace(" ", "-")
+                        for line in output_text.splitlines()
+                    )
+                )
+            )
+            if not anchor_present:
+                missing_output_anchors.append(
+                    {
+                        "source_uid": source_uid,
+                        "span_index": candidates[0].get("index"),
+                        "span_sha256": span_sha256,
+                        "output_anchor": output_anchor,
+                    }
+                )
+        if (
+            action == "ledger"
+            and span_text not in disposition_text
+            and span_sha256 not in disposition_text
+        ):
+            missing_ledger_spans.append(
+                {
+                    "source_uid": source_uid,
+                    "span_index": candidates[0].get("index"),
+                    "span_sha256": span_sha256,
+                }
+            )
     missing_fingerprints = {
         kind: sorted(
             value
@@ -225,6 +292,9 @@ def verify_merge_coverage(
     )
     if (
         missing_spans
+        or missing_output_spans
+        or missing_output_anchors
+        or missing_ledger_spans
         or missing_fingerprints
         or missing_raw_refs
         or invalid_mappings
@@ -234,6 +304,9 @@ def verify_merge_coverage(
             json.dumps(
                 {
                     "missing_spans": missing_spans,
+                    "missing_output_spans": missing_output_spans,
+                    "missing_output_anchors": missing_output_anchors,
+                    "missing_ledger_spans": missing_ledger_spans,
                     "missing_fingerprints": missing_fingerprints,
                     "missing_raw_refs": missing_raw_refs,
                     "invalid_mappings": invalid_mappings,

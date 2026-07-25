@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from chronovisor.classification import (
     ClassificationError,
     ControlledSubject,
     classification_authority_status,
+    classification_source_sha256,
     default_udc_package,
     load_ndc_overlay,
     propose_from_legacy_metadata,
@@ -15,6 +17,7 @@ from chronovisor.classification import (
     validate_controlled_subject,
     validate_record,
 )
+from chronovisor import classification_model_worker
 from chronovisor.librarian import capture_baseline, run_shadow
 from chronovisor.librarian_status import build_librarian_status
 
@@ -34,7 +37,7 @@ def _write_page(path: Path, *, tags: str = "") -> None:
 
 
 def test_bootstrap_classification_cannot_become_authority() -> None:
-    package = default_udc_package()
+    package = replace(default_udc_package(), complete=False)
     record = propose_from_legacy_metadata(
         tags=["d/ai", "t/architecture"],
         page_type="architecture",
@@ -60,9 +63,11 @@ def test_cvo_subject_and_ndc_overlay_are_explicitly_versioned(
     tmp_path: Path,
 ) -> None:
     package = default_udc_package()
+    broader = package.by_notation("0")
+    assert broader is not None
     subject = ControlledSubject(
         concept_uri="cvo:subject/agent-memory",
-        broader_udc_uri="urn:chronovisor:udcs:0",
+        broader_udc_uri=str(broader["uri"]),
         label="Agent memory",
         definition="Long-term memory systems for software agents.",
         inclusion_examples=("retrieval memory",),
@@ -72,6 +77,48 @@ def test_cvo_subject_and_ndc_overlay_are_explicitly_versioned(
     )
     validate_controlled_subject(subject, package=package)
     assert load_ndc_overlay(tmp_path) is None
+
+
+def test_bundled_udc_snapshot_is_complete_licensed_and_japanese() -> None:
+    package = default_udc_package()
+    concepts = list(package.concepts.values())
+
+    assert package.complete is True
+    assert package.license == "CC BY-SA 3.0"
+    assert len(concepts) >= 2_500
+    assert (
+        sum(bool(row.get("label_ja")) for row in concepts) / len(concepts)
+        >= 0.95
+    )
+    artificial_intelligence = package.by_notation("004.8")
+    assert artificial_intelligence is not None
+    assert artificial_intelligence["label_en"]
+    assert artificial_intelligence["label_ja"]
+
+
+def test_classification_source_hash_ignores_adopted_metadata() -> None:
+    before = (
+        "---\n"
+        "title: Memory\n"
+        "tags: [d/ai]\n"
+        "---\n\n"
+        "# Memory\n\n"
+        "Stable body.\n"
+    )
+    after = (
+        "---\n"
+        "title: Memory\n"
+        "tags: [d/ai]\n"
+        "uid: 019f0000-0000-7000-8000-000000000000\n"
+        "call_number: UDCS 004.8\n"
+        "classification_status: adopted\n"
+        'classification_json: {"status":"adopted"}\n'
+        "---\n\n"
+        "# Memory\n\n"
+        "Stable body.\n"
+    )
+
+    assert classification_source_sha256(before) == classification_source_sha256(after)
 
 
 def test_librarian_shadow_progress_is_visible_but_not_false_green(
@@ -139,3 +186,41 @@ def test_baseline_records_missing_locked_fixture_without_wiki_mutation(
     }
     assert baseline["wiki_mutated"] is False
     assert not (tmp_path / "runtime").exists()
+
+
+def test_model_worker_splits_a_truncated_json_batch(monkeypatch) -> None:
+    pages = [
+        {
+            "uid": f"uid-{index}",
+            "title": f"Page {index}",
+            "candidates": [{"notation": "0"}],
+        }
+        for index in range(2)
+    ]
+    calls: list[int] = []
+
+    def fake_chat(*args, **kwargs):
+        count = kwargs["format"]["properties"]["decisions"]["minItems"]
+        calls.append(count)
+        if count == 2:
+            return '{"decisions":[{"uid":"uid-0"'
+        uid = "uid-0" if len(calls) == 2 else "uid-1"
+        return (
+            '{"decisions":[{"uid":"'
+            + uid
+            + '","primary_notation":"0","secondary_notations":[],'
+            '"confidence":0.9,"rationale":"ok"}]}'
+        )
+
+    monkeypatch.setattr(classification_model_worker.ollama, "chat", fake_chat)
+
+    decisions, model_calls = classification_model_worker._call(
+        model="test",
+        keep_alive="0",
+        pages=pages,
+        role="primary-proposer",
+    )
+
+    assert [row["uid"] for row in decisions] == ["uid-0", "uid-1"]
+    assert model_calls == 3
+    assert calls == [2, 1, 1]

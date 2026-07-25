@@ -16,6 +16,7 @@ from typing import Any, Mapping
 
 from chronovisor import frontmatter
 from chronovisor.classification import (
+    classification_source_sha256,
     classification_authority_status,
     load_udc_package,
     propose_from_legacy_metadata,
@@ -203,6 +204,10 @@ def run_shadow(
     authority = classification_authority_status(root, package=package)
     candidates = []
     for uid, row in sorted(pages.items()):
+        path = root / str(row.get("path") or "")
+        source_sha256 = classification_source_sha256(
+            path.read_text(encoding="utf-8")
+        )
         classification = row.get("classification")
         evidence_refs = (
             classification.get("evidence_refs")
@@ -216,7 +221,7 @@ def run_shadow(
         )
         if (
             not isinstance(classification, Mapping)
-            or current_ref != f"page-sha256:{row.get('content_sha256')}"
+            or current_ref != f"page-sha256:{source_sha256}"
         ):
             candidates.append((uid, row))
     selected = candidates if full_sweep or limit < 0 else candidates[: max(0, limit)]
@@ -236,7 +241,9 @@ def run_shadow(
                 sensitivity=str(
                     meta.get("sensitivity") or row.get("sensitivity") or "normal"
                 ),
-                evidence_ref=f"page-sha256:{row.get('content_sha256')}",
+                # Full-file hashes change when UID/classification metadata is
+                # backfilled. Bind evidence to classification-relevant bytes.
+                evidence_ref=f"page-sha256:{classification_source_sha256(_text)}",
                 package=package,
             )
             updates[uid] = {

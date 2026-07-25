@@ -1433,6 +1433,7 @@ class ConvergenceStore:
         failure_class: str | None = None,
         owner: str | None = None,
         allow_frontier: bool = True,
+        consume_attempt: bool = True,
         now: datetime | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
@@ -1456,6 +1457,13 @@ class ConvergenceStore:
             item["last_failure_class"] = failure_class
             item["updated_at"] = _iso(current_time)
             self._clear_lease(item)
+
+            if not consume_attempt:
+                field = self._stage_attempt_field(stage)
+                item[field] = max(0, int(item.get(field) or 0) - 1)
+                item["status"] = f"pending_{stage}"
+                item["next_attempt_at"] = None
+                return item, previous_status
 
             if is_human_required_failure(failure_class):
                 item["status"] = "human_required"
@@ -1500,7 +1508,9 @@ class ConvergenceStore:
             self._append_event_unlocked(
                 self._event(
                     key=key,
-                    name="attempt_failed",
+                    name=(
+                        "attempt_failed" if consume_attempt else "attempt_preempted"
+                    ),
                     now=current_time,
                     previous_status=previous_status,
                     item=item,

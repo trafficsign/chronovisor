@@ -19,13 +19,15 @@ import sqlite3
 import tempfile
 import time
 import uuid
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
+from chronovisor import frontmatter
+from chronovisor.page_identity import normalize_page_uid
 from chronovisor.store import CHRONOVISOR_ROOT, page_id_from_path
 
 SEMANTIC_ROOT = CHRONOVISOR_ROOT / ".index" / "semantic"
@@ -33,9 +35,9 @@ GENERATIONS_DIR = SEMANTIC_ROOT / "generations"
 DELTAS_DIR = SEMANTIC_ROOT / "deltas"
 ACTIVE_FILE = SEMANTIC_ROOT / "active.json"
 ACTIVATION_LOCK = SEMANTIC_ROOT / "activation.lock"
-EXTRACTOR_SCHEMA_VERSION = 1
-INDEX_SCHEMA_VERSION = 2
-SUPPORTED_INDEX_SCHEMA_VERSIONS = {1, INDEX_SCHEMA_VERSION}
+EXTRACTOR_SCHEMA_VERSION = 2
+INDEX_SCHEMA_VERSION = 3
+SUPPORTED_INDEX_SCHEMA_VERSIONS = {1, 2, INDEX_SCHEMA_VERSION}
 DEFAULT_COARSE_DIMENSIONS = 512
 ANN_FILENAME = "coarse.usearch"
 LEGACY_EMBEDDINGS_DB = CHRONOVISOR_ROOT / ".index" / "embeddings.sqlite"
@@ -56,6 +58,7 @@ class SemanticDocument:
     source_path: str
     source_sha256: str
     source_mtime_ns: int
+    page_uid: str = ""
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,12 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
     except (OSError, UnicodeDecodeError):
         return []
     page_id = page_id_from_path(path)
+    metadata, _body = frontmatter.parse(content)
+    try:
+        page_uid = normalize_page_uid(metadata.get("uid"))
+    except ValueError:
+        page_uid = ""
+    identity = page_uid or page_id
     source_sha256 = _sha256_bytes(content.encode("utf-8"))
     title_match = re.search(r"title:\s*(.+)", content)
     title = title_match.group(1).strip() if title_match else page_id
@@ -166,10 +175,11 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
         "source_path": str(path),
         "source_sha256": source_sha256,
         "source_mtime_ns": mtime_ns,
+        "page_uid": page_uid,
     }
     documents = [
         SemanticDocument(
-            doc_id=page_id,
+            doc_id=identity,
             kind="page",
             ordinal=-1,
             text=page_text,
@@ -178,7 +188,7 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
     ]
     documents.extend(
         SemanticDocument(
-            doc_id=f"{page_id}#q{index}",
+            doc_id=f"{identity}#q{index}",
             kind="question",
             ordinal=index,
             text=question,
@@ -188,7 +198,7 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
     )
     documents.extend(
         SemanticDocument(
-            doc_id=f"{page_id}#c{index}",
+            doc_id=f"{identity}#c{index}",
             kind="chunk",
             ordinal=index,
             text=chunk,
@@ -259,7 +269,8 @@ def _write_metadata(path: Path, documents: Sequence[SemanticDocument]) -> None:
                 text TEXT NOT NULL,
                 source_path TEXT NOT NULL,
                 source_sha256 TEXT NOT NULL,
-                source_mtime_ns INTEGER NOT NULL
+                source_mtime_ns INTEGER NOT NULL,
+                page_uid TEXT NOT NULL
             );
             CREATE INDEX documents_page_id_idx ON documents(page_id);
             CREATE INDEX documents_kind_idx ON documents(kind);
@@ -269,8 +280,8 @@ def _write_metadata(path: Path, documents: Sequence[SemanticDocument]) -> None:
             """
             INSERT INTO documents
             (vector_row, doc_id, page_id, kind, ordinal, text, source_path,
-             source_sha256, source_mtime_ns)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             source_sha256, source_mtime_ns, page_uid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (
@@ -283,6 +294,7 @@ def _write_metadata(path: Path, documents: Sequence[SemanticDocument]) -> None:
                     document.source_path,
                     document.source_sha256,
                     document.source_mtime_ns,
+                    document.page_uid,
                 )
                 for row, document in enumerate(documents)
             ),
@@ -645,10 +657,14 @@ def rollback_generation(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
 def _metadata_rows(path: Path) -> list[tuple[Any, ...]]:
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(documents)")
+        }
+        page_uid = "page_uid" if "page_uid" in columns else "'' AS page_uid"
         return connection.execute(
-            """
+            f"""
             SELECT vector_row, doc_id, page_id, kind, ordinal, source_sha256,
-                   source_mtime_ns
+                   source_mtime_ns, {page_uid}
             FROM documents ORDER BY vector_row
             """
         ).fetchall()
@@ -669,6 +685,7 @@ class LoadedGeneration:
     delta_page_ids: list[str]
     delta_kinds: list[str]
     page_rows: dict[str, list[int]]
+    page_uids: list[str] = field(default_factory=list)
     ann_index: Any | None = None
 
     def _normalized_query(self, query_vector: Sequence[float]) -> np.ndarray:
@@ -960,6 +977,7 @@ def load_generation(
         delta_page_ids=delta_page_ids,
         delta_kinds=delta_kinds,
         page_rows=page_rows,
+        page_uids=[str(row[7]) for row in rows],
         ann_index=ann_index,
     )
 
