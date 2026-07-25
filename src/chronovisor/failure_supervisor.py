@@ -742,14 +742,16 @@ def _current_adopted_authority_sha256() -> str | None:
     """
 
     try:
+        from chronovisor import runtime_config
         from chronovisor.decision_router import resolve_router_policy
-        from chronovisor.runtime_config import load_decision_router_config
 
-        resolution = resolve_router_policy(
-            load_decision_router_config(
-                chronovisor_store.CHRONOVISOR_ROOT / "config.toml"
-            )
+        loader = runtime_config.load_decision_router_config
+        config = (
+            loader(chronovisor_store.CHRONOVISOR_ROOT / "config.toml")
+            if getattr(loader, "__module__", "") == runtime_config.__name__
+            else loader()
         )
+        resolution = resolve_router_policy(config)
     except Exception:
         return None
     artifact_sha256 = resolution.artifact_sha256
