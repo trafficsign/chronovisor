@@ -745,7 +745,11 @@ def _current_adopted_authority_sha256() -> str | None:
         from chronovisor.decision_router import resolve_router_policy
         from chronovisor.runtime_config import load_decision_router_config
 
-        resolution = resolve_router_policy(load_decision_router_config())
+        resolution = resolve_router_policy(
+            load_decision_router_config(
+                chronovisor_store.CHRONOVISOR_ROOT / "config.toml"
+            )
+        )
     except Exception:
         return None
     artifact_sha256 = resolution.artifact_sha256
