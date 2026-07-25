@@ -7,8 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import classification_engine
-from chronovisor import classification_model_worker
+from chronovisor import classification_engine, classification_model_worker
 from chronovisor.classification import (
     ClassificationError,
     ControlledSubject,
@@ -332,3 +331,91 @@ def test_consensus_batch_retries_foreground_preemption(monkeypatch) -> None:
     assert decisions[0]["uid"] == "uid-1"
     assert store.failures[0]["consume_attempt"] is False
     assert len(store.completed) == 1
+
+
+def test_model_stage_cache_resumes_from_last_complete_chunk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pages = [
+        {
+            "uid": f"uid-{index}",
+            "source_sha256": f"sha256:{index}",
+            "candidates": [{"notation": "004.8"}],
+        }
+        for index in range(6)
+    ]
+    cache_path = tmp_path / "stage-cache.json"
+    cache = {
+        "schema": classification_model_worker.STAGE_CACHE_SCHEMA,
+        "cache_key": "cache-key",
+        "stages": {},
+    }
+    first_calls: list[list[str]] = []
+
+    def interrupted_call(**kwargs):
+        first_calls.append([str(row["uid"]) for row in kwargs["pages"]])
+        if len(first_calls) == 2:
+            raise RuntimeError("foreground killed child")
+        return (
+            [
+                {
+                    "uid": row["uid"],
+                    "primary_notation": "004.8",
+                    "secondary_notations": [],
+                    "confidence": 0.9,
+                    "rationale": "ok",
+                }
+                for row in kwargs["pages"]
+            ],
+            1,
+        )
+
+    monkeypatch.setattr(classification_model_worker, "_call", interrupted_call)
+    with pytest.raises(RuntimeError, match="foreground"):
+        classification_model_worker._cached_stage_call(
+            cache=cache,
+            cache_path=cache_path,
+            stage="primary",
+            model="test",
+            keep_alive="0",
+            pages=pages,
+            role="primary-proposer",
+        )
+
+    resumed_cache = classification_model_worker._load_stage_cache(
+        cache_path,
+        "cache-key",
+    )
+    resumed_calls: list[list[str]] = []
+
+    def resumed_call(**kwargs):
+        resumed_calls.append([str(row["uid"]) for row in kwargs["pages"]])
+        return (
+            [
+                {
+                    "uid": row["uid"],
+                    "primary_notation": "004.8",
+                    "secondary_notations": [],
+                    "confidence": 0.9,
+                    "rationale": "ok",
+                }
+                for row in kwargs["pages"]
+            ],
+            1,
+        )
+
+    monkeypatch.setattr(classification_model_worker, "_call", resumed_call)
+    decisions, model_calls = classification_model_worker._cached_stage_call(
+        cache=resumed_cache,
+        cache_path=cache_path,
+        stage="primary",
+        model="test",
+        keep_alive="0",
+        pages=pages,
+        role="primary-proposer",
+    )
+
+    assert len(decisions) == 6
+    assert model_calls == 1
+    assert resumed_calls == [["uid-5"]]

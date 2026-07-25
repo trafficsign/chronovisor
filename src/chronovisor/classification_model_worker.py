@@ -12,7 +12,15 @@ from typing import Any
 from chronovisor import ollama
 from chronovisor.classification import load_udc_package
 from chronovisor.classification_engine import CONSENSUS_SCHEMA
+from chronovisor.durable_state import (
+    DurableStateError,
+    verify_sealed_object,
+    write_sealed_json,
+)
 from chronovisor.runtime_config import load_decision_router_config
+
+STAGE_CACHE_SCHEMA = "chronovisor.classification-stage-cache.v1"
+STAGE_CHUNK_SIZE = 5
 
 
 def _schema(count: int) -> dict[str, Any]:
@@ -229,6 +237,153 @@ def _tie_candidate_pages(
     return output
 
 
+def _stage_cache_path(
+    root: Path,
+    pages: Sequence[Mapping[str, Any]],
+    *,
+    primary_model: str,
+    challenger_model: str,
+    tie_break_model: str,
+) -> tuple[str, Path]:
+    identity = {
+        "schema": STAGE_CACHE_SCHEMA,
+        "consensus_schema": CONSENSUS_SCHEMA,
+        "models": {
+            "primary": primary_model,
+            "challenger": challenger_model,
+            "tie_break": tie_break_model,
+        },
+        "pages": [
+            {
+                "uid": str(page["uid"]),
+                "source_sha256": str(page["source_sha256"]),
+                "candidates": [
+                    str(candidate["notation"])
+                    for candidate in page.get("candidates") or []
+                ],
+            }
+            for page in pages
+        ],
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    path = (
+        root
+        / "runtime"
+        / "librarian"
+        / "classification-stage-cache"
+        / f"{digest}.json"
+    )
+    return digest, path
+
+
+def _load_stage_cache(path: Path, cache_key: str) -> dict[str, Any]:
+    try:
+        payload = verify_sealed_object(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+    except (OSError, ValueError, TypeError, DurableStateError):
+        return {
+            "schema": STAGE_CACHE_SCHEMA,
+            "cache_key": cache_key,
+            "stages": {},
+        }
+    if (
+        payload.get("schema") != STAGE_CACHE_SCHEMA
+        or payload.get("cache_key") != cache_key
+        or not isinstance(payload.get("stages"), dict)
+    ):
+        return {
+            "schema": STAGE_CACHE_SCHEMA,
+            "cache_key": cache_key,
+            "stages": {},
+        }
+    return payload
+
+
+def _valid_cached_stage(
+    rows: object,
+    pages: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]] | None:
+    if not isinstance(rows, list) or len(rows) != len(pages):
+        return None
+    by_uid = {
+        str(row.get("uid") or ""): dict(row)
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+    output: list[dict[str, Any]] = []
+    for page in pages:
+        uid = str(page["uid"])
+        row = by_uid.get(uid)
+        if row is None:
+            return None
+        allowed = {
+            str(candidate["notation"]) for candidate in page.get("candidates") or []
+        }
+        if str(row.get("primary_notation") or "") not in allowed:
+            return None
+        if any(
+            str(value) not in allowed
+            for value in row.get("secondary_notations") or []
+        ):
+            return None
+        output.append(row)
+    return output
+
+
+def _cached_stage_call(
+    *,
+    cache: dict[str, Any],
+    cache_path: Path,
+    stage: str,
+    model: str,
+    keep_alive: str,
+    pages: Sequence[Mapping[str, Any]],
+    role: str,
+    prior: Sequence[Mapping[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    stages = cache.setdefault("stages", {})
+    raw_cached = stages.get(stage)
+    cached = _valid_cached_stage(raw_cached, pages)
+    if cached is not None:
+        return cached, 0
+    decisions: list[dict[str, Any]] = []
+    if isinstance(raw_cached, list) and len(raw_cached) < len(pages):
+        valid_prefix = _valid_cached_stage(
+            raw_cached,
+            pages[: len(raw_cached)],
+        )
+        if valid_prefix is not None:
+            decisions = valid_prefix
+    calls = 0
+    for offset in range(len(decisions), len(pages), STAGE_CHUNK_SIZE):
+        chunk = pages[offset : offset + STAGE_CHUNK_SIZE]
+        prior_chunk = (
+            prior[offset : offset + STAGE_CHUNK_SIZE]
+            if prior is not None
+            else None
+        )
+        chunk_decisions, chunk_calls = _call(
+            model=model,
+            keep_alive=keep_alive,
+            pages=chunk,
+            role=role,
+            prior=prior_chunk,
+        )
+        decisions.extend(chunk_decisions)
+        calls += chunk_calls
+        stages[stage] = decisions
+        write_sealed_json(cache_path, cache, backup=False)
+    return decisions, calls
+
+
 def _decision_digest(
     uid: str,
     primary: Mapping[str, Any],
@@ -260,13 +415,27 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(pages, list) or not pages:
         raise ValueError("classification worker requires pages")
     config = load_decision_router_config()
-    primary, primary_calls = _call(
+    cache_key, cache_path = _stage_cache_path(
+        root,
+        pages,
+        primary_model=config.primary_model,
+        challenger_model=config.challenger_model,
+        tie_break_model=config.tie_break_model,
+    )
+    cache = _load_stage_cache(cache_path, cache_key)
+    primary, primary_calls = _cached_stage_call(
+        cache=cache,
+        cache_path=cache_path,
+        stage="primary",
         model=config.primary_model,
         keep_alive=config.primary_keep_alive,
         pages=pages,
         role="primary-proposer",
     )
-    challenger, challenger_calls = _call(
+    challenger, challenger_calls = _cached_stage_call(
+        cache=cache,
+        cache_path=cache_path,
+        stage="challenger",
         model=config.challenger_model,
         keep_alive=config.challenger_keep_alive,
         pages=pages,
@@ -299,7 +468,10 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             }
             for index in disagreements
         ]
-        tie, tie_calls = _call(
+        tie, tie_calls = _cached_stage_call(
+            cache=cache,
+            cache_path=cache_path,
+            stage="tie_break",
             model=config.tie_break_model,
             keep_alive=config.tie_break_keep_alive,
             pages=tie_pages,
