@@ -320,6 +320,29 @@ def _derive_code(state: Mapping[str, Any], queue: Mapping[str, Any]) -> str:
     return "STEADY_CLEAN"
 
 
+def _rollout_status(root: Path) -> dict[str, Any]:
+    path = root / "runtime" / "librarian" / "rollout.json"
+    if not path.exists():
+        return {
+            "status": "not_started",
+            "stage": None,
+            "updated_at": None,
+        }
+    try:
+        payload = read_sealed_json(path, recover_backup=False)
+    except DurableStateError:
+        return {
+            "status": "unreadable",
+            "stage": None,
+            "updated_at": None,
+        }
+    return {
+        "status": str(payload.get("status") or "unknown"),
+        "stage": payload.get("stage"),
+        "updated_at": payload.get("updated_at"),
+    }
+
+
 def build_librarian_status(
     root: Path,
     *,
@@ -512,6 +535,7 @@ def build_librarian_status(
         "restore_points": _restore_points(root),
         "transaction_preimages": preimages,
         "migration_dispositions": dispositions,
+        "rollout": _rollout_status(root),
         "soak": soak,
         "recent_receipts": recent_receipts[:20],
         "blocked_reasons": blocked_reasons,

@@ -101,6 +101,7 @@ const els = {
   librarianSweepBar: document.getElementById("librarian-sweep-bar"),
   librarianAuthority: document.getElementById("librarian-authority"),
   librarianQuality: document.getElementById("librarian-quality"),
+  librarianRollout: document.getElementById("librarian-rollout"),
   librarianSoak: document.getElementById("librarian-soak"),
   librarianRecovery: document.getElementById("librarian-recovery"),
   librarianQueue: document.getElementById("librarian-queue"),
@@ -2022,6 +2023,7 @@ function renderLibrarian(librarian) {
   const queue = data.queue || {};
   const authority = data.authority || {};
   const quality = data.quality || {};
+  const rollout = data.rollout || {};
   const soak = data.soak || {};
   const restorePoints = data.restore_points || {};
   const preimages = data.transaction_preimages || {};
@@ -2077,6 +2079,14 @@ function renderLibrarian(librarian) {
     : "";
   els.librarianQuality.textContent =
     [exact, forced].filter(Boolean).join(" · ") || fmt(quality.locked_holdout, "Not evaluated");
+  const rolloutStatus = fmt(rollout.status, "not_started").replaceAll("_", " ");
+  const rolloutStage = fmt(rollout.stage, "").replaceAll("_", " ");
+  els.librarianRollout.textContent = rolloutStage
+    ? `${rolloutStatus} · ${rolloutStage}`
+    : rolloutStatus;
+  els.librarianRollout.title = rollout.updated_at
+    ? `Updated ${timeLabel(rollout.updated_at)}`
+    : "No rollout receipt yet";
   const remaining = intValue(soak.remaining_seconds);
   els.librarianSoak.textContent = soak.status === "running"
     ? `${(remaining / 86400).toFixed(1)}d remaining`

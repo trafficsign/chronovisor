@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from chronovisor import dashboard
+from chronovisor.durable_state import write_sealed_json
 from chronovisor.librarian import run_shadow
 from chronovisor.librarian_status import _derive_code
 
@@ -24,6 +25,7 @@ def test_dashboard_static_contract_exposes_librarian_progress() -> None:
         "librarian-receipts",
         "librarian-authority",
         "librarian-quality",
+        "librarian-rollout",
         "librarian-soak",
         "librarian-recovery",
     ):
@@ -40,6 +42,16 @@ def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> N
         encoding="utf-8",
     )
     run_shadow(root=tmp_path, full_sweep=True)
+    write_sealed_json(
+        tmp_path / "runtime" / "librarian" / "rollout.json",
+        {
+            "schema": "chronovisor.librarian-rollout.v1",
+            "status": "running",
+            "stage": "phase0_fixture_adjudication",
+            "updated_at": "2026-07-25T10:12:33+00:00",
+            "detail": {},
+        },
+    )
 
     from chronovisor.librarian_status import build_librarian_status
 
@@ -47,6 +59,11 @@ def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> N
     assert status["state"] == "NOT_READY"
     assert status["reason_codes"]
     assert "threshold_version" in status
+    assert status["rollout"] == {
+        "status": "running",
+        "stage": "phase0_fixture_adjudication",
+        "updated_at": "2026-07-25T10:12:33+00:00",
+    }
     assert status["progress"]["uid"] == {
         "numerator": 1,
         "denominator": 1,
