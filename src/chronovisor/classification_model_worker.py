@@ -339,7 +339,12 @@ def _valid_cached_stage(
         allowed = {
             str(candidate["notation"]) for candidate in page.get("candidates") or []
         }
-        if str(row.get("primary_notation") or "") not in allowed:
+        primary = str(row.get("primary_notation") or "")
+        safely_marked_invalid = (
+            row.get("_invalid_reason") == "notation_outside_host_candidates"
+            and float(row.get("confidence") or 0.0) == 0.0
+        )
+        if primary not in allowed and not safely_marked_invalid:
             return None
         if any(
             str(value) not in allowed

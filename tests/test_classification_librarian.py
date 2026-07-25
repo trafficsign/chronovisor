@@ -554,6 +554,73 @@ def test_model_stage_cache_resumes_from_last_complete_chunk(
     ]
 
 
+def test_model_stage_cache_resumes_after_safely_marked_invalid_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pages = [
+        {
+            "uid": f"uid-{index}",
+            "source_sha256": f"sha256:{index}",
+            "candidates": [{"notation": "004.8"}],
+        }
+        for index in range(2)
+    ]
+    invalid = {
+        "uid": "uid-0",
+        "primary_notation": "999",
+        "secondary_notations": [],
+        "confidence": 0.0,
+        "rationale": "model left the host candidate set",
+        "_invalid_reason": "notation_outside_host_candidates",
+    }
+    cache_path = tmp_path / "stage-cache.json"
+    cache = {
+        "schema": classification_model_worker.STAGE_CACHE_SCHEMA,
+        "cache_key": "cache-key",
+        "stages": {"primary": [invalid]},
+    }
+    calls: list[list[str]] = []
+
+    def resumed_call(**kwargs):
+        calls.append([str(row["uid"]) for row in kwargs["pages"]])
+        return (
+            [
+                {
+                    "uid": row["uid"],
+                    "primary_notation": "004.8",
+                    "secondary_notations": [],
+                    "confidence": 0.9,
+                    "rationale": "ok",
+                }
+                for row in kwargs["pages"]
+            ],
+            1,
+        )
+
+    monkeypatch.setattr(classification_model_worker, "_call", resumed_call)
+    decisions, model_calls = classification_model_worker._cached_stage_call(
+        cache=cache,
+        cache_path=cache_path,
+        stage="primary",
+        model="test",
+        keep_alive="0",
+        pages=pages,
+        role="primary-proposer",
+    )
+
+    assert decisions[0] == invalid
+    assert decisions[1]["uid"] == "uid-1"
+    assert model_calls == 1
+    assert calls == [["uid-1"]]
+    unsafe = {**invalid}
+    unsafe.pop("_invalid_reason")
+    assert (
+        classification_model_worker._valid_cached_stage([unsafe], pages[:1])
+        is None
+    )
+
+
 def test_expected_hold_is_a_separate_safety_gate() -> None:
     fixtures = [
         {
