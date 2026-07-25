@@ -120,7 +120,7 @@ def _call(
         model=model,
         format=_schema(len(pages)),
         num_ctx=min(config.num_ctx, 65_536),
-        num_predict=max(2_048, min(8_192, len(pages) * 220)),
+        num_predict=max(1_536, min(4_096, len(pages) * 110)),
         keep_alive=keep_alive,
         read_timeout_ms=config.read_timeout_ms,
         max_output_chars=max(16_000, len(pages) * 1_000),
