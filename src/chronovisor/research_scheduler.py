@@ -11,11 +11,12 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from chronovisor.jsonl_write import append_jsonl_durable
 from chronovisor.store import CHRONOVISOR_ROOT
@@ -28,7 +29,7 @@ SCHEDULER_LOG = RUNTIME_DIR / "scheduler.jsonl"
 
 
 def _iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _event(kind: str, **payload: Any) -> None:
@@ -101,6 +102,15 @@ def _set_model_phase(run_id: str, *, active: bool, model_pid: int | None) -> Non
     )
 
 
+def _preempt_requested(run_id: str) -> bool:
+    current = _active_research()
+    return bool(
+        current is not None
+        and current.get("run_id") == run_id
+        and current.get("preempt_requested") is True
+    )
+
+
 def sync_pending() -> bool:
     try:
         return any(path.is_file() for path in SYNC_DIR.iterdir())
@@ -142,6 +152,15 @@ def foreground_lane(*, preempt_grace_ms: int = 250) -> Iterator[ForegroundReceip
                 # The model worker is deliberately an isolated, stateless
                 # child.  Signal it from the foreground process so preemption
                 # cannot be delayed by a GPU-saturated research parent.
+                _atomic_ephemeral_json(
+                    ACTIVE_FILE,
+                    {
+                        **active,
+                        "preempt_requested": True,
+                        "preempt_marker_id": marker_id,
+                        "preempt_requested_at": _iso(),
+                    },
+                )
                 os.kill(model_pid, signal.SIGKILL)
                 preempt_signal_sent = True
             except (ProcessLookupError, PermissionError):
@@ -376,7 +395,9 @@ def run_cancellable_command(
             process.kill()
             stdout, stderr = process.communicate(timeout=0.05)
         if not status:
-            if lease.cancelled():
+            if lease.cancelled() or _preempt_requested(
+                lease.admission.run_id
+            ):
                 status = "cancelled"
                 error = "cancelled for foreground sync"
             elif process.returncode == 0:

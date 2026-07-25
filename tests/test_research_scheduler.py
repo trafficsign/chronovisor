@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import time
 import sys
+import time
 
 from chronovisor import research_scheduler
 
@@ -75,6 +75,38 @@ def test_foreground_marker_cancels_running_research_child(tmp_path, monkeypatch)
             assert receipt.resource_wait_ms <= 50
         assert result[0].status == "cancelled"
         assert result[0].latency_ms < 1000
+
+
+def test_closed_foreground_marker_still_classifies_sigkill_as_cancelled(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _paths(tmp_path, monkeypatch)
+    with research_scheduler.research_lane(
+        "run", enabled=True, mode="explicit", purpose="explicit", needs_model=True
+    ) as lease:
+        import threading
+
+        result = []
+        thread = threading.Thread(
+            target=lambda: result.append(
+                research_scheduler.run_cancellable_command(
+                    [sys.executable, "-c", "import time; time.sleep(5)"],
+                    "",
+                    lease,
+                    timeout_seconds=10,
+                    poll_seconds=0.2,
+                )
+            )
+        )
+        thread.start()
+        time.sleep(0.05)
+        with research_scheduler.foreground_lane(preempt_grace_ms=0) as receipt:
+            assert receipt.preempted is True
+        thread.join(timeout=1)
+
+        assert result[0].status == "cancelled"
+        assert result[0].error == "cancelled for foreground sync"
 
 
 def test_foreground_does_not_wait_for_non_model_research_phase(
