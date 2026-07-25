@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import shutil
 from collections import Counter
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -27,6 +28,8 @@ from chronovisor.runtime_config import load_decision_router_config
 from chronovisor.store import CHRONOVISOR_ROOT
 
 DISTRIBUTION_SCHEMA = "chronovisor.classification-distribution.v1"
+DEV_AUDIT_SCHEMA = "chronovisor.classification-dev-audit.v1"
+DEV_AUDIT_RECEIPT_SCHEMA = "chronovisor.classification-dev-audit-receipt.v1"
 
 
 def _now() -> str:
@@ -208,6 +211,127 @@ def distribution(root: Path) -> dict[str, Any]:
         backup=True,
     )
     return payload
+
+
+def apply_dev_audit(root: Path, audit_path: Path) -> dict[str, Any]:
+    """Apply reviewed dev-label corrections without opening locked Holdout."""
+
+    dev_path, _holdout_path, manifest_path = fixture_paths(root)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest["holdout"].get("opened_at"):
+        raise RuntimeError("dev audit is forbidden after Holdout opening")
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    if audit.get("schema") != DEV_AUDIT_SCHEMA:
+        raise RuntimeError("unsupported dev audit schema")
+    audit_id = str(audit.get("audit_id") or "")
+    if not audit_id or any(
+        value not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
+        for value in audit_id
+    ):
+        raise RuntimeError("dev audit requires a safe audit_id")
+    corrections = audit.get("corrections")
+    if not isinstance(corrections, list) or not corrections:
+        raise RuntimeError("dev audit requires corrections")
+
+    rows = _jsonl(dev_path)
+    by_uid = {str(row["uid"]): row for row in rows}
+    reviewed_at = str(audit.get("reviewed_at") or _now())
+    applied: list[dict[str, Any]] = []
+    for correction in corrections:
+        if not isinstance(correction, Mapping):
+            raise RuntimeError("dev audit correction must be an object")
+        uid = str(correction.get("uid") or "")
+        row = by_uid.get(uid)
+        if row is None:
+            raise RuntimeError(f"dev audit UID is not in dev fixture: {uid}")
+        if str(row.get("source_sha256") or "") != str(
+            correction.get("source_sha256") or ""
+        ):
+            raise RuntimeError(f"dev audit source hash drifted: {uid}")
+        original = str(correction.get("original_gold_primary_notation") or "")
+        if str(row.get("gold_primary_notation") or "") != original:
+            raise RuntimeError(f"dev audit original gold drifted: {uid}")
+        primary = str(correction.get("gold_primary_notation") or "")
+        allowed = [
+            str(value)
+            for value in correction.get("gold_allowed_primary_notations") or []
+        ]
+        candidate_notations = {
+            str(candidate.get("notation") or "")
+            for candidate in row.get("candidates") or []
+            if isinstance(candidate, Mapping)
+        }
+        if (
+            not primary
+            or primary not in candidate_notations
+            or not allowed
+            or primary not in allowed
+            or any(value not in candidate_notations for value in allowed)
+        ):
+            raise RuntimeError(f"dev audit notation is outside candidates: {uid}")
+        rationale = str(correction.get("gold_rationale") or "").strip()
+        reason = str(correction.get("reason") or "").strip()
+        if not rationale or not reason:
+            raise RuntimeError(f"dev audit rationale is missing: {uid}")
+        row["gold_primary_notation"] = primary
+        row["gold_allowed_primary_notations"] = allowed
+        row["gold_rationale"] = rationale
+        row["gold_review"] = {
+            "audit_id": audit_id,
+            "reviewed_at": reviewed_at,
+            "original_gold_primary_notation": original,
+            "reason": reason,
+        }
+        applied.append(
+            {
+                "uid": uid,
+                "original": original,
+                "primary": primary,
+                "allowed": allowed,
+            }
+        )
+
+    archive = (
+        root
+        / "classification"
+        / "fixtures"
+        / "epochs"
+        / f"{audit_id}-pre-audit"
+    )
+    archive.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(dev_path, archive / dev_path.name)
+    shutil.copy2(manifest_path, archive / manifest_path.name)
+    before_sha256 = hashlib.sha256(dev_path.read_bytes()).hexdigest()
+    _write_jsonl(dev_path, rows)
+    after_sha256 = hashlib.sha256(dev_path.read_bytes()).hexdigest()
+    audit_sha256 = hashlib.sha256(audit_path.read_bytes()).hexdigest()
+    manifest["dev"] = {
+        **manifest["dev"],
+        "sha256": f"sha256:{after_sha256}",
+        "audit_id": audit_id,
+        "audit_sha256": f"sha256:{audit_sha256}",
+        "reviewed_at": reviewed_at,
+    }
+    write_sealed_json(manifest_path, manifest, backup=True)
+    receipt = {
+        "schema": DEV_AUDIT_RECEIPT_SCHEMA,
+        "status": "verified",
+        "audit_id": audit_id,
+        "audit_sha256": f"sha256:{audit_sha256}",
+        "reviewed_at": reviewed_at,
+        "holdout_opened": False,
+        "correction_count": len(applied),
+        "corrections": applied,
+        "dev_before_sha256": f"sha256:{before_sha256}",
+        "dev_after_sha256": f"sha256:{after_sha256}",
+        "archive": str(archive),
+    }
+    write_sealed_json(
+        root / "classification" / "dev-audit-receipt.json",
+        receipt,
+        backup=True,
+    )
+    return receipt
 
 
 def _config_digest() -> str:
@@ -400,12 +524,14 @@ def main(argv: list[str] | None = None) -> int:
             "adjudicate",
             "lock",
             "distribution",
+            "audit-dev",
             "calibrate",
             "all",
         ),
     )
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
     parser.add_argument("--package", type=Path)
+    parser.add_argument("--audit", type=Path)
     parser.add_argument("--batch-size", type=int, default=20)
     args = parser.parse_args(argv)
     if args.command == "install-package":
@@ -420,6 +546,10 @@ def main(argv: list[str] | None = None) -> int:
         result = lock(args.root)
     elif args.command == "distribution":
         result = distribution(args.root)
+    elif args.command == "audit-dev":
+        if args.audit is None:
+            parser.error("--audit is required")
+        result = apply_dev_audit(args.root, args.audit)
     elif args.command == "calibrate":
         result = calibrate(args.root)
     else:

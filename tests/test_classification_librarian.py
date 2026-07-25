@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -7,7 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import classification_engine, classification_model_worker
+from chronovisor import (
+    classification_calibration,
+    classification_engine,
+    classification_model_worker,
+)
 from chronovisor.classification import (
     ClassificationError,
     ControlledSubject,
@@ -364,6 +370,94 @@ def test_consensus_batch_retries_foreground_preemption(monkeypatch) -> None:
     assert decisions[0]["uid"] == "uid-1"
     assert store.failures[0]["consume_attempt"] is False
     assert len(store.completed) == 1
+
+
+def test_dev_audit_corrects_reviewed_labels_without_opening_holdout(
+    tmp_path: Path,
+) -> None:
+    fixture_root = tmp_path / "classification" / "fixtures"
+    fixture_root.mkdir(parents=True)
+    dev_path = fixture_root / "classification-dev-200.jsonl"
+    holdout_path = fixture_root / "classification-holdout-100.jsonl"
+    manifest_path = fixture_root / "manifest.json"
+    row = {
+        "uid": "uid-1",
+        "source_sha256": "sha256:source",
+        "gold_primary_notation": "004.3",
+        "gold_allowed_primary_notations": ["004.3"],
+        "gold_rationale": "Original local consensus.",
+        "candidates": [
+            {"notation": "004.3"},
+            {"notation": "62"},
+            {"notation": "6"},
+        ],
+    }
+    dev_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    holdout_before = b'{"uid":"sealed"}\n'
+    holdout_path.write_bytes(holdout_before)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dev": {
+                    "path": str(dev_path),
+                    "count": 1,
+                    "sha256": "sha256:before",
+                },
+                "holdout": {
+                    "path": str(holdout_path),
+                    "count": 1,
+                    "sha256": "sha256:sealed",
+                    "opened_at": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    audit_path = tmp_path / "audit.json"
+    audit_path.write_text(
+        json.dumps(
+            {
+                "schema": classification_calibration.DEV_AUDIT_SCHEMA,
+                "audit_id": "epoch2-dev-review-v1",
+                "reviewed_at": "2026-07-26T06:30:00+09:00",
+                "corrections": [
+                    {
+                        "uid": "uid-1",
+                        "source_sha256": "sha256:source",
+                        "original_gold_primary_notation": "004.3",
+                        "gold_primary_notation": "62",
+                        "gold_allowed_primary_notations": ["62", "6"],
+                        "gold_rationale": "Automotive body specification is engineering.",
+                        "reason": "Computer hardware was a false lexical match.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    receipt = classification_calibration.apply_dev_audit(
+        tmp_path,
+        audit_path,
+    )
+
+    updated = json.loads(dev_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "verified"
+    assert receipt["correction_count"] == 1
+    assert updated["gold_primary_notation"] == "62"
+    assert updated["gold_allowed_primary_notations"] == ["62", "6"]
+    assert holdout_path.read_bytes() == holdout_before
+    assert manifest["holdout"]["opened_at"] is None
+    assert manifest["dev"]["sha256"] == (
+        "sha256:" + hashlib.sha256(dev_path.read_bytes()).hexdigest()
+    )
+    assert (
+        fixture_root
+        / "epochs"
+        / "epoch2-dev-review-v1-pre-audit"
+        / dev_path.name
+    ).is_file()
 
 
 def test_model_stage_cache_resumes_from_last_complete_chunk(
