@@ -44,7 +44,7 @@ from chronovisor.research_scheduler import (
 )
 from chronovisor.store import CHRONOVISOR_ROOT
 
-ENGINE_VERSION = "1"
+ENGINE_VERSION = "2"
 FIXTURE_SCHEMA = "chronovisor.classification-fixture.v1"
 FIXTURE_MANIFEST_SCHEMA = "chronovisor.classification-fixture-manifest.v1"
 CONSENSUS_SCHEMA = "chronovisor.classification-consensus.v1"
@@ -509,8 +509,11 @@ def lock_fixtures(
     _write_jsonl(holdout_path, holdout_rows)
     payload = {
         "schema": FIXTURE_MANIFEST_SCHEMA,
+        "fixture_epoch": int(ENGINE_VERSION),
         "locked_at": _now(),
         "adjudicator": adjudicator,
+        "engine_version": ENGINE_VERSION,
+        "inference_isolation": "one_page_per_model_call",
         "dev": {
             "path": str(dev_path),
             "count": len(dev_rows),
@@ -706,12 +709,30 @@ def evaluate_predictions(
     exact = 0
     held = 0
     forced_wrong = 0
+    expected_holds = 0
+    correct_expected_holds = 0
+    assignable = 0
+    assigned = 0
     distances: list[int] = []
     for row in fixture_rows:
         decision = by_uid.get(str(row["uid"]))
-        if decision is None or decision.get("status") == "held":
+        expected_hold = str(row.get("gold_expected_status") or "") == "held"
+        if expected_hold:
+            expected_holds += 1
+        else:
+            assignable += 1
+        if decision is None:
             held += 1
             continue
+        if decision.get("status") == "held":
+            held += 1
+            if expected_hold:
+                correct_expected_holds += 1
+            continue
+        if expected_hold:
+            forced_wrong += 1
+            continue
+        assigned += 1
         predicted = str(decision.get("primary_notation") or "")
         gold = str(row.get("gold_primary_notation") or "")
         allowed = {
@@ -731,17 +752,26 @@ def evaluate_predictions(
         else:
             distances.append(2)
             forced_wrong += 1
-    evaluated = max(1, total - held)
+    evaluated = max(1, assigned)
     return {
         "total": total,
-        "evaluated": total - held,
-        "primary_assignment_rate": (total - held) / max(1, total),
+        "evaluated": assigned,
+        "assignable": assignable,
+        "assigned": assigned,
+        "expected_holds": expected_holds,
+        "correct_expected_holds": correct_expected_holds,
+        "primary_assignment_rate": assigned / max(1, assignable),
         "exact_match_rate": exact / evaluated,
         "hierarchy_within_one_rate": (
             sum(distance <= 1 for distance in distances) / max(1, len(distances))
         ),
         "hold_rate": held / max(1, total),
         "forced_misclassification_rate": forced_wrong / max(1, total),
+        "expected_hold_recall": correct_expected_holds / max(1, expected_holds),
+        "expected_hold_escape_rate": (
+            expected_holds - correct_expected_holds
+        )
+        / max(1, expected_holds),
         "required_facet_macro_f1": 1.0,
     }
 
@@ -769,6 +799,9 @@ def adopt_calibration(
         "hold": float(holdout_metrics["hold_rate"]) <= 0.08,
         "forced_misclassification": (
             float(holdout_metrics["forced_misclassification_rate"]) <= 0.01
+        ),
+        "expected_hold_safety": (
+            float(holdout_metrics.get("expected_hold_escape_rate") or 0.0) == 0.0
         ),
         "required_facets": (
             float(holdout_metrics.get("required_facet_macro_f1") or 0.0) >= 0.90

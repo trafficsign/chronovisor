@@ -450,5 +450,69 @@ def test_model_stage_cache_resumes_from_last_complete_chunk(
     )
 
     assert len(decisions) == 6
-    assert model_calls == 1
-    assert resumed_calls == [["uid-5"]]
+    assert model_calls == 5
+    assert resumed_calls == [
+        ["uid-1"],
+        ["uid-2"],
+        ["uid-3"],
+        ["uid-4"],
+        ["uid-5"],
+    ]
+
+
+def test_expected_hold_is_a_separate_safety_gate() -> None:
+    fixtures = [
+        {
+            "uid": "assignable",
+            "gold_primary_notation": "004.8",
+            "gold_expected_status": "proposed",
+        },
+        {
+            "uid": "safety-hold",
+            "gold_primary_notation": "62",
+            "gold_expected_status": "held",
+        },
+    ]
+    decisions = [
+        {
+            "uid": "assignable",
+            "primary_notation": "004.8",
+            "status": "proposed",
+        },
+        {
+            "uid": "safety-hold",
+            "primary_notation": "62",
+            "status": "held",
+        },
+    ]
+
+    metrics = classification_engine.evaluate_predictions(fixtures, decisions)
+
+    assert metrics["primary_assignment_rate"] == 1.0
+    assert metrics["exact_match_rate"] == 1.0
+    assert metrics["hold_rate"] == 0.5
+    assert metrics["expected_hold_recall"] == 1.0
+    assert metrics["expected_hold_escape_rate"] == 0.0
+    assert metrics["forced_misclassification_rate"] == 0.0
+
+
+def test_expected_hold_escape_is_forced_misclassification() -> None:
+    fixtures = [
+        {
+            "uid": "safety-hold",
+            "gold_primary_notation": "62",
+            "gold_expected_status": "held",
+        }
+    ]
+    decisions = [
+        {
+            "uid": "safety-hold",
+            "primary_notation": "62",
+            "status": "proposed",
+        }
+    ]
+
+    metrics = classification_engine.evaluate_predictions(fixtures, decisions)
+
+    assert metrics["expected_hold_escape_rate"] == 1.0
+    assert metrics["forced_misclassification_rate"] == 1.0

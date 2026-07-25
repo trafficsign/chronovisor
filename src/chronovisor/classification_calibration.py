@@ -14,6 +14,7 @@ from typing import Any
 
 from chronovisor.classification import CALIBRATION_SCHEMA, load_udc_package
 from chronovisor.classification_engine import (
+    ENGINE_VERSION,
     adopt_calibration,
     build_fixture_candidates,
     evaluate_predictions,
@@ -80,7 +81,7 @@ def adjudicate(root: Path, *, batch_size: int) -> dict[str, Any]:
         batch_size=batch_size,
         purpose="explicit",
         timeout_seconds=1_800,
-        run_namespace="legacy",
+        run_namespace="adjudication-epoch2-v2",
     )
     initial_by_uid = {str(row["uid"]): row for row in decisions}
     refinement_rows = [
@@ -95,7 +96,7 @@ def adjudicate(root: Path, *, batch_size: int) -> dict[str, Any]:
             batch_size=batch_size,
             purpose="explicit",
             timeout_seconds=1_800,
-            run_namespace="adjudication-tie-policy-v2",
+            run_namespace="adjudication-tie-policy-v3",
         )
         initial_by_uid.update({str(row["uid"]): row for row in refined})
         decisions = [initial_by_uid[str(row["uid"])] for row in rows]
@@ -167,7 +168,7 @@ def lock(root: Path) -> dict[str, Any]:
         rows,
         adjudicator=(
             "local-ornith-gpt-oss-gemma-independent-consensus-with-"
-            "deterministic-host-validation"
+            "deterministic-host-validation-and-per-page-inference-isolation"
         ),
     )
     return {"status": "locked", "manifest": manifest}
@@ -216,7 +217,7 @@ def _config_digest() -> str:
             "primary_model": config.primary_model,
             "challenger_model": config.challenger_model,
             "tie_break_model": config.tie_break_model,
-            "engine": "classification-consensus-v1",
+            "engine": f"classification-consensus-v{ENGINE_VERSION}",
         },
         sort_keys=True,
     )
@@ -239,7 +240,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         batch_size=20,
         purpose="explicit",
         timeout_seconds=1_800,
-        run_namespace="calibration-dev-epoch1-v1",
+        run_namespace="calibration-dev-epoch2-v2",
     )
     sweep = []
     for minimum_confidence in (0.45, 0.50, 0.55, 0.60, 0.65, 0.70):
@@ -266,6 +267,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         row
         for row in sweep
         if row["metrics"]["forced_misclassification_rate"] <= 0.01
+        and row["metrics"]["expected_hold_escape_rate"] == 0.0
         and row["metrics"]["hold_rate"] <= 0.08
         and row["metrics"]["primary_assignment_rate"] >= 0.98
         and row["metrics"]["exact_match_rate"] >= 0.90
@@ -303,6 +305,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         "minimum_confidence": float(selected["minimum_confidence"]),
         "maximum_hold_rate": 0.08,
         "maximum_forced_misclassification_rate": 0.01,
+        "maximum_expected_hold_escape_rate": 0.0,
         "minimum_exact_match_rate": 0.90,
         "minimum_hierarchy_within_one_rate": 0.97,
     }
@@ -334,7 +337,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         batch_size=20,
         purpose="explicit",
         timeout_seconds=1_800,
-        run_namespace="calibration-holdout-epoch1-v1",
+        run_namespace="calibration-holdout-epoch2-v2",
     )
     holdout_decisions = [
         {
@@ -353,7 +356,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         root
         / "classification"
         / "fixtures"
-        / "classification-holdout-epoch1-results.jsonl",
+        / "classification-holdout-epoch2-results.jsonl",
         holdout_decisions,
     )
     holdout_metrics = evaluate_predictions(holdout, holdout_decisions)

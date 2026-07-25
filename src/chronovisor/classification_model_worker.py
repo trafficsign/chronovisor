@@ -19,8 +19,9 @@ from chronovisor.durable_state import (
 )
 from chronovisor.runtime_config import load_decision_router_config
 
-STAGE_CACHE_SCHEMA = "chronovisor.classification-stage-cache.v1"
-STAGE_CHUNK_SIZE = 5
+STAGE_CACHE_SCHEMA = "chronovisor.classification-stage-cache.v2"
+# A page's classification must not depend on unrelated pages sharing its batch.
+STAGE_CHUNK_SIZE = 1
 
 
 def _schema(count: int) -> dict[str, Any]:
