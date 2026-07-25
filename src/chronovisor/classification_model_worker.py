@@ -202,9 +202,20 @@ def _call(
         }
         primary = str(decision.get("primary_notation") or "")
         secondary = [str(value) for value in decision.get("secondary_notations") or []]
-        if primary not in allowed or any(value not in allowed for value in secondary):
+        if primary not in allowed:
             decision["_invalid_reason"] = "notation_outside_host_candidates"
             decision["confidence"] = 0.0
+        else:
+            rejected_secondary = [
+                value for value in secondary if value not in allowed
+            ]
+            decision["secondary_notations"] = [
+                value
+                for value in secondary
+                if value in allowed and value != primary
+            ]
+            if rejected_secondary:
+                decision["_rejected_secondary_notations"] = rejected_secondary
         ordered.append(decision)
     return ordered, 1
 

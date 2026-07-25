@@ -228,6 +228,39 @@ def test_model_worker_splits_a_truncated_json_batch(monkeypatch) -> None:
     assert calls == [2, 1, 1]
 
 
+def test_invalid_optional_secondary_does_not_discard_valid_primary(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        classification_model_worker.ollama,
+        "chat",
+        lambda *args, **kwargs: (
+            '{"decisions":[{"uid":"uid-1",'
+            '"primary_notation":"004.8",'
+            '"secondary_notations":["999"],'
+            '"confidence":0.9,"rationale":"ok"}]}'
+        ),
+    )
+
+    decisions, _calls = classification_model_worker._call(
+        model="test",
+        keep_alive="0",
+        pages=[
+            {
+                "uid": "uid-1",
+                "title": "AI",
+                "candidates": [{"notation": "004.8"}],
+            }
+        ],
+        role="primary-proposer",
+    )
+
+    assert decisions[0]["primary_notation"] == "004.8"
+    assert decisions[0]["secondary_notations"] == []
+    assert decisions[0]["_rejected_secondary_notations"] == ["999"]
+    assert "_invalid_reason" not in decisions[0]
+
+
 def test_tie_break_candidates_are_limited_to_independent_proposals() -> None:
     pages = [
         {
