@@ -291,3 +291,61 @@ def test_rollout_retries_rejected_calibration_after_fixture_audit(
     assert calls == ["calibrate"]
     assert result["status"] == "blocked"
     assert result["stage"] == "quality_gate"
+
+
+def test_rollout_resumes_incomplete_opened_holdout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture_root = tmp_path / "classification" / "fixtures"
+    fixture_root.mkdir(parents=True)
+    (fixture_root / "classification-adjudication-300.jsonl").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    _write(
+        fixture_root / "manifest.json",
+        {
+            "status": "locked",
+            "holdout": {"opened_at": "2026-07-26T07:11:35+00:00"},
+        },
+    )
+    _write(
+        tmp_path / "runtime" / "librarian" / "phase0-receipt.json",
+        {"status": "ok"},
+    )
+    _write(
+        tmp_path / "classification" / "distribution-analysis.json",
+        {"status": "ok"},
+    )
+    _write(
+        tmp_path / "classification" / "calibration.json",
+        {"status": "rejected"},
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "adjudication_path",
+        lambda _root: fixture_root / "classification-adjudication-300.jsonl",
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "fixture_paths",
+        lambda _root: (
+            fixture_root / "dev.jsonl",
+            fixture_root / "holdout.jsonl",
+            fixture_root / "manifest.json",
+        ),
+    )
+    calls: list[str] = []
+
+    def resume(_root):
+        calls.append("calibrate")
+        return {"status": "rejected"}
+
+    monkeypatch.setattr(librarian_rollout, "calibrate", resume)
+
+    result = librarian_rollout.run_rollout(tmp_path)
+
+    assert calls == ["calibrate"]
+    assert result["status"] == "blocked"
+    assert result["stage"] == "quality_gate"

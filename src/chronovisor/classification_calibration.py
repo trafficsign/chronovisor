@@ -23,13 +23,14 @@ from chronovisor.classification_engine import (
     lock_fixtures,
     run_consensus_batches,
 )
-from chronovisor.durable_state import write_sealed_json
+from chronovisor.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.runtime_config import load_decision_router_config
 from chronovisor.store import CHRONOVISOR_ROOT
 
 DISTRIBUTION_SCHEMA = "chronovisor.classification-distribution.v1"
 DEV_AUDIT_SCHEMA = "chronovisor.classification-dev-audit.v1"
 DEV_AUDIT_RECEIPT_SCHEMA = "chronovisor.classification-dev-audit-receipt.v1"
+PREREGISTRATION_SCHEMA = "chronovisor.classification-preregistration.v1"
 
 
 def _now() -> str:
@@ -363,17 +364,91 @@ def calibration_input_fingerprint(root: Path) -> dict[str, str]:
     }
 
 
+def _verify_locked_holdout(manifest: Mapping[str, Any], holdout_path: Path) -> None:
+    observed = "sha256:" + hashlib.sha256(holdout_path.read_bytes()).hexdigest()
+    expected = str(manifest.get("holdout", {}).get("sha256") or "")
+    if observed != expected:
+        raise RuntimeError("locked Holdout hash does not match its manifest")
+
+
+def _evaluate_locked_holdout(
+    root: Path,
+    holdout: list[dict[str, Any]],
+    *,
+    dev_metrics: Mapping[str, Any],
+    thresholds: Mapping[str, Any],
+    input_fingerprint: Mapping[str, str],
+) -> dict[str, Any]:
+    holdout_raw = run_consensus_batches(
+        holdout,
+        root=root,
+        batch_size=20,
+        purpose="explicit",
+        timeout_seconds=1_800,
+        run_namespace="calibration-holdout-epoch2-v2",
+    )
+    holdout_decisions = [
+        {
+            **row,
+            "status": (
+                "proposed"
+                if int(row.get("quorum") or 0) >= 2
+                and float(row.get("confidence") or 0.0)
+                >= float(thresholds["minimum_confidence"])
+                else "held"
+            ),
+        }
+        for row in holdout_raw
+    ]
+    _write_jsonl(
+        root
+        / "classification"
+        / "fixtures"
+        / "classification-holdout-epoch2-results.jsonl",
+        holdout_decisions,
+    )
+    holdout_metrics = evaluate_predictions(holdout, holdout_decisions)
+    return adopt_calibration(
+        root,
+        dev_metrics=dev_metrics,
+        holdout_metrics=holdout_metrics,
+        config_digest=str(input_fingerprint["config_digest"]),
+        thresholds=thresholds,
+    )
+
+
 def calibrate(root: Path) -> dict[str, Any]:
     dev_path, holdout_path, manifest_path = fixture_paths(root)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _verify_locked_holdout(manifest, holdout_path)
+    input_fingerprint = calibration_input_fingerprint(root)
+    holdout = _jsonl(holdout_path)
     if manifest["holdout"].get("opened_at"):
         calibration_path = root / "classification" / "calibration.json"
         if calibration_path.exists():
-            return json.loads(calibration_path.read_text(encoding="utf-8"))
-        raise RuntimeError("locked holdout was opened without a calibration artifact")
-    input_fingerprint = calibration_input_fingerprint(root)
+            existing = json.loads(calibration_path.read_text(encoding="utf-8"))
+            if existing.get("status") == "adopted":
+                return existing
+        preregistration = read_sealed_json(
+            root / "classification" / "calibration-preregistration.json"
+        )
+        if (
+            preregistration.get("schema") != PREREGISTRATION_SCHEMA
+            or preregistration.get("input_fingerprint") != input_fingerprint
+            or not isinstance(preregistration.get("thresholds"), Mapping)
+            or not isinstance(preregistration.get("dev_metrics"), Mapping)
+        ):
+            raise RuntimeError(
+                "opened Holdout lacks a matching sealed preregistration"
+            )
+        return _evaluate_locked_holdout(
+            root,
+            holdout,
+            dev_metrics=preregistration["dev_metrics"],
+            thresholds=preregistration["thresholds"],
+            input_fingerprint=input_fingerprint,
+        )
     dev = _jsonl(dev_path)
-    holdout = _jsonl(holdout_path)
     dev_raw = run_consensus_batches(
         dev,
         root=root,
@@ -451,7 +526,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         "minimum_hierarchy_within_one_rate": 0.97,
     }
     preregistration = {
-        "schema": "chronovisor.classification-preregistration.v1",
+        "schema": PREREGISTRATION_SCHEMA,
         "registered_at": _now(),
         "authority_epoch": 1,
         "fixture_manifest_sha256": (
@@ -473,41 +548,12 @@ def calibrate(root: Path) -> dict[str, Any]:
     manifest["holdout"]["opened_at"] = _now()
     manifest["holdout"]["opening_reason"] = "single_locked_authority_evaluation"
     write_sealed_json(manifest_path, manifest, backup=True)
-    holdout_raw = run_consensus_batches(
-        holdout,
-        root=root,
-        batch_size=20,
-        purpose="explicit",
-        timeout_seconds=1_800,
-        run_namespace="calibration-holdout-epoch2-v2",
-    )
-    holdout_decisions = [
-        {
-            **row,
-            "status": (
-                "proposed"
-                if int(row.get("quorum") or 0) >= 2
-                and float(row.get("confidence") or 0.0)
-                >= thresholds["minimum_confidence"]
-                else "held"
-            ),
-        }
-        for row in holdout_raw
-    ]
-    _write_jsonl(
-        root
-        / "classification"
-        / "fixtures"
-        / "classification-holdout-epoch2-results.jsonl",
-        holdout_decisions,
-    )
-    holdout_metrics = evaluate_predictions(holdout, holdout_decisions)
-    return adopt_calibration(
+    return _evaluate_locked_holdout(
         root,
         dev_metrics=dev_metrics,
-        holdout_metrics=holdout_metrics,
-        config_digest=input_fingerprint["config_digest"],
         thresholds=thresholds,
+        holdout=holdout,
+        input_fingerprint=input_fingerprint,
     )
 
 

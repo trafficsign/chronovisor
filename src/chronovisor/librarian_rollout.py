@@ -147,7 +147,14 @@ def run_rollout(
                 and calibration.get("input_fingerprint")
                 != calibration_input_fingerprint(root)
             )
-            if not calibration or rejected_inputs_changed:
+            opened_holdout_incomplete = (
+                holdout_opened and calibration.get("status") != "adopted"
+            )
+            if (
+                not calibration
+                or rejected_inputs_changed
+                or opened_holdout_incomplete
+            ):
                 calibration = _run_stage(
                     root,
                     "phase4_calibration",

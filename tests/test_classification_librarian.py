@@ -460,6 +460,107 @@ def test_dev_audit_corrects_reviewed_labels_without_opening_holdout(
     ).is_file()
 
 
+def test_calibration_resumes_opened_holdout_from_sealed_preregistration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture_root = tmp_path / "classification" / "fixtures"
+    fixture_root.mkdir(parents=True)
+    dev_path = fixture_root / "classification-dev-200.jsonl"
+    holdout_path = fixture_root / "classification-holdout-100.jsonl"
+    manifest_path = fixture_root / "manifest.json"
+    dev_path.write_text('{"uid":"dev"}\n', encoding="utf-8")
+    holdout_row = {
+        "uid": "holdout-1",
+        "gold_primary_notation": "004.8",
+        "gold_allowed_primary_notations": ["004.8"],
+        "gold_expected_status": "proposed",
+    }
+    holdout_path.write_text(json.dumps(holdout_row) + "\n", encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dev": {
+                    "sha256": (
+                        "sha256:"
+                        + hashlib.sha256(dev_path.read_bytes()).hexdigest()
+                    )
+                },
+                "holdout": {
+                    "sha256": (
+                        "sha256:"
+                        + hashlib.sha256(holdout_path.read_bytes()).hexdigest()
+                    ),
+                    "opened_at": "2026-07-26T07:11:35+00:00",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "classification" / "calibration.json").write_text(
+        '{"status":"rejected"}\n',
+        encoding="utf-8",
+    )
+    fingerprint = {
+        "dev_fixture_sha256": "sha256:dev",
+        "package_checksum": "sha256:package",
+        "config_digest": "sha256:config",
+    }
+    classification_calibration.write_sealed_json(
+        tmp_path / "classification" / "calibration-preregistration.json",
+        {
+            "schema": classification_calibration.PREREGISTRATION_SCHEMA,
+            "input_fingerprint": fingerprint,
+            "thresholds": {"minimum_confidence": 0.7},
+            "dev_metrics": {"forced_misclassification_rate": 0.005},
+        },
+    )
+    monkeypatch.setattr(
+        classification_calibration,
+        "calibration_input_fingerprint",
+        lambda _root: fingerprint,
+    )
+    calls: list[str] = []
+
+    def consensus(rows, **kwargs):
+        calls.append(kwargs["run_namespace"])
+        assert rows == [holdout_row]
+        return [
+            {
+                "uid": "holdout-1",
+                "primary_notation": "004.8",
+                "quorum": 2,
+                "confidence": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr(
+        classification_calibration,
+        "run_consensus_batches",
+        consensus,
+    )
+    adopted: dict[str, object] = {}
+
+    def adopt(_root, **kwargs):
+        adopted.update(kwargs)
+        return {"status": "adopted"}
+
+    monkeypatch.setattr(
+        classification_calibration,
+        "adopt_calibration",
+        adopt,
+    )
+
+    result = classification_calibration.calibrate(tmp_path)
+
+    assert result["status"] == "adopted"
+    assert calls == ["calibration-holdout-epoch2-v2"]
+    assert adopted["dev_metrics"] == {
+        "forced_misclassification_rate": 0.005
+    }
+    assert adopted["holdout_metrics"]["exact_match_rate"] == 1.0
+
+
 def test_model_stage_cache_resumes_from_last_complete_chunk(
     tmp_path: Path,
     monkeypatch,
