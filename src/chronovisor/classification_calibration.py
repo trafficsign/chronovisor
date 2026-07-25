@@ -348,6 +348,21 @@ def _config_digest() -> str:
     return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
 
 
+def calibration_input_fingerprint(root: Path) -> dict[str, str]:
+    """Return the immutable inputs that determine a calibration result."""
+
+    dev_path, _holdout_path, manifest_path = fixture_paths(root)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    dev_sha256 = "sha256:" + hashlib.sha256(dev_path.read_bytes()).hexdigest()
+    if str(manifest.get("dev", {}).get("sha256") or "") != dev_sha256:
+        raise RuntimeError("dev fixture hash does not match its locked manifest")
+    return {
+        "dev_fixture_sha256": dev_sha256,
+        "package_checksum": load_udc_package(root).checksum,
+        "config_digest": _config_digest(),
+    }
+
+
 def calibrate(root: Path) -> dict[str, Any]:
     dev_path, holdout_path, manifest_path = fixture_paths(root)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -356,6 +371,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         if calibration_path.exists():
             return json.loads(calibration_path.read_text(encoding="utf-8"))
         raise RuntimeError("locked holdout was opened without a calibration artifact")
+    input_fingerprint = calibration_input_fingerprint(root)
     dev = _jsonl(dev_path)
     holdout = _jsonl(holdout_path)
     dev_raw = run_consensus_batches(
@@ -402,9 +418,10 @@ def calibrate(root: Path) -> dict[str, Any]:
             "schema": CALIBRATION_SCHEMA,
             "status": "rejected",
             "reason": "dev_gate_unmet_holdout_remains_sealed",
-            "package_checksum": load_udc_package(root).checksum,
+            "input_fingerprint": input_fingerprint,
+            "package_checksum": input_fingerprint["package_checksum"],
             "fixture_locked": True,
-            "config_digest": _config_digest(),
+            "config_digest": input_fingerprint["config_digest"],
             "dev_sweep": sweep,
             "forced_misclassification_rate": min(
                 row["metrics"]["forced_misclassification_rate"] for row in sweep
@@ -440,8 +457,9 @@ def calibrate(root: Path) -> dict[str, Any]:
         "fixture_manifest_sha256": (
             "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         ),
-        "package_checksum": load_udc_package(root).checksum,
-        "config_digest": _config_digest(),
+        "input_fingerprint": input_fingerprint,
+        "package_checksum": input_fingerprint["package_checksum"],
+        "config_digest": input_fingerprint["config_digest"],
         "thresholds": thresholds,
         "dev_metrics": dev_metrics,
         "dev_sweep": sweep,
@@ -488,7 +506,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         root,
         dev_metrics=dev_metrics,
         holdout_metrics=holdout_metrics,
-        config_digest=_config_digest(),
+        config_digest=input_fingerprint["config_digest"],
         thresholds=thresholds,
     )
 

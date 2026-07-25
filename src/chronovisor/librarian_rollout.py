@@ -12,6 +12,7 @@ from typing import Any
 from chronovisor.classification_calibration import (
     adjudicate,
     adjudication_path,
+    calibration_input_fingerprint,
     calibrate,
     distribution,
     lock,
@@ -138,7 +139,15 @@ def run_rollout(
                 _run_stage(root, "phase4_distribution", lambda: distribution(root))
             calibration_path = root / "classification" / "calibration.json"
             calibration = _read_json(calibration_path)
-            if not calibration:
+            manifest = _read_json(manifest_path)
+            holdout_opened = bool(manifest.get("holdout", {}).get("opened_at"))
+            rejected_inputs_changed = (
+                calibration.get("status") == "rejected"
+                and not holdout_opened
+                and calibration.get("input_fingerprint")
+                != calibration_input_fingerprint(root)
+            )
+            if not calibration or rejected_inputs_changed:
                 calibration = _run_stage(
                     root,
                     "phase4_calibration",

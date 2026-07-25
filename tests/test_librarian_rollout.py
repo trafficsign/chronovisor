@@ -188,7 +188,22 @@ def test_rollout_stops_at_rejected_calibration(
     )
     _write(
         tmp_path / "classification" / "calibration.json",
-        {"status": "rejected"},
+        {
+            "status": "rejected",
+            "input_fingerprint": {"dev_fixture_sha256": "sha256:current"},
+        },
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "calibration_input_fingerprint",
+        lambda _root: {"dev_fixture_sha256": "sha256:current"},
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "calibrate",
+        lambda _root: (_ for _ in ()).throw(
+            AssertionError("unchanged rejected calibration must not rerun")
+        ),
     )
     monkeypatch.setattr(
         librarian_rollout,
@@ -207,5 +222,72 @@ def test_rollout_stops_at_rejected_calibration(
 
     result = librarian_rollout.run_rollout(tmp_path)
 
+    assert result["status"] == "blocked"
+    assert result["stage"] == "quality_gate"
+
+
+def test_rollout_retries_rejected_calibration_after_fixture_audit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture_root = tmp_path / "classification" / "fixtures"
+    fixture_root.mkdir(parents=True)
+    (fixture_root / "classification-adjudication-300.jsonl").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    _write(
+        fixture_root / "manifest.json",
+        {"status": "locked", "holdout": {"opened_at": None}},
+    )
+    _write(
+        tmp_path / "runtime" / "librarian" / "phase0-receipt.json",
+        {"status": "ok"},
+    )
+    _write(
+        tmp_path / "classification" / "distribution-analysis.json",
+        {"status": "ok"},
+    )
+    _write(
+        tmp_path / "classification" / "calibration.json",
+        {
+            "status": "rejected",
+            "input_fingerprint": {"dev_fixture_sha256": "sha256:old"},
+        },
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "adjudication_path",
+        lambda _root: fixture_root / "classification-adjudication-300.jsonl",
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "fixture_paths",
+        lambda _root: (
+            fixture_root / "dev.jsonl",
+            fixture_root / "holdout.jsonl",
+            fixture_root / "manifest.json",
+        ),
+    )
+    current = {"dev_fixture_sha256": "sha256:audited"}
+    monkeypatch.setattr(
+        librarian_rollout,
+        "calibration_input_fingerprint",
+        lambda _root: current,
+    )
+    calls: list[str] = []
+
+    def recalibrate(_root):
+        calls.append("calibrate")
+        return {
+            "status": "rejected",
+            "input_fingerprint": current,
+        }
+
+    monkeypatch.setattr(librarian_rollout, "calibrate", recalibrate)
+
+    result = librarian_rollout.run_rollout(tmp_path)
+
+    assert calls == ["calibrate"]
     assert result["status"] == "blocked"
     assert result["stage"] == "quality_gate"
