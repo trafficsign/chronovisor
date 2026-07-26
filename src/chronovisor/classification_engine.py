@@ -177,9 +177,7 @@ def _page_payload(root: Path, uid: str, row: Mapping[str, Any]) -> dict[str, Any
     title = str(meta.get("title") or path.stem)
     raw_keywords = meta.get("raw_keywords")
     raw_keywords = (
-        [str(value) for value in raw_keywords]
-        if isinstance(raw_keywords, list)
-        else []
+        [str(value) for value in raw_keywords] if isinstance(raw_keywords, list) else []
     )
     excerpt = body.strip()[:2_400]
     return {
@@ -241,9 +239,7 @@ class CandidateIndex:
         title = str(page.get("title") or "")
         summary = str(page.get("summary") or "")
         tags_text = " ".join(str(value) for value in page.get("tags") or [])
-        keywords_text = " ".join(
-            str(value) for value in page.get("raw_keywords") or []
-        )
+        keywords_text = " ".join(str(value) for value in page.get("raw_keywords") or [])
         excerpt = str(page.get("excerpt") or "")[:1_200]
         text = f"{title} {summary} {tags_text} {keywords_text} {excerpt}"
         folded = text.casefold()
@@ -322,6 +318,7 @@ def record_from_consensus(
     package: UDCPackage,
     authority_epoch: int,
     status: str,
+    authority_digest: str | None = None,
 ) -> ClassificationRecord:
     notation = str(decision.get("primary_notation") or "")
     primary_row = package.by_notation(notation)
@@ -364,7 +361,8 @@ def record_from_consensus(
             "project": [],
             "form": (
                 str(page.get("page_type"))
-                if str(page.get("page_type")) in {
+                if str(page.get("page_type"))
+                in {
                     "decision",
                     "event",
                     "howto",
@@ -399,6 +397,7 @@ def record_from_consensus(
         ),
         classifier_authority_epoch=authority_epoch,
         status=status,
+        classifier_authority_digest=authority_digest,
     )
     validate_record(
         record,
@@ -472,8 +471,7 @@ def build_fixture_candidates(
 def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "".join(
-        json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
-        for row in rows
+        json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n" for row in rows
     )
     path.write_text(content, encoding="utf-8")
 
@@ -526,9 +524,7 @@ def lock_fixtures(
             "opened_at": None,
         },
         "source_scope_sha256": _sha256_text(
-            "\n".join(
-                f"{row['uid']}:{row['source_sha256']}" for row in rows
-            )
+            "\n".join(f"{row['uid']}:{row['source_sha256']}" for row in rows)
         ),
     }
     write_sealed_json(manifest_path, payload, backup=True)
@@ -560,15 +556,25 @@ def run_consensus_batches(
     purpose: str = "explicit",
     timeout_seconds: float = 1_800,
     run_namespace: str = "classification",
+    adjudication_mode: str = "proposal-audit",
+    stage_cache_epoch: str = "default",
 ) -> list[dict[str, Any]]:
     """Run local-only classification in cancellable isolated workers."""
 
+    if adjudication_mode not in {"proposal-audit", "dual-blind"}:
+        raise ClassificationError(
+            f"unsupported classification adjudication mode: {adjudication_mode}"
+        )
+    if not stage_cache_epoch.strip() or len(stage_cache_epoch) > 80:
+        raise ClassificationError("classification stage cache epoch is invalid")
     store = librarian_convergence_store(root)
     outputs: list[dict[str, Any]] = []
     for offset in range(0, len(rows), max(1, batch_size)):
         batch = [dict(row) for row in rows[offset : offset + batch_size]]
         input_data = {
             "engine_version": ENGINE_VERSION,
+            "adjudication_mode": adjudication_mode,
+            "stage_cache_epoch": stage_cache_epoch,
             "package_checksum": load_udc_package(root).checksum,
             "pages": [
                 {
@@ -577,6 +583,14 @@ def run_consensus_batches(
                     "candidates": [
                         candidate["notation"] for candidate in row["candidates"]
                     ],
+                    "evidence_card_sha256": _sha256_text(
+                        json.dumps(
+                            row.get("evidence_card") or {},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    ),
                 }
                 for row in batch
             ],
@@ -603,7 +617,9 @@ def run_consensus_batches(
             raise ClassificationError("classification queue merge failed")
         if item.get("status") == "applied":
             cached = item.get("result")
-            if isinstance(cached, Mapping) and isinstance(cached.get("decisions"), list):
+            if isinstance(cached, Mapping) and isinstance(
+                cached.get("decisions"), list
+            ):
                 outputs.extend(dict(value) for value in cached["decisions"])
                 continue
         key = str(item["key"])
@@ -624,6 +640,8 @@ def run_consensus_batches(
                 {
                     "schema": CONSENSUS_SCHEMA,
                     "root": str(root),
+                    "adjudication_mode": adjudication_mode,
+                    "stage_cache_epoch": stage_cache_epoch,
                     "pages": batch,
                 },
                 ensure_ascii=False,
@@ -658,9 +676,7 @@ def run_consensus_batches(
                 while sync_pending():
                     time.sleep(0.05)
                 continue
-            if result.status != "completed" or not isinstance(
-                result.value, Mapping
-            ):
+            if result.status != "completed" or not isinstance(result.value, Mapping):
                 store.fail_attempt(
                     key,
                     "local",
@@ -708,6 +724,7 @@ def evaluate_predictions(
     total = len(fixture_rows)
     exact = 0
     held = 0
+    unexpected_holds = 0
     forced_wrong = 0
     expected_holds = 0
     correct_expected_holds = 0
@@ -723,11 +740,15 @@ def evaluate_predictions(
             assignable += 1
         if decision is None:
             held += 1
+            if not expected_hold:
+                unexpected_holds += 1
             continue
         if decision.get("status") == "held":
             held += 1
             if expected_hold:
                 correct_expected_holds += 1
+            else:
+                unexpected_holds += 1
             continue
         if expected_hold:
             forced_wrong += 1
@@ -736,8 +757,7 @@ def evaluate_predictions(
         predicted = str(decision.get("primary_notation") or "")
         gold = str(row.get("gold_primary_notation") or "")
         allowed = {
-            str(value)
-            for value in row.get("gold_allowed_primary_notations") or [gold]
+            str(value) for value in row.get("gold_allowed_primary_notations") or [gold]
         }
         if predicted in allowed:
             exact += 1
@@ -745,8 +765,10 @@ def evaluate_predictions(
             continue
         predicted_head = predicted.split(".", 1)[0]
         gold_head = gold.split(".", 1)[0]
-        if predicted_head == gold_head or predicted.startswith(gold) or gold.startswith(
-            predicted
+        if (
+            predicted_head == gold_head
+            or predicted.startswith(gold)
+            or gold.startswith(predicted)
         ):
             distances.append(1)
         else:
@@ -766,11 +788,12 @@ def evaluate_predictions(
             sum(distance <= 1 for distance in distances) / max(1, len(distances))
         ),
         "hold_rate": held / max(1, total),
+        "total_hold_rate": held / max(1, total),
+        "unexpected_holds": unexpected_holds,
+        "unexpected_hold_rate": unexpected_holds / max(1, assignable),
         "forced_misclassification_rate": forced_wrong / max(1, total),
         "expected_hold_recall": correct_expected_holds / max(1, expected_holds),
-        "expected_hold_escape_rate": (
-            expected_holds - correct_expected_holds
-        )
+        "expected_hold_escape_rate": (expected_holds - correct_expected_holds)
         / max(1, expected_holds),
         "required_facet_macro_f1": 1.0,
     }
@@ -783,9 +806,13 @@ def adopt_calibration(
     holdout_metrics: Mapping[str, Any],
     config_digest: str,
     thresholds: Mapping[str, float],
+    manifest_path: Path | None = None,
+    output_path: Path | None = None,
+    authority_epoch: int = 1,
 ) -> dict[str, Any]:
     package = load_udc_package(root)
-    manifest_path = fixture_paths(root)[2]
+    manifest_path = manifest_path or fixture_paths(root)[2]
+    output_path = output_path or root / "classification" / "calibration.json"
     if not manifest_path.exists():
         raise ClassificationError("fixture manifest is missing")
     gates = {
@@ -796,7 +823,15 @@ def adopt_calibration(
         "hierarchy_within_one": (
             float(holdout_metrics["hierarchy_within_one_rate"]) >= 0.97
         ),
-        "hold": float(holdout_metrics["hold_rate"]) <= 0.08,
+        "unexpected_hold": (
+            float(
+                holdout_metrics.get(
+                    "unexpected_hold_rate",
+                    holdout_metrics["hold_rate"],
+                )
+            )
+            <= float(thresholds.get("maximum_unexpected_hold_rate", 0.08))
+        ),
         "forced_misclassification": (
             float(holdout_metrics["forced_misclassification_rate"]) <= 0.01
         ),
@@ -825,10 +860,10 @@ def adopt_calibration(
             holdout_metrics["forced_misclassification_rate"]
         ),
         "gates": gates,
-        "authority_epoch": 1,
+        "authority_epoch": authority_epoch,
     }
     write_sealed_json(
-        root / "classification" / "calibration.json",
+        output_path,
         payload,
         backup=True,
     )

@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from chronovisor.durable_state import DurableStateError, read_sealed_json
 from chronovisor.merge_ledger import MergeLedger
@@ -27,8 +28,8 @@ STATE_CODES = {
 
 
 def _now(now: datetime | None = None) -> datetime:
-    value = now or datetime.now(timezone.utc)
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    value = now or datetime.now(UTC)
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 def _iso(value: datetime) -> str:
@@ -117,9 +118,7 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
             classification_status = str(row.get("classification_status") or "")
             current_held += int(classification_status == "held")
             current_adopted += int(classification_status == "adopted")
-            current_terminal += int(
-                classification_status in {"adopted", "held"}
-            )
+            current_terminal += int(classification_status in {"adopted", "held"})
     encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return {
         "scope_generation": "sha256:" + hashlib.sha256(encoded).hexdigest(),
@@ -151,6 +150,189 @@ def _read_events(root: Path, limit: int = 4000) -> list[dict[str, Any]]:
     return rows
 
 
+def _safe_receipt(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = read_sealed_json(path, recover_backup=False)
+    except (DurableStateError, OSError, json.JSONDecodeError):
+        return {"status": "unreadable", "path": str(path)}
+    return value if isinstance(value, dict) else {}
+
+
+def _library_evidence_status(root: Path) -> dict[str, Any]:
+    pilot_root = root / "classification" / "library-evidence"
+    fixture_root = (
+        root / "classification" / "fixtures" / "epochs" / "epoch-3-library-evidence-v1"
+    )
+    fixture = _safe_receipt(fixture_root / "manifest.json")
+    candidate_lock = _safe_receipt(fixture_root / "candidate-lock.json")
+    index = _safe_receipt(pilot_root / "index" / "evidence.manifest.json")
+    candidate_eval = _safe_receipt(
+        pilot_root / "evaluation" / "candidate-evaluation.json"
+    )
+    paired_eval = _safe_receipt(pilot_root / "evaluation" / "holdout-evaluation.json")
+    resource = _safe_receipt(pilot_root / "evaluation" / "resource-gate.json")
+    sweep = _safe_receipt(pilot_root / "sweep" / "receipt.json")
+    receipts = {
+        f"E{index_value}": _safe_receipt(
+            pilot_root / "receipts" / f"phase-e{index_value}.json"
+        )
+        for index_value in range(9)
+    }
+    completed = [
+        phase
+        for phase, receipt in receipts.items()
+        if receipt.get("status") in {"passed", "complete", "skipped-not-required"}
+    ]
+    failed = [
+        phase
+        for phase, receipt in receipts.items()
+        if receipt.get("status") in {"failed", "blocked", "rejected", "unreadable"}
+    ]
+    try:
+        from chronovisor.classification_bundle import resolve_authority
+
+        resolver = resolve_authority(root)
+    except (DurableStateError, OSError, ValueError, json.JSONDecodeError) as exc:
+        resolver = {"status": "error", "reason": str(exc)}
+    source_manifests = sorted(pilot_root.glob("sources/*/*/manifest.json"))
+    supervisor = _safe_receipt(pilot_root / "supervisor" / "latest.json")
+    rollback = _safe_receipt(pilot_root / "supervisor" / "rollback-latest.json")
+    final_storage = receipts["E7"].get("final_storage")
+    storage_source = (
+        final_storage if isinstance(final_storage, Mapping) else sweep.get("storage")
+    )
+    storage = dict(storage_source or {}) if isinstance(storage_source, Mapping) else {}
+    holdout_metrics = dict(paired_eval.get("holdout_metrics") or {})
+    if not holdout_metrics and paired_eval.get("schema"):
+        holdout_metrics = {
+            "n": paired_eval.get("n"),
+            "unexpected_hold_rate": paired_eval.get("unexpected_hold_rate"),
+            "severe_error_count": paired_eval.get("severe_error_count"),
+            "exact_difference": paired_eval.get("exact_difference"),
+            "exact_ci_lower": paired_eval.get("exact_ci_lower"),
+        }
+    state = "not_started"
+    if completed:
+        state = "running"
+    if failed:
+        state = "blocked"
+    if len(completed) == len(receipts):
+        state = "complete"
+    package_receipts = [_safe_receipt(path) for path in source_manifests]
+    resource_stages = (
+        resource.get("stages") if isinstance(resource.get("stages"), Mapping) else {}
+    )
+    stage_values = [
+        value for value in resource_stages.values() if isinstance(value, Mapping)
+    ]
+    return {
+        "schema": "chronovisor.library-evidence-dashboard.v1",
+        "status": state,
+        "completed_phases": completed,
+        "failed_phases": failed,
+        "phase_progress": {
+            "numerator": len(completed),
+            "denominator": len(receipts),
+        },
+        "fixture": {
+            "epoch": fixture.get("fixture_epoch"),
+            "candidate_groups": candidate_lock.get("selected_groups"),
+            "dev": (fixture.get("dev") or {}).get("count"),
+            "holdout": (fixture.get("holdout") or {}).get("count"),
+            "reserve": (fixture.get("reserve") or {}).get("count"),
+            "holdout_opened_at": (fixture.get("holdout") or {}).get("opened_at"),
+        },
+        "sources": {
+            "package_count": len(source_manifests),
+            "packages": [
+                {
+                    "path": str(path),
+                    "source_name": receipt.get("source_name"),
+                    "record_count": receipt.get("record_count"),
+                }
+                for path, receipt in zip(
+                    source_manifests, package_receipts, strict=True
+                )
+            ],
+        },
+        "index": {
+            "support_count": index.get("support_count"),
+            "vocabulary_count": index.get("vocabulary_count"),
+            "working_set_bytes": index.get("working_set_bytes"),
+            "sha256": index.get("index_sha256"),
+        },
+        "candidate_metrics": candidate_eval.get("metrics") or {},
+        "external_test": candidate_eval.get("external_test") or {},
+        "holdout_metrics": holdout_metrics,
+        "resource": {
+            "status": resource.get("status"),
+            "sample_count": sum(
+                int(value.get("sample_count") or 0) for value in stage_values
+            ),
+            "samples_per_stage": resource.get("samples_per_stage"),
+            "recall_p95_ms": max(
+                (
+                    int((value.get("recall_latency_ms") or {}).get("p95") or 0)
+                    for value in stage_values
+                ),
+                default=None,
+            ),
+            "recall_p99_ms": max(
+                (
+                    int((value.get("recall_latency_ms") or {}).get("p99") or 0)
+                    for value in stage_values
+                ),
+                default=None,
+            ),
+            "recall_max_ms": max(
+                (
+                    int((value.get("recall_latency_ms") or {}).get("max") or 0)
+                    for value in stage_values
+                ),
+                default=None,
+            ),
+            "cancel_to_ready_max_ms": max(
+                (
+                    int(value.get("cancel_to_resource_ready_max_ms") or 0)
+                    for value in stage_values
+                ),
+                default=None,
+            ),
+            "gates": resource.get("gates") or {},
+        },
+        "storage": storage,
+        "authority": {
+            "status": resolver.get("status"),
+            "reason": resolver.get("reason"),
+            "candidate_behavior": resolver.get("candidate_behavior"),
+            "mutation_capability": resolver.get("mutation_capability"),
+            "authority_digest": (
+                ((resolver.get("target") or {}).get("authority") or {}).get(
+                    "authority_digest"
+                )
+                if isinstance(resolver.get("target"), Mapping)
+                else None
+            ),
+            "activation_probe": receipts["E8"].get("activation_probe") or supervisor,
+            "rollback": rollback,
+            "rollback_deadline_seconds": 60,
+        },
+        "update_validation": {
+            "source_or_index": receipts["E8"].get("source_semantic_update_policy"),
+            "model_policy_taxonomy": receipts["E8"].get("model_policy_update_policy"),
+            "epoch3_holdout_reusable": False,
+        },
+        "retention": receipts["E8"].get("retention") or {},
+        "attribution": [
+            receipt.get("attribution")
+            for receipt in package_receipts
+            if receipt.get("attribution")
+        ],
+    }
+
+
 def _flow(events: Iterable[Mapping[str, Any]], since: datetime) -> dict[str, int]:
     counts = Counter()
     for row in events:
@@ -159,16 +341,13 @@ def _flow(events: Iterable[Mapping[str, Any]], since: datetime) -> dict[str, int
         except (TypeError, ValueError):
             continue
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            timestamp = timestamp.replace(tzinfo=UTC)
         if timestamp < since:
             continue
         counts["runs"] += int(row.get("event") == "shadow_run")
         counts["arrivals"] += int(row.get("created") or 0)
         counts["completed"] += int(
-            row.get("classified")
-            or row.get("migrated")
-            or row.get("completed")
-            or 0
+            row.get("classified") or row.get("migrated") or row.get("completed") or 0
         )
         counts["held"] += int(row.get("held") or 0)
     return {
@@ -287,7 +466,7 @@ def _soak_status(root: Path, now: datetime) -> dict[str, Any]:
         try:
             starts = datetime.fromisoformat(str(payload["starts_at"]))
             if starts.tzinfo is None:
-                starts = starts.replace(tzinfo=timezone.utc)
+                starts = starts.replace(tzinfo=UTC)
         except (KeyError, TypeError, ValueError):
             return {"status": "invalid", "remaining_seconds": None}
         return {
@@ -298,7 +477,7 @@ def _soak_status(root: Path, now: datetime) -> dict[str, Any]:
     try:
         ends = datetime.fromisoformat(str(payload["ends_at"]))
         if ends.tzinfo is None:
-            ends = ends.replace(tzinfo=timezone.utc)
+            ends = ends.replace(tzinfo=UTC)
     except (KeyError, TypeError, ValueError):
         return {"status": "invalid", "remaining_seconds": None}
     remaining = max(0, int((ends - now).total_seconds()))
@@ -378,9 +557,7 @@ def _current_quality(
     quality["holdout_metrics"] = dict(metrics) if isinstance(metrics, Mapping) else {}
     gates = calibration.get("gates")
     quality["forced_misclassification_gate"] = (
-        gates.get("forced_misclassification")
-        if isinstance(gates, Mapping)
-        else None
+        gates.get("forced_misclassification") if isinstance(gates, Mapping) else None
     )
     return quality
 
@@ -421,7 +598,7 @@ def build_librarian_status(
         from chronovisor.classification import classification_authority_status
 
         authority = classification_authority_status(root)
-    except Exception:
+    except (DurableStateError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
         authority = {
             "active": False,
             "reason": "classification_authority_unavailable",
@@ -569,6 +746,7 @@ def build_librarian_status(
         "debts": debts,
         "quality": _current_quality(root, state.get("quality") or {}),
         "resources": dict(state.get("resources") or {}),
+        "library_evidence": _library_evidence_status(root),
         "flow": {
             "24h": flow_24h,
             "7d": flow_7d,

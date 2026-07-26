@@ -104,6 +104,15 @@ const els = {
   librarianRollout: document.getElementById("librarian-rollout"),
   librarianSoak: document.getElementById("librarian-soak"),
   librarianRecovery: document.getElementById("librarian-recovery"),
+  librarianEvidenceStatus: document.getElementById("librarian-evidence-status"),
+  librarianEvidenceFixture: document.getElementById("librarian-evidence-fixture"),
+  librarianEvidenceRecall: document.getElementById("librarian-evidence-recall"),
+  librarianEvidenceExternal: document.getElementById("librarian-evidence-external"),
+  librarianEvidenceHold: document.getElementById("librarian-evidence-hold"),
+  librarianEvidenceResource: document.getElementById("librarian-evidence-resource"),
+  librarianEvidenceStorage: document.getElementById("librarian-evidence-storage"),
+  librarianEvidenceAuthority: document.getElementById("librarian-evidence-authority"),
+  librarianEvidenceUpdate: document.getElementById("librarian-evidence-update"),
   librarianQueue: document.getElementById("librarian-queue"),
   librarianFlow: document.getElementById("librarian-flow"),
   librarianReceipts: document.getElementById("librarian-receipts"),
@@ -2027,6 +2036,7 @@ function renderLibrarian(librarian) {
   const soak = data.soak || {};
   const restorePoints = data.restore_points || {};
   const preimages = data.transaction_preimages || {};
+  const evidence = data.library_evidence || {};
   const progressRows = [
     ["uid", els.librarianUid, els.librarianUidBar],
     ["classification_shadow", els.librarianClassification, els.librarianClassificationBar],
@@ -2101,6 +2111,51 @@ function renderLibrarian(librarian) {
   els.librarianRecovery.textContent =
     `${intValue(restorePoints.verified)}/${intValue(restorePoints.count)} verified` +
     ` · ${intValue(preimages.count)} preimage`;
+  const evidenceProgress = evidence.phase_progress || {};
+  els.librarianEvidenceStatus.textContent =
+    `${fmt(evidence.status, "not started").replaceAll("_", " ")} · ` +
+    `${intValue(evidenceProgress.numerator)}/${intValue(evidenceProgress.denominator)} phases`;
+  const fixture = evidence.fixture || {};
+  els.librarianEvidenceFixture.textContent = fixture.dev || fixture.holdout
+    ? `${intValue(fixture.dev)} dev · ${intValue(fixture.holdout)} holdout · ${intValue(fixture.reserve)} reserve`
+    : "Not locked";
+  const candidateMetrics = evidence.candidate_metrics || {};
+  const unionMetrics = candidateMetrics.union || {};
+  const p0Metrics = candidateMetrics.official_baseline || {};
+  els.librarianEvidenceRecall.textContent = numeric(unionMetrics.recall_at_12)
+    ? `P0 ${(intValue(p0Metrics.recall_at_12 * 1000) / 10).toFixed(1)}% · W ${(intValue(unionMetrics.recall_at_12 * 1000) / 10).toFixed(1)}%`
+    : "Not evaluated";
+  const externalTest = evidence.external_test || {};
+  const externalUnion = (externalTest.metrics || {}).union || {};
+  els.librarianEvidenceExternal.textContent = numeric(externalUnion.recall_at_20)
+    ? `${intValue(externalTest.n).toLocaleString()} test · R@20 ${(externalUnion.recall_at_20 * 100).toFixed(1)}%`
+    : "Not evaluated";
+  const holdoutEvidence = evidence.holdout_metrics || {};
+  const unexpectedHold = numeric(holdoutEvidence.unexpected_hold_rate)
+    ? `${(holdoutEvidence.unexpected_hold_rate * 100).toFixed(1)}% unexpected`
+    : "";
+  const severeCount = holdoutEvidence.severe_error_count;
+  els.librarianEvidenceHold.textContent =
+    [unexpectedHold, severeCount !== undefined ? `${intValue(severeCount)} severe` : ""]
+      .filter(Boolean)
+      .join(" · ") || "Not evaluated";
+  const evidenceResource = evidence.resource || {};
+  els.librarianEvidenceResource.textContent = numeric(evidenceResource.recall_p99_ms)
+    ? `p99 ${intValue(evidenceResource.recall_p99_ms)}ms · max ${intValue(evidenceResource.recall_max_ms)}ms`
+    : fmt(evidenceResource.status, "Not measured").replaceAll("_", " ");
+  const evidenceStorage = evidence.storage || {};
+  els.librarianEvidenceStorage.textContent = numeric(evidenceStorage.working_set_bytes)
+    ? `${formatBytes(evidenceStorage.working_set_bytes)} working · ${formatBytes(evidenceStorage.audit_store_bytes)} audit`
+    : "Not measured";
+  const evidenceAuthority = evidence.authority || {};
+  els.librarianEvidenceAuthority.textContent =
+    `${fmt(evidenceAuthority.status, "inactive").replaceAll("_", " ")} · ` +
+    `${evidenceAuthority.mutation_capability ? "mutation enabled" : "decision only"}`;
+  const updateValidation = evidence.update_validation || {};
+  const sourceUpdate = updateValidation.source_or_index || {};
+  els.librarianEvidenceUpdate.textContent = sourceUpdate.fixture_requirement
+    ? `${fmt(sourceUpdate.fixture_requirement).replaceAll("-", " ")} · epoch 3 sealed`
+    : "Not adopted";
   els.librarianQueue.replaceChildren();
   [
     ["queued", "Queued"],

@@ -23,6 +23,7 @@ from chronovisor.classification_engine import (
     lock_fixtures,
     run_consensus_batches,
 )
+from chronovisor.classification_fixture_set import load_fixture_set
 from chronovisor.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.runtime_config import load_decision_router_config
 from chronovisor.store import CHRONOVISOR_ROOT
@@ -61,7 +62,9 @@ def candidate_path(root: Path) -> Path:
 
 
 def adjudication_path(root: Path) -> Path:
-    return root / "classification" / "fixtures" / "classification-adjudication-300.jsonl"
+    return (
+        root / "classification" / "fixtures" / "classification-adjudication-300.jsonl"
+    )
 
 
 def prepare(root: Path) -> dict[str, Any]:
@@ -112,18 +115,14 @@ def adjudicate(root: Path, *, batch_size: int) -> dict[str, Any]:
         merged = {
             **row,
             "gold_primary_notation": str(decision["primary_notation"]),
-            "gold_secondary_notations": list(
-                decision.get("secondary_notations") or []
-            ),
+            "gold_secondary_notations": list(decision.get("secondary_notations") or []),
             "gold_rationale": str(decision.get("rationale") or ""),
             "gold_consensus_sha256": str(decision["consensus_sha256"]),
             "gold_quorum": int(decision.get("quorum") or 0),
             "gold_expected_status": (
                 "proposed" if int(decision.get("quorum") or 0) >= 2 else "held"
             ),
-            "gold_allowed_primary_notations": [
-                str(decision["primary_notation"])
-            ],
+            "gold_allowed_primary_notations": [str(decision["primary_notation"])],
             "gold_models": {
                 "primary": decision.get("primary_model"),
                 "challenger": decision.get("challenger_model"),
@@ -226,8 +225,7 @@ def apply_dev_audit(root: Path, audit_path: Path) -> dict[str, Any]:
         raise RuntimeError("unsupported dev audit schema")
     audit_id = str(audit.get("audit_id") or "")
     if not audit_id or any(
-        value not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
-        for value in audit_id
+        value not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for value in audit_id
     ):
         raise RuntimeError("dev audit requires a safe audit_id")
     corrections = audit.get("corrections")
@@ -240,7 +238,7 @@ def apply_dev_audit(root: Path, audit_path: Path) -> dict[str, Any]:
     applied: list[dict[str, Any]] = []
     for correction in corrections:
         if not isinstance(correction, Mapping):
-            raise RuntimeError("dev audit correction must be an object")
+            raise TypeError("dev audit correction must be an object")
         uid = str(correction.get("uid") or "")
         row = by_uid.get(uid)
         if row is None:
@@ -292,13 +290,7 @@ def apply_dev_audit(root: Path, audit_path: Path) -> dict[str, Any]:
             }
         )
 
-    archive = (
-        root
-        / "classification"
-        / "fixtures"
-        / "epochs"
-        / f"{audit_id}-pre-audit"
-    )
+    archive = root / "classification" / "fixtures" / "epochs" / f"{audit_id}-pre-audit"
     archive.mkdir(parents=True, exist_ok=True)
     shutil.copy2(dev_path, archive / dev_path.name)
     shutil.copy2(manifest_path, archive / manifest_path.name)
@@ -349,16 +341,30 @@ def _config_digest() -> str:
     return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
 
 
-def calibration_input_fingerprint(root: Path) -> dict[str, str]:
+def calibration_input_fingerprint(
+    root: Path,
+    *,
+    fixture_manifest_path: Path | None = None,
+) -> dict[str, str]:
     """Return the immutable inputs that determine a calibration result."""
 
-    dev_path, _holdout_path, manifest_path = fixture_paths(root)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if fixture_manifest_path is None:
+        dev_path, _holdout_path, manifest_path = fixture_paths(root)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    else:
+        manifest_path = fixture_manifest_path
+        manifest = load_fixture_set(manifest_path)
+        dev_path = Path(str(manifest["dev"]["path"]))
     dev_sha256 = "sha256:" + hashlib.sha256(dev_path.read_bytes()).hexdigest()
     if str(manifest.get("dev", {}).get("sha256") or "") != dev_sha256:
         raise RuntimeError("dev fixture hash does not match its locked manifest")
     return {
         "dev_fixture_sha256": dev_sha256,
+        "fixture_manifest_sha256": (
+            "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        ),
+        "fixture_epoch": str(manifest.get("fixture_epoch") or "legacy"),
+        "engine_version": str(manifest.get("engine_version") or ENGINE_VERSION),
         "package_checksum": load_udc_package(root).checksum,
         "config_digest": _config_digest(),
     }
@@ -378,6 +384,10 @@ def _evaluate_locked_holdout(
     dev_metrics: Mapping[str, Any],
     thresholds: Mapping[str, Any],
     input_fingerprint: Mapping[str, str],
+    manifest_path: Path | None = None,
+    calibration_path: Path | None = None,
+    holdout_results_path: Path | None = None,
+    run_namespace: str = "calibration-holdout-epoch2-v2",
 ) -> dict[str, Any]:
     holdout_raw = run_consensus_batches(
         holdout,
@@ -385,7 +395,7 @@ def _evaluate_locked_holdout(
         batch_size=20,
         purpose="explicit",
         timeout_seconds=1_800,
-        run_namespace="calibration-holdout-epoch2-v2",
+        run_namespace=run_namespace,
     )
     holdout_decisions = [
         {
@@ -400,13 +410,13 @@ def _evaluate_locked_holdout(
         }
         for row in holdout_raw
     ]
-    _write_jsonl(
+    holdout_results_path = holdout_results_path or (
         root
         / "classification"
         / "fixtures"
-        / "classification-holdout-epoch2-results.jsonl",
-        holdout_decisions,
+        / "classification-holdout-epoch2-results.jsonl"
     )
+    _write_jsonl(holdout_results_path, holdout_decisions)
     holdout_metrics = evaluate_predictions(holdout, holdout_decisions)
     return adopt_calibration(
         root,
@@ -414,39 +424,77 @@ def _evaluate_locked_holdout(
         holdout_metrics=holdout_metrics,
         config_digest=str(input_fingerprint["config_digest"]),
         thresholds=thresholds,
+        manifest_path=manifest_path,
+        output_path=calibration_path,
+        authority_epoch=(
+            int(str(input_fingerprint.get("fixture_epoch") or "1").split("-")[1])
+            if str(input_fingerprint.get("fixture_epoch") or "").startswith("epoch-")
+            and str(input_fingerprint.get("fixture_epoch")).split("-")[1].isdigit()
+            else 1
+        ),
     )
 
 
-def calibrate(root: Path) -> dict[str, Any]:
-    dev_path, holdout_path, manifest_path = fixture_paths(root)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+def calibrate(
+    root: Path,
+    *,
+    fixture_manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    if fixture_manifest_path is None:
+        dev_path, holdout_path, manifest_path = fixture_paths(root)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        calibration_path = root / "classification" / "calibration.json"
+        preregistration_path = (
+            root / "classification" / "calibration-preregistration.json"
+        )
+        holdout_results_path = (
+            root
+            / "classification"
+            / "fixtures"
+            / "classification-holdout-epoch2-results.jsonl"
+        )
+        namespace_suffix = "epoch2-v2"
+    else:
+        manifest_path = fixture_manifest_path
+        manifest = load_fixture_set(manifest_path)
+        dev_path = Path(str(manifest["dev"]["path"]))
+        holdout_path = Path(str(manifest["holdout"]["path"]))
+        calibration_path = manifest_path.parent / "calibration.json"
+        preregistration_path = manifest_path.parent / "calibration-preregistration.json"
+        holdout_results_path = manifest_path.parent / "holdout-results.jsonl"
+        namespace_suffix = str(manifest["fixture_epoch"])
     _verify_locked_holdout(manifest, holdout_path)
-    input_fingerprint = calibration_input_fingerprint(root)
+    input_fingerprint = (
+        calibration_input_fingerprint(root)
+        if fixture_manifest_path is None
+        else calibration_input_fingerprint(
+            root, fixture_manifest_path=fixture_manifest_path
+        )
+    )
     holdout = _jsonl(holdout_path)
     if manifest["holdout"].get("opened_at"):
-        calibration_path = root / "classification" / "calibration.json"
         if calibration_path.exists():
             existing = json.loads(calibration_path.read_text(encoding="utf-8"))
             if existing.get("status") == "adopted":
                 return existing
-        preregistration = read_sealed_json(
-            root / "classification" / "calibration-preregistration.json"
-        )
+        preregistration = read_sealed_json(preregistration_path)
         if (
             preregistration.get("schema") != PREREGISTRATION_SCHEMA
             or preregistration.get("input_fingerprint") != input_fingerprint
             or not isinstance(preregistration.get("thresholds"), Mapping)
             or not isinstance(preregistration.get("dev_metrics"), Mapping)
         ):
-            raise RuntimeError(
-                "opened Holdout lacks a matching sealed preregistration"
-            )
+            raise RuntimeError("opened Holdout lacks a matching sealed preregistration")
         return _evaluate_locked_holdout(
             root,
             holdout,
             dev_metrics=preregistration["dev_metrics"],
             thresholds=preregistration["thresholds"],
             input_fingerprint=input_fingerprint,
+            manifest_path=manifest_path,
+            calibration_path=calibration_path,
+            holdout_results_path=holdout_results_path,
+            run_namespace=f"calibration-holdout-{namespace_suffix}",
         )
     dev = _jsonl(dev_path)
     dev_raw = run_consensus_batches(
@@ -455,7 +503,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         batch_size=20,
         purpose="explicit",
         timeout_seconds=1_800,
-        run_namespace="calibration-dev-epoch2-v2",
+        run_namespace=f"calibration-dev-{namespace_suffix}",
     )
     sweep = []
     for minimum_confidence in (0.45, 0.50, 0.55, 0.60, 0.65, 0.70):
@@ -483,7 +531,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         for row in sweep
         if row["metrics"]["forced_misclassification_rate"] <= 0.01
         and row["metrics"]["expected_hold_escape_rate"] == 0.0
-        and row["metrics"]["hold_rate"] <= 0.08
+        and row["metrics"]["unexpected_hold_rate"] <= 0.08
         and row["metrics"]["primary_assignment_rate"] >= 0.98
         and row["metrics"]["exact_match_rate"] >= 0.90
         and row["metrics"]["hierarchy_within_one_rate"] >= 0.97
@@ -503,7 +551,7 @@ def calibrate(root: Path) -> dict[str, Any]:
             ),
         }
         write_sealed_json(
-            root / "classification" / "calibration.json",
+            calibration_path,
             rejection,
             backup=True,
         )
@@ -519,7 +567,7 @@ def calibrate(root: Path) -> dict[str, Any]:
     thresholds = {
         "minimum_quorum": 2,
         "minimum_confidence": float(selected["minimum_confidence"]),
-        "maximum_hold_rate": 0.08,
+        "maximum_unexpected_hold_rate": 0.08,
         "maximum_forced_misclassification_rate": 0.01,
         "maximum_expected_hold_escape_rate": 0.0,
         "minimum_exact_match_rate": 0.90,
@@ -528,7 +576,12 @@ def calibrate(root: Path) -> dict[str, Any]:
     preregistration = {
         "schema": PREREGISTRATION_SCHEMA,
         "registered_at": _now(),
-        "authority_epoch": 1,
+        "authority_epoch": (
+            int(str(manifest.get("fixture_epoch") or "1").split("-")[1])
+            if str(manifest.get("fixture_epoch") or "").startswith("epoch-")
+            and str(manifest.get("fixture_epoch")).split("-")[1].isdigit()
+            else 1
+        ),
         "fixture_manifest_sha256": (
             "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         ),
@@ -541,7 +594,7 @@ def calibrate(root: Path) -> dict[str, Any]:
         "holdout_opened": False,
     }
     write_sealed_json(
-        root / "classification" / "calibration-preregistration.json",
+        preregistration_path,
         preregistration,
         backup=True,
     )
@@ -554,6 +607,10 @@ def calibrate(root: Path) -> dict[str, Any]:
         thresholds=thresholds,
         holdout=holdout,
         input_fingerprint=input_fingerprint,
+        manifest_path=manifest_path,
+        calibration_path=calibration_path,
+        holdout_results_path=holdout_results_path,
+        run_namespace=f"calibration-holdout-{namespace_suffix}",
     )
 
 

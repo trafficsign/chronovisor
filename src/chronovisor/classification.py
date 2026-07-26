@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from chronovisor import frontmatter
 
@@ -56,6 +57,7 @@ class ClassificationRecord:
     evidence_refs: tuple[str, ...]
     classifier_authority_epoch: int
     status: str = "proposed"
+    classifier_authority_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -77,7 +79,7 @@ class UDCPackage:
     concepts: Mapping[str, Mapping[str, Any]]
 
     @classmethod
-    def load(cls, path: Path) -> "UDCPackage":
+    def load(cls, path: Path) -> UDCPackage:
         raw = path.read_bytes()
         try:
             payload = json.loads(raw)
@@ -162,9 +164,7 @@ class ControlledSubject:
 
 
 def default_udc_package() -> UDCPackage:
-    return UDCPackage.load(
-        Path(__file__).parent / "data" / "udc-summary.json"
-    )
+    return UDCPackage.load(Path(__file__).parent / "data" / "udc-summary.json")
 
 
 def classification_source_sha256(text: str) -> str:
@@ -210,6 +210,48 @@ def classification_authority_status(
     package: UDCPackage | None = None,
 ) -> dict[str, Any]:
     package = package or load_udc_package(root)
+    pointer_path = root / "classification" / "authority" / "active.json"
+    if pointer_path.exists():
+        from chronovisor.classification_bundle import resolve_authority
+
+        resolved = resolve_authority(root)
+        common = {
+            "package_complete": package.complete,
+            "release": package.release,
+            "checksum": package.checksum,
+            "license": package.license,
+            "bundle_resolver_status": resolved.get("status"),
+            "candidate_behavior": resolved.get("candidate_behavior"),
+            "mutation_capability": bool(resolved.get("mutation_capability")),
+        }
+        if resolved.get("status") == "active":
+            target = resolved.get("target") or {}
+            authority = target.get("authority") or {}
+            return {
+                **common,
+                "active": True,
+                "calibrated": True,
+                "authority_epoch": int(
+                    target.get("adoption_payload", {})
+                    .get("adoption_policy", {})
+                    .get("authority_epoch")
+                    or 0
+                ),
+                "calibration_path": target.get("candidate_bundle_path"),
+                "threshold_version": authority.get("authority_digest"),
+                "thresholds": {},
+                "reason": "adopted_decision_only",
+            }
+        return {
+            **common,
+            "active": False,
+            "calibrated": False,
+            "authority_epoch": 0,
+            "calibration_path": None,
+            "threshold_version": None,
+            "thresholds": {},
+            "reason": str(resolved.get("reason") or "bundle_resolver_error"),
+        }
     calibration_path = root / "classification" / "calibration.json"
     calibration: dict[str, Any] = {}
     if calibration_path.exists():
@@ -249,6 +291,9 @@ def classification_authority_status(
         "calibration_path": str(calibration_path),
         "threshold_version": calibration.get("config_digest"),
         "thresholds": calibration.get("thresholds") or {},
+        "bundle_resolver_status": "legacy",
+        "candidate_behavior": "A0-production-replay",
+        "mutation_capability": False,
         "reason": ",".join(reasons) if reasons else "adopted",
     }
 
@@ -285,6 +330,11 @@ def validate_record(
         raise ClassificationError("confidence must be within [0, 1]")
     if record.classifier_authority_epoch < 0:
         raise ClassificationError("authority epoch must be non-negative")
+    if record.classifier_authority_epoch >= 3 and (
+        not record.classifier_authority_digest
+        or not record.classifier_authority_digest.startswith("sha256:")
+    ):
+        raise ClassificationError("vNext classification requires an authority digest")
     facets = dict(record.facets)
     if facets.get("form") not in VALID_FORMS:
         raise ClassificationError("invalid form facet")
@@ -309,6 +359,7 @@ def classification_frontmatter(record: ClassificationRecord) -> dict[str, Any]:
         "classification_status": record.status,
         "classification_confidence": f"{record.confidence:.6f}",
         "classification_authority_epoch": str(record.classifier_authority_epoch),
+        "classification_authority_digest": (record.classifier_authority_digest or ""),
         "classification_json": json.dumps(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ),
@@ -344,6 +395,9 @@ def record_from_dict(payload: Mapping[str, Any]) -> ClassificationRecord:
             evidence_refs=tuple(str(value) for value in payload["evidence_refs"]),
             classifier_authority_epoch=int(payload["classifier_authority_epoch"]),
             status=str(payload.get("status") or "proposed"),
+            classifier_authority_digest=(
+                str(payload.get("classifier_authority_digest") or "") or None
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ClassificationError(f"invalid classification record: {exc}") from exc

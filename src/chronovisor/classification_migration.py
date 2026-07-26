@@ -23,11 +23,11 @@ from chronovisor.classification import (
     validate_record,
 )
 from chronovisor.classification_engine import (
-    CandidateIndex,
     _page_payload,
     record_from_consensus,
     run_consensus_batches,
 )
+from chronovisor.classification_resolver import production_candidate_index
 from chronovisor.durable_state import write_sealed_json
 from chronovisor.librarian import _append_event, _now_iso
 from chronovisor.link_fix import atomic_write
@@ -81,12 +81,11 @@ def build_classification_index(
         assignments[uid] = {
             "primary_uri": record.primary.concept_uri,
             "primary_notation": record.primary.notation,
-            "secondary_notations": [
-                value.notation for value in record.secondary
-            ],
+            "secondary_notations": [value.notation for value in record.secondary],
             "status": status,
             "confidence": record.confidence,
             "authority_epoch": record.classifier_authority_epoch,
+            "authority_digest": record.classifier_authority_digest,
             "page_path": str(row.get("path") or ""),
         }
     payload = {
@@ -99,9 +98,7 @@ def build_classification_index(
         "by_notation": {
             key: sorted(value) for key, value in sorted(by_notation.items())
         },
-        "by_status": {
-            key: sorted(value) for key, value in sorted(by_status.items())
-        },
+        "by_status": {key: sorted(value) for key, value in sorted(by_status.items())},
         "assignments": dict(sorted(assignments.items())),
     }
     if write:
@@ -122,12 +119,26 @@ def run_full_model_shadow(
     """Classify every stale page with local 2-of-3 consensus."""
 
     started = time.monotonic()
+    authority = classification_authority_status(root)
+    if authority.get("bundle_resolver_status") != "legacy" and not authority.get(
+        "mutation_capability"
+    ):
+        raise RuntimeError(
+            "classification bundle is decision-only; parent Phase 5 mutation CAS "
+            "has not enabled Page Registry writes"
+        )
     registry = PageRegistry(root)
     state = registry.ensure_manifest(write=True)["registry"]
     package = load_udc_package(root)
     if not package.complete:
         raise RuntimeError("full model shadow requires the complete UDC package")
-    index = CandidateIndex(package)
+    index = production_candidate_index(root, package)
+    authority_epoch = int(authority.get("authority_epoch") or 1)
+    authority_digest = (
+        str(authority.get("threshold_version") or "")
+        if authority.get("bundle_resolver_status") != "legacy"
+        else ""
+    )
     rows: list[dict[str, Any]] = []
     for uid, row in sorted(_active_pages(root, state).items()):
         page = _page_payload(root, uid, row)
@@ -144,7 +155,12 @@ def run_full_model_shadow(
             isinstance(classification, Mapping)
             and classification.get("subject_checksum") == package.checksum
             and current_ref == f"page-sha256:{page['source_sha256']}"
-            and int(classification.get("classifier_authority_epoch") or 0) >= 1
+            and int(classification.get("classifier_authority_epoch") or 0)
+            == authority_epoch
+            and (
+                not authority_digest
+                or classification.get("classifier_authority_digest") == authority_digest
+            )
         ):
             continue
         page["candidates"] = index.candidates(page)
@@ -168,8 +184,9 @@ def run_full_model_shadow(
             page,
             decision,
             package=package,
-            authority_epoch=1,
+            authority_epoch=authority_epoch,
             status=status,
+            authority_digest=authority_digest or None,
         )
         updates[str(page["uid"])] = {
             "classification": record.to_dict(),
@@ -196,9 +213,7 @@ def run_full_model_shadow(
         event="librarian_local_consensus_shadow",
     )
     latest = registry.load()
-    index_payload = build_classification_index(
-        root, registry_state=latest, write=True
-    )
+    index_payload = build_classification_index(root, registry_state=latest, write=True)
     remaining = 0
     for uid, row in _active_pages(root, latest).items():
         page = _page_payload(root, uid, row)
@@ -215,7 +230,13 @@ def run_full_model_shadow(
             not isinstance(classification, Mapping)
             or classification.get("subject_checksum") != package.checksum
             or current_ref != f"page-sha256:{page['source_sha256']}"
-            or int(classification.get("classifier_authority_epoch") or 0) < 1
+            or int(classification.get("classifier_authority_epoch") or 0)
+            != authority_epoch
+            or (
+                authority_digest
+                and classification.get("classifier_authority_digest")
+                != authority_digest
+            )
         ):
             remaining += 1
     receipt = {
@@ -272,6 +293,8 @@ def _classification_updates(
     row: Mapping[str, Any],
     *,
     package: Any,
+    authority_epoch: int,
+    authority_digest: str | None,
 ) -> tuple[dict[str, Any], Any]:
     classification = row.get("classification")
     if not isinstance(classification, Mapping):
@@ -282,7 +305,8 @@ def _classification_updates(
     )
     adopted = replace(
         record,
-        classifier_authority_epoch=1,
+        classifier_authority_epoch=authority_epoch,
+        classifier_authority_digest=authority_digest,
         status=target_status,
     )
     validate_record(adopted, package=package, require_complete_package=True)
@@ -304,7 +328,22 @@ def migrate_active_metadata(
 
     authority = classification_authority_status(root)
     if not authority["active"]:
-        raise RuntimeError(f"classification authority is inactive: {authority['reason']}")
+        raise RuntimeError(
+            f"classification authority is inactive: {authority['reason']}"
+        )
+    if authority.get("bundle_resolver_status") != "legacy" and not authority.get(
+        "mutation_capability"
+    ):
+        raise RuntimeError(
+            "classification bundle is decision-only; parent Phase 5 mutation CAS "
+            "has not enabled Page writes"
+        )
+    authority_epoch = int(authority.get("authority_epoch") or 1)
+    authority_digest = (
+        str(authority.get("threshold_version") or "")
+        if authority.get("bundle_resolver_status") != "legacy"
+        else ""
+    )
     package = load_udc_package(root)
     registry = PageRegistry(root)
     state = registry.ensure_manifest(write=True)["registry"]
@@ -316,17 +355,26 @@ def migrate_active_metadata(
         meta, _body = frontmatter.parse(text)
         current_uid = str(meta.get("uid") or "")
         current_checksum = ""
+        current_epoch = 0
+        current_authority_digest = ""
         raw_classification = meta.get("classification_json")
         if isinstance(raw_classification, str):
             try:
-                current_checksum = str(
-                    json.loads(raw_classification).get("subject_checksum") or ""
+                current_payload = json.loads(raw_classification)
+                current_checksum = str(current_payload.get("subject_checksum") or "")
+                current_epoch = int(
+                    current_payload.get("classifier_authority_epoch") or 0
                 )
-            except json.JSONDecodeError:
+                current_authority_digest = str(
+                    current_payload.get("classifier_authority_digest") or ""
+                )
+            except (json.JSONDecodeError, TypeError, ValueError):
                 current_checksum = ""
         if (
             current_uid == uid
             and current_checksum == package.checksum
+            and current_epoch == authority_epoch
+            and (not authority_digest or current_authority_digest == authority_digest)
             and meta.get("classification_status") in {"adopted", "held"}
         ):
             continue
@@ -366,14 +414,20 @@ def migrate_active_metadata(
                     if _sha256_bytes(original) != str(row.get("content_sha256") or ""):
                         raise RuntimeError(f"CAS preimage changed for {row['path']}")
                     updates, adopted = _classification_updates(
-                        uid, row, package=package
+                        uid,
+                        row,
+                        package=package,
+                        authority_epoch=authority_epoch,
+                        authority_digest=authority_digest or None,
                     )
                     text = original.decode("utf-8")
                     _meta, body = frontmatter.parse(text)
                     updated = frontmatter.patch(text, updates)
                     _updated_meta, updated_body = frontmatter.parse(updated)
                     if updated_body != body:
-                        raise RuntimeError(f"frontmatter patch changed body for {row['path']}")
+                        raise RuntimeError(
+                            f"frontmatter patch changed body for {row['path']}"
+                        )
                     preimages[path] = original
                     updated_bytes = updated.encode("utf-8")
                     atomic_write(path, updated)

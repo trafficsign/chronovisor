@@ -30,6 +30,12 @@ def test_dashboard_static_contract_exposes_librarian_progress() -> None:
         "librarian-rollout",
         "librarian-soak",
         "librarian-recovery",
+        "librarian-evidence-status",
+        "librarian-evidence-fixture",
+        "librarian-evidence-external",
+        "librarian-evidence-resource",
+        "librarian-evidence-authority",
+        "librarian-evidence-update",
     ):
         assert f'id="{identifier}"' in html
     assert "function renderLibrarian" in js

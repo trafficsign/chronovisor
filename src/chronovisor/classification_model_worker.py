@@ -19,12 +19,21 @@ from chronovisor.durable_state import (
 )
 from chronovisor.runtime_config import load_decision_router_config
 
-STAGE_CACHE_SCHEMA = "chronovisor.classification-stage-cache.v2"
+STAGE_CACHE_SCHEMA = "chronovisor.classification-stage-cache.v3"
 # A page's classification must not depend on unrelated pages sharing its batch.
 STAGE_CHUNK_SIZE = 1
 
 
-def _schema(count: int) -> dict[str, Any]:
+def _schema(count: int, *, dual_blind: bool = False) -> dict[str, Any]:
+    required = [
+        "uid",
+        "primary_notation",
+        "secondary_notations",
+        "confidence",
+        "rationale",
+    ]
+    if dual_blind:
+        required.append("expected_status")
     return {
         "type": "object",
         "additionalProperties": False,
@@ -37,13 +46,7 @@ def _schema(count: int) -> dict[str, Any]:
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": [
-                        "uid",
-                        "primary_notation",
-                        "secondary_notations",
-                        "confidence",
-                        "rationale",
-                    ],
+                    "required": required,
                     "properties": {
                         "uid": {"type": "string"},
                         "primary_notation": {"type": "string"},
@@ -58,6 +61,10 @@ def _schema(count: int) -> dict[str, Any]:
                             "maximum": 1,
                         },
                         "rationale": {"type": "string", "maxLength": 160},
+                        "expected_status": {
+                            "type": "string",
+                            "enum": ["proposed", "held"],
+                        },
                     },
                 },
             }
@@ -66,14 +73,12 @@ def _schema(count: int) -> dict[str, Any]:
 
 
 def _page_prompt(page: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         "uid": str(page["uid"]),
         "title": str(page.get("title") or ""),
         "summary": str(page.get("summary") or ""),
         "tags": [str(value) for value in page.get("tags") or []],
-        "raw_keywords": [
-            str(value) for value in (page.get("raw_keywords") or [])[:30]
-        ],
+        "raw_keywords": [str(value) for value in (page.get("raw_keywords") or [])[:30]],
         "excerpt": str(page.get("excerpt") or "")[:1_200],
         "allowed_candidates": [
             {
@@ -85,6 +90,10 @@ def _page_prompt(page: Mapping[str, Any]) -> dict[str, Any]:
             for candidate in page.get("candidates") or []
         ],
     }
+    evidence_card = page.get("evidence_card")
+    if isinstance(evidence_card, Mapping):
+        payload["evidence_card"] = dict(evidence_card)
+    return payload
 
 
 def _call(
@@ -94,6 +103,7 @@ def _call(
     pages: Sequence[Mapping[str, Any]],
     role: str,
     prior: Sequence[Mapping[str, Any]] | None = None,
+    dual_blind: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     config = load_decision_router_config()
     prompt = {
@@ -106,6 +116,15 @@ def _call(
         "role": role,
         "pages": [_page_prompt(page) for page in pages],
     }
+    if dual_blind:
+        prompt["adjudication_contract"] = (
+            "This is an independent gold-fixture adjudication. Do not infer "
+            "another reviewer's answer. Set expected_status=proposed only when "
+            "the page text supports one allowed UDC concept. Set "
+            "expected_status=held when the text is genuinely ambiguous or "
+            "insufficient; still return the nearest allowed parent as "
+            "primary_notation for auditability."
+        )
     if prior is not None:
         prompt["proposal_to_audit"] = list(prior)
         if role == "tie-break-adjudicator":
@@ -135,7 +154,7 @@ def _call(
             },
         ],
         model=model,
-        format=_schema(len(pages)),
+        format=_schema(len(pages), dual_blind=dual_blind),
         num_ctx=min(config.num_ctx, 65_536),
         num_predict=max(1_536, min(4_096, len(pages) * 110)),
         keep_alive=keep_alive,
@@ -158,6 +177,7 @@ def _call(
                 pages=pages[:midpoint],
                 role=role,
                 prior=prior_left,
+                dual_blind=dual_blind,
             )
             right, right_calls = _call(
                 model=model,
@@ -165,6 +185,7 @@ def _call(
                 pages=pages[midpoint:],
                 role=role,
                 prior=prior_right,
+                dual_blind=dual_blind,
             )
             return left + right, 1 + left_calls + right_calls
         page = pages[0]
@@ -176,6 +197,7 @@ def _call(
                     "secondary_notations": [],
                     "confidence": 0.0,
                     "rationale": f"{model} returned truncated JSON.",
+                    **({"expected_status": "held"} if dual_blind else {}),
                     "_invalid_reason": "model_json_truncated",
                 }
             ],
@@ -196,6 +218,7 @@ def _call(
                 "secondary_notations": [],
                 "confidence": 0.0,
                 "rationale": f"{model} omitted this page.",
+                **({"expected_status": "held"} if dual_blind else {}),
                 "_invalid_reason": "model_omitted_page",
             }
         allowed = {
@@ -203,17 +226,19 @@ def _call(
         }
         primary = str(decision.get("primary_notation") or "")
         secondary = [str(value) for value in decision.get("secondary_notations") or []]
+        if dual_blind and decision.get("expected_status") not in {
+            "proposed",
+            "held",
+        }:
+            decision["_invalid_reason"] = "invalid_expected_status"
+            decision["confidence"] = 0.0
         if primary not in allowed:
             decision["_invalid_reason"] = "notation_outside_host_candidates"
             decision["confidence"] = 0.0
         else:
-            rejected_secondary = [
-                value for value in secondary if value not in allowed
-            ]
+            rejected_secondary = [value for value in secondary if value not in allowed]
             decision["secondary_notations"] = [
-                value
-                for value in secondary
-                if value in allowed and value != primary
+                value for value in secondary if value in allowed and value != primary
             ]
             if rejected_secondary:
                 decision["_rejected_secondary_notations"] = rejected_secondary
@@ -256,10 +281,14 @@ def _stage_cache_path(
     primary_model: str,
     challenger_model: str,
     tie_break_model: str,
+    adjudication_mode: str,
+    stage_cache_epoch: str,
 ) -> tuple[str, Path]:
     identity = {
         "schema": STAGE_CACHE_SCHEMA,
         "consensus_schema": CONSENSUS_SCHEMA,
+        "adjudication_mode": adjudication_mode,
+        "stage_cache_epoch": stage_cache_epoch,
         "models": {
             "primary": primary_model,
             "challenger": challenger_model,
@@ -273,6 +302,14 @@ def _stage_cache_path(
                     str(candidate["notation"])
                     for candidate in page.get("candidates") or []
                 ],
+                "evidence_card_sha256": hashlib.sha256(
+                    json.dumps(
+                        page.get("evidence_card") or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
             }
             for page in pages
         ],
@@ -286,20 +323,14 @@ def _stage_cache_path(
         ).encode("utf-8")
     ).hexdigest()
     path = (
-        root
-        / "runtime"
-        / "librarian"
-        / "classification-stage-cache"
-        / f"{digest}.json"
+        root / "runtime" / "librarian" / "classification-stage-cache" / f"{digest}.json"
     )
     return digest, path
 
 
 def _load_stage_cache(path: Path, cache_key: str) -> dict[str, Any]:
     try:
-        payload = verify_sealed_object(
-            json.loads(path.read_text(encoding="utf-8"))
-        )
+        payload = verify_sealed_object(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError, DurableStateError):
         return {
             "schema": STAGE_CACHE_SCHEMA,
@@ -326,9 +357,7 @@ def _valid_cached_stage(
     if not isinstance(rows, list) or len(rows) != len(pages):
         return None
     by_uid = {
-        str(row.get("uid") or ""): dict(row)
-        for row in rows
-        if isinstance(row, Mapping)
+        str(row.get("uid") or ""): dict(row) for row in rows if isinstance(row, Mapping)
     }
     output: list[dict[str, Any]] = []
     for page in pages:
@@ -347,8 +376,7 @@ def _valid_cached_stage(
         if primary not in allowed and not safely_marked_invalid:
             return None
         if any(
-            str(value) not in allowed
-            for value in row.get("secondary_notations") or []
+            str(value) not in allowed for value in row.get("secondary_notations") or []
         ):
             return None
         output.append(row)
@@ -365,6 +393,7 @@ def _cached_stage_call(
     pages: Sequence[Mapping[str, Any]],
     role: str,
     prior: Sequence[Mapping[str, Any]] | None = None,
+    dual_blind: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     stages = cache.setdefault("stages", {})
     raw_cached = stages.get(stage)
@@ -383,9 +412,7 @@ def _cached_stage_call(
     for offset in range(len(decisions), len(pages), STAGE_CHUNK_SIZE):
         chunk = pages[offset : offset + STAGE_CHUNK_SIZE]
         prior_chunk = (
-            prior[offset : offset + STAGE_CHUNK_SIZE]
-            if prior is not None
-            else None
+            prior[offset : offset + STAGE_CHUNK_SIZE] if prior is not None else None
         )
         chunk_decisions, chunk_calls = _call(
             model=model,
@@ -393,6 +420,7 @@ def _cached_stage_call(
             pages=chunk,
             role=role,
             prior=prior_chunk,
+            dual_blind=dual_blind,
         )
         decisions.extend(chunk_decisions)
         calls += chunk_calls
@@ -432,12 +460,19 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(pages, list) or not pages:
         raise ValueError("classification worker requires pages")
     config = load_decision_router_config()
+    adjudication_mode = str(payload.get("adjudication_mode") or "proposal-audit")
+    if adjudication_mode not in {"proposal-audit", "dual-blind"}:
+        raise ValueError("unsupported classification adjudication mode")
+    dual_blind = adjudication_mode == "dual-blind"
+    stage_cache_epoch = str(payload.get("stage_cache_epoch") or "default")
     cache_key, cache_path = _stage_cache_path(
         root,
         pages,
         primary_model=config.primary_model,
         challenger_model=config.challenger_model,
         tie_break_model=config.tie_break_model,
+        adjudication_mode=adjudication_mode,
+        stage_cache_epoch=stage_cache_epoch,
     )
     cache = _load_stage_cache(cache_path, cache_key)
     primary, primary_calls = _cached_stage_call(
@@ -448,6 +483,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         keep_alive=config.primary_keep_alive,
         pages=pages,
         role="primary-proposer",
+        dual_blind=dual_blind,
     )
     challenger, challenger_calls = _cached_stage_call(
         cache=cache,
@@ -457,14 +493,23 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         keep_alive=config.challenger_keep_alive,
         pages=pages,
         role="independent-challenger",
-        prior=primary,
+        prior=None if dual_blind else primary,
+        dual_blind=dual_blind,
     )
     disagreements = [
         index
         for index, (left, right) in enumerate(zip(primary, challenger, strict=True))
         if left.get("_invalid_reason")
         or right.get("_invalid_reason")
-        or str(left["primary_notation"]) != str(right["primary_notation"])
+        or (
+            dual_blind
+            and str(left.get("expected_status") or "")
+            != str(right.get("expected_status") or "")
+        )
+        or (
+            (not dual_blind or str(left.get("expected_status") or "") == "proposed")
+            and str(left["primary_notation"]) != str(right["primary_notation"])
+        )
     ]
     tie_by_uid: dict[str, dict[str, Any]] = {}
     model_calls = primary_calls + challenger_calls
@@ -494,6 +539,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             pages=tie_pages,
             role="tie-break-adjudicator",
             prior=paired_prior,
+            dual_blind=dual_blind,
         )
         tie_by_uid = {str(row["uid"]): row for row in tie}
         model_calls += tie_calls
@@ -506,22 +552,51 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         left_valid = not left.get("_invalid_reason")
         right_valid = not right.get("_invalid_reason")
         tie_valid = tie is not None and not tie.get("_invalid_reason")
-        if (
-            left_valid
-            and right_valid
-            and left["primary_notation"] == right["primary_notation"]
+        left_status = str(left.get("expected_status") or "proposed")
+        right_status = str(right.get("expected_status") or "proposed")
+        tie_status = str(
+            (tie.get("expected_status") if tie is not None else None) or "proposed"
+        )
+        if dual_blind and (
+            left_valid and right_valid and left_status == right_status == "held"
         ):
             winner = left
             votes = 2
+            expected_status = "held"
+        elif (
+            left_valid
+            and right_valid
+            and left["primary_notation"] == right["primary_notation"]
+            and (not dual_blind or left_status == right_status == "proposed")
+        ):
+            winner = left
+            votes = 2
+            expected_status = "proposed"
         elif tie_valid and (
-            (left_valid and tie["primary_notation"] == left["primary_notation"])
+            (
+                dual_blind
+                and tie_status == "held"
+                and (
+                    (left_valid and left_status == "held")
+                    or (right_valid and right_status == "held")
+                )
+            )
             or (
-                right_valid
+                tie_status == "proposed"
+                and left_valid
+                and tie["primary_notation"] == left["primary_notation"]
+                and (not dual_blind or left_status == "proposed")
+            )
+            or (
+                tie_status == "proposed"
+                and right_valid
                 and tie["primary_notation"] == right["primary_notation"]
+                and (not dual_blind or right_status == "proposed")
             )
         ):
             winner = tie
             votes = 2
+            expected_status = tie_status if dual_blind else "proposed"
         else:
             winner = (
                 tie
@@ -540,6 +615,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 }
             )
             votes = 1
+            expected_status = "held" if dual_blind else "proposed"
         confidence = min(
             float(winner.get("confidence") or 0.0),
             0.99 if votes >= 2 else 0.49,
@@ -549,12 +625,19 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "uid": uid,
                 "primary_notation": str(winner["primary_notation"]),
                 "secondary_notations": [
-                    str(value)
-                    for value in winner.get("secondary_notations") or []
+                    str(value) for value in winner.get("secondary_notations") or []
                 ][:3],
                 "confidence": confidence,
                 "rationale": str(winner.get("rationale") or "")[:400],
-                "status": "proposed" if votes >= 2 else "held",
+                "status": (
+                    expected_status
+                    if dual_blind and votes >= 2
+                    else "proposed"
+                    if votes >= 2
+                    else "held"
+                ),
+                "expected_status": (expected_status if votes >= 2 else "unresolved"),
+                "adjudication_mode": adjudication_mode,
                 "quorum": votes,
                 "primary_model": config.primary_model,
                 "challenger_model": config.challenger_model,
