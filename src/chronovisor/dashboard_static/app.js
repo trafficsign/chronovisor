@@ -2037,6 +2037,7 @@ function renderLibrarian(librarian) {
   const restorePoints = data.restore_points || {};
   const preimages = data.transaction_preimages || {};
   const evidence = data.library_evidence || {};
+  const annif = evidence.annif || {};
   const progressRows = [
     ["uid", els.librarianUid, els.librarianUidBar],
     ["classification_shadow", els.librarianClassification, els.librarianClassificationBar],
@@ -2112,25 +2113,36 @@ function renderLibrarian(librarian) {
     `${intValue(restorePoints.verified)}/${intValue(restorePoints.count)} verified` +
     ` · ${intValue(preimages.count)} preimage`;
   const evidenceProgress = evidence.phase_progress || {};
+  const evidenceMethod = fmt(evidence.method, "classification").replaceAll("_", " ");
   els.librarianEvidenceStatus.textContent =
-    `${fmt(evidence.status, "not started").replaceAll("_", " ")} · ` +
+    `${evidenceMethod} · ${fmt(evidence.status, "not started").replaceAll("_", " ")} · ` +
     `${fmt(evidence.stage, "idle").replaceAll("_", " ")} · ` +
     `${intValue(evidenceProgress.numerator)}/${intValue(evidenceProgress.denominator)} phases`;
   const fixture = evidence.fixture || {};
-  els.librarianEvidenceFixture.textContent = fixture.dev || fixture.holdout
-    ? `${intValue(fixture.dev)} dev · ${intValue(fixture.holdout)} holdout · ${intValue(fixture.reserve)} reserve`
-    : "Not locked";
+  els.librarianEvidenceFixture.textContent = annif.council_case_count
+    ? `Council ${intValue(annif.council_hit_count)}/${intValue(annif.council_case_count)} · ` +
+      `${fmt(annif.council_decision, "reviewed").replaceAll("-", " ")} · ` +
+      `${intValue(annif.council_completed_rows)} rows stopped`
+    : fixture.dev || fixture.holdout
+      ? `${intValue(fixture.dev)} dev · ${intValue(fixture.holdout)} holdout · ${intValue(fixture.reserve)} reserve`
+      : "Not locked";
   const candidateMetrics = evidence.candidate_metrics || {};
   const unionMetrics = candidateMetrics.union || {};
   const p0Metrics = candidateMetrics.official_baseline || {};
-  els.librarianEvidenceRecall.textContent = numeric(unionMetrics.recall_at_12)
-    ? `P0 ${(intValue(p0Metrics.recall_at_12 * 1000) / 10).toFixed(1)}% · W ${(intValue(unionMetrics.recall_at_12 * 1000) / 10).toFixed(1)}%`
-    : "Not evaluated";
+  els.librarianEvidenceRecall.textContent = annif.case_count
+    ? `Annif top1 ${intValue(annif.best_top1_hit_count)}/${intValue(annif.case_count)} · ` +
+      `top5 ${intValue(annif.best_top5_hit_count)}/${intValue(annif.case_count)}`
+    : numeric(unionMetrics.recall_at_12)
+      ? `P0 ${(intValue(p0Metrics.recall_at_12 * 1000) / 10).toFixed(1)}% · W ${(intValue(unionMetrics.recall_at_12 * 1000) / 10).toFixed(1)}%`
+      : "Awaiting Annif 10-case gate";
   const externalTest = evidence.external_test || {};
   const externalUnion = (externalTest.metrics || {}).union || {};
-  els.librarianEvidenceExternal.textContent = numeric(externalUnion.recall_at_20)
-    ? `${intValue(externalTest.n).toLocaleString()} test · R@20 ${(externalUnion.recall_at_20 * 100).toFixed(1)}%`
-    : "Not evaluated";
+  els.librarianEvidenceExternal.textContent = annif.train_documents
+    ? `${intValue(annif.train_documents).toLocaleString()} train · ` +
+      `${intValue(annif.test_documents).toLocaleString()} external test`
+    : numeric(externalUnion.recall_at_20)
+      ? `${intValue(externalTest.n).toLocaleString()} test · R@20 ${(externalUnion.recall_at_20 * 100).toFixed(1)}%`
+      : "Corpus acquisition in progress";
   const holdoutEvidence = evidence.holdout_metrics || {};
   const unexpectedHold = numeric(holdoutEvidence.unexpected_hold_rate)
     ? `${(holdoutEvidence.unexpected_hold_rate * 100).toFixed(1)}% unexpected`

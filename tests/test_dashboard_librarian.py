@@ -105,6 +105,50 @@ def test_library_evidence_dashboard_reports_in_progress_runtime_stage(
     assert status["fixture"]["adjudication_accepted"] == 12
 
 
+def test_library_evidence_dashboard_prefers_annif_runtime(tmp_path: Path) -> None:
+    write_sealed_json(
+        tmp_path / "classification" / "library-evidence" / "state.json",
+        {
+            "schema": "chronovisor.classification-library-pilot-state.v1",
+            "status": "rejected",
+            "stage": "e0_early_sample_rejected",
+            "fixture_cursor": 50,
+            "fixture_accepted": 50,
+        },
+        backup=False,
+    )
+    write_sealed_json(
+        tmp_path / "classification" / "annif-pilot" / "state.json",
+        {
+            "schema": "chronovisor.classification-annif-pilot-state.v1",
+            "status": "running",
+            "stage": "download-czech-bibliography",
+        },
+        backup=False,
+    )
+    write_sealed_json(
+        tmp_path
+        / "classification"
+        / "annif-pilot"
+        / "early-council-review.json",
+        {
+            "decision": "reject-council",
+            "council_hit_count": 3,
+            "source_completed_rows": 50,
+            "cases": [{}, {}, {}, {}, {}, {}, {}, {}, {}, {}],
+        },
+        backup=False,
+    )
+
+    status = _library_evidence_status(tmp_path)
+
+    assert status["method"] == "annif"
+    assert status["status"] == "running"
+    assert status["stage"] == "download-czech-bibliography"
+    assert status["annif"]["council_hit_count"] == 3
+    assert status["annif"]["council_case_count"] == 10
+
+
 def test_status_overlays_latest_locked_calibration_quality(tmp_path: Path) -> None:
     page = tmp_path / "pages" / "alpha.md"
     page.parent.mkdir(parents=True)

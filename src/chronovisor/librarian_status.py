@@ -162,12 +162,17 @@ def _safe_receipt(path: Path) -> dict[str, Any]:
 
 def _library_evidence_status(root: Path) -> dict[str, Any]:
     pilot_root = root / "classification" / "library-evidence"
+    annif_root = root / "classification" / "annif-pilot"
     fixture_root = (
         root / "classification" / "fixtures" / "epochs" / "epoch-3-library-evidence-v1"
     )
     fixture = _safe_receipt(fixture_root / "manifest.json")
     candidate_lock = _safe_receipt(fixture_root / "candidate-lock.json")
     pilot_state = _safe_receipt(pilot_root / "state.json")
+    annif_state = _safe_receipt(annif_root / "state.json")
+    annif_review = _safe_receipt(annif_root / "early-council-review.json")
+    annif_artifacts = _safe_receipt(annif_root / "artifacts.json")
+    annif_evaluation = _safe_receipt(annif_root / "early-evaluation.json")
     index = _safe_receipt(pilot_root / "index" / "evidence.manifest.json")
     candidate_eval = _safe_receipt(
         pilot_root / "evaluation" / "candidate-evaluation.json"
@@ -215,6 +220,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "exact_ci_lower": paired_eval.get("exact_ci_lower"),
         }
     runtime_status = str(pilot_state.get("status") or "")
+    annif_runtime_status = str(annif_state.get("status") or "")
     state = "not_started"
     if completed or runtime_status in {"running", "retrying", "observing"}:
         state = "running"
@@ -224,6 +230,12 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
         state = "blocked"
     if len(completed) == len(receipts) or runtime_status == "complete":
         state = "complete"
+    if annif_runtime_status:
+        state = (
+            "running"
+            if annif_runtime_status in {"running", "prepared", "trained"}
+            else annif_runtime_status
+        )
     package_receipts = [_safe_receipt(path) for path in source_manifests]
     resource_stages = (
         resource.get("stages") if isinstance(resource.get("stages"), Mapping) else {}
@@ -234,8 +246,9 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     return {
         "schema": "chronovisor.library-evidence-dashboard.v1",
         "status": state,
-        "stage": pilot_state.get("stage"),
-        "runtime_status": runtime_status or None,
+        "stage": annif_state.get("stage") or pilot_state.get("stage"),
+        "runtime_status": annif_runtime_status or runtime_status or None,
+        "method": "annif" if annif_runtime_status else "library-evidence-council",
         "last_error": pilot_state.get("last_error"),
         "completed_phases": completed,
         "failed_phases": failed,
@@ -332,6 +345,31 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "source_or_index": receipts["E8"].get("source_semantic_update_policy"),
             "model_policy_taxonomy": receipts["E8"].get("model_policy_update_policy"),
             "epoch3_holdout_reusable": False,
+        },
+        "annif": {
+            "status": annif_runtime_status or None,
+            "stage": annif_state.get("stage"),
+            "decision": (
+                annif_evaluation.get("decision")
+                or annif_state.get("decision")
+            ),
+            "council_decision": annif_review.get("decision"),
+            "council_hit_count": annif_review.get("council_hit_count"),
+            "council_case_count": len(annif_review.get("cases") or []),
+            "council_completed_rows": annif_review.get("source_completed_rows"),
+            "train_documents": (
+                (annif_artifacts.get("corpus") or {}).get("train_documents")
+            ),
+            "test_documents": (
+                (annif_artifacts.get("corpus") or {}).get("test_documents")
+            ),
+            "best_project": annif_evaluation.get("best_project"),
+            "best_top1_hit_count": annif_evaluation.get("best_top1_hit_count"),
+            "best_top5_hit_count": annif_evaluation.get("best_top5_hit_count"),
+            "case_count": annif_evaluation.get("case_count"),
+            "larger_evaluation_authorized": annif_evaluation.get(
+                "larger_evaluation_authorized"
+            ),
         },
         "retention": receipts["E8"].get("retention") or {},
         "attribution": [
