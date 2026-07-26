@@ -2040,6 +2040,7 @@ function renderLibrarian(librarian) {
   const annif = evidence.annif || {};
   const profile = evidence.profile_retrieval || {};
   const query2doc = evidence.query2doc || {};
+  const query2docUnseen = evidence.query2doc_unseen || {};
   const progressRows = [
     ["uid", els.librarianUid, els.librarianUidBar],
     ["classification_shadow", els.librarianClassification, els.librarianClassificationBar],
@@ -2123,7 +2124,10 @@ function renderLibrarian(librarian) {
     `${fmt(evidence.stage, "idle").replaceAll("_", " ")} · ` +
     `${intValue(evidenceProgress.numerator)}/${intValue(evidenceProgress.denominator)} phases`;
   const fixture = evidence.fixture || {};
-  els.librarianEvidenceFixture.textContent = query2doc.case_count
+  els.librarianEvidenceFixture.textContent = query2docUnseen.case_count
+    ? `Unseen gate ${intValue(query2docUnseen.fused?.hit_count)}/${intValue(query2docUnseen.case_count)} · ` +
+      `${fmt(query2docUnseen.decision, "evaluated").replaceAll("-", " ")}`
+    : query2doc.case_count
     ? `Query2doc gate ${intValue(query2doc.fused?.hit_count)}/${intValue(query2doc.case_count)} · ` +
       `${fmt(query2doc.decision, "evaluated").replaceAll("-", " ")}`
     : profile.case_count
@@ -2139,7 +2143,11 @@ function renderLibrarian(librarian) {
   const candidateMetrics = evidence.candidate_metrics || {};
   const unionMetrics = candidateMetrics.union || {};
   const p0Metrics = candidateMetrics.official_baseline || {};
-  els.librarianEvidenceRecall.textContent = query2doc.case_count
+  els.librarianEvidenceRecall.textContent = query2docUnseen.case_count
+    ? `Fused ${intValue(query2docUnseen.fused?.hit_count)}/${intValue(query2docUnseen.case_count)} · ` +
+      `best raw ${intValue(query2docUnseen.best_raw_hit_count)}/${intValue(query2docUnseen.case_count)} · ` +
+      `gate ${intValue(query2docUnseen.minimum_fused_hits)}/${intValue(query2docUnseen.case_count)}`
+    : query2doc.case_count
     ? `Fused ${intValue(query2doc.fused?.hit_count)}/${intValue(query2doc.case_count)} · ` +
       `Q2D dense ${intValue(query2doc.query2doc_dense?.hit_count)}/${intValue(query2doc.case_count)} · ` +
       `gate ${intValue(query2doc.minimum_fused_hits)}/${intValue(query2doc.case_count)}`
@@ -2155,7 +2163,10 @@ function renderLibrarian(librarian) {
       : "Awaiting Annif 10-case gate";
   const externalTest = evidence.external_test || {};
   const externalUnion = (externalTest.metrics || {}).union || {};
-  els.librarianEvidenceExternal.textContent = query2doc.query_count
+  els.librarianEvidenceExternal.textContent = query2docUnseen.query_count
+    ? `${intValue(query2docUnseen.query_count)} unseen queries · ` +
+      `${shortName(query2docUnseen.model)} · ${intValue(query2docUnseen.model_calls)} model calls`
+    : query2doc.query_count
     ? `${intValue(query2doc.query_count)} local queries · ` +
       `${shortName(query2doc.model)} · ${intValue(query2doc.model_calls)} model calls`
     : profile.profile_count
@@ -2174,7 +2185,11 @@ function renderLibrarian(librarian) {
     : "";
   const severeCount = holdoutEvidence.severe_error_count;
   els.librarianEvidenceHold.textContent =
-    query2doc.case_count
+    query2docUnseen.case_count
+      ? query2docUnseen.decision_trial_authorized
+        ? "Decision trial authorized · corpus blocked"
+        : "Decision trial blocked · corpus blocked"
+      : query2doc.case_count
       ? query2doc.unseen_evaluation_authorized
         ? "Unseen evaluation authorized · corpus blocked"
         : "Unseen evaluation blocked"

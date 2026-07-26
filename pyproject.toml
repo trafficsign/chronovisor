@@ -78,6 +78,7 @@ chronovisor-classification-library-pilot = "chronovisor.classification_library_p
 chronovisor-classification-annif = "chronovisor.classification_annif:main"
 chronovisor-classification-profile-pilot = "chronovisor.classification_profile_pilot:main"
 chronovisor-classification-query2doc-pilot = "chronovisor.classification_query2doc_pilot:main"
+chronovisor-classification-query2doc-unseen = "chronovisor.classification_query2doc_unseen:main"
 chronovisor-librarian-merge = "chronovisor.librarian_merge:main"
 chronovisor-librarian-release = "chronovisor.librarian_release:main"
 chronovisor-link-anchor-repair = "chronovisor.link_anchor_repair:main"

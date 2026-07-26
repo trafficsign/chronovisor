@@ -295,6 +295,81 @@ def test_library_evidence_dashboard_prefers_query2doc_gate(
     assert status["query2doc"]["query_count"] == 10
 
 
+def test_library_evidence_dashboard_prefers_unseen_query2doc_gate(
+    tmp_path: Path,
+) -> None:
+    fixed_root = tmp_path / "classification" / "query2doc-pilot"
+    write_sealed_json(
+        fixed_root / "state.json",
+        {
+            "schema": "chronovisor.classification-query2doc-pilot-state.v1",
+            "status": "qualified",
+            "stage": "fixed-ten-query2doc-complete",
+        },
+        backup=False,
+    )
+    unseen_root = tmp_path / "classification" / "query2doc-unseen"
+    write_sealed_json(
+        unseen_root / "state.json",
+        {
+            "schema": "chronovisor.classification-query2doc-unseen-state.v1",
+            "status": "rejected",
+            "stage": "unseen-query2doc-complete",
+            "decision": "reject-unseen-query2doc-retrieval",
+        },
+        backup=False,
+    )
+    write_sealed_json(
+        unseen_root / "manifest.json",
+        {
+            "schema": "chronovisor.classification-query2doc-unseen-manifest.v1",
+            "query_count": 30,
+        },
+        backup=False,
+    )
+    write_sealed_json(
+        unseen_root / "evaluation.json",
+        {
+            "schema": "chronovisor.classification-query2doc-unseen-evaluation.v1",
+            "decision": "reject-unseen-query2doc-retrieval",
+            "case_count": 30,
+            "model": "ornith:test",
+            "model_calls": 30,
+            "model_attempts": 31,
+            "metrics": {
+                "raw_lexical": {"hit_count": 16, "recall_at_12": 16 / 30},
+                "raw_dense": {"hit_count": 8, "recall_at_12": 8 / 30},
+                "query2doc_lexical": {
+                    "hit_count": 18,
+                    "recall_at_12": 0.6,
+                },
+                "query2doc_dense": {
+                    "hit_count": 13,
+                    "recall_at_12": 13 / 30,
+                },
+                "fused": {"hit_count": 19, "recall_at_12": 19 / 30},
+            },
+            "minimum_fused_hits": 24,
+            "best_raw_hit_count": 16,
+            "decision_trial_authorized": False,
+            "larger_corpus_evaluation_authorized": False,
+            "classification_judge_calls": 0,
+            "page_mutations": 0,
+        },
+        backup=False,
+    )
+
+    status = _library_evidence_status(tmp_path)
+
+    assert status["method"] == "query2doc-unseen-rrf"
+    assert status["status"] == "rejected"
+    assert status["stage"] == "unseen-query2doc-complete"
+    assert status["query2doc_unseen"]["fused"]["hit_count"] == 19
+    assert status["query2doc_unseen"]["best_raw_hit_count"] == 16
+    assert status["query2doc_unseen"]["decision_trial_authorized"] is False
+    assert status["query2doc_unseen"]["query_count"] == 30
+
+
 def test_status_overlays_latest_locked_calibration_quality(tmp_path: Path) -> None:
     page = tmp_path / "pages" / "alpha.md"
     page.parent.mkdir(parents=True)

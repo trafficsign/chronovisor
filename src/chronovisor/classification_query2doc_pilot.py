@@ -143,13 +143,14 @@ def generate_query_artifact(
     model_digest: str,
     keep_alive: str,
     read_timeout_ms: int,
+    artifact_path: Path | None = None,
 ) -> dict[str, Any]:
     source_sha256 = str(page.get("source_sha256") or "")
     projected = candidate_blind_page(page)
     uid = projected["uid"]
     if not source_sha256 or not uid:
         raise ClassificationError("query2doc source identity is incomplete")
-    path = _artifact_path(root, uid)
+    path = artifact_path or _artifact_path(root, uid)
     cached = _cached_artifact(
         path,
         source_sha256=source_sha256,
