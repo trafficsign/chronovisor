@@ -343,6 +343,8 @@ def run_cancellable_command(
     if process.stdin is not None:
         process.stdin.close()
     process.stdin = None
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
 
     def feed_input() -> None:
         if input_fd is None:
@@ -364,6 +366,31 @@ def run_cancellable_command(
     # daemon thread keeps the scheduler polling the foreground marker instead
     # of blocking on a full pipe before cancellation becomes observable.
     threading.Thread(target=feed_input, daemon=True).start()
+
+    def drain_output(stream: Any, chunks: list[str]) -> None:
+        if stream is None:
+            return
+        try:
+            while value := stream.read(65_536):
+                chunks.append(value)
+        except (OSError, ValueError):
+            pass
+
+    # Model workers can return multi-megabyte JSON vectors.  Drain both pipes
+    # while the child is alive; waiting for process exit before communicate()
+    # deadlocks once either OS pipe buffer fills.
+    stdout_thread = threading.Thread(
+        target=drain_output,
+        args=(process.stdout, stdout_chunks),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=drain_output,
+        args=(process.stderr, stderr_chunks),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
     deadline = started + max(0.001, timeout_seconds)
     status = ""
     value: Any = None
@@ -388,12 +415,16 @@ def run_cancellable_command(
         # foreground lease budget.  Some HTTP/model workers linger while
         # unwinding a cancelled request; kill them before they can consume the
         # 50 ms synchronous resource-wait allowance.
-        communicate_timeout = 0.025 if status in {"cancelled", "timeout"} else 0.2
+        settle_timeout = 0.025 if status in {"cancelled", "timeout"} else 0.2
         try:
-            stdout, stderr = process.communicate(timeout=communicate_timeout)
+            process.wait(timeout=settle_timeout)
         except subprocess.TimeoutExpired:
             process.kill()
-            stdout, stderr = process.communicate(timeout=0.05)
+            process.wait(timeout=0.05)
+        stdout_thread.join(timeout=0.05)
+        stderr_thread.join(timeout=0.05)
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
         if not status:
             if lease.cancelled() or _preempt_requested(
                 lease.admission.run_id
@@ -410,7 +441,7 @@ def run_cancellable_command(
             else:
                 status = "error"
                 error = (stderr or stdout or f"research worker exited {process.returncode}")[-2000:]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - subprocess boundary must seal errors
         if process.poll() is None:
             process.kill()
         status = "error"

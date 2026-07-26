@@ -163,6 +163,7 @@ def _safe_receipt(path: Path) -> dict[str, Any]:
 def _library_evidence_status(root: Path) -> dict[str, Any]:
     pilot_root = root / "classification" / "library-evidence"
     annif_root = root / "classification" / "annif-pilot"
+    profile_root = root / "classification" / "profile-retrieval-pilot"
     fixture_root = (
         root / "classification" / "fixtures" / "epochs" / "epoch-3-library-evidence-v1"
     )
@@ -173,6 +174,9 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     annif_review = _safe_receipt(annif_root / "early-council-review.json")
     annif_artifacts = _safe_receipt(annif_root / "artifacts.json")
     annif_evaluation = _safe_receipt(annif_root / "early-evaluation.json")
+    profile_state = _safe_receipt(profile_root / "state.json")
+    profile_manifest = _safe_receipt(profile_root / "manifest.json")
+    profile_evaluation = _safe_receipt(profile_root / "evaluation.json")
     index = _safe_receipt(pilot_root / "index" / "evidence.manifest.json")
     candidate_eval = _safe_receipt(
         pilot_root / "evaluation" / "candidate-evaluation.json"
@@ -221,6 +225,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
         }
     runtime_status = str(pilot_state.get("status") or "")
     annif_runtime_status = str(annif_state.get("status") or "")
+    profile_runtime_status = str(profile_state.get("status") or "")
     state = "not_started"
     if completed or runtime_status in {"running", "retrying", "observing"}:
         state = "running"
@@ -236,6 +241,12 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             if annif_runtime_status in {"running", "prepared", "trained"}
             else annif_runtime_status
         )
+    if profile_runtime_status:
+        state = (
+            "running"
+            if profile_runtime_status in {"running", "prepared"}
+            else profile_runtime_status
+        )
     package_receipts = [_safe_receipt(path) for path in source_manifests]
     resource_stages = (
         resource.get("stages") if isinstance(resource.get("stages"), Mapping) else {}
@@ -246,10 +257,22 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     return {
         "schema": "chronovisor.library-evidence-dashboard.v1",
         "status": state,
-        "stage": annif_state.get("stage") or pilot_state.get("stage"),
-        "runtime_status": annif_runtime_status or runtime_status or None,
-        "method": "annif" if annif_runtime_status else "library-evidence-council",
-        "last_error": pilot_state.get("last_error"),
+        "stage": (
+            profile_state.get("stage")
+            or annif_state.get("stage")
+            or pilot_state.get("stage")
+        ),
+        "runtime_status": (
+            profile_runtime_status or annif_runtime_status or runtime_status or None
+        ),
+        "method": (
+            "udc-profile-dense"
+            if profile_runtime_status
+            else "annif"
+            if annif_runtime_status
+            else "library-evidence-council"
+        ),
+        "last_error": profile_state.get("error") or pilot_state.get("last_error"),
         "completed_phases": completed,
         "failed_phases": failed,
         "phase_progress": {
@@ -369,6 +392,46 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "case_count": annif_evaluation.get("case_count"),
             "larger_evaluation_authorized": annif_evaluation.get(
                 "larger_evaluation_authorized"
+            ),
+        },
+        "profile_retrieval": {
+            "status": profile_runtime_status or None,
+            "stage": profile_state.get("stage"),
+            "decision": (
+                profile_evaluation.get("decision")
+                or profile_state.get("decision")
+            ),
+            "case_count": profile_evaluation.get("case_count"),
+            "baseline_hit_count": profile_evaluation.get("baseline_hit_count"),
+            "baseline_recall_at_12": profile_evaluation.get(
+                "baseline_recall_at_12"
+            ),
+            "baseline_mrr": profile_evaluation.get("baseline_mrr"),
+            "profile_hit_count": profile_evaluation.get("profile_hit_count"),
+            "profile_recall_at_12": profile_evaluation.get(
+                "profile_recall_at_12"
+            ),
+            "profile_mrr": profile_evaluation.get("profile_mrr"),
+            "minimum_profile_hits": profile_evaluation.get(
+                "minimum_profile_hits"
+            ),
+            "larger_evaluation_authorized": profile_evaluation.get(
+                "larger_evaluation_authorized"
+            ),
+            "profile_count": profile_manifest.get("profile_count"),
+            "embedding_model": profile_manifest.get("embedding_model"),
+            "dimensions": profile_manifest.get("dimensions"),
+            "working_set_bytes": profile_manifest.get("working_set_bytes"),
+            "external_library_records_used": profile_manifest.get(
+                "external_library_records_used"
+            ),
+            "local_page_label_associations_used": profile_manifest.get(
+                "local_page_label_associations_used"
+            ),
+            "llm_calls": (
+                profile_evaluation.get("llm_calls")
+                if profile_evaluation.get("llm_calls") is not None
+                else profile_manifest.get("llm_calls")
             ),
         },
         "retention": receipts["E8"].get("retention") or {},

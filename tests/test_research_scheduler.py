@@ -162,3 +162,26 @@ def test_cancellable_child_receives_stdin(tmp_path, monkeypatch) -> None:
 
     assert result.status == "completed"
     assert result.value == {"value": "payload"}
+
+
+def test_cancellable_child_drains_output_larger_than_pipe_buffer(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _paths(tmp_path, monkeypatch)
+    with research_scheduler.research_lane(
+        "run", enabled=True, mode="explicit", purpose="explicit", needs_model=True
+    ) as lease:
+        result = research_scheduler.run_cancellable_command(
+            [
+                sys.executable,
+                "-c",
+                "import json; print(json.dumps({'value': 'x' * 1_000_000}))",
+            ],
+            "",
+            lease,
+            timeout_seconds=10,
+        )
+
+    assert result.status == "completed"
+    assert result.value == {"value": "x" * 1_000_000}

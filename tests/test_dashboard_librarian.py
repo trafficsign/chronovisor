@@ -149,6 +149,90 @@ def test_library_evidence_dashboard_prefers_annif_runtime(tmp_path: Path) -> Non
     assert status["annif"]["council_case_count"] == 10
 
 
+def test_library_evidence_dashboard_prefers_latest_profile_gate(
+    tmp_path: Path,
+) -> None:
+    write_sealed_json(
+        tmp_path / "classification" / "annif-pilot" / "state.json",
+        {
+            "schema": "chronovisor.classification-annif-pilot-state.v1",
+            "status": "rejected",
+            "stage": "early-gate-complete",
+        },
+        backup=False,
+    )
+    profile_root = tmp_path / "classification" / "profile-retrieval-pilot"
+    write_sealed_json(
+        profile_root / "state.json",
+        {
+            "schema": "chronovisor.classification-profile-pilot-state.v1",
+            "status": "rejected",
+            "stage": "fixed-ten-retrieval-complete",
+            "decision": "reject-profile-retrieval",
+        },
+        backup=False,
+    )
+    write_sealed_json(
+        profile_root / "manifest.json",
+        {
+            "schema": "chronovisor.classification-profile-index.v1",
+            "profile_count": 1850,
+            "embedding_model": "bge-m3",
+            "dimensions": 1024,
+            "working_set_bytes": 10_013_043,
+            "external_library_records_used": 0,
+            "local_page_label_associations_used": 0,
+            "llm_calls": 0,
+        },
+        backup=False,
+    )
+    write_sealed_json(
+        profile_root / "evaluation.json",
+        {
+            "schema": "chronovisor.classification-profile-evaluation.v1",
+            "decision": "reject-profile-retrieval",
+            "case_count": 10,
+            "baseline_hit_count": 4,
+            "baseline_recall_at_12": 0.4,
+            "baseline_mrr": 0.2667,
+            "profile_hit_count": 4,
+            "profile_recall_at_12": 0.4,
+            "profile_mrr": 0.2183,
+            "minimum_profile_hits": 8,
+            "larger_evaluation_authorized": False,
+            "llm_calls": 0,
+        },
+        backup=False,
+    )
+
+    status = _library_evidence_status(tmp_path)
+
+    assert status["method"] == "udc-profile-dense"
+    assert status["status"] == "rejected"
+    assert status["stage"] == "fixed-ten-retrieval-complete"
+    assert status["profile_retrieval"] == {
+        "status": "rejected",
+        "stage": "fixed-ten-retrieval-complete",
+        "decision": "reject-profile-retrieval",
+        "case_count": 10,
+        "baseline_hit_count": 4,
+        "baseline_recall_at_12": 0.4,
+        "baseline_mrr": 0.2667,
+        "profile_hit_count": 4,
+        "profile_recall_at_12": 0.4,
+        "profile_mrr": 0.2183,
+        "minimum_profile_hits": 8,
+        "larger_evaluation_authorized": False,
+        "profile_count": 1850,
+        "embedding_model": "bge-m3",
+        "dimensions": 1024,
+        "working_set_bytes": 10_013_043,
+        "external_library_records_used": 0,
+        "local_page_label_associations_used": 0,
+        "llm_calls": 0,
+    }
+
+
 def test_status_overlays_latest_locked_calibration_quality(tmp_path: Path) -> None:
     page = tmp_path / "pages" / "alpha.md"
     page.parent.mkdir(parents=True)

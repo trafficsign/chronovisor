@@ -2038,6 +2038,7 @@ function renderLibrarian(librarian) {
   const preimages = data.transaction_preimages || {};
   const evidence = data.library_evidence || {};
   const annif = evidence.annif || {};
+  const profile = evidence.profile_retrieval || {};
   const progressRows = [
     ["uid", els.librarianUid, els.librarianUidBar],
     ["classification_shadow", els.librarianClassification, els.librarianClassificationBar],
@@ -2113,13 +2114,18 @@ function renderLibrarian(librarian) {
     `${intValue(restorePoints.verified)}/${intValue(restorePoints.count)} verified` +
     ` · ${intValue(preimages.count)} preimage`;
   const evidenceProgress = evidence.phase_progress || {};
-  const evidenceMethod = fmt(evidence.method, "classification").replaceAll("_", " ");
+  const evidenceMethod = fmt(evidence.method, "classification")
+    .replaceAll("_", " ")
+    .replaceAll("-", " ");
   els.librarianEvidenceStatus.textContent =
     `${evidenceMethod} · ${fmt(evidence.status, "not started").replaceAll("_", " ")} · ` +
     `${fmt(evidence.stage, "idle").replaceAll("_", " ")} · ` +
     `${intValue(evidenceProgress.numerator)}/${intValue(evidenceProgress.denominator)} phases`;
   const fixture = evidence.fixture || {};
-  els.librarianEvidenceFixture.textContent = annif.council_case_count
+  els.librarianEvidenceFixture.textContent = profile.case_count
+    ? `Profile gate ${intValue(profile.profile_hit_count)}/${intValue(profile.case_count)} · ` +
+      `${fmt(profile.decision, "evaluated").replaceAll("-", " ")}`
+    : annif.council_case_count
     ? `Council ${intValue(annif.council_hit_count)}/${intValue(annif.council_case_count)} · ` +
       `${fmt(annif.council_decision, "reviewed").replaceAll("-", " ")} · ` +
       `${intValue(annif.council_completed_rows)} rows stopped`
@@ -2129,7 +2135,11 @@ function renderLibrarian(librarian) {
   const candidateMetrics = evidence.candidate_metrics || {};
   const unionMetrics = candidateMetrics.union || {};
   const p0Metrics = candidateMetrics.official_baseline || {};
-  els.librarianEvidenceRecall.textContent = annif.case_count
+  els.librarianEvidenceRecall.textContent = profile.case_count
+    ? `Profile ${intValue(profile.profile_hit_count)}/${intValue(profile.case_count)} · ` +
+      `baseline ${intValue(profile.baseline_hit_count)}/${intValue(profile.case_count)} · ` +
+      `gate ${intValue(profile.minimum_profile_hits)}/${intValue(profile.case_count)}`
+    : annif.case_count
     ? `Annif top1 ${intValue(annif.best_top1_hit_count)}/${intValue(annif.case_count)} · ` +
       `top5 ${intValue(annif.best_top5_hit_count)}/${intValue(annif.case_count)}`
     : numeric(unionMetrics.recall_at_12)
@@ -2137,7 +2147,11 @@ function renderLibrarian(librarian) {
       : "Awaiting Annif 10-case gate";
   const externalTest = evidence.external_test || {};
   const externalUnion = (externalTest.metrics || {}).union || {};
-  els.librarianEvidenceExternal.textContent = annif.train_documents
+  els.librarianEvidenceExternal.textContent = profile.profile_count
+    ? `${intValue(profile.profile_count).toLocaleString()} official profiles · ` +
+      `${fmt(profile.embedding_model, "embedding unknown")} · ` +
+      `${intValue(profile.llm_calls)} LLM calls`
+    : annif.train_documents
     ? `${intValue(annif.train_documents).toLocaleString()} train · ` +
       `${intValue(annif.test_documents).toLocaleString()} external test`
     : numeric(externalUnion.recall_at_20)
