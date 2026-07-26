@@ -355,6 +355,36 @@ def _rollout_status(root: Path) -> dict[str, Any]:
     }
 
 
+def _current_quality(
+    root: Path,
+    persisted: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Overlay the latest sealed calibration on the last shadow sweep."""
+
+    quality = dict(persisted)
+    path = root / "classification" / "calibration.json"
+    if not path.exists():
+        return quality
+    try:
+        calibration = read_sealed_json(path, recover_backup=False)
+    except DurableStateError:
+        quality["locked_holdout"] = "unreadable"
+        return quality
+    if calibration.get("schema") != "chronovisor.classification-calibration.v1":
+        quality["locked_holdout"] = "invalid"
+        return quality
+    quality["locked_holdout"] = str(calibration.get("status") or "missing")
+    metrics = calibration.get("holdout_metrics")
+    quality["holdout_metrics"] = dict(metrics) if isinstance(metrics, Mapping) else {}
+    gates = calibration.get("gates")
+    quality["forced_misclassification_gate"] = (
+        gates.get("forced_misclassification")
+        if isinstance(gates, Mapping)
+        else None
+    )
+    return quality
+
+
 def build_librarian_status(
     root: Path,
     *,
@@ -537,7 +567,7 @@ def build_librarian_status(
         "progress": progress,
         "queue": queue,
         "debts": debts,
-        "quality": dict(state.get("quality") or {}),
+        "quality": _current_quality(root, state.get("quality") or {}),
         "resources": dict(state.get("resources") or {}),
         "flow": {
             "24h": flow_24h,

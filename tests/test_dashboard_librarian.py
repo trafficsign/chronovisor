@@ -73,6 +73,39 @@ def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> N
     }
 
 
+def test_status_overlays_latest_locked_calibration_quality(tmp_path: Path) -> None:
+    page = tmp_path / "pages" / "alpha.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\ntitle: Alpha\nupdated: 2026-07-25\ntags: [d/ai]\n---\n\n# Alpha\n",
+        encoding="utf-8",
+    )
+    run_shadow(root=tmp_path, full_sweep=True)
+    write_sealed_json(
+        tmp_path / "classification" / "calibration.json",
+        {
+            "schema": "chronovisor.classification-calibration.v1",
+            "status": "rejected",
+            "holdout_metrics": {
+                "exact_match_rate": 0.78,
+                "forced_misclassification_rate": 0.12,
+            },
+            "gates": {"forced_misclassification": False},
+        },
+    )
+
+    from chronovisor.librarian_status import build_librarian_status
+
+    status = build_librarian_status(tmp_path)
+
+    assert status["quality"]["locked_holdout"] == "rejected"
+    assert status["quality"]["holdout_metrics"] == {
+        "exact_match_rate": 0.78,
+        "forced_misclassification_rate": 0.12,
+    }
+    assert status["quality"]["forced_misclassification_gate"] is False
+
+
 def test_dashboard_reports_migration_observation_elapsed_time(
     tmp_path: Path,
 ) -> None:
