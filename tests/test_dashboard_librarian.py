@@ -233,6 +233,68 @@ def test_library_evidence_dashboard_prefers_latest_profile_gate(
     }
 
 
+def test_library_evidence_dashboard_prefers_query2doc_gate(
+    tmp_path: Path,
+) -> None:
+    query_root = tmp_path / "classification" / "query2doc-pilot"
+    write_sealed_json(
+        query_root / "state.json",
+        {
+            "schema": "chronovisor.classification-query2doc-pilot-state.v1",
+            "status": "qualified",
+            "stage": "fixed-ten-query2doc-complete",
+            "decision": "qualify-query2doc-retrieval",
+        },
+        backup=False,
+    )
+    write_sealed_json(
+        query_root / "manifest.json",
+        {
+            "schema": "chronovisor.classification-query2doc-manifest.v1",
+            "query_count": 10,
+        },
+        backup=False,
+    )
+    write_sealed_json(
+        query_root / "evaluation.json",
+        {
+            "schema": "chronovisor.classification-query2doc-evaluation.v1",
+            "decision": "qualify-query2doc-retrieval",
+            "case_count": 10,
+            "model": "ornith:test",
+            "model_digest": "sha256:model",
+            "prompt_sha256": "sha256:prompt",
+            "model_calls": 10,
+            "model_attempts": 10,
+            "metrics": {
+                "raw_lexical": {"hit_count": 4, "recall_at_12": 0.4},
+                "raw_dense": {"hit_count": 4, "recall_at_12": 0.4},
+                "query2doc_lexical": {"hit_count": 7, "recall_at_12": 0.7},
+                "query2doc_dense": {"hit_count": 9, "recall_at_12": 0.9},
+                "fused": {"hit_count": 9, "recall_at_12": 0.9},
+            },
+            "minimum_fused_hits": 8,
+            "unseen_evaluation_authorized": True,
+            "larger_corpus_evaluation_authorized": False,
+            "classification_judge_calls": 0,
+            "page_mutations": 0,
+        },
+        backup=False,
+    )
+
+    status = _library_evidence_status(tmp_path)
+
+    assert status["method"] == "query2doc-rrf"
+    assert status["status"] == "qualified"
+    assert status["stage"] == "fixed-ten-query2doc-complete"
+    assert status["query2doc"]["fused"]["hit_count"] == 9
+    assert status["query2doc"]["query2doc_dense"]["hit_count"] == 9
+    assert status["query2doc"]["unseen_evaluation_authorized"] is True
+    assert status["query2doc"]["larger_corpus_evaluation_authorized"] is False
+    assert status["query2doc"]["classification_judge_calls"] == 0
+    assert status["query2doc"]["query_count"] == 10
+
+
 def test_status_overlays_latest_locked_calibration_quality(tmp_path: Path) -> None:
     page = tmp_path / "pages" / "alpha.md"
     page.parent.mkdir(parents=True)

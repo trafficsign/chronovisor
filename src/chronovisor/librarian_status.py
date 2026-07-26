@@ -164,6 +164,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     pilot_root = root / "classification" / "library-evidence"
     annif_root = root / "classification" / "annif-pilot"
     profile_root = root / "classification" / "profile-retrieval-pilot"
+    query2doc_root = root / "classification" / "query2doc-pilot"
     fixture_root = (
         root / "classification" / "fixtures" / "epochs" / "epoch-3-library-evidence-v1"
     )
@@ -177,6 +178,9 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     profile_state = _safe_receipt(profile_root / "state.json")
     profile_manifest = _safe_receipt(profile_root / "manifest.json")
     profile_evaluation = _safe_receipt(profile_root / "evaluation.json")
+    query2doc_state = _safe_receipt(query2doc_root / "state.json")
+    query2doc_manifest = _safe_receipt(query2doc_root / "manifest.json")
+    query2doc_evaluation = _safe_receipt(query2doc_root / "evaluation.json")
     index = _safe_receipt(pilot_root / "index" / "evidence.manifest.json")
     candidate_eval = _safe_receipt(
         pilot_root / "evaluation" / "candidate-evaluation.json"
@@ -226,6 +230,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     runtime_status = str(pilot_state.get("status") or "")
     annif_runtime_status = str(annif_state.get("status") or "")
     profile_runtime_status = str(profile_state.get("status") or "")
+    query2doc_runtime_status = str(query2doc_state.get("status") or "")
     state = "not_started"
     if completed or runtime_status in {"running", "retrying", "observing"}:
         state = "running"
@@ -247,6 +252,12 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             if profile_runtime_status in {"running", "prepared"}
             else profile_runtime_status
         )
+    if query2doc_runtime_status:
+        state = (
+            "running"
+            if query2doc_runtime_status in {"running", "prepared"}
+            else query2doc_runtime_status
+        )
     package_receipts = [_safe_receipt(path) for path in source_manifests]
     resource_stages = (
         resource.get("stages") if isinstance(resource.get("stages"), Mapping) else {}
@@ -258,21 +269,32 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
         "schema": "chronovisor.library-evidence-dashboard.v1",
         "status": state,
         "stage": (
-            profile_state.get("stage")
+            query2doc_state.get("stage")
+            or profile_state.get("stage")
             or annif_state.get("stage")
             or pilot_state.get("stage")
         ),
         "runtime_status": (
-            profile_runtime_status or annif_runtime_status or runtime_status or None
+            query2doc_runtime_status
+            or profile_runtime_status
+            or annif_runtime_status
+            or runtime_status
+            or None
         ),
         "method": (
-            "udc-profile-dense"
+            "query2doc-rrf"
+            if query2doc_runtime_status
+            else "udc-profile-dense"
             if profile_runtime_status
             else "annif"
             if annif_runtime_status
             else "library-evidence-council"
         ),
-        "last_error": profile_state.get("error") or pilot_state.get("last_error"),
+        "last_error": (
+            query2doc_state.get("error")
+            or profile_state.get("error")
+            or pilot_state.get("last_error")
+        ),
         "completed_phases": completed,
         "failed_phases": failed,
         "phase_progress": {
@@ -433,6 +455,51 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
                 if profile_evaluation.get("llm_calls") is not None
                 else profile_manifest.get("llm_calls")
             ),
+        },
+        "query2doc": {
+            "status": query2doc_runtime_status or None,
+            "stage": query2doc_state.get("stage"),
+            "decision": (
+                query2doc_evaluation.get("decision")
+                or query2doc_state.get("decision")
+            ),
+            "case_count": query2doc_evaluation.get("case_count"),
+            "model": query2doc_evaluation.get("model"),
+            "model_digest": query2doc_evaluation.get("model_digest"),
+            "prompt_sha256": query2doc_evaluation.get("prompt_sha256"),
+            "model_calls": query2doc_evaluation.get("model_calls"),
+            "model_attempts": query2doc_evaluation.get("model_attempts"),
+            "raw_lexical": (
+                (query2doc_evaluation.get("metrics") or {}).get("raw_lexical")
+            ),
+            "raw_dense": (
+                (query2doc_evaluation.get("metrics") or {}).get("raw_dense")
+            ),
+            "query2doc_lexical": (
+                (query2doc_evaluation.get("metrics") or {}).get(
+                    "query2doc_lexical"
+                )
+            ),
+            "query2doc_dense": (
+                (query2doc_evaluation.get("metrics") or {}).get(
+                    "query2doc_dense"
+                )
+            ),
+            "fused": (query2doc_evaluation.get("metrics") or {}).get("fused"),
+            "minimum_fused_hits": query2doc_evaluation.get(
+                "minimum_fused_hits"
+            ),
+            "unseen_evaluation_authorized": query2doc_evaluation.get(
+                "unseen_evaluation_authorized"
+            ),
+            "larger_corpus_evaluation_authorized": query2doc_evaluation.get(
+                "larger_corpus_evaluation_authorized"
+            ),
+            "classification_judge_calls": query2doc_evaluation.get(
+                "classification_judge_calls"
+            ),
+            "page_mutations": query2doc_evaluation.get("page_mutations"),
+            "query_count": query2doc_manifest.get("query_count"),
         },
         "retention": receipts["E8"].get("retention") or {},
         "attribution": [
