@@ -191,7 +191,7 @@ def test_intent_lexicon_is_high_precision_and_core_aware() -> None:
 
     implementation_only = classify_complement(
         {
-            "title": "LLM Wiki Frontier Review Architecture and Call Sites",
+            "title": "Chronovisor Frontier Review Architecture and Call Sites",
             "summary": "",
         },
         core_anchor_id="cvo:anchor:0001",

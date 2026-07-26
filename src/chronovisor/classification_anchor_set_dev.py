@@ -217,7 +217,7 @@ def _call_worker(
 def run_case(
     root: Path,
     page: Mapping[str, Any],
-    anchor_set: AnchorSet,
+    anchor_set: Any,
     *,
     extractor: Mapping[str, str],
     classifier: Mapping[str, str],
@@ -246,7 +246,47 @@ def run_case(
         ),
         experiment=experiment,
     )
-    subject = dict(extraction["result"])
+    return run_case_with_subject(
+        root,
+        page,
+        anchor_set,
+        subject=dict(extraction["result"]),
+        classifier=classifier,
+        read_timeout_ms=read_timeout_ms,
+        experiment=experiment,
+        inherited_model_calls=1,
+    )
+
+
+def run_case_with_subject(
+    root: Path,
+    page: Mapping[str, Any],
+    classification_space: Any,
+    *,
+    subject: Mapping[str, Any],
+    classifier: Mapping[str, str],
+    read_timeout_ms: int,
+    experiment: str,
+    inherited_model_calls: int = 0,
+) -> dict[str, Any]:
+    """Classify against a frozen card space using a precomputed subject.
+
+    Development arms may share the already-opened subject extraction while
+    keeping their classification calls and result artifacts independent.
+    Fresh sealed evaluations continue to use :func:`run_case`, which performs
+    both calls inside each arm.
+    """
+
+    uid = str(page.get("uid") or "")
+    source_sha256 = str(page.get("source_sha256") or "")
+    if not uid or not source_sha256:
+        raise ClassificationError(
+            "CVO anchor-set page requires UID and source hash"
+        )
+    case_path = output_root(root, experiment) / "cases" / uid / "result.json"
+    if case_path.is_file():
+        return read_sealed_json(case_path)
+    capsule = deterministic_evidence_capsule(page)
     selection = _call_worker(
         root,
         uid,
@@ -254,8 +294,8 @@ def run_case(
         _model_payload(
             operation="classify",
             page=capsule,
-            subject=subject,
-            anchors=anchor_set.model_cards(),
+            subject=dict(subject),
+            anchors=classification_space.model_cards(),
             read_timeout_ms=read_timeout_ms,
             **classifier,
         ),
@@ -266,14 +306,15 @@ def run_case(
         "created_at": _now(),
         "uid": uid,
         "source_sha256": source_sha256,
-        "anchor_epoch": anchor_set.epoch,
-        "anchor_checksum": anchor_set.checksum,
+        "anchor_epoch": classification_space.epoch,
+        "anchor_checksum": classification_space.checksum,
         "output_contract_epoch": "cvo-anchor-set-v1",
         "prompt_sha256": PROMPT_SHA256,
         "capsule": capsule,
-        "subject": subject,
+        "subject": dict(subject),
         "selection": dict(selection["result"]),
-        "model_calls": 2,
+        "model_calls": inherited_model_calls + 1,
+        "new_model_calls": 1,
         "page_mutations": 0,
     }
     write_sealed_json(case_path, result, backup=True)
