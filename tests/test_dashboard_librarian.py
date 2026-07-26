@@ -9,7 +9,11 @@ import pytest
 from chronovisor import dashboard
 from chronovisor.durable_state import write_sealed_json
 from chronovisor.librarian import run_shadow
-from chronovisor.librarian_status import _derive_code, _soak_status
+from chronovisor.librarian_status import (
+    _derive_code,
+    _library_evidence_status,
+    _soak_status,
+)
 
 
 def test_dashboard_static_contract_exposes_librarian_progress() -> None:
@@ -77,6 +81,28 @@ def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> N
         "denominator": 1,
         "scope_generation": status["scope_generation"],
     }
+
+
+def test_library_evidence_dashboard_reports_in_progress_runtime_stage(
+    tmp_path: Path,
+) -> None:
+    write_sealed_json(
+        tmp_path / "classification" / "library-evidence" / "state.json",
+        {
+            "schema": "chronovisor.classification-library-pilot-state.v1",
+            "status": "running",
+            "stage": "e0_adjudicate",
+            "fixture_cursor": 15,
+            "fixture_accepted": 12,
+        },
+    )
+
+    status = _library_evidence_status(tmp_path)
+
+    assert status["status"] == "running"
+    assert status["stage"] == "e0_adjudicate"
+    assert status["fixture"]["adjudication_cursor"] == 15
+    assert status["fixture"]["adjudication_accepted"] == 12
 
 
 def test_status_overlays_latest_locked_calibration_quality(tmp_path: Path) -> None:

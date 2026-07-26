@@ -2114,6 +2114,7 @@ function renderLibrarian(librarian) {
   const evidenceProgress = evidence.phase_progress || {};
   els.librarianEvidenceStatus.textContent =
     `${fmt(evidence.status, "not started").replaceAll("_", " ")} · ` +
+    `${fmt(evidence.stage, "idle").replaceAll("_", " ")} · ` +
     `${intValue(evidenceProgress.numerator)}/${intValue(evidenceProgress.denominator)} phases`;
   const fixture = evidence.fixture || {};
   els.librarianEvidenceFixture.textContent = fixture.dev || fixture.holdout

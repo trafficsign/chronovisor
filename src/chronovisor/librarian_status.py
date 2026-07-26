@@ -167,6 +167,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     )
     fixture = _safe_receipt(fixture_root / "manifest.json")
     candidate_lock = _safe_receipt(fixture_root / "candidate-lock.json")
+    pilot_state = _safe_receipt(pilot_root / "state.json")
     index = _safe_receipt(pilot_root / "index" / "evidence.manifest.json")
     candidate_eval = _safe_receipt(
         pilot_root / "evaluation" / "candidate-evaluation.json"
@@ -213,12 +214,15 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "exact_difference": paired_eval.get("exact_difference"),
             "exact_ci_lower": paired_eval.get("exact_ci_lower"),
         }
+    runtime_status = str(pilot_state.get("status") or "")
     state = "not_started"
-    if completed:
+    if completed or runtime_status in {"running", "retrying", "observing"}:
         state = "running"
-    if failed:
+    if runtime_status == "awaiting_user":
+        state = "awaiting_user"
+    if failed or runtime_status == "blocked":
         state = "blocked"
-    if len(completed) == len(receipts):
+    if len(completed) == len(receipts) or runtime_status == "complete":
         state = "complete"
     package_receipts = [_safe_receipt(path) for path in source_manifests]
     resource_stages = (
@@ -230,6 +234,9 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     return {
         "schema": "chronovisor.library-evidence-dashboard.v1",
         "status": state,
+        "stage": pilot_state.get("stage"),
+        "runtime_status": runtime_status or None,
+        "last_error": pilot_state.get("last_error"),
         "completed_phases": completed,
         "failed_phases": failed,
         "phase_progress": {
@@ -243,6 +250,8 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "holdout": (fixture.get("holdout") or {}).get("count"),
             "reserve": (fixture.get("reserve") or {}).get("count"),
             "holdout_opened_at": (fixture.get("holdout") or {}).get("opened_at"),
+            "adjudication_cursor": pilot_state.get("fixture_cursor"),
+            "adjudication_accepted": pilot_state.get("fixture_accepted"),
         },
         "sources": {
             "package_count": len(source_manifests),
