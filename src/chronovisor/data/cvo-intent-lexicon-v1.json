@@ -1,0 +1,73 @@
+{
+  "schema": "chronovisor.cvo-intent-lexicon.v1",
+  "epoch": "cvo-intent-v1",
+  "status": "development",
+  "purpose": "High-precision Chronovisor-specific evidence for a complementary anchor. A non-match safely produces no complement.",
+  "rules": [
+    {
+      "term_id": "cvo:term:career-document",
+      "label_ja": "就職・転職・面接・履歴書文書",
+      "anchor_id": "cvo:anchor:0008",
+      "priority": 100,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(interview|resume|career|job application|scout|面接|職務経歴書|転職|応募|採用)"},
+        {"field": "summary", "pattern": "(?i)(career option|career transition|job application|resume|interview preparation|転職|面接|職務経歴書)"},
+        {"field": "excerpt", "pattern": "(?i)(strategic reference for evaluating.{0,80}career option|suitability for engineers transitioning|career transition planning)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:ai-model-study",
+      "label_ja": "AIモデルの評価・更新・能力分析",
+      "anchor_id": "cvo:anchor:0002",
+      "priority": 95,
+      "signals": [
+        {"field": "title", "pattern": "(?i)((evaluat|benchmark).*(llm|ai model)|(llm|ai model).*(evaluat|benchmark)|gemma.*model update|model (capability|update policy))"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:market-analysis",
+      "label_ja": "市場構造・事業変化の分析",
+      "anchor_id": "cvo:anchor:0022",
+      "priority": 90,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(market (evolution|analysis|structure|shift)|e-commerce|economics|business model|市場(構造|分析|変化))"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:societal-spatial-change",
+      "label_ja": "都市・地方・社会構造の変化",
+      "anchor_id": "cvo:anchor:0025",
+      "priority": 90,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(urban.*rural|rural.*urban|social change|societal shift|都市.*地方|地方.*都市)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:defense-domain",
+      "label_ja": "防衛・軍事分野",
+      "anchor_id": "cvo:anchor:0024",
+      "priority": 90,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(defen[cs]e|military|geopolit|防衛|軍事|国防)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:formal-mathematics",
+      "label_ja": "数学・形式構造",
+      "anchor_id": "cvo:anchor:0021",
+      "priority": 90,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(math|mathemat|statistics|formal (logic|structure)|数学|統計|形式論理)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:skill-transferability",
+      "label_ja": "職業能力の移転可能性",
+      "anchor_id": "cvo:anchor:0008",
+      "priority": 85,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(skill transferability|career skill|職業能力|スキル移転)"}
+      ]
+    }
+  ]
+}

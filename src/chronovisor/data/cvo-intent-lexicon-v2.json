@@ -1,0 +1,130 @@
+{
+  "schema": "chronovisor.cvo-intent-lexicon.v1",
+  "epoch": "cvo-intent-v2",
+  "status": "development",
+  "purpose": "High-precision Chronovisor-specific evidence for a complementary anchor. Rules generalize opened failure families; a non-match safely produces no complement.",
+  "rules": [
+    {
+      "term_id": "cvo:term:career-document",
+      "label_ja": "就職・転職・面接・履歴書文書",
+      "anchor_id": "cvo:anchor:0008",
+      "priority": 100,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(interview|resume|career|job application|scout|面接|職務経歴書|転職|応募|採用)"},
+        {"field": "summary", "pattern": "(?i)(career option|career transition|job application|resume|interview preparation|転職|面接|職務経歴書)"},
+        {"field": "excerpt", "pattern": "(?i)(strategic reference for evaluating.{0,80}career option|suitability for engineers transitioning|career transition planning)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:information-security-protocol",
+      "label_ja": "情報セキュリティ・機密保持",
+      "anchor_id": "cvo:anchor:0005",
+      "priority": 98,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(security protocol|privacy protocol|data leakage|confidentiality|ssl inspection|access control|情報セキュリティ|機密保持|情報漏洩)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:ai-model-or-agent",
+      "label_ja": "AIモデル・エージェント",
+      "anchor_id": "cvo:anchor:0002",
+      "priority": 97,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(ai (agent|model)|managed agents?|memory agent|model welfare|frontier model|ai エージェント|AIモデル)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:software-runtime-implementation",
+      "label_ja": "AI・検索・記憶システムの実装",
+      "anchor_id": "cvo:anchor:0001",
+      "priority": 96,
+      "signals": [
+        {"field": "title", "pattern": "(?i)((frontier|model|ai|agent|semantic|search|recall|memory).*(implementation|architecture|integration|regression fix|pipeline)|(implementation|architecture|integration|regression fix).*(frontier|model|ai|agent|semantic|search|recall|memory))"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:ai-model-study",
+      "label_ja": "AIモデルの評価・更新・能力分析",
+      "anchor_id": "cvo:anchor:0002",
+      "priority": 95,
+      "signals": [
+        {"field": "title", "pattern": "(?i)((evaluat|benchmark).*(llm|ai model)|(llm|ai model).*(evaluat|benchmark)|gemma.*model update|model (capability|update policy))"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:automotive-engineering-standard",
+      "label_ja": "自動車設計評価基準",
+      "anchor_id": "cvo:anchor:0011",
+      "priority": 94,
+      "signals": [
+        {"field": "excerpt", "pattern": "(?s)# 基準No:.{0,500}(部品名称|評価項目|全車)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:workplace-organization",
+      "label_ja": "職場・組織行動",
+      "anchor_id": "cvo:anchor:0009",
+      "priority": 93,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(workplace|organizational behavior|labor management|職場|組織行動|労務管理|残業)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:philosophy-ethics",
+      "label_ja": "哲学・倫理・意識",
+      "anchor_id": "cvo:anchor:0026",
+      "priority": 92,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(philosophy|ethics|model welfare|consciousness|哲学|倫理|意識)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:market-analysis",
+      "label_ja": "市場構造・事業変化の分析",
+      "anchor_id": "cvo:anchor:0022",
+      "priority": 90,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(market (evolution|analysis|structure|shift)|e-commerce|economics|business model|市場(構造|分析|変化)|アプリ市場)"},
+        {"field": "summary", "pattern": "(?i)(market barrier|market entry|licen[cs]ing barrier|新規参入|市場.*障壁)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:societal-spatial-change",
+      "label_ja": "都市・地方・社会構造の変化",
+      "anchor_id": "cvo:anchor:0025",
+      "priority": 90,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(urban.*rural|rural.*urban|social change|societal shift|都市.*地方|地方.*都市)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:defense-domain",
+      "label_ja": "防衛・軍事分野",
+      "anchor_id": "cvo:anchor:0024",
+      "priority": 90,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(defen[cs]e|military|geopolit|防衛|軍事|国防)"},
+        {"field": "summary", "pattern": "(?i)(geopolit|national security|military competition|国家間競争|米中対立)"},
+        {"field": "excerpt", "pattern": "(?is)((AGI|ASI|超知能).{0,500}(geopolit|地政学|国家間競争|米中対立)|(geopolit|地政学|国家間競争|米中対立).{0,500}(AGI|ASI|超知能))"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:formal-mathematics",
+      "label_ja": "数学・形式構造",
+      "anchor_id": "cvo:anchor:0021",
+      "priority": 90,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(math|mathemat|statistics|formal (logic|structure)|数学|統計|形式論理)"}
+      ]
+    },
+    {
+      "term_id": "cvo:term:skill-transferability",
+      "label_ja": "職業能力の移転可能性",
+      "anchor_id": "cvo:anchor:0008",
+      "priority": 85,
+      "signals": [
+        {"field": "title", "pattern": "(?i)(skill transferability|career skill|職業能力|スキル移転)"}
+      ]
+    }
+  ]
+}
