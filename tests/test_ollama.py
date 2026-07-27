@@ -902,6 +902,73 @@ def test_pressure_aware_snapshot_bootstraps_exactly_one_uncalibrated_runner() ->
     assert plan.calibrated_models == ()
 
 
+def test_macos_pressure_snapshot_reads_compressor_and_swap(monkeypatch) -> None:
+    class _Darwin:
+        sysname = "Darwin"
+
+    def fake_run(
+        args: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if args == ["vm_stat"]:
+            stdout = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages occupied by compressor: 2523793.
+"""
+        elif args == ["sysctl", "-n", "vm.swapusage"]:
+            stdout = "vm.swapusage: total = 9216.00M  used = 8155.19M  free = 1060.81M"
+        else:  # pragma: no cover - all commands are enumerated above
+            pytest.fail(f"unexpected command: {args}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(ollama.os, "uname", lambda: _Darwin())
+    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+
+    snapshot = ollama.macos_pressure_snapshot()
+
+    assert snapshot == ollama.MacOSPressureSnapshot(
+        compressed_bytes=2_523_793 * 16_384,
+        swap_used_bytes=int(8_155.19 * 1024**2),
+        source="vm_stat+swapusage",
+    )
+
+
+def test_compressed_memory_forces_single_resident_even_when_three_fit() -> None:
+    memory = ollama.MemorySnapshot(
+        total_bytes=128 * ollama.GIB,
+        available_bytes=96 * ollama.GIB,
+        source="macos_memory_pressure",
+    )
+    plan = ollama.build_model_residency_plan(
+        ["ornith:35b", "gpt-oss:20b", "gemma4:26b"],
+        num_ctx=16_384,
+        max_num_ctx=114_688,
+        memory=memory,
+        installed_sizes={
+            "ornith:35b": 8 * ollama.GIB,
+            "gpt-oss:20b": 8 * ollama.GIB,
+            "gemma4:26b": 8 * ollama.GIB,
+        },
+        resident={},
+        calibrated_sizes={
+            ("ornith:35b", 16_384): 10 * ollama.GIB,
+            ("gpt-oss:20b", 16_384): 10 * ollama.GIB,
+            ("gemma4:26b", 16_384): 10 * ollama.GIB,
+        },
+        reserve_bytes=16 * ollama.GIB,
+        configured_max_resident=3,
+        pressure=ollama.MacOSPressureSnapshot(
+            compressed_bytes=40 * ollama.GIB,
+            swap_used_bytes=8 * ollama.GIB,
+            source="test",
+        ),
+    )
+
+    assert plan.max_resident_models == 1
+    assert plan.pressure_forced_single is True
+    assert plan.compressed_bytes == 40 * ollama.GIB
+    assert plan.swap_used_bytes == 8 * ollama.GIB
+    assert plan.audit_record()["pressure_forced_single"] is True
+
+
 def test_daemon_identity_ignores_runner_and_changes_on_restart(monkeypatch) -> None:
     process_table = {
         "stdout": """

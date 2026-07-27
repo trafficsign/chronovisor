@@ -136,12 +136,24 @@ RESIDENCY_UPSHIFT_MIN_HEADROOM_BYTES = 2 * GIB
 RESIDENCY_UPSHIFT_HEADROOM_RATIO = 0.10
 RESIDENCY_CONTEXT_FLOOR_TOLERANCE_BYTES = 256 * 1024 * 1024
 RESIDENCY_CONTEXT_FLOOR_TOLERANCE_RATIO = 0.02
+RESIDENCY_COMPRESSED_SINGLE_MIN_BYTES = 8 * GIB
+RESIDENCY_COMPRESSED_SINGLE_RATIO = 0.20
+RESIDENCY_SWAP_SINGLE_MIN_BYTES = 1 * GIB
+RESIDENCY_SWAP_COMPRESSED_FLOOR_BYTES = 4 * GIB
+RESIDENCY_SWAP_COMPRESSED_FLOOR_RATIO = 0.0625
 
 
 @dataclass(frozen=True)
 class MemorySnapshot:
     total_bytes: int
     available_bytes: int
+    source: str
+
+
+@dataclass(frozen=True)
+class MacOSPressureSnapshot:
+    compressed_bytes: int
+    swap_used_bytes: int
     source: str
 
 
@@ -164,6 +176,9 @@ class ModelResidencyPlan:
     context_floor_models: tuple[str, ...] = ()
     forced_single: bool = False
     reuse_larger_context: bool = False
+    pressure_forced_single: bool = False
+    compressed_bytes: int = 0
+    swap_used_bytes: int = 0
 
     def estimate(self, model: str) -> int:
         return dict(self.estimated_model_bytes).get(model, 0)
@@ -188,6 +203,9 @@ class ModelResidencyPlan:
             "source": self.source,
             "forced_single": self.forced_single,
             "reuse_larger_context": self.reuse_larger_context,
+            "pressure_forced_single": self.pressure_forced_single,
+            "compressed_bytes": self.compressed_bytes,
+            "swap_used_bytes": self.swap_used_bytes,
             "upshift_min_headroom_bytes": RESIDENCY_UPSHIFT_MIN_HEADROOM_BYTES,
             "upshift_headroom_ratio": RESIDENCY_UPSHIFT_HEADROOM_RATIO,
         }
@@ -748,6 +766,93 @@ def memory_snapshot() -> MemorySnapshot:
     return MemorySnapshot(0, 0, "unavailable")
 
 
+def macos_pressure_snapshot() -> MacOSPressureSnapshot:
+    """Read compressed-memory and swap occupancy used for residency upshifts."""
+
+    if os.uname().sysname != "Darwin":
+        return MacOSPressureSnapshot(0, 0, "not_macos")
+    compressed_bytes = 0
+    swap_used_bytes = 0
+    sources: list[str] = []
+    try:
+        vm_result = subprocess.run(
+            ["vm_stat"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        page_match = re.search(r"page size of (\d+) bytes", vm_result.stdout)
+        page_size = int(page_match.group(1)) if page_match else 4096
+        compressed_match = re.search(
+            r"Pages occupied by compressor:\s+([0-9.]+)\.?",
+            vm_result.stdout,
+        )
+        if compressed_match is None:
+            raise ValueError("vm_stat compressor occupancy is unavailable")
+        compressed_pages = int(compressed_match.group(1).replace(".", ""))
+        compressed_bytes = compressed_pages * page_size
+        sources.append("vm_stat")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        sources.append("vm_stat_unavailable")
+    try:
+        swap_result = subprocess.run(
+            ["sysctl", "-n", "vm.swapusage"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        used_match = re.search(
+            r"used\s*=\s*([0-9.]+)([KMGTP])",
+            swap_result.stdout,
+            flags=re.IGNORECASE,
+        )
+        if used_match is None:
+            raise ValueError("vm.swapusage used value is unavailable")
+        unit_bytes = {
+            "K": 1024,
+            "M": 1024**2,
+            "G": 1024**3,
+            "T": 1024**4,
+            "P": 1024**5,
+        }[used_match.group(2).upper()]
+        swap_used_bytes = int(float(used_match.group(1)) * unit_bytes)
+        sources.append("swapusage")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        sources.append("swapusage_unavailable")
+    return MacOSPressureSnapshot(
+        compressed_bytes=max(0, compressed_bytes),
+        swap_used_bytes=max(0, swap_used_bytes),
+        source="+".join(sources),
+    )
+
+
+def memory_pressure_requires_single_resident(
+    memory: MemorySnapshot,
+    pressure: MacOSPressureSnapshot,
+) -> bool:
+    """Refuse residency upshifts while macOS is compressing or swapping heavily."""
+
+    if memory.total_bytes <= 0:
+        return True
+    compressed_limit = max(
+        RESIDENCY_COMPRESSED_SINGLE_MIN_BYTES,
+        int(memory.total_bytes * RESIDENCY_COMPRESSED_SINGLE_RATIO),
+    )
+    swap_compressed_floor = max(
+        RESIDENCY_SWAP_COMPRESSED_FLOOR_BYTES,
+        int(memory.total_bytes * RESIDENCY_SWAP_COMPRESSED_FLOOR_RATIO),
+    )
+    return bool(
+        pressure.compressed_bytes >= compressed_limit
+        or (
+            pressure.swap_used_bytes >= RESIDENCY_SWAP_SINGLE_MIN_BYTES
+            and pressure.compressed_bytes >= swap_compressed_floor
+        )
+    )
+
+
 def _ollama_resource_rows() -> tuple[dict[str, int], dict[str, tuple[int, int]]]:
     tags_response = _client().get("/api/tags", timeout=3)
     tags_response.raise_for_status()
@@ -805,6 +910,7 @@ def build_model_residency_plan(
     source: str = "measured",
     reuse_larger_context: bool = True,
     reuse_context_ceilings: Mapping[str, int] | None = None,
+    pressure: MacOSPressureSnapshot | None = None,
 ) -> ModelResidencyPlan:
     """Choose a 1/2/3-runner cap from context-scaled model footprints.
 
@@ -816,7 +922,13 @@ def build_model_residency_plan(
     ordered = tuple(dict.fromkeys(model for model in models if model))
     if not ordered:
         raise ValueError("at least one model is required")
-    maximum = max(1, min(3, configured_max_resident, len(ordered)))
+    pressure_snapshot = pressure or MacOSPressureSnapshot(0, 0, "not_probed")
+    pressure_forced_single = memory_pressure_requires_single_resident(
+        memory,
+        pressure_snapshot,
+    )
+    configured_maximum = max(1, min(3, configured_max_resident, len(ordered)))
+    maximum = 1 if pressure_forced_single else configured_maximum
     reserve = (
         max(reserve_bytes, memory.total_bytes // 8)
         if memory.total_bytes
@@ -985,6 +1097,9 @@ def build_model_residency_plan(
         context_floor_models=context_floor_models,
         forced_single=forced_single,
         reuse_larger_context=reuse_larger_context,
+        pressure_forced_single=pressure_forced_single,
+        compressed_bytes=pressure_snapshot.compressed_bytes,
+        swap_used_bytes=pressure_snapshot.swap_used_bytes,
     )
 
 
@@ -1001,6 +1116,11 @@ def plan_model_residency(
     """Probe live host/Ollama state and return a fail-safe residency plan."""
 
     memory = memory_snapshot()
+    pressure = (
+        macos_pressure_snapshot()
+        if memory.source.startswith("macos_")
+        else MacOSPressureSnapshot(0, 0, "not_probed")
+    )
     try:
         installed, resident = _ollama_resource_rows()
         source = f"{memory.source}+ollama"
@@ -1041,6 +1161,7 @@ def plan_model_residency(
         source=source,
         reuse_larger_context=reuse_larger_context,
         reuse_context_ceilings=reuse_context_ceilings,
+        pressure=pressure,
     )
     if (
         memory.total_bytes <= 0

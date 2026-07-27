@@ -880,13 +880,18 @@ def test_non_fitting_tie_does_not_block_an_agreeing_pair(
             estimates=(8, 10, 22),
         ),
         model_observer=lambda model: (8 * ollama.GIB, 16_384),
-        model_unloader=lambda model: pytest.fail(f"unexpected unload: {model}"),
+        model_unloader=lambda model: events.append(("unload", model)) or True,
         live_resource_control=True,
     ).decide("prompt", SCHEMA)
 
     assert result.ok is True
     assert [vote.model for vote in result.votes] == [PRIMARY, CHALLENGER]
-    assert events == [("chat", PRIMARY, 2), ("chat", CHALLENGER, 2)]
+    assert events == [
+        ("chat", PRIMARY, 2),
+        ("chat", CHALLENGER, 2),
+        ("unload", PRIMARY),
+        ("unload", CHALLENGER),
+    ]
 
 
 def test_non_fitting_tie_quarantines_only_after_pair_disagrees(
@@ -919,7 +924,7 @@ def test_non_fitting_tie_quarantines_only_after_pair_disagrees(
             estimates=(8, 10, 22),
         ),
         model_observer=lambda model: (8 * ollama.GIB, 16_384),
-        model_unloader=lambda model: pytest.fail(f"unexpected unload: {model}"),
+        model_unloader=lambda model: events.append(("unload", model)) or True,
         live_resource_control=True,
     ).decide("prompt", SCHEMA)
 
@@ -927,7 +932,12 @@ def test_non_fitting_tie_quarantines_only_after_pair_disagrees(
     assert result.failure_class == "local_resource_quarantined"
     assert result.quarantine_reason == "tie_break_runner_no_longer_fits_reserved_memory"
     assert [vote.model for vote in result.votes] == [PRIMARY, CHALLENGER]
-    assert events == [("chat", PRIMARY, 2), ("chat", CHALLENGER, 2)]
+    assert events == [
+        ("chat", PRIMARY, 2),
+        ("chat", CHALLENGER, 2),
+        ("unload", PRIMARY),
+        ("unload", CHALLENGER),
+    ]
 
 
 def test_memory_probe_failure_quarantines_before_any_inference(
@@ -1089,9 +1099,15 @@ def test_two_residents_keep_smaller_pair_model_for_calibrated_tie_break(
         ("chat", CHALLENGER, 2),
         ("unload", CHALLENGER),
         ("chat", TIE_BREAK, 2),
+        ("unload", PRIMARY),
+        ("unload", TIE_BREAK),
     ]
     assert result.residency is not None
-    assert result.residency["evictions"] == [{"model": CHALLENGER, "verified": True}]
+    assert result.residency["evictions"] == [
+        {"model": CHALLENGER, "verified": True},
+        {"model": PRIMARY, "verified": True},
+        {"model": TIE_BREAK, "verified": True},
+    ]
 
 
 def test_tie_substitution_keeps_the_same_two_gib_upshift_headroom(
@@ -1131,11 +1147,12 @@ def test_tie_substitution_keeps_the_same_two_gib_upshift_headroom(
         ("unload", PRIMARY),
         ("unload", CHALLENGER),
         ("chat", TIE_BREAK, 2),
+        ("unload", TIE_BREAK),
     ]
 
 
 @pytest.mark.parametrize("max_resident_models", [2, 3])
-def test_multi_resident_pair_agreement_does_not_unload_runners(
+def test_multi_resident_pair_agreement_releases_runners_after_decision(
     max_resident_models: int,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1172,12 +1189,20 @@ def test_multi_resident_pair_agreement_does_not_unload_runners(
 
     assert result.ok is True
     assert [vote.model for vote in result.votes] == [PRIMARY, CHALLENGER]
-    assert events == [("chat", PRIMARY, 2), ("chat", CHALLENGER, 2)]
+    assert events == [
+        ("chat", PRIMARY, 2),
+        ("chat", CHALLENGER, 2),
+        ("unload", PRIMARY),
+        ("unload", CHALLENGER),
+    ]
     assert result.residency is not None
-    assert result.residency["evictions"] == []
+    assert result.residency["evictions"] == [
+        {"model": PRIMARY, "verified": True},
+        {"model": CHALLENGER, "verified": True},
+    ]
 
 
-def test_three_residents_run_tie_break_without_eviction(
+def test_three_residents_run_tie_break_then_release_all_runners(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1204,7 +1229,7 @@ def test_three_residents_run_tie_break_without_eviction(
         record_replay=False,
         residency_planner=lambda _models, **_kwargs: _plan(3),
         model_observer=lambda model: (8 * ollama.GIB, 16_384),
-        model_unloader=lambda model: pytest.fail(f"unexpected unload: {model}"),
+        model_unloader=lambda model: events.append(("unload", model)) or True,
         live_resource_control=True,
     ).decide("prompt", SCHEMA)
 
@@ -1214,9 +1239,16 @@ def test_three_residents_run_tie_break_without_eviction(
         ("chat", PRIMARY, 2),
         ("chat", CHALLENGER, 2),
         ("chat", TIE_BREAK, 2),
+        ("unload", PRIMARY),
+        ("unload", CHALLENGER),
+        ("unload", TIE_BREAK),
     ]
     assert result.residency is not None
-    assert result.residency["evictions"] == []
+    assert result.residency["evictions"] == [
+        {"model": PRIMARY, "verified": True},
+        {"model": CHALLENGER, "verified": True},
+        {"model": TIE_BREAK, "verified": True},
+    ]
 
 
 def test_three_resident_plan_evicts_incompatible_runner_before_first_vote(
@@ -1262,6 +1294,12 @@ def test_three_resident_plan_evicts_incompatible_runner_before_first_vote(
         ("unload", TIE_BREAK),
         ("chat", PRIMARY, 2),
         ("chat", CHALLENGER, 2),
+        ("unload", PRIMARY),
+        ("unload", CHALLENGER),
     ]
     assert result.residency is not None
-    assert result.residency["evictions"] == [{"model": TIE_BREAK, "verified": True}]
+    assert result.residency["evictions"] == [
+        {"model": TIE_BREAK, "verified": True},
+        {"model": PRIMARY, "verified": True},
+        {"model": CHALLENGER, "verified": True},
+    ]

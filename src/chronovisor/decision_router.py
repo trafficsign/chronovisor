@@ -3762,6 +3762,19 @@ class DecisionRouter:
                         result.votes,
                         "local_policy_resolution_lacks_two_vote_quorum",
                     )
+            # Heavy decision runners are batch resources, not services. Release
+            # every runner that actually voted before returning authority to
+            # the caller. The protected Recall runner is not one of these
+            # configured roles and remains resident. Single-runner plans have
+            # already evicted between votes; the attempted-event set prevents a
+            # redundant second unload.
+            attempted_evictions = {
+                str(event.get("model") or "") for event in eviction_events
+            }
+            for model in dict.fromkeys(vote.model for vote in result.votes):
+                if model in attempted_evictions:
+                    continue
+                self._evict_model(model, eviction_events)
             residency = {
                 **residency_plan.audit_record(),
                 "required_num_ctx": required_num_ctx,
