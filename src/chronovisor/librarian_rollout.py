@@ -12,8 +12,8 @@ from typing import Any
 from chronovisor.classification_calibration import (
     adjudicate,
     adjudication_path,
-    calibration_input_fingerprint,
     calibrate,
+    calibration_input_fingerprint,
     distribution,
     lock,
 )
@@ -137,10 +137,18 @@ def _run_collection_rollout(root: Path) -> dict[str, Any]:
         },
         backup=True,
     )
+    review_queue = result["queue"]
+    queue_open = int(review_queue.get("open", 0))
+    if queue_open:
+        next_stage = "collection_review_queue"
+        next_gate = "review_queue_budget_and_split_proposal_audit"
+    else:
+        next_stage = "phase7_burn_receipts"
+        next_gate = "cancellable_broker_burn_receipts"
     return _write_state(
         root,
         status="observing",
-        stage="collection_review_queue",
+        stage=next_stage,
         detail={
             "authority": authority,
             "quality": {
@@ -148,8 +156,8 @@ def _run_collection_rollout(root: Path) -> dict[str, Any]:
                 "warnings": quality["warnings"],
                 "hard_failures": quality["hard_failures"],
             },
-            "review_queue": result["queue"],
-            "next_gate": "review_queue_budget_and_split_proposal_audit",
+            "review_queue": review_queue,
+            "next_gate": next_gate,
         },
     )
 

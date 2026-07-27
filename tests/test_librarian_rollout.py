@@ -73,6 +73,50 @@ def test_rollout_uses_collection_phase4_and_skips_legacy_classifier(
     )
 
 
+def test_collection_rollout_advances_when_review_queue_is_empty(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_sealed_json(
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "phase4-collection-authority.json",
+        {"status": "adopted"},
+        backup=False,
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "run_collection_librarian",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "sync": {
+                "assignment_count": 12,
+                "collection_count": 3,
+                "page_registry_mirror": {"generation": 7},
+            },
+            "quality": {
+                "status": "passed",
+                "warnings": [],
+                "hard_failures": [],
+            },
+            "queue": {"open": 0},
+        },
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "collection_authority_status",
+        lambda _root: {"active": True, "mode": "collection-first"},
+    )
+
+    result = librarian_rollout.run_rollout(tmp_path)
+
+    assert result["status"] == "observing"
+    assert result["stage"] == "phase7_burn_receipts"
+    assert result["detail"]["review_queue"]["open"] == 0
+    assert result["detail"]["next_gate"] == "cancellable_broker_burn_receipts"
+
+
 def test_rollout_observes_migration_and_releases_after_evidence(
     tmp_path: Path,
     monkeypatch,
