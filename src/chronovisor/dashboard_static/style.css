@@ -679,7 +679,7 @@ canvas {
 }
 
 .knowledge-panel {
-  height: 560px;
+  height: var(--panel-height);
 }
 
 .knowledge-donut-wrap {
@@ -1728,7 +1728,7 @@ canvas {
 
 .event {
   display: grid;
-  grid-template-columns: 84px 74px minmax(0, 1fr);
+  grid-template-columns: 84px 160px minmax(0, 1fr);
   align-items: baseline;
   gap: 10px;
   padding: 9px 12px;
@@ -1761,6 +1761,8 @@ canvas {
 .event-level {
   display: inline-flex;
   justify-content: center;
+  min-width: 0;
+  overflow: hidden;
   padding: 2px 7px;
   border: 1px solid rgba(130, 143, 255, 0.28);
   border-radius: 5px;
@@ -1770,7 +1772,9 @@ canvas {
   font-size: 9.5px;
   font-weight: 560;
   letter-spacing: 0.05em;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .event-level.success {

@@ -792,6 +792,21 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert ".decision-trace-panel" in style
 
 
+def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() -> None:
+    style = (dashboard.STATIC_DIR / "style.css").read_text(encoding="utf-8")
+
+    assert ".knowledge-panel {\n  height: var(--panel-height);\n}" in style
+    assert "grid-template-columns: 84px 160px minmax(0, 1fr);" in style
+    assert (
+        ".event-level {\n"
+        "  display: inline-flex;\n"
+        "  justify-content: center;\n"
+        "  min-width: 0;\n"
+        "  overflow: hidden;"
+    ) in style
+    assert "text-overflow: ellipsis;\n  text-transform: uppercase;\n  white-space: nowrap;" in style
+
+
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
