@@ -11,6 +11,7 @@ from chronovisor import collection_anomaly_worker, collection_authority
 from chronovisor.collection_authority import (
     CollectionAuthorityError,
     CollectionRegistry,
+    adjudicate_collection_review_queue,
     build_review_candidates,
     collection_quality_snapshot,
     evaluate_unseen40,
@@ -529,6 +530,154 @@ def test_collection_lifecycle_is_cas_receipted_and_non_destructive(
             collection_uid=ai_collection,
             new_label="stale",
         )
+
+
+def test_collection_batch_move_is_one_cas_and_preserves_page_bytes(
+    tmp_path: Path,
+) -> None:
+    first_uid, second_uid = _uids(2, start=250)
+    first_path = tmp_path / "pages" / "misc" / "first.md"
+    second_path = tmp_path / "pages" / "misc" / "second.md"
+    _page(first_path, first_uid)
+    _page(second_path, second_uid)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(20, start=280)).__next__,
+    )
+    synced = registry.sync_from_pages()
+    state = registry.load()
+    ai_row = registry._new_collection(
+        slug="ai",
+        label="Artificial intelligence",
+        source_path=None,
+        created_by="test",
+    )
+    career_row = registry._new_collection(
+        slug="career",
+        label="Career",
+        source_path=None,
+        created_by="test",
+    )
+    state["collections"][ai_row["uid"]] = ai_row
+    state["collections"][career_row["uid"]] = career_row
+    state["slug_index"]["ai"] = ai_row["uid"]
+    state["slug_index"]["career"] = career_row["uid"]
+    state["generation"] = synced["generation"] + 1
+    write_sealed_json(registry.path, state, backup=True)
+    before = {
+        first_uid: first_path.read_bytes(),
+        second_uid: second_path.read_bytes(),
+    }
+
+    receipt = registry.apply_batch_moves(
+        {
+            first_uid: ai_row["uid"],
+            second_uid: career_row["uid"],
+        },
+        expected_generation=state["generation"],
+    )
+
+    final = registry.load()
+    assert receipt["operation"] == "batch_move"
+    assert receipt["generation_after"] == state["generation"] + 1
+    assert final["assignments"][first_uid]["collection_uid"] == ai_row["uid"]
+    assert (
+        final["assignments"][second_uid]["collection_uid"]
+        == career_row["uid"]
+    )
+    assert first_path.read_bytes() == before[first_uid]
+    assert second_path.read_bytes() == before[second_uid]
+    assert receipt["page_mutations"] == 0
+
+
+def test_host_adjudication_moves_review_required_and_preserves_affinity(
+    tmp_path: Path,
+) -> None:
+    misc_uid, ai_uid, career_a, career_b, career_c = _uids(5, start=320)
+    misc_path = tmp_path / "pages" / "misc" / "orphan.md"
+    ai_path = tmp_path / "pages" / "ai" / "misplaced.md"
+    _page(misc_path, misc_uid)
+    _page(
+        ai_path,
+        ai_uid,
+        links=("career-a", "career-b", "career-c"),
+    )
+    _page(tmp_path / "pages" / "career" / "career-a.md", career_a)
+    _page(tmp_path / "pages" / "career" / "career-b.md", career_b)
+    _page(tmp_path / "pages" / "career" / "career-c.md", career_c)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(30, start=380)).__next__,
+    )
+    registry.sync_from_pages()
+    index = {
+        "entries": {
+            "orphan": {"outlinks": []},
+            "misplaced": {
+                "outlinks": ["career-a", "career-b", "career-c"]
+            },
+            "career-a": {"outlinks": []},
+            "career-b": {"outlinks": []},
+            "career-c": {"outlinks": []},
+        }
+    }
+    index_path = tmp_path / ".index" / "pages.json"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    misc_candidate = next(
+        row
+        for row in queue["items"].values()
+        if row["reason"] == "collection_requires_review"
+    )
+    before = {
+        misc_uid: misc_path.read_bytes(),
+        ai_uid: ai_path.read_bytes(),
+    }
+    result = adjudicate_collection_review_queue(
+        tmp_path,
+        {
+            "schema": collection_authority.COLLECTION_DECISION_SCHEMA,
+            "status": "approved",
+            "approved_at": "2026-07-27T00:00:00+00:00",
+            "decision_authority": "test_host",
+            "expected_registry_generation": registry.load()["generation"],
+            "preserve_remaining_reasons": [
+                "cross_collection_link_affinity"
+            ],
+            "decisions": [
+                {
+                    "candidate_id": misc_candidate["candidate_id"],
+                    "action": "move",
+                    "target_collection_slug": "ai",
+                    "rationale": "The page is an AI note.",
+                }
+            ],
+        },
+    )
+
+    final = registry.load()
+    persisted = read_sealed_json(
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "collection-review-queue.json"
+    )
+    ai_collection = final["slug_index"]["ai"]
+    assert final["assignments"][misc_uid]["collection_uid"] == ai_collection
+    assert result["moves"] == 1
+    assert result["preserves"] == 1
+    assert result["queue"]["open"] == 0
+    assert {
+        row["status"] for row in persisted["items"].values()
+    } == {"move_approved", "dismissed"}
+    assert persisted["host_assignment_mutations"] == 1
+    assert persisted["page_mutations"] == 0
+    assert misc_path.read_bytes() == before[misc_uid]
+    assert ai_path.read_bytes() == before[ai_uid]
+    page_state = PageRegistry(tmp_path).load()
+    assert page_state["pages"][misc_uid]["collection_uid"] == ai_collection
+    assert page_state["pages"][misc_uid]["collection_status"] == "assigned"
 
 
 def test_review_candidates_detect_misc_and_cross_collection_affinity(

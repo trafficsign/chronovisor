@@ -643,6 +643,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run bounded local-only anomaly review without mutation",
     )
+    parser.add_argument(
+        "--adjudicate-collection-queue",
+        action="store_true",
+        help="apply a host-approved collection review decision manifest",
+    )
+    parser.add_argument("--collection-decision-manifest", type=Path)
     parser.add_argument("--review-model")
     parser.add_argument(
         "--review-role",
@@ -662,7 +668,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    if args.collection_operation:
+    if args.adjudicate_collection_queue:
+        from chronovisor.collection_authority import (
+            adjudicate_collection_review_queue,
+        )
+
+        if args.collection_decision_manifest is None:
+            parser.error(
+                "--adjudicate-collection-queue requires "
+                "--collection-decision-manifest"
+            )
+        try:
+            manifest = json.loads(
+                args.collection_decision_manifest.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            parser.error(f"cannot read collection decision manifest: {exc}")
+        if not isinstance(manifest, dict):
+            parser.error("collection decision manifest must be a JSON object")
+        payload = adjudicate_collection_review_queue(args.root, manifest)
+    elif args.collection_operation:
         from chronovisor.collection_authority import CollectionRegistry
 
         if args.expected_collection_generation is None:

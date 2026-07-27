@@ -41,6 +41,7 @@ from chronovisor.uid_link_index import build_uid_link_index
 COLLECTION_REGISTRY_SCHEMA = "chronovisor.collection-registry.v1"
 COLLECTION_RECEIPT_SCHEMA = "chronovisor.collection-lifecycle-receipt.v1"
 COLLECTION_QUEUE_SCHEMA = "chronovisor.collection-review-queue.v1"
+COLLECTION_DECISION_SCHEMA = "chronovisor.collection-review-decisions.v1"
 COLLECTION_EVALUATION_SCHEMA = "chronovisor.collection-authority-evaluation.v1"
 COLLECTION_QUALITY_SCHEMA = "chronovisor.collection-quality.v1"
 DEFAULT_CHALLENGER_MODEL = "gpt-oss:20b"
@@ -624,6 +625,90 @@ class CollectionRegistry:
             )
         return receipt
 
+    def apply_batch_moves(
+        self,
+        moves: Mapping[str, str],
+        *,
+        expected_generation: int,
+    ) -> dict[str, Any]:
+        """Move pages to multiple collections under one registry CAS."""
+
+        normalized_moves = {
+            normalize_page_uid(page_uid): normalize_page_uid(collection_uid)
+            for page_uid, collection_uid in moves.items()
+        }
+        if not normalized_moves:
+            raise CollectionAuthorityError("batch move requires pages")
+        with file_lock(self.lock_path):
+            state = self.load()
+            generation = int(state.get("generation") or 0)
+            if generation != expected_generation:
+                raise CollectionAuthorityError(
+                    f"collection generation changed: {generation} != "
+                    f"{expected_generation}"
+                )
+            collections = {
+                str(uid): dict(row)
+                for uid, row in state["collections"].items()
+            }
+            assignments = {
+                str(uid): dict(row)
+                for uid, row in state["assignments"].items()
+            }
+            for page_uid, target_uid in normalized_moves.items():
+                if page_uid not in assignments:
+                    raise CollectionAuthorityError(
+                        f"page assignment is missing: {page_uid}"
+                    )
+                target = collections.get(target_uid)
+                if (
+                    not isinstance(target, Mapping)
+                    or target.get("status") != "active"
+                ):
+                    raise CollectionAuthorityError(
+                        f"target collection is not active: {target_uid}"
+                    )
+            before_digest = canonical_sha256(
+                {"collections": collections, "assignments": assignments}
+            )
+            move_rows = []
+            for page_uid, target_uid in sorted(normalized_moves.items()):
+                source_uid = str(assignments[page_uid]["collection_uid"])
+                assignments[page_uid]["collection_uid"] = target_uid
+                assignments[page_uid]["status"] = "assigned"
+                assignments[page_uid]["source"] = "manual"
+                assignments[page_uid]["updated_at"] = _now()
+                move_rows.append(
+                    {
+                        "page_uid": page_uid,
+                        "source_collection_uid": source_uid,
+                        "target_collection_uid": target_uid,
+                    }
+                )
+            state["assignments"] = assignments
+            state["generation"] = generation + 1
+            state["updated_at"] = _now()
+            write_sealed_json(self.path, state, backup=True)
+            return self._write_receipt(
+                {
+                    "operation": "batch_move",
+                    "status": "committed",
+                    "generation_before": generation,
+                    "generation_after": state["generation"],
+                    "moves": move_rows,
+                    "affected_page_uids": sorted(normalized_moves),
+                    "before_digest": "sha256:" + before_digest,
+                    "after_digest": "sha256:"
+                    + canonical_sha256(
+                        {
+                            "collections": collections,
+                            "assignments": assignments,
+                        }
+                    ),
+                    "page_mutations": 0,
+                }
+            )
+
 
 def _load_page_index(root: Path) -> dict[str, Any]:
     path = root / ".index" / "pages.json"
@@ -821,6 +906,10 @@ def refresh_review_queue(
             for row in items.values()
         ),
         "reviewer_calls": int(previous.get("reviewer_calls") or 0),
+        "host_adjudication": previous.get("host_adjudication"),
+        "host_assignment_mutations": int(
+            previous.get("host_assignment_mutations") or 0
+        ),
         "frontier_calls": 0,
         "page_mutations": 0,
         "assignment_mutations": 0,
@@ -1471,6 +1560,317 @@ def review_collection_queue(
         "frontier_calls": 0,
         "page_mutations": 0,
         "assignment_mutations": 0,
+    }
+
+
+def adjudicate_collection_review_queue(
+    root: Path,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply host-approved queue decisions with one batch assignment CAS."""
+
+    if (
+        manifest.get("schema") != COLLECTION_DECISION_SCHEMA
+        or manifest.get("status") != "approved"
+    ):
+        raise CollectionAuthorityError(
+            "collection review decision manifest is not approved"
+        )
+    raw_decisions = manifest.get("decisions")
+    if not isinstance(raw_decisions, list):
+        raise CollectionAuthorityError("collection review decisions are missing")
+    preserve_reasons = manifest.get("preserve_remaining_reasons") or []
+    if (
+        not isinstance(preserve_reasons, list)
+        or any(
+            reason != "cross_collection_link_affinity"
+            for reason in preserve_reasons
+        )
+    ):
+        raise CollectionAuthorityError(
+            "only cross-collection affinity may use a blanket preserve decision"
+        )
+
+    queue_path = root / "runtime" / "librarian" / "collection-review-queue.json"
+    if not queue_path.is_file():
+        raise CollectionAuthorityError("collection review queue is missing")
+    queue = read_sealed_json(queue_path)
+    if queue.get("schema") != COLLECTION_QUEUE_SCHEMA:
+        raise CollectionAuthorityError("collection review queue schema mismatch")
+    items = {
+        str(candidate_id): dict(row)
+        for candidate_id, row in (queue.get("items") or {}).items()
+        if isinstance(row, Mapping)
+    }
+    state = CollectionRegistry(root).load()
+    generation = int(state.get("generation") or 0)
+    expected_generation = manifest.get("expected_registry_generation")
+    if (
+        not isinstance(expected_generation, int)
+        or expected_generation != generation
+    ):
+        raise CollectionAuthorityError(
+            f"collection generation changed: {generation} != "
+            f"{expected_generation}"
+        )
+    page_state = PageRegistry(root).load()
+    collection_by_slug = {
+        str(row.get("slug") or ""): str(uid)
+        for uid, row in state["collections"].items()
+        if isinstance(row, Mapping) and row.get("status") == "active"
+    }
+    slug_by_collection = {
+        collection_uid: slug
+        for slug, collection_uid in collection_by_slug.items()
+    }
+    crosswalk = load_crosswalk()
+
+    explicit: dict[str, dict[str, Any]] = {}
+    for raw_decision in raw_decisions:
+        if not isinstance(raw_decision, Mapping):
+            raise CollectionAuthorityError("collection review decision is malformed")
+        decision = dict(raw_decision)
+        candidate_id = str(decision.get("candidate_id") or "")
+        if not candidate_id or candidate_id in explicit:
+            raise CollectionAuthorityError(
+                "collection review decision IDs must be unique"
+            )
+        if decision.get("action") not in {"move", "preserve"}:
+            raise CollectionAuthorityError(
+                f"unsupported collection review action: {candidate_id}"
+            )
+        if not str(decision.get("rationale") or "").strip():
+            raise CollectionAuthorityError(
+                f"collection review rationale is missing: {candidate_id}"
+            )
+        explicit[candidate_id] = decision
+
+    decisions = dict(explicit)
+    for candidate_id, row in items.items():
+        if (
+            row.get("reason") in preserve_reasons
+            and candidate_id not in decisions
+        ):
+            decisions[candidate_id] = {
+                "candidate_id": candidate_id,
+                "action": "preserve",
+                "rationale": (
+                    "Existing collection remains the primary archival authority; "
+                    "cross-collection links are relational evidence only."
+                ),
+            }
+    unresolved_required = [
+        candidate_id
+        for candidate_id, row in items.items()
+        if row.get("reason") in {"unclassified", "collection_requires_review"}
+        and candidate_id not in decisions
+    ]
+    if unresolved_required:
+        raise CollectionAuthorityError(
+            "review-required candidates lack explicit host decisions: "
+            + ",".join(sorted(unresolved_required))
+        )
+
+    move_targets: dict[str, str] = {}
+    resolved_rows: dict[str, dict[str, Any]] = {}
+    for candidate_id, decision in sorted(decisions.items()):
+        candidate = items.get(candidate_id)
+        if not isinstance(candidate, Mapping):
+            raise CollectionAuthorityError(
+                f"review candidate is missing: {candidate_id}"
+            )
+        page_uid = str(candidate.get("page_uid") or "")
+        assignment = state["assignments"].get(page_uid)
+        if not isinstance(assignment, Mapping):
+            raise CollectionAuthorityError(
+                f"candidate page assignment is missing: {candidate_id}"
+            )
+        current_slug = slug_by_collection.get(
+            str(assignment.get("collection_uid") or ""),
+            "",
+        )
+        if current_slug != candidate.get("current_collection_slug"):
+            raise CollectionAuthorityError(
+                f"candidate collection changed: {candidate_id}"
+            )
+        row = dict(candidate)
+        row["host_decision"] = {
+            "action": decision["action"],
+            "rationale": str(decision["rationale"]).strip(),
+            "authority": str(
+                manifest.get("decision_authority") or "host_adjudication"
+            ),
+            "decided_at": str(manifest.get("approved_at") or _now()),
+        }
+        if decision["action"] == "preserve":
+            crosswalk_row = crosswalk["by_slug"].get(current_slug) or {}
+            if (
+                candidate.get("reason")
+                in {"unclassified", "collection_requires_review"}
+                and (
+                    current_slug == "_unclassified"
+                    or crosswalk_row.get("review_required")
+                )
+            ):
+                raise CollectionAuthorityError(
+                    "review-required collection cannot be preserved: "
+                    f"{candidate_id}"
+                )
+            row["status"] = "dismissed"
+            row["resolved_at"] = _now()
+            row["resolution"] = "host_preserve_original_order"
+        else:
+            target_slug = str(
+                decision.get("target_collection_slug") or ""
+            ).strip()
+            target_uid = collection_by_slug.get(target_slug)
+            target_crosswalk = crosswalk["by_slug"].get(target_slug) or {}
+            if (
+                not target_uid
+                or target_slug in {"_unclassified", current_slug}
+                or target_crosswalk.get("review_required")
+            ):
+                raise CollectionAuthorityError(
+                    f"unsafe collection move target: {candidate_id}"
+                )
+            if page_uid in move_targets:
+                raise CollectionAuthorityError(
+                    f"page has multiple move decisions: {page_uid}"
+                )
+            move_targets[page_uid] = target_uid
+            row["status"] = "move_approved"
+            row["resolved_at"] = _now()
+            row["resolution"] = "host_approved_collection_move"
+            row["approved_collection_slug"] = target_slug
+        resolved_rows[candidate_id] = row
+
+    page_rows = page_state.get("pages") or {}
+    content_paths = {
+        page_uid: root / str(page_rows[page_uid].get("path") or "")
+        for page_uid in move_targets
+        if isinstance(page_rows.get(page_uid), Mapping)
+    }
+    if len(content_paths) != len(move_targets) or any(
+        not path.is_file() for path in content_paths.values()
+    ):
+        raise CollectionAuthorityError("move target page content is unavailable")
+    content_before = {
+        page_uid: _content_sha256(path)
+        for page_uid, path in content_paths.items()
+    }
+
+    registry = CollectionRegistry(root)
+    move_receipt: dict[str, Any] | None = None
+    if move_targets:
+        move_receipt = registry.apply_batch_moves(
+            move_targets,
+            expected_generation=generation,
+        )
+        generation = int(move_receipt["generation_after"])
+        registry.sync_from_pages(expected_generation=generation)
+    content_after = {
+        page_uid: _content_sha256(path)
+        for page_uid, path in content_paths.items()
+    }
+    if content_before != content_after:
+        raise CollectionAuthorityError("collection adjudication mutated page content")
+
+    queue["items"].update(resolved_rows)
+    queue["host_adjudication"] = {
+        "schema": COLLECTION_DECISION_SCHEMA,
+        "manifest_sha256": "sha256:" + canonical_sha256(dict(manifest)),
+        "approved_at": str(manifest.get("approved_at") or _now()),
+        "decision_authority": str(
+            manifest.get("decision_authority") or "host_adjudication"
+        ),
+        "explicit_decisions": len(explicit),
+        "blanket_preserves": len(decisions) - len(explicit),
+        "moves": len(move_targets),
+        "preserves": sum(
+            decision.get("action") == "preserve"
+            for decision in decisions.values()
+        ),
+        "move_receipt": (
+            move_receipt.get("transaction_id") if move_receipt else None
+        ),
+    }
+    queue["host_assignment_mutations"] = (
+        int(queue.get("host_assignment_mutations") or 0) + len(move_targets)
+    )
+    _checkpoint_review_queue(
+        queue_path,
+        queue,
+        base_reviewer_calls=int(queue.get("reviewer_calls") or 0),
+        reviewed_count=0,
+    )
+    refreshed = refresh_review_queue(root, state=registry.load())
+    new_preserves = 0
+    if preserve_reasons and refreshed["open"]:
+        refreshed_queue = read_sealed_json(queue_path)
+        for candidate_id, raw_row in (
+            refreshed_queue.get("items") or {}
+        ).items():
+            if (
+                not isinstance(raw_row, Mapping)
+                or raw_row.get("status")
+                not in {"queued", "review_recommended"}
+                or raw_row.get("reason") not in preserve_reasons
+            ):
+                continue
+            row = dict(raw_row)
+            row["status"] = "dismissed"
+            row["resolved_at"] = _now()
+            row["resolution"] = "host_preserve_original_order"
+            row["host_decision"] = {
+                "action": "preserve",
+                "rationale": (
+                    "Existing collection remains the primary archival authority; "
+                    "cross-collection links are relational evidence only."
+                ),
+                "authority": str(
+                    manifest.get("decision_authority")
+                    or "host_adjudication"
+                ),
+                "decided_at": str(manifest.get("approved_at") or _now()),
+            }
+            refreshed_queue["items"][candidate_id] = row
+            new_preserves += 1
+        if new_preserves:
+            adjudication = dict(
+                refreshed_queue.get("host_adjudication") or {}
+            )
+            adjudication["blanket_preserves"] = (
+                int(adjudication.get("blanket_preserves") or 0)
+                + new_preserves
+            )
+            adjudication["preserves"] = (
+                int(adjudication.get("preserves") or 0) + new_preserves
+            )
+            refreshed_queue["host_adjudication"] = adjudication
+            _checkpoint_review_queue(
+                queue_path,
+                refreshed_queue,
+                base_reviewer_calls=int(
+                    refreshed_queue.get("reviewer_calls") or 0
+                ),
+                reviewed_count=0,
+            )
+            refreshed = refresh_review_queue(root, state=registry.load())
+    return {
+        "status": "ok",
+        "explicit_decisions": len(explicit),
+        "resolved": len(decisions) + new_preserves,
+        "moves": len(move_targets),
+        "preserves": len(decisions) - len(move_targets) + new_preserves,
+        "registry_generation": int(registry.load().get("generation") or 0),
+        "queue": {
+            "candidate_count": refreshed["candidate_count"],
+            "open": refreshed["open"],
+            "completed": refreshed["completed"],
+        },
+        "move_receipt": move_receipt,
+        "frontier_calls": 0,
+        "page_mutations": 0,
     }
 
 
