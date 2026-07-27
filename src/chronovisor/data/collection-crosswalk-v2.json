@@ -1,11 +1,11 @@
 {
   "schema": "chronovisor.collection-crosswalk.v1",
-  "epoch": "collection-crosswalk-v1",
+  "epoch": "collection-crosswalk-v2",
   "status": "frozen",
   "audited_at": "2026-07-27",
-  "reviewer": "Codex full semantic review of all 65 live collection names and representative pages",
+  "reviewer": "Codex full semantic review of all 66 live collection names and representative pages",
   "mapping_audit": "all-entries-reviewed",
-  "checksum": "sha256:ae98210dcc27104699fb928c6c700325913a52e9611e8f29252ef4bdba7ed10e",
+  "checksum": "sha256:06d8f33e0c23a695bd0adc54e892f04219f614621e1d30e25793e3e21400c911",
   "entries": [
     {"slug":"agi-economic-structure-and-human-irrelevance","label":"AGI economic structure and human irrelevance","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0002","relation":"exact"},{"anchor_id":"cvo:anchor:0022","relation":"broad"}]},
     {"slug":"agi-timeline-and-physical-ai-impact","label":"AGI timeline and physical AI impact","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0002","relation":"exact"},{"anchor_id":"cvo:anchor:0025","relation":"broad"}]},
@@ -30,6 +30,7 @@
     {"slug":"chronovisor-recall-redesign-architecture","label":"Chronovisor Recall redesign architecture","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0003","relation":"exact"},{"anchor_id":"cvo:anchor:0001","relation":"broad"}]},
     {"slug":"chronovisor-recall-runtime-architecture","label":"Chronovisor Recall runtime architecture","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0003","relation":"exact"},{"anchor_id":"cvo:anchor:0001","relation":"broad"}]},
     {"slug":"chronovisor-semantic-projection-v57-campaign-a-completion","label":"Semantic projection campaign completion","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0007","relation":"exact"},{"anchor_id":"cvo:anchor:0003","relation":"broad"}]},
+    {"slug":"chronovisor-semantic-projection-v75-campaign-b-phase-2-4","label":"Semantic projection campaign B phase 2-4","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0007","relation":"exact"},{"anchor_id":"cvo:anchor:0003","relation":"broad"}]},
     {"slug":"chronovisor-semantic-projection-v75-soak-and-preemption-validation","label":"Semantic projection soak validation","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0007","relation":"exact"},{"anchor_id":"cvo:anchor:0003","relation":"broad"}]},
     {"slug":"claude-api-migration-guide","label":"Claude API migration","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0001","relation":"exact"},{"anchor_id":"cvo:anchor:0002","relation":"broad"}]},
     {"slug":"culture","label":"Culture and society","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0025","relation":"exact"}]},

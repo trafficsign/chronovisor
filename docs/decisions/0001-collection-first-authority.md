@@ -37,8 +37,11 @@ set:
 The initial archive audit assigned all 3,045 active pages to 64 collections
 without duplicate page identity. Before activation, a fresh dry-run observed
 3,052 pages and one new collection; the audited crosswalk was expanded to all
-65 live collections before the sealed evaluation opened. This drift behavior
-is intentional: new collections fail the 100% crosswalk gate until reviewed.
+65 live collections before the sealed evaluation opened. On 2026-07-27,
+normal corpus growth added one more collection; the gate failed closed until
+the semantically equivalent campaign collection was reviewed and published as
+crosswalk epoch v2 with 66 entries. This drift behavior is intentional: new
+collections fail the 100% crosswalk gate until reviewed.
 
 ## Invariants
 
@@ -47,7 +50,7 @@ is intentional: new collections fail the 100% crosswalk gate until reviewed.
 3. No collection lifecycle operation moves or edits Markdown page bytes.
 4. A page outside a known collection is assigned to the logical
    `_unclassified` collection and enters the review queue.
-5. The current 65-entry collection crosswalk is fully reviewed, checksum-locked, and
+5. The current 66-entry collection crosswalk is fully reviewed, checksum-locked, and
    has exactly one `exact` anchor per collection plus optional `broad` anchors.
 6. Crosswalk changes create a new epoch.
 7. Large-collection graph analysis proposes splits only; it never applies one.
