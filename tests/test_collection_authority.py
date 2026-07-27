@@ -755,3 +755,48 @@ def test_anomaly_worker_is_review_only(
     assert result["model_calls"] == 1
     assert result["page_mutations"] == 0
     assert result["assignment_mutations"] == 0
+
+
+def test_anomaly_worker_gpt_oss_reserves_bounded_reasoning_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        collection_anomaly_worker.ollama,
+        "model_digests",
+        lambda _models: {"gpt-oss:20b": "sha256:model"},
+    )
+
+    def _chat(*_args: object, **kwargs: object) -> str:
+        observed.update(kwargs)
+        return json.dumps(
+            {
+                "decision": "no_issue",
+                "suggested_collection_slug": "",
+                "rationale": "The current collection is defensible.",
+                "evidence": "The title and excerpt match the collection.",
+            }
+        )
+
+    monkeypatch.setattr(collection_anomaly_worker.ollama, "chat", _chat)
+
+    collection_anomaly_worker.run(
+        {
+            "schema": collection_anomaly_worker.WORKER_SCHEMA,
+            "model": "gpt-oss:20b",
+            "model_digest": "sha256:model",
+            "candidate": {
+                "current_collection_slug": "chronovisor",
+                "reason": "collection_requires_review",
+            },
+            "document": {
+                "title": "Chronovisor",
+                "summary": "",
+                "evidence_excerpt": "Validation.",
+            },
+            "collections": [{"slug": "chronovisor", "label": "Chronovisor"}],
+        }
+    )
+
+    assert observed["num_predict"] == 1_800
+    assert observed["think"] == "low"

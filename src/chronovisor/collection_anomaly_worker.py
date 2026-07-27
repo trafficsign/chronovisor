@@ -29,6 +29,18 @@ PROMPT_SHA256 = "sha256:" + hashlib.sha256(
 ).hexdigest()
 
 
+def _generation_profile(model: str) -> tuple[int, bool | str]:
+    """Return a bounded profile that leaves room for model-family reasoning."""
+
+    if model.partition(":")[0] == "gpt-oss":
+        # gpt-oss may consume the entire output budget in its hidden reasoning
+        # channel when thinking is disabled. A small explicit reasoning budget
+        # produces the schema-constrained answer reliably while remaining
+        # bounded and local-only.
+        return 1_800, "low"
+    return 700, False
+
+
 def _schema(slugs: list[str]) -> dict[str, Any]:
     return {
         "type": "object",
@@ -84,6 +96,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     observed_digest = ollama.model_digests([model]).get(model, "")
     if observed_digest != expected_digest:
         raise CollectionAuthorityError("anomaly reviewer model digest changed")
+    num_predict, think = _generation_profile(model)
     response = ollama.chat(
         [
             {
@@ -111,13 +124,13 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         model=model,
         format=_schema(slugs),
         num_ctx=8_192,
-        num_predict=700,
+        num_predict=num_predict,
         keep_alive="0",
         read_timeout_ms=int(payload.get("read_timeout_ms") or 660_000),
         max_output_chars=6_000,
         temperature=0,
         seed=0,
-        think=False,
+        think=think,
     )
     try:
         raw = json.loads(str(response))
