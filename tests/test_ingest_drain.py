@@ -21,6 +21,111 @@ def _disable_runtime_status_reset(
         lambda: False,
     )
     monkeypatch.setattr(ingest_drain, "CHRONOVISOR_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(ingest_drain.ollama, "ingest_model", lambda: "ornith:test")
+    monkeypatch.setattr(ingest_drain.ollama, "resident_model_rows", lambda: {})
+
+
+def test_release_ingest_runner_unloads_only_when_resident(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, str, dict]] = []
+    unloaded: list[str] = []
+    monkeypatch.setattr(ingest_drain.ollama, "ingest_model", lambda: "ornith:test")
+    monkeypatch.setattr(
+        ingest_drain.ollama,
+        "resident_model_rows",
+        lambda: {"ornith:test": (20, 32768), "recall:test": (4, 4096)},
+    )
+    monkeypatch.setattr(
+        ingest_drain.ollama,
+        "unload_named_model",
+        lambda model: unloaded.append(model) or True,
+    )
+    monkeypatch.setattr(
+        ingest_drain.runtime_status,
+        "safe_append_event",
+        lambda level, message, **fields: events.append((level, message, fields)),
+    )
+
+    result = ingest_drain._release_ingest_runner()
+
+    assert result == {
+        "status": "released",
+        "released": True,
+        "model": "ornith:test",
+    }
+    assert unloaded == ["ornith:test"]
+    assert events[0][0:2] == ("info", "ingest drain | runner released")
+
+
+def test_release_ingest_runner_does_not_wake_absent_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_drain.ollama, "ingest_model", lambda: "ornith:test")
+    monkeypatch.setattr(
+        ingest_drain.ollama,
+        "resident_model_rows",
+        lambda: {"recall:test": (4, 4096)},
+    )
+    monkeypatch.setattr(
+        ingest_drain.ollama,
+        "unload_named_model",
+        lambda model: (_ for _ in ()).throw(AssertionError(model)),
+    )
+
+    result = ingest_drain._release_ingest_runner()
+
+    assert result == {
+        "status": "not_resident",
+        "released": False,
+        "model": "ornith:test",
+    }
+
+
+def test_drain_attaches_release_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ingest_drain,
+        "_drain",
+        lambda **kwargs: {"status": "drained", "kwargs": kwargs},
+    )
+    monkeypatch.setattr(
+        ingest_drain,
+        "_release_ingest_runner",
+        lambda: {"status": "released", "released": True, "model": "ornith:test"},
+    )
+
+    result = ingest_drain.drain(max_batches=2, max_units=3, sleep_seconds=0)
+
+    assert result["kwargs"]["max_batches"] == 2
+    assert result["kwargs"]["max_units"] == 3
+    assert result["model_release"] == {
+        "status": "released",
+        "released": True,
+        "model": "ornith:test",
+    }
+
+
+def test_drain_releases_runner_when_cycle_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    releases: list[bool] = []
+
+    def fail(**kwargs) -> dict:
+        raise RuntimeError("cycle failed")
+
+    monkeypatch.setattr(ingest_drain, "_drain", fail)
+    monkeypatch.setattr(
+        ingest_drain,
+        "_release_ingest_runner",
+        lambda: releases.append(True) or {"status": "released"},
+    )
+
+    with pytest.raises(RuntimeError, match="cycle failed"):
+        ingest_drain.drain()
+
+    assert releases == [True]
 
 
 def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:

@@ -105,7 +105,53 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
         f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
-def drain(
+def _release_ingest_runner() -> dict[str, Any]:
+    """Release the heavy ingest runner after a complete drain cycle."""
+
+    try:
+        model = ollama.ingest_model()
+        resident = ollama.resident_model_rows()
+    except Exception as exc:
+        result = {
+            "status": "probe_failed",
+            "released": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        runtime_status.safe_append_event(
+            "warn",
+            "ingest drain | runner release probe failed",
+            source="ingest-drain",
+            **result,
+        )
+        return result
+
+    if model not in resident:
+        return {
+            "status": "not_resident",
+            "released": False,
+            "model": model,
+        }
+
+    released = ollama.unload_named_model(model)
+    result = {
+        "status": "released" if released else "release_failed",
+        "released": released,
+        "model": model,
+    }
+    runtime_status.safe_append_event(
+        "info" if released else "warn",
+        (
+            "ingest drain | runner released"
+            if released
+            else "ingest drain | runner release failed"
+        ),
+        source="ingest-drain",
+        **result,
+    )
+    return result
+
+
+def _drain(
     *,
     max_batches: int = DEFAULT_MAX_BATCHES,
     max_units: int = DEFAULT_MAX_UNITS,
@@ -270,6 +316,30 @@ def drain(
         "managed_holds": managed_holds,
         "liveness": liveness,
     }
+
+
+def drain(
+    *,
+    max_batches: int = DEFAULT_MAX_BATCHES,
+    max_units: int = DEFAULT_MAX_UNITS,
+    sleep_seconds: float = DEFAULT_SLEEP_SECONDS,
+    log_file: Path | None = None,
+) -> dict[str, Any]:
+    """Drain pending raws and release the ingest runner at cycle end."""
+
+    result: dict[str, Any] | None = None
+    try:
+        result = _drain(
+            max_batches=max_batches,
+            max_units=max_units,
+            sleep_seconds=sleep_seconds,
+            log_file=log_file,
+        )
+        return result
+    finally:
+        release = _release_ingest_runner()
+        if result is not None:
+            result["model_release"] = release
 
 
 def watch(
