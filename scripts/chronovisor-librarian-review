@@ -1,6 +1,19 @@
 #!/bin/sh
 set -eu
 
+# Reconcile new and changed pages before reviewing placement anomalies.  The
+# rollout process is intentionally one-shot, so this periodic worker owns the
+# post-release collection catch-up path.  State and receipts are persisted by
+# the Librarian; suppress the very large registry JSON from the launchd log.
+/Users/trafficsign/.local/bin/uvx \
+  --refresh-package chronovisor \
+  --from git+ssh://git@github.com/trafficsign/chronovisor \
+  chronovisor-librarian \
+  --root /Users/trafficsign/.chronovisor \
+  --full-sweep \
+  --json \
+  >/dev/null
+
 /Users/trafficsign/.local/bin/uvx \
   --refresh-package chronovisor \
   --from git+ssh://git@github.com/trafficsign/chronovisor \
