@@ -252,7 +252,7 @@ def cleanup_expired_restore_points(
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             retained.append(path.name)
             continue
-        if expires <= current:
+        if force or expires <= current:
             shutil.rmtree(path)
             deleted.append(path.name)
         else:
