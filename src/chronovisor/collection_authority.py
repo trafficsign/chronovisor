@@ -1356,6 +1356,11 @@ def review_collection_queue(
                     "reason": outcome.error or outcome.status,
                 }
             )
+            if outcome.status in {"deferred", "cancelled"}:
+                # Resource pressure and P0 preemption apply to the whole local
+                # model lane. Stop this batch instead of pointlessly marking
+                # every remaining item with the same transient condition.
+                break
             continue
         worker = dict(outcome.value)
         if (

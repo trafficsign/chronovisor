@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.trafficsign.chronovisor-librarian-review</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/trafficsign/projects/personal/chronovisor/scripts/chronovisor-librarian-review</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/trafficsign/projects/personal/chronovisor</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/trafficsign</string>
+    <key>PATH</key>
+    <string>/Users/trafficsign/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/sbin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/trafficsign/.chronovisor/logs/librarian-review.launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/trafficsign/.chronovisor/logs/librarian-review.launchd.err.log</string>
+</dict>
+</plist>

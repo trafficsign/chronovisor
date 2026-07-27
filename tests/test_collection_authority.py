@@ -275,6 +275,54 @@ def test_collection_review_checkpoint_survives_later_worker_failure(
     assert queue["completed"] == 1
 
 
+def test_collection_review_stops_batch_when_model_lane_is_deferred(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_uid, second_uid = _uids(2, start=70)
+    _page(tmp_path / "pages" / "misc" / "first.md", first_uid)
+    _page(tmp_path / "pages" / "misc" / "second.md", second_uid)
+    CollectionRegistry(tmp_path).sync_from_pages()
+    collection_authority.refresh_review_queue(tmp_path)
+    monkeypatch.setattr(
+        "chronovisor.ollama.model_digests",
+        lambda _models: {"gemma4:26b": "digest"},
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "research_lane",
+        lambda *_args, **_kwargs: nullcontext(object()),
+    )
+    calls = 0
+
+    def defer_worker(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(
+            status="deferred",
+            value=None,
+            error="sync_pending",
+        )
+
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        defer_worker,
+    )
+
+    result = collection_authority.review_collection_queue(
+        tmp_path,
+        limit=2,
+        model="gemma4:26b",
+    )
+
+    assert calls == 1
+    assert result["status"] == "partial"
+    assert result["reviewer_calls"] == 0
+    assert len(result["deferred"]) == 1
+    assert result["deferred"][0]["reason"] == "sync_pending"
+
+
 def test_collection_lifecycle_is_cas_receipted_and_non_destructive(
     tmp_path: Path,
 ) -> None:
