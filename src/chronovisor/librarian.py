@@ -645,6 +645,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--review-model")
     parser.add_argument(
+        "--review-role",
+        choices=("primary", "challenger"),
+        default="primary",
+    )
+    parser.add_argument(
         "--collection-operation",
         choices=("rename", "merge", "split", "move"),
     )
@@ -704,6 +709,7 @@ def main(argv: list[str] | None = None) -> int:
             args.root,
             limit=max(0, args.limit),
             model=args.review_model,
+            role=args.review_role,
         )
     else:
         payload = run_shadow(

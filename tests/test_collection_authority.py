@@ -101,15 +101,22 @@ def test_collection_sync_is_stable_and_direct_pages_fail_closed(
     assert all(read_sealed_json(path)["page_mutations"] == 0 for path in receipts)
 
 
-def _review_worker_result(*, decision: str = "no_issue") -> SimpleNamespace:
-    suggested = "ai" if decision == "review_recommended" else ""
+def _review_worker_result(
+    *,
+    decision: str = "no_issue",
+    model: str = "gemma4:26b",
+    digest: str = "digest",
+    suggested: str | None = None,
+) -> SimpleNamespace:
+    if suggested is None:
+        suggested = "ai" if decision == "review_recommended" else ""
     return SimpleNamespace(
         status="completed",
         error=None,
         value={
             "schema": collection_anomaly_worker.WORKER_SCHEMA,
-            "model": "gemma4:26b",
-            "model_digest": "digest",
+            "model": model,
+            "model_digest": digest,
             "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
             "model_calls": 1,
             "page_mutations": 0,
@@ -220,6 +227,143 @@ def test_existing_no_issue_review_is_reconciled_without_another_call(
     assert persisted_item["status"] == "dismissed"
     assert persisted["open"] == 0
     assert persisted["completed"] == 1
+
+
+def test_collection_challenger_rejects_move_and_preserves_original_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _page(
+        tmp_path / "pages" / "misc" / "note.md",
+        _uids(1, start=58)[0],
+    )
+    CollectionRegistry(tmp_path).sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    item = next(iter(queue["items"].values()))
+    item["status"] = "review_recommended"
+    item["model_review"] = {
+        "schema": collection_anomaly_worker.REVIEW_SCHEMA,
+        "decision": "review_recommended",
+        "suggested_collection_slug": "ai",
+        "rationale": "The page may fit AI.",
+        "evidence": "The page mentions AI.",
+        "model": "gemma4:26b",
+        "model_digest": "primary-digest",
+        "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
+        "reviewed_at": "2026-07-27T00:00:00+00:00",
+    }
+    queue_path = (
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "collection-review-queue.json"
+    )
+    write_sealed_json(queue_path, queue, backup=True)
+    monkeypatch.setattr(
+        "chronovisor.ollama.model_digests",
+        lambda _models: {"gpt-oss:20b": "challenger-digest"},
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "research_lane",
+        lambda *_args, **_kwargs: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        lambda *_args, **_kwargs: _review_worker_result(
+            model="gpt-oss:20b",
+            digest="challenger-digest",
+        ),
+    )
+
+    result = collection_authority.review_collection_queue(
+        tmp_path,
+        limit=1,
+        model="gpt-oss:20b",
+        role="challenger",
+    )
+    persisted = read_sealed_json(queue_path)
+    persisted_item = next(iter(persisted["items"].values()))
+
+    assert result["role"] == "challenger"
+    assert result["reviewer_calls"] == 1
+    assert persisted_item["status"] == "dismissed"
+    assert persisted_item["challenge_status"] == "rejected_recommendation"
+    assert persisted_item["resolution"] == (
+        "challenger_no_issue_preserve_original_order"
+    )
+    assert persisted["open"] == 0
+    assert persisted["assignment_mutations"] == 0
+
+
+def test_collection_challenger_records_consensus_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _page(
+        tmp_path / "pages" / "misc" / "note.md",
+        _uids(1, start=59)[0],
+    )
+    CollectionRegistry(tmp_path).sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    item = next(iter(queue["items"].values()))
+    item["status"] = "review_recommended"
+    item["model_review"] = {
+        "schema": collection_anomaly_worker.REVIEW_SCHEMA,
+        "decision": "review_recommended",
+        "suggested_collection_slug": "ai",
+        "rationale": "The page may fit AI.",
+        "evidence": "The page mentions AI.",
+        "model": "gemma4:26b",
+        "model_digest": "primary-digest",
+        "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
+        "reviewed_at": "2026-07-27T00:00:00+00:00",
+    }
+    queue_path = (
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "collection-review-queue.json"
+    )
+    write_sealed_json(queue_path, queue, backup=True)
+    monkeypatch.setattr(
+        "chronovisor.ollama.model_digests",
+        lambda _models: {"gpt-oss:20b": "challenger-digest"},
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "research_lane",
+        lambda *_args, **_kwargs: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        lambda *_args, **_kwargs: _review_worker_result(
+            decision="review_recommended",
+            model="gpt-oss:20b",
+            digest="challenger-digest",
+            suggested="ai",
+        ),
+    )
+
+    collection_authority.review_collection_queue(
+        tmp_path,
+        limit=1,
+        model="gpt-oss:20b",
+        role="challenger",
+    )
+    persisted = read_sealed_json(queue_path)
+    persisted_item = next(iter(persisted["items"].values()))
+
+    assert persisted_item["status"] == "review_recommended"
+    assert persisted_item["challenge_status"] == "consensus_recommended"
+    assert (
+        persisted_item["challenger_review"]["suggested_collection_slug"]
+        == "ai"
+    )
+    assert persisted["open"] == 1
+    assert persisted["assignment_mutations"] == 0
 
 
 def test_collection_review_checkpoint_survives_later_worker_failure(

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-exec /Users/trafficsign/.local/bin/uvx \
+/Users/trafficsign/.local/bin/uvx \
   --refresh-package chronovisor \
   --from git+ssh://git@github.com/trafficsign/chronovisor \
   chronovisor-librarian \
@@ -9,4 +9,16 @@ exec /Users/trafficsign/.local/bin/uvx \
   --review-collection-queue \
   --limit "${CHRONOVISOR_LIBRARIAN_REVIEW_LIMIT:-5}" \
   --review-model "${CHRONOVISOR_LIBRARIAN_REVIEW_MODEL:-gemma4:26b}" \
+  --review-role primary \
+  --json
+
+exec /Users/trafficsign/.local/bin/uvx \
+  --refresh-package chronovisor \
+  --from git+ssh://git@github.com/trafficsign/chronovisor \
+  chronovisor-librarian \
+  --root /Users/trafficsign/.chronovisor \
+  --review-collection-queue \
+  --limit "${CHRONOVISOR_LIBRARIAN_CHALLENGE_LIMIT:-5}" \
+  --review-model "${CHRONOVISOR_LIBRARIAN_CHALLENGER_MODEL:-gpt-oss:20b}" \
+  --review-role challenger \
   --json
