@@ -2130,7 +2130,10 @@ function renderLibrarian(librarian) {
     : "--";
   els.librarianReviewQueue.textContent = collectionFirst
     ? `${intValue(collectionQueue.open)} open · ` +
-      `${intValue(collectionQueue.reviewer_calls)} model review`
+      `${intValue(collectionQueue.completed)} closed · ` +
+      `${intValue(collectionQueue.primary_reviews)} primary / ` +
+      `${intValue(collectionQueue.challenger_reviews)} challenge · ` +
+      `${intValue(collectionQueue.consensus_recommended)} consensus`
     : "--";
   const splitProposals = Array.isArray(collectionPlane.split_proposals)
     ? collectionPlane.split_proposals

@@ -893,6 +893,19 @@ def _collection_control_plane(root: Path) -> dict[str, Any]:
     registry = _safe_receipt(registry_path)
     metrics = quality.get("metrics")
     metrics = dict(metrics) if isinstance(metrics, Mapping) else {}
+    queue_items = [
+        row
+        for row in (queue.get("items") or {}).values()
+        if isinstance(row, Mapping)
+    ]
+    status_counts = Counter(
+        str(row.get("status") or "unknown") for row in queue_items
+    )
+    challenge_counts = Counter(
+        str(row.get("challenge_status"))
+        for row in queue_items
+        if row.get("challenge_status")
+    )
     return {
         "status": quality.get("status") or "not_started",
         "metrics": metrics,
@@ -906,6 +919,24 @@ def _collection_control_plane(root: Path) -> dict[str, Any]:
             "completed": int(queue.get("completed") or 0),
             "reviewer_calls": int(queue.get("reviewer_calls") or 0),
             "frontier_calls": int(queue.get("frontier_calls") or 0),
+            "primary_reviews": sum(
+                isinstance(row.get("model_review"), Mapping)
+                for row in queue_items
+            ),
+            "challenger_reviews": sum(
+                isinstance(row.get("challenger_review"), Mapping)
+                for row in queue_items
+            ),
+            "consensus_recommended": int(
+                challenge_counts["consensus_recommended"]
+            ),
+            "disagreement_or_insufficient": int(
+                challenge_counts["disagreement_or_insufficient"]
+            ),
+            "rejected_recommendation": int(
+                challenge_counts["rejected_recommendation"]
+            ),
+            "status_counts": dict(sorted(status_counts.items())),
         },
         "registry": {
             "generation": int(registry.get("generation") or 0),

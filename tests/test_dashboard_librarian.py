@@ -130,9 +130,24 @@ def test_collection_review_queue_is_visible_but_not_catch_up_work(
         {
             "candidate_count": 5,
             "open": 5,
-            "completed": 0,
-            "reviewer_calls": 0,
+            "completed": 1,
+            "reviewer_calls": 3,
             "frontier_calls": 0,
+            "items": {
+                "dismissed": {
+                    "status": "dismissed",
+                    "model_review": {"decision": "no_issue"},
+                },
+                "consensus": {
+                    "status": "review_recommended",
+                    "challenge_status": "consensus_recommended",
+                    "model_review": {"decision": "review_recommended"},
+                    "challenger_review": {
+                        "decision": "review_recommended"
+                    },
+                },
+                "pending": {"status": "queued"},
+            },
         },
     )
 
@@ -143,6 +158,17 @@ def test_collection_review_queue_is_visible_but_not_catch_up_work(
     assert status["queue"]["actionable"] == 0
     assert status["debts"]["collection_review_queue"] == 5
     assert status["collection_authority"]["queue"]["open"] == 5
+    assert status["collection_authority"]["queue"]["completed"] == 1
+    assert status["collection_authority"]["queue"]["primary_reviews"] == 2
+    assert status["collection_authority"]["queue"]["challenger_reviews"] == 1
+    assert (
+        status["collection_authority"]["queue"]["consensus_recommended"] == 1
+    )
+    assert status["collection_authority"]["queue"]["status_counts"] == {
+        "dismissed": 1,
+        "queued": 1,
+        "review_recommended": 1,
+    }
     assert status["progress"]["classification_terminal"] == {
         "denominator": 1,
         "numerator": 1,
