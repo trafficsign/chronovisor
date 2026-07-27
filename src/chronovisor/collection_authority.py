@@ -828,6 +828,34 @@ def refresh_review_queue(
     return queue
 
 
+def _checkpoint_review_queue(
+    path: Path,
+    queue: dict[str, Any],
+    *,
+    base_reviewer_calls: int,
+    reviewed_count: int,
+) -> None:
+    """Persist review progress after every completed local-model call."""
+
+    queue["updated_at"] = _now()
+    queue["reviewer_calls"] = base_reviewer_calls + reviewed_count
+    queue["frontier_calls"] = 0
+    queue["page_mutations"] = 0
+    queue["assignment_mutations"] = 0
+    queue["open"] = sum(
+        row.get("status") in {"queued", "review_recommended"}
+        for row in queue["items"].values()
+        if isinstance(row, Mapping)
+    )
+    queue["completed"] = sum(
+        row.get("status")
+        in {"dismissed", "move_approved", "resolved_by_evidence_change"}
+        for row in queue["items"].values()
+        if isinstance(row, Mapping)
+    )
+    write_sealed_json(path, queue, backup=True)
+
+
 def _label_propagation(
     nodes: set[str],
     adjacency: Mapping[str, set[str]],
@@ -1234,6 +1262,32 @@ def review_collection_queue(
         for row in state["collections"].values()
         if isinstance(row, Mapping) and row.get("status") == "active"
     ]
+    reconciled = []
+    for candidate_id, raw_row in sorted((queue.get("items") or {}).items()):
+        if not isinstance(raw_row, Mapping) or raw_row.get("status") != "queued":
+            continue
+        review = raw_row.get("model_review")
+        if (
+            not isinstance(review, Mapping)
+            or review.get("decision") != "no_issue"
+            or review.get("model") != selected_model
+            or review.get("model_digest") != digest
+            or review.get("prompt_sha256") != PROMPT_SHA256
+        ):
+            continue
+        row = dict(raw_row)
+        row["status"] = "dismissed"
+        row["resolved_at"] = _now()
+        row["resolution"] = "model_no_issue_preserve_original_order"
+        queue["items"][candidate_id] = row
+        reconciled.append(str(candidate_id))
+    base_reviewer_calls = int(queue.get("reviewer_calls") or 0)
+    _checkpoint_review_queue(
+        queue_path,
+        queue,
+        base_reviewer_calls=base_reviewer_calls,
+        reviewed_count=0,
+    )
     pending = [
         (str(candidate_id), dict(row))
         for candidate_id, row in sorted((queue.get("items") or {}).items())
@@ -1332,8 +1386,13 @@ def review_collection_queue(
         }
         if review.get("decision") == "review_recommended":
             row["status"] = "review_recommended"
-        # A model "no issue" recommendation remains queued until a human
-        # decision or deterministic evidence change resolves it.
+        elif review.get("decision") == "no_issue":
+            # Preserving original order is the fail-safe action. The local
+            # reviewer may close the anomaly without gaining assignment
+            # authority because no collection or page mutation occurs.
+            row["status"] = "dismissed"
+            row["resolved_at"] = _now()
+            row["resolution"] = "model_no_issue_preserve_original_order"
         queue["items"][candidate_id] = row
         reviewed.append(
             {
@@ -1341,23 +1400,23 @@ def review_collection_queue(
                 "decision": review.get("decision"),
             }
         )
-    queue["updated_at"] = _now()
-    queue["reviewer_calls"] = int(queue.get("reviewer_calls") or 0) + len(
-        reviewed
+        _checkpoint_review_queue(
+            queue_path,
+            queue,
+            base_reviewer_calls=base_reviewer_calls,
+            reviewed_count=len(reviewed),
+        )
+    _checkpoint_review_queue(
+        queue_path,
+        queue,
+        base_reviewer_calls=base_reviewer_calls,
+        reviewed_count=len(reviewed),
     )
-    queue["frontier_calls"] = 0
-    queue["page_mutations"] = 0
-    queue["assignment_mutations"] = 0
-    queue["open"] = sum(
-        row.get("status") in {"queued", "review_recommended"}
-        for row in queue["items"].values()
-        if isinstance(row, Mapping)
-    )
-    write_sealed_json(queue_path, queue, backup=True)
     return {
         "status": "ok" if not deferred else "partial",
         "model": selected_model,
         "model_digest": digest,
+        "reconciled": reconciled,
         "reviewed": reviewed,
         "deferred": deferred,
         "reviewer_calls": len(reviewed),

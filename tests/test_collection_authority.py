@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -97,6 +99,180 @@ def test_collection_sync_is_stable_and_direct_pages_fail_closed(
     )
     assert len(receipts) == 2
     assert all(read_sealed_json(path)["page_mutations"] == 0 for path in receipts)
+
+
+def _review_worker_result(*, decision: str = "no_issue") -> SimpleNamespace:
+    suggested = "ai" if decision == "review_recommended" else ""
+    return SimpleNamespace(
+        status="completed",
+        error=None,
+        value={
+            "schema": collection_anomaly_worker.WORKER_SCHEMA,
+            "model": "gemma4:26b",
+            "model_digest": "digest",
+            "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
+            "model_calls": 1,
+            "page_mutations": 0,
+            "assignment_mutations": 0,
+            "result": {
+                "schema": collection_anomaly_worker.REVIEW_SCHEMA,
+                "decision": decision,
+                "suggested_collection_slug": suggested,
+                "rationale": "The original collection remains defensible.",
+                "evidence": "The page content matches its original order.",
+            },
+        },
+    )
+
+
+def test_collection_no_issue_review_is_checkpointed_and_dismissed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _page(
+        tmp_path / "pages" / "misc" / "note.md",
+        _uids(1, start=50)[0],
+    )
+    CollectionRegistry(tmp_path).sync_from_pages()
+    collection_authority.refresh_review_queue(tmp_path)
+    monkeypatch.setattr(
+        "chronovisor.ollama.model_digests",
+        lambda _models: {"gemma4:26b": "digest"},
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "research_lane",
+        lambda *_args, **_kwargs: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        lambda *_args, **_kwargs: _review_worker_result(),
+    )
+
+    result = collection_authority.review_collection_queue(
+        tmp_path,
+        limit=1,
+        model="gemma4:26b",
+    )
+    queue = read_sealed_json(
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "collection-review-queue.json"
+    )
+    item = next(iter(queue["items"].values()))
+
+    assert result["reviewer_calls"] == 1
+    assert item["status"] == "dismissed"
+    assert item["resolution"] == "model_no_issue_preserve_original_order"
+    assert queue["open"] == 0
+    assert queue["completed"] == 1
+    assert queue["reviewer_calls"] == 1
+    assert queue["assignment_mutations"] == 0
+    assert queue["page_mutations"] == 0
+
+
+def test_existing_no_issue_review_is_reconciled_without_another_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _page(
+        tmp_path / "pages" / "misc" / "note.md",
+        _uids(1, start=55)[0],
+    )
+    CollectionRegistry(tmp_path).sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    item = next(iter(queue["items"].values()))
+    item["model_review"] = {
+        "schema": collection_anomaly_worker.REVIEW_SCHEMA,
+        "decision": "no_issue",
+        "suggested_collection_slug": "",
+        "rationale": "The original collection remains defensible.",
+        "evidence": "The page content matches its original order.",
+        "model": "gemma4:26b",
+        "model_digest": "digest",
+        "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
+        "reviewed_at": "2026-07-27T00:00:00+00:00",
+    }
+    queue_path = (
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "collection-review-queue.json"
+    )
+    write_sealed_json(queue_path, queue, backup=True)
+    monkeypatch.setattr(
+        "chronovisor.ollama.model_digests",
+        lambda _models: {"gemma4:26b": "digest"},
+    )
+
+    result = collection_authority.review_collection_queue(
+        tmp_path,
+        limit=0,
+        model="gemma4:26b",
+    )
+    persisted = read_sealed_json(queue_path)
+    persisted_item = next(iter(persisted["items"].values()))
+
+    assert result["reviewer_calls"] == 0
+    assert result["reconciled"] == [item["candidate_id"]]
+    assert persisted_item["status"] == "dismissed"
+    assert persisted["open"] == 0
+    assert persisted["completed"] == 1
+
+
+def test_collection_review_checkpoint_survives_later_worker_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_uid, second_uid = _uids(2, start=60)
+    _page(tmp_path / "pages" / "misc" / "first.md", first_uid)
+    _page(tmp_path / "pages" / "misc" / "second.md", second_uid)
+    CollectionRegistry(tmp_path).sync_from_pages()
+    collection_authority.refresh_review_queue(tmp_path)
+    monkeypatch.setattr(
+        "chronovisor.ollama.model_digests",
+        lambda _models: {"gemma4:26b": "digest"},
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "research_lane",
+        lambda *_args, **_kwargs: nullcontext(object()),
+    )
+    calls = 0
+
+    def run_worker(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _review_worker_result()
+        raise RuntimeError("simulated worker crash")
+
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        run_worker,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated worker crash"):
+        collection_authority.review_collection_queue(
+            tmp_path,
+            limit=2,
+            model="gemma4:26b",
+        )
+
+    queue = read_sealed_json(
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "collection-review-queue.json"
+    )
+    items = list(queue["items"].values())
+    assert sum("model_review" in item for item in items) == 1
+    assert sum(item["status"] == "dismissed" for item in items) == 1
+    assert queue["reviewer_calls"] == 1
+    assert queue["completed"] == 1
 
 
 def test_collection_lifecycle_is_cas_receipted_and_non_destructive(
