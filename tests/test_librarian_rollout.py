@@ -77,6 +77,7 @@ def test_collection_rollout_advances_when_review_queue_is_empty(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    calls: list[str] = []
     write_sealed_json(
         tmp_path
         / "runtime"
@@ -88,33 +89,108 @@ def test_collection_rollout_advances_when_review_queue_is_empty(
     monkeypatch.setattr(
         collection_authority,
         "run_collection_librarian",
-        lambda *_args, **_kwargs: {
-            "status": "ok",
-            "sync": {
-                "assignment_count": 12,
-                "collection_count": 3,
-                "page_registry_mirror": {"generation": 7},
-            },
-            "quality": {
-                "status": "passed",
-                "warnings": [],
-                "hard_failures": [],
-            },
-            "queue": {"open": 0},
-        },
+        lambda *_args, **_kwargs: (
+            calls.append("collection_sync")
+            or {
+                "status": "ok",
+                "sync": {
+                    "assignment_count": 12,
+                    "collection_count": 3,
+                    "page_registry_mirror": {"generation": 7},
+                },
+                "quality": {
+                    "status": "passed",
+                    "warnings": [],
+                    "hard_failures": [],
+                },
+                "queue": {"open": 0},
+            }
+        ),
     )
     monkeypatch.setattr(
         collection_authority,
         "collection_authority_status",
         lambda _root: {"active": True, "mode": "collection-first"},
     )
+    _write(
+        tmp_path / "runtime" / "librarian" / "phase7-burn.json",
+        {"status": "passed"},
+    )
+    _write(
+        tmp_path / "runtime" / "librarian" / "phase10-pilot.json",
+        {"status": "ok"},
+    )
+    _write(
+        tmp_path / "runtime" / "librarian" / "phase11-receipt.json",
+        {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "start_soak",
+        lambda _root: calls.append("observation") or {"status": "running"},
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "advance_migration_observation",
+        lambda _root, *, stage: calls.append(f"observe:{stage}") or {},
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "reconcile_librarian_state",
+        lambda *_args, **_kwargs: calls.append("reconcile") or {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "finalize_if_ready",
+        lambda _root: calls.append("release") or {"status": "released"},
+    )
 
     result = librarian_rollout.run_rollout(tmp_path)
 
-    assert result["status"] == "observing"
-    assert result["stage"] == "phase7_burn_receipts"
-    assert result["detail"]["review_queue"]["open"] == 0
-    assert result["detail"]["next_gate"] == "cancellable_broker_burn_receipts"
+    assert result["status"] == "released"
+    assert result["stage"] == "complete"
+    assert calls == [
+        "collection_sync",
+        "observation",
+        "observe:phase5_collection_shadow_complete",
+        "observe:phase6_collection_authority_complete",
+        "observe:phase7_preemption_burn_complete",
+        "observe:phase10_pilot_complete",
+        "observe:phase11_full_migration_complete",
+        "collection_sync",
+        "reconcile",
+        "release",
+    ]
+
+
+def test_released_collection_rollout_stays_complete(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _write(
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "phase4-collection-authority.json",
+        {"status": "adopted"},
+    )
+    _write(
+        tmp_path / "runtime" / "librarian" / "phase12-release.json",
+        {"status": "released", "released_at": "2026-07-27T00:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "run_collection_librarian",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("released rollout must not restart collection sync")
+        ),
+    )
+
+    result = librarian_rollout.run_rollout(tmp_path)
+
+    assert result["status"] == "released"
+    assert result["stage"] == "complete"
+    assert result["detail"]["released_at"] == "2026-07-27T00:00:00+00:00"
 
 
 def test_rollout_observes_migration_and_releases_after_evidence(

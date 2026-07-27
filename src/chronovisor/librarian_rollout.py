@@ -92,7 +92,7 @@ def _run_stage(
 
 
 def _run_collection_rollout(root: Path) -> dict[str, Any]:
-    """Resume the ADR-0001 path without invoking superseded page classifiers."""
+    """Resume ADR-0001 through the shared burn, merge and release gates."""
 
     from chronovisor.collection_authority import (
         collection_authority_status,
@@ -142,23 +142,110 @@ def _run_collection_rollout(root: Path) -> dict[str, Any]:
     if queue_open:
         next_stage = "collection_review_queue"
         next_gate = "review_queue_budget_and_split_proposal_audit"
-    else:
-        next_stage = "phase7_burn_receipts"
-        next_gate = "cancellable_broker_burn_receipts"
+        return _write_state(
+            root,
+            status="observing",
+            stage=next_stage,
+            detail={
+                "authority": authority,
+                "quality": {
+                    "status": quality["status"],
+                    "warnings": quality["warnings"],
+                    "hard_failures": quality["hard_failures"],
+                },
+                "review_queue": review_queue,
+                "next_gate": next_gate,
+            },
+        )
+
+    _run_stage(
+        root,
+        "phase5_migration_observation",
+        lambda: start_soak(root),
+    )
+    advance_migration_observation(
+        root,
+        stage="phase5_collection_shadow_complete",
+    )
+    advance_migration_observation(
+        root,
+        stage="phase6_collection_authority_complete",
+    )
+    if not _receipt_ok(root, "phase7-burn.json", "passed"):
+        burn = _run_stage(
+            root,
+            "phase7_preemption_burn",
+            lambda: run_burn(root, foreground_admissions=200),
+        )
+        if burn.get("status") != "passed":
+            raise RolloutBlocked("P0 preemption burn gate failed")
+    advance_migration_observation(
+        root,
+        stage="phase7_preemption_burn_complete",
+    )
+    if not _receipt_ok(root, "phase10-pilot.json", "ok"):
+        _run_stage(
+            root,
+            "phase10_pilot",
+            lambda: run_merge_migration(root, pilot_limit=3),
+        )
+    advance_migration_observation(
+        root,
+        stage="phase10_pilot_complete",
+    )
+    if not _receipt_ok(root, "phase11-receipt.json", "ok"):
+        _run_stage(
+            root,
+            "phase11_migration",
+            lambda: run_merge_migration(root, pilot_limit=None),
+        )
+    advance_migration_observation(
+        root,
+        stage="phase11_full_migration_complete",
+    )
+
+    postflight = _run_stage(
+        root,
+        "phase12_collection_postflight",
+        lambda: run_collection_librarian(root, evaluate_unseen=True),
+    )
+    postflight_authority = collection_authority_status(root)
+    if not postflight_authority.get("active"):
+        raise RolloutBlocked("collection authority drifted during postflight")
+    if int(postflight["queue"].get("open", 0)):
+        return _write_state(
+            root,
+            status="observing",
+            stage="collection_review_queue",
+            detail={
+                "authority": postflight_authority,
+                "quality": postflight["quality"],
+                "review_queue": postflight["queue"],
+                "next_gate": "review_queue_budget_and_split_proposal_audit",
+            },
+        )
+    _run_stage(
+        root,
+        "phase12_reconcile",
+        lambda: reconcile_librarian_state(root, mode="active"),
+    )
+    release = _run_stage(
+        root,
+        "phase12_release",
+        lambda: finalize_if_ready(root),
+    )
+    if release.get("status") == "released":
+        return _write_state(
+            root,
+            status="released",
+            stage="complete",
+            detail=release,
+        )
     return _write_state(
         root,
         status="observing",
-        stage=next_stage,
-        detail={
-            "authority": authority,
-            "quality": {
-                "status": quality["status"],
-                "warnings": quality["warnings"],
-                "hard_failures": quality["hard_failures"],
-            },
-            "review_queue": review_queue,
-            "next_gate": next_gate,
-        },
+        stage="phase12_release_gates",
+        detail=release,
     )
 
 
@@ -173,6 +260,16 @@ def run_rollout(
 
     lock_path = root / "runtime" / "librarian" / "rollout.lock"
     with file_lock(lock_path):
+        release = _read_json(
+            root / "runtime" / "librarian" / "phase12-release.json"
+        )
+        if release.get("status") == "released":
+            return _write_state(
+                root,
+                status="released",
+                stage="complete",
+                detail=release,
+            )
         collection_receipt = _read_json(
             root
             / "runtime"
@@ -189,16 +286,6 @@ def run_rollout(
                     stage="quality_gate",
                     detail={"error": str(exc)},
                 )
-        release = _read_json(
-            root / "runtime" / "librarian" / "phase12-release.json"
-        )
-        if release.get("status") == "released":
-            return _write_state(
-                root,
-                status="released",
-                stage="complete",
-                detail=release,
-            )
         try:
             if not adjudication_path(root).is_file():
                 _run_stage(
