@@ -726,7 +726,7 @@ def _transaction_preimages(root: Path) -> dict[str, Any]:
             rows.append(
                 {
                     "transaction_id": path.name,
-                    "status": "quarantined",
+                    "status": "retained_insurance",
                     "created_at": manifest.get("created_at"),
                     "expires_at": manifest.get("expires_at"),
                     "file_count": len(manifest.get("files") or []),
@@ -734,7 +734,11 @@ def _transaction_preimages(root: Path) -> dict[str, Any]:
                     "canonical_uid": manifest.get("canonical_uid"),
                 }
             )
-    return {"count": len(rows), "recent": rows[:5]}
+    return {
+        "count": len(rows),
+        "invalid": sum(row.get("status") == "invalid" for row in rows),
+        "recent": rows[:5],
+    }
 
 
 def _migration_dispositions(root: Path) -> dict[str, Any]:
@@ -1099,7 +1103,8 @@ def build_librarian_status(
         ),
         "running": 0,
         "held": current_held,
-        "quarantined": int(preimages["count"]),
+        "quarantined": int(queue.get("quarantined") or 0)
+        + int(preimages["invalid"]),
         "completed": current_adopted,
     }
     debts = {

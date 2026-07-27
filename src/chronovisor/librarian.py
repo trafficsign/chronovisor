@@ -10,14 +10,15 @@ import os
 import subprocess
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from chronovisor import frontmatter
 from chronovisor.classification import (
-    classification_source_sha256,
     classification_authority_status,
+    classification_source_sha256,
     load_udc_package,
     propose_from_legacy_metadata,
 )
@@ -37,7 +38,7 @@ BASELINE_SCHEMA = "chronovisor.librarian-baseline.v1"
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _scope_generation(root: Path, pages: Mapping[str, Any]) -> str:
@@ -126,7 +127,7 @@ def capture_baseline(
         from chronovisor.raw_store import RawStore
 
         raw_count = sum(1 for _unit in RawStore(root / "raw").iter_units())
-    except Exception:
+    except Exception:  # noqa: BLE001 - RawStore failure has a safe file fallback
         raw_count = sum(1 for _path in (root / "raw").rglob("*.md"))
     aliases_path = root / "runtime" / "page-aliases.json"
     alias_count = 0
@@ -252,7 +253,7 @@ def run_legacy_udc_shadow(
             }
             notation_counts[record.primary.notation] += 1
             disposition_counts[record.status] += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - isolate one bad page
             failures.append({"uid": uid, "error": f"{type(exc).__name__}: {exc}"})
 
     apply_result = (
@@ -340,9 +341,9 @@ def run_legacy_udc_shadow(
         try:
             last = datetime.fromisoformat(str(previous["last_run"]))
             if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
+                last = last.replace(tzinfo=UTC)
             oldest_age = max(
-                0, int((datetime.now(timezone.utc) - last).total_seconds())
+                0, int((datetime.now(UTC) - last).total_seconds())
             )
         except ValueError:
             oldest_age = 0
@@ -436,7 +437,7 @@ def run_shadow(
     full_sweep: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Run the collection-first Librarian without page or model mutation.
+    """Run the collection-first Librarian with bounded local autonomy.
 
     ``limit`` and ``full_sweep`` remain accepted for the stable CLI/Sleep
     contract. Collection reconciliation is a deterministic metadata scan and
@@ -447,7 +448,11 @@ def run_shadow(
     from chronovisor.collection_authority import run_collection_librarian
 
     started = time.monotonic()
-    result = run_collection_librarian(root, dry_run=dry_run)
+    result = run_collection_librarian(
+        root,
+        dry_run=dry_run,
+        autonomous=not dry_run,
+    )
     if dry_run:
         return result
     sync = result["sync"]
@@ -571,9 +576,9 @@ def run_shadow(
         },
         "resources": {
             "priority": "P3",
-            "model_calls": 0,
+            "model_calls": int(result.get("model_calls") or 0),
             "frontier_calls": 0,
-            "p0_preemption_contract": "deterministic_collection_sync",
+            "p0_preemption_contract": "cancellable_local_collection_review",
         },
         "blocked_reasons": list(quality["hard_failures"]),
         "last_run": _now_iso(),

@@ -587,7 +587,10 @@ def finalize_release(
     soak = _json(soak_path)
     if soak.get("schema") != SOAK_SCHEMA:
         raise RuntimeError("migration observation has not started")
-    if soak.get("status") != "running":
+    release_path = root / "runtime" / "librarian" / "phase12-release.json"
+    if release_path.is_file():
+        return _json(release_path)
+    if soak.get("status") not in {"running", "complete"}:
         raise RuntimeError("migration observation is not running")
     _require_release_prerequisites(root)
 

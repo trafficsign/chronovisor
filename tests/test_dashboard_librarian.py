@@ -614,6 +614,40 @@ def test_dashboard_reports_migration_observation_elapsed_time(
     assert status["elapsed_seconds"] == 3 * 3600
 
 
+def test_valid_transaction_preimage_is_retained_insurance_not_quarantine(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.librarian_status import _transaction_preimages
+
+    manifest = (
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "transaction-preimages"
+        / "merge-example"
+        / "manifest.json"
+    )
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "created_at": "2026-07-27T00:00:00+00:00",
+                "expires_at": "2026-08-03T00:00:00+00:00",
+                "files": [{"path": "pages/a.md"}],
+                "input_uids": ["uid-a"],
+                "canonical_uid": "uid-a",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    preimages = _transaction_preimages(tmp_path)
+
+    assert preimages["count"] == 1
+    assert preimages["invalid"] == 0
+    assert preimages["recent"][0]["status"] == "retained_insurance"
+
+
 @pytest.mark.parametrize(
     ("overrides", "queue", "expected"),
     [

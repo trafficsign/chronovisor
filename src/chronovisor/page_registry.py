@@ -12,10 +12,11 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 
 from chronovisor import frontmatter
 from chronovisor.page_identity import new_page_uid, normalize_page_uid
@@ -30,7 +31,7 @@ class PageRegistryError(RuntimeError):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _sha256(data: bytes) -> str:
@@ -39,8 +40,7 @@ def _sha256(data: bytes) -> str:
 
 def _normalize_key(value: object) -> str:
     text = str(value or "").strip()
-    if text.endswith(".md"):
-        text = text[:-3]
+    text = text.removesuffix(".md")
     return text.casefold()
 
 
@@ -247,7 +247,7 @@ class PageRegistry:
                     "uid": uid,
                     "page_id": page_id,
                     "path": rel,
-                    "legacy_keys": sorted(set([page_id, *legacy_keys])),
+                    "legacy_keys": sorted({page_id, *legacy_keys}),
                     "status": str(meta.get("status") or "active"),
                     "canonical_uid": None,
                     "content_sha256": _sha256(raw),
@@ -304,7 +304,7 @@ class PageRegistry:
                         continue
                     if normalized in ambiguous_keys:
                         ambiguous_keys[normalized] = sorted(
-                            set([*ambiguous_keys[normalized], uid])
+                            {*ambiguous_keys[normalized], uid}
                         )
                         continue
                     existing = keys.get(normalized)
@@ -401,12 +401,15 @@ class PageRegistry:
                 "updated": changed,
             }
 
-    def resolve(
-        self, key: object, *, max_hops: int = MAX_REDIRECT_HOPS
+    @staticmethod
+    def resolve_from_state(
+        state: Mapping[str, Any],
+        key: object,
+        *,
+        max_hops: int = MAX_REDIRECT_HOPS,
     ) -> dict[str, Any] | None:
-        """Resolve a UID/slug/path through bounded redirects without writes."""
+        """Resolve a key against one already validated registry snapshot."""
 
-        state = self.load()
         normalized_key = _normalize_key(key)
         ambiguous = state.get("ambiguous_keys", {}).get(normalized_key)
         if isinstance(ambiguous, list) and ambiguous:
@@ -459,6 +462,13 @@ class PageRegistry:
                 )
             uid = target
         raise PageRegistryError(f"redirect hop limit exceeded for {key!r}")
+
+    def resolve(
+        self, key: object, *, max_hops: int = MAX_REDIRECT_HOPS
+    ) -> dict[str, Any] | None:
+        """Resolve a UID/slug/path through bounded redirects without writes."""
+
+        return self.resolve_from_state(self.load(), key, max_hops=max_hops)
 
     def path_for(self, key: object) -> Path | None:
         resolved = self.resolve(key)

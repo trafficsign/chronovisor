@@ -106,3 +106,64 @@ def test_release_uses_migration_evidence_without_post_migration_delay(
     assert released["observation"]["observed_through"] == "phase12_postflight"
     assert released["cleanup"]["restore_points"]["deleted"] == ["restore"]
     assert released["cleanup"]["transaction_preimages"]["deleted"] == ["preimage"]
+
+
+def test_release_recovers_completed_observation_without_receipt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    statuses = {
+        "phase0-receipt.json": "ok",
+        "phase1-receipt.json": "verified",
+        "phase3-receipt.json": "verified",
+        "phase5-receipt.json": "ok",
+        "phase6-receipt.json": "ok",
+        "phase7-burn.json": "passed",
+        "phase10-pilot.json": "ok",
+        "phase11-receipt.json": "ok",
+    }
+    for filename, status in statuses.items():
+        _write_json(
+            tmp_path / "runtime" / "librarian" / filename,
+            {"status": status},
+        )
+    _write_json(
+        tmp_path / "runtime" / "librarian" / "soak.json",
+        {
+            "schema": librarian_release.SOAK_SCHEMA,
+            "status": "complete",
+            "observation_mode": "concurrent_migration",
+            "starts_at": NOW.isoformat(),
+        },
+    )
+    _write_json(
+        tmp_path / "classification" / "calibration.json",
+        {"status": "adopted"},
+    )
+    monkeypatch.setattr(
+        librarian_release,
+        "reconcile_librarian_state",
+        lambda *args, **kwargs: _release_state(),
+    )
+    monkeypatch.setattr(
+        librarian_release,
+        "_restore_all",
+        lambda _root: [{"status": "verified", "restore_id": "test"}],
+    )
+    monkeypatch.setattr(
+        librarian_release,
+        "cleanup_expired_restore_points",
+        lambda *args, **kwargs: {"deleted": [], "retained": []},
+    )
+    monkeypatch.setattr(
+        librarian_release,
+        "cleanup_expired_preimages",
+        lambda *args, **kwargs: {"deleted": [], "retained": []},
+    )
+
+    released = librarian_release.finalize_if_ready(tmp_path, now=NOW)
+
+    assert released["status"] == "released"
+    assert (
+        tmp_path / "runtime" / "librarian" / "phase12-release.json"
+    ).is_file()

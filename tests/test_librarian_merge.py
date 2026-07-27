@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from chronovisor.legacy_archive import migrate_processed_legacy
 from chronovisor.librarian_merge import prepare_cluster_plan
 from chronovisor.merge_transaction import (
     apply_merge_plan,
@@ -26,9 +27,7 @@ def _page(
         "updated: 2026-07-25\n"
         f"sensitivity: {sensitivity}\n"
         + (
-            "recall_questions: ["
-            + ", ".join(recall_questions)
-            + "]\n"
+            "recall_questions: [" + ", ".join(recall_questions) + "]\n"
             if recall_questions
             else ""
         )
@@ -110,9 +109,7 @@ def test_cluster_plan_and_transaction_preserve_links_provenance_and_sensitivity(
         row["uid"] for row in plan["inputs"] if row["uid"] != canonical_uid
     )
     loser_page_id = next(
-        Path(row["path"]).stem
-        for row in plan["inputs"]
-        if row["uid"] == loser_uid
+        Path(row["path"]).stem for row in plan["inputs"] if row["uid"] == loser_uid
     )
     assert registry.resolve(loser_uid)["uid"] == canonical_uid
     incoming = (tmp_path / "pages" / "incoming.md").read_text(encoding="utf-8")
@@ -123,6 +120,55 @@ def test_cluster_plan_and_transaction_preserve_links_provenance_and_sensitivity(
     assert cleanup["deleted"] == [plan["transaction_id"]]
     assert cleanup["retained"] == []
     assert not Path(result["preimage"]).exists()
+
+
+def test_cluster_plan_resolves_raw_provenance_inside_legacy_archives(
+    tmp_path: Path,
+) -> None:
+    _page(tmp_path / "pages" / "alpha.md", "Alpha", "Alpha archived fact.")
+    _page(tmp_path / "pages" / "beta.md", "Beta", "Beta archived fact.")
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    for name in ("alpha-source.md", "beta-source.md"):
+        (raw_dir / name).write_text(f"raw {name}\n", encoding="utf-8")
+    claims = tmp_path / "claims" / "claims.jsonl"
+    claims.parent.mkdir(parents=True)
+    claims.write_text(
+        "\n".join(
+            json.dumps({"source_page": page, "source_raw": f"{page}-source.md"})
+            for page in ("alpha", "beta")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    migrate_processed_legacy(
+        raw_dir,
+        processed_raw_ids={"alpha-source.md", "beta-source.md"},
+        before="2100/01/01",
+        remove_source=True,
+        dry_run=False,
+    )
+    registry = PageRegistry(tmp_path)
+    registry.ensure_manifest()
+
+    plan = prepare_cluster_plan(tmp_path, page_keys=["alpha", "beta"])
+
+    assert plan["status"] == "prepared"
+    assert plan["verification_receipt"]["raw_ref_count"] > 0
+
+
+def test_missing_raw_provenance_is_terminal_keep_both_not_human_hold(
+    tmp_path: Path,
+) -> None:
+    _page(tmp_path / "pages" / "alpha.md", "Alpha", "Alpha orphan fact.")
+    _page(tmp_path / "pages" / "beta.md", "Beta", "Beta orphan fact.")
+    PageRegistry(tmp_path).ensure_manifest()
+
+    plan = prepare_cluster_plan(tmp_path, page_keys=["alpha", "beta"])
+
+    assert plan["status"] == "kept"
+    assert plan["reason"] == "raw_provenance_unrecoverable_keep_both"
+    assert len(plan["uids"]) == 2
 
 
 def test_transaction_restores_owned_pages_when_registry_commit_fails(
@@ -149,9 +195,7 @@ def test_transaction_restores_owned_pages_when_registry_commit_fails(
     claims.parent.mkdir(parents=True, exist_ok=True)
     claims.write_text(
         "\n".join(
-            json.dumps(
-                {"source_page": page, "source_raw": f"{page}-source.md"}
-            )
+            json.dumps({"source_page": page, "source_raw": f"{page}-source.md"})
             for page in ("alpha", "beta")
         )
         + "\n",
@@ -163,10 +207,7 @@ def test_transaction_restores_owned_pages_when_registry_commit_fails(
         tmp_path,
         page_keys=["alpha", "beta"],
     )
-    before = {
-        path: path.read_bytes()
-        for path in (tmp_path / "pages").glob("*.md")
-    }
+    before = {path: path.read_bytes() for path in (tmp_path / "pages").glob("*.md")}
 
     def fail_redirects(*args, **kwargs):
         raise RuntimeError("injected registry failure")

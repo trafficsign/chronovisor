@@ -45,6 +45,7 @@ COLLECTION_DECISION_SCHEMA = "chronovisor.collection-review-decisions.v1"
 COLLECTION_EVALUATION_SCHEMA = "chronovisor.collection-authority-evaluation.v1"
 COLLECTION_QUALITY_SCHEMA = "chronovisor.collection-quality.v1"
 DEFAULT_CHALLENGER_MODEL = "gpt-oss:20b"
+AUTONOMOUS_DECISION_AUTHORITY = "local_model_consensus"
 
 
 class CollectionAuthorityError(RuntimeError):
@@ -79,7 +80,9 @@ def _read_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise CollectionAuthorityError(f"cannot read JSON object {path}: {exc}") from exc
+        raise CollectionAuthorityError(
+            f"cannot read JSON object {path}: {exc}"
+        ) from exc
     if not isinstance(value, dict):
         raise CollectionAuthorityError(f"expected JSON object: {path}")
     return value
@@ -105,14 +108,32 @@ def load_contract(path: Path | None = None) -> dict[str, Any]:
         raise CollectionAuthorityError("collection authority contract is not adopted")
     gates = payload.get("quality_gates")
     reviewer = payload.get("anomaly_reviewer")
-    if not isinstance(gates, dict) or not isinstance(reviewer, dict):
+    adjudicator = payload.get("consensus_adjudicator")
+    if (
+        not isinstance(gates, dict)
+        or not isinstance(reviewer, dict)
+        or not isinstance(adjudicator, dict)
+    ):
         raise CollectionAuthorityError("collection authority gates are missing")
     if reviewer.get("assignment_mutation_capability") is not False:
         raise CollectionAuthorityError("anomaly reviewer must be review-only")
+    if (
+        adjudicator.get("required_local_models") != 2
+        or adjudicator.get("agreement") != "same_audited_target"
+        or adjudicator.get("frontier_calls") != 0
+        or adjudicator.get("page_mutation_capability") is not False
+    ):
+        raise CollectionAuthorityError(
+            "collection consensus adjudicator is not fail-closed"
+        )
     return {**payload, "content_sha256": _content_sha256(source)}
 
 
-def load_crosswalk(path: Path | None = None) -> dict[str, Any]:
+def load_crosswalk(
+    path: Path | None = None,
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
     source = path or default_crosswalk_path()
     payload = _read_object(source)
     if (
@@ -126,6 +147,41 @@ def load_crosswalk(path: Path | None = None) -> dict[str, Any]:
     entries = payload.get("entries")
     if not isinstance(entries, list) or not entries:
         raise CollectionAuthorityError("collection crosswalk is empty")
+    if any(not isinstance(row, Mapping) for row in entries):
+        raise CollectionAuthorityError("crosswalk entry is malformed")
+    entries = [dict(row) for row in entries]
+    runtime_checksum = None
+    if root is not None:
+        runtime_path = (
+            Path(root) / "runtime" / "librarian" / "collection-crosswalk-auto.json"
+        )
+        if runtime_path.is_file():
+            try:
+                runtime = read_sealed_json(runtime_path)
+            except DurableStateError as exc:
+                raise CollectionAuthorityError(
+                    f"autonomous crosswalk is invalid: {exc}"
+                ) from exc
+            if (
+                runtime.get("schema") != "chronovisor.collection-crosswalk-auto.v1"
+                or runtime.get("base_checksum") != payload.get("checksum")
+                or not isinstance(runtime.get("entries"), list)
+            ):
+                raise CollectionAuthorityError(
+                    "autonomous crosswalk contract is invalid"
+                )
+            static_slugs = {
+                str(row.get("slug") or "")
+                for row in entries
+                if isinstance(row, Mapping)
+            }
+            entries.extend(
+                dict(row)
+                for row in runtime["entries"]
+                if isinstance(row, Mapping)
+                and str(row.get("slug") or "") not in static_slugs
+            )
+            runtime_checksum = "sha256:" + canonical_sha256(runtime)
     slugs: set[str] = set()
     for row in entries:
         if not isinstance(row, dict):
@@ -151,6 +207,8 @@ def load_crosswalk(path: Path | None = None) -> dict[str, Any]:
     return {
         **payload,
         "content_sha256": _content_sha256(source),
+        "runtime_checksum": runtime_checksum,
+        "entries": entries,
         "by_slug": {str(row["slug"]): dict(row) for row in entries},
     }
 
@@ -210,9 +268,7 @@ class CollectionRegistry:
             try:
                 normalize_page_uid(uid)
             except ValueError as exc:
-                raise CollectionAuthorityError(
-                    f"invalid collection UID {uid}"
-                ) from exc
+                raise CollectionAuthorityError(f"invalid collection UID {uid}") from exc
             if not isinstance(row, dict) or row.get("uid") != uid:
                 raise CollectionAuthorityError(f"malformed collection {uid}")
         return payload
@@ -288,8 +344,7 @@ class CollectionRegistry:
             state = {
                 **before,
                 "collections": {
-                    str(uid): dict(row)
-                    for uid, row in before["collections"].items()
+                    str(uid): dict(row) for uid, row in before["collections"].items()
                 },
                 "slug_index": dict(before["slug_index"]),
                 "assignments": {
@@ -374,9 +429,7 @@ class CollectionRegistry:
                 )
                 collection = state["collections"][collection_uid]
                 status = (
-                    "unclassified"
-                    if collection.get("is_unclassified")
-                    else "assigned"
+                    "unclassified" if collection.get("is_unclassified") else "assigned"
                 )
                 assignment = {
                     "page_uid": page_uid,
@@ -427,7 +480,7 @@ class CollectionRegistry:
                 write_sealed_json(self.path, state, backup=True)
 
         mirror_updates = {}
-        crosswalk = load_crosswalk()
+        crosswalk = load_crosswalk(root=self.root)
         for page_uid, assignment in state["assignments"].items():
             collection = state["collections"][assignment["collection_uid"]]
             crosswalk_row = crosswalk["by_slug"].get(collection["slug"])
@@ -438,9 +491,7 @@ class CollectionRegistry:
             mirror_updates[page_uid] = {
                 "collection_uid": assignment["collection_uid"],
                 "collection_status": (
-                    "review_required"
-                    if review_required
-                    else assignment["status"]
+                    "review_required" if review_required else assignment["status"]
                 ),
                 "collection_generation": int(state["generation"]),
             }
@@ -499,7 +550,9 @@ class CollectionRegistry:
         """Apply rename, merge, split, or logical page move under one CAS."""
 
         if operation not in {"rename", "merge", "split", "move"}:
-            raise CollectionAuthorityError(f"unsupported lifecycle operation: {operation}")
+            raise CollectionAuthorityError(
+                f"unsupported lifecycle operation: {operation}"
+            )
         source_uid = (
             normalize_page_uid(collection_uid) if collection_uid is not None else None
         )
@@ -518,12 +571,10 @@ class CollectionRegistry:
                     f"{expected_generation}"
                 )
             collections = {
-                str(uid): dict(row)
-                for uid, row in state["collections"].items()
+                str(uid): dict(row) for uid, row in state["collections"].items()
             }
             assignments = {
-                str(uid): dict(row)
-                for uid, row in state["assignments"].items()
+                str(uid): dict(row) for uid, row in state["assignments"].items()
             }
             if source_uid and source_uid not in collections:
                 raise CollectionAuthorityError("source collection is missing")
@@ -537,7 +588,9 @@ class CollectionRegistry:
 
             if operation == "rename":
                 if source_uid is None or not str(new_label or "").strip():
-                    raise CollectionAuthorityError("rename requires collection and label")
+                    raise CollectionAuthorityError(
+                        "rename requires collection and label"
+                    )
                 collections[source_uid]["label"] = str(new_label).strip()
                 collections[source_uid]["updated_at"] = _now()
             elif operation == "merge":
@@ -586,9 +639,10 @@ class CollectionRegistry:
                 state["slug_index"][str(new_slug).strip()] = created_uid
                 for page_uid in normalized_pages:
                     assignment = assignments.get(page_uid)
-                    if not isinstance(assignment, dict) or assignment.get(
-                        "collection_uid"
-                    ) != source_uid:
+                    if (
+                        not isinstance(assignment, dict)
+                        or assignment.get("collection_uid") != source_uid
+                    ):
                         raise CollectionAuthorityError(
                             f"split page is outside source collection: {page_uid}"
                         )
@@ -648,12 +702,10 @@ class CollectionRegistry:
                     f"{expected_generation}"
                 )
             collections = {
-                str(uid): dict(row)
-                for uid, row in state["collections"].items()
+                str(uid): dict(row) for uid, row in state["collections"].items()
             }
             assignments = {
-                str(uid): dict(row)
-                for uid, row in state["assignments"].items()
+                str(uid): dict(row) for uid, row in state["assignments"].items()
             }
             for page_uid, target_uid in normalized_moves.items():
                 if page_uid not in assignments:
@@ -661,10 +713,7 @@ class CollectionRegistry:
                         f"page assignment is missing: {page_uid}"
                     )
                 target = collections.get(target_uid)
-                if (
-                    not isinstance(target, Mapping)
-                    or target.get("status") != "active"
-                ):
+                if not isinstance(target, Mapping) or target.get("status") != "active":
                     raise CollectionAuthorityError(
                         f"target collection is not active: {target_uid}"
                     )
@@ -754,7 +803,7 @@ def build_review_candidates(
     """Return deterministic anomaly candidates; never change assignments."""
 
     registry_state = state or CollectionRegistry(root).load()
-    crosswalk = load_crosswalk()
+    crosswalk = load_crosswalk(root=root)
     page_registry = PageRegistry(root).load()
     page_index = _load_page_index(root)
     slug_by_page_id, _uid_by_page_id, slug_by_page_uid = _page_id_maps(
@@ -865,8 +914,7 @@ def refresh_review_queue(
     max_open = int(gates["review_queue_open_max"])
     max_new = int(gates["review_queue_new_per_run_max"])
     open_count = sum(
-        row.get("status") in {"queued", "review_recommended"}
-        for row in items.values()
+        row.get("status") in {"queued", "review_recommended"} for row in items.values()
     )
     added = 0
     for candidate in candidates:
@@ -879,10 +927,7 @@ def refresh_review_queue(
         added += 1
     active_candidate_ids = {str(row["candidate_id"]) for row in candidates}
     for candidate_id, row in items.items():
-        if (
-            row.get("status") == "queued"
-            and candidate_id not in active_candidate_ids
-        ):
+        if row.get("status") == "queued" and candidate_id not in active_candidate_ids:
             row["status"] = "resolved_by_evidence_change"
             row["resolved_at"] = _now()
     queue = {
@@ -959,9 +1004,7 @@ def _label_propagation(
                 continue
             counts = Counter(labels[value] for value in neighbors)
             maximum = max(counts.values())
-            chosen = min(
-                label for label, count in counts.items() if count == maximum
-            )
+            chosen = min(label for label, count in counts.items() if count == maximum)
             if labels[node] != chosen:
                 labels[node] = chosen
                 changes += 1
@@ -983,7 +1026,7 @@ def collection_quality_snapshot(
     queue: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     registry_state = state or CollectionRegistry(root).load()
-    crosswalk = load_crosswalk()
+    crosswalk = load_crosswalk(root=root)
     contract = load_contract()
     page_registry = PageRegistry(root).load()
     page_index = _load_page_index(root)
@@ -1087,26 +1130,18 @@ def collection_quality_snapshot(
         gates["crosswalk_audit_coverage_min"]
     ):
         hard_failures.append("crosswalk_audit_coverage")
-    if metrics["top_collection_share"] > float(
-        gates["top_collection_share_block"]
-    ):
+    if metrics["top_collection_share"] > float(gates["top_collection_share_block"]):
         hard_failures.append("top_collection_share")
     if metrics["review_queue_open"] > int(gates["review_queue_open_max"]):
         hard_failures.append("review_queue_budget")
     if metrics["unresolved_link_count"] > int(gates["unresolved_link_max"]):
         hard_failures.append("unresolved_link")
-    if metrics["median_collection_size"] < float(
-        gates["median_collection_size_min"]
-    ):
+    if metrics["median_collection_size"] < float(gates["median_collection_size_min"]):
         hard_failures.append("median_collection_size")
     warnings = []
-    if metrics["top_collection_share"] > float(
-        gates["top_collection_share_warn"]
-    ):
+    if metrics["top_collection_share"] > float(gates["top_collection_share_warn"]):
         warnings.append("top_collection_share")
-    if metrics["review_candidate_rate"] > float(
-        gates["review_candidate_rate_warn"]
-    ):
+    if metrics["review_candidate_rate"] > float(gates["review_candidate_rate_warn"]):
         warnings.append("review_candidate_rate")
     return {
         "schema": COLLECTION_QUALITY_SCHEMA,
@@ -1133,20 +1168,14 @@ def evaluate_unseen40(
     """Open the frozen 40 only after the new contract and gold are locked."""
 
     output = (
-        root
-        / "classification"
-        / "collection-authority-v1"
-        / "unseen40-evaluation.json"
+        root / "classification" / "collection-authority-v1" / "unseen40-evaluation.json"
     )
     if output.is_file():
         return read_sealed_json(output)
     prereg = _read_object(default_preregistration_path())
     gold = _read_object(default_gold_path())
     selected_path = selection_path or (
-        root
-        / "classification"
-        / "cvo-ab-v1-unseen40"
-        / "selection.json"
+        root / "classification" / "cvo-ab-v1-unseen40" / "selection.json"
     )
     selection = read_sealed_json(selected_path)
     seal = str(selection.get("seal_sha256") or "")
@@ -1159,9 +1188,7 @@ def evaluate_unseen40(
     ):
         raise CollectionAuthorityError("unseen40 preregistration boundary mismatch")
     selected_uids = [str(row.get("uid") or "") for row in selection.get("cases") or []]
-    gold_by_uid = {
-        str(row.get("uid") or ""): row for row in gold.get("cases") or []
-    }
+    gold_by_uid = {str(row.get("uid") or ""): row for row in gold.get("cases") or []}
     if len(selected_uids) != 40 or set(selected_uids) != set(gold_by_uid):
         raise CollectionAuthorityError("unseen40 gold identity mismatch")
     state = CollectionRegistry(root).load()
@@ -1179,7 +1206,7 @@ def evaluate_unseen40(
     assigned_correct = 0
     review_correct = 0
     crosswalk_invalid = 0
-    crosswalk = load_crosswalk()
+    crosswalk = load_crosswalk(root=root)
     for uid in selected_uids:
         expected = gold_by_uid[uid]
         assignment = (state.get("assignments") or {}).get(uid) or {}
@@ -1189,9 +1216,8 @@ def evaluate_unseen40(
             str(value) for value in expected.get("acceptable_collection_slugs") or []
         }
         is_assigned_correct = slug in acceptable
-        is_review_correct = (
-            expected.get("disposition") == "review"
-            and bool(queued_by_uid.get(uid))
+        is_review_correct = expected.get("disposition") == "review" and bool(
+            queued_by_uid.get(uid)
         )
         passed = is_assigned_correct or is_review_correct
         mapping = crosswalk["by_slug"].get(slug)
@@ -1227,16 +1253,12 @@ def evaluate_unseen40(
         "evaluated_at": _now(),
         "epoch": prereg["epoch"],
         "selection_seal_sha256": seal,
-        "preregistration_sha256": _content_sha256(
-            default_preregistration_path()
-        ),
+        "preregistration_sha256": _content_sha256(default_preregistration_path()),
         "gold_sha256": _content_sha256(default_gold_path()),
         "case_count": 40,
         "assigned_correct": assigned_correct,
         "review_correct": review_correct,
-        "assignment_or_review_rate": round(
-            (assigned_correct + review_correct) / 40, 6
-        ),
+        "assignment_or_review_rate": round((assigned_correct + review_correct) / 40, 6),
         "major_error_count": major_errors,
         "crosswalk_invalid_count": crosswalk_invalid,
         "model_calls": 0,
@@ -1253,11 +1275,9 @@ def evaluate_unseen40(
 def collection_authority_status(root: Path) -> dict[str, Any]:
     try:
         contract = load_contract()
-        crosswalk = load_crosswalk()
+        crosswalk = load_crosswalk(root=root)
         state = CollectionRegistry(root).load()
-        quality_path = (
-            root / "runtime" / "librarian" / "collection-quality.json"
-        )
+        quality_path = root / "runtime" / "librarian" / "collection-quality.json"
         quality = (
             read_sealed_json(quality_path)
             if quality_path.is_file()
@@ -1339,9 +1359,7 @@ def review_collection_queue(
         raise CollectionAuthorityError(
             f"anomaly reviewer model is unavailable: {selected_model}"
         )
-    queue_path = (
-        root / "runtime" / "librarian" / "collection-review-queue.json"
-    )
+    queue_path = root / "runtime" / "librarian" / "collection-review-queue.json"
     queue = (
         read_sealed_json(queue_path)
         if queue_path.is_file()
@@ -1360,10 +1378,7 @@ def review_collection_queue(
     reconciled = []
     if role == "primary":
         for candidate_id, raw_row in sorted((queue.get("items") or {}).items()):
-            if (
-                not isinstance(raw_row, Mapping)
-                or raw_row.get("status") != "queued"
-            ):
+            if not isinstance(raw_row, Mapping) or raw_row.get("status") != "queued":
                 continue
             review = raw_row.get("model_review")
             if (
@@ -1411,9 +1426,7 @@ def review_collection_queue(
         page_uid = str(candidate.get("page_uid") or "")
         page = (page_state.get("pages") or {}).get(page_uid)
         if not isinstance(page, Mapping):
-            deferred.append(
-                {"candidate_id": candidate_id, "reason": "page_missing"}
-            )
+            deferred.append({"candidate_id": candidate_id, "reason": "page_missing"})
             continue
         path = root / str(page.get("path") or "")
         try:
@@ -1457,9 +1470,7 @@ def review_collection_queue(
                 lease,
                 timeout_seconds=max(60.0, read_timeout_ms / 1_000 + 30),
             )
-        if outcome.status != "completed" or not isinstance(
-            outcome.value, Mapping
-        ):
+        if outcome.status != "completed" or not isinstance(outcome.value, Mapping):
             deferred.append(
                 {
                     "candidate_id": candidate_id,
@@ -1492,9 +1503,7 @@ def review_collection_queue(
             continue
         review = dict(worker["result"])
         row = dict(queue["items"][candidate_id])
-        review_field = (
-            "model_review" if role == "primary" else "challenger_review"
-        )
+        review_field = "model_review" if role == "primary" else "challenger_review"
         row[review_field] = {
             **review,
             "model": selected_model,
@@ -1517,15 +1526,11 @@ def review_collection_queue(
             if review.get("decision") == "no_issue":
                 row["status"] = "dismissed"
                 row["resolved_at"] = _now()
-                row["resolution"] = (
-                    "challenger_no_issue_preserve_original_order"
-                )
+                row["resolution"] = "challenger_no_issue_preserve_original_order"
                 row["challenge_status"] = "rejected_recommendation"
-            elif (
-                review.get("decision") == "review_recommended"
-                and review.get("suggested_collection_slug")
-                == primary.get("suggested_collection_slug")
-            ):
+            elif review.get("decision") == "review_recommended" and review.get(
+                "suggested_collection_slug"
+            ) == primary.get("suggested_collection_slug"):
                 row["challenge_status"] = "consensus_recommended"
             else:
                 row["challenge_status"] = "disagreement_or_insufficient"
@@ -1563,6 +1568,127 @@ def review_collection_queue(
     }
 
 
+def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
+    """Apply local-model consensus and terminal fail-closed non-decisions.
+
+    A move requires two independently bound local-model reviews to recommend
+    the same active, audited target.  All other completed reviews preserve the
+    existing archival order and become terminal queue evidence; unavailable or
+    preempted workers remain queued for a later cycle.
+    """
+
+    queue_path = root / "runtime" / "librarian" / "collection-review-queue.json"
+    if not queue_path.is_file():
+        queue = refresh_review_queue(root)
+    else:
+        queue = read_sealed_json(queue_path)
+    state = CollectionRegistry(root).load()
+    crosswalk = load_crosswalk(root=root)
+    active_slugs = {
+        str(row.get("slug") or "")
+        for row in state["collections"].values()
+        if isinstance(row, Mapping) and row.get("status") == "active"
+    }
+    decisions = []
+    terminalized = []
+    for candidate_id, raw_row in sorted((queue.get("items") or {}).items()):
+        if not isinstance(raw_row, Mapping) or raw_row.get("status") not in {
+            "queued",
+            "review_recommended",
+        }:
+            continue
+        row = dict(raw_row)
+        reason = str(row.get("reason") or "")
+        if reason == "cross_collection_link_affinity":
+            row["status"] = "dismissed"
+            row["resolved_at"] = _now()
+            row["resolution"] = "autonomous_preserve_original_order"
+            row["autonomous_decision"] = {
+                "action": "preserve",
+                "authority": "deterministic_original_order",
+                "decided_at": _now(),
+            }
+            queue["items"][candidate_id] = row
+            terminalized.append(str(candidate_id))
+            continue
+        primary = row.get("model_review")
+        challenger = row.get("challenger_review")
+        if (
+            isinstance(primary, Mapping)
+            and isinstance(challenger, Mapping)
+            and primary.get("decision") == "review_recommended"
+            and challenger.get("decision") == "review_recommended"
+            and primary.get("suggested_collection_slug")
+            == challenger.get("suggested_collection_slug")
+        ):
+            target_slug = str(primary.get("suggested_collection_slug") or "")
+            target_crosswalk = crosswalk["by_slug"].get(target_slug) or {}
+            if (
+                target_slug in active_slugs
+                and target_slug != row.get("current_collection_slug")
+                and not target_crosswalk.get("review_required")
+            ):
+                decisions.append(
+                    {
+                        "candidate_id": str(candidate_id),
+                        "action": "move",
+                        "target_collection_slug": target_slug,
+                        "rationale": (
+                            "Independent local reviewers agreed on the same "
+                            f"audited collection: {target_slug}."
+                        ),
+                    }
+                )
+                continue
+        review_finished = isinstance(primary, Mapping) and (
+            primary.get("decision") in {"no_issue", "insufficient_evidence"}
+            or isinstance(challenger, Mapping)
+        )
+        if review_finished:
+            row["status"] = "dismissed"
+            row["resolved_at"] = _now()
+            row["resolution"] = "autonomous_fail_closed_preserve_original_order"
+            row["autonomous_decision"] = {
+                "action": "preserve",
+                "authority": AUTONOMOUS_DECISION_AUTHORITY,
+                "decided_at": _now(),
+                "reason": "no_two_model_move_consensus",
+            }
+            queue["items"][candidate_id] = row
+            terminalized.append(str(candidate_id))
+    _checkpoint_review_queue(
+        queue_path,
+        queue,
+        base_reviewer_calls=int(queue.get("reviewer_calls") or 0),
+        reviewed_count=0,
+    )
+    adjudication = None
+    if decisions:
+        adjudication = adjudicate_collection_review_queue(
+            root,
+            {
+                "schema": COLLECTION_DECISION_SCHEMA,
+                "status": "approved",
+                "approved_at": _now(),
+                "decision_authority": AUTONOMOUS_DECISION_AUTHORITY,
+                "expected_registry_generation": int(state.get("generation") or 0),
+                "preserve_remaining_reasons": [],
+                "decisions": decisions,
+            },
+        )
+    refreshed = refresh_review_queue(root, state=CollectionRegistry(root).load())
+    return {
+        "status": "ok",
+        "moves": len(decisions),
+        "terminal_preserves": len(terminalized),
+        "terminalized": terminalized,
+        "queue_open": int(refreshed.get("open") or 0),
+        "adjudication": adjudication,
+        "frontier_calls": 0,
+        "page_mutations": 0,
+    }
+
+
 def adjudicate_collection_review_queue(
     root: Path,
     manifest: Mapping[str, Any],
@@ -1580,12 +1706,8 @@ def adjudicate_collection_review_queue(
     if not isinstance(raw_decisions, list):
         raise CollectionAuthorityError("collection review decisions are missing")
     preserve_reasons = manifest.get("preserve_remaining_reasons") or []
-    if (
-        not isinstance(preserve_reasons, list)
-        or any(
-            reason != "cross_collection_link_affinity"
-            for reason in preserve_reasons
-        )
+    if not isinstance(preserve_reasons, list) or any(
+        reason != "cross_collection_link_affinity" for reason in preserve_reasons
     ):
         raise CollectionAuthorityError(
             "only cross-collection affinity may use a blanket preserve decision"
@@ -1605,13 +1727,9 @@ def adjudicate_collection_review_queue(
     state = CollectionRegistry(root).load()
     generation = int(state.get("generation") or 0)
     expected_generation = manifest.get("expected_registry_generation")
-    if (
-        not isinstance(expected_generation, int)
-        or expected_generation != generation
-    ):
+    if not isinstance(expected_generation, int) or expected_generation != generation:
         raise CollectionAuthorityError(
-            f"collection generation changed: {generation} != "
-            f"{expected_generation}"
+            f"collection generation changed: {generation} != {expected_generation}"
         )
     page_state = PageRegistry(root).load()
     collection_by_slug = {
@@ -1620,10 +1738,9 @@ def adjudicate_collection_review_queue(
         if isinstance(row, Mapping) and row.get("status") == "active"
     }
     slug_by_collection = {
-        collection_uid: slug
-        for slug, collection_uid in collection_by_slug.items()
+        collection_uid: slug for slug, collection_uid in collection_by_slug.items()
     }
-    crosswalk = load_crosswalk()
+    crosswalk = load_crosswalk(root=root)
 
     explicit: dict[str, dict[str, Any]] = {}
     for raw_decision in raw_decisions:
@@ -1647,10 +1764,7 @@ def adjudicate_collection_review_queue(
 
     decisions = dict(explicit)
     for candidate_id, row in items.items():
-        if (
-            row.get("reason") in preserve_reasons
-            and candidate_id not in decisions
-        ):
+        if row.get("reason") in preserve_reasons and candidate_id not in decisions:
             decisions[candidate_id] = {
                 "candidate_id": candidate_id,
                 "action": "preserve",
@@ -1666,7 +1780,10 @@ def adjudicate_collection_review_queue(
         and row.get("status") in {"queued", "review_recommended"}
         and candidate_id not in decisions
     ]
-    if unresolved_required:
+    if (
+        unresolved_required
+        and manifest.get("decision_authority") != AUTONOMOUS_DECISION_AUTHORITY
+    ):
         raise CollectionAuthorityError(
             "review-required candidates lack explicit host decisions: "
             + ",".join(sorted(unresolved_required))
@@ -1698,32 +1815,25 @@ def adjudicate_collection_review_queue(
         row["host_decision"] = {
             "action": decision["action"],
             "rationale": str(decision["rationale"]).strip(),
-            "authority": str(
-                manifest.get("decision_authority") or "host_adjudication"
-            ),
+            "authority": str(manifest.get("decision_authority") or "host_adjudication"),
             "decided_at": str(manifest.get("approved_at") or _now()),
         }
         if decision["action"] == "preserve":
             crosswalk_row = crosswalk["by_slug"].get(current_slug) or {}
-            if (
-                candidate.get("reason")
-                in {"unclassified", "collection_requires_review"}
-                and (
-                    current_slug == "_unclassified"
-                    or crosswalk_row.get("review_required")
-                )
+            if candidate.get("reason") in {
+                "unclassified",
+                "collection_requires_review",
+            } and (
+                current_slug == "_unclassified" or crosswalk_row.get("review_required")
             ):
                 raise CollectionAuthorityError(
-                    "review-required collection cannot be preserved: "
-                    f"{candidate_id}"
+                    f"review-required collection cannot be preserved: {candidate_id}"
                 )
             row["status"] = "dismissed"
             row["resolved_at"] = _now()
             row["resolution"] = "host_preserve_original_order"
         else:
-            target_slug = str(
-                decision.get("target_collection_slug") or ""
-            ).strip()
+            target_slug = str(decision.get("target_collection_slug") or "").strip()
             target_uid = collection_by_slug.get(target_slug)
             target_crosswalk = crosswalk["by_slug"].get(target_slug) or {}
             if (
@@ -1756,8 +1866,7 @@ def adjudicate_collection_review_queue(
     ):
         raise CollectionAuthorityError("move target page content is unavailable")
     content_before = {
-        page_uid: _content_sha256(path)
-        for page_uid, path in content_paths.items()
+        page_uid: _content_sha256(path) for page_uid, path in content_paths.items()
     }
 
     registry = CollectionRegistry(root)
@@ -1770,8 +1879,7 @@ def adjudicate_collection_review_queue(
         generation = int(move_receipt["generation_after"])
         registry.sync_from_pages(expected_generation=generation)
     content_after = {
-        page_uid: _content_sha256(path)
-        for page_uid, path in content_paths.items()
+        page_uid: _content_sha256(path) for page_uid, path in content_paths.items()
     }
     if content_before != content_after:
         raise CollectionAuthorityError("collection adjudication mutated page content")
@@ -1788,16 +1896,13 @@ def adjudicate_collection_review_queue(
         "blanket_preserves": len(decisions) - len(explicit),
         "moves": len(move_targets),
         "preserves": sum(
-            decision.get("action") == "preserve"
-            for decision in decisions.values()
+            decision.get("action") == "preserve" for decision in decisions.values()
         ),
-        "move_receipt": (
-            move_receipt.get("transaction_id") if move_receipt else None
-        ),
+        "move_receipt": (move_receipt.get("transaction_id") if move_receipt else None),
     }
-    queue["host_assignment_mutations"] = (
-        int(queue.get("host_assignment_mutations") or 0) + len(move_targets)
-    )
+    queue["host_assignment_mutations"] = int(
+        queue.get("host_assignment_mutations") or 0
+    ) + len(move_targets)
     _checkpoint_review_queue(
         queue_path,
         queue,
@@ -1808,13 +1913,10 @@ def adjudicate_collection_review_queue(
     new_preserves = 0
     if preserve_reasons and refreshed["open"]:
         refreshed_queue = read_sealed_json(queue_path)
-        for candidate_id, raw_row in (
-            refreshed_queue.get("items") or {}
-        ).items():
+        for candidate_id, raw_row in (refreshed_queue.get("items") or {}).items():
             if (
                 not isinstance(raw_row, Mapping)
-                or raw_row.get("status")
-                not in {"queued", "review_recommended"}
+                or raw_row.get("status") not in {"queued", "review_recommended"}
                 or raw_row.get("reason") not in preserve_reasons
             ):
                 continue
@@ -1829,20 +1931,16 @@ def adjudicate_collection_review_queue(
                     "cross-collection links are relational evidence only."
                 ),
                 "authority": str(
-                    manifest.get("decision_authority")
-                    or "host_adjudication"
+                    manifest.get("decision_authority") or "host_adjudication"
                 ),
                 "decided_at": str(manifest.get("approved_at") or _now()),
             }
             refreshed_queue["items"][candidate_id] = row
             new_preserves += 1
         if new_preserves:
-            adjudication = dict(
-                refreshed_queue.get("host_adjudication") or {}
-            )
+            adjudication = dict(refreshed_queue.get("host_adjudication") or {})
             adjudication["blanket_preserves"] = (
-                int(adjudication.get("blanket_preserves") or 0)
-                + new_preserves
+                int(adjudication.get("blanket_preserves") or 0) + new_preserves
             )
             adjudication["preserves"] = (
                 int(adjudication.get("preserves") or 0) + new_preserves
@@ -1851,9 +1949,7 @@ def adjudicate_collection_review_queue(
             _checkpoint_review_queue(
                 queue_path,
                 refreshed_queue,
-                base_reviewer_calls=int(
-                    refreshed_queue.get("reviewer_calls") or 0
-                ),
+                base_reviewer_calls=int(refreshed_queue.get("reviewer_calls") or 0),
                 reviewed_count=0,
             )
             refreshed = refresh_review_queue(root, state=registry.load())
@@ -1875,13 +1971,290 @@ def adjudicate_collection_review_queue(
     }
 
 
+def _collection_crosswalk_capsule(
+    root: Path,
+    *,
+    state: Mapping[str, Any],
+    collection_uid: str,
+) -> dict[str, str]:
+    from chronovisor import frontmatter
+
+    collection = state["collections"][collection_uid]
+    page_state = PageRegistry(root).load()
+    page_rows = page_state.get("pages") or {}
+    samples = []
+    for page_uid, assignment in sorted((state.get("assignments") or {}).items()):
+        if (
+            not isinstance(assignment, Mapping)
+            or assignment.get("collection_uid") != collection_uid
+            or not isinstance(page_rows.get(page_uid), Mapping)
+        ):
+            continue
+        path = root / str(page_rows[page_uid].get("path") or "")
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            meta, body = frontmatter.parse(text)
+        except (OSError, UnicodeError):
+            continue
+        samples.append(
+            {
+                "title": str(meta.get("title") or path.stem),
+                "summary": str(meta.get("summary") or ""),
+                "excerpt": body.strip()[:500],
+            }
+        )
+        if len(samples) >= 8:
+            break
+    return {
+        "title": str(collection.get("label") or collection.get("slug") or ""),
+        "summary": " | ".join(
+            f"{row['title']}: {row['summary']}".strip(": ") for row in samples
+        )[:2_000],
+        "evidence_excerpt": "\n\n".join(
+            f"{row['title']}\n{row['excerpt']}" for row in samples
+        )[:4_000],
+    }
+
+
+def _call_crosswalk_anchor_worker(
+    *,
+    payload: Mapping[str, Any],
+    purpose: str,
+    timeout_seconds: float = 720.0,
+) -> dict[str, Any] | None:
+    with research_lane(
+        f"collection-crosswalk-{purpose}-{uuid.uuid4().hex[:8]}",
+        enabled=True,
+        mode="on",
+        purpose="explicit",
+        needs_model=True,
+    ) as lease:
+        outcome = run_cancellable_command(
+            [
+                sys.executable,
+                "-m",
+                "chronovisor.classification_anchor_worker",
+            ],
+            json.dumps(dict(payload), ensure_ascii=False, sort_keys=True),
+            lease,
+            timeout_seconds=timeout_seconds,
+        )
+    if outcome.status != "completed" or not isinstance(outcome.value, Mapping):
+        return None
+    return dict(outcome.value)
+
+
+def _propose_collection_crosswalk(
+    root: Path,
+    *,
+    state: Mapping[str, Any],
+    collection_uid: str,
+    model_digests: Mapping[str, str],
+) -> tuple[str | None, list[dict[str, Any]], int]:
+    from chronovisor.classification_anchor import UNRESOLVED_ANCHOR_ID
+    from chronovisor.classification_anchor_worker import (
+        PROMPT_SHA256,
+        WORKER_SCHEMA,
+    )
+
+    anchor_set = load_anchor_set()
+    capsule = _collection_crosswalk_capsule(
+        root,
+        state=state,
+        collection_uid=collection_uid,
+    )
+    selections = []
+    calls = 0
+    for model, digest in model_digests.items():
+        if not digest:
+            continue
+        common = {
+            "schema": WORKER_SCHEMA,
+            "model": model,
+            "model_digest": digest,
+            "page": capsule,
+            "keep_alive": "0",
+            "read_timeout_ms": 660_000,
+        }
+        extracted = _call_crosswalk_anchor_worker(
+            payload={**common, "operation": "extract"},
+            purpose=f"{collection_uid[:10]}-extract",
+        )
+        calls += int(extracted is not None)
+        if (
+            not isinstance(extracted, Mapping)
+            or extracted.get("schema") != WORKER_SCHEMA
+            or extracted.get("prompt_sha256") != PROMPT_SHA256
+            or extracted.get("model_digest") != digest
+            or not isinstance(extracted.get("result"), Mapping)
+        ):
+            continue
+        classified = _call_crosswalk_anchor_worker(
+            payload={
+                **common,
+                "operation": "classify",
+                "subject": dict(extracted["result"]),
+                "anchors": anchor_set.model_cards(),
+            },
+            purpose=f"{collection_uid[:10]}-classify",
+        )
+        calls += int(classified is not None)
+        if (
+            not isinstance(classified, Mapping)
+            or classified.get("schema") != WORKER_SCHEMA
+            or classified.get("prompt_sha256") != PROMPT_SHA256
+            or classified.get("model_digest") != digest
+            or not isinstance(classified.get("result"), Mapping)
+        ):
+            continue
+        selection = dict(classified["result"])
+        selections.append(
+            {
+                "model": model,
+                "model_digest": digest,
+                "subject": dict(extracted["result"]),
+                "selection": selection,
+            }
+        )
+    exact_ids = {
+        str(row["selection"].get("primary_anchor_id") or "") for row in selections
+    }
+    accepted = (
+        next(iter(exact_ids))
+        if len(selections) == len(model_digests) == 2
+        and len(exact_ids) == 1
+        and UNRESOLVED_ANCHOR_ID not in exact_ids
+        else None
+    )
+    return accepted, selections, calls
+
+
+def ensure_autonomous_crosswalk(
+    root: Path,
+    *,
+    state: Mapping[str, Any] | None = None,
+    use_models: bool,
+) -> dict[str, Any]:
+    """Create sealed runtime crosswalks for newly discovered collections."""
+
+    from chronovisor import ollama
+    from chronovisor.classification_anchor import UNRESOLVED_ANCHOR_ID
+
+    registry_state = dict(state or CollectionRegistry(root).load())
+    base = load_crosswalk()
+    path = root / "runtime" / "librarian" / "collection-crosswalk-auto.json"
+    try:
+        runtime = read_sealed_json(path) if path.is_file() else {}
+    except DurableStateError:
+        runtime = {}
+    if (
+        runtime.get("schema") != "chronovisor.collection-crosswalk-auto.v1"
+        or runtime.get("base_checksum") != base["checksum"]
+        or not isinstance(runtime.get("entries"), list)
+    ):
+        runtime = {
+            "schema": "chronovisor.collection-crosswalk-auto.v1",
+            "base_checksum": base["checksum"],
+            "updated_at": None,
+            "entries": [],
+            "model_calls": 0,
+            "frontier_calls": 0,
+        }
+    entries = {
+        str(row.get("slug") or ""): dict(row)
+        for row in runtime["entries"]
+        if isinstance(row, Mapping) and str(row.get("slug") or "")
+    }
+    models = [
+        str(load_contract()["anomaly_reviewer"]["default_model"]),
+        DEFAULT_CHALLENGER_MODEL,
+    ]
+    model_digests = ollama.model_digests(models) if use_models else {}
+    calls = 0
+    changed = False
+    for collection_uid, raw_collection in sorted(
+        (registry_state.get("collections") or {}).items()
+    ):
+        if (
+            not isinstance(raw_collection, Mapping)
+            or raw_collection.get("status") != "active"
+            or raw_collection.get("is_unclassified")
+        ):
+            continue
+        collection = dict(raw_collection)
+        slug = str(collection.get("slug") or "")
+        if not slug or slug in base["by_slug"]:
+            continue
+        previous = entries.get(slug)
+        previous_digests = (
+            dict((previous or {}).get("model_digests") or {})
+            if isinstance(previous, Mapping)
+            else {}
+        )
+        should_attempt = bool(
+            use_models
+            and len(model_digests) == 2
+            and all(model_digests.values())
+            and previous_digests != model_digests
+        )
+        if previous is not None and not should_attempt:
+            continue
+        accepted = None
+        evidence = []
+        if should_attempt:
+            accepted, evidence, new_calls = _propose_collection_crosswalk(
+                root,
+                state=registry_state,
+                collection_uid=str(collection_uid),
+                model_digests=model_digests,
+            )
+            calls += new_calls
+        anchor_id = accepted or UNRESOLVED_ANCHOR_ID
+        entries[slug] = {
+            "slug": slug,
+            "label": str(collection.get("label") or slug.replace("-", " ")),
+            "review_required": accepted is None,
+            "mappings": [{"anchor_id": anchor_id, "relation": "exact"}],
+            "authority": (
+                AUTONOMOUS_DECISION_AUTHORITY
+                if accepted is not None
+                else "autonomous_fail_closed_unresolved"
+            ),
+            "decided_at": _now(),
+            "model_digests": dict(model_digests),
+            "evidence": evidence,
+        }
+        changed = True
+    if changed or not path.is_file():
+        runtime = {
+            **runtime,
+            "updated_at": _now(),
+            "entries": [entries[slug] for slug in sorted(entries)],
+            "model_calls": int(runtime.get("model_calls") or 0) + calls,
+            "frontier_calls": 0,
+        }
+        write_sealed_json(path, runtime, backup=True)
+    return {
+        "status": "ok",
+        "changed": changed,
+        "entry_count": len(entries),
+        "model_calls": calls,
+        "frontier_calls": 0,
+        "path": str(path),
+    }
+
+
 def run_collection_librarian(
     root: Path = CHRONOVISOR_ROOT,
     *,
     evaluate_unseen: bool = False,
     dry_run: bool = False,
+    autonomous: bool = False,
+    review_limit: int = 10,
 ) -> dict[str, Any]:
-    """Run collection synchronization, deterministic review triage and gates."""
+    """Run collection synchronization, autonomous local review and gates."""
 
     registry = CollectionRegistry(root)
     sync = registry.sync_from_pages(dry_run=dry_run)
@@ -1893,9 +2266,46 @@ def run_collection_librarian(
             "frontier_calls": 0,
             "page_mutations": 0,
         }
+    crosswalk_update = ensure_autonomous_crosswalk(
+        root,
+        state=sync["registry"],
+        use_models=autonomous,
+    )
+    if crosswalk_update["changed"]:
+        sync = registry.sync_from_pages(
+            expected_generation=int(
+                CollectionRegistry(root).load().get("generation") or 0
+            )
+        )
     build_uid_link_index(root, write=True)
     state = registry.load()
     queue = refresh_review_queue(root, state=state)
+    automation: dict[str, Any] | None = None
+    model_calls = int(crosswalk_update.get("model_calls") or 0)
+    if autonomous and int(queue.get("open") or 0):
+        # Deterministic cross-collection affinity never grants mutation
+        # authority and can be closed before spending local-model work.
+        autonomously_finalize_collection_queue(root)
+        queue = refresh_review_queue(root, state=registry.load())
+        if int(queue.get("open") or 0):
+            primary = review_collection_queue(root, limit=review_limit, role="primary")
+            model_calls += int(primary.get("reviewer_calls") or 0)
+            challenger = review_collection_queue(
+                root,
+                limit=review_limit,
+                role="challenger",
+            )
+            model_calls += int(challenger.get("reviewer_calls") or 0)
+            automation = autonomously_finalize_collection_queue(root)
+            queue = refresh_review_queue(root, state=registry.load())
+        else:
+            automation = {
+                "status": "ok",
+                "moves": 0,
+                "terminal_preserves": 0,
+                "queue_open": 0,
+            }
+        state = registry.load()
     quality = collection_quality_snapshot(root, state=state, queue=queue)
     write_sealed_json(
         root / "runtime" / "librarian" / "collection-quality.json",
@@ -1910,9 +2320,9 @@ def run_collection_librarian(
         "recorded_at": _now(),
         "contract": load_contract(),
         "crosswalk": {
-            "epoch": load_crosswalk()["epoch"],
-            "entry_count": len(load_crosswalk()["entries"]),
-            "checksum": load_crosswalk()["checksum"],
+            "epoch": load_crosswalk(root=root)["epoch"],
+            "entry_count": len(load_crosswalk(root=root)["entries"]),
+            "checksum": load_crosswalk(root=root)["checksum"],
         },
         "sync": {
             key: sync.get(key)
@@ -1939,7 +2349,7 @@ def run_collection_librarian(
             else {"decision": "not_opened"}
         ),
         "authority": status,
-        "model_calls": 0,
+        "model_calls": model_calls,
         "frontier_calls": 0,
         "page_mutations": 0,
     }
@@ -1959,7 +2369,9 @@ def run_collection_librarian(
         "quality": quality,
         "evaluation": evaluation,
         "authority": status,
-        "model_calls": 0,
+        "crosswalk_update": crosswalk_update,
+        "automation": automation,
+        "model_calls": model_calls,
         "frontier_calls": 0,
         "page_mutations": 0,
     }

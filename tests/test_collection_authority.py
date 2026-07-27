@@ -12,8 +12,10 @@ from chronovisor.collection_authority import (
     CollectionAuthorityError,
     CollectionRegistry,
     adjudicate_collection_review_queue,
+    autonomously_finalize_collection_queue,
     build_review_candidates,
     collection_quality_snapshot,
+    ensure_autonomous_crosswalk,
     evaluate_unseen40,
     load_contract,
     load_crosswalk,
@@ -31,9 +33,7 @@ def _page(path: Path, uid: str, *, links: tuple[str, ...] = ()) -> None:
         f"uid: {uid}\n"
         "updated: 2026-07-27\n"
         "---\n\n"
-        f"# {path.stem}\n\n"
-        + "\n".join(f"[[{value}]]" for value in links)
-        + "\n",
+        f"# {path.stem}\n\n" + "\n".join(f"[[{value}]]" for value in links) + "\n",
         encoding="utf-8",
     )
 
@@ -90,17 +90,58 @@ def test_collection_sync_is_stable_and_direct_pages_fail_closed(
     assert state["assignments"][loose_uid]["status"] == "unclassified"
     page_state = PageRegistry(tmp_path).load()
     assert page_state["pages"][ai_uid]["collection_uid"] == ai_collection["uid"]
-    assert (
-        page_state["pages"][loose_uid]["collection_status"]
-        == "review_required"
-    )
+    assert page_state["pages"][loose_uid]["collection_status"] == "review_required"
     receipts = list(
-        (tmp_path / "runtime" / "librarian" / "collection-receipts").glob(
-            "*.json"
-        )
+        (tmp_path / "runtime" / "librarian" / "collection-receipts").glob("*.json")
     )
     assert len(receipts) == 2
     assert all(read_sealed_json(path)["page_mutations"] == 0 for path in receipts)
+
+
+def test_new_collection_crosswalk_is_local_consensus_and_runtime_sealed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from chronovisor import ollama
+
+    page_uid = _uids(1, start=115)[0]
+    _page(tmp_path / "pages" / "new-topic" / "note.md", page_uid)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(10, start=120)).__next__,
+    )
+    state = registry.sync_from_pages()["registry"]
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda models: {
+            str(model): f"digest-{index}" for index, model in enumerate(models)
+        },
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "_propose_collection_crosswalk",
+        lambda *args, **kwargs: (
+            "cvo:anchor:0001",
+            [{"model": "gemma4:26b"}, {"model": "gpt-oss:20b"}],
+            4,
+        ),
+    )
+
+    result = ensure_autonomous_crosswalk(
+        tmp_path,
+        state=state,
+        use_models=True,
+    )
+    crosswalk = load_crosswalk(root=tmp_path)
+
+    assert result["changed"] is True
+    assert result["model_calls"] == 4
+    assert crosswalk["by_slug"]["new-topic"]["review_required"] is False
+    assert crosswalk["by_slug"]["new-topic"]["mappings"] == [
+        {"anchor_id": "cvo:anchor:0001", "relation": "exact"}
+    ]
+    assert read_sealed_json(Path(result["path"]))["frontier_calls"] == 0
 
 
 def _review_worker_result(
@@ -165,10 +206,7 @@ def test_collection_no_issue_review_is_checkpointed_and_dismissed(
         model="gemma4:26b",
     )
     queue = read_sealed_json(
-        tmp_path
-        / "runtime"
-        / "librarian"
-        / "collection-review-queue.json"
+        tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     )
     item = next(iter(queue["items"].values()))
 
@@ -204,12 +242,7 @@ def test_existing_no_issue_review_is_reconciled_without_another_call(
         "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
         "reviewed_at": "2026-07-27T00:00:00+00:00",
     }
-    queue_path = (
-        tmp_path
-        / "runtime"
-        / "librarian"
-        / "collection-review-queue.json"
-    )
+    queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     write_sealed_json(queue_path, queue, backup=True)
     monkeypatch.setattr(
         "chronovisor.ollama.model_digests",
@@ -254,12 +287,7 @@ def test_collection_challenger_rejects_move_and_preserves_original_order(
         "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
         "reviewed_at": "2026-07-27T00:00:00+00:00",
     }
-    queue_path = (
-        tmp_path
-        / "runtime"
-        / "librarian"
-        / "collection-review-queue.json"
-    )
+    queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     write_sealed_json(queue_path, queue, backup=True)
     monkeypatch.setattr(
         "chronovisor.ollama.model_digests",
@@ -322,12 +350,7 @@ def test_collection_challenger_records_consensus_without_mutation(
         "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
         "reviewed_at": "2026-07-27T00:00:00+00:00",
     }
-    queue_path = (
-        tmp_path
-        / "runtime"
-        / "librarian"
-        / "collection-review-queue.json"
-    )
+    queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     write_sealed_json(queue_path, queue, backup=True)
     monkeypatch.setattr(
         "chronovisor.ollama.model_digests",
@@ -360,10 +383,7 @@ def test_collection_challenger_records_consensus_without_mutation(
 
     assert persisted_item["status"] == "review_recommended"
     assert persisted_item["challenge_status"] == "consensus_recommended"
-    assert (
-        persisted_item["challenger_review"]["suggested_collection_slug"]
-        == "ai"
-    )
+    assert persisted_item["challenger_review"]["suggested_collection_slug"] == "ai"
     assert persisted["open"] == 1
     assert persisted["assignment_mutations"] == 0
 
@@ -409,10 +429,7 @@ def test_collection_review_checkpoint_survives_later_worker_failure(
         )
 
     queue = read_sealed_json(
-        tmp_path
-        / "runtime"
-        / "librarian"
-        / "collection-review-queue.json"
+        tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     )
     items = list(queue["items"].values())
     assert sum("model_review" in item for item in items) == 1
@@ -519,10 +536,7 @@ def test_collection_lifecycle_is_cas_receipted_and_non_destructive(
     assert moved["affected_page_uids"] == [second_uid]
     assert merged["affected_page_uids"] == [second_uid]
     final = registry.load()
-    assert (
-        final["assignments"][second_uid]["collection_uid"]
-        == career_collection
-    )
+    assert final["assignments"][second_uid]["collection_uid"] == career_collection
     with pytest.raises(CollectionAuthorityError, match="generation changed"):
         registry.apply_lifecycle(
             "rename",
@@ -581,10 +595,7 @@ def test_collection_batch_move_is_one_cas_and_preserves_page_bytes(
     assert receipt["operation"] == "batch_move"
     assert receipt["generation_after"] == state["generation"] + 1
     assert final["assignments"][first_uid]["collection_uid"] == ai_row["uid"]
-    assert (
-        final["assignments"][second_uid]["collection_uid"]
-        == career_row["uid"]
-    )
+    assert final["assignments"][second_uid]["collection_uid"] == career_row["uid"]
     assert first_path.read_bytes() == before[first_uid]
     assert second_path.read_bytes() == before[second_uid]
     assert receipt["page_mutations"] == 0
@@ -613,9 +624,7 @@ def test_host_adjudication_moves_review_required_and_preserves_affinity(
     index = {
         "entries": {
             "orphan": {"outlinks": []},
-            "misplaced": {
-                "outlinks": ["career-a", "career-b", "career-c"]
-            },
+            "misplaced": {"outlinks": ["career-a", "career-b", "career-c"]},
             "career-a": {"outlinks": []},
             "career-b": {"outlinks": []},
             "career-c": {"outlinks": []},
@@ -642,9 +651,7 @@ def test_host_adjudication_moves_review_required_and_preserves_affinity(
             "approved_at": "2026-07-27T00:00:00+00:00",
             "decision_authority": "test_host",
             "expected_registry_generation": registry.load()["generation"],
-            "preserve_remaining_reasons": [
-                "cross_collection_link_affinity"
-            ],
+            "preserve_remaining_reasons": ["cross_collection_link_affinity"],
             "decisions": [
                 {
                     "candidate_id": misc_candidate["candidate_id"],
@@ -658,19 +665,17 @@ def test_host_adjudication_moves_review_required_and_preserves_affinity(
 
     final = registry.load()
     persisted = read_sealed_json(
-        tmp_path
-        / "runtime"
-        / "librarian"
-        / "collection-review-queue.json"
+        tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     )
     ai_collection = final["slug_index"]["ai"]
     assert final["assignments"][misc_uid]["collection_uid"] == ai_collection
     assert result["moves"] == 1
     assert result["preserves"] == 1
     assert result["queue"]["open"] == 0
-    assert {
-        row["status"] for row in persisted["items"].values()
-    } == {"move_approved", "dismissed"}
+    assert {row["status"] for row in persisted["items"].values()} == {
+        "move_approved",
+        "dismissed",
+    }
     assert persisted["host_assignment_mutations"] == 1
     assert persisted["page_mutations"] == 0
     assert misc_path.read_bytes() == before[misc_uid]
@@ -751,16 +756,73 @@ def test_incremental_adjudication_does_not_reopen_terminal_required_items(
     assert second_result["moves"] == 1
     assert second_result["queue"]["open"] == 0
     persisted = read_sealed_json(
-        tmp_path
-        / "runtime"
-        / "librarian"
-        / "collection-review-queue.json"
+        tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     )
     assert persisted["items"][first_candidate["candidate_id"]]["status"] == (
         "move_approved"
     )
     assert persisted["items"][second_candidate["candidate_id"]]["status"] == (
         "move_approved"
+    )
+
+
+def test_local_consensus_moves_and_disagreement_preserves_without_host(
+    tmp_path: Path,
+) -> None:
+    move_uid, preserve_uid, ai_uid = _uids(3, start=470)
+    _page(tmp_path / "pages" / "misc" / "move.md", move_uid)
+    _page(tmp_path / "pages" / "misc" / "preserve.md", preserve_uid)
+    _page(tmp_path / "pages" / "ai" / "reference.md", ai_uid)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(20, start=490)).__next__,
+    )
+    registry.sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    for candidate_id, raw_row in queue["items"].items():
+        row = dict(raw_row)
+        if row["page_uid"] == move_uid:
+            primary_slug = challenger_slug = "ai"
+        elif row["page_uid"] == preserve_uid:
+            primary_slug, challenger_slug = "ai", "career"
+        else:
+            continue
+        row["status"] = "review_recommended"
+        row["model_review"] = {
+            "decision": "review_recommended",
+            "suggested_collection_slug": primary_slug,
+        }
+        row["challenger_review"] = {
+            "decision": "review_recommended",
+            "suggested_collection_slug": challenger_slug,
+        }
+        queue["items"][candidate_id] = row
+    write_sealed_json(
+        tmp_path / "runtime" / "librarian" / "collection-review-queue.json",
+        queue,
+        backup=True,
+    )
+
+    result = autonomously_finalize_collection_queue(tmp_path)
+
+    final = registry.load()
+    assert result["moves"] == 1
+    assert result["terminal_preserves"] == 1
+    assert result["queue_open"] == 0
+    assert final["assignments"][move_uid]["collection_uid"] == final["slug_index"]["ai"]
+    assert (
+        final["assignments"][preserve_uid]["collection_uid"]
+        == final["slug_index"]["misc"]
+    )
+    persisted = read_sealed_json(
+        tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
+    )
+    preserve_row = next(
+        row for row in persisted["items"].values() if row["page_uid"] == preserve_uid
+    )
+    assert preserve_row["status"] == "dismissed"
+    assert preserve_row["resolution"] == (
+        "autonomous_fail_closed_preserve_original_order"
     )
 
 
@@ -785,9 +847,7 @@ def test_review_candidates_detect_misc_and_cross_collection_affinity(
     index = {
         "entries": {
             "orphan": {"outlinks": []},
-            "misplaced": {
-                "outlinks": ["career-a", "career-b", "career-c"]
-            },
+            "misplaced": {"outlinks": ["career-a", "career-b", "career-c"]},
             "career-a": {"outlinks": []},
             "career-b": {"outlinks": []},
             "career-c": {"outlinks": []},
@@ -802,9 +862,7 @@ def test_review_candidates_detect_misc_and_cross_collection_affinity(
     for row in candidates:
         by_uid.setdefault(row["page_uid"], []).append(row)
 
-    assert {row["reason"] for row in by_uid[misc_uid]} == {
-        "collection_requires_review"
-    }
+    assert {row["reason"] for row in by_uid[misc_uid]} == {"collection_requires_review"}
     affinity = next(
         row
         for row in by_uid[ai_uid]
@@ -829,10 +887,7 @@ def test_quality_gate_warns_and_proposes_without_auto_split(
     state = registry.sync_from_pages()["registry"]
     page_index = {
         "entries": {
-            f"ai-{index}": {
-                "outlinks": [f"ai-{(index + 1) % 6}"]
-            }
-            for index in range(6)
+            f"ai-{index}": {"outlinks": [f"ai-{(index + 1) % 6}"]} for index in range(6)
         }
     }
     index_path = tmp_path / ".index" / "pages.json"

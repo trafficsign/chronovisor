@@ -31,6 +31,7 @@ from chronovisor.migration_snapshot import (
     restore_drill,
 )
 from chronovisor.page_registry import PageRegistry, PageRegistryError
+from chronovisor.raw_store import RawStore
 from chronovisor.store import CHRONOVISOR_ROOT
 from chronovisor.uid_link_index import build_uid_link_index
 
@@ -39,11 +40,20 @@ PILOT_SCHEMA = "chronovisor.librarian-pilot.v1"
 MERGE_SCORE_THRESHOLD = 0.95
 
 
-def _load_raw_refs(root: Path, registry: PageRegistry) -> dict[str, list[str]]:
-    raw_by_name = {
-        path.name: str(path.relative_to(root))
-        for path in (root / "raw").rglob("*")
-        if path.is_file()
+def _load_raw_refs(
+    root: Path,
+    registry: PageRegistry,
+    *,
+    only_uids: set[str] | None = None,
+    registry_state: Mapping[str, Any] | None = None,
+) -> dict[str, list[str]]:
+    raw_store = RawStore(root / "raw")
+    loaded_state = dict(registry_state or registry.load())
+    target_uids = set(only_uids or loaded_state["pages"])
+    uid_by_key = {
+        str(key).removesuffix(".md").casefold(): str(uid)
+        for key, uid in (loaded_state.get("keys") or {}).items()
+        if str(uid) in target_uids
     }
     refs: dict[str, set[str]] = defaultdict(set)
     for filename in ("claims/claims.jsonl", "claims/claims-index.jsonl"):
@@ -61,16 +71,17 @@ def _load_raw_refs(root: Path, registry: PageRegistry) -> dict[str, list[str]]:
             source_raw = str(row.get("source_raw") or "")
             if not source_page or not source_raw:
                 continue
-            raw_name = Path(source_raw.removeprefix("replay:")).name
-            raw_path = raw_by_name.get(raw_name)
-            if not raw_path:
+            resolved_uid = uid_by_key.get(source_page.removesuffix(".md").casefold())
+            if resolved_uid is None:
                 continue
+            raw_name = Path(source_raw.removeprefix("replay:")).name
             try:
-                resolved = registry.resolve(source_page)
-            except PageRegistryError:
-                resolved = None
-            if resolved is not None:
-                refs[str(resolved["uid"])].add(raw_path)
+                raw_unit = raw_store.resolve(raw_name)
+            except (OSError, ValueError):
+                raw_unit = None
+            if raw_unit is None:
+                continue
+            refs[resolved_uid].add(f"{raw_unit.raw_id}#sha256={raw_unit.sha256}")
     return {uid: sorted(values) for uid, values in refs.items()}
 
 
@@ -127,6 +138,7 @@ def _rewrite_links(
     text: str,
     *,
     registry: PageRegistry,
+    registry_state: Mapping[str, Any],
     loser_uids: set[str],
     canonical_page_id: str,
 ) -> tuple[str, int, set[str]]:
@@ -141,7 +153,7 @@ def _rewrite_links(
         inside = match.group(1)
         target = normalize_link_target(inside)
         try:
-            resolved = registry.resolve(target)
+            resolved = registry.resolve_from_state(registry_state, target)
         except PageRegistryError:
             resolved = None
         if resolved is None or str(resolved["uid"]) not in loser_uids:
@@ -164,6 +176,7 @@ def _build_union_output(
     *,
     canonical_uid: str,
     registry: PageRegistry,
+    registry_state: Mapping[str, Any],
     root: Path,
 ) -> tuple[str, dict[str, str], set[str]]:
     canonical = next(row for row in source_rows if str(row["uid"]) == canonical_uid)
@@ -190,6 +203,7 @@ def _build_union_output(
         rewritten, _count, anchors = _rewrite_links(
             source_body,
             registry=registry,
+            registry_state=registry_state,
             loser_uids=loser_uids,
             canonical_page_id=canonical_id,
         )
@@ -237,6 +251,7 @@ def _incoming_rewrites(
     root: Path,
     *,
     registry: PageRegistry,
+    registry_state: Mapping[str, Any],
     source_rows: Sequence[Mapping[str, Any]],
     canonical_uid: str,
 ) -> tuple[dict[str, str], set[str]]:
@@ -244,10 +259,9 @@ def _incoming_rewrites(
     loser_uids = source_uids - {canonical_uid}
     canonical = next(row for row in source_rows if str(row["uid"]) == canonical_uid)
     canonical_page_id = (root / str(canonical["path"])).stem
-    state = registry.load()
     updates: dict[str, str] = {}
     anchors: set[str] = set()
-    for uid, row in state["pages"].items():
+    for uid, row in registry_state["pages"].items():
         if (
             uid in source_uids
             or not isinstance(row, Mapping)
@@ -261,6 +275,7 @@ def _incoming_rewrites(
         rewritten, count, found_anchors = _rewrite_links(
             text,
             registry=registry,
+            registry_state=registry_state,
             loser_uids=loser_uids,
             canonical_page_id=canonical_page_id,
         )
@@ -297,22 +312,29 @@ def prepare_cluster_plan(
     page_keys: Sequence[str],
 ) -> dict[str, Any]:
     registry = PageRegistry(root)
+    registry_state = registry.load()
     rows_by_uid = {}
     for key in page_keys:
-        row = registry.resolve(key)
+        row = registry.resolve_from_state(registry_state, key)
         if row is None:
             raise KeyError(key)
         rows_by_uid[str(row["uid"])] = row
     rows = list(rows_by_uid.values())
     if len(rows) < 2:
         raise ValueError("merge cluster requires at least two active pages")
-    raw_refs = _load_raw_refs(root, registry)
+    raw_refs = _load_raw_refs(
+        root,
+        registry,
+        only_uids=set(rows_by_uid),
+        registry_state=registry_state,
+    )
     missing_raw = sorted(uid for uid in rows_by_uid if not raw_refs.get(uid))
     if missing_raw:
         return {
-            "status": "held",
-            "reason": "raw_provenance_missing",
-            "uids": missing_raw,
+            "status": "kept",
+            "reason": "raw_provenance_unrecoverable_keep_both",
+            "uids": sorted(rows_by_uid),
+            "missing_raw_uids": missing_raw,
         }
     link_index = build_uid_link_index(root, registry=registry, write=True)
     canonical_uid = _choose_canonical(rows, link_index=link_index)
@@ -320,25 +342,24 @@ def prepare_cluster_plan(
         rows,
         canonical_uid=canonical_uid,
         registry=registry,
+        registry_state=registry_state,
         root=root,
     )
     affected, incoming_anchors = _incoming_rewrites(
         root,
         registry=registry,
+        registry_state=registry_state,
         source_rows=rows,
         canonical_uid=canonical_uid,
     )
     for uid in anchor_maps:
-        anchor_maps[uid].update(
-            {anchor: anchor for anchor in sorted(incoming_anchors)}
-        )
+        anchor_maps[uid].update({anchor: anchor for anchor in sorted(incoming_anchors)})
     missing_heading_anchors = []
     for anchor in sorted(incoming_anchors):
         normalized = anchor.strip().casefold().replace(" ", "-")
         if not any(
             line.startswith("#")
-            and line.lstrip("#").strip().casefold().replace(" ", "-")
-            == normalized
+            and line.lstrip("#").strip().casefold().replace(" ", "-") == normalized
             for line in output.splitlines()
         ):
             missing_heading_anchors.append(anchor)
@@ -496,17 +517,17 @@ def run_merge_migration(
         plan = prepare_cluster_plan(root, page_keys=component)
         if plan.get("status") != shadow_plan.get("status"):
             raise RuntimeError("cluster disposition changed after shadow preflight")
-        if plan.get("status") == "held":
+        if plan.get("status") in {"held", "kept"}:
             result = dict(plan)
             for uid in plan.get("uids") or []:
                 dispositions["pages"][uid] = {
-                    "disposition": "explicit-hold",
+                    "disposition": (
+                        "explicit-hold" if plan.get("status") == "held" else "keep-both"
+                    ),
                     "reason": plan["reason"],
                 }
         else:
-            paths = [
-                root / str(row["path"]) for row in plan.get("inputs") or []
-            ] + [
+            paths = [root / str(row["path"]) for row in plan.get("inputs") or []] + [
                 root / str(row["path"]) for row in plan.get("link_rewrites") or []
             ]
             restore = _verified_incremental(
@@ -531,9 +552,7 @@ def run_merge_migration(
             for row in plan["inputs"]:
                 uid = str(row["uid"])
                 dispositions["pages"][uid] = {
-                    "disposition": (
-                        "merged" if uid != output_uid else "canonical"
-                    ),
+                    "disposition": ("merged" if uid != output_uid else "canonical"),
                     "canonical_uid": output_uid,
                     "transaction_id": plan["transaction_id"],
                 }
@@ -543,9 +562,7 @@ def run_merge_migration(
         dispositions["clusters"][cluster_id] = {
             "members": component,
             "result": {
-                key: value
-                for key, value in result.items()
-                if key not in {"receipt"}
+                key: value for key, value in result.items() if key not in {"receipt"}
             },
         }
         cluster_results.append(result)
@@ -558,9 +575,7 @@ def run_merge_migration(
                 and row.get("status") != "superseded"
                 and uid not in dispositions["pages"]
             ):
-                classification_status = str(
-                    row.get("classification_status") or ""
-                )
+                classification_status = str(row.get("classification_status") or "")
                 dispositions["pages"][uid] = {
                     "disposition": (
                         "explicit-hold"
@@ -592,6 +607,7 @@ def run_merge_migration(
             result.get("status") == "committed" for result in cluster_results
         ),
         "held": sum(result.get("status") == "held" for result in cluster_results),
+        "kept": sum(result.get("status") == "kept" for result in cluster_results),
         "terminal_pages": len(dispositions["pages"]),
         "duration_seconds": round(time.monotonic() - started, 3),
         "results": cluster_results,
