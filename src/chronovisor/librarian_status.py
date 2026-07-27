@@ -94,16 +94,43 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
     }
     unregistered = sorted(set(actual) - set(registered))
     missing = sorted(set(registered) - set(actual))
+    collection_unregistered = sorted(
+        relative for relative in unregistered if relative.startswith("pages/")
+    )
+    collection_missing = sorted(
+        relative
+        for relative in missing
+        if relative.startswith("pages/")
+        and str((registered.get(relative) or {}).get("status") or "active")
+        == "active"
+    )
     changed: list[str] = []
+    collection_changed: list[str] = []
     current_classified = 0
     current_held = 0
     current_terminal = 0
     current_adopted = 0
+    current_collection_assigned = 0
+    current_collection_review = 0
+    collection_actual_total = 0
+    collection_registered_current = 0
     rows = []
+    collection_rows = []
     for relative, stat in sorted(actual.items()):
         row = registered.get(relative)
         status = str(row.get("status") or "active") if row else "active"
+        in_collection_scope = (
+            relative.startswith("pages/") and status == "active"
+        )
+        collection_actual_total += int(in_collection_scope)
+        collection_registered_current += int(
+            in_collection_scope and row is not None
+        )
         rows.append((relative, stat.st_size, stat.st_mtime_ns, status))
+        if in_collection_scope:
+            collection_rows.append(
+                (relative, stat.st_size, stat.st_mtime_ns, status)
+            )
         if row is None:
             continue
         is_current = (
@@ -112,7 +139,14 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
         )
         if not is_current:
             changed.append(relative)
+            if in_collection_scope:
+                collection_changed.append(relative)
             continue
+        if row.get("collection_uid"):
+            current_collection_assigned += 1
+            current_collection_review += int(
+                row.get("collection_status") == "review_required"
+            )
         if isinstance(row.get("classification"), Mapping):
             current_classified += 1
             classification_status = str(row.get("classification_status") or "")
@@ -120,18 +154,38 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
             current_adopted += int(classification_status == "adopted")
             current_terminal += int(classification_status in {"adopted", "held"})
     encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    collection_encoded = json.dumps(
+        collection_rows,
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
     return {
         "scope_generation": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+        "collection_scope_generation": (
+            "sha256:" + hashlib.sha256(collection_encoded).hexdigest()
+        ),
         "actual_total": len(actual),
         "registered_current": len(actual) - len(unregistered),
         "current_classified": current_classified,
         "current_held": current_held,
         "current_terminal": current_terminal,
         "current_adopted": current_adopted,
+        "current_collection_assigned": current_collection_assigned,
+        "current_collection_review": current_collection_review,
+        "collection_actual_total": collection_actual_total,
+        "collection_registered_current": collection_registered_current,
         "unregistered": unregistered,
         "changed": changed,
         "missing": missing,
         "actionable": len(unregistered) + len(changed) + len(missing),
+        "collection_unregistered": collection_unregistered,
+        "collection_changed": collection_changed,
+        "collection_missing": collection_missing,
+        "collection_actionable": (
+            len(collection_unregistered)
+            + len(collection_changed)
+            + len(collection_missing)
+        ),
     }
 
 
@@ -826,6 +880,41 @@ def _current_quality(
     return quality
 
 
+def _collection_control_plane(root: Path) -> dict[str, Any]:
+    quality_path = root / "runtime" / "librarian" / "collection-quality.json"
+    queue_path = (
+        root / "runtime" / "librarian" / "collection-review-queue.json"
+    )
+    registry_path = (
+        root / "runtime" / "librarian" / "collection-registry.json"
+    )
+    quality = _safe_receipt(quality_path)
+    queue = _safe_receipt(queue_path)
+    registry = _safe_receipt(registry_path)
+    metrics = quality.get("metrics")
+    metrics = dict(metrics) if isinstance(metrics, Mapping) else {}
+    return {
+        "status": quality.get("status") or "not_started",
+        "metrics": metrics,
+        "warnings": list(quality.get("warnings") or []),
+        "hard_failures": list(quality.get("hard_failures") or []),
+        "split_proposals": list(quality.get("split_proposals") or []),
+        "queue": {
+            "candidate_count": int(queue.get("candidate_count") or 0),
+            "open": int(queue.get("open") or 0),
+            "added": int(queue.get("added") or 0),
+            "completed": int(queue.get("completed") or 0),
+            "reviewer_calls": int(queue.get("reviewer_calls") or 0),
+            "frontier_calls": int(queue.get("frontier_calls") or 0),
+        },
+        "registry": {
+            "generation": int(registry.get("generation") or 0),
+            "collection_count": len(registry.get("collections") or {}),
+            "assignment_count": len(registry.get("assignments") or {}),
+        },
+    }
+
+
 def build_librarian_status(
     root: Path,
     *,
@@ -859,26 +948,73 @@ def build_librarian_status(
         state = {**state, "blocked_reasons": blocked_reasons}
     observed = _observed_scope(root, registry)
     try:
-        from chronovisor.classification import classification_authority_status
+        collection_registry_path = (
+            root / "runtime" / "librarian" / "collection-registry.json"
+        )
+        if collection_registry_path.is_file():
+            from chronovisor.collection_authority import (
+                collection_authority_status,
+            )
 
-        authority = classification_authority_status(root)
+            authority = collection_authority_status(root)
+        else:
+            from chronovisor.classification import (
+                classification_authority_status,
+            )
+
+            authority = classification_authority_status(root)
     except (DurableStateError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
         authority = {
             "active": False,
-            "reason": "classification_authority_unavailable",
+            "mode": "collection-first",
+            "reason": "collection_authority_unavailable",
         }
+    collection_first = authority.get("mode") == "collection-first"
     progress = {
         str(key): dict(value) if isinstance(value, Mapping) else {}
         for key, value in (state.get("progress") or {}).items()
     }
-    actual_total = int(observed["actual_total"])
-    current_classified = int(observed["current_classified"])
-    current_held = int(observed["current_held"])
-    current_terminal = int(observed["current_terminal"])
-    current_adopted = int(observed["current_adopted"])
-    observed_generation = str(observed["scope_generation"])
+    actual_total = int(
+        observed["collection_actual_total"]
+        if collection_first
+        else observed["actual_total"]
+    )
+    current_classified = (
+        int(observed["current_collection_assigned"])
+        if collection_first
+        else int(observed["current_classified"])
+    )
+    current_held = (
+        int(observed["current_collection_review"])
+        if collection_first
+        else int(observed["current_held"])
+    )
+    current_terminal = (
+        current_classified - current_held
+        if collection_first
+        else int(observed["current_terminal"])
+    )
+    current_adopted = (
+        current_terminal
+        if collection_first
+        else int(observed["current_adopted"])
+    )
+    observed_generation = str(
+        observed[
+            "collection_scope_generation"
+            if collection_first
+            else "scope_generation"
+        ]
+    )
     for key, numerator in (
-        ("uid", int(observed["registered_current"])),
+        (
+            "uid",
+            int(
+                observed["collection_registered_current"]
+                if collection_first
+                else observed["registered_current"]
+            ),
+        ),
         ("classification_shadow", current_classified),
         ("classification_terminal", current_terminal),
         ("migration_batch", current_terminal),
@@ -889,8 +1025,15 @@ def build_librarian_status(
             "denominator": actual_total,
             "scope_generation": observed_generation,
         }
+    progress["collection_assignment"] = {
+        "numerator": int(observed["current_collection_assigned"]),
+        "denominator": actual_total,
+        "scope_generation": observed_generation,
+    }
     sweep_current = bool(
-        not observed["actionable"]
+        not observed[
+            "collection_actionable" if collection_first else "actionable"
+        ]
         and state.get("last_swept_scope_generation") == observed_generation
     )
     progress["full_sweep"] = {
@@ -901,10 +1044,23 @@ def build_librarian_status(
         "current": sweep_current,
     }
     preimages = _transaction_preimages(root)
+    collection_plane = _collection_control_plane(root)
+    collection_queue_open = (
+        int(collection_plane["queue"]["open"]) if collection_first else 0
+    )
     queue = {
         **queue,
-        "queued": actual_total - current_classified,
-        "actionable": actual_total - current_classified + len(observed["missing"]),
+        "queued": actual_total - current_classified + collection_queue_open,
+        "actionable": (
+            actual_total
+            - current_classified
+            + len(
+                observed[
+                    "collection_missing" if collection_first else "missing"
+                ]
+            )
+            + collection_queue_open
+        ),
         "running": 0,
         "held": current_held,
         "quarantined": int(preimages["count"]),
@@ -914,9 +1070,24 @@ def build_librarian_status(
         **dict(state.get("debts") or {}),
         "unclassified": actual_total - current_classified,
         "explicit_hold": current_held,
-        "scope_unregistered": len(observed["unregistered"]),
-        "scope_changed": len(observed["changed"]),
-        "scope_missing": len(observed["missing"]),
+        "scope_unregistered": len(
+            observed[
+                "collection_unregistered"
+                if collection_first
+                else "unregistered"
+            ]
+        ),
+        "scope_changed": len(
+            observed[
+                "collection_changed" if collection_first else "changed"
+            ]
+        ),
+        "scope_missing": len(
+            observed[
+                "collection_missing" if collection_first else "missing"
+            ]
+        ),
+        "collection_review_queue": collection_queue_open,
     }
     state = {
         **state,
@@ -956,15 +1127,25 @@ def build_librarian_status(
                 if observed["actionable"]
                 else "Shadow migration is current; "
             )
-            + "classification authority remains "
-            "fail-closed until a complete licensed UDC package and calibrated "
-            "locked fixture exist."
+            + (
+                "collection authority remains fail-closed until the sealed "
+                "collection audit and current quality gates pass."
+                if collection_first
+                else "classification authority remains fail-closed until a "
+                "complete licensed UDC package and calibrated locked fixture "
+                "exist."
+            )
         )
     elif code == "MIGRATING":
         detail = (
             f"{current_terminal} of {actual_total} pages have terminal "
-            "classification; initial organization and concurrent migration "
-            "observation are still in progress."
+            + (
+                "collection assignment; initial organization and review-queue "
+                "triage are still in progress."
+                if collection_first
+                else "classification; initial organization and concurrent "
+                "migration observation are still in progress."
+            )
         )
     dispositions = _migration_dispositions(root)
     soak = _soak_status(root, current)
@@ -1008,7 +1189,23 @@ def build_librarian_status(
         "progress": progress,
         "queue": queue,
         "debts": debts,
-        "quality": _current_quality(root, state.get("quality") or {}),
+        "quality": (
+            {
+                **dict(state.get("quality") or {}),
+                "collection_status": collection_plane["status"],
+                "collection_metrics": collection_plane["metrics"],
+                "collection_warnings": collection_plane["warnings"],
+                "collection_hard_failures": collection_plane[
+                    "hard_failures"
+                ],
+                "legacy_page_udc_gate": (
+                    "superseded_by_collection_authority_v1"
+                ),
+            }
+            if collection_first
+            else _current_quality(root, state.get("quality") or {})
+        ),
+        "collection_authority": collection_plane,
         "resources": dict(state.get("resources") or {}),
         "library_evidence": _library_evidence_status(root),
         "flow": {

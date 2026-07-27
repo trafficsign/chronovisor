@@ -91,6 +91,69 @@ def _run_stage(
     return result
 
 
+def _run_collection_rollout(root: Path) -> dict[str, Any]:
+    """Resume the ADR-0001 path without invoking superseded page classifiers."""
+
+    from chronovisor.collection_authority import (
+        collection_authority_status,
+        run_collection_librarian,
+    )
+
+    result = _run_stage(
+        root,
+        "phase5_collection_sync",
+        lambda: run_collection_librarian(root, evaluate_unseen=True),
+    )
+    authority = collection_authority_status(root)
+    if not authority.get("active"):
+        raise RolloutBlocked(
+            "collection authority rejected by preregistered quality gates"
+        )
+    quality = result["quality"]
+    phase5 = {
+        "status": "ok",
+        "method": "collection-first-authority",
+        "assignment_count": result["sync"]["assignment_count"],
+        "collection_count": result["sync"]["collection_count"],
+        "quality_status": quality["status"],
+        "review_queue_open": result["queue"]["open"],
+        "page_mutations": 0,
+        "model_calls": 0,
+    }
+    write_sealed_json(
+        root / "runtime" / "librarian" / "phase5-receipt.json",
+        phase5,
+        backup=True,
+    )
+    write_sealed_json(
+        root / "runtime" / "librarian" / "phase6-receipt.json",
+        {
+            "status": "ok",
+            "method": "legacy-page-udc-metadata-superseded",
+            "collection_registry_mirror_generation": result["sync"][
+                "page_registry_mirror"
+            ]["generation"],
+            "page_mutations": 0,
+        },
+        backup=True,
+    )
+    return _write_state(
+        root,
+        status="observing",
+        stage="collection_review_queue",
+        detail={
+            "authority": authority,
+            "quality": {
+                "status": quality["status"],
+                "warnings": quality["warnings"],
+                "hard_failures": quality["hard_failures"],
+            },
+            "review_queue": result["queue"],
+            "next_gate": "review_queue_budget_and_split_proposal_audit",
+        },
+    )
+
+
 def run_rollout(
     root: Path = CHRONOVISOR_ROOT,
     *,
@@ -102,6 +165,22 @@ def run_rollout(
 
     lock_path = root / "runtime" / "librarian" / "rollout.lock"
     with file_lock(lock_path):
+        collection_receipt = _read_json(
+            root
+            / "runtime"
+            / "librarian"
+            / "phase4-collection-authority.json"
+        )
+        if collection_receipt.get("status") == "adopted":
+            try:
+                return _run_collection_rollout(root)
+            except RolloutBlocked as exc:
+                return _write_state(
+                    root,
+                    status="blocked",
+                    stage="quality_gate",
+                    detail={"error": str(exc)},
+                )
         release = _read_json(
             root / "runtime" / "librarian" / "phase12-release.json"
         )

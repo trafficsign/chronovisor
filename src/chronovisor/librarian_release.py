@@ -266,6 +266,31 @@ def reconcile_librarian_state(
 ) -> dict[str, Any]:
     """Refresh host-derived state after classification or migration work."""
 
+    if (
+        root / "runtime" / "librarian" / "collection-registry.json"
+    ).is_file():
+        from chronovisor.librarian import run_shadow
+
+        current = dict(run_shadow(root=root)["state"])
+        changed = False
+        if mode is not None and current.get("mode") != mode:
+            current["mode"] = mode
+            changed = True
+        if (
+            initial_complete_at is not None
+            and current.get("initial_organization_complete_at")
+            != initial_complete_at
+        ):
+            current["initial_organization_complete_at"] = initial_complete_at
+            changed = True
+        if changed:
+            write_sealed_json(
+                root / "runtime" / "librarian" / "state.json",
+                current,
+                backup=True,
+            )
+        return current
+
     registry = PageRegistry(root)
     state = registry.ensure_manifest(write=True)["registry"]
     active = {
@@ -442,9 +467,21 @@ def _release_prerequisite_errors(
             invalid.append(
                 f"{filename}:{payload.get('status')}!={expected_status}"
             )
-    calibration = _json(root / "classification" / "calibration.json")
-    if calibration.get("status") != "adopted":
-        invalid.append("classification/calibration.json:not_adopted")
+    collection_receipt = _json(
+        root / "runtime" / "librarian" / "phase4-collection-authority.json"
+    )
+    if collection_receipt.get("status") == "adopted":
+        authority = (
+            (collection_receipt.get("authority") or {})
+            if isinstance(collection_receipt.get("authority"), dict)
+            else {}
+        )
+        if not authority.get("active"):
+            invalid.append("phase4-collection-authority.json:not_active")
+    else:
+        calibration = _json(root / "classification" / "calibration.json")
+        if calibration.get("status") != "adopted":
+            invalid.append("classification/calibration.json:not_adopted")
     return missing, invalid
 
 

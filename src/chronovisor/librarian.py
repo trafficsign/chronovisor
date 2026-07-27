@@ -179,7 +179,7 @@ def capture_baseline(
     return payload
 
 
-def run_shadow(
+def run_legacy_udc_shadow(
     *,
     root: Path = CHRONOVISOR_ROOT,
     limit: int = 250,
@@ -429,6 +429,197 @@ def run_shadow(
     }
 
 
+def run_shadow(
+    *,
+    root: Path = CHRONOVISOR_ROOT,
+    limit: int = 250,
+    full_sweep: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Run the collection-first Librarian without page or model mutation.
+
+    ``limit`` and ``full_sweep`` remain accepted for the stable CLI/Sleep
+    contract. Collection reconciliation is a deterministic metadata scan and
+    therefore always observes the complete current scope.
+    """
+
+    del limit, full_sweep
+    from chronovisor.collection_authority import run_collection_librarian
+
+    started = time.monotonic()
+    result = run_collection_librarian(root, dry_run=dry_run)
+    if dry_run:
+        return result
+    sync = result["sync"]
+    collection_state = sync["registry"]
+    assignments = collection_state.get("assignments") or {}
+    collections = collection_state.get("collections") or {}
+    total = len(assignments)
+    review_required = {
+        str(uid)
+        for uid, row in PageRegistry(root).load()["pages"].items()
+        if isinstance(row, Mapping)
+        and row.get("status") == "active"
+        and row.get("collection_status") == "review_required"
+    }
+    unclassified = sum(
+        isinstance(row, Mapping) and row.get("status") == "unclassified"
+        for row in assignments.values()
+    )
+    assigned = max(0, total - unclassified)
+    queue = result["queue"]
+    quality = result["quality"]
+    authority = result["authority"]
+    scope_generation = _scope_generation(
+        root,
+        {
+            uid: row
+            for uid, row in PageRegistry(root).load()["pages"].items()
+            if isinstance(row, Mapping)
+            and row.get("status") == "active"
+            and str(row.get("path") or "").startswith("pages/")
+            and (root / str(row.get("path") or "")).is_file()
+        },
+    )
+    link_path = root / "runtime" / "librarian" / "uid-link-index.json"
+    try:
+        links = json.loads(link_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        links = {}
+    link_count = int(links.get("edge_count") or 0)
+    unresolved_links = int(links.get("unresolved_count") or 0)
+    previous = load_librarian_state(root)
+    organization_complete = bool(
+        authority.get("active")
+        and quality["metrics"]["assignment_coverage"] == 1.0
+    )
+    initial_complete_at = previous.get("initial_organization_complete_at")
+    if organization_complete and not initial_complete_at:
+        initial_complete_at = _now_iso()
+    progress = {
+        "uid": {
+            "numerator": total,
+            "denominator": total,
+            "scope_generation": scope_generation,
+        },
+        "collection_assignment": {
+            "numerator": total,
+            "denominator": total,
+            "scope_generation": scope_generation,
+        },
+        # Backward-compatible snapshot key during the dashboard transition.
+        "classification_shadow": {
+            "numerator": total,
+            "denominator": total,
+            "scope_generation": scope_generation,
+            "note": "collection-first authority; no per-page UDC prediction",
+        },
+        "classification_terminal": {
+            "numerator": assigned,
+            "denominator": total,
+            "scope_generation": scope_generation,
+        },
+        "links": {
+            "numerator": link_count,
+            "denominator": link_count + unresolved_links,
+            "scope_generation": scope_generation,
+            "unresolved": unresolved_links,
+        },
+        "migration_batch": {
+            "numerator": total,
+            "denominator": total,
+            "scope_generation": scope_generation,
+        },
+        "full_sweep": {
+            "numerator": 1,
+            "denominator": 1,
+            "scope_generation": scope_generation,
+            "current": True,
+        },
+    }
+    state = {
+        "schema": STATE_SCHEMA,
+        "enabled": True,
+        "mode": "active" if authority.get("active") else "shadow",
+        "generation": int(previous.get("generation") or 0) + 1,
+        "scope_generation": scope_generation,
+        "last_swept_scope_generation": scope_generation,
+        "initial_organization_complete_at": initial_complete_at,
+        "authority": authority,
+        "progress": progress,
+        "queue": {
+            "queued": int(queue.get("open") or 0),
+            "actionable": int(queue.get("open") or 0),
+            "running": 0,
+            "held": len(review_required),
+            "quarantined": 0,
+            "completed": assigned - len(review_required),
+            "oldest_age_seconds": 0,
+        },
+        "debts": {
+            "unclassified": unclassified,
+            "review_required": len(review_required),
+            "unresolved_link": unresolved_links,
+            "worker_failure": 0,
+        },
+        "quality": {
+            "collection_authority_active": bool(authority.get("active")),
+            "collection_metrics": quality["metrics"],
+            "collection_warnings": quality["warnings"],
+            "collection_hard_failures": quality["hard_failures"],
+            "legacy_page_udc_gate": "superseded_by_collection_authority_v1",
+        },
+        "resources": {
+            "priority": "P3",
+            "model_calls": 0,
+            "frontier_calls": 0,
+            "p0_preemption_contract": "deterministic_collection_sync",
+        },
+        "blocked_reasons": list(quality["hard_failures"]),
+        "last_run": _now_iso(),
+        "last_result": {
+            "assigned": assigned,
+            "review_required": len(review_required),
+            "unclassified": unclassified,
+            "collection_count": len(
+                [
+                    row
+                    for row in collections.values()
+                    if isinstance(row, Mapping) and row.get("status") == "active"
+                ]
+            ),
+            "duration_seconds": round(time.monotonic() - started, 3),
+        },
+    }
+    write_sealed_json(
+        root / "runtime" / "librarian" / "state.json",
+        state,
+        backup=True,
+    )
+    _append_event(
+        root / "runtime" / "librarian" / "events.jsonl",
+        {
+            "event": "collection_sync",
+            "status": result["status"],
+            "assigned": assigned,
+            "held": len(review_required),
+            "collection_count": state["last_result"]["collection_count"],
+            "scope_generation": scope_generation,
+            "registry_generation": sync["generation"],
+        },
+    )
+    return {
+        **result,
+        "scope_generation": scope_generation,
+        "observed": total,
+        "assigned": assigned,
+        "held": len(review_required),
+        "remaining": unclassified,
+        "failures": [],
+        "state": state,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Chronovisor Librarian worker")
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
@@ -437,25 +628,90 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--capture-baseline", action="store_true")
+    parser.add_argument(
+        "--legacy-udc-shadow",
+        action="store_true",
+        help="run the superseded page-to-UDC shadow for diagnostics only",
+    )
+    parser.add_argument(
+        "--evaluate-collection-unseen",
+        action="store_true",
+        help="open the preregistered 40-case collection audit once",
+    )
+    parser.add_argument(
+        "--review-collection-queue",
+        action="store_true",
+        help="run bounded local-only anomaly review without mutation",
+    )
+    parser.add_argument("--review-model")
+    parser.add_argument(
+        "--collection-operation",
+        choices=("rename", "merge", "split", "move"),
+    )
+    parser.add_argument("--collection-uid")
+    parser.add_argument("--target-collection-uid")
+    parser.add_argument("--page-uid", action="append", default=[])
+    parser.add_argument("--new-label")
+    parser.add_argument("--new-slug")
+    parser.add_argument("--expected-collection-generation", type=int)
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    payload = (
-        capture_baseline(
+    if args.collection_operation:
+        from chronovisor.collection_authority import CollectionRegistry
+
+        if args.expected_collection_generation is None:
+            parser.error(
+                "--collection-operation requires "
+                "--expected-collection-generation"
+            )
+        payload = CollectionRegistry(args.root).apply_lifecycle(
+            args.collection_operation,
+            expected_generation=args.expected_collection_generation,
+            collection_uid=args.collection_uid,
+            target_collection_uid=args.target_collection_uid,
+            page_uids=args.page_uid,
+            new_label=args.new_label,
+            new_slug=args.new_slug,
+        )
+    elif args.capture_baseline:
+        payload = capture_baseline(
             root=args.root,
             repo_root=args.repo_root,
             write=not args.dry_run,
         )
-        if args.capture_baseline
-        else build_librarian_status(args.root)
-        if args.status
-        else run_shadow(
+    elif args.status:
+        payload = build_librarian_status(args.root)
+    elif args.legacy_udc_shadow:
+        payload = run_legacy_udc_shadow(
             root=args.root,
             limit=args.limit,
             full_sweep=args.full_sweep,
             dry_run=args.dry_run,
         )
-    )
+    elif args.evaluate_collection_unseen:
+        from chronovisor.collection_authority import run_collection_librarian
+
+        payload = run_collection_librarian(
+            args.root,
+            evaluate_unseen=True,
+            dry_run=args.dry_run,
+        )
+    elif args.review_collection_queue:
+        from chronovisor.collection_authority import review_collection_queue
+
+        payload = review_collection_queue(
+            args.root,
+            limit=max(0, args.limit),
+            model=args.review_model,
+        )
+    else:
+        payload = run_shadow(
+            root=args.root,
+            limit=args.limit,
+            full_sweep=args.full_sweep,
+            dry_run=args.dry_run,
+        )
     print(
         json.dumps(payload, ensure_ascii=False, sort_keys=True)
         if args.json

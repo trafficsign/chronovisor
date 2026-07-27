@@ -181,7 +181,7 @@
         <div class="panel-head">
           <div>
             <h2>Librarian</h2>
-            <p>Classification, identity, link integrity, and consolidation progress.</p>
+            <p>Collection authority, identity, link integrity, and consolidation progress.</p>
           </div>
           <span class="librarian-state" id="librarian-state">NOT_READY</span>
         </div>
@@ -203,7 +203,7 @@
             <div class="librarian-progress-track"><i id="librarian-uid-bar"></i></div>
           </div>
           <div class="librarian-progress-card">
-            <span>Classified (shadow)</span>
+            <span>Collection assigned</span>
             <strong id="librarian-classification">-- / --</strong>
             <div class="librarian-progress-track"><i id="librarian-classification-bar"></i></div>
           </div>
@@ -225,7 +225,13 @@
         </div>
         <div class="librarian-gate-grid" aria-label="Librarian release gates">
           <div><span>Authority</span><strong id="librarian-authority">Shadow only</strong></div>
-          <div><span>Holdout quality</span><strong id="librarian-quality">Not evaluated</strong></div>
+          <div><span>Collection quality</span><strong id="librarian-quality">Not evaluated</strong></div>
+          <div><span>Collections</span><strong id="librarian-collection-count">--</strong></div>
+          <div><span>Assignment coverage</span><strong id="librarian-assignment">--</strong></div>
+          <div><span>Crosswalk audit</span><strong id="librarian-crosswalk">--</strong></div>
+          <div><span>Largest collection</span><strong id="librarian-top-share">--</strong></div>
+          <div><span>Placement review</span><strong id="librarian-review-queue">--</strong></div>
+          <div><span>Split proposals</span><strong id="librarian-split-proposals">--</strong></div>
           <div><span>Rollout</span><strong id="librarian-rollout">Not started</strong></div>
               <div><span>Migration observation</span><strong id="librarian-soak">Not started</strong></div>
           <div><span>Recovery insurance</span><strong id="librarian-recovery">--</strong></div>

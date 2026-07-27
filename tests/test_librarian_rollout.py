@@ -3,12 +3,74 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor import librarian_rollout
+from chronovisor import collection_authority, librarian_rollout
+from chronovisor.durable_state import read_sealed_json, write_sealed_json
 
 
 def _write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_rollout_uses_collection_phase4_and_skips_legacy_classifier(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_sealed_json(
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "phase4-collection-authority.json",
+        {"status": "adopted"},
+        backup=False,
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "run_collection_librarian",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "sync": {
+                "assignment_count": 12,
+                "collection_count": 3,
+                "page_registry_mirror": {"generation": 7},
+            },
+            "quality": {
+                "status": "passed",
+                "warnings": ["top_collection_share"],
+                "hard_failures": [],
+            },
+            "queue": {"open": 2},
+        },
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "collection_authority_status",
+        lambda _root: {"active": True, "mode": "collection-first"},
+    )
+    monkeypatch.setattr(
+        librarian_rollout,
+        "adjudicate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy classification must not run")
+        ),
+    )
+
+    result = librarian_rollout.run_rollout(tmp_path)
+
+    assert result["status"] == "observing"
+    assert result["stage"] == "collection_review_queue"
+    assert (
+        read_sealed_json(
+            tmp_path / "runtime" / "librarian" / "phase5-receipt.json"
+        )["method"]
+        == "collection-first-authority"
+    )
+    assert (
+        read_sealed_json(
+            tmp_path / "runtime" / "librarian" / "phase6-receipt.json"
+        )["page_mutations"]
+        == 0
+    )
 
 
 def test_rollout_observes_migration_and_releases_after_evidence(

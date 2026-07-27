@@ -1,0 +1,24 @@
+{
+  "schema": "chronovisor.collection-authority-unseen-prereg.v1",
+  "epoch": "collection-authority-unseen-v1",
+  "status": "locked-before-evaluation",
+  "locked_at": "2026-07-27",
+  "selection_schema": "chronovisor.cvo-ab-unseen-selection.v1",
+  "selection_seal_sha256": "9549e966d5453b36bf80f64088649e861c746989091f65cf9efd2be3d4423ed7",
+  "case_count": 40,
+  "evaluation_contract": {
+    "assignment_or_review_rate_min": 1.0,
+    "major_error_max": 0,
+    "crosswalk_invalid_max": 0,
+    "page_mutations_max": 0,
+    "model_calls": 0,
+    "review_required_is_not_counted_as_assigned_correct": true,
+    "review_required_passes_only_when_gold_requires_review_and_queue_reason_is_deterministic": true
+  },
+  "scoring": {
+    "assigned_correct": "logical collection slug is in acceptable_collection_slugs",
+    "review_correct": "gold disposition is review and a deterministic review queue item exists",
+    "major_error": "neither assigned_correct nor review_correct",
+    "crosswalk_valid": "assigned collection has a fully audited exact or broad mapping"
+  }
+}

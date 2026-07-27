@@ -1,0 +1,51 @@
+{
+  "schema": "chronovisor.collection-authority-contract.v1",
+  "epoch": "collection-authority-v1",
+  "status": "adopted",
+  "adopted_at": "2026-07-27",
+  "decision": "existing_collection_is_primary_authority",
+  "supersedes": [
+    "page_to_udc_exact_match_gate",
+    "page_to_cvo_anchor_exact_match_gate",
+    "mandatory_per_page_udc_prediction"
+  ],
+  "invariants": [
+    "physical_folder_is_bootstrap_provenance_not_mutable_identity",
+    "stable_collection_uid_is_identity",
+    "collection_lifecycle_changes_require_generation_cas_and_receipt",
+    "unassigned_pages_enter_unclassified_and_review_queue",
+    "udc_and_cvo_are_collection_level_crosswalks_only",
+    "crosswalk_is_versioned_many_to_many_and_fully_audited",
+    "llm_review_may_create_queue_evidence_but_never_mutate_assignment",
+    "split_detection_proposes_only_and_never_auto_splits",
+    "sealed_fixture_is_opened_only_after_contract_and_gold_lock"
+  ],
+  "quality_gates": {
+    "assignment_coverage_min": 1.0,
+    "duplicate_page_assignment_max": 0,
+    "crosswalk_audit_coverage_min": 1.0,
+    "unseen_assignment_or_review_rate_min": 1.0,
+    "unseen_major_error_max": 0,
+    "unresolved_link_max": 0,
+    "top_collection_share_warn": 0.35,
+    "top_collection_share_block": 0.6,
+    "median_collection_size_min": 1,
+    "review_queue_open_max": 500,
+    "review_queue_new_per_run_max": 100,
+    "review_candidate_rate_warn": 0.1
+  },
+  "anomaly_reviewer": {
+    "role": "review_only",
+    "default_model": "gemma4:26b",
+    "priority": "P3",
+    "frontier_calls": 0,
+    "assignment_mutation_capability": false,
+    "page_mutation_capability": false
+  },
+  "migration": {
+    "legacy_phase4_gate": "explicitly_superseded",
+    "legacy_page_classification": "retained_as_non_authoritative_history",
+    "unseen40_selection": "cvo-ab-v1-unseen40",
+    "unseen40_new_contract": "collection-authority-unseen-v1"
+  }
+}

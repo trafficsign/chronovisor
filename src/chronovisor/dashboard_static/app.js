@@ -101,6 +101,12 @@ const els = {
   librarianSweepBar: document.getElementById("librarian-sweep-bar"),
   librarianAuthority: document.getElementById("librarian-authority"),
   librarianQuality: document.getElementById("librarian-quality"),
+  librarianCollectionCount: document.getElementById("librarian-collection-count"),
+  librarianAssignment: document.getElementById("librarian-assignment"),
+  librarianCrosswalk: document.getElementById("librarian-crosswalk"),
+  librarianTopShare: document.getElementById("librarian-top-share"),
+  librarianReviewQueue: document.getElementById("librarian-review-queue"),
+  librarianSplitProposals: document.getElementById("librarian-split-proposals"),
   librarianRollout: document.getElementById("librarian-rollout"),
   librarianSoak: document.getElementById("librarian-soak"),
   librarianRecovery: document.getElementById("librarian-recovery"),
@@ -2032,6 +2038,9 @@ function renderLibrarian(librarian) {
   const queue = data.queue || {};
   const authority = data.authority || {};
   const quality = data.quality || {};
+  const collectionPlane = data.collection_authority || {};
+  const collectionMetrics = collectionPlane.metrics || quality.collection_metrics || {};
+  const collectionQueue = collectionPlane.queue || {};
   const rollout = data.rollout || {};
   const soak = data.soak || {};
   const restorePoints = data.restore_points || {};
@@ -2054,11 +2063,16 @@ function renderLibrarian(librarian) {
   const classification = progress.classification_shadow || {};
   const complete = intValue(classification.numerator);
   const total = intValue(classification.denominator);
-  els.librarianHeadline.textContent = data.initial_organization_complete_at
-    ? "Initial organization complete"
-    : total
-      ? `${complete.toLocaleString()} of ${total.toLocaleString()} pages shadow-classified`
-      : "Shadow migration has not started";
+  const collectionFirst = authority.mode === "collection-first";
+  els.librarianHeadline.textContent = collectionFirst
+    ? total
+      ? `${complete.toLocaleString()} of ${total.toLocaleString()} pages assigned to stable collections`
+      : "Collection registry has not been synchronized"
+    : data.initial_organization_complete_at
+      ? "Initial organization complete"
+      : total
+        ? `${complete.toLocaleString()} of ${total.toLocaleString()} pages shadow-classified`
+        : "Shadow migration has not started";
   els.librarianDetail.textContent = fmt(data.detail, "Waiting for Librarian state.");
   const generation = String(data.scope_generation || "--");
   els.librarianGeneration.textContent = generation.startsWith("sha256:")
@@ -2082,8 +2096,12 @@ function renderLibrarian(librarian) {
     (quality.holdout_metrics || {}).authority_epoch || authority.authority_epoch,
   );
   els.librarianAuthority.textContent = authority.active
-    ? `Active${authorityEpoch ? ` · epoch ${authorityEpoch}` : ""}`
-    : "Shadow only";
+    ? collectionFirst
+      ? `Collection-first · active`
+      : `Active${authorityEpoch ? ` · epoch ${authorityEpoch}` : ""}`
+    : collectionFirst
+      ? "Collection-first · shadow"
+      : "Shadow only";
   const holdout = quality.holdout_metrics || {};
   const exact = numeric(holdout.exact_match_rate)
     ? `${(holdout.exact_match_rate * 100).toFixed(1)}% exact`
@@ -2091,8 +2109,35 @@ function renderLibrarian(librarian) {
   const forced = numeric(holdout.forced_misclassification_rate)
     ? `${(holdout.forced_misclassification_rate * 100).toFixed(1)}% forced`
     : "";
-  els.librarianQuality.textContent =
-    [exact, forced].filter(Boolean).join(" · ") || fmt(quality.locked_holdout, "Not evaluated");
+  els.librarianQuality.textContent = collectionFirst
+    ? `${fmt(quality.collection_status, "not evaluated").replaceAll("_", " ")} · ` +
+      `${intValue(collectionPlane.hard_failures?.length)} hard · ` +
+      `${intValue(collectionPlane.warnings?.length)} warning`
+    : [exact, forced].filter(Boolean).join(" · ") || fmt(quality.locked_holdout, "Not evaluated");
+  els.librarianCollectionCount.textContent = numeric(collectionMetrics.active_collection_count)
+    ? `${intValue(collectionMetrics.active_collection_count)} active`
+    : "--";
+  els.librarianAssignment.textContent = numeric(collectionMetrics.assignment_coverage)
+    ? `${(collectionMetrics.assignment_coverage * 100).toFixed(1)}% · ` +
+      `${intValue(collectionMetrics.assignment_count).toLocaleString()} pages`
+    : "--";
+  els.librarianCrosswalk.textContent = numeric(collectionMetrics.crosswalk_audit_coverage)
+    ? `${(collectionMetrics.crosswalk_audit_coverage * 100).toFixed(1)}% audited`
+    : "--";
+  els.librarianTopShare.textContent = numeric(collectionMetrics.top_collection_share)
+    ? `${fmt(collectionMetrics.top_collection_slug, "unknown")} · ` +
+      `${(collectionMetrics.top_collection_share * 100).toFixed(1)}%`
+    : "--";
+  els.librarianReviewQueue.textContent = collectionFirst
+    ? `${intValue(collectionQueue.open)} open · ` +
+      `${intValue(collectionQueue.reviewer_calls)} model review`
+    : "--";
+  const splitProposals = Array.isArray(collectionPlane.split_proposals)
+    ? collectionPlane.split_proposals
+    : [];
+  els.librarianSplitProposals.textContent = collectionFirst
+    ? `${splitProposals.length} proposal · no auto-split`
+    : "--";
   const rolloutStatus = fmt(rollout.status, "not_started").replaceAll("_", " ");
   const rolloutStage = fmt(rollout.stage, "").replaceAll("_", " ");
   els.librarianRollout.textContent = rolloutStage

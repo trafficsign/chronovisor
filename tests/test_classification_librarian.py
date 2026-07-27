@@ -26,7 +26,10 @@ from chronovisor.classification import (
     validate_controlled_subject,
     validate_record,
 )
-from chronovisor.librarian import capture_baseline, run_shadow
+from chronovisor.librarian import (
+    capture_baseline,
+    run_legacy_udc_shadow,
+)
 from chronovisor.librarian_status import build_librarian_status
 
 
@@ -135,8 +138,8 @@ def test_librarian_shadow_progress_is_visible_but_not_false_green(
     _write_page(tmp_path / "pages" / "ai-memory.md", tags="d/ai, t/architecture")
     _write_page(tmp_path / "pages" / "unknown.md")
 
-    result = run_shadow(root=tmp_path, full_sweep=True)
-    repeated = run_shadow(root=tmp_path, full_sweep=True)
+    result = run_legacy_udc_shadow(root=tmp_path, full_sweep=True)
+    repeated = run_legacy_udc_shadow(root=tmp_path, full_sweep=True)
     status = build_librarian_status(tmp_path)
 
     assert result["status"] == "ok"
@@ -168,7 +171,11 @@ def test_librarian_dry_run_is_byte_for_byte_read_only(tmp_path: Path) -> None:
         if path.is_file()
     }
 
-    result = run_shadow(root=tmp_path, full_sweep=True, dry_run=True)
+    result = run_legacy_udc_shadow(
+        root=tmp_path,
+        full_sweep=True,
+        dry_run=True,
+    )
 
     after = {
         path.relative_to(tmp_path): path.read_bytes()

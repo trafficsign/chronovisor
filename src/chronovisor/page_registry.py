@@ -259,6 +259,9 @@ class PageRegistry:
                         else "unclassified"
                     ),
                     "classification": None,
+                    "collection_uid": None,
+                    "collection_status": "unclassified",
+                    "collection_generation": None,
                     "sensitivity": str(meta.get("sensitivity") or "normal"),
                     "updated_at": previous_updated_at or _now_iso(),
                 }
@@ -270,6 +273,13 @@ class PageRegistry:
                         row["classification_status"] = str(
                             previous.get("classification_status") or "proposed"
                         )
+                    row["collection_uid"] = previous.get("collection_uid")
+                    row["collection_status"] = str(
+                        previous.get("collection_status") or "unclassified"
+                    )
+                    row["collection_generation"] = previous.get(
+                        "collection_generation"
+                    )
                     row["canonical_uid"] = previous.get("canonical_uid")
                     if previous != row:
                         row["updated_at"] = _now_iso()

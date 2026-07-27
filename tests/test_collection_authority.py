@@ -1,0 +1,389 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from chronovisor import collection_anomaly_worker, collection_authority
+from chronovisor.collection_authority import (
+    CollectionAuthorityError,
+    CollectionRegistry,
+    build_review_candidates,
+    collection_quality_snapshot,
+    evaluate_unseen40,
+    load_contract,
+    load_crosswalk,
+)
+from chronovisor.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.page_identity import new_page_uid
+from chronovisor.page_registry import PageRegistry
+
+
+def _page(path: Path, uid: str, *, links: tuple[str, ...] = ()) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        f"title: {path.stem}\n"
+        f"uid: {uid}\n"
+        "updated: 2026-07-27\n"
+        "---\n\n"
+        f"# {path.stem}\n\n"
+        + "\n".join(f"[[{value}]]" for value in links)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _uids(count: int, *, start: int = 1) -> list[str]:
+    return [
+        new_page_uid(
+            timestamp_ms=1_725_000_000_000 + index,
+            random_bits=index,
+        )
+        for index in range(start, start + count)
+    ]
+
+
+def test_collection_contract_and_crosswalk_are_frozen_and_fully_audited() -> None:
+    contract = load_contract()
+    crosswalk = load_crosswalk()
+
+    assert contract["decision"] == "existing_collection_is_primary_authority"
+    assert contract["anomaly_reviewer"]["assignment_mutation_capability"] is False
+    assert len(crosswalk["entries"]) == 65
+    assert len(crosswalk["by_slug"]) == 65
+    assert crosswalk["by_slug"]["misc"]["review_required"] is True
+    assert {
+        mapping["relation"]
+        for mapping in crosswalk["by_slug"]["chronovisor"]["mappings"]
+    } == {"exact", "broad"}
+
+
+def test_collection_sync_is_stable_and_direct_pages_fail_closed(
+    tmp_path: Path,
+) -> None:
+    ai_uid, loose_uid = _uids(2)
+    _page(tmp_path / "pages" / "ai" / "model.md", ai_uid)
+    _page(tmp_path / "pages" / "loose.md", loose_uid)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(10, start=100)).__next__,
+    )
+
+    first = registry.sync_from_pages()
+    second = registry.sync_from_pages()
+    state = registry.load()
+    collections = state["collections"]
+    ai_collection = collections[state["slug_index"]["ai"]]
+    unresolved = collections[state["slug_index"]["_unclassified"]]
+
+    assert first["assignment_count"] == 2
+    assert second["created_collections"] == []
+    assert second["generation"] == first["generation"]
+    assert ai_collection["uid"] == state["assignments"][ai_uid]["collection_uid"]
+    assert unresolved["is_unclassified"] is True
+    assert state["assignments"][loose_uid]["status"] == "unclassified"
+    page_state = PageRegistry(tmp_path).load()
+    assert page_state["pages"][ai_uid]["collection_uid"] == ai_collection["uid"]
+    assert (
+        page_state["pages"][loose_uid]["collection_status"]
+        == "review_required"
+    )
+    receipts = list(
+        (tmp_path / "runtime" / "librarian" / "collection-receipts").glob(
+            "*.json"
+        )
+    )
+    assert len(receipts) == 2
+    assert all(read_sealed_json(path)["page_mutations"] == 0 for path in receipts)
+
+
+def test_collection_lifecycle_is_cas_receipted_and_non_destructive(
+    tmp_path: Path,
+) -> None:
+    first_uid, second_uid = _uids(2)
+    first_path = tmp_path / "pages" / "ai" / "first.md"
+    second_path = tmp_path / "pages" / "career" / "second.md"
+    _page(first_path, first_uid)
+    _page(second_path, second_uid)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(20, start=200)).__next__,
+    )
+    synced = registry.sync_from_pages()
+    state = registry.load()
+    ai_collection = state["slug_index"]["ai"]
+    career_collection = state["slug_index"]["career"]
+
+    renamed = registry.apply_lifecycle(
+        "rename",
+        expected_generation=synced["generation"],
+        collection_uid=ai_collection,
+        new_label="AI systems",
+    )
+    moved = registry.apply_lifecycle(
+        "move",
+        expected_generation=renamed["generation_after"],
+        target_collection_uid=ai_collection,
+        page_uids=[second_uid],
+    )
+    split = registry.apply_lifecycle(
+        "split",
+        expected_generation=moved["generation_after"],
+        collection_uid=ai_collection,
+        page_uids=[second_uid],
+        new_slug="ai-career",
+        new_label="AI career",
+    )
+    merged = registry.apply_lifecycle(
+        "merge",
+        expected_generation=split["generation_after"],
+        collection_uid=split["created_collection_uid"],
+        target_collection_uid=career_collection,
+    )
+
+    assert first_path.is_file()
+    assert second_path.is_file()
+    assert renamed["page_mutations"] == 0
+    assert moved["affected_page_uids"] == [second_uid]
+    assert merged["affected_page_uids"] == [second_uid]
+    final = registry.load()
+    assert (
+        final["assignments"][second_uid]["collection_uid"]
+        == career_collection
+    )
+    with pytest.raises(CollectionAuthorityError, match="generation changed"):
+        registry.apply_lifecycle(
+            "rename",
+            expected_generation=synced["generation"],
+            collection_uid=ai_collection,
+            new_label="stale",
+        )
+
+
+def test_review_candidates_detect_misc_and_cross_collection_affinity(
+    tmp_path: Path,
+) -> None:
+    misc_uid, ai_uid, career_a, career_b, career_c = _uids(5)
+    _page(tmp_path / "pages" / "misc" / "orphan.md", misc_uid)
+    _page(
+        tmp_path / "pages" / "ai" / "misplaced.md",
+        ai_uid,
+        links=("career-a", "career-b", "career-c"),
+    )
+    _page(tmp_path / "pages" / "career" / "career-a.md", career_a)
+    _page(tmp_path / "pages" / "career" / "career-b.md", career_b)
+    _page(tmp_path / "pages" / "career" / "career-c.md", career_c)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(20, start=300)).__next__,
+    )
+    state = registry.sync_from_pages()["registry"]
+    index = {
+        "entries": {
+            "orphan": {"outlinks": []},
+            "misplaced": {
+                "outlinks": ["career-a", "career-b", "career-c"]
+            },
+            "career-a": {"outlinks": []},
+            "career-b": {"outlinks": []},
+            "career-c": {"outlinks": []},
+        }
+    }
+    index_path = tmp_path / ".index" / "pages.json"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+
+    candidates = build_review_candidates(tmp_path, state=state)
+    by_uid = {}
+    for row in candidates:
+        by_uid.setdefault(row["page_uid"], []).append(row)
+
+    assert {row["reason"] for row in by_uid[misc_uid]} == {
+        "collection_requires_review"
+    }
+    affinity = next(
+        row
+        for row in by_uid[ai_uid]
+        if row["reason"] == "cross_collection_link_affinity"
+    )
+    assert affinity["proposed_collection_slug"] == "career"
+    assert affinity["assignment_mutation"] is False
+
+
+def test_quality_gate_warns_and_proposes_without_auto_split(
+    tmp_path: Path,
+) -> None:
+    identifiers = _uids(8)
+    for index, uid in enumerate(identifiers[:6]):
+        _page(tmp_path / "pages" / "ai" / f"ai-{index}.md", uid)
+    for index, uid in enumerate(identifiers[6:]):
+        _page(tmp_path / "pages" / "career" / f"career-{index}.md", uid)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(20, start=400)).__next__,
+    )
+    state = registry.sync_from_pages()["registry"]
+    page_index = {
+        "entries": {
+            f"ai-{index}": {
+                "outlinks": [f"ai-{(index + 1) % 6}"]
+            }
+            for index in range(6)
+        }
+    }
+    index_path = tmp_path / ".index" / "pages.json"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_text(json.dumps(page_index), encoding="utf-8")
+
+    quality = collection_quality_snapshot(
+        tmp_path,
+        state=state,
+        queue={
+            "candidate_count": 0,
+            "open": 0,
+        },
+    )
+
+    assert quality["metrics"]["assignment_coverage"] == 1.0
+    assert quality["metrics"]["top_collection_share"] == 0.75
+    assert "top_collection_share" in quality["hard_failures"]
+    assert quality["split_proposals"][0]["auto_split"] is False
+    assert (
+        quality["split_proposals"][0]["algorithm"]
+        == "deterministic_label_propagation_v1"
+    )
+
+
+def test_unseen_evaluation_honors_locked_assignment_or_review_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identifiers = _uids(40, start=500)
+    for index, uid in enumerate(identifiers):
+        slug = "misc" if index == 14 else "ai"
+        _page(tmp_path / "pages" / slug / f"page-{index}.md", uid)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(20, start=700)).__next__,
+    )
+    registry.sync_from_pages()
+    selection_path = tmp_path / "selection.json"
+    sealed = write_sealed_json(
+        selection_path,
+        {
+            "schema": "chronovisor.cvo-ab-unseen-selection.v1",
+            "case_count": 40,
+            "cases": [{"uid": uid} for uid in identifiers],
+        },
+        backup=False,
+    )
+    prereg_path = tmp_path / "prereg.json"
+    gold_path = tmp_path / "gold.json"
+    prereg_path.write_text(
+        json.dumps(
+            {
+                "schema": "chronovisor.collection-authority-unseen-prereg.v1",
+                "epoch": "test",
+                "status": "locked-before-evaluation",
+                "selection_seal_sha256": sealed["seal_sha256"],
+                "case_count": 40,
+                "evaluation_contract": {
+                    "assignment_or_review_rate_min": 1.0,
+                    "major_error_max": 0,
+                    "crosswalk_invalid_max": 0,
+                    "page_mutations_max": 0,
+                    "model_calls": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    gold_path.write_text(
+        json.dumps(
+            {
+                "schema": "chronovisor.collection-authority-unseen-gold.v1",
+                "epoch": "test",
+                "status": "sealed-before-evaluation",
+                "selection_seal_sha256": sealed["seal_sha256"],
+                "cases": [
+                    {
+                        "uid": uid,
+                        "disposition": "review" if index == 14 else "assigned",
+                        "acceptable_collection_slugs": (
+                            ["chronovisor"] if index == 14 else ["ai"]
+                        ),
+                    }
+                    for index, uid in enumerate(identifiers)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "default_preregistration_path",
+        lambda: prereg_path,
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "default_gold_path",
+        lambda: gold_path,
+    )
+
+    result = evaluate_unseen40(tmp_path, selection_path=selection_path)
+
+    assert result["decision"] == "adopt"
+    assert result["assigned_correct"] == 39
+    assert result["review_correct"] == 1
+    assert result["major_error_count"] == 0
+    assert result["model_calls"] == 0
+
+
+def test_anomaly_worker_is_review_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_anomaly_worker.ollama,
+        "model_digests",
+        lambda _models: {"gemma4:test": "sha256:model"},
+    )
+    monkeypatch.setattr(
+        collection_anomaly_worker.ollama,
+        "chat",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "decision": "review_recommended",
+                "suggested_collection_slug": "chronovisor",
+                "rationale": "The page describes Chronovisor validation.",
+                "evidence": "Title and body both describe a soak test.",
+            }
+        ),
+    )
+
+    result = collection_anomaly_worker.run(
+        {
+            "schema": collection_anomaly_worker.WORKER_SCHEMA,
+            "model": "gemma4:test",
+            "model_digest": "sha256:model",
+            "candidate": {
+                "current_collection_slug": "misc",
+                "reason": "collection_requires_review",
+            },
+            "document": {
+                "title": "Chronovisor soak",
+                "summary": "",
+                "evidence_excerpt": "Validation.",
+            },
+            "collections": [
+                {"slug": "misc", "label": "Misc"},
+                {"slug": "chronovisor", "label": "Chronovisor"},
+            ],
+        }
+    )
+
+    assert result["result"]["decision"] == "review_recommended"
+    assert result["model_calls"] == 1
+    assert result["page_mutations"] == 0
+    assert result["assignment_mutations"] == 0

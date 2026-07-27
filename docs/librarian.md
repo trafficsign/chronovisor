@@ -1,12 +1,32 @@
 # Classification and Librarian
 
-Chronovisor has a low-priority Librarian control plane for stable page
-identity, versioned classification, UID-normalized links, and future
+Chronovisor has a low-priority Librarian control plane for stable page and
+collection identity, UID-normalized links, placement review, and future
 claim-level consolidation. It is deliberately separate from synchronous
 Recall. The default worker is deterministic, local-only, performs no model
 calls, and never mutates Active Markdown.
 
-## Current activation boundary
+## Collection-first authority
+
+ADR-0001 supersedes mandatory per-page UDC prediction. Existing Wiki
+collections are the primary authority and receive stable UUIDv7 identities in
+`collection-registry.json`. The physical folder is bootstrap provenance;
+subsequent rename, merge, split, and page move are logical CAS operations with
+sealed receipts.
+
+UDC/CVO is a fully audited collection-level crosswalk. The local Gemma reviewer
+may review deterministic misplacement candidates, but cannot mutate a page or
+assignment. Pages without a known collection fail closed into
+`_unclassified` and the review queue.
+
+The legacy page-to-UDC pipeline remains available only as an explicit
+diagnostic:
+
+```sh
+chronovisor-librarian --legacy-udc-shadow --full-sweep --json
+```
+
+## Superseded activation boundary
 
 The bundled `udc-summary-top-level.json` is a nine-class bootstrap used only to
 measure distribution and exercise the migration path. It is explicitly marked
@@ -30,7 +50,11 @@ All artifacts are metadata or temporary migration insurance under
 
 | Artifact | Purpose |
 | --- | --- |
-| `page-registry.json` | UID, current path, legacy keys, status, classification proposal |
+| `page-registry.json` | Page UID, path, legacy keys, and collection mirror |
+| `collection-registry.json` | Stable collection UIDs and logical page assignments |
+| `collection-receipts/` | CAS lifecycle receipts for sync/rename/merge/split/move |
+| `collection-review-queue.json` | Deterministic and local-model placement review |
+| `collection-quality.json` | Assignment, crosswalk, size and split-proposal gates |
 | `page-registry-events.jsonl` | Append-only registry audit |
 | `uid-link-index.json` | UID outlinks, backlinks, anchors, unresolved links |
 | `state.json` | Sealed `LibrarianStatusSnapshot` source |
@@ -51,13 +75,16 @@ chronovisor-librarian --capture-baseline --repo-root /path/to/chronovisor --json
 chronovisor-librarian --dry-run --limit 100 --json
 chronovisor-librarian --limit 100 --json
 chronovisor-librarian --full-sweep --json
+chronovisor-librarian --evaluate-collection-unseen --json
+chronovisor-librarian --review-collection-queue --limit 10 --json
 chronovisor-librarian-release start-observation --json
 ```
 
-The Sleep cycle invokes a bounded 100-page shadow batch. This lane has P3
-priority and does not acquire or call Ornith, Nemotron, Gemma, GPT-OSS, or any
-frontier model. Later model-backed stages must preserve P0 Recall capacity,
-support cancellation/requeue, and pass the same deterministic preflight.
+The Sleep cycle invokes a full deterministic collection reconciliation (the
+`--limit` argument is retained for CLI compatibility). It makes no model
+calls. Model-backed placement review is a separate explicit P3 lane using the
+same cancellable scheduler as other research work and defaults to Gemma. It
+never calls a frontier model.
 
 ## Merge hard gates
 

@@ -8,7 +8,7 @@ import pytest
 
 from chronovisor import dashboard
 from chronovisor.durable_state import write_sealed_json
-from chronovisor.librarian import run_shadow
+from chronovisor.librarian import run_legacy_udc_shadow, run_shadow
 from chronovisor.librarian_status import (
     _derive_code,
     _library_evidence_status,
@@ -31,6 +31,12 @@ def test_dashboard_static_contract_exposes_librarian_progress() -> None:
         "librarian-receipts",
         "librarian-authority",
         "librarian-quality",
+        "librarian-collection-count",
+        "librarian-assignment",
+        "librarian-crosswalk",
+        "librarian-top-share",
+        "librarian-review-queue",
+        "librarian-split-proposals",
         "librarian-rollout",
         "librarian-soak",
         "librarian-recovery",
@@ -46,6 +52,61 @@ def test_dashboard_static_contract_exposes_librarian_progress() -> None:
     assert "renderLibrarian(snapshot.librarian || {})" in js
 
 
+def test_collection_first_status_exposes_registry_quality(
+    tmp_path: Path,
+) -> None:
+    pages = (
+        ("ai", "model"),
+        ("career", "interview"),
+        ("workplace", "meeting"),
+    )
+    for index, (folder, name) in enumerate(pages, 1):
+        uid = (
+            f"019f0000-000{index}-7000-8000-"
+            f"{index:012d}"
+        )
+        path = tmp_path / "pages" / folder / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\n"
+            f"title: {name}\n"
+            f"uid: {uid}\n"
+            "updated: 2026-07-27\n"
+            "---\n\n"
+            f"# {name}\n",
+            encoding="utf-8",
+        )
+    archived = tmp_path / "pages" / "ai" / "archived.md"
+    archived.write_text(
+        "---\n"
+        "title: Archived\n"
+        "uid: 019f0000-0004-7000-8000-000000000004\n"
+        "updated: 2026-07-27\n"
+        "status: archived\n"
+        "---\n\n"
+        "# Archived\n",
+        encoding="utf-8",
+    )
+
+    result = run_shadow(root=tmp_path, full_sweep=True)
+
+    from chronovisor.librarian_status import build_librarian_status
+
+    status = build_librarian_status(tmp_path)
+    assert result["observed"] == 3
+    assert status["authority"]["mode"] == "collection-first"
+    assert status["progress"]["collection_assignment"]["numerator"] == 3
+    assert status["progress"]["collection_assignment"]["denominator"] == 3
+    assert status["progress"]["full_sweep"]["current"] is True
+    assert (
+        status["collection_authority"]["metrics"]["assignment_coverage"]
+        == 1.0
+    )
+    assert status["quality"]["legacy_page_udc_gate"] == (
+        "superseded_by_collection_authority_v1"
+    )
+
+
 def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> None:
     page = tmp_path / "pages" / "alpha.md"
     page.parent.mkdir(parents=True)
@@ -53,7 +114,7 @@ def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> N
         "---\ntitle: Alpha\nupdated: 2026-07-25\ntags: [d/ai]\n---\n\n# Alpha\n",
         encoding="utf-8",
     )
-    run_shadow(root=tmp_path, full_sweep=True)
+    run_legacy_udc_shadow(root=tmp_path, full_sweep=True)
     write_sealed_json(
         tmp_path / "runtime" / "librarian" / "rollout.json",
         {
@@ -377,7 +438,7 @@ def test_status_overlays_latest_locked_calibration_quality(tmp_path: Path) -> No
         "---\ntitle: Alpha\nupdated: 2026-07-25\ntags: [d/ai]\n---\n\n# Alpha\n",
         encoding="utf-8",
     )
-    run_shadow(root=tmp_path, full_sweep=True)
+    run_legacy_udc_shadow(root=tmp_path, full_sweep=True)
     write_sealed_json(
         tmp_path / "classification" / "calibration.json",
         {
