@@ -990,12 +990,12 @@ def build_librarian_status(
         else int(observed["current_held"])
     )
     current_terminal = (
-        current_classified - current_held
+        current_classified
         if collection_first
         else int(observed["current_terminal"])
     )
     current_adopted = (
-        current_terminal
+        current_classified - current_held
         if collection_first
         else int(observed["current_adopted"])
     )
@@ -1048,9 +1048,14 @@ def build_librarian_status(
     collection_queue_open = (
         int(collection_plane["queue"]["open"]) if collection_first else 0
     )
+    collection_unclassified = (
+        int(collection_plane["metrics"].get("unclassified_count") or 0)
+        if collection_first
+        else 0
+    )
     queue = {
         **queue,
-        "queued": actual_total - current_classified + collection_queue_open,
+        "queued": actual_total - current_classified + collection_unclassified,
         "actionable": (
             actual_total
             - current_classified
@@ -1059,7 +1064,7 @@ def build_librarian_status(
                     "collection_missing" if collection_first else "missing"
                 ]
             )
-            + collection_queue_open
+            + collection_unclassified
         ),
         "running": 0,
         "held": current_held,

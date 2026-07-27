@@ -107,6 +107,105 @@ def test_collection_first_status_exposes_registry_quality(
     )
 
 
+def test_collection_review_queue_is_visible_but_not_catch_up_work(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "pages" / "ai" / "model.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\n"
+        "title: Model\n"
+        "uid: 019f0000-0100-7000-8000-000000000100\n"
+        "updated: 2026-07-27\n"
+        "---\n\n"
+        "# Model\n",
+        encoding="utf-8",
+    )
+    run_shadow(root=tmp_path, full_sweep=True)
+    write_sealed_json(
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "collection-review-queue.json",
+        {
+            "candidate_count": 5,
+            "open": 5,
+            "completed": 0,
+            "reviewer_calls": 0,
+            "frontier_calls": 0,
+        },
+    )
+
+    from chronovisor.librarian_status import build_librarian_status
+
+    status = build_librarian_status(tmp_path)
+
+    assert status["queue"]["actionable"] == 0
+    assert status["debts"]["collection_review_queue"] == 5
+    assert status["collection_authority"]["queue"]["open"] == 5
+    assert status["progress"]["classification_terminal"] == {
+        "denominator": 1,
+        "numerator": 1,
+        "scope_generation": status["scope_generation"],
+    }
+    assert (
+        _derive_code(
+            {
+                "enabled": True,
+                "authority": {"active": True},
+                "blocked_reasons": [],
+                "initial_organization_complete_at": (
+                    "2026-07-27T00:00:00+00:00"
+                ),
+                "progress": {"full_sweep": {"current": True}},
+            },
+            status["queue"],
+        )
+        == "STEADY_CLEAN"
+    )
+
+
+def test_collection_review_required_is_terminal_with_visible_hold(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "pages" / "misc" / "note.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\n"
+        "title: Note\n"
+        "uid: 019f0000-0101-7000-8000-000000000101\n"
+        "updated: 2026-07-27\n"
+        "---\n\n"
+        "# Note\n",
+        encoding="utf-8",
+    )
+    run_shadow(root=tmp_path, full_sweep=True)
+
+    from chronovisor.librarian_status import build_librarian_status
+
+    status = build_librarian_status(tmp_path)
+
+    assert status["queue"]["actionable"] == 0
+    assert status["queue"]["held"] == 1
+    assert status["progress"]["classification_terminal"]["numerator"] == 1
+    assert status["progress"]["classification_terminal"]["denominator"] == 1
+    assert (
+        _derive_code(
+            {
+                "enabled": True,
+                "authority": {"active": True},
+                "blocked_reasons": [],
+                "initial_organization_complete_at": (
+                    "2026-07-27T00:00:00+00:00"
+                ),
+                "progress": {"full_sweep": {"current": True}},
+            },
+            status["queue"],
+        )
+        == "STEADY_WITH_HOLDS"
+    )
+
+
 def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> None:
     page = tmp_path / "pages" / "alpha.md"
     page.parent.mkdir(parents=True)
