@@ -1663,6 +1663,7 @@ def adjudicate_collection_review_queue(
         candidate_id
         for candidate_id, row in items.items()
         if row.get("reason") in {"unclassified", "collection_requires_review"}
+        and row.get("status") in {"queued", "review_recommended"}
         and candidate_id not in decisions
     ]
     if unresolved_required:

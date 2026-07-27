@@ -680,6 +680,90 @@ def test_host_adjudication_moves_review_required_and_preserves_affinity(
     assert page_state["pages"][misc_uid]["collection_status"] == "assigned"
 
 
+def test_incremental_adjudication_does_not_reopen_terminal_required_items(
+    tmp_path: Path,
+) -> None:
+    first_uid, second_uid, ai_uid = _uids(3, start=410)
+    _page(tmp_path / "pages" / "misc" / "first.md", first_uid)
+    _page(tmp_path / "pages" / "ai" / "reference.md", ai_uid)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(20, start=430)).__next__,
+    )
+    registry.sync_from_pages()
+    first_queue = collection_authority.refresh_review_queue(tmp_path)
+    first_candidate = next(
+        row
+        for row in first_queue["items"].values()
+        if row["page_uid"] == first_uid
+        and row["reason"] == "collection_requires_review"
+    )
+    first_result = adjudicate_collection_review_queue(
+        tmp_path,
+        {
+            "schema": collection_authority.COLLECTION_DECISION_SCHEMA,
+            "status": "approved",
+            "approved_at": "2026-07-27T00:00:00+00:00",
+            "decision_authority": "test_host",
+            "expected_registry_generation": registry.load()["generation"],
+            "preserve_remaining_reasons": [],
+            "decisions": [
+                {
+                    "candidate_id": first_candidate["candidate_id"],
+                    "action": "move",
+                    "target_collection_slug": "ai",
+                    "rationale": "The first page is an AI note.",
+                }
+            ],
+        },
+    )
+    assert first_result["moves"] == 1
+
+    _page(tmp_path / "pages" / "misc" / "second.md", second_uid)
+    registry.sync_from_pages()
+    second_queue = collection_authority.refresh_review_queue(tmp_path)
+    second_candidate = next(
+        row
+        for row in second_queue["items"].values()
+        if row["page_uid"] == second_uid
+        and row["reason"] == "collection_requires_review"
+    )
+    second_result = adjudicate_collection_review_queue(
+        tmp_path,
+        {
+            "schema": collection_authority.COLLECTION_DECISION_SCHEMA,
+            "status": "approved",
+            "approved_at": "2026-07-27T00:05:00+00:00",
+            "decision_authority": "test_host",
+            "expected_registry_generation": registry.load()["generation"],
+            "preserve_remaining_reasons": [],
+            "decisions": [
+                {
+                    "candidate_id": second_candidate["candidate_id"],
+                    "action": "move",
+                    "target_collection_slug": "ai",
+                    "rationale": "The second page is also an AI note.",
+                }
+            ],
+        },
+    )
+
+    assert second_result["moves"] == 1
+    assert second_result["queue"]["open"] == 0
+    persisted = read_sealed_json(
+        tmp_path
+        / "runtime"
+        / "librarian"
+        / "collection-review-queue.json"
+    )
+    assert persisted["items"][first_candidate["candidate_id"]]["status"] == (
+        "move_approved"
+    )
+    assert persisted["items"][second_candidate["candidate_id"]]["status"] == (
+        "move_approved"
+    )
+
+
 def test_review_candidates_detect_misc_and_cross_collection_affinity(
     tmp_path: Path,
 ) -> None:
