@@ -64,7 +64,7 @@ def default_contract_path() -> Path:
 
 
 def default_crosswalk_path() -> Path:
-    return _data_path("collection-crosswalk-v2.json")
+    return _data_path("collection-crosswalk-v3.json")
 
 
 def default_preregistration_path() -> Path:

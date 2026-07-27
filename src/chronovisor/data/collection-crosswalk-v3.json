@@ -1,11 +1,11 @@
 {
   "schema": "chronovisor.collection-crosswalk.v1",
-  "epoch": "collection-crosswalk-v2",
+  "epoch": "collection-crosswalk-v3",
   "status": "frozen",
   "audited_at": "2026-07-27",
-  "reviewer": "Codex full semantic review of all 66 live collection names and representative pages",
+  "reviewer": "Codex full semantic review of all 67 live collection names and representative pages",
   "mapping_audit": "all-entries-reviewed",
-  "checksum": "sha256:06d8f33e0c23a695bd0adc54e892f04219f614621e1d30e25793e3e21400c911",
+  "checksum": "sha256:a220423b7b4de373272a114d1fd0bc62137dacb42a9b002366eb031d210b7b09",
   "entries": [
     {"slug":"agi-economic-structure-and-human-irrelevance","label":"AGI economic structure and human irrelevance","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0002","relation":"exact"},{"anchor_id":"cvo:anchor:0022","relation":"broad"}]},
     {"slug":"agi-timeline-and-physical-ai-impact","label":"AGI timeline and physical AI impact","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0002","relation":"exact"},{"anchor_id":"cvo:anchor:0025","relation":"broad"}]},
@@ -56,6 +56,7 @@
     {"slug":"personal","label":"Personal records and planning","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0030","relation":"exact"}]},
     {"slug":"philosophy","label":"Philosophy and ethics","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0026","relation":"exact"}]},
     {"slug":"physics","label":"Physics and astronomy","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0018","relation":"exact"}]},
+    {"slug":"richest-person-wealth-analysis","label":"Richest person wealth analysis","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0022","relation":"exact"}]},
     {"slug":"search-adapters","label":"Search adapter software","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0001","relation":"exact"},{"anchor_id":"cvo:anchor:0003","relation":"broad"}]},
     {"slug":"semantic-projection","label":"Semantic projection classification research","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0003","relation":"exact"},{"anchor_id":"cvo:anchor:0007","relation":"broad"}]},
     {"slug":"semantic-projection-v57-campaign-a-completion","label":"Semantic projection campaign A","review_required":false,"mappings":[{"anchor_id":"cvo:anchor:0007","relation":"exact"},{"anchor_id":"cvo:anchor:0003","relation":"broad"}]},

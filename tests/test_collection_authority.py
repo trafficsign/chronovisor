@@ -54,9 +54,9 @@ def test_collection_contract_and_crosswalk_are_frozen_and_fully_audited() -> Non
 
     assert contract["decision"] == "existing_collection_is_primary_authority"
     assert contract["anomaly_reviewer"]["assignment_mutation_capability"] is False
-    assert crosswalk["epoch"] == "collection-crosswalk-v2"
-    assert len(crosswalk["entries"]) == 66
-    assert len(crosswalk["by_slug"]) == 66
+    assert crosswalk["epoch"] == "collection-crosswalk-v3"
+    assert len(crosswalk["entries"]) == 67
+    assert len(crosswalk["by_slug"]) == 67
     assert crosswalk["by_slug"]["misc"]["review_required"] is True
     assert {
         mapping["relation"]
