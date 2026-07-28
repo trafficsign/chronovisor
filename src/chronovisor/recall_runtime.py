@@ -950,11 +950,17 @@ def _compact_query(text: str, limit: int = 180) -> str:
     return text[:limit].rsplit(" ", 1)[0] or text[:limit]
 
 
+def _split_alphanumeric_query(text: str) -> str:
+    """Add searchable token boundaries to joined names such as ``AI2040``."""
+
+    return re.sub(r"(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])", " ", text)
+
+
 def _dedupe_queries(candidates: list[str], limit: int) -> list[str]:
     seen = set()
     out = []
     for candidate in candidates:
-        q = re.sub(r"\s+", " ", candidate).strip()
+        q = _split_alphanumeric_query(re.sub(r"\s+", " ", candidate).strip())
         if not q:
             continue
         key = q.lower()

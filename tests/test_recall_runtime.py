@@ -91,6 +91,26 @@ def test_build_queries_does_not_add_single_generic_decision_term() -> None:
     assert queries == ["マツダでCADグループから設計グループへ移った話"]
 
 
+def test_build_queries_adds_alphanumeric_boundary_alias() -> None:
+    policy = RecallPolicy(max_queries=3)
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="これはまさにAI2040のプランDだ。",
+    )
+    matched = {
+        "project": [],
+        "past_reference": [],
+        "ownership": [],
+        "decision": ["プラン"],
+        "ambiguity": ["これ"],
+    }
+
+    queries = build_queries(request, matched, [], policy)
+
+    assert queries == ["これはまさにAI 2040のプランDだ。"]
+
+
 def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
     from chronovisor import recall_runtime
 
