@@ -96,6 +96,59 @@ def test_searxng_adapter_normalizes_mocked_live_results(tmp_path, monkeypatch) -
     assert "bounded research" in (tmp_path / "trace.jsonl").read_text()
 
 
+def test_searxng_partial_engine_failure_is_visible_without_losing_results(
+    tmp_path, monkeypatch
+) -> None:
+    import httpx
+    from chronovisor import web_provider
+    from chronovisor.web_provider import HttpSearchProvider
+
+    monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "title": "Healthy result",
+                            "url": "https://example.com/healthy",
+                            "content": "available from another engine",
+                        }
+                    ],
+                    "unresponsive_engines": [
+                        ["brave", "Too many requests"],
+                        ["startpage", "parsing error"],
+                    ],
+                },
+            )
+        )
+    )
+    provider = HttpSearchProvider(
+        name="searxng",
+        endpoint="https://example.com",
+        client=client,
+    )
+
+    result = search_web(
+        "bounded research",
+        config=WebConfig(
+            adapter_enabled=True,
+            live_egress_enabled=True,
+            provider="searxng",
+        ),
+        provider=provider,
+    )
+
+    assert result.status == "degraded"
+    assert [row.title for row in result.results] == ["Healthy result"]
+    assert result.provider_statuses == {
+        "searxng:brave": "error:Too many requests",
+        "searxng:startpage": "error:parsing error",
+    }
+    assert result.error.startswith("partial provider degradation:")
+
+
 def test_mediawiki_adapter_is_a_keyless_bounded_fallback() -> None:
     import httpx
     from chronovisor.web_provider import HttpSearchProvider

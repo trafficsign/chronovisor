@@ -713,9 +713,12 @@ def _triage_plan_validation_issues(
             if not isinstance(filename, str):
                 continue
             fn = filename.strip()
-            if not _BARE_FILENAME_PATTERN.fullmatch(fn):
-                continue
             if _triage_update_target_exists(fn):
+                continue
+            # A valid foldered create path is normalized deterministically by
+            # _normalize_triage_plan after the structured session. Only paths
+            # that cannot be safely retyped need another model repair turn.
+            if _filename_allowed_for_create(fn):
                 continue
             issues.append(
                 ValidationIssue(
@@ -732,7 +735,8 @@ def _triage_plan_validation_issues(
                     received={"type": "string", "value": filename},
                     message=(
                         "update target does not exist; return a create operation "
-                        "with exactly one top-level folder instead of a bare filename"
+                        "using a valid ASCII kebab-case filename with exactly one "
+                        "top-level folder"
                     ),
                 )
             )
@@ -3961,7 +3965,11 @@ def _refresh_ingest_derived_artifacts(
         try:
             from chronovisor.search import update_embeddings
 
-            update_embeddings(page_ids=changed_pages)
+            # Read-back is a correctness gate, so publication of the delta
+            # index must complete before retrieval is evaluated. The previous
+            # fire-and-forget enqueue produced false misses that passed when
+            # the same query was repeated after the worker caught up.
+            update_embeddings(page_ids=changed_pages, strict=True)
         except Exception as exc:
             _safe_log(f"ingest | semantic index enqueue failed: {exc}")
         try:

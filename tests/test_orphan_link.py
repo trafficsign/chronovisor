@@ -1331,6 +1331,27 @@ def test_no_candidate_terminal_decision_is_durable(
     assert len(state.list_items()) == 1
 
 
+def test_production_candidate_discovery_uses_strict_semantic_health_boundary(
+    isolated_pages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor import search
+
+    store = _FakeStore()
+    store.add_page("target")
+    _seed_page(isolated_pages, "target", "target topic")
+    calls: list[tuple[str, int, bool]] = []
+
+    def semantic(query: str, top_n: int, *, strict: bool = False):
+        calls.append((query, top_n, strict))
+        return []
+
+    monkeypatch.setattr(search, "semantic_search", semantic)
+
+    assert gather_candidates("target", store) == []
+    assert calls and calls[0][2] is True
+
+
 def test_candidate_discovery_error_retries_then_quarantines(
     tmp_path: Path,
     isolated_pages: Path,

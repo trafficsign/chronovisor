@@ -765,6 +765,50 @@ def _current_adopted_authority_sha256() -> str | None:
     return artifact_sha256
 
 
+def _current_adopted_authority_epoch() -> str | None:
+    """Fingerprint the adopted artifact together with executable policy code.
+
+    The artifact identifies the evaluated model triplet, but a safe router
+    contract can improve without changing those model weights. Semantic holds
+    must be retried after such a contract change instead of remaining bound to
+    the artifact digest forever.
+    """
+
+    artifact_sha256 = _current_adopted_authority_sha256()
+    if artifact_sha256 is None:
+        return None
+    try:
+        from chronovisor.decision_lane_contracts import (
+            LANE_CONTRACT_POLICY_VERSION,
+            lane_contract_manifest_sha256,
+        )
+        from chronovisor.decision_router import (
+            DECISION_SEMANTICS_POLICY_VERSION,
+            QUORUM_SAFETY_POLICY_VERSION,
+            TIE_BREAK_ADJUDICATION_POLICY_VERSION,
+        )
+
+        payload = {
+            "artifact_sha256": artifact_sha256,
+            "decision_semantics_policy_version": DECISION_SEMANTICS_POLICY_VERSION,
+            "lane_contract_policy_version": LANE_CONTRACT_POLICY_VERSION,
+            "lane_contract_manifest_sha256": lane_contract_manifest_sha256(),
+            "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
+            "tie_break_adjudication_policy_version": (
+                TIE_BREAK_ADJUDICATION_POLICY_VERSION
+            ),
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except Exception:
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _semantic_unit_paths(
     raw_path: Path,
     related_raw_paths: Sequence[Path],
@@ -961,6 +1005,7 @@ def _reusable_semantic_defer_packet(
     filenames: Sequence[str],
     record: FailureRecord,
     source_evidence: Sequence[dict[str, Any]],
+    authority_epoch: str,
 ) -> tuple[Path, dict[str, Any]] | None:
     evidence_by_name = {
         str(row.get("filename")): row
@@ -976,6 +1021,7 @@ def _reusable_semantic_defer_packet(
             or entry.get("fingerprint") != record.fingerprint
             or entry.get("authority_artifact_sha256")
             != record.authority_artifact_sha256
+            or entry.get("authority_epoch") != authority_epoch
         ):
             continue
         packet_value = entry.get("packet_path")
@@ -992,6 +1038,7 @@ def _reusable_semantic_defer_packet(
             or packet.get("terminal_deferred") is not True
             or packet.get("authority_artifact_sha256")
             != record.authority_artifact_sha256
+            or packet.get("authority_epoch") != authority_epoch
         ):
             continue
         prior_evidence = packet.get("source_raws")
@@ -1126,6 +1173,9 @@ def _record_semantic_no_quorum_defer_unlocked(
     authority_sha256 = record.authority_artifact_sha256
     if authority_sha256 is None:
         raise ValueError("semantic no-quorum defer requires an authority artifact hash")
+    authority_epoch = _current_adopted_authority_epoch()
+    if authority_epoch is None:
+        raise ValueError("semantic no-quorum defer requires a valid authority epoch")
     source_paths = _semantic_unit_paths(raw_path, related_raw_paths)
     source_evidence = _semantic_source_evidence(source_paths)
     filenames = [path.name for path in source_paths]
@@ -1146,6 +1196,7 @@ def _record_semantic_no_quorum_defer_unlocked(
         filenames=filenames,
         record=record,
         source_evidence=source_evidence,
+        authority_epoch=authority_epoch,
     )
     if reusable is None:
         packet_path = _write_packet(
@@ -1161,6 +1212,7 @@ def _record_semantic_no_quorum_defer_unlocked(
                 "self_heal_queued": False,
                 "defer_reason": SEMANTIC_NO_QUORUM_DEFER_REASON,
                 "authority_artifact_sha256": authority_sha256,
+                "authority_epoch": authority_epoch,
                 "related_raw_files": filenames,
                 "source_raws": source_evidence,
                 "quarantined_at": now,
@@ -1209,6 +1261,7 @@ def _record_semantic_no_quorum_defer_unlocked(
         "self_heal_queued": False,
         "defer_reason": SEMANTIC_NO_QUORUM_DEFER_REASON,
         "authority_artifact_sha256": authority_sha256,
+        "authority_epoch": authority_epoch,
         "packet_path": str(packet_path),
         "related_raw_files": list(filenames),
     }
@@ -1240,6 +1293,7 @@ def _record_semantic_no_quorum_defer_unlocked(
         failure_class=record.failure_class,
         fingerprint=record.fingerprint,
         authority_artifact_sha256=authority_sha256,
+        authority_epoch=authority_epoch,
         packet_path=str(packet_path),
         outcome_kind="terminal_semantic_defer",
     )
@@ -1713,6 +1767,8 @@ def _operational_deferred_raw_files_unlocked(
     deferred: dict[str, str] = {}
     authority_sha256_loaded = False
     current_authority_sha256: str | None = None
+    authority_epoch_loaded = False
+    current_authority_epoch: str | None = None
 
     for raw_file, value in list(failures.items()):
         if not isinstance(raw_file, str) or not isinstance(value, dict):
@@ -1725,20 +1781,22 @@ def _operational_deferred_raw_files_unlocked(
                 # reset_raw_failure publishes the packet release before state
                 # cleanup. A crash between those writes must stay released.
                 continue
-            stored_authority_sha256 = value.get("authority_artifact_sha256")
-            if not authority_sha256_loaded:
-                current_authority_sha256 = _current_adopted_authority_sha256()
-                authority_sha256_loaded = True
+            stored_authority_epoch = value.get(
+                "authority_epoch",
+                value.get("authority_artifact_sha256"),
+            )
+            if not authority_epoch_loaded:
+                current_authority_epoch = _current_adopted_authority_epoch()
+                authority_epoch_loaded = True
             if (
-                not isinstance(stored_authority_sha256, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", stored_authority_sha256)
-                or current_authority_sha256 is None
-                or current_authority_sha256 == stored_authority_sha256
+                not isinstance(stored_authority_epoch, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", stored_authority_epoch)
+                or current_authority_epoch is None
+                or current_authority_epoch == stored_authority_epoch
             ):
                 deferred[raw_file] = SEMANTIC_NO_QUORUM_DEFER_REASON
-            # A different fully validated adopted artifact is a new authority
-            # epoch. The immutable raw remains in place and automatically
-            # re-enters ingest; an invalid nomination stays fail-closed.
+            # A different fully validated executable authority epoch releases
+            # the immutable raw for automatic re-evaluation.
             continue
         if (
             value.get("failure_class") not in OPERATIONAL_SELF_HEAL_FAILURE_CLASSES
@@ -1784,19 +1842,22 @@ def _operational_deferred_raw_files_unlocked(
     for _packet_path, packet, packet_raws in _semantic_defer_packet_records(
         verify_sources=True
     ):
-        stored_authority_sha256 = packet["authority_artifact_sha256"]
-        if not authority_sha256_loaded:
-            current_authority_sha256 = _current_adopted_authority_sha256()
-            authority_sha256_loaded = True
+        stored_authority_epoch = packet.get(
+            "authority_epoch",
+            packet["authority_artifact_sha256"],
+        )
+        if not authority_epoch_loaded:
+            current_authority_epoch = _current_adopted_authority_epoch()
+            authority_epoch_loaded = True
         if (
-            current_authority_sha256 is None
-            or current_authority_sha256 == stored_authority_sha256
+            current_authority_epoch is None
+            or current_authority_epoch == stored_authority_epoch
         ):
             for raw_file in packet_raws:
                 deferred[raw_file] = SEMANTIC_NO_QUORUM_DEFER_REASON
-        # A different fully validated adopted artifact is the only automatic
-        # release condition. Superseded and explicitly released packets never
-        # reach this loop because their status is not local_quarantined.
+        # A different executable authority epoch is the automatic release
+        # condition. Superseded and explicitly released packets never reach
+        # this loop because their status is not local_quarantined.
     return dict(sorted(deferred.items()))
 
 

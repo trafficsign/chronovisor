@@ -242,7 +242,15 @@ def gather_candidates(
     if semantic_search_fn is None:
         from chronovisor.search import semantic_search
 
-        semantic_search_fn = semantic_search
+        # Orphan resolution must distinguish a healthy empty result from the
+        # search layer's normal fail-open ``[]``. Strict mode preserves that
+        # distinction so legitimate no-candidate pages terminate as no-link,
+        # while an unavailable semantic service remains retryable.
+        semantic_search_fn = lambda query, top_n: semantic_search(
+            query,
+            top_n,
+            strict=True,
+        )
 
     query = _build_query(orphan_id, store)
     if not query.strip():
@@ -1188,12 +1196,6 @@ def run_autonomous(
         except Exception as exc:
             candidates = []
             discovery_error = f"{exc.__class__.__name__}: {exc}"
-        # The production semantic path returns [] both for an empty result and
-        # for unavailable/missing embeddings. Treat that ambiguous condition as
-        # retryable. Injected search functions in tests/tools can explicitly
-        # establish a deterministic empty result.
-        if not candidates and semantic_search_fn is None and discovery_error is None:
-            discovery_error = "production semantic search returned no candidates"
         source_id = candidates[0] if candidates else ""
         decision_authority, authority_error = current_semantic_authority(
             DECISION_LANE,

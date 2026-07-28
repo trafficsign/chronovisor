@@ -949,7 +949,11 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setattr(index_store, "_store", None)
     monkeypatch.setattr(ollama, "is_available", lambda: False)
-    monkeypatch.setattr(search, "update_embeddings", lambda page_ids=None: 0)
+    monkeypatch.setattr(
+        search,
+        "update_embeddings",
+        lambda page_ids=None, *, strict=False: 0,
+    )
     from chronovisor.runtime_config import DecisionRouterConfig
 
     # Review planning must not inherit the operator's live adoption artifact.
@@ -1542,6 +1546,8 @@ class TestIngestFrontierGate:
         }
         assert authority["router"] == router_audit
         assert authority["source"] == "adopted_local_consensus"
+        assert authority["quorum_safety_policy_version"] == 2
+        assert authority["tie_break_adjudication_policy_version"] == 1
         assert ingest._ingest_review_authority_shape_error(authority) is None
 
     @pytest.mark.parametrize("authority_state", ["stable", "drifted", "missing"])
@@ -8374,6 +8380,44 @@ class TestPerRawOrchestrator:
 
         assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
 
+    def test_semantic_hold_reenters_ingest_after_executable_policy_epoch_change(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor import failure_supervisor
+
+        artifact = "a" * 64
+        epoch = ["b" * 64]
+        monkeypatch.setattr(
+            failure_supervisor,
+            "_current_adopted_authority_sha256",
+            lambda: artifact,
+        )
+        monkeypatch.setattr(
+            failure_supervisor,
+            "_current_adopted_authority_epoch",
+            lambda: epoch[0],
+        )
+        raw_path = isolated_wiki / "raw" / "policy-epoch-retry.md"
+        raw_path.write_text("grounded source", encoding="utf-8")
+
+        supervision = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=(
+                "local consensus semantic no quorum "
+                f"[authority_sha256={artifact}]: two proposals disagreed"
+            ),
+            raw_text="grounded source",
+        )
+
+        assert supervision.terminal_deferred is True
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
+            raw_path.name: failure_supervisor.SEMANTIC_NO_QUORUM_DEFER_REASON
+        }
+
+        epoch[0] = "c" * 64
+
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
+
     def test_generation_repair_exhaustion_is_operational_not_bad_raw(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -9459,6 +9503,46 @@ class TestReadBackVerification:
 
         assert result == {"checked": 1, "passed": 1, "failed": []}
 
+    def test_refresh_waits_for_semantic_delta_before_read_back(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor import claims, index_store, ingest, search, state_register
+
+        events: list[object] = []
+
+        class Store:
+            def refresh(self) -> None:
+                events.append("store-refresh")
+
+        def update_embeddings(page_ids=None, *, strict=False):
+            events.append(("semantic-index", list(page_ids or ()), strict))
+            return len(page_ids or ())
+
+        def read_back(page_ids, *, top_n=10):
+            events.append(("read-back", list(page_ids), top_n))
+            return {"checked": 1, "passed": 1, "failed": []}
+
+        monkeypatch.setattr(ingest, "_rebuild_index", lambda: events.append("index"))
+        monkeypatch.setattr(index_store, "get_store", lambda: Store())
+        monkeypatch.setattr(search, "update_embeddings", update_embeddings)
+        monkeypatch.setattr(claims, "append_page_claims", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            state_register,
+            "refresh_state_register",
+            lambda *_a, **_k: None,
+        )
+        monkeypatch.setattr(ingest, "_verify_changed_pages_read_back", read_back)
+
+        result = ingest._refresh_ingest_derived_artifacts(
+            ["p"],
+            source_raw="raw.md",
+        )
+
+        assert result == {"checked": 1, "passed": 1, "failed": []}
+        assert events.index(("semantic-index", ["p"], True)) < events.index(
+            ("read-back", ["p"], 10)
+        )
+
 
 # ---------------------------------------------------------------------------
 # Triage plan schema validation (R3-High)
@@ -9592,6 +9676,34 @@ class TestTriagePlanSchema:
         assert ingest._triage("new domain knowledge", transport=transport) == [repaired]
         feedback = transport.requests[1].messages[-1]["content"]
         assert '"keyword":"missingUpdateNeedsFolderedCreate"' in feedback
+
+    def test_live_triage_repairs_missing_legacy_style_update_before_post_validation(
+        self, isolated_wiki: Path
+    ) -> None:
+        from chronovisor import ingest
+
+        invalid = {
+            "type": "update",
+            "filename": "Legacy Folder/New Topic.md",
+            "title": "New Topic",
+            "keywords": ["new", "topic"],
+            "summary": "Durable knowledge without an existing legacy target.",
+        }
+        repaired = {
+            **invalid,
+            "type": "create",
+            "filename": "new-domain/new-topic.md",
+        }
+        transport = _QueueStructuredTransport(
+            json.dumps([invalid]),
+            json.dumps([repaired]),
+        )
+
+        assert ingest._triage("new domain knowledge", transport=transport) == [repaired]
+        assert len(transport.requests) == 2
+        feedback = transport.requests[1].messages[-1]["content"]
+        assert '"keyword":"missingUpdateNeedsFolderedCreate"' in feedback
+        assert "valid ASCII kebab-case filename" in feedback
 
     def test_more_than_8_operations_is_rejected_by_host_validator(self) -> None:
         from chronovisor.ingest import _triage_plan_validation_issues

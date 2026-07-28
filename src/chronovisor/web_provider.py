@@ -149,6 +149,7 @@ class HttpSearchProvider:
         self.endpoint = endpoint
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.last_statuses: dict[str, str] = {}
         self.client = client or httpx.Client(
             timeout=timeout_seconds,
             follow_redirects=False,
@@ -156,6 +157,7 @@ class HttpSearchProvider:
         )
 
     def search(self, query: str, *, limit: int) -> list[SearchResult]:
+        self.last_statuses = {}
         if self.name == "mediawiki":
             response = self.client.get(
                 self.endpoint,
@@ -401,6 +403,14 @@ class HttpSearchProvider:
         response.raise_for_status()
         payload = response.json()
         rows = payload.get("results", []) if isinstance(payload, dict) else []
+        if self.name == "searxng" and isinstance(payload, dict):
+            unresponsive = payload.get("unresponsive_engines")
+            for row in unresponsive if isinstance(unresponsive, list) else []:
+                if not isinstance(row, (list, tuple)) or not row:
+                    continue
+                engine = str(row[0] or "unknown")
+                detail = str(row[1] or "unresponsive") if len(row) > 1 else "unresponsive"
+                self.last_statuses[f"searxng:{engine}"] = f"error:{detail[:160]}"
         return _normalize_rows(
             rows, provider=self.name, limit=limit, snippet_key="content"
         )
@@ -817,7 +827,18 @@ def search_web(
                             str(name): str(value)
                             for name, value in observed_statuses.items()
                         }
-                    status = "ok"
+                    partial_errors = [
+                        f"{name}={value}"
+                        for name, value in sorted(provider_statuses.items())
+                        if value.startswith(("error:", "blocked:"))
+                    ]
+                    if results and partial_errors:
+                        status = "degraded"
+                        error = "partial provider degradation: " + "; ".join(
+                            partial_errors
+                        )
+                    else:
+                        status = "ok"
                     break
                 except (
                     httpx.HTTPError,

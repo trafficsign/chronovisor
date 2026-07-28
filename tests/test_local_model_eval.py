@@ -435,6 +435,8 @@ def test_live_eval_resets_surviving_runners_and_wires_exact_mode(
     assert events[3:] == [
         ("chat", "ornith:test"),
         ("chat", "gpt-oss:test"),
+        ("unload", "ornith:test"),
+        ("unload", "gpt-oss:test"),
     ]
 
 

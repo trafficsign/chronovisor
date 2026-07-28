@@ -511,7 +511,11 @@ def ingest_semantic_hold_inventory(chronovisor_root: Path) -> list[dict[str, Any
         if not normalized or any(not isinstance(row.get("sha256"), str) for row in normalized):
             continue
         raw_sha = hashlib.sha256(canonical_bytes(normalized)).hexdigest()
-        authority = str(packet.get("authority_artifact_sha256") or "")
+        authority = str(
+            packet.get("authority_epoch")
+            or packet.get("authority_artifact_sha256")
+            or ""
+        )
         hold_sha = hashlib.sha256(
             canonical_bytes(
                 {
@@ -549,9 +553,9 @@ def sync_ingest_semantic_holds(
 ) -> dict[str, Any]:
     inventory = ingest_semantic_hold_inventory(chronovisor_root)
     try:
-        from chronovisor.failure_supervisor import _current_adopted_authority_sha256
+        from chronovisor.failure_supervisor import _current_adopted_authority_epoch
 
-        current_authority = _current_adopted_authority_sha256()
+        current_authority = _current_adopted_authority_epoch()
     except Exception:
         current_authority = None
     if dry_run:

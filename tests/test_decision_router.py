@@ -1214,6 +1214,15 @@ def test_content_review_nonapproval_vote_vetoes_mutating_majority() -> None:
         "gpt-oss:test",
         "gemma:test",
     ]
+    tie_request = transport.requests[2]
+    tie_prompt = tie_request.messages[-1]["content"]
+    assert "Trusted adjudication task" in tie_prompt
+    assert '"proposal": "A"' in tie_prompt
+    assert '"proposal": "B"' in tie_prompt
+    assert "prompt" in tie_prompt
+    assert "CHRONOVISOR_TIE_BREAK_ADJUDICATION_POLICY=1" in (
+        tie_request.messages[0]["content"]
+    )
 
 
 def test_generic_nonapproval_vetoes_durable_mutating_majority() -> None:
@@ -1460,7 +1469,12 @@ def test_three_way_disagreement_quarantines_with_no_frontier_fallback() -> None:
     assert result.failure_class == "local_consensus_failed"
     assert result.quarantine_reason == "local_models_did_not_reach_two_vote_quorum"
     assert len(result.votes) == 3
-    assert all(vote.valid for vote in result.votes)
+    assert all(vote.valid for vote in result.votes[:2])
+    assert result.votes[2].valid is False
+    assert (
+        result.votes[2].invalid_reason
+        == "tie_break_not_bound_to_existing_proposal"
+    )
 
 
 def test_tie_break_failure_leaves_one_vote_and_quarantines() -> None:

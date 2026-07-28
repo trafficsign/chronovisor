@@ -2625,7 +2625,7 @@ def _active_semantic_defer_packet_evidence(
         return None
     from chronovisor.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
-        _current_adopted_authority_sha256,
+        _current_adopted_authority_epoch,
         _semantic_defer_packet_records,
     )
 
@@ -2635,19 +2635,22 @@ def _active_semantic_defer_packet_evidence(
         or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
     ):
         return None
-    current_authority_sha256 = _current_adopted_authority_sha256()
+    current_authority_epoch = _current_adopted_authority_epoch()
     for packet_path, packet, packet_raws in reversed(
         _semantic_defer_packet_records(verify_sources=True)
     ):
         if raw_name not in packet_raws:
             continue
-        authority_sha256 = packet.get("authority_artifact_sha256")
+        authority_epoch = packet.get(
+            "authority_epoch",
+            packet.get("authority_artifact_sha256"),
+        )
         if (
-            not isinstance(authority_sha256, str)
-            or re.fullmatch(r"[0-9a-f]{64}", authority_sha256) is None
+            not isinstance(authority_epoch, str)
+            or re.fullmatch(r"[0-9a-f]{64}", authority_epoch) is None
             or (
-                current_authority_sha256 is not None
-                and current_authority_sha256 != authority_sha256
+                current_authority_epoch is not None
+                and current_authority_epoch != authority_epoch
             )
         ):
             continue
