@@ -1403,6 +1403,39 @@ def test_health_materialization_fingerprint_changes_with_runtime(
     assert before != after
 
 
+def test_health_materialization_fingerprint_tracks_ingest_liveness(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    runtime_dir = chronovisor_root / "runtime"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        dashboard,
+        "runtime_identity",
+        lambda: {
+            "commit_id": "a" * 40,
+            "module_path": "/archive/a/chronovisor/runtime_config.py",
+            "package_version": "0.1.1",
+        },
+    )
+
+    before = dashboard._health_materialization_fingerprint([])
+    (runtime_dir / "ingest-liveness.json").write_text(
+        json.dumps(
+            {
+                "status": "blocked_by_decision_authority",
+                "alert": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    after = dashboard._health_materialization_fingerprint([])
+
+    assert before != after
+
+
 def test_materialized_component_returns_stale_while_audit_refreshes(
     tmp_path: Path, monkeypatch
 ) -> None:

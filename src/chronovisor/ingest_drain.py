@@ -38,33 +38,42 @@ def _record_liveness(
     *,
     pending: int,
     error: str = "",
+    authority_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     previous = _read_liveness()
     now = datetime.now().isoformat(timespec="seconds")
     previous_status = str(previous.get("status") or "")
     waiting = status == "waiting_for_ollama"
+    authority_blocked = status == "blocked_by_decision_authority"
+    blocked = waiting or authority_blocked
+    previous_blocked = previous_status in {
+        "waiting_for_ollama",
+        "blocked_by_decision_authority",
+    }
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": status,
         "observed_at": now,
         "pending_raws": max(0, int(pending)),
         "ollama_available": not waiting,
-        "alert": waiting and pending > 0,
-        "retryable": waiting,
+        "authority_available": not authority_blocked,
+        "alert": authority_blocked or (waiting and pending > 0),
+        "retryable": blocked,
         "consecutive_unavailable_checks": (
             int(previous.get("consecutive_unavailable_checks") or 0) + 1
-            if waiting
+            if blocked
             else 0
         ),
         "unavailable_since": (
-            str(previous.get("unavailable_since") or now) if waiting else None
+            str(previous.get("unavailable_since") or now) if blocked else None
         ),
         "last_recovered_at": (
             now
-            if not waiting and previous_status == "waiting_for_ollama"
+            if not blocked and previous_blocked
             else previous.get("last_recovered_at")
         ),
         "error": error,
+        "authority_preflight": authority_preflight,
         "transitioned": previous_status != status,
     }
     atomic_write(
@@ -198,9 +207,8 @@ def _drain(
             "managed_holds": managed_holds,
         }
 
-    if pending_start == 0:
-        liveness = _record_liveness("idle", pending=0)
-    elif not ollama.is_available():
+    ollama_available = ollama.is_available()
+    if not ollama_available and pending_start > 0:
         liveness = _record_liveness(
             "waiting_for_ollama",
             pending=pending_start,
@@ -234,9 +242,53 @@ def _drain(
             "liveness": liveness,
             "managed_holds": managed_holds,
         }
+    authority_preflight = (
+        orchestrator.ingest_authority_preflight() if ollama_available else None
+    )
+    if authority_preflight is not None and not authority_preflight["ok"]:
+        liveness = _record_liveness(
+            "blocked_by_decision_authority",
+            pending=pending_start,
+            error=str(authority_preflight["error"]),
+            authority_preflight=authority_preflight,
+        )
+        if liveness["transitioned"]:
+            _append_jsonl(
+                log_path,
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "kind": "ingest_liveness",
+                    "status": liveness["status"],
+                    "pending_before": pending_start,
+                    "pending_after": pending_start,
+                    "alert": True,
+                    "retryable": True,
+                    "error": liveness["error"],
+                    "authority_preflight": authority_preflight,
+                },
+            )
+        return {
+            "status": "blocked",
+            "pending_start": pending_start,
+            "pending_after": pending_start,
+            "batches_run": 0,
+            "files_processed": 0,
+            "stop_reason": str(authority_preflight["error"]),
+            "elapsed_seconds": round(time.time() - started, 2),
+            "log_file": str(log_path),
+            "alert": True,
+            "retryable": True,
+            "blocked_by": "decision_authority",
+            "authority_preflight": authority_preflight,
+            "liveness": liveness,
+            "managed_holds": managed_holds,
+        }
+    if pending_start == 0:
+        liveness = _record_liveness("idle", pending=0)
     else:
         liveness = _record_liveness("ready", pending=pending_start)
 
+    batch_authority_block: dict[str, Any] | None = None
     for batch_index in range(1, max_batches + 1):
         pending_before = len(orchestrator.get_pending_raw_files())
         if pending_before == 0:
@@ -276,6 +328,24 @@ def _drain(
         batches.append(record)
         _append_jsonl(log_path, record)
 
+        if result.get("blocked_by") == "decision_authority":
+            batch_authority_block = (
+                result.get("authority_preflight")
+                if isinstance(result.get("authority_preflight"), dict)
+                else {
+                    "ok": False,
+                    "status": "blocked",
+                    "blocked_by": "decision_authority",
+                    "retryable": True,
+                    "error": result.get("reason"),
+                    "artifact_sha256": None,
+                }
+            )
+            stop_reason = str(
+                batch_authority_block.get("error")
+                or "local consensus authority unavailable"
+            )
+            break
         if not result.get("triggered"):
             stop_reason = result.get("reason", "ingest did not trigger")
             break
@@ -289,7 +359,9 @@ def _drain(
             time.sleep(sleep_seconds)
 
     pending_final = len(orchestrator.get_pending_raw_files())
-    if pending_final == 0:
+    if batch_authority_block is not None:
+        status = "blocked"
+    elif pending_final == 0:
         status = "drained"
     elif not batches and pending_start == 0:
         status = "idle"
@@ -300,10 +372,18 @@ def _drain(
     else:
         status = "partial"
 
-    liveness = _record_liveness(
-        "idle" if pending_final == 0 else "ready",
-        pending=pending_final,
-    )
+    if batch_authority_block is not None:
+        liveness = _record_liveness(
+            "blocked_by_decision_authority",
+            pending=pending_final,
+            error=str(batch_authority_block.get("error") or stop_reason),
+            authority_preflight=batch_authority_block,
+        )
+    else:
+        liveness = _record_liveness(
+            "idle" if pending_final == 0 else "ready",
+            pending=pending_final,
+        )
     return {
         "status": status,
         "pending_start": pending_start,
@@ -315,6 +395,12 @@ def _drain(
         "log_file": str(log_path),
         "managed_holds": managed_holds,
         "liveness": liveness,
+        "alert": batch_authority_block is not None,
+        "retryable": batch_authority_block is not None,
+        "blocked_by": (
+            "decision_authority" if batch_authority_block is not None else None
+        ),
+        "authority_preflight": batch_authority_block,
     }
 
 

@@ -23,6 +23,19 @@ def _disable_runtime_status_reset(
     monkeypatch.setattr(ingest_drain, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(ingest_drain.ollama, "ingest_model", lambda: "ornith:test")
     monkeypatch.setattr(ingest_drain.ollama, "resident_model_rows", lambda: {})
+    monkeypatch.setattr(ingest_drain.ollama, "is_available", lambda: True)
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "ingest_authority_preflight",
+        lambda: {
+            "ok": True,
+            "status": "ready",
+            "blocked_by": None,
+            "retryable": False,
+            "error": None,
+            "artifact_sha256": "a" * 64,
+        },
+    )
 
 
 def test_release_ingest_runner_unloads_only_when_resident(
@@ -310,3 +323,90 @@ def test_drain_waits_for_ollama_and_recovers_without_losing_pending_raws(
     assert recovered["pending_after"] == 0
     assert state["runs"] == 1
     assert recovered["liveness"]["last_recovered_at"]
+
+
+def test_drain_blocks_globally_before_raw_processing_when_authority_is_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"pending": 3, "runs": 0}
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "get_pending_raw_files",
+        lambda: [object()] * state["pending"],
+    )
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "ingest_authority_preflight",
+        lambda: {
+            "ok": False,
+            "status": "blocked",
+            "blocked_by": "decision_authority",
+            "retryable": True,
+            "error": (
+                "local consensus authority unavailable: "
+                "adoption_artifact_invalid:policy version mismatch"
+            ),
+            "artifact_sha256": None,
+        },
+    )
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "run_pending_ingest",
+        lambda **_kwargs: state.__setitem__("runs", state["runs"] + 1),
+    )
+
+    result = ingest_drain.drain(
+        max_batches=3,
+        sleep_seconds=0,
+        log_file=tmp_path / "authority-block.jsonl",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_by"] == "decision_authority"
+    assert result["pending_after"] == 3
+    assert result["files_processed"] == 0
+    assert result["alert"] is True
+    assert result["liveness"]["status"] == "blocked_by_decision_authority"
+    assert state["runs"] == 0
+
+
+def test_drain_reports_authority_outage_even_when_failed_raws_are_deferred(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "get_pending_raw_files",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "ingest_authority_preflight",
+        lambda: {
+            "ok": False,
+            "status": "blocked",
+            "blocked_by": "decision_authority",
+            "retryable": True,
+            "error": (
+                "local consensus authority unavailable: "
+                "adoption_artifact_invalid:policy version mismatch"
+            ),
+            "artifact_sha256": None,
+        },
+    )
+
+    result = ingest_drain.drain(
+        max_batches=1,
+        sleep_seconds=0,
+        log_file=tmp_path / "authority-empty.jsonl",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["pending_after"] == 0
+    assert result["alert"] is True
+    assert result["liveness"]["alert"] is True

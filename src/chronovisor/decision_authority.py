@@ -54,7 +54,6 @@ def current_semantic_authority(
         from chronovisor.decision_policy import resolve_decision_policy
         from chronovisor.decision_router import (
             QUORUM_SAFETY_POLICY_VERSION,
-            TIE_BREAK_ADJUDICATION_POLICY_VERSION,
             resolve_router_policy,
         )
         from chronovisor.runtime_config import load_decision_router_config
@@ -73,9 +72,6 @@ def current_semantic_authority(
                 decision_lane_contract_case_manifest_sha256()
             ),
             "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
-            "tie_break_adjudication_policy_version": (
-                TIE_BREAK_ADJUDICATION_POLICY_VERSION
-            ),
             "policy": {
                 "kind": policy.kind if policy is not None else None,
                 "schema_name": policy.schema_name if policy is not None else None,

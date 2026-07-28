@@ -785,7 +785,6 @@ def _current_adopted_authority_epoch() -> str | None:
         from chronovisor.decision_router import (
             DECISION_SEMANTICS_POLICY_VERSION,
             QUORUM_SAFETY_POLICY_VERSION,
-            TIE_BREAK_ADJUDICATION_POLICY_VERSION,
         )
 
         payload = {
@@ -794,9 +793,6 @@ def _current_adopted_authority_epoch() -> str | None:
             "lane_contract_policy_version": LANE_CONTRACT_POLICY_VERSION,
             "lane_contract_manifest_sha256": lane_contract_manifest_sha256(),
             "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
-            "tie_break_adjudication_policy_version": (
-                TIE_BREAK_ADJUDICATION_POLICY_VERSION
-            ),
         }
         encoded = json.dumps(
             payload,

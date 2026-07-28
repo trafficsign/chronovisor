@@ -666,13 +666,16 @@ def ingest_liveness_kpi() -> dict[str, Any]:
         }
     if not isinstance(payload, dict):
         return {"status": "invalid", "path": str(path), "alert": False}
-    waiting = payload.get("status") == "waiting_for_ollama"
+    runtime_state = payload.get("status")
+    waiting = runtime_state == "waiting_for_ollama"
+    authority_blocked = runtime_state == "blocked_by_decision_authority"
     pending = int(payload.get("pending_raws") or 0)
+    alert = authority_blocked or (waiting and pending > 0)
     return {
         **payload,
-        "status": "alert" if waiting and pending > 0 else "ok",
-        "runtime_status": payload.get("status"),
-        "alert": waiting and pending > 0,
+        "status": "alert" if alert else "ok",
+        "runtime_status": runtime_state,
+        "alert": alert,
         "path": str(path),
     }
 

@@ -964,6 +964,18 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "_ingest_review_router_config",
         lambda: DecisionRouterConfig(adoption_artifact=""),
     )
+    monkeypatch.setattr(
+        orchestrator,
+        "ingest_authority_preflight",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "ready",
+            "blocked_by": None,
+            "retryable": False,
+            "error": None,
+            "artifact_sha256": "a" * 64,
+        },
+    )
 
     def isolated_frontier_review(proposal, *, reviewer=None):
         if reviewer is not None:
@@ -1546,8 +1558,8 @@ class TestIngestFrontierGate:
         }
         assert authority["router"] == router_audit
         assert authority["source"] == "adopted_local_consensus"
-        assert authority["quorum_safety_policy_version"] == 2
-        assert authority["tie_break_adjudication_policy_version"] == 1
+        assert authority["quorum_safety_policy_version"] == 1
+        assert "tie_break_adjudication_policy_version" not in authority
         assert ingest._ingest_review_authority_shape_error(authority) is None
 
     @pytest.mark.parametrize("authority_state", ["stable", "drifted", "missing"])
@@ -7388,6 +7400,54 @@ class TestOrchestrator:
         assert loaded["current_job_id"] is None
         assert loaded["current_job_pid"] is None
         assert loaded["current_job_started_at"] is None
+
+    def test_run_pending_ingest_does_not_turn_global_authority_outage_into_raw_failures(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor import ingest as ingest_mod, orchestrator, runtime_status
+
+        raw_path = isolated_wiki / "raw" / "authority-blocked.md"
+        raw_path.write_text("valid immutable source", encoding="utf-8")
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(
+            orchestrator,
+            "ingest_authority_preflight",
+            lambda **_kwargs: {
+                "ok": False,
+                "status": "blocked",
+                "blocked_by": "decision_authority",
+                "retryable": True,
+                "error": (
+                    "local consensus authority unavailable: "
+                    "adoption_artifact_invalid:policy version mismatch"
+                ),
+                "artifact_sha256": None,
+            },
+        )
+        monkeypatch.setattr(
+            ingest_mod,
+            "run_ingest",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("Raw processing must not start")
+            ),
+        )
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert result["triggered"] is False
+        assert result["blocked_by"] == "decision_authority"
+        assert result["files_attempted"] == []
+        assert result["files_processed"] == []
+        assert raw_path.exists()
+        assert [path.name for path in orchestrator.get_pending_raw_files()] == [
+            raw_path.name
+        ]
+        assert not (
+            isolated_wiki / "runtime" / "failures" / "state.json"
+        ).exists()
+        status = runtime_status.read_status()
+        assert status["state"] == "blocked"
+        assert status["stage"] == "decision-authority"
 
     def test_run_pending_ingest_serial_then_idempotent(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

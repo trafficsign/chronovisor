@@ -190,6 +190,35 @@ def test_ingest_liveness_kpi_alerts_when_ollama_blocks_pending_raws(
     assert payload["pending_raws"] == 7
 
 
+def test_ingest_liveness_kpi_alerts_on_invalid_authority_without_pending_raws(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    state_path = chronovisor_root / "runtime" / "ingest-liveness.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "status": "blocked_by_decision_authority",
+                "pending_raws": 0,
+                "alert": True,
+                "error": "adoption artifact policy version mismatch",
+                "observed_at": "2026-07-28T20:42:42",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
+
+    payload = health.ingest_liveness_kpi()
+
+    assert payload["status"] == "alert"
+    assert payload["runtime_status"] == "blocked_by_decision_authority"
+    assert payload["pending_raws"] == 0
+    assert payload["alert"] is True
+
+
 def test_cofire_kpi_reads_graph_summary(tmp_path: Path, monkeypatch) -> None:
     chronovisor_root = tmp_path / "wiki"
     recall_dir = chronovisor_root / "recall"

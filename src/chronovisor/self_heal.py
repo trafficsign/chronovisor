@@ -3985,10 +3985,19 @@ def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
 
     original_run_ingest = ingest_mod.run_ingest
     original_run_frontier = globals()["_run_frontier"]
+    original_authority_preflight = orchestrator.ingest_authority_preflight
 
     def fake_run_ingest(
-        content, job_id, on_complete=None, on_finally=None, *, metadata=None
+        content,
+        job_id,
+        on_complete=None,
+        on_finally=None,
+        *,
+        metadata=None,
+        frontier_reviewer=None,
     ):
+        if frontier_reviewer is not None:
+            raise AssertionError("sandbox drill must not invoke frontier authority")
         aliases = load_aliases()
         if (
             aliases.get("opus-4-7-evaluation-and-industry-geopolitics")
@@ -4012,6 +4021,14 @@ def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
             on_finally(failed=True, triage_failed=False)
 
     ingest_mod.run_ingest = fake_run_ingest
+    orchestrator.ingest_authority_preflight = lambda **_kwargs: {
+        "ok": True,
+        "status": "ready",
+        "blocked_by": None,
+        "retryable": False,
+        "error": None,
+        "artifact_sha256": "sandbox-drill-authority",
+    }
     globals()["_run_frontier"] = lambda *_args, **_kwargs: (_ for _ in ()).throw(
         AssertionError("sandbox semantic repair must remain in the local data plane")
     )
@@ -4030,6 +4047,7 @@ def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
         aliases = load_aliases()
     finally:
         ingest_mod.run_ingest = original_run_ingest
+        orchestrator.ingest_authority_preflight = original_authority_preflight
         globals()["_run_frontier"] = original_run_frontier
         if old_autorun is None:
             os.environ.pop("CHRONOVISOR_SELF_HEAL_AUTORUN", None)

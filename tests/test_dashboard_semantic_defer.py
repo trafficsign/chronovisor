@@ -671,6 +671,18 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
     )
     monkeypatch.setattr(
         orchestrator,
+        "ingest_authority_preflight",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "ready",
+            "blocked_by": None,
+            "retryable": False,
+            "error": None,
+            "artifact_sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator,
         "get_pending_raw_files",
         lambda: [] if deferred else [raw],
     )

@@ -447,6 +447,59 @@ def get_ollama_status() -> dict:
     }
 
 
+def ingest_authority_preflight(
+    *,
+    frontier_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Prove the batch-wide semantic authority before claiming any Raw.
+
+    Authority configuration is global to the batch. Treating an invalid
+    adoption artifact as a per-Raw failure creates a false failure storm and
+    can quarantine every otherwise valid Raw behind the same control-plane
+    incident. This preflight keeps that global outage outside the per-Raw
+    failure supervisor.
+    """
+
+    from chronovisor.ingest_review_authority import (
+        current_ingest_review_authority,
+        ingest_review_authority_shape_error,
+    )
+
+    authority, authority_error = current_ingest_review_authority(
+        injected_reviewer=frontier_reviewer is not None
+    )
+    shape_error = (
+        ingest_review_authority_shape_error(authority)
+        if authority is not None
+        else None
+    )
+    problem = (
+        authority_error
+        or shape_error
+        or (None if authority is not None else "authority is missing")
+    )
+    if problem is not None:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "blocked_by": "decision_authority",
+            "retryable": True,
+            "error": "local consensus authority unavailable: " + problem,
+            "artifact_sha256": None,
+        }
+    router = authority.get("router") if isinstance(authority, dict) else None
+    return {
+        "ok": True,
+        "status": "ready",
+        "blocked_by": None,
+        "retryable": False,
+        "error": None,
+        "artifact_sha256": (
+            router.get("artifact_sha256") if isinstance(router, dict) else None
+        ),
+    }
+
+
 @dataclass(frozen=True)
 class _PendingRawUnit:
     paths: tuple[Path, ...]
@@ -1003,6 +1056,38 @@ def run_pending_ingest(
         )
 
         initial_ollama_status = get_ollama_status()
+        authority_preflight = ingest_authority_preflight(
+            frontier_reviewer=frontier_reviewer
+        )
+        if not authority_preflight["ok"]:
+            runtime_status.safe_write_status(
+                state="blocked",
+                stage="decision-authority",
+                pending=pending_before_count,
+                current_raw=None,
+                current_op=None,
+                current_job_id=None,
+                current_job_pid=None,
+                ollama=initial_ollama_status,
+                llm=None,
+                authority_preflight=authority_preflight,
+            )
+            return {
+                "triggered": False,
+                "reason": authority_preflight["error"],
+                "failure_class": (
+                    "ingest.runtime_local_consensus_authority_unavailable"
+                ),
+                "blocked_by": "decision_authority",
+                "retryable": True,
+                "pending_before": pending_before_count,
+                "pending_after": pending_before_count,
+                "files_attempted": [],
+                "files_processed": [],
+                "fragment_quarantined": fragment_quarantined,
+                "fragment_deferred": fragment_deferred,
+                "authority_preflight": authority_preflight,
+            }
         per_raw: list[dict] = []
         job_ids: list[str] = []
         succeeded_filenames: list[str] = []

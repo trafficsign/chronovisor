@@ -3386,6 +3386,7 @@ def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
         CHRONOVISOR_ROOT / "runtime" / "managed-holds" / "state.json",
         CHRONOVISOR_ROOT / "runtime" / "provisional-recall" / "index.json",
         CHRONOVISOR_ROOT / "runtime" / "quality" / "probe-latest.json",
+        CHRONOVISOR_ROOT / "runtime" / "ingest-liveness.json",
         CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-runs.jsonl",
         CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-failures.jsonl",
         CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-repair.json",
