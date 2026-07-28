@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chronovisor.recall_prompt import normalize_recall_prompt
 from chronovisor.recall_runtime_paths import RECALL_DIR
 
 
@@ -41,8 +42,14 @@ class RecallSessionState:
 
     @classmethod
     def from_dict(cls, session_id: str, data: dict[str, Any]) -> "RecallSessionState":
-        recent_queries = _str_list(data.get("recent_queries"))[-12:]
-        recent_topics = _str_list(data.get("recent_topics"))[-40:]
+        recent_queries = _normalize_queries(
+            _str_list(data.get("recent_queries"))
+        )[-12:]
+        # Rebuild topics from trusted queries instead of retaining tokens that
+        # may have been extracted from an old host transport envelope.
+        recent_topics = extract_topic_terms(
+            " ".join(recent_queries), limit=40
+        )
         raw_pages = data.get("injected_pages")
         injected_pages = raw_pages if isinstance(raw_pages, dict) else {}
         last_seen = data.get("last_seen")
@@ -98,7 +105,8 @@ def update_session_after_recall(
     if state is None:
         return
     state.last_seen = time.time()
-    for query in queries:
+    state.recent_queries = _normalize_queries(state.recent_queries)
+    for query in _normalize_queries(queries):
         q = re.sub(r"\s+", " ", query).strip()
         # Existing session state can still contain the former product name.
         # Canonicalize it so a migration does not duplicate otherwise equal
@@ -108,11 +116,9 @@ def update_session_after_recall(
             state.recent_queries.append(q)
     state.recent_queries = state.recent_queries[-12:]
 
-    topics = extract_topic_terms(" ".join(queries))
-    for topic in topics:
-        if topic not in state.recent_topics:
-            state.recent_topics.append(topic)
-    state.recent_topics = state.recent_topics[-40:]
+    state.recent_topics = extract_topic_terms(
+        " ".join(state.recent_queries), limit=40
+    )
 
     updates = page_updated or {}
     now = time.time()
@@ -124,6 +130,16 @@ def update_session_after_recall(
             "updated": updates.get(page_id, ""),
         }
     save_session_state(state)
+
+
+def _normalize_queries(queries: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for query in queries:
+        cleaned, _reasons = normalize_recall_prompt(query)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
+    return normalized
 
 
 def extract_topic_terms(text: str, *, limit: int = 12) -> list[str]:

@@ -62,6 +62,68 @@ def test_update_session_persists_bounded_unique_state(
     assert recall_session.should_skip_page(state, "page-a", "newer") is False
 
 
+def test_load_session_repairs_host_transport_query_and_topic_pollution(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(recall_session, "SESSIONS_DIR", tmp_path)
+    path = recall_session.session_path("session-a")
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "session_id": "session-a",
+                "recent_queries": [
+                    '<in-app-browser-context source="ambient-ui-state"> truncated',
+                    "AI 2040 Plan D",
+                    "<heartbeat> <automation_id>chronovisor</automation_id>",
+                ],
+                "recent_topics": [
+                    "in-app-browser-context",
+                    "ambient-ui-state",
+                    "automation_id",
+                    "plan",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = recall_session.load_session_state("session-a")
+
+    assert state is not None
+    assert state.recent_queries == ["AI 2040 Plan D"]
+    assert "in-app-browser-context" not in state.recent_topics
+    assert "ambient-ui-state" not in state.recent_topics
+    assert "automation_id" not in state.recent_topics
+    assert "plan" in state.recent_topics
+
+
+def test_update_session_rejects_new_transport_only_queries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(recall_session, "SESSIONS_DIR", tmp_path)
+    state = recall_session.RecallSessionState(
+        session_id="session-a",
+        recent_queries=[
+            '<in-app-browser-context source="ambient-ui-state"> truncated'
+        ],
+        recent_topics=["ambient-ui-state"],
+    )
+
+    recall_session.update_session_after_recall(
+        state,
+        queries=[
+            "<heartbeat> <automation_id>chronovisor</automation_id>",
+            "Chronovisor recall",
+        ],
+        page_ids=[],
+    )
+
+    assert state.recent_queries == ["Chronovisor recall"]
+    assert "ambient-ui-state" not in state.recent_topics
+    assert "automation_id" not in state.recent_topics
+
+
 def test_cleanup_sessions_uses_mtime_for_corrupt_state(
     tmp_path: Path, monkeypatch
 ) -> None:

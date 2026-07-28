@@ -26,6 +26,11 @@ from typing import Any
 from chronovisor.index_store import get_store
 from chronovisor.jsonl_write import append_jsonl_durable
 from chronovisor.local_structured import LocalStructuredSession
+from chronovisor.recall_prompt import (
+    CODEX_INTERNAL_SUGGESTION_RE,
+    SYSTEM_ENVELOPE_RE,
+    normalize_recall_prompt,
+)
 from chronovisor.recall_runtime_paths import RECALL_DIR
 from chronovisor.runtime_config import active_config_file
 from chronovisor.search import search as run_search
@@ -41,27 +46,6 @@ RECALL_CALIBRATION_FILE = RECALL_DIR / "calibration.json"
 TRIVIAL_PROMPT_RE = re.compile(
     r"^\s*(はい|いいえ|うん|おう|ok|okay|yes|no|y|n|ありがとう|thanks|thx|了解|りょ)\s*[。.!！?？]*\s*$",
     re.IGNORECASE,
-)
-SYSTEM_ENVELOPE_RE = re.compile(
-    r"^\s*<(task-notification|system-reminder|system-notification)\b",
-    re.IGNORECASE,
-)
-SYSTEM_BLOCK_RE = re.compile(
-    r"(?ims)(^|\n)\s*<(task-notification|system-reminder|system-notification)\b.*?</\2>\s*"
-)
-SYSTEM_BLOCK_TO_END_RE = re.compile(
-    r"(?ims)(^|\n)\s*<(task-notification|system-reminder|system-notification)\b.*\Z"
-)
-RECALL_CONTEXT_BLOCK_RE = re.compile(
-    r"(?ms)(^|\n)\s*\[RECALL_CONTEXT\].*?\[/RECALL_CONTEXT\]\s*"
-)
-RECALL_CONTEXT_TO_END_RE = re.compile(r"(?ms)(^|\n)\s*\[RECALL_CONTEXT\].*\Z")
-CODEX_INTERNAL_SUGGESTION_RE = re.compile(
-    r"^\s*#\s*Overview\s+Generate\s+0\s+to\s+3\s+hyperpersonalized\s+suggestions\b",
-    re.IGNORECASE,
-)
-CODEX_INTERNAL_SUGGESTION_BLOCK_RE = re.compile(
-    r"(?ims)(^|\n)\s*#\s*Overview\s+Generate\s+0\s+to\s+3\s+hyperpersonalized\s+suggestions\b.*\Z"
 )
 MACHINE_TAG_RE = re.compile(r"^\s*<([a-z][a-z0-9-]{2,})\b", re.IGNORECASE)
 
@@ -612,32 +596,7 @@ def classify_non_user_prompt(prompt: str, policy: RecallPolicy | None = None) ->
 
 
 def strip_non_user_blocks(prompt: str) -> tuple[str, list[str]]:
-    cleaned = prompt
-    reasons: list[str] = []
-    cleaned, removed = _strip_block(cleaned, SYSTEM_BLOCK_RE)
-    if removed:
-        reasons.append("stripped system notification block")
-    cleaned, removed_to_end = _strip_block(cleaned, SYSTEM_BLOCK_TO_END_RE)
-    if removed_to_end and "stripped system notification block" not in reasons:
-        reasons.append("stripped system notification block")
-
-    cleaned, removed = _strip_block(cleaned, RECALL_CONTEXT_BLOCK_RE)
-    if removed:
-        reasons.append("stripped recall context block")
-    cleaned, removed_to_end = _strip_block(cleaned, RECALL_CONTEXT_TO_END_RE)
-    if removed_to_end and "stripped recall context block" not in reasons:
-        reasons.append("stripped recall context block")
-
-    cleaned, removed = _strip_block(cleaned, CODEX_INTERNAL_SUGGESTION_BLOCK_RE)
-    if removed:
-        reasons.append("stripped codex internal suggestion block")
-
-    return re.sub(r"\n{3,}", "\n\n", cleaned).strip(), reasons
-
-
-def _strip_block(text: str, pattern: re.Pattern[str]) -> tuple[str, bool]:
-    cleaned, count = pattern.subn("\n", text)
-    return cleaned, count > 0
+    return normalize_recall_prompt(prompt)
 
 
 def classify_feedback_suppressed_prompt(prompt: str) -> str:
@@ -1277,21 +1236,6 @@ def collect_context(
         if len(items) >= policy.max_pages:
             return items
 
-    for page_id in prefetch_page_ids_for_request(
-        request, queries, limit=policy.max_pages
-    ):
-        if page_id in seen:
-            continue
-        prefetched = context_item_from_page_id(page_id, queries, decision, score=0.95)
-        if prefetched is None:
-            continue
-        if should_filter_sensitive_result(prefetched, request):
-            continue
-        seen.add(page_id)
-        items.append(prefetched)
-        if len(items) >= policy.max_pages:
-            return items
-
     results = pre_results
     if results is None:
         results, _mode = search_candidates(
@@ -1330,6 +1274,24 @@ def collect_context(
                 sensitivity=getattr(result, "sensitivity", "normal") or "normal",
             )
         )
+        if len(items) >= policy.max_pages:
+            return items
+
+    # Prefetch is speculative exposure/usage history.  It may fill an empty
+    # result set, but it must never displace direct evidence from the current
+    # normalized query.
+    for page_id in prefetch_page_ids_for_request(
+        request, queries, limit=policy.max_pages
+    ):
+        if page_id in seen:
+            continue
+        prefetched = context_item_from_page_id(page_id, queries, decision, score=0.95)
+        if prefetched is None:
+            continue
+        if should_filter_sensitive_result(prefetched, request):
+            continue
+        seen.add(page_id)
+        items.append(prefetched)
         if len(items) >= policy.max_pages:
             return items
     return items
@@ -1813,38 +1775,39 @@ def _run_recall_impl(
             latency_ms=_elapsed_ms(started),
         )
 
-    skip_reason = classify_non_user_prompt(request.prompt, policy)
-    if skip_reason:
+    active_request = request
+    cleaned_prompt, stripped_reasons = strip_non_user_blocks(request.prompt)
+    if not cleaned_prompt:
+        skip_reason = classify_non_user_prompt(request.prompt, policy)
         result = RecallResult(
             status="skipped",
             decision="none",
             confidence=0.0,
             queries=[],
-            reasons=[skip_reason],
+            reasons=[skip_reason] if skip_reason else stripped_reasons,
             matched_terms={},
             latency_ms=_elapsed_ms(started),
         )
         if policy.log_decisions:
             append_recall_log(request, result)
         return result
-
-    active_request = request
-    cleaned_prompt, stripped_reasons = strip_non_user_blocks(request.prompt)
     if stripped_reasons:
-        if not cleaned_prompt:
-            result = RecallResult(
-                status="skipped",
-                decision="none",
-                confidence=0.0,
-                queries=[],
-                reasons=stripped_reasons,
-                matched_terms={},
-                latency_ms=_elapsed_ms(started),
-            )
-            if policy.log_decisions:
-                append_recall_log(request, result)
-            return result
         active_request = replace(request, prompt=cleaned_prompt)
+
+    skip_reason = classify_non_user_prompt(active_request.prompt, policy)
+    if skip_reason:
+        result = RecallResult(
+            status="skipped",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=stripped_reasons + [skip_reason],
+            matched_terms={},
+            latency_ms=_elapsed_ms(started),
+        )
+        if policy.log_decisions:
+            append_recall_log(request, result)
+        return result
 
     score, reasons, matched = evaluate_heuristic(active_request, policy)
     reasons = stripped_reasons + reasons

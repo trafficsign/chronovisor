@@ -16,6 +16,7 @@ from chronovisor.recall_runtime import (
     append_feedback,
     best_excerpt_index,
     build_queries,
+    collect_context,
     evaluate_heuristic,
     excerpt_terms,
     format_recall_context,
@@ -28,6 +29,7 @@ from chronovisor.recall_runtime import (
     run_query_rewriter,
     run_recall,
     search_candidates,
+    strip_non_user_blocks,
     warm_recall_model,
 )
 from chronovisor.search import ScoredPage
@@ -132,6 +134,56 @@ def test_search_candidates_runs_query_entrances_concurrently(monkeypatch) -> Non
 
     assert [result.page_id for result in results] == ["first", "second", "third"]
     assert mode == "hybrid"
+
+
+def test_collect_context_does_not_let_prefetch_displace_direct_search(
+    monkeypatch,
+) -> None:
+    from chronovisor import recall_runtime
+
+    monkeypatch.setattr(recall_runtime, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(
+        recall_runtime,
+        "get_store",
+        lambda: SimpleNamespace(refresh_if_stale=lambda: None),
+    )
+    monkeypatch.setattr(recall_runtime, "query_hint_page_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        recall_runtime,
+        "prefetch_page_ids_for_request",
+        lambda *_a, **_k: ["stale-prefetch"],
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "context_item_from_page_id",
+        lambda page_id, *_a, **_k: ContextItem(
+            page_id=page_id,
+            title=page_id,
+            updated="2026-01-01",
+            score=0.95,
+        ),
+    )
+    direct = ScoredPage(
+        "plan-d-race-to-asi",
+        "AI 2040 Plan D",
+        "direct match",
+        "2026-07-28",
+        1.0,
+    )
+
+    items = collect_context(
+        ["AI 2040 Plan D"],
+        "search",
+        RecallPolicy(max_pages=1),
+        request=RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="これはAI 2040のプランDだ",
+        ),
+        pre_results=[direct],
+    )
+
+    assert [item.page_id for item in items] == ["plan-d-race-to-asi"]
 
 
 def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) -> None:
@@ -903,6 +955,100 @@ def test_middle_recall_context_block_is_stripped_before_recall_gate() -> None:
     assert result.queries
     assert all("RECALL_CONTEXT" not in query for query in result.queries)
     assert all("systemheadertemplate" not in query for query in result.queries)
+
+
+def test_codex_app_ambient_context_uses_only_explicit_user_request() -> None:
+    policy = RecallPolicy(judge_mode="off", log_decisions=False)
+    prompt = """
+<in-app-browser-context source="ambient-ui-state">
+This block is automatically supplied ambient UI state, not part of the user's request.
+# In app browser:
+- Current URL: http://127.0.0.1:8765/
+</in-app-browser-context>
+
+## My request for Codex:
+これはまさにAI 2040のプランDだ。
+"""
+
+    result = run_recall(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt=prompt,
+            cwd="/Users/trafficsign/Documents/Codex/new-chat",
+        ),
+        policy,
+        perform_search=False,
+    )
+
+    assert result.queries[0] == "これはまさにAI 2040のプランDだ。"
+    assert "stripped in-app browser context" in result.reasons
+    assert "extracted codex user request" in result.reasons
+    assert all("ambient-ui-state" not in query for query in result.queries)
+    assert all("127.0.0.1" not in query for query in result.queries)
+
+
+def test_codex_cli_plain_prompt_is_not_rewritten() -> None:
+    prompt = "前回のChronovisor設計をCLIでも確認したい"
+
+    cleaned, reasons = strip_non_user_blocks(prompt)
+
+    assert cleaned == prompt
+    assert reasons == []
+
+
+def test_claude_code_leading_system_reminder_keeps_user_request() -> None:
+    policy = RecallPolicy(judge_mode="off", log_decisions=False)
+    prompt = (
+        "<system-reminder>internal project metadata</system-reminder>\n"
+        "昨日のChronovisor設計の続きを確認したい"
+    )
+
+    result = run_recall(
+        RecallRequest(
+            host="claude-code",
+            event="UserPromptSubmit",
+            prompt=prompt,
+            cwd="/Users/trafficsign/projects/personal/chronovisor",
+        ),
+        policy,
+        perform_search=False,
+    )
+
+    assert result.queries[0] == "昨日のChronovisor設計の続きを確認したい"
+    assert "stripped system notification block" in result.reasons
+    assert all("internal project metadata" not in query for query in result.queries)
+
+
+def test_automation_heartbeat_extracts_instructions_without_transport_metadata() -> None:
+    policy = RecallPolicy(judge_mode="off", log_decisions=False)
+    prompt = """
+<heartbeat>
+  <automation_id>chronovisor</automation_id>
+  <current_time_iso>2026-07-28T12:00:00Z</current_time_iso>
+  <instructions>前回のChronovisor分類計画を監視して、異常なら直す。</instructions>
+</heartbeat>
+"""
+
+    result = run_recall(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt=prompt),
+        policy,
+        perform_search=False,
+    )
+
+    assert result.queries[0] == "前回のChronovisor分類計画を監視して、異常なら直す。"
+    assert "extracted automation instructions" in result.reasons
+    assert all("automation_id" not in query for query in result.queries)
+    assert all("current_time_iso" not in query for query in result.queries)
+
+
+def test_user_discussing_in_app_context_tag_is_not_filtered() -> None:
+    prompt = "さっきの <in-app-browser-context> が検索語に入るバグを直して"
+
+    cleaned, reasons = strip_non_user_blocks(prompt)
+
+    assert cleaned == prompt
+    assert reasons == []
 
 
 def test_feedback_exact_false_positive_suppresses_repeat(tmp_path, monkeypatch) -> None:
