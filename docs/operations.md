@@ -186,37 +186,37 @@ ARTIFACT="$HOME/.chronovisor/runtime/model-lab/local-eval/adoption-v64-evaluator
 chmod 600 "$CANDIDATE_CONFIG"
 
 # Preflight the deterministic selection without replacing the durable corpus.
-chronovisor-adoption-corpus \
+chronovisor-lab adoption-corpus \
   --config "$CANDIDATE_CONFIG" \
   --output "$CORPUS" \
   --dry-run
 
 # Freeze the production-representative corpus at an explicit durable path.
-chronovisor-adoption-corpus \
+chronovisor-lab adoption-corpus \
   --config "$CANDIDATE_CONFIG" \
   --output "$CORPUS"
 chmod 600 "$CORPUS"
 
 # Read-only inspection performs no inference.
-chronovisor-local-model-eval \
+chronovisor-lab local-model-eval \
   --input "$CORPUS" \
   --config "$CANDIDATE_CONFIG" \
   --dry-run
-chronovisor-local-model-eval \
+chronovisor-lab local-model-eval \
   --input "$CORPUS" \
   --config "$CANDIDATE_CONFIG" \
   --list \
   --limit 20
 
 # A full run evaluates every exact context bucket in ascending order.
-chronovisor-local-model-eval \
+chronovisor-lab local-model-eval \
   --input "$CORPUS" \
   --config "$CANDIDATE_CONFIG" \
   --output "$ARTIFACT"
 chmod 600 "$ARTIFACT"
 
 # Resume only with the exact same candidate config, corpus, and output path.
-chronovisor-local-model-eval \
+chronovisor-lab local-model-eval \
   --input "$CORPUS" \
   --config "$CANDIDATE_CONFIG" \
   --output "$ARTIFACT" \
@@ -301,7 +301,7 @@ copying the same context into every selectable repair.
 If this complete deterministic projection still exceeds the fixed input or
 context ceiling, the request fails closed before inference.
 
-`chronovisor-local-model-eval --dry-run` validates and counts the compiled cases,
+`chronovisor-lab local-model-eval --dry-run` validates and counts the compiled cases,
 while `--list` prints redacted case metadata; neither performs inference. A
 full evaluation uses the candidate local decision router and atomically
 checkpoints a resumable, redacted artifact containing hashes, labels,

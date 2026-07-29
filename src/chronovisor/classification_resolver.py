@@ -12,8 +12,8 @@ from chronovisor.classification_bundle import (
     resolve_authority,
 )
 from chronovisor.classification_engine import CandidateIndex
-from chronovisor.classification_fixture_set import inference_dto
-from chronovisor.classification_library_evidence import (
+from chronovisor.lab.classification_fixture_set import inference_dto
+from chronovisor.lab.classification_library_evidence import (
     LibraryEvidenceIndex,
     LibraryEvidenceProvider,
 )

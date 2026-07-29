@@ -1515,7 +1515,7 @@ def _run_codex(
             json.dumps(strict_schema, indent=2) + "\n",
             encoding="utf-8",
         )
-        from chronovisor.model_lab import resolve_role
+        from chronovisor.lab.model_lab import resolve_role
 
         model, reasoning_effort = resolve_role("code_repair")
         invocation = _build_codex_exec_invocation(

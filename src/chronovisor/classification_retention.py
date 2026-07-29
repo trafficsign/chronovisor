@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.classification import ClassificationError
-from chronovisor.classification_fixture_set import sha256_bytes, sha256_file
+from chronovisor.lab.classification_fixture_set import sha256_bytes, sha256_file
 from chronovisor.durable_state import write_sealed_json
 
 RETENTION_SCHEMA = "chronovisor.classification-audit-retention.v1"

@@ -931,7 +931,7 @@ def _run_sleep_cycle(
     )
     model_lab = _run_lane(
         "model_lab",
-        lambda: __import__("chronovisor.model_lab", fromlist=["run_due"]).run_due(
+        lambda: __import__("chronovisor.lab.model_lab", fromlist=["run_due"]).run_due(
             dry_run=dry_run,
             max_evaluations=2,
         ),

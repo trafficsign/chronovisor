@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 
 from chronovisor.classification import ClassificationError
-from chronovisor.classification_fixture_set import sha256_bytes, sha256_file
+from chronovisor.lab.classification_fixture_set import sha256_bytes, sha256_file
 from chronovisor.durable_state import read_sealed_json, write_sealed_json
 
 EXTERNAL_PACKAGE_SCHEMA = "chronovisor.external-library-package.v1"

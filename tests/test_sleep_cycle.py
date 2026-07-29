@@ -210,10 +210,6 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         "chronovisor.frontier_review.run_frontier_preflight", lambda: {"ok": True}
     )
     monkeypatch.setattr(
-        "chronovisor.capability_recovery.resume_external_queues",
-        lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
-    )
-    monkeypatch.setattr(
         "chronovisor.convergence.ConvergenceStore.resume_due_quarantined",
         lambda self, **kwargs: {"status": "ok"},
     )

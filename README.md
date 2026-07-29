@@ -19,7 +19,7 @@ exceptional, repeatedly reproduced system-code repair incidents.
   consensus and fail closed when the local quorum cannot be reached.
 - `chronovisor-codex-record` / `chronovisor-claude-code-record`: deterministic, lossless
   host transcript-delta capture. The save path does not call an LLM.
-- `chronovisor-local-model-eval`: read-only, full-corpus replay gate for measuring
+- `chronovisor-lab local-model-eval`: read-only, full-corpus replay gate for measuring
   the local decision fleet before an artifact-backed atomic policy adoption.
 - `chronovisor_research` / `chronovisor-research`: asynchronous-by-default, bounded
   evidence research through MCP or CLI. It

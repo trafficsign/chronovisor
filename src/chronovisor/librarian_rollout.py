@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification_calibration import (
+from chronovisor.lab.classification_calibration import (
     adjudicate,
     adjudication_path,
     calibrate,
@@ -18,12 +18,12 @@ from chronovisor.classification_calibration import (
     lock,
 )
 from chronovisor.classification_engine import fixture_paths
-from chronovisor.classification_migration import (
+from chronovisor.lab.classification_migration import (
     migrate_active_metadata,
     run_full_model_shadow,
 )
 from chronovisor.durable_state import file_lock, write_sealed_json
-from chronovisor.librarian_burn import run_burn
+from chronovisor.lab.librarian_burn import run_burn
 from chronovisor.librarian_merge import run_merge_migration
 from chronovisor.librarian_release import (
     advance_migration_observation,

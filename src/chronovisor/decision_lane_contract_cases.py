@@ -122,7 +122,7 @@ def _make_case(
         decision_signature_value,
         production_decision_schemas,
     )
-    from chronovisor.local_model_eval import replay_semantic_effect
+    from chronovisor.lab.local_model_eval import replay_semantic_effect
     from chronovisor.local_structured import validate_json
 
     schema = production_decision_schemas()[schema_name]

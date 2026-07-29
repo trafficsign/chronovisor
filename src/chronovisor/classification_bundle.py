@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.classification import ClassificationError
-from chronovisor.classification_fixture_set import (
+from chronovisor.lab.classification_fixture_set import (
     DISABLED_BASELINE_SCHEMA,
     sha256_bytes,
     sha256_file,

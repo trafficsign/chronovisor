@@ -1,4 +1,4 @@
-"""Opened-data evaluation for the complementary retrieval-anchor audit."""
+"""Development audit for conservative second-anchor admission."""
 
 from __future__ import annotations
 
@@ -20,14 +20,18 @@ from chronovisor.classification_anchor import (
     AnchorSet,
     load_anchor_set,
 )
-from chronovisor.classification_anchor_complement_auditor import (
+from chronovisor.lab.classification_anchor_second_auditor import (
     AUDIT_SCHEMA,
     PROMPT_SHA256,
     WORKER_SCHEMA,
 )
-from chronovisor.classification_anchor_set_dev import (
+from chronovisor.lab.classification_anchor_set_dev import (
+    MAXIMUM_DUAL_RATE,
+    default_dev_gold_path,
+    load_dev70,
     score_anchor_set,
     summarize_metrics,
+    validate_set_gold,
 )
 from chronovisor.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.research_scheduler import (
@@ -38,29 +42,16 @@ from chronovisor.research_scheduler import (
 from chronovisor.runtime_config import load_decision_router_config
 from chronovisor.store import CHRONOVISOR_ROOT
 
-CALL_SCHEMA = "chronovisor.classification-anchor-complement-call.v1"
-EVALUATION_SCHEMA = "chronovisor.classification-anchor-complement-dev.v1"
-EXPERIMENT = "cvo-anchor-set-v2-complement-dev40"
-SOURCE_EXPERIMENT = "cvo-anchor-set-v1-unseen40"
-EARLY_LIMIT = 15
-EARLY_REQUIRED_REPAIRS = 7
-EARLY_MAXIMUM_BROKEN_CONTROLS = 1
+CALL_SCHEMA = "chronovisor.classification-anchor-second-call.v1"
+EVALUATION_SCHEMA = "chronovisor.classification-anchor-second-dev.v1"
+EXPERIMENT = "cvo-anchor-set-v1-second-audit-dev70"
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
-def _model_slug(model: str) -> str:
-    return "".join(character if character.isalnum() else "-" for character in model)
-
-
-def output_root(root: Path, *, model_override: str | None = None) -> Path:
-    experiment = (
-        EXPERIMENT
-        if model_override is None
-        else f"{EXPERIMENT}-{_model_slug(model_override)}"
-    )
+def output_root(root: Path, experiment: str = EXPERIMENT) -> Path:
     return root / "classification" / experiment
 
 
@@ -74,19 +65,38 @@ def _json_sha256(value: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _source_result_path(root: Path, uid: str) -> Path:
+    dev_path = (
+        root
+        / "classification"
+        / "cvo-anchor-v0-dev40"
+        / "cases"
+        / uid
+        / "result.json"
+    )
+    unseen_path = (
+        root
+        / "classification"
+        / "cvo-anchor-v0-unseen30"
+        / "cases"
+        / uid
+        / "result.json"
+    )
+    if dev_path.is_file():
+        return dev_path
+    if unseen_path.is_file():
+        return unseen_path
+    raise ClassificationError(f"single-anchor source result is missing: {uid}")
+
+
 def _call_auditor(
     root: Path,
     uid: str,
     payload: Mapping[str, Any],
     *,
-    model_override: str | None = None,
+    experiment: str = EXPERIMENT,
 ) -> dict[str, Any]:
-    path = (
-        output_root(root, model_override=model_override)
-        / "cases"
-        / uid
-        / "complement-audit.json"
-    )
+    path = output_root(root, experiment) / "cases" / uid / "second-audit.json"
     input_sha256 = _json_sha256(payload)
     if path.is_file():
         artifact = read_sealed_json(path)
@@ -96,7 +106,7 @@ def _call_auditor(
             or artifact.get("prompt_sha256") != PROMPT_SHA256
         ):
             raise ClassificationError(
-                f"sealed complement audit contract changed: {uid}"
+                f"sealed second-anchor audit contract changed: {uid}"
             )
         return artifact
     attempts = 0
@@ -106,11 +116,11 @@ def _call_auditor(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ClassificationError(
-                f"complement audit exceeded deadline: {uid}"
+                f"second-anchor audit exceeded deadline: {uid}"
             )
         attempts += 1
         with research_lane(
-            f"complement-audit-{uid[:10]}-{uuid.uuid4().hex[:8]}",
+            f"second-audit-{uid[:10]}-{uuid.uuid4().hex[:8]}",
             enabled=True,
             mode="on",
             purpose="explicit",
@@ -120,7 +130,7 @@ def _call_auditor(
                 [
                     sys.executable,
                     "-m",
-                    "chronovisor.classification_anchor_complement_auditor",
+                    "chronovisor.lab.classification_anchor_second_auditor",
                 ],
                 json.dumps(dict(payload), ensure_ascii=False, sort_keys=True),
                 lease,
@@ -130,13 +140,13 @@ def _call_auditor(
             while sync_pending():
                 if time.monotonic() >= deadline:
                     raise ClassificationError(
-                        f"complement wait exceeded deadline: {uid}"
+                        f"second-anchor foreground wait exceeded deadline: {uid}"
                     )
                 time.sleep(0.05)
             continue
         if result.status != "completed" or not isinstance(result.value, Mapping):
             raise ClassificationError(
-                result.error or f"complement auditor failed: {uid}"
+                result.error or f"second-anchor auditor failed: {uid}"
             )
         worker = dict(result.value)
         audit = worker.get("result")
@@ -150,7 +160,7 @@ def _call_auditor(
             or audit.get("schema") != AUDIT_SCHEMA
         ):
             raise ClassificationError(
-                f"complement worker contract mismatch: {uid}"
+                f"second-anchor worker contract mismatch: {uid}"
             )
         artifact = {
             "schema": CALL_SCHEMA,
@@ -180,7 +190,7 @@ def _auditor_payload(
 ) -> dict[str, Any]:
     core = anchor_set.by_id.get(core_anchor_id)
     if core is None or core_anchor_id == UNRESOLVED_ANCHOR_ID:
-        raise ClassificationError("complement audit has no valid core anchor")
+        raise ClassificationError("second-anchor audit has no valid core anchor")
     return {
         "schema": WORKER_SCHEMA,
         "model": model,
@@ -198,190 +208,121 @@ def _auditor_payload(
     }
 
 
-def _source_paths(root: Path) -> tuple[Path, Path]:
-    source_root = root / "classification" / SOURCE_EXPERIMENT
-    return source_root / "evaluation.json", source_root / "cases"
-
-
-def _ordered_cases(root: Path) -> list[dict[str, Any]]:
-    evaluation_path, _ = _source_paths(root)
-    evaluation = read_sealed_json(evaluation_path)
-    rows = [
-        dict(case)
-        for case in evaluation.get("cases") or []
-        if isinstance(case, Mapping)
-    ]
-    misses = [case for case in rows if not bool(case.get("exact_set"))]
-    controls = [case for case in rows if bool(case.get("exact_set"))]
-    return [*misses, *controls]
-
-
-def run_dev(
-    root: Path,
-    *,
-    limit: int,
-    model_override: str | None = None,
-) -> dict[str, Any]:
-    if not 1 <= limit <= 40:
-        raise ClassificationError("complement dev limit must be 1 to 40")
-    evaluation_name = (
-        "evaluation.json" if limit == 40 else f"evaluation-{limit}.json"
-    )
-    evaluation_path = (
-        output_root(root, model_override=model_override) / evaluation_name
-    )
+def run_dev(root: Path, *, limit: int) -> dict[str, Any]:
+    if not 1 <= limit <= 70:
+        raise ClassificationError("second-anchor dev limit must be 1 to 70")
+    evaluation_name = "evaluation.json" if limit == 70 else f"evaluation-{limit}.json"
+    evaluation_path = output_root(root) / evaluation_name
     if evaluation_path.is_file():
         return read_sealed_json(evaluation_path)
-    source_evaluation_path, source_cases_root = _source_paths(root)
-    source_evaluation = read_sealed_json(source_evaluation_path)
-    pages = _ordered_cases(root)[:limit]
+    pages = load_dev70(root)[:limit]
     anchor_set = load_anchor_set()
-    config = load_decision_router_config()
-    model = model_override or config.primary_model
-    keep_alive = (
-        config.tie_break_keep_alive
-        if model == config.tie_break_model
-        else config.primary_keep_alive
+    gold_payload = json.loads(default_dev_gold_path().read_text(encoding="utf-8"))
+    if not isinstance(gold_payload, Mapping):
+        raise ClassificationError("second-anchor dev gold root is invalid")
+    gold = validate_set_gold(
+        gold_payload,
+        anchor_set,
+        [str(page.get("uid") or "") for page in load_dev70(root)],
     )
+    config = load_decision_router_config()
+    model = config.primary_model
     model_digest = ollama.model_digests([model]).get(model, "")
     if not model_digest:
-        raise ClassificationError("complement auditor model is unavailable")
+        raise ClassificationError("second-anchor auditor model is unavailable")
     cases = []
     model_calls = 0
-    for source_score in pages:
-        uid = str(source_score.get("uid") or "")
-        page_result = read_sealed_json(
-            source_cases_root / uid / "result.json"
-        )
+    for page in pages:
+        uid = str(page.get("uid") or "")
+        source_path = _source_result_path(root, uid)
+        source = read_sealed_json(source_path)
+        selection = dict(source.get("selection") or {})
         core_anchor_id = str(
-            page_result.get("selection", {}).get("primary_anchor_id")
-            or UNRESOLVED_ANCHOR_ID
+            selection.get("primary_anchor_id") or UNRESOLVED_ANCHOR_ID
         )
         if core_anchor_id == UNRESOLVED_ANCHOR_ID:
             audit = {
                 "schema": AUDIT_SCHEMA,
                 "second_anchor_id": "NONE",
-                "different_principal_axis": False,
-                "independent_retrieval_route": False,
-                "explicit_document_evidence": False,
+                "independent_principal_subject": False,
+                "not_subsumed_by_core": False,
                 "not_incidental_context": False,
+                "explicit_document_evidence": False,
                 "admitted": False,
                 "rationale": "Core classifier held the page.",
                 "invalid_reason": "core_hold",
             }
-            call_count = 0
+            model_call_count = 0
         else:
             artifact = _call_auditor(
                 root,
                 uid,
                 _auditor_payload(
-                    page_result=page_result,
+                    page_result=source,
                     anchor_set=anchor_set,
                     core_anchor_id=core_anchor_id,
                     model=model,
                     model_digest=model_digest,
-                    keep_alive=keep_alive,
+                    keep_alive=config.primary_keep_alive,
                     read_timeout_ms=config.read_timeout_ms,
                 ),
-                model_override=model_override,
             )
             audit = dict(artifact["audit"])
-            call_count = int(artifact.get("model_calls") or 0)
+            model_call_count = int(artifact.get("model_calls") or 0)
         selected = [core_anchor_id]
         if audit.get("admitted"):
             selected.append(str(audit["second_anchor_id"]))
         selected = sorted(dict.fromkeys(selected))
-        acceptable_sets = [
-            [str(value) for value in acceptable]
-            for acceptable in source_score.get("acceptable_anchor_sets") or []
-        ]
-        acceptable_union = sorted(
-            {value for acceptable in acceptable_sets for value in acceptable}
-        )
-        defensible = [
-            str(value)
-            for value in source_score.get("defensible_anchor_ids") or []
-        ]
+        target = gold[uid]["target"]
+        defensible = gold[uid]["defensible"]
         score = score_anchor_set(
             selected,
-            acceptable_union,
+            target,
             defensible,
-            acceptable_sets,
+            gold[uid]["acceptable_sets"],
         )
-        was_exact = bool(source_score.get("exact_set"))
-        model_calls += call_count
+        model_calls += model_call_count
         cases.append(
             {
                 "uid": uid,
-                "title": str(source_score.get("title") or ""),
-                "source_was_exact": was_exact,
-                "source_selected_anchor_ids": list(
-                    source_score.get("selected_anchor_ids") or []
-                ),
+                "title": str(page.get("title") or ""),
+                "source_result_path": str(source_path),
                 "core_anchor_id": core_anchor_id,
                 "audit": audit,
                 "selected_anchor_ids": selected,
-                "acceptable_anchor_sets": acceptable_sets,
+                "selection": {"anchor_ids": selected},
+                "target_anchor_ids": target,
+                "acceptable_anchor_sets": gold[uid]["acceptable_sets"],
                 "defensible_anchor_ids": defensible,
-                "repaired_source_miss": not was_exact and score["exact_set"],
-                "broke_source_control": was_exact and not score["exact_set"],
                 **score,
             }
         )
     metrics = summarize_metrics(cases)
-    metrics["source_misses_in_sample"] = sum(
-        not bool(case["source_was_exact"]) for case in cases
-    )
-    metrics["source_controls_in_sample"] = sum(
-        bool(case["source_was_exact"]) for case in cases
-    )
-    metrics["repaired_source_misses"] = sum(
-        bool(case["repaired_source_miss"]) for case in cases
-    )
-    metrics["broken_source_controls"] = sum(
-        bool(case["broke_source_control"]) for case in cases
-    )
-    if limit == EARLY_LIMIT:
-        passed = (
-            metrics["repaired_source_misses"] >= EARLY_REQUIRED_REPAIRS
-            and metrics["broken_source_controls"]
-            <= EARLY_MAXIMUM_BROKEN_CONTROLS
-            and metrics["major_errors"] == 0
-        )
-    else:
-        passed = (
-            metrics["exact_sets"] >= 36
-            and metrics["semantic_coverage_cases"] >= 38
-            and metrics["excess_anchor_rate"] <= 0.10
-            and metrics["missing_anchor_rate"] <= 0.10
-            and metrics["dual_assignment_rate"] <= 0.40
-            and metrics["holds"] <= 2
-            and metrics["major_errors"] == 0
-        )
     evaluation = {
         "schema": EVALUATION_SCHEMA,
         "evaluated_at": _now(),
-        "fixture_status": "opened-development-only",
-        "source_evaluation_path": str(source_evaluation_path),
-        "source_evaluation_sha256": _json_sha256(source_evaluation),
+        "fixture_set": f"opened-development-first-{limit}",
         "case_limit": limit,
-        "model": model,
-        "model_digest": model_digest,
-        "prompt_sha256": PROMPT_SHA256,
+        "source_contract": "cvo-anchor-v0 single primary",
+        "output_contract_epoch": "cvo-anchor-set-v1",
+        "auditor_model": model,
+        "auditor_model_digest": model_digest,
+        "auditor_prompt_sha256": PROMPT_SHA256,
         "model_calls": model_calls,
         "page_mutations": 0,
-        "early_gate": {
-            "case_order": "nine source misses then exact controls",
-            "required_repairs": EARLY_REQUIRED_REPAIRS,
-            "maximum_broken_controls": EARLY_MAXIMUM_BROKEN_CONTROLS,
+        "fixed_invariants": {
+            "maximum_anchors_per_page": 2,
+            "maximum_dual_assignment_rate": MAXIMUM_DUAL_RATE,
             "maximum_major_errors": 0,
+            "all_four_admission_axes_required": True,
         },
         "metrics": metrics,
         "cases": cases,
         "decision": (
-            "continue-complement-auditor"
-            if passed
-            else "kill-complement-auditor"
+            "continue-second-anchor-audit-dev"
+            if metrics["dual_assignment_rate"] <= MAXIMUM_DUAL_RATE
+            and metrics["major_errors"] == 0
+            else "reject-second-anchor-audit-dev"
         ),
     }
     write_sealed_json(evaluation_path, evaluation, backup=True)
@@ -390,20 +331,15 @@ def run_dev(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Evaluate the complement auditor on opened data"
+        description="Audit conservative second-anchor admission on opened dev data"
     )
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
-    parser.add_argument("--limit", type=int, default=EARLY_LIMIT)
-    parser.add_argument("--model")
+    parser.add_argument("--limit", type=int, default=15)
     args = parser.parse_args(argv)
     try:
         print(
             json.dumps(
-                run_dev(
-                    args.root.expanduser(),
-                    limit=args.limit,
-                    model_override=args.model,
-                ),
+                run_dev(args.root.expanduser(), limit=args.limit),
                 ensure_ascii=False,
                 sort_keys=True,
             )

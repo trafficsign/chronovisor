@@ -160,7 +160,7 @@ def structured_review_authority_observation_sha256(
     models = router.get("models")
     assert isinstance(models, list)
 
-    from chronovisor.local_model_eval import (
+    from chronovisor.lab.local_model_eval import (
         _safe_model_metadata,
         fetch_local_model_metadata,
     )

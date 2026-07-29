@@ -1436,7 +1436,7 @@ def _validated_adoption_artifact(
     if artifact.get("status") != "complete" or artifact.get("adopted") is not True:
         raise ValueError("adoption artifact is not complete and adopted")
 
-    from chronovisor.local_model_eval import (
+    from chronovisor.lab.local_model_eval import (
         EVALUATOR_POLICY_VERSION,
         AdoptionThresholds,
         adoption_evidence_sha256,
@@ -2015,7 +2015,7 @@ def resolve_router_policy(
         candidate, artifact_sha256, expected_metadata = _validated_adoption_artifact(
             path
         )
-        from chronovisor.local_model_eval import (
+        from chronovisor.lab.local_model_eval import (
             _safe_model_metadata,
             fetch_local_model_metadata,
             validate_model_metadata_identity,
@@ -3864,8 +3864,8 @@ class DecisionRouter:
             if self.record_replay and result.ok and isinstance(result.value, Mapping):
                 try:
                     from chronovisor import store
-                    from chronovisor.local_model_eval import replay_semantic_effect
-                    from chronovisor.model_lab import record_local_replay_case
+                    from chronovisor.lab.local_model_eval import replay_semantic_effect
+                    from chronovisor.lab.model_lab import record_local_replay_case
 
                     replay_path = self.replay_path
                     if replay_path is None:

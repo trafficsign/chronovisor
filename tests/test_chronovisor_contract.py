@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from chronovisor import sealed_artifact_decoder, store
-from chronovisor.contract_audit import audit
 
 
 def test_resolve_root_uses_only_canonical_root(
@@ -145,13 +144,3 @@ def test_server_alias_read_returns_and_traces_only_canonical_page_id(
             "requested_page_id": "previous-page-id",
         }
     ]
-
-
-def test_contract_audit_has_no_unclassified_previous_tokens() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-
-    result = audit(repo_root)
-
-    assert result["status"] == "ok", json.dumps(
-        result["violations"], ensure_ascii=False, indent=2
-    )

@@ -3092,7 +3092,7 @@ def _recall_improvement_snapshot() -> dict[str, Any]:
 
 def _model_lab_snapshot() -> dict[str, Any]:
     try:
-        from chronovisor.model_lab import snapshot
+        from chronovisor.lab.model_lab import snapshot
 
         return snapshot()
     except Exception as exc:

@@ -13,7 +13,7 @@ from typing import Any
 from chronovisor import ollama
 from chronovisor.classification import ClassificationError
 from chronovisor.classification_engine import run_consensus_batches
-from chronovisor.classification_fixture_set import _write_jsonl, sha256_bytes
+from chronovisor.lab.classification_fixture_set import _write_jsonl, sha256_bytes
 from chronovisor.durable_state import write_sealed_json
 from chronovisor.research_scheduler import foreground_lane
 
