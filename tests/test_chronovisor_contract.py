@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import sealed_artifact_decoder
-from chronovisor.core import store
+from chronovisor.core import sealed_artifact_decoder, store
 
 
 def test_resolve_root_uses_only_canonical_root(

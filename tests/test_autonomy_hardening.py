@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.ops import background_jobs
-from chronovisor.hosts import codex_record
-from chronovisor.recall import recall_hints
-from chronovisor.ops import session_sweeper
 from chronovisor.core.frontmatter import normalize_nested, parse
 from chronovisor.core.jsonl import read_jsonl
+from chronovisor.hosts import codex_record
+from chronovisor.ops import background_jobs, session_sweeper
+from chronovisor.recall import recall_hints
 
 
 def test_jsonl_reader_preserves_unicode_line_separator(tmp_path: Path) -> None:
@@ -655,7 +654,7 @@ def test_background_job_snapshot_separates_recent_quarantines(
     monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     recent = (now - timedelta(hours=2)).isoformat(timespec="seconds")
     old = (now - timedelta(days=5)).isoformat(timespec="seconds")
     state = {

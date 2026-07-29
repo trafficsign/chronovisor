@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from chronovisor.core.frontmatter import canonicalize, parse, patch
 
-
 # ---------------------------------------------------------------------------
 # parse() — empty / no frontmatter
 # ---------------------------------------------------------------------------

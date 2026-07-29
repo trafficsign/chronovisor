@@ -17,18 +17,20 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR, init_chronovisor
+from chronovisor.decision.decision_policy import resolve_decision_policy
 from chronovisor.hosts.agent_save_base import (
     content_has_capture_payload as _content_has_capture_payload,
+)
+from chronovisor.hosts.agent_save_base import (
     extract_json_object,
     iter_jsonl,
-    last_saved_at,
     load_state,
-    publish_transcript_capture,
     publish_oversized_shadow,
+    publish_transcript_capture,
     read_hook_payload,
     sanitize_keywords,
     save_raw,
@@ -36,14 +38,10 @@ from chronovisor.hosts.agent_save_base import (
     should_process,
     trim_middle,
     update_state,
-    validate_raw_keyword,
     write_state,
 )
-from chronovisor.decision.decision_policy import resolve_decision_policy
-from chronovisor.research.evidence_grounding import (
-    ProtectedLiteralGroundingError,
-    validate_protected_literals,
-)
+from chronovisor.raw.raw_segment import copy_source_interval
+from chronovisor.raw.raw_store import raw_layout_mode
 from chronovisor.raw.save_transaction import (
     SaveTransaction,
     attach_save_transaction_marker,
@@ -52,9 +50,10 @@ from chronovisor.raw.save_transaction import (
     save_transaction_lock,
     validate_published_save_receipt,
 )
-from chronovisor.raw.raw_segment import copy_source_interval
-from chronovisor.raw.raw_store import raw_layout_mode
-from chronovisor.core.store import RAW_DIR, CHRONOVISOR_ROOT, init_chronovisor
+from chronovisor.research.evidence_grounding import (
+    ProtectedLiteralGroundingError,
+    validate_protected_literals,
+)
 
 DEFAULT_STATE_FILE = CHRONOVISOR_ROOT / "claude-code-save-state.json"
 DEFAULT_MAX_CHARS = 120_000
@@ -275,9 +274,12 @@ def _content_has_file_changes(content: Any) -> bool:
     if not isinstance(content, list):
         return False
     for part in content:
-        if isinstance(part, dict) and part.get("type") == "tool_use":
-            if part.get("name") in FILE_CHANGE_TOOLS:
-                return True
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "tool_use"
+            and part.get("name") in FILE_CHANGE_TOOLS
+        ):
+            return True
     return False
 
 

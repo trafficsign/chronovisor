@@ -20,8 +20,6 @@ trail.
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import ensure_utc as _utc_now
-
 import copy
 import fcntl
 import hashlib
@@ -33,19 +31,19 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from chronovisor.core import store as chronovisor_store
+from chronovisor.core.timeutil import ensure_utc as _utc_now
 from chronovisor.search.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
     persisted_semantic_no_quorum_hold,
 )
-
 
 SCHEMA_VERSION = 1
 
@@ -208,7 +206,7 @@ class CycleBudget:
         max_frontier_calls: int = 0,
         max_mutations: int = 0,
         max_raw_bytes: int = 0,
-    ) -> "CycleBudgetSlice":
+    ) -> CycleBudgetSlice:
         """Reserve a per-lane ceiling while charging every use to this parent."""
 
         return CycleBudgetSlice(
@@ -507,10 +505,8 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp_path, path)
     except Exception:
-        try:
+        with suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
         raise
 
 
@@ -1909,7 +1905,7 @@ class ConvergenceStore:
         terminal_result: dict[str, Any] = {
             "terminal_reason": "semantic_no_quorum",
             "semantic_hold": strict_hold,
-            "stage": str((item.get("lease_stage") or "frontier")),
+            "stage": str(item.get("lease_stage") or "frontier"),
         }
         if preserved_history:
             terminal_result["semantic_hold_history"] = preserved_history

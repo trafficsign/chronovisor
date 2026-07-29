@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import statistics
@@ -12,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall.feedback_ledger import active_feedback_rows
 from chronovisor.recall.recall_runtime import (
     RECALL_FEEDBACK_FILE,
@@ -22,8 +24,6 @@ from chronovisor.recall.recall_runtime import (
     load_policy,
     run_recall,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT
-
 
 BASELINE_DIR = CHRONOVISOR_ROOT / "runtime" / "eval"
 
@@ -167,15 +167,11 @@ def apply_overrides(policy: RecallPolicy, overrides: list[str] | None) -> Recall
         if isinstance(current, bool):
             values[key] = raw.lower() in {"1", "true", "yes", "on"}
         elif isinstance(current, int):
-            try:
+            with contextlib.suppress(ValueError):
                 values[key] = int(raw)
-            except ValueError:
-                pass
         elif isinstance(current, float):
-            try:
+            with contextlib.suppress(ValueError):
                 values[key] = float(raw)
-            except ValueError:
-                pass
         else:
             values[key] = raw
     return RecallPolicy(**values)

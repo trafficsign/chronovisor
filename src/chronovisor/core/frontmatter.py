@@ -22,9 +22,9 @@ Design tradeoffs:
 
 from __future__ import annotations
 
-import re
 import hashlib
 import json
+import re
 from typing import Any
 
 _FM_DELIM = "---"

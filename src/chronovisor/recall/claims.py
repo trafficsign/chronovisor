@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.frontmatter import parse
-from chronovisor.search.index_store import get_store
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
+from chronovisor.search.index_store import get_store
 
 CLAIMS_DIR = CHRONOVISOR_ROOT / "claims"
 CLAIMS_FILE = CLAIMS_DIR / "claims.jsonl"
@@ -215,7 +215,7 @@ def _fact_claims(
             if key in seen:
                 continue
             seen.add(key)
-            digest = hashlib.sha256(f"{page_id}:{line_no}:{predicate}:{value}".encode("utf-8")).hexdigest()[:16]
+            digest = hashlib.sha256(f"{page_id}:{line_no}:{predicate}:{value}".encode()).hexdigest()[:16]
             rows.append({
                 **base,
                 "claim_id": f"{page_id}:fact:{digest}",
@@ -472,9 +472,7 @@ def _is_placeholder_claim(row: dict[str, Any]) -> bool:
         return True
     if value in {"", "body", "test", "placeholder"}:
         return True
-    if find_page(source_page) is None:
-        return True
-    return False
+    return find_page(source_page) is None
 
 
 def sanitize_claim_ledger(*, path: Path = CLAIMS_FILE, write: bool = True) -> dict[str, Any]:

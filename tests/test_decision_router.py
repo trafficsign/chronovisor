@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from collections import defaultdict, deque
 from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
 
-from chronovisor.ops.autonomy import DUPLICATE_FRONTIER_SCHEMA
-from chronovisor.lab.adoption_corpus import contract_candidates
+from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision.decision_lane_contract_cases import (
     decision_lane_contract_case_manifest_sha256,
 )
@@ -17,66 +16,67 @@ from chronovisor.decision.decision_lane_contracts import (
     LANE_CONTRACT_POLICY_VERSION,
     lane_contract_manifest_sha256,
 )
-from chronovisor.decision.decision_router import (
-    DECISION_SEMANTICS_POLICY_VERSION,
-    QUORUM_SAFETY_POLICY_VERSION,
-    DecisionRouter,
-    DecisionRouterResult,
-    REQUIRED_ADOPTION_CHECKS,
-    canonical_agreement_signature,
-    decision_effective_request,
-    decision_request_context,
-    decision_request_fingerprint_sha256,
-    decision_system_with_policy,
-    decision_context_buckets,
-    default_agreement_value,
-    _decision_value_validator,
-    _ingest_reconciliation_value_validator,
-    _paths_resolve_to_same_file,
-    _prompt_json_block,
-)
-from chronovisor.decision.decision_schema_manifest import (
-    decision_signature_value,
-    production_decision_schemas,
-)
 from chronovisor.decision.decision_lane_prompts import (
     INGEST_PROPOSAL_SCHEMA_VERSION,
     INGEST_REPAIR_HOST_BLOCK,
     build_ingest_reconciliation_prompt,
     ingest_repair_option_id,
 )
+from chronovisor.decision.decision_router import (
+    DECISION_SEMANTICS_POLICY_VERSION,
+    QUORUM_SAFETY_POLICY_VERSION,
+    REQUIRED_ADOPTION_CHECKS,
+    DecisionRouter,
+    DecisionRouterResult,
+    _decision_value_validator,
+    _ingest_reconciliation_value_validator,
+    _paths_resolve_to_same_file,
+    _prompt_json_block,
+    canonical_agreement_signature,
+    decision_context_buckets,
+    decision_effective_request,
+    decision_request_context,
+    decision_request_fingerprint_sha256,
+    decision_system_with_policy,
+    default_agreement_value,
+)
+from chronovisor.decision.decision_schema_manifest import (
+    decision_signature_value,
+    production_decision_schemas,
+)
+from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
+from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
 from chronovisor.decision.local_structured import (
-    ChatRequest,
     STRUCTURED_GENERATION_POLICY_VERSION,
+    ChatRequest,
     required_structured_context_tokens,
     structured_generation_policy,
     structured_generation_policy_sha256,
     structured_request_sha256,
 )
+from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+from chronovisor.lab.adoption_corpus import contract_candidates
 from chronovisor.lab.local_model_eval import (
     ARTIFACT_SCHEMA_VERSION,
     EVALUATOR_POLICY_VERSION,
     AdoptionThresholds,
-    adoption_evidence_sha256,
+    _safe_model_metadata,
     adoption_case_derived_evidence,
+    adoption_evidence_sha256,
     adoption_gate,
     adoption_metrics,
     adoption_result_sha256,
     load_replay_corpus,
     replay_effect_context,
     replay_semantic_effect,
-    _safe_model_metadata,
 )
-from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
+from chronovisor.ops.autonomy import DUPLICATE_FRONTIER_SCHEMA
 from chronovisor.ops.lint_repair import TAG_REPAIR_SCHEMA
-from chronovisor.search.search_eval import FRONTIER_LABEL_SCHEMA
-from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
-from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
-from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.recall.content_correction import (
     FRONTIER_CLASSIFICATION_SCHEMA,
     FRONTIER_REVIEW_SCHEMA,
 )
+from chronovisor.search.search_eval import FRONTIER_LABEL_SCHEMA
 
 
 @pytest.fixture(autouse=True)

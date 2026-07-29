@@ -19,11 +19,31 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
+from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.frontmatter import patch as patch_frontmatter
+from chronovisor.core.runtime_config import (
+    runtime_identity,
+    runtime_repo_root,
+    uvx_runtime_command,
+)
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
+from chronovisor.decision.decision_authority import (
+    compare_semantic_authority,
+    current_semantic_authority,
+    seal_semantic_artifact,
+    semantic_authority_shape_error,
+    semantic_verdict_authority_error,
+)
+from chronovisor.ingest.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
 from chronovisor.ops.convergence import (
     ConvergenceStateError,
     ConvergenceStore,
@@ -32,21 +52,6 @@ from chronovisor.ops.convergence import (
     is_human_required_result,
     stable_item_key,
 )
-from chronovisor.decision.decision_authority import (
-    compare_semantic_authority,
-    current_semantic_authority,
-    seal_semantic_artifact,
-    semantic_authority_shape_error,
-    semantic_verdict_authority_error,
-)
-from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.frontmatter import patch as patch_frontmatter
-from chronovisor.ingest.page_mutation import decision_authority_lock, chronovisor_mutation_lock
-from chronovisor.core.runtime_config import (
-    runtime_identity,
-    runtime_repo_root,
-    uvx_runtime_command,
-)
 from chronovisor.search.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     canonical_sha256,
@@ -54,8 +59,6 @@ from chronovisor.search.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
-
 
 AUTONOMY_DIR = CHRONOVISOR_ROOT / "autonomy"
 DECISIONS_FILE = AUTONOMY_DIR / "decisions.jsonl"
@@ -173,8 +176,7 @@ def _git(args: list[str], *, cwd: Path = CHRONOVISOR_ROOT) -> subprocess.Complet
         ["git", *args],
         cwd=cwd,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 
@@ -1143,18 +1145,17 @@ def _patch_page_status(
             "reason": "page_changed_before_apply",
             "page_id": page_id,
         }
-    if effect_receipt is not None:
-        if (
-            _effect_receipt_shape_error(effect_receipt) is not None
-            or effect_receipt.get("targets") != {"page_id": page_id}
-            or effect_receipt.get("preimages", {}).get(page_id)
-            != _bytes_receipt(original)
-        ):
-            return {
-                "status": "retry",
-                "reason": "effect_receipt_preimage_mismatch",
-                "page_id": page_id,
-            }
+    if effect_receipt is not None and (
+        _effect_receipt_shape_error(effect_receipt) is not None
+        or effect_receipt.get("targets") != {"page_id": page_id}
+        or effect_receipt.get("preimages", {}).get(page_id)
+        != _bytes_receipt(original)
+    ):
+        return {
+            "status": "retry",
+            "reason": "effect_receipt_preimage_mismatch",
+            "page_id": page_id,
+        }
     new_text = patch_frontmatter(text, updates)
     if new_text == text:
         return {"status": "unchanged", "page_id": page_id, "path": str(path)}
@@ -1431,10 +1432,8 @@ def _rollback_owned_page_write_locked(
         return False
     finally:
         if rollback is not None:
-            try:
+            with suppress(OSError):
                 rollback.unlink()
-            except OSError:
-                pass
 
 
 def _soft_supersede_page(
@@ -1465,19 +1464,18 @@ def _soft_supersede_page(
         return {"status": "retry", "reason": "loser_content_changed"}
     if hashlib.sha256(winner_raw).hexdigest() != expected_winner_hash:
         return {"status": "retry", "reason": "winner_content_changed"}
-    if effect_receipt is not None:
-        if (
-            _effect_receipt_shape_error(effect_receipt) is not None
-            or effect_receipt.get("operation") != "soft_supersede"
-            or effect_receipt.get("targets") != {"loser": loser, "winner": winner}
-            or effect_receipt.get("decision_at") != decision_at
-            or effect_receipt.get("preimages")
-            != {
-                loser: _bytes_receipt(loser_raw),
-                winner: _bytes_receipt(winner_raw),
-            }
-        ):
-            return {"status": "retry", "reason": "effect_receipt_preimage_mismatch"}
+    if effect_receipt is not None and (
+        _effect_receipt_shape_error(effect_receipt) is not None
+        or effect_receipt.get("operation") != "soft_supersede"
+        or effect_receipt.get("targets") != {"loser": loser, "winner": winner}
+        or effect_receipt.get("decision_at") != decision_at
+        or effect_receipt.get("preimages")
+        != {
+            loser: _bytes_receipt(loser_raw),
+            winner: _bytes_receipt(winner_raw),
+        }
+    ):
+        return {"status": "retry", "reason": "effect_receipt_preimage_mismatch"}
 
     loser_meta, loser_body = parse_frontmatter(loser_text)
     winner_meta, _winner_body = parse_frontmatter(winner_text)
@@ -1605,10 +1603,8 @@ def _soft_supersede_page(
         return {"status": "retry", "reason": f"write_error:{exc}", "rolled_back": False}
     finally:
         if tmp is not None:
-            try:
+            with suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
     return {
         "status": "applied",
         "loser": loser,
@@ -1766,7 +1762,6 @@ def resolve_deferred_duplicates_with_frontier(
     frontier_calls = 0
     applied = 0
     kept_both = 0
-
     for record in records:
         local_decision = decide_duplicate(record)
         deferred_seen += 1
@@ -1940,7 +1935,6 @@ def resolve_deferred_duplicates_with_frontier(
         snapshots_ok = (
             left_snapshot["status"] == "ok" and right_snapshot["status"] == "ok"
         )
-
         if dry_run:
             if not snapshots_ok:
                 results.append(
@@ -2138,7 +2132,9 @@ def resolve_deferred_duplicates_with_frontier(
                     else _review_deferred_duplicate(review_candidate, timeout=timeout)
                 )
             except Exception as exc:
-                from chronovisor.decision.frontier_review import classify_frontier_failure
+                from chronovisor.decision.frontier_review import (
+                    classify_frontier_failure,
+                )
 
                 failure = classify_frontier_failure(str(exc)).to_dict()
                 raw_review = {
@@ -2510,7 +2506,6 @@ def apply_retention_archives(
     eligible_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     """Frontier-review retention proposals before reversible soft archival."""
-
     candidates = retention_payload.get("archive_candidates")
     if not isinstance(candidates, list):
         candidates = []
@@ -2541,7 +2536,6 @@ def apply_retention_archives(
     frontier_calls = 0
     actionable_seen = 0
     seen_keys: set[str] = set()
-
     for page_id in [str(item) for item in candidates if isinstance(item, str)]:
         row = pages.get(page_id) if isinstance(pages.get(page_id), dict) else {}
         snapshot = _duplicate_page_snapshot(page_id)
@@ -2878,7 +2872,9 @@ def apply_retention_archives(
                     else _review_retention_candidate(review_candidate, timeout=timeout)
                 )
             except Exception as exc:
-                from chronovisor.decision.frontier_review import classify_frontier_failure
+                from chronovisor.decision.frontier_review import (
+                    classify_frontier_failure,
+                )
 
                 raw_review = {
                     "decision": "needs_retry",
@@ -3485,10 +3481,8 @@ def _write_watchdog_history(
         )
         os.replace(tmp, target)
     finally:
-        try:
+        with suppress(OSError):
             tmp.unlink()
-        except OSError:
-            pass
 
 
 def _run_watchdog_quality_probe(*, write: bool) -> dict[str, Any]:
@@ -3497,8 +3491,8 @@ def _run_watchdog_quality_probe(*, write: bool) -> dict[str, Any]:
     if not write:
         return {"status": "read_only_skipped"}
     try:
-        from chronovisor.decision.quality_guard import run_quality_probe
         from chronovisor.core.runtime_config import load_decision_router_config
+        from chronovisor.decision.quality_guard import run_quality_probe
 
         adoption_artifact = load_decision_router_config().adoption_artifact.strip()
         if not adoption_artifact:
@@ -3579,9 +3573,9 @@ def watchdog_snapshot(
     max_sleep_age_hours: float = 30.0,
     min_capture_rate: float = 0.80,
 ) -> dict[str, Any]:
+    from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
     from chronovisor.ops.health import health_snapshot
     from chronovisor.ops.sleep_cycle import HISTORY_FILE
-    from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
 
     quality_probe = _run_watchdog_quality_probe(write=write)
     health, component_alert = _read_watchdog_health(

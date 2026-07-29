@@ -59,6 +59,7 @@ def test_sensitive_query_is_blocked_before_provider_call(tmp_path, monkeypatch) 
 
 def test_searxng_adapter_normalizes_mocked_live_results(tmp_path, monkeypatch) -> None:
     import httpx
+
     from chronovisor.research import web_provider
     from chronovisor.research.web_provider import HttpSearchProvider
 
@@ -100,6 +101,7 @@ def test_searxng_partial_engine_failure_is_visible_without_losing_results(
     tmp_path, monkeypatch
 ) -> None:
     import httpx
+
     from chronovisor.research import web_provider
     from chronovisor.research.web_provider import HttpSearchProvider
 
@@ -151,6 +153,7 @@ def test_searxng_partial_engine_failure_is_visible_without_losing_results(
 
 def test_mediawiki_adapter_is_a_keyless_bounded_fallback() -> None:
     import httpx
+
     from chronovisor.research.web_provider import HttpSearchProvider
 
     client = httpx.Client(

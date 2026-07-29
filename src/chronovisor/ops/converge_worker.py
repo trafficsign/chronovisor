@@ -16,11 +16,11 @@ def run_maintenance_batch(
     """Drain existing semantic maintenance without rebuilding sleep artifacts."""
 
     from chronovisor.ops.autonomy import resolve_deferred_duplicates_with_frontier
-    from chronovisor.recall.content_correction import run_pending_corrections
     from chronovisor.ops.convergence import ConvergenceStore, CycleBudget
-    from chronovisor.recall.duplicate_review import build_duplicate_review_queue
     from chronovisor.ops.lint_repair import run_lint_repair
     from chronovisor.ops.orphan_link import run_autonomous
+    from chronovisor.recall.content_correction import run_pending_corrections
+    from chronovisor.recall.duplicate_review import build_duplicate_review_queue
 
     state = ConvergenceStore()
     budget = CycleBudget(

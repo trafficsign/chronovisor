@@ -27,7 +27,6 @@ from chronovisor.ingest.ingest import (
     _strip_all_frontmatter,
 )
 
-
 # ---------------------------------------------------------------------------
 # _extract_json_array
 # ---------------------------------------------------------------------------
@@ -578,8 +577,8 @@ def test_generate_one_failure_logs_are_confined_to_isolated_wiki(
     )
 
     assert result is None
-    assert ingest.LOG_FILE == isolated_wiki / "log.md"
-    assert runtime_status.EVENTS_FILE == isolated_wiki / "runtime" / "events.jsonl"
+    assert isolated_wiki / "log.md" == ingest.LOG_FILE
+    assert isolated_wiki / "runtime" / "events.jsonl" == runtime_status.EVENTS_FILE
     assert "isolated transport sentinel" in ingest.LOG_FILE.read_text()
     assert "isolated transport sentinel" in runtime_status.EVENTS_FILE.read_text()
 
@@ -628,8 +627,8 @@ def test_generate_one_holds_one_exclusive_lease_across_repair_session(
     monkeypatch: pytest.MonkeyPatch,
     isolated_wiki: Path,
 ) -> None:
-    from chronovisor.ingest import ingest
     from chronovisor.core.runtime_config import IngestConfig
+    from chronovisor.ingest import ingest
 
     invalid = (
         "=== NEW PAGE: memory/leased.md ===\n"
@@ -712,8 +711,8 @@ def test_generate_one_rejects_context_accounting_at_admitted_boundary(
     monkeypatch: pytest.MonkeyPatch,
     isolated_wiki: Path,
 ) -> None:
-    from chronovisor.ingest import ingest
     from chronovisor.core.runtime_config import IngestConfig
+    from chronovisor.ingest import ingest
 
     calls = 0
 
@@ -772,8 +771,8 @@ def test_generate_one_oversized_full_repair_envelope_fails_before_resources(
     monkeypatch: pytest.MonkeyPatch,
     isolated_wiki: Path,
 ) -> None:
-    from chronovisor.ingest import ingest
     from chronovisor.core.runtime_config import IngestConfig
+    from chronovisor.ingest import ingest
 
     def forbidden(*_args, **_kwargs):
         pytest.fail(
@@ -891,14 +890,10 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.core import store
-    from chronovisor.ingest import ingest
-    from chronovisor.search import index_store
-    from chronovisor.core import ollama
-    from chronovisor.ingest import orchestrator
-    from chronovisor.ingest import page_mutation
+    from chronovisor.core import ollama, store
+    from chronovisor.ingest import ingest, orchestrator, page_mutation
     from chronovisor.ops import runtime_status
-    from chronovisor.search import search
+    from chronovisor.search import index_store, search
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
@@ -1071,8 +1066,10 @@ def _downgrade_ingest_proposal_artifact_to_v1(
 
 
 def test_ingest_artifact_schema_tracks_proposal_envelope_schema() -> None:
+    from chronovisor.decision.decision_lane_prompts import (
+        INGEST_PROPOSAL_SCHEMA_VERSION,
+    )
     from chronovisor.ingest import ingest
-    from chronovisor.decision.decision_lane_prompts import INGEST_PROPOSAL_SCHEMA_VERSION
 
     assert (
         ingest.INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION == INGEST_PROPOSAL_SCHEMA_VERSION
@@ -1426,7 +1423,9 @@ class TestIngestFrontierGate:
         summary: str = "authority-bound review",
     ) -> dict:
         from chronovisor.decision.decision_router import canonical_agreement_signature
-        from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+        from chronovisor.decision.decision_schema_manifest import (
+            production_decision_schemas,
+        )
 
         review = {
             "decision": decision,
@@ -1476,10 +1475,8 @@ class TestIngestFrontierGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         del isolated_wiki
-        from chronovisor.decision import decision_policy
-        from chronovisor.decision import decision_router
-        from chronovisor.ingest import ingest
         from chronovisor.core import runtime_config
+        from chronovisor.decision import decision_policy, decision_router
         from chronovisor.decision.decision_lane_contract_cases import (
             decision_lane_contract_case_manifest_sha256,
         )
@@ -1487,6 +1484,7 @@ class TestIngestFrontierGate:
             lane_contract_manifest_sha256,
             lane_contract_sha256,
         )
+        from chronovisor.ingest import ingest
 
         def production_review_stub(*_args, **_kwargs):
             raise AssertionError("authority resolution must not invoke review")
@@ -1566,9 +1564,9 @@ class TestIngestFrontierGate:
         monkeypatch: pytest.MonkeyPatch,
         authority_state: str,
     ) -> None:
+        from chronovisor.core import jobs
         from chronovisor.decision import failure_supervisor
         from chronovisor.ingest import ingest
-        from chronovisor.core import jobs
 
         authority_a = self._production_authority("a")
         authority_b = self._production_authority("b")
@@ -1699,9 +1697,9 @@ class TestIngestFrontierGate:
         monkeypatch: pytest.MonkeyPatch,
         publication_authority: str | None,
     ) -> None:
+        from chronovisor.core import jobs
         from chronovisor.decision import failure_supervisor
         from chronovisor.ingest import ingest
-        from chronovisor.core import jobs
 
         authority_a = self._production_authority("a")
         authority_sha256: list[str | None] = ["a" * 64]
@@ -1855,7 +1853,9 @@ class TestIngestFrontierGate:
             "decision verdict local consensus proof is missing"
         )
         from chronovisor.decision.decision_router import canonical_agreement_signature
-        from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+        from chronovisor.decision.decision_schema_manifest import (
+            production_decision_schemas,
+        )
 
         signature = canonical_agreement_signature(
             review,
@@ -2342,8 +2342,8 @@ class TestIngestFrontierGate:
         monkeypatch: pytest.MonkeyPatch,
         drift_kind: str,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import DecisionRouterConfig
+        from chronovisor.ingest import ingest
 
         config = {"value": self._fixed_review_config()}
         monkeypatch.setattr(
@@ -2719,8 +2719,8 @@ class TestIngestFrontierGate:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import DecisionRouterConfig
+        from chronovisor.ingest import ingest
 
         config = {"value": self._fixed_review_config()}
         monkeypatch.setattr(
@@ -2939,8 +2939,8 @@ class TestIngestFrontierGate:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import DecisionRouterConfig
+        from chronovisor.ingest import ingest
 
         historical_config = self._fixed_review_config()
         monkeypatch.setattr(
@@ -3034,8 +3034,8 @@ class TestIngestFrontierGate:
         monkeypatch: pytest.MonkeyPatch,
         tamper_target: str,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import DecisionRouterConfig
+        from chronovisor.ingest import ingest
 
         historical_config = self._fixed_review_config()
         monkeypatch.setattr(
@@ -4695,8 +4695,8 @@ class TestRunIngestPartialFailure:
     def test_all_generation_failure_bypasses_semantic_review(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         monkeypatch.setattr(
             ingest,
@@ -4747,10 +4747,9 @@ class TestRunIngestPartialFailure:
     def test_structured_review_failure_does_not_regenerate_or_exhaust_budget(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.decision import failure_supervisor
-        from chronovisor.decision import frontier_review
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.decision import failure_supervisor, frontier_review
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -4819,8 +4818,8 @@ class TestRunIngestPartialFailure:
         authority_sha256: str | None,
         semantic_defer: bool,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -4932,8 +4931,8 @@ class TestRunIngestPartialFailure:
     ) -> None:
         """Applied pages remain durable, but raw ACK failure is job failure."""
 
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         monkeypatch.setattr(
             ingest,
@@ -4981,8 +4980,8 @@ class TestRunIngestPartialFailure:
     def test_confirmed_noop_revalidates_authority_before_retiring_raw(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         monkeypatch.setattr(ingest, "_triage", lambda _content: [])
         monkeypatch.setattr(ingest, "is_available", lambda: True)
@@ -5035,8 +5034,8 @@ class TestRunIngestPartialFailure:
     def test_confirmed_noop_recomputes_action_proof_before_retiring_raw(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         authority = TestIngestFrontierGate._production_authority("a")
         review = TestIngestFrontierGate._authority_review(
@@ -5092,8 +5091,8 @@ class TestRunIngestPartialFailure:
         raws that kept failing; partial apply + raws-processed avoids both.
         """
 
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         # Stub triage → returns 3 ops.
         plan = [
@@ -5161,8 +5160,8 @@ class TestRunIngestPartialFailure:
         failure therefore crosses this boundary exactly once.
         """
 
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {"type": "create", "filename": "misc/p0.md", "title": "P0"},
@@ -5211,8 +5210,8 @@ class TestRunIngestPartialFailure:
         not be mutated, but on_complete still fires so one bad model
         output does not block the pending drain forever."""
 
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {"type": "create", "filename": f"misc/p{i}.md", "title": f"P{i}"}
@@ -5262,8 +5261,8 @@ class TestRunIngestPartialFailure:
         quarantine the raw with update_target_not_found.
         """
 
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -5323,8 +5322,8 @@ class TestRunIngestPartialFailure:
     def test_failure_packet_missing_update_target_becomes_create(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -5398,8 +5397,8 @@ class TestRunIngestFrontierDisposition:
     def test_frontier_content_replacement_is_re_reviewed_before_apply(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -5475,8 +5474,8 @@ class TestRunIngestFrontierDisposition:
     def test_frontier_invalid_tag_uses_minimal_repair_before_regeneration(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -5696,8 +5695,8 @@ class TestRunIngestFrontierDisposition:
     def test_frontier_content_replacement_preserves_unrejected_taxonomy(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -5768,8 +5767,8 @@ class TestRunIngestFrontierDisposition:
     def test_frontier_rejection_regenerates_with_feedback_in_same_job(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -5871,8 +5870,8 @@ class TestRunIngestFrontierDisposition:
     def test_invalid_local_authority_fails_before_triage_or_generation(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         calls: list[str] = []
         monkeypatch.setattr(ingest, "is_available", lambda: True)
@@ -5920,8 +5919,8 @@ class TestRunIngestFrontierDisposition:
     def test_local_noop_requires_frontier_confirmation(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         monkeypatch.setattr(ingest, "_triage", lambda _content: [])
         monkeypatch.setattr(ingest, "is_available", lambda: True)
@@ -5958,8 +5957,8 @@ class TestRunIngestFrontierDisposition:
     def test_all_generation_failures_require_frontier_disposition(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -6003,8 +6002,8 @@ class TestRunIngestFrontierDisposition:
     def test_partial_apply_without_explicit_failed_disposition_retries(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {"type": "create", "filename": "memory/ready.md", "title": "Ready"},
@@ -6045,8 +6044,8 @@ class TestRunIngestFrontierDisposition:
     def test_complete_proposal_ignores_redundant_failed_disposition(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {"type": "create", "filename": "memory/ready.md", "title": "Ready"},
@@ -6082,8 +6081,8 @@ class TestRunIngestFrontierDisposition:
     def test_retryable_partial_proposal_does_not_pin_later_complete_generation(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {"type": "create", "filename": "memory/one.md", "title": "One"},
@@ -6151,8 +6150,8 @@ class TestRawKeywordsMetadataPropagation:
     def test_metadata_raw_keywords_lands_on_every_operation(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {"type": "create", "filename": f"misc/p{i}.md", "title": f"P{i}"}
@@ -6238,8 +6237,8 @@ class TestRawKeywordsMetadataPropagation:
         "no propagation". Important defensive behavior so a malformed raw
         frontmatter can't produce mojibake page metadata.
         """
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [{"type": "create", "filename": "misc/p0.md", "title": "P"}]
         monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
@@ -6381,11 +6380,10 @@ class TestOrchestrator:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.decision import failure_supervisor
-        from chronovisor.ingest import ingest
-        from chronovisor.ingest import orchestrator
-        from chronovisor.ops import runtime_status
         from chronovisor.core.runtime_config import DecisionRouterConfig
+        from chronovisor.decision import failure_supervisor
+        from chronovisor.ingest import ingest, orchestrator
+        from chronovisor.ops import runtime_status
 
         raw_path = isolated_wiki / "raw" / "eight-shard-continuation.md"
         raw_content = "Eight grounded memories require bounded local review."
@@ -6521,10 +6519,9 @@ class TestOrchestrator:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.decision import failure_supervisor
-        from chronovisor.ingest import ingest
-        from chronovisor.ingest import orchestrator
         from chronovisor.core.runtime_config import DecisionRouterConfig
+        from chronovisor.decision import failure_supervisor
+        from chronovisor.ingest import ingest, orchestrator
 
         raw_path = isolated_wiki / "raw" / "shard-repair-continuation.md"
         raw_content = "One exact shard needs repair before bounded review resumes."
@@ -6712,8 +6709,7 @@ class TestOrchestrator:
     ) -> None:
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_completion_ack
-        from chronovisor.raw import raw_semantic_projection
+        from chronovisor.raw import raw_completion_ack, raw_semantic_projection
 
         record = json.dumps(
             [{"line": 7, "role": "user", "text": "remember projected record"}],
@@ -6874,9 +6870,9 @@ class TestOrchestrator:
     def test_over_limit_fragment_group_fans_out_without_quarantine(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import runtime_config
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.core import runtime_config
 
         record = json.dumps([{"role": "user", "text": "X" * 6_000}])
         record_sha256, paths = self._write_capture_fragments(
@@ -6952,8 +6948,8 @@ class TestOrchestrator:
         from chronovisor.decision import failure_supervisor
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_semantic_projection
         from chronovisor.ops import self_heal
+        from chronovisor.raw import raw_semantic_projection
 
         record = json.dumps([{"role": "user", "text": "grounded record"}])
         record_sha256, paths = self._write_capture_fragments(
@@ -7219,6 +7215,7 @@ class TestOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from contextlib import contextmanager
+
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
 
@@ -7313,8 +7310,8 @@ class TestOrchestrator:
         assert orchestrator._load_state()["current_job_id"] is None
 
     def test_reset_stale_lock_keeps_known_job(self, isolated_wiki: Path) -> None:
-        from chronovisor.ingest import orchestrator
         from chronovisor.core import jobs
+        from chronovisor.ingest import orchestrator
 
         job = jobs.job_store.create(processor="ollama")
         try:
@@ -7648,9 +7645,9 @@ class TestPerRawOrchestrator:
         monkeypatch: pytest.MonkeyPatch,
         chronovisor_root: Path,
     ) -> dict[str, int]:
+        from chronovisor.core.jobs import JobStatus, job_store
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.core.jobs import JobStatus, job_store
 
         calls = {"ingest": 0, "mutation": 0}
 
@@ -7723,9 +7720,9 @@ class TestPerRawOrchestrator:
     def test_state_write_failure_resumes_durable_ack_without_duplicate_apply(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core.jobs import JobStatus, job_store
         from chronovisor.ingest import orchestrator
         from chronovisor.raw import raw_completion_ack
-        from chronovisor.core.jobs import JobStatus, job_store
 
         raw_path = isolated_wiki / "raw" / "ack-state-failure.md"
         raw_path.write_text("stable source bytes", encoding="utf-8")
@@ -7776,8 +7773,7 @@ class TestPerRawOrchestrator:
     def test_applied_artifact_recovers_before_model_and_ack_protects_later_update(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
-        from chronovisor.ingest import orchestrator
+        from chronovisor.ingest import ingest, orchestrator
         from chronovisor.raw import raw_completion_ack
 
         raw_path = isolated_wiki / "raw" / "pretriage-crash.md"
@@ -7843,8 +7839,8 @@ class TestPerRawOrchestrator:
     def test_pretriage_terminal_recovery_rejects_tampered_current_review(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.jobs import JobStatus, job_store
+        from chronovisor.ingest import ingest
 
         raw_content = "tampered terminal artifact must not reach a model"
         _page, seeded = self._seed_applied_terminal_artifact(
@@ -7882,8 +7878,8 @@ class TestPerRawOrchestrator:
     def test_pretriage_proof_race_has_no_model_or_derived_side_effect(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.jobs import JobStatus, job_store
+        from chronovisor.ingest import ingest
 
         raw_content = "terminal proof changes before the recovery lock"
         self._seed_applied_terminal_artifact(
@@ -7931,8 +7927,8 @@ class TestPerRawOrchestrator:
     def test_confirmed_noop_terminal_artifact_recovers_before_model(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.jobs import JobStatus, job_store
+        from chronovisor.ingest import ingest
 
         raw_content = "durably reviewed as a semantic noop"
 
@@ -8013,8 +8009,8 @@ class TestPerRawOrchestrator:
         corruption: str,
     ) -> None:
         from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_completion_ack
         from chronovisor.ops import self_heal
+        from chronovisor.raw import raw_completion_ack
 
         raw_path = isolated_wiki / "raw" / f"ack-{corruption}.md"
         raw_path.write_text("original source", encoding="utf-8")
@@ -8056,8 +8052,8 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_completion_ack
         from chronovisor.ops import self_heal
+        from chronovisor.raw import raw_completion_ack
 
         raw_path = isolated_wiki / "raw" / "ack-publish-failure.md"
         raw_path.write_text("source survives", encoding="utf-8")
@@ -8087,8 +8083,8 @@ class TestPerRawOrchestrator:
     ) -> None:
         """Each raw's frontmatter keywords must reach run_ingest as that
         raw's own metadata — no blanket copy across the batch."""
-        from chronovisor.ingest import orchestrator
         from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import orchestrator
 
         (isolated_wiki / "raw" / "a.md").write_text(
             "---\nraw_keywords: [alpha-1, alpha-2]\n---\nA body\n"
@@ -8139,8 +8135,8 @@ class TestPerRawOrchestrator:
     ) -> None:
         """Pre-rename raws written with ``keywords:`` (not ``raw_keywords:``)
         must still propagate via the legacy fallback path."""
-        from chronovisor.ingest import orchestrator
         from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import orchestrator
 
         (isolated_wiki / "raw" / "legacy.md").write_text(
             "---\nkeywords: [legacy-only]\n---\nlegacy body\n"
@@ -8168,8 +8164,8 @@ class TestPerRawOrchestrator:
     ) -> None:
         """If a raw has both fields (transitional state), the new
         ``raw_keywords`` wins — fallback is a strict else branch."""
-        from chronovisor.ingest import orchestrator
         from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import orchestrator
 
         (isolated_wiki / "raw" / "both.md").write_text(
             "---\nraw_keywords: [new-name]\nkeywords: [old-name]\n---\nbody\n"
@@ -8197,8 +8193,8 @@ class TestPerRawOrchestrator:
     ) -> None:
         """A failed raw must remain pending while its successful peers
         get marked processed individually."""
-        from chronovisor.ingest import orchestrator
         from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import orchestrator
 
         (isolated_wiki / "raw" / "ok.md").write_text("ok body")
         (isolated_wiki / "raw" / "broken.md").write_text("broken body")
@@ -8232,9 +8228,9 @@ class TestPerRawOrchestrator:
     def test_distinct_triage_failures_are_retried_per_raw_without_bulk_quarantine(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import orchestrator
-        from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.core.jobs import JobStatus, job_store
+        from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import orchestrator
 
         paths = [isolated_wiki / "raw" / f"bad-{index}.md" for index in range(4)]
         for path in paths:
@@ -8280,9 +8276,9 @@ class TestPerRawOrchestrator:
     ) -> None:
         """Repeated deterministic apply failures leave the queue and become
         self-healing packets instead of being retried forever."""
-        from chronovisor.ingest import orchestrator
-        from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.core.jobs import JobStatus, job_store
+        from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import orchestrator
 
         raw_path = isolated_wiki / "raw" / "broken.md"
         raw_path.write_text("broken body")
@@ -8587,8 +8583,8 @@ class TestPerRawOrchestrator:
         It must not accumulate per-raw attempts or quarantine otherwise valid
         source material into the self-heal queue.
         """
-        from chronovisor.ingest import orchestrator
         from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import orchestrator
 
         raw_path = isolated_wiki / "raw" / "model-memory.md"
         raw_path.write_text("body")
@@ -8908,10 +8904,10 @@ class TestPerRawOrchestrator:
     def test_operational_defer_skips_second_run_and_repair_success_retries(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core.jobs import JobStatus, job_store
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
         from chronovisor.ops import self_heal
-        from chronovisor.core.jobs import JobStatus, job_store
 
         raw_path = isolated_wiki / "raw" / "operational.md"
         raw_path.write_text("valid source", encoding="utf-8")
@@ -9020,8 +9016,8 @@ class TestPerRawOrchestrator:
         from chronovisor.decision import failure_supervisor
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_semantic_projection
         from chronovisor.ops import self_heal
+        from chronovisor.raw import raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
             isolated_wiki / "raw",
@@ -9081,8 +9077,8 @@ class TestPerRawOrchestrator:
     ) -> None:
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_semantic_projection
         from chronovisor.ops import self_heal
+        from chronovisor.raw import raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
             isolated_wiki / "raw",
@@ -9126,8 +9122,8 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.decision import failure_supervisor
-        from chronovisor.raw import raw_semantic_projection
         from chronovisor.ops import self_heal
+        from chronovisor.raw import raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
             isolated_wiki / "raw",
@@ -9161,8 +9157,8 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.decision import failure_supervisor
-        from chronovisor.raw import raw_semantic_projection
         from chronovisor.ops import self_heal
+        from chronovisor.raw import raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
             isolated_wiki / "raw",
@@ -9290,6 +9286,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import threading
+
         from chronovisor.decision import failure_supervisor
 
         deferred_raw = isolated_wiki / "raw" / "deferred.md"
@@ -9410,8 +9407,9 @@ class TestPerRawOrchestrator:
         no per-raw worker thread should be spawned.
         """
         import threading
-        from chronovisor.ingest import orchestrator
+
         from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import orchestrator
 
         for i in range(3):
             (isolated_wiki / "raw" / f"r{i}.md").write_text("body")
@@ -9451,8 +9449,8 @@ class TestPhase6Compatibility:
     ) -> None:
         """The Phase 3 keyword-only ``metadata`` parameter must not
         break callers that still pass the original 4 positional args."""
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [{"type": "create", "filename": "misc/p.md", "title": "P"}]
         monkeypatch.setattr(ingest, "_triage", lambda _content: plan)
@@ -9497,8 +9495,8 @@ class TestPhase6Compatibility:
         Verify by feeding a triage plan with ``keywords`` AND a metadata
         ``raw_keywords`` — they must reach the operation as two distinct
         signals."""
-        from chronovisor.ingest import ingest
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
 
         plan = [
             {
@@ -9579,9 +9577,8 @@ class TestReadBackVerification:
     def test_changed_page_passes_when_search_returns_page(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.search import index_store
         from chronovisor.ingest import ingest
-        from chronovisor.search import search
+        from chronovisor.search import index_store, search
         from chronovisor.search.search_types import ScoredPage
 
         class Store:
@@ -9615,11 +9612,10 @@ class TestReadBackVerification:
     def test_refresh_waits_for_semantic_delta_before_read_back(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.recall import claims
-        from chronovisor.search import index_store
         from chronovisor.ingest import ingest
-        from chronovisor.search import search
         from chronovisor.ops import state_register
+        from chronovisor.recall import claims
+        from chronovisor.search import index_store, search
 
         events: list[object] = []
 
@@ -9678,8 +9674,8 @@ class _QueueStructuredTransport:
 class TestTriagePlanSchema:
     def test_ollama_grammar_schema_uses_host_side_numeric_bounds(self) -> None:
         from chronovisor.ingest.ingest import (
-            TRIAGE_PLAN_SCHEMA,
             _TRIAGE_PLAN_VALIDATION_SCHEMA,
+            TRIAGE_PLAN_SCHEMA,
         )
 
         encoded = json.dumps(TRIAGE_PLAN_SCHEMA, sort_keys=True)
@@ -10340,8 +10336,8 @@ class TestTriagePlanSchema:
     def test_live_triage_grows_context_for_large_input(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
 
         transport = _QueueStructuredTransport("[]")
         monkeypatch.setattr(
@@ -10357,8 +10353,8 @@ class TestTriagePlanSchema:
     def test_live_triage_over_configured_cap_clears_progress(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
 
         transport = _QueueStructuredTransport("[]")
         progress: list[dict] = []
@@ -10417,8 +10413,8 @@ class TestTriagePlanSchema:
     def test_structured_transport_forwards_complete_request(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.decision.local_structured import ChatRequest
+        from chronovisor.ingest import ingest
 
         captured: dict = {}
 
@@ -10467,9 +10463,9 @@ class TestTriagePlanSchema:
     def test_structured_transport_preserves_completion_metadata(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import ollama
         from chronovisor.decision.local_structured import ChatRequest
+        from chronovisor.ingest import ingest
 
         response = ollama.GenerateResponse(
             content="[]",
@@ -10501,8 +10497,8 @@ class TestTriagePlanSchema:
     def test_native_structured_transport_preserves_chat_roles(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.decision.local_structured import ChatRequest
+        from chronovisor.ingest import ingest
 
         captured: dict = {}
 
@@ -10539,6 +10535,7 @@ class TestTriagePlanSchema:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from contextlib import nullcontext
+
         from chronovisor.ingest import ingest
 
         native = _QueueStructuredTransport("[]")
@@ -10592,8 +10589,8 @@ class TestTriagePlanSchema:
     def test_structured_transport_supports_narrow_generate_fixture(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.decision.local_structured import ChatRequest
+        from chronovisor.ingest import ingest
 
         captured: dict[str, str] = {}
 
@@ -10728,8 +10725,8 @@ class TestPageGenerationBudget:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
 
         invalid_one = "=== NEW PAGE: memory/adaptive.md ===\nmissing frontmatter"
         invalid_two = "=== NEW PAGE: memory/adaptive.md ===\nstill invalid"
@@ -11039,8 +11036,8 @@ class TestOversizedAppendOnlyUpdateContext:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
 
         page_text = (
             "---\ntitle: Interview Narrative\nupdated: 2026-01-01\n---\n"
@@ -11157,8 +11154,8 @@ class TestOversizedAppendOnlyUpdateContext:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
 
         op = {
             "type": "update",
@@ -11294,8 +11291,8 @@ class TestOversizedAppendOnlyUpdateContext:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
 
         huge = "x" * 300_000
         compact = ingest._CompactUpdateContext(
@@ -11355,9 +11352,9 @@ class TestIngestContextAdmission:
     def test_high_context_evicts_every_other_resident_model(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import ollama
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
 
         config = IngestConfig(
             model="ornith:ingest",
@@ -11413,9 +11410,9 @@ class TestIngestContextAdmission:
     def test_lower_context_reclaims_unrelated_models_only_after_initial_stall(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core import ollama
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
 
         config = IngestConfig(
             model="ornith:ingest",
@@ -11468,8 +11465,8 @@ class TestIngestContextAdmission:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
 
         related = _seed_page(
             isolated_wiki,
@@ -11876,8 +11873,8 @@ class TestIngestContextAdmission:
     def test_generation_capacity_failure_is_not_retried(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.core.jobs import job_store
+        from chronovisor.ingest import ingest
 
         calls = 0
 
@@ -11908,10 +11905,11 @@ class TestRecallMetadataStructuredSession:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from contextlib import contextmanager
-        from chronovisor.ingest import ingest
+
         from chronovisor.core import ollama
-        from chronovisor.decision.local_structured import LocalStructuredResult
         from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.decision.local_structured import LocalStructuredResult
+        from chronovisor.ingest import ingest
 
         planned: list[dict] = []
         sessions: list[dict] = []
@@ -12133,10 +12131,10 @@ class TestApplyPreparePhase:
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor.ingest import ingest
         from chronovisor.decision.decision_lane_prompts import (
             validate_ingest_proposal_envelope,
         )
+        from chronovisor.ingest import ingest
 
         system_page = isolated_wiki / "system" / "lessons-learned.md"
         canonical = "---\ntitle: System Lessons\nupdated: 2026-07-11\n---\ncanonical\n"
@@ -12321,8 +12319,8 @@ class TestWikiSaveRawRouting:
     def test_idempotency_key_reuses_first_complete_raw(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import orchestrator
         from chronovisor.hosts import server
+        from chronovisor.ingest import orchestrator
 
         tool_fn = (
             server.chronovisor_record.fn
@@ -12354,8 +12352,8 @@ class TestWikiSaveRawRouting:
     def test_idempotency_key_rejects_different_unverified_payload(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import orchestrator
         from chronovisor.hosts import server
+        from chronovisor.ingest import orchestrator
 
         tool_fn = (
             server.chronovisor_record.fn
@@ -12378,8 +12376,8 @@ class TestWikiSaveRawRouting:
     def test_idempotency_key_accepts_different_self_verified_retry_receipt(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import orchestrator
         from chronovisor.hosts import server
+        from chronovisor.ingest import orchestrator
         from chronovisor.raw.save_transaction import (
             attach_save_transaction_marker,
             make_save_transaction,
@@ -12430,8 +12428,8 @@ class TestWikiSaveRawRouting:
     def test_idempotency_key_rejects_corrupt_existing_receipt(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import orchestrator
         from chronovisor.hosts import server
+        from chronovisor.ingest import orchestrator
         from chronovisor.raw.save_transaction import (
             attach_save_transaction_marker,
             make_save_transaction,
@@ -12571,6 +12569,7 @@ class TestLogFailuresDontBreakRollback:
     ) -> None:
         """A correction committed after ingest prepare must not be overwritten."""
         from contextlib import contextmanager
+
         from chronovisor.ingest import page_mutation
 
         target = isolated_wiki / "pages" / "x" / "page.md"
@@ -12737,8 +12736,8 @@ class TestWikiIngestForce:
     def test_force_triggers_below_threshold(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import orchestrator
         from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import orchestrator
 
         # 1 pending raw — far below INGEST_THRESHOLD (5). Without force, the
         # orchestrator should refuse; with force=True, it should trigger.
@@ -12832,6 +12831,7 @@ class TestUnicodeCollision:
         depth.)
         """
         import unicodedata
+
         from chronovisor.ingest.ingest import _normalize_for_collision
 
         nfc = unicodedata.normalize("NFC", "café")
@@ -12855,8 +12855,8 @@ class TestRebuildIndexNonFatal:
         have been written, we must still report COMPLETED and call
         on_complete — otherwise raws stay pending and retry will collide
         on every page we already created."""
-        from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest as ingest_mod
 
         monkeypatch.setattr(ingest_mod, "is_available", lambda: True)
         monkeypatch.setattr(
@@ -12903,8 +12903,8 @@ class TestRebuildIndexNonFatal:
         """Stronger version: don't mock _rebuild_index — let it actually run,
         but make INDEX_FILE be a directory so the real write_text raises
         IsADirectoryError. We still expect COMPLETED + on_complete."""
-        from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest as ingest_mod
 
         # Replace INDEX_FILE with a directory (cannot write_text).
         idx_path = isolated_wiki / "index.md"
@@ -12953,10 +12953,11 @@ class TestRawAllocationParallel:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Ingest must never observe the zero-byte reservation window."""
-        from concurrent.futures import ThreadPoolExecutor
         import threading
-        from chronovisor.ingest import orchestrator
+        from concurrent.futures import ThreadPoolExecutor
+
         from chronovisor.hosts import server
+        from chronovisor.ingest import orchestrator
 
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
         tool_fn = (
@@ -13009,8 +13010,9 @@ class TestRawAllocationParallel:
         """Real concurrency test: 50 threads racing into _allocate_raw_path
         must each receive a distinct path. The sequential test in R4 only
         proved the single-thread case."""
-        from concurrent.futures import ThreadPoolExecutor
         import threading
+        from concurrent.futures import ThreadPoolExecutor
+
         from chronovisor.hosts import server
 
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
@@ -13078,8 +13080,8 @@ class TestPostApplyLogSafety:
 
         With _safe_log wrapping every post-apply log call, this can't
         happen. Verify by patching _append_log to raise on every call."""
-        from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.core import jobs
+        from chronovisor.ingest import ingest as ingest_mod
 
         monkeypatch.setattr(ingest_mod, "is_available", lambda: True)
         monkeypatch.setattr(

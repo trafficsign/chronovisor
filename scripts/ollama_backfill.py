@@ -21,14 +21,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from chronovisor.core.ollama import generate, is_available  # noqa: E402
-from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
+# AUTO_MARKER を Ollama 版に上書きするため import 後に再定義
+import backfill_links
+from backfill_links import atomic_write, merge_related_section
+
+from chronovisor.core.ollama import generate, is_available
+from chronovisor.raw.legacy_semantic_write import (
     block_legacy_semantic_mutation,
 )
-from backfill_links import merge_related_section, atomic_write  # noqa: E402
 
-# AUTO_MARKER を Ollama 版に上書きするため import 後に再定義
-import backfill_links  # noqa: E402
 backfill_links.AUTO_MARKER = "<!-- auto-linked: backfill (ollama gemma4) -->"
 
 

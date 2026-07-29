@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_file as _sha256
-
-import hashlib
 import json
 import os
 import shutil
@@ -16,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.core.hashutil import sha256_file as _sha256
 
 SCHEMA = "chronovisor.migration-restore-point.v1"
 

@@ -7,8 +7,6 @@ previous adoption artifact instead of silently drifting away from its evidence.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_text as _sha256_text
-
 import difflib
 import hashlib
 import json
@@ -17,11 +15,12 @@ from typing import Any
 
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying_strict as canonical_json_sha256,
+)
+from chronovisor.core.canonical_json import (
     canonical_json_stringifying_strict as _canonical_json,
 )
-
+from chronovisor.core.hashutil import sha256_text as _sha256_text
 from chronovisor.librarian.tags import parse_tags, validate_axis_counts, validate_tag
-
 
 INGEST_REPAIR_OPTION_POLICY_VERSION = 2
 INGEST_REPAIR_OPTION_ID_RE = re.compile(r"^rp_[0-9a-f]{32}$")
@@ -839,9 +838,8 @@ def _frontmatter_field_keys(
             if span_start == span_end
             else line_end > span_start and offset < span_end
         )
-        if active_key is not None and intersects:
-            if active_key not in keys:
-                keys.append(active_key)
+        if active_key is not None and intersects and active_key not in keys:
+            keys.append(active_key)
         offset = line_end
     return keys
 

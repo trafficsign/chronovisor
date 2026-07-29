@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from chronovisor.recall.content_correction import correction_signal
-
 
 DEFAULT_CORPUS = (
     Path(__file__).resolve().parents[1]

@@ -8,9 +8,9 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from chronovisor.core import ollama
 from chronovisor.classification.classification import ClassificationError
 from chronovisor.classification.classification_hierarchy import ROOT_NOTATIONS
+from chronovisor.core import ollama
 
 WORKER_SCHEMA = "chronovisor.classification-hierarchy-worker.v2"
 EXTRACTION_SCHEMA = "chronovisor.classification-hierarchy-subject.v1"

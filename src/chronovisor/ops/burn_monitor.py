@@ -21,15 +21,15 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from chronovisor.core.canonical_json import (
     canonical_json_bytes_stringifying as canonical_bytes,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
-
 
 RUNTIME_ROOT = CHRONOVISOR_ROOT / "runtime"
 AUTONOMY_ROOT = CHRONOVISOR_ROOT / "autonomy"
@@ -110,7 +110,7 @@ OLLAMA_PATTERNS = (
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def sha256_value(value: Any) -> str:
@@ -436,13 +436,14 @@ def process_snapshot() -> dict[str, Any]:
         ]
     role_counts = {role: len(items) for role, items in role_roots.items()}
     duplicates = {role: max(0, count - 1) for role, count in role_counts.items()}
-    compact = lambda row: {
-        "pid": row["pid"],
-        "ppid": row["ppid"],
-        "rss_bytes": row["rss_bytes"],
-        "etime": row["etime"],
-        "command": str(row["command"])[:500],
-    }
+    def compact(row):
+        return {
+            "pid": row["pid"],
+            "ppid": row["ppid"],
+            "rss_bytes": row["rss_bytes"],
+            "etime": row["etime"],
+            "command": str(row["command"])[:500],
+        }
     return {
         "available": True,
         "role_counts": role_counts,
@@ -864,7 +865,7 @@ class FileDeltaTracker:
         path: Path,
         *,
         replace_record_key: str | None = None,
-    ) -> "FileDeltaTracker":
+    ) -> FileDeltaTracker:
         tracker = cls(name=name, path=path, replace_record_key=replace_record_key)
         try:
             stat = path.stat()
@@ -1020,7 +1021,7 @@ def keyed_jsonl_delta(
         return [], current_ids, False, "history became empty"
     new_pairs = [
         (line, record_id)
-        for line, record_id in zip(lines, ids)
+        for line, record_id in zip(lines, ids, strict=False)
         if record_id not in seen_record_ids
     ]
     latest_seen = max(seen_record_ids) if seen_record_ids else None
@@ -1871,7 +1872,7 @@ def main(argv: list[str] | None = None) -> int:
     BURN_ROOT.mkdir(parents=True, exist_ok=True)
     output = args.output or (
         BURN_ROOT
-        / f"burn-in-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}.jsonl"
+        / f"burn-in-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}.jsonl"
     )
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

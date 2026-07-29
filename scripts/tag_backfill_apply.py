@@ -28,19 +28,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from chronovisor.core.frontmatter import parse as fm_parse, patch as fm_patch  # noqa: E402
-from chronovisor.search.index_store import get_store  # noqa: E402
-from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
-    block_legacy_semantic_mutation,
-)
-from chronovisor.core.ollama import generate as _ollama_generate  # noqa: E402
-from chronovisor.librarian.tag_distribution import (  # noqa: E402
+from chronovisor.core.frontmatter import parse as fm_parse
+from chronovisor.core.frontmatter import patch as fm_patch
+from chronovisor.core.ollama import generate as _ollama_generate
+from chronovisor.core.store import find_page
+from chronovisor.librarian.tag_distribution import (
     TAG_REPORT_SYSTEM_PROMPT,
     parse_llm_response,
 )
-from chronovisor.librarian.tags import SEED_TAGS  # noqa: E402
-from chronovisor.core.store import find_page  # noqa: E402
-
+from chronovisor.librarian.tags import SEED_TAGS
+from chronovisor.raw.legacy_semantic_write import (
+    block_legacy_semantic_mutation,
+)
+from chronovisor.search.index_store import get_store
 
 PROGRESS_FILE = Path.home() / ".chronovisor" / ".tag-backfill-progress.jsonl"
 PLAN_INBOX = Path.home() / "projects" / "plan" / "inbox"

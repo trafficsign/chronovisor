@@ -9,6 +9,7 @@ this module are retained only for historical artifact compatibility.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -23,11 +24,16 @@ from typing import Any
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
-
+from chronovisor.core.runtime_config import load_toml_file, runtime_repo_root
 from chronovisor.decision import decision_authority
+from chronovisor.decision.local_structured import (
+    LocalStructuredSession,
+    ValidationIssue,
+)
+from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops.convergence import is_human_required_result
+from chronovisor.ops.runtime_status import safe_append_event, safe_append_metric
 from chronovisor.recall.feedback_ledger import active_feedback_rows
-from chronovisor.decision.local_structured import LocalStructuredSession, ValidationIssue
 from chronovisor.recall.recall_eval import (
     RecallExample,
     build_dataset,
@@ -58,10 +64,6 @@ from chronovisor.recall.recall_runtime import (
     RecallPolicy,
     load_policy,
 )
-from chronovisor.ingest.page_mutation import decision_authority_lock
-from chronovisor.core.runtime_config import load_toml_file, runtime_repo_root
-from chronovisor.ops.runtime_status import safe_append_event, safe_append_metric
-
 
 DEFAULT_IMPROVEMENT_MODELS = (
     "maxwell1500/ornith-35b:Q5_K_M",
@@ -1739,9 +1741,8 @@ def run_improvement(
             budget_reason = authority_error or "ok"
             if authority_error is not None or review_authority is None:
                 allowed = False
-            if frontier_audit is None and frontier_budget is not None:
-                if allowed:
-                    allowed, budget_reason = frontier_budget.consume("frontier")
+            if frontier_audit is None and frontier_budget is not None and allowed:
+                allowed, budget_reason = frontier_budget.consume("frontier")
             if frontier_audit is None:
                 try:
                     frontier_audit = (
@@ -2010,10 +2011,8 @@ def rollback_policy(
             status = "rolled_back"
             target = previous.get("run_id")
         else:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 active_file.unlink()
-            except FileNotFoundError:
-                pass
             status = "cleared"
             target = None
     record = {

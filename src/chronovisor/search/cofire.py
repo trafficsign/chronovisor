@@ -14,13 +14,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall.recall_log_schema import (
     canonicalize_page_ids,
     join_used_recall_episodes,
     page_ids_from_record,
 )
 from chronovisor.recall.recall_runtime_paths import RECALL_DIR
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_PULL_LOG_FILE = RECALL_DIR / "pull-log.jsonl"

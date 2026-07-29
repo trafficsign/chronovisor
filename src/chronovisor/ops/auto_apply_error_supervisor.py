@@ -9,9 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.ops import runtime_status
 from chronovisor.core import store as chronovisor_store
-
+from chronovisor.ops import runtime_status
 
 AUTO_APPLY_ERROR_THRESHOLD = 3
 MAX_CLUSTER_SAMPLES = 8
@@ -271,7 +270,9 @@ def supervise_error_records(
                 )
                 if start_background:
                     try:
-                        from chronovisor.ops.self_heal import start_background as start_self_heal
+                        from chronovisor.ops.self_heal import (
+                            start_background as start_self_heal,
+                        )
 
                         start_self_heal(packet_path)
                     except Exception as exc:

@@ -5,7 +5,14 @@ import json
 import pytest
 
 from chronovisor.classification.classification import ClassificationError
-from chronovisor.classification.classification_anchor import UNRESOLVED_ANCHOR_ID, load_anchor_set
+from chronovisor.classification.classification_anchor import (
+    UNRESOLVED_ANCHOR_ID,
+    load_anchor_set,
+)
+from chronovisor.classification.classification_anchor_set_worker import (
+    validate_selection,
+)
+from chronovisor.classification.classification_intent_lexicon import classify_complement
 from chronovisor.lab.classification_anchor_second_auditor import validate_audit
 from chronovisor.lab.classification_anchor_set_dev import (
     score_anchor_set,
@@ -16,8 +23,6 @@ from chronovisor.lab.classification_anchor_set_unseen import (
     OUTPUT_CONTRACT_EPOCH,
     _load_manual_gold,
 )
-from chronovisor.classification.classification_anchor_set_worker import validate_selection
-from chronovisor.classification.classification_intent_lexicon import classify_complement
 
 
 def test_set_worker_normalizes_order_and_unresolved_contract() -> None:

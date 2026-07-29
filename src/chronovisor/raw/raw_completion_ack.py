@@ -9,20 +9,18 @@ process can validate the receipt and finish only the state transition.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256
-
-import hashlib
 import json
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.canonical_json import (
     canonical_json_bytes_strict as _canonical_bytes,
 )
+from chronovisor.core.hashutil import sha256_bytes as _sha256
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-
 
 RECEIPT_SCHEMA = "chronovisor.raw-completion-ack.v1"
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from collections.abc import Iterable
@@ -170,24 +171,18 @@ def read_metrics(limit: int = 300) -> list[dict[str, Any]]:
 
 
 def safe_write_status(**fields: Any) -> None:
-    try:
+    with contextlib.suppress(Exception):
         write_status(fields)
-    except Exception:
-        pass
 
 
 def safe_append_event(level: str, message: str, **fields: Any) -> None:
-    try:
+    with contextlib.suppress(Exception):
         append_event(level, message, **fields)
-    except Exception:
-        pass
 
 
 def safe_append_metric(kind: str, **fields: Any) -> None:
-    try:
+    with contextlib.suppress(Exception):
         append_metric(kind, **fields)
-    except Exception:
-        pass
 
 
 def reset_stale_runtime_status(

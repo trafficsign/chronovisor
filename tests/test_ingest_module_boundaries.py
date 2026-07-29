@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 INGEST_MODULES = (
     "chronovisor.ingest.ingest_schemas",
     "chronovisor.ingest.ingest_transport",

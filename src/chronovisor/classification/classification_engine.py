@@ -8,12 +8,6 @@ and deterministic calibration artifact pass the configured gates.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_prefixed_text as _sha256_text
-
-from chronovisor.core.jsonl import write_jsonl as _write_jsonl
-
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import hashlib
 import json
 import math
@@ -23,12 +17,10 @@ import sys
 import time
 import uuid
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
-from datetime import UTC, datetime
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import frontmatter
 from chronovisor.classification.classification import (
     CALIBRATION_SCHEMA,
     CLASSIFICATION_SCHEMA,
@@ -40,15 +32,19 @@ from chronovisor.classification.classification import (
     load_udc_package,
     validate_record,
 )
-from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
+from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.core.hashutil import sha256_prefixed_text as _sha256_text
+from chronovisor.core.jsonl import write_jsonl as _write_jsonl
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.ingest.page_registry import PageRegistry
+from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
 from chronovisor.research.research_scheduler import (
     research_lane,
     run_cancellable_command,
     sync_pending,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 ENGINE_VERSION = "2"
 FIXTURE_SCHEMA = "chronovisor.classification-fixture.v1"

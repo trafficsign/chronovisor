@@ -7,8 +7,6 @@ reviewed diagnostic set without mutating pages, calibration, or rollout state.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_prefixed_bytes as _sha256_bytes
-
 import argparse
 import hashlib
 import json
@@ -19,15 +17,15 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.search import embedding
-from chronovisor.core import ollama
 from chronovisor.classification.classification import (
     UDCPackage,
     load_udc_package,
 )
 from chronovisor.classification.classification_engine import CandidateIndex
+from chronovisor.core import ollama
+from chronovisor.core.hashutil import sha256_prefixed_bytes as _sha256_bytes
 from chronovisor.core.runtime_config import load_decision_router_config
-
+from chronovisor.search import embedding
 
 DIAGNOSTIC_SCHEMA = "chronovisor.classification-diagnostic.v1"
 PILOT_SCHEMA = "chronovisor.classification-method-pilot.v1"
@@ -738,10 +736,7 @@ class PilotRunner:
         decision = dict(result["payload"]["decision"])
         choice = str(decision.get("choice") or HOLD)
         disposition = str(decision.get("disposition") or "hold")
-        if choice == HOLD or disposition == "hold":
-            choice = ""
-            disposition = "hold"
-        elif choice not in choices:
+        if choice == HOLD or disposition == "hold" or choice not in choices:
             choice = ""
             disposition = "hold"
         if choice == common and common not in {left_notation, right_notation}:

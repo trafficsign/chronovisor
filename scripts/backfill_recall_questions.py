@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,9 +28,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     from chronovisor.core.frontmatter import parse, patch
-    from chronovisor.ingest.ingest import _ensure_recall_metadata_frontmatter
     from chronovisor.core.link_fix import atomic_write
     from chronovisor.core.store import all_pages, page_id_from_path
+    from chronovisor.ingest.ingest import _ensure_recall_metadata_frontmatter
 
     scanned = 0
     updated = 0

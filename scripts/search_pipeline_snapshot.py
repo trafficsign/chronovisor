@@ -16,8 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.search.search import search
-from chronovisor.search.search_eval import DEFAULT_VARIANTS, GOLDEN_FILE, run_report, run_variant
-
+from chronovisor.search.search_eval import (
+    DEFAULT_VARIANTS,
+    GOLDEN_FILE,
+    run_report,
+    run_variant,
+)
 
 DEFAULT_QUERIES = (
     "Chronovisor 検索 ロードマップ",
@@ -132,7 +136,7 @@ def _compare(expected: Any, actual: Any, path: str, diffs: list[str]) -> None:
         if len(expected) != len(actual):
             diffs.append(f"{path}: length {len(expected)} != {len(actual)}")
             return
-        for idx, (left, right) in enumerate(zip(expected, actual)):
+        for idx, (left, right) in enumerate(zip(expected, actual, strict=False)):
             _compare(left, right, f"{path}[{idx}]", diffs)
         return
     if isinstance(expected, float) or isinstance(actual, float):

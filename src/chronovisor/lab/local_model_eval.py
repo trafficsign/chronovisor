@@ -8,9 +8,8 @@ and aggregate metrics -- never prompts or literal model responses.
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_iso_seconds as _now
-
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -20,19 +19,29 @@ import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.canonical_json import (
-    canonical_json_sha256_strict as _sha256_json,
-    canonical_json_strict as _canonical_json,
-)
-
 import httpx
 
 from chronovisor.core import ollama
+from chronovisor.core.canonical_json import (
+    canonical_json_sha256_strict as _sha256_json,
+)
+from chronovisor.core.canonical_json import (
+    canonical_json_strict as _canonical_json,
+)
+from chronovisor.core.runtime_config import (
+    DecisionRouterConfig,
+    load_candidate_decision_router_config,
+    load_decision_router_config,
+)
+from chronovisor.core.timeutil import utc_iso_seconds as _now
+from chronovisor.decision.decision_lane_contract_cases import (
+    decision_lane_contract_case_manifest,
+    decision_lane_contract_case_manifest_sha256,
+)
 from chronovisor.decision.decision_lane_contracts import (
     LANE_CONTRACT_CASE_VERSION,
     LANE_CONTRACT_POLICY_VERSION,
@@ -43,10 +52,6 @@ from chronovisor.decision.decision_lane_contracts import (
     model_backed_lane_names,
     validate_declared_lane_contract,
 )
-from chronovisor.decision.decision_lane_contract_cases import (
-    decision_lane_contract_case_manifest,
-    decision_lane_contract_case_manifest_sha256,
-)
 from chronovisor.decision.decision_router import (
     DECISION_REQUEST_FINGERPRINT_VERSION,
     DECISION_SEMANTICS_POLICY_VERSION,
@@ -56,8 +61,8 @@ from chronovisor.decision.decision_router import (
     ModelObserver,
     decision_context_buckets,
     decision_effective_request,
-    decision_request_fingerprint_sha256,
     decision_request_context,
+    decision_request_fingerprint_sha256,
 )
 from chronovisor.decision.decision_schema_manifest import (
     decision_signature_value,
@@ -68,20 +73,15 @@ from chronovisor.decision.decision_schema_manifest import (
     schema_sha256,
 )
 from chronovisor.decision.local_structured import (
+    STRUCTURED_GENERATION_POLICY_VERSION,
     ChatRequest,
     ChatTransport,
-    STRUCTURED_GENERATION_POLICY_VERSION,
     structured_generation_policy,
     structured_generation_policy_sha256,
     validate_json,
     validate_schema_definition,
 )
 from chronovisor.lab.model_lab import REPLAY_FILE
-from chronovisor.core.runtime_config import (
-    DecisionRouterConfig,
-    load_candidate_decision_router_config,
-    load_decision_router_config,
-)
 
 ARTIFACT_SCHEMA_VERSION = 12
 # Policy 20 seals the fixed structured-generation sampler (including the
@@ -545,7 +545,6 @@ def load_replay_corpus(
     allow_empty_after_stale_exclusion: bool = False,
 ) -> ReplayCorpus:
     """Load and validate replay JSONL without invoking any model."""
-
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         raise ReplayInputError("offset must be an integer >= 0")
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
@@ -590,7 +589,6 @@ def load_replay_corpus(
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ReplayInputError(f"replay input is not UTF-8: {exc}") from exc
-
     rows: list[ReplayCase] = []
     excluded_reasons: dict[str, int] = {}
     total_cases = 0
@@ -664,9 +662,13 @@ def load_replay_corpus(
         may_exclude_stale_identity = (
             exclude_stale_historical_identity and not is_deterministic_contract
         )
-
-        def reject_or_exclude_stale_identity(message: str) -> bool:
-            if may_exclude_stale_identity:
+        def reject_or_exclude_stale_identity(
+            message: str,
+            *,
+            may_exclude: bool = may_exclude_stale_identity,
+            current_line: int = line_number,
+        ) -> bool:
+            if may_exclude:
                 excluded_reasons[STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION] = (
                     excluded_reasons.get(
                         STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION,
@@ -675,8 +677,7 @@ def load_replay_corpus(
                     + 1
                 )
                 return True
-            raise ReplayInputError(f"line {line_number}: {message}")
-
+            raise ReplayInputError(f"line {current_line}: {message}")
         if evidence_provenance is not None and not isinstance(
             evidence_provenance, dict
         ):
@@ -695,11 +696,10 @@ def load_replay_corpus(
                 or not isinstance(declared_lane_contract_sha256, str)
                 or not isinstance(declared_lane_contract_effect, str)
                 or not declared_lane_contract_effect
+            ) and reject_or_exclude_stale_identity(
+                "lane contract metadata is incomplete"
             ):
-                if reject_or_exclude_stale_identity(
-                    "lane contract metadata is incomplete"
-                ):
-                    continue
+                continue
             try:
                 validate_declared_lane_contract(
                     lane=decision_lane,
@@ -775,9 +775,11 @@ def load_replay_corpus(
                 != hashlib.sha256(effective_model_prompt.encode("utf-8")).hexdigest()
             ):
                 evidence_mismatches.append("effective_model_prompt_sha256")
-        if "effective_model_system" in row:
-            if row["effective_model_system"] != effective_model_system:
-                evidence_mismatches.append("effective_model_system")
+        if (
+            "effective_model_system" in row
+            and row["effective_model_system"] != effective_model_system
+        ):
+            evidence_mismatches.append("effective_model_system")
         if "effective_model_system_chars" in row:
             declared = row["effective_model_system_chars"]
             expected_chars = (
@@ -815,11 +817,10 @@ def load_replay_corpus(
             not isinstance(declared_request_sha256, str)
             or re.fullmatch(r"[0-9a-f]{64}", declared_request_sha256) is None
             or declared_request_sha256 != effective_request_sha256
+        ) and reject_or_exclude_stale_identity(
+            "effective request fingerprint mismatch"
         ):
-            if reject_or_exclude_stale_identity(
-                "effective request fingerprint mismatch"
-            ):
-                continue
+            continue
         expected_effect = _semantic_effect(
             expected_copy,
             schema_copy,
@@ -829,11 +830,10 @@ def load_replay_corpus(
         if (
             isinstance(declared_lane_contract_effect, str)
             and declared_lane_contract_effect != expected_effect
+        ) and reject_or_exclude_stale_identity(
+            "lane contract effect no longer matches evaluator"
         ):
-            if reject_or_exclude_stale_identity(
-                "lane contract effect no longer matches evaluator"
-            ):
-                continue
+            continue
         rows.append(
             ReplayCase(
                 index=index,
@@ -2834,10 +2834,8 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
             finally:
                 os.close(directory_fd)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(temporary)
-        except OSError:
-            pass
 
 
 def _read_artifact(path: Path) -> dict[str, Any]:

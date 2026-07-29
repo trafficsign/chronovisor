@@ -6,10 +6,9 @@ import ipaddress
 import re
 import socket
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 from urllib.parse import urlsplit
-
 
 _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),

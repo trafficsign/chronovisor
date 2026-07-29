@@ -8,27 +8,30 @@ import json
 import os
 import re
 import sys
+import tomllib
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import store as chronovisor_store
+from chronovisor.core.alias_store import add_alias, load_aliases
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
-
-import tomllib
-
-from chronovisor.decision import decision_authority
-from chronovisor.core import store as chronovisor_store
-from chronovisor.core.alias_store import add_alias, load_aliases
-from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.frontmatter import patch as patch_frontmatter
-from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.jsonl import read_jsonl
-from chronovisor.ingest.page_mutation import decision_authority_lock, chronovisor_mutation_lock
+from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.runtime_config import active_config_file
+from chronovisor.decision import decision_authority
+from chronovisor.ingest.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
+from chronovisor.librarian.tags import record_new_tag, validate_tag
+from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.recall.recall_hints import (
     add_query_hint,
     load_query_hints,
@@ -40,7 +43,6 @@ from chronovisor.recall.recall_runtime import (
     RECALL_FEEDBACK_FILE,
     append_jsonl,
 )
-from chronovisor.core.runtime_config import active_config_file
 from chronovisor.search.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -50,8 +52,6 @@ from chronovisor.search.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.librarian.tags import record_new_tag, validate_tag
-
 
 AUTO_ACTIONS = frozenset({"alias", "query_hint", "page_tag"})
 REVIEW_ACTIONS = frozenset({"few_shot", "threshold"})
@@ -468,7 +468,9 @@ def review_auto_apply_with_frontier(
 ) -> dict[str, Any]:
     """Ask the frontier model for the authoritative action verdict."""
     from chronovisor.decision import frontier_review
-    from chronovisor.decision.decision_lane_prompts import build_recall_auto_apply_prompt
+    from chronovisor.decision.decision_lane_prompts import (
+        build_recall_auto_apply_prompt,
+    )
 
     prompt = build_recall_auto_apply_prompt(proposal)
     timeout_seconds = timeout or int(
@@ -973,7 +975,7 @@ def eligible_records(
         grouped[(str(action), str(record["normalize_key"]))].append(record)
 
     out: list[dict[str, Any]] = []
-    for _group_key, group in grouped.items():
+    for group in grouped.values():
         if len(group) >= policy.min_count:
             out.append(group[-1])
     return out

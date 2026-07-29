@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_text as _sha256_text
-
 import argparse
 import difflib
 import hashlib
@@ -14,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.frontmatter import parse, patch
+from chronovisor.core.hashutil import sha256_text as _sha256_text
+from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.runtime_config import runtime_repo_root
+from chronovisor.core.store import CHRONOVISOR_ROOT, all_pages, page_id_from_path
+from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 from chronovisor.ops.lint import (
     StructuredReviewer,
     _review_packet_error,
@@ -21,10 +24,6 @@ from chronovisor.ops.lint import (
     review_semantic_mutation,
     semantic_review_effect_lock,
 )
-from chronovisor.core.link_fix import atomic_write
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
-from chronovisor.core.runtime_config import runtime_repo_root
-from chronovisor.core.store import CHRONOVISOR_ROOT, all_pages, page_id_from_path
 
 ENTITY_DIR = CHRONOVISOR_ROOT / "entities"
 ENTITY_REGISTRY_FILE = ENTITY_DIR / "registry.json"

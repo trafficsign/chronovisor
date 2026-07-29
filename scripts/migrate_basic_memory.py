@@ -13,16 +13,14 @@ proposal owns any new knowledge page.
 
 import re
 import sys
-import unicodedata
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
+from chronovisor.raw.legacy_semantic_write import (
     block_legacy_semantic_mutation,
 )
-
 
 BASIC_MEMORY_ROOT = Path.home() / "basic-memory"
 WIKI_PAGES = Path.home() / ".chronovisor" / "pages"

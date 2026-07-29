@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from chronovisor.research.evidence_bundle import (
@@ -20,7 +20,7 @@ def _artifact(
         artifact_id=artifact_id,
         source_type="chronovisor_read",
         source_uri="wiki:fact",
-        retrieved_at=datetime.now(timezone.utc).isoformat(),
+        retrieved_at=datetime.now(UTC).isoformat(),
         sha256=artifact_id.removeprefix("sha256:"),
         byte_length=len(preview),
         preview=preview,

@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.research.research_config import ResearchConfig, load_research_config
 from chronovisor.research.research_store import ResearchStore
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 STATE_FILE = CHRONOVISOR_ROOT / "runtime" / "research" / "consolidation-state.json"
 LOCK_FILE = CHRONOVISOR_ROOT / "runtime" / "research" / "consolidation.lock"
@@ -33,10 +35,8 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(temporary)
-        except OSError:
-            pass
 
 
 def _load_state(path: Path) -> dict[str, Any]:
@@ -107,13 +107,13 @@ def _proposal_rows(
         for operation, page_id, value in candidates:
             if operation not in ALLOWED_OPERATIONS:
                 continue
-            coalesce_key = hashlib.sha256(f"{operation}\0{page_id}\0{value}".encode("utf-8")).hexdigest()
-            proposal_id = "proposal:" + hashlib.sha256(f"{run_id}\0{coalesce_key}".encode("utf-8")).hexdigest()
+            coalesce_key = hashlib.sha256(f"{operation}\0{page_id}\0{value}".encode()).hexdigest()
+            proposal_id = "proposal:" + hashlib.sha256(f"{run_id}\0{coalesce_key}".encode()).hexdigest()
             rows.append(
                 {
                     "schema_version": 1,
                     "proposal_id": proposal_id,
-                    "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
                     "research_run_id": run_id,
                     "operation": operation,
                     "page_id": page_id,
@@ -156,7 +156,7 @@ def run_consolidation(
         last_completed = str(state.get("completed_at") or "")
         if last_completed and not force:
             try:
-                elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last_completed)).total_seconds()
+                elapsed = (datetime.now(UTC) - datetime.fromisoformat(last_completed)).total_seconds()
             except ValueError:
                 elapsed = config.consolidation_min_interval_seconds
             if elapsed < config.consolidation_min_interval_seconds:
@@ -178,7 +178,7 @@ def run_consolidation(
                 {
                     "schema_version": 1,
                     "proposal_id": f"noop:{hashlib.sha256('|'.join(run_ids).encode()).hexdigest()}",
-                    "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
                     "operation": "query_hint",
                     "value": "",
                     "coalesce_key": "noop",
@@ -197,7 +197,7 @@ def run_consolidation(
             for event in store.events(run_id)
             if event.get("kind") == "durable_receipt"
         )
-        completed = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        completed = datetime.now(UTC).isoformat(timespec="seconds")
         _atomic_json(
             state_path,
             {

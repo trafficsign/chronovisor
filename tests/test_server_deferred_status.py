@@ -66,10 +66,10 @@ def test_chronovisor_status_separates_runnable_and_deferred_raws(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import health
     from chronovisor.core import ollama
-    from chronovisor.ingest import orchestrator
     from chronovisor.hosts import server
+    from chronovisor.ingest import orchestrator
+    from chronovisor.ops import health
 
     raw_dir = _seed_raws(tmp_path)
     scans = _patch_deferred_statuses(monkeypatch)
@@ -109,8 +109,8 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.core import ollama
-    from chronovisor.ingest import orchestrator
     from chronovisor.hosts import server
+    from chronovisor.ingest import orchestrator
 
     raw_dir = _seed_raws(tmp_path)
     system_dir = tmp_path / "system"

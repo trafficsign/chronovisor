@@ -8,19 +8,12 @@ fixed ten-case diagnostic set.
 
 from __future__ import annotations
 
-from chronovisor.core.jsonl_write import atomic_replace_text as _atomic_write_text
-
-from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
-
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import argparse
 import json
 import os
 import re
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,15 +24,17 @@ from chronovisor.classification.classification import (
     UDCPackage,
     default_udc_package,
 )
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
+from chronovisor.core.runtime_config import load_embedding_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_file
 from chronovisor.lab.classification_library_evidence import (
     DENSE_MODEL_LICENSE,
     DENSE_TRAINING_CORPUS_LICENSE,
     embed_texts_cancellable,
 )
-from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.core.runtime_config import load_embedding_config
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 PROFILE_SCHEMA = "chronovisor.classification-profile-index.v1"
 EVALUATION_SCHEMA = "chronovisor.classification-profile-evaluation.v1"

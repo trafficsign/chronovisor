@@ -13,7 +13,6 @@ from chronovisor.ops.system_incident_supervisor import (
     SystemIncidentSupervisor,
 )
 
-
 FAILURE_CLASS = "ingest.runtime_schema_invalid"
 FINGERPRINT = "ingest.runtime_schema_invalid"
 
@@ -690,8 +689,7 @@ def test_operational_incident_enqueue_contract_accepts_only_bound_producer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import background_jobs
-    from chronovisor.ops import self_heal
+    from chronovisor.ops import background_jobs, self_heal
     from chronovisor.ops import system_incident_supervisor as incident_module
 
     supervisor, source_path, _state_path, _enqueued = _fixture(
@@ -747,11 +745,9 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import background_jobs
-    from chronovisor.ops import runtime_status
-    from chronovisor.ops import self_heal
     from chronovisor.core import store
     from chronovisor.decision.local_repair import LocalRepairDecision
+    from chronovisor.ops import background_jobs, runtime_status, self_heal
 
     chronovisor_root = tmp_path / "wiki"
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)

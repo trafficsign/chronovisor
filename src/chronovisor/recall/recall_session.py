@@ -17,7 +17,6 @@ from typing import Any
 from chronovisor.recall.recall_prompt import normalize_recall_prompt
 from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 
-
 SESSIONS_DIR = RECALL_DIR / "sessions"
 DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 
@@ -41,7 +40,7 @@ class RecallSessionState:
         }
 
     @classmethod
-    def from_dict(cls, session_id: str, data: dict[str, Any]) -> "RecallSessionState":
+    def from_dict(cls, session_id: str, data: dict[str, Any]) -> RecallSessionState:
         recent_queries = _normalize_queries(
             _str_list(data.get("recent_queries"))
         )[-12:]

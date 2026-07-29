@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import iso_seconds as _iso
-
-from chronovisor.core.timeutil import utc_now as _now
-
 import fcntl
 import json
 import os
 import tempfile
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
+from chronovisor.core.timeutil import iso_seconds as _iso
+from chronovisor.core.timeutil import utc_now as _now
 from chronovisor.recall.recall_runtime_paths import RECALL_DIR
-
 
 BREAKER_FILE = RECALL_DIR / "circuit-breaker.json"
 
@@ -33,8 +31,8 @@ def _parse_time(value: object) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _lock_file(path: Path) -> Path:
@@ -79,10 +77,8 @@ def _write(path: Path, payload: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     finally:
-        try:
+        with suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
 
 
 def snapshot(

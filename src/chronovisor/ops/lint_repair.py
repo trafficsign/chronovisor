@@ -23,16 +23,12 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from chronovisor.decision import frontier_review
 from chronovisor.core import store as chronovisor_store
-from chronovisor.ops.convergence import (
-    CycleBudget,
-    ConvergenceStore,
-    FRONTIER_STATUSES,
-    TERMINAL_STATUSES,
-    is_human_required_result,
-    stable_item_key,
-)
+from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.frontmatter import patch as patch_frontmatter
+from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.runtime_config import load_ingest_config, runtime_repo_root
+from chronovisor.decision import frontier_review
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -40,12 +36,25 @@ from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_error,
 )
-from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.frontmatter import patch as patch_frontmatter
-from chronovisor.core.link_fix import atomic_write
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
-from chronovisor.ingest.page_mutation import decision_authority_lock, chronovisor_mutation_lock
-from chronovisor.core.runtime_config import load_ingest_config, runtime_repo_root
+from chronovisor.ingest.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
+from chronovisor.librarian.tags import (
+    SEED_TAGS,
+    parse_tags,
+    validate_axis_counts,
+    validate_tag,
+)
+from chronovisor.ops.convergence import (
+    FRONTIER_STATUSES,
+    TERMINAL_STATUSES,
+    ConvergenceStore,
+    CycleBudget,
+    is_human_required_result,
+    stable_item_key,
+)
 from chronovisor.search.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     canonical_sha256,
@@ -53,8 +62,6 @@ from chronovisor.search.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.librarian.tags import SEED_TAGS, parse_tags, validate_axis_counts, validate_tag
-
 
 REPAIR_RESOLVER_VERSION = "lint-repair-v1"
 TAG_REVIEW_CONTRACT_VERSION = 2

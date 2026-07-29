@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from chronovisor.raw import raw_replay
 from chronovisor.ingest import read_back_repair
-from chronovisor.recall import recall_auto_apply
-from chronovisor.recall import recall_calibration
-from chronovisor.recall import recall_hints
+from chronovisor.raw import raw_replay
+from chronovisor.recall import recall_auto_apply, recall_calibration, recall_hints
 from chronovisor.search import search_eval
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
@@ -75,7 +73,7 @@ def test_raw_replay_reuses_exact_semantic_hold_without_review(
         [row],
         claims_file=tmp_path / "claims.jsonl",
         history_file=history,
-        now=datetime(2026, 7, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 15, tzinfo=UTC),
         budget=None,
         retry_delay_seconds=0,
         reviewer=reviewer,
@@ -84,7 +82,7 @@ def test_raw_replay_reuses_exact_semantic_hold_without_review(
         [row],
         claims_file=tmp_path / "claims.jsonl",
         history_file=history,
-        now=datetime(2027, 7, 15, tzinfo=timezone.utc),
+        now=datetime(2027, 7, 15, tzinfo=UTC),
         budget=None,
         retry_delay_seconds=0,
         reviewer=lambda *_args: (_ for _ in ()).throw(
@@ -102,7 +100,7 @@ def test_raw_replay_reuses_exact_semantic_hold_without_review(
         [row],
         claims_file=tmp_path / "claims.jsonl",
         history_file=history,
-        now=datetime(2028, 7, 15, tzinfo=timezone.utc),
+        now=datetime(2028, 7, 15, tzinfo=UTC),
         budget=None,
         retry_delay_seconds=0,
         reviewer=reviewer,
@@ -112,7 +110,7 @@ def test_raw_replay_reuses_exact_semantic_hold_without_review(
         [row],
         claims_file=tmp_path / "claims.jsonl",
         history_file=history,
-        now=datetime(2029, 7, 15, tzinfo=timezone.utc),
+        now=datetime(2029, 7, 15, tzinfo=UTC),
         budget=None,
         retry_delay_seconds=0,
         reviewer=lambda *_args: (_ for _ in ()).throw(
@@ -174,7 +172,7 @@ def test_read_back_repair_semantic_hold_ignores_cooldown(
         ledger_file=ledger,
         hints_file=tmp_path / "hints.jsonl",
         reviewer=reviewer,
-        now=datetime(2026, 7, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 15, tzinfo=UTC),
     )
     second = read_back_repair.run_read_back_repair(
         failure_file=failure_file,
@@ -183,7 +181,7 @@ def test_read_back_repair_semantic_hold_ignores_cooldown(
         reviewer=lambda _proposal: (_ for _ in ()).throw(
             AssertionError("cooldown must not reopen semantic hold")
         ),
-        now=datetime(2027, 7, 15, tzinfo=timezone.utc),
+        now=datetime(2027, 7, 15, tzinfo=UTC),
         quarantine_cooldown_seconds=0,
     )
 
@@ -206,7 +204,7 @@ def test_read_back_repair_semantic_hold_ignores_cooldown(
             ledger_file=ledger,
             hints_file=tmp_path / "hints.jsonl",
             reviewer=reviewer,
-            now=datetime(2027 + index, 7, 15, tzinfo=timezone.utc),
+            now=datetime(2027 + index, 7, 15, tzinfo=UTC),
             quarantine_cooldown_seconds=0,
         )
         assert changed["semantic_hold"] == 1
@@ -218,7 +216,7 @@ def test_read_back_repair_semantic_hold_ignores_cooldown(
         reviewer=lambda _proposal: (_ for _ in ()).throw(
             AssertionError("oldest hold must survive more than eight transitions")
         ),
-        now=datetime(2038, 7, 15, tzinfo=timezone.utc),
+        now=datetime(2038, 7, 15, tzinfo=UTC),
         quarantine_cooldown_seconds=0,
     )
     assert restored["semantic_hold"] == 1

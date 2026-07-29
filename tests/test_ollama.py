@@ -21,7 +21,7 @@ class _StreamResponse:
     def __init__(self, lines: list[dict]) -> None:
         self.lines = lines
 
-    def __enter__(self) -> "_StreamResponse":
+    def __enter__(self) -> _StreamResponse:
         return self
 
     def __exit__(self, *_exc: object) -> None:

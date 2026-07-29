@@ -23,7 +23,6 @@ from chronovisor.lab.classification_pilot import (
     score_prediction,
 )
 
-
 V2_SCHEMA = "chronovisor.classification-method-pilot.v2"
 V2_ENGINE_VERSION = 12
 RRF_K = 60

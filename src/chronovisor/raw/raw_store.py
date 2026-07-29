@@ -12,10 +12,12 @@ import hashlib
 import json
 import os
 import tomllib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Literal
 
+from chronovisor.core.sealed_artifact_decoder import schema_matches
 from chronovisor.raw.raw_segment import (
     RawSegmentCommit,
     RawSegmentCorrupt,
@@ -24,8 +26,6 @@ from chronovisor.raw.raw_segment import (
     read_open_range,
     read_sealed_range,
 )
-from chronovisor.core.sealed_artifact_decoder import schema_matches
-
 
 RawLayoutMode = Literal["legacy", "shadow", "v2"]
 RawStorageKind = Literal[

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from inspect import Parameter, signature
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
-from chronovisor.decision.local_structured import ChatRequest, ChatTransport
 from chronovisor.core.ollama import ChatResponse, GenerateResponse
+from chronovisor.decision.local_structured import ChatRequest, ChatTransport
 
 
 class RuntimeStatusProtocol(Protocol):

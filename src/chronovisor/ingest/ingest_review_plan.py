@@ -7,19 +7,21 @@ from dataclasses import dataclass
 from typing import Any
 
 from chronovisor.core.canonical_json import canonical_json_sha256_stringifying_strict
-from chronovisor.decision.decision_lane_prompts import build_ingest_reconciliation_prompt
+from chronovisor.decision.decision_lane_prompts import (
+    build_ingest_reconciliation_prompt,
+)
 from chronovisor.decision.decision_router import (
     decision_effective_request,
     decision_request_context,
     decision_request_fingerprint_sha256,
 )
+from chronovisor.decision.local_structured import preflight_structured_request
 from chronovisor.ingest.ingest_schemas import (
     INGEST_FRONTIER_DECISION_SCHEMA,
     INGEST_REVIEW_SHARD_POLICY_VERSION,
     INGEST_REVIEW_SHARD_SCHEMA_VERSION,
     MAX_INGEST_REVIEW_SHARDS,
 )
-from chronovisor.decision.local_structured import preflight_structured_request
 
 
 class IngestReviewShardCapacityError(RuntimeError):

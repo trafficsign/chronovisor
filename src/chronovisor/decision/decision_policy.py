@@ -14,7 +14,6 @@ from typing import Any
 
 from chronovisor.core.runtime_config import load_toml_file
 
-
 VALID_MODES = frozenset({"off", "shadow", "enabled"})
 VALID_KINDS = frozenset(
     {"validated_local", "consensus", "preserve_conflict", "local_batch", "repair_only"}

@@ -12,7 +12,11 @@ import pytest
 from chronovisor.search import semantic_hold
 from tests.semantic_hold_support import (
     semantic_authority as _authority,
+)
+from tests.semantic_hold_support import (
     semantic_review as _semantic_review,
+)
+from tests.semantic_hold_support import (
     structured_review_epoch as _epoch,
 )
 
@@ -72,8 +76,8 @@ def test_authority_observation_detects_a_b_a_file_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.lab import local_model_eval
     from chronovisor.core import runtime_config
+    from chronovisor.lab import local_model_eval
 
     config_path = tmp_path / "config.toml"
     artifact_path = tmp_path / "adoption.json"
@@ -210,13 +214,12 @@ def test_structured_review_v1_epoch_is_a_safe_miss(tmp_path: Path) -> None:
         is not None
     )
     cache = semantic_hold.StructuredReviewSemanticHoldCache(tmp_path / "cache")
-    with pytest.raises(ValueError):
-        with cache.locked(
-            lane="recall_auto_apply",
-            epoch=old_epoch,
-            authority=authority,
-        ):
-            pass
+    with pytest.raises(ValueError), cache.locked(
+        lane="recall_auto_apply",
+        epoch=old_epoch,
+        authority=authority,
+    ):
+        pass
     assert not (tmp_path / "cache" / "entries").exists()
 
 

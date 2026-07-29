@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
-from chronovisor.decision import decision_authority
 from chronovisor.core.canonical_json import canonical_json_sha256_stringifying_strict
+from chronovisor.decision import decision_authority
 from chronovisor.ingest.ingest_schemas import (
     INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
     INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION,
@@ -72,7 +73,9 @@ def load_ingest_proposal(
 ) -> tuple[dict[str, Any], PreparedT] | None:
     """Read and validate a proposal envelope using caller-owned page checks."""
 
-    from chronovisor.decision.decision_lane_prompts import validate_ingest_proposal_envelope
+    from chronovisor.decision.decision_lane_prompts import (
+        validate_ingest_proposal_envelope,
+    )
 
     try:
         artifact = json.loads(path.read_text(encoding="utf-8"))

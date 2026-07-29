@@ -11,11 +11,11 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any, cast
 
 import httpx
 
@@ -226,10 +226,8 @@ def _raise_for_status_with_detail(response: httpx.Response) -> None:
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        try:
+        with suppress(Exception):
             response.read()
-        except Exception:
-            pass
         detail = ""
         try:
             body = response.json()
@@ -354,9 +352,11 @@ def is_available() -> bool:
     now = time.time()
 
     # If last check failed, use cache for TTL
-    if _health_cache["status"] is False:
-        if now - _health_cache["checked_at"] < HEALTH_CACHE_TTL:
-            return False
+    if (
+        _health_cache["status"] is False
+        and now - _health_cache["checked_at"] < HEALTH_CACHE_TTL
+    ):
+        return False
 
     try:
         resp = _client().get("/api/tags", timeout=3)
@@ -533,10 +533,8 @@ def _atomic_write_calibration_payload(path: Path, payload: Mapping[str, Any]) ->
         temporary.chmod(0o600)
         os.replace(temporary, path)
     finally:
-        try:
+        with suppress(FileNotFoundError):
             temporary.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def _matching_persisted_calibrations(
@@ -1090,7 +1088,7 @@ def build_model_residency_plan(
         role_contexts=tuple(contexts),
         resident_models=tuple(model for model in ordered if model in resident),
         calibrated_models=tuple(
-            model for (model, _estimated), known in zip(estimates, calibrated) if known
+            model for (model, _estimated), known in zip(estimates, calibrated, strict=False) if known
         ),
         source=source,
         initial_eviction_models=initial_eviction_models,
@@ -1240,10 +1238,8 @@ def _emit_progress(
 ) -> None:
     if callback is None:
         return
-    try:
+    with suppress(Exception):
         callback(payload)
-    except Exception:
-        pass
 
 
 def ingest_model() -> str:

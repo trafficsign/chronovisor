@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
-import inspect
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from chronovisor.ops import convergence_drain
 from chronovisor.core import store as chronovisor_store
+from chronovisor.ops import convergence_drain
 from chronovisor.ops.convergence import ConvergenceStore
 
 
@@ -307,7 +307,7 @@ def test_backoff_is_reported_without_spinning(
         "local",
         error="retry later",
         owner=owner,
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
     )
     monkeypatch.setattr(
         convergence_drain,
@@ -529,8 +529,8 @@ def test_policy_mode_only_drift_stops_before_claim(
 
 
 def test_adoption_fingerprint_binds_resolved_policy_mode(monkeypatch) -> None:
-    from chronovisor.decision import decision_policy
     from chronovisor.core import runtime_config
+    from chronovisor.decision import decision_policy
 
     monkeypatch.setattr(
         runtime_config,
@@ -1013,8 +1013,8 @@ def test_malformed_retention_inventory_marks_every_target_indeterminate(
 
 
 def test_unreadable_orphan_page_is_indeterminate(monkeypatch) -> None:
-    from chronovisor.search import index_store
     from chronovisor.ops import orphan_link
+    from chronovisor.search import index_store
 
     class Index:
         def refresh(self) -> None:
@@ -1041,9 +1041,8 @@ def test_unreadable_orphan_page_is_indeterminate(monkeypatch) -> None:
 def test_orphan_semantic_outage_is_indeterminate_not_empty_inventory(
     monkeypatch,
 ) -> None:
-    from chronovisor.search import index_store
     from chronovisor.ops import orphan_link
-    from chronovisor.search import search
+    from chronovisor.search import index_store, search
 
     class Index:
         def refresh(self) -> None:
@@ -1418,10 +1417,10 @@ def test_derived_atomic_batch_blocks_all_creation_on_post_preflight_race(
     inventory = convergence_drain.Inventory(
         keys_by_source={
             "duplicate_frontier": {
-                source: {row["key"]} for source, row in zip(sources, derived)
+                source: {row["key"]} for source, row in zip(sources, derived, strict=False)
             },
             "autonomy_duplicate_resolution": {
-                source: {row["key"]} for source, row in zip(sources, derived)
+                source: {row["key"]} for source, row in zip(sources, derived, strict=False)
             },
         },
         payloads={},
@@ -1781,10 +1780,8 @@ def test_local_only_environment_is_restored(monkeypatch) -> None:
 
 
 def test_lane_dispatch_passes_exact_per_lane_allowlists(tmp_path, monkeypatch) -> None:
-    from chronovisor.ops import autonomy
+    from chronovisor.ops import autonomy, lint_repair, orphan_link
     from chronovisor.recall import content_correction
-    from chronovisor.ops import lint_repair
-    from chronovisor.ops import orphan_link
 
     store = _store(tmp_path)
     items = {

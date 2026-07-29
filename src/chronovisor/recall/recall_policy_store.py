@@ -8,9 +8,8 @@ from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.jsonl import read_jsonl as _strict_read_jsonl
-
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 IMPROVEMENT_DIR = CHRONOVISOR_ROOT / "runtime" / "recall-improvement"
 ACTIVE_POLICY_FILE = IMPROVEMENT_DIR / "active-policy.json"

@@ -7,22 +7,22 @@ the failure, and where to persist the evidence for local/frontier repair.
 
 from __future__ import annotations
 
-import hashlib
 import fcntl
+import hashlib
 import json
 import re
 import shutil
 import threading
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
-from chronovisor.ops import runtime_status
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.link_fix import atomic_write
-
+from chronovisor.ops import runtime_status
 
 FAILURE_THRESHOLD = 3
 _FAILURE_STATE_THREAD_LOCK = threading.RLock()
@@ -610,7 +610,7 @@ def _write_packet(
     created_at = datetime.now()
     now = created_at.isoformat()
     source_suffix = hashlib.sha256(
-        f"{raw_file}\0{record.fingerprint}".encode("utf-8")
+        f"{raw_file}\0{record.fingerprint}".encode()
     ).hexdigest()[:8]
     failure_id = (
         created_at.strftime("%Y%m%d-%H%M%S-%f")

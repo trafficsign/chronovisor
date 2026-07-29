@@ -2,26 +2,24 @@
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
-
 import difflib
 import fcntl
-import hashlib
 import json
 import os
 import threading
-from contextlib import contextmanager
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.frontmatter import patch as patch_frontmatter
+from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.link_fix import atomic_write, protected_spans
-from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR, CHRONOVISOR_ROOT, find_page
-
+from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR, find_page
 
 CHRONOVISOR_MUTATION_LOCK = (
     CHRONOVISOR_ROOT / "runtime" / "chronovisor-mutation.lock"
@@ -241,7 +239,7 @@ def _constraint_row(
     return {
         "schema_version": CORRECTION_CONSTRAINT_SCHEMA_VERSION,
         "kind": "content_correction_constraint",
-        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "correction_id": mutation.correction_id,
         "page_id": mutation.page_id,
         "action": replacement.action,
@@ -820,10 +818,8 @@ def _rollback_owned_write_locked(mutation: PreparedPageMutation) -> bool:
         return False
     finally:
         if tmp is not None:
-            try:
+            with suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
 
 
 def _rollback_owned_write(mutation: PreparedPageMutation) -> bool:

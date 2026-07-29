@@ -15,22 +15,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import frontmatter
 from chronovisor.classification.classification import (
     classification_authority_status,
     classification_source_sha256,
     load_udc_package,
     propose_from_legacy_metadata,
 )
+from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.ingest.page_registry import PageRegistry
+from chronovisor.ingest.uid_link_index import build_uid_link_index
 from chronovisor.librarian.librarian_status import (
     STATE_SCHEMA,
     build_librarian_status,
     load_librarian_state,
 )
-from chronovisor.ingest.page_registry import PageRegistry
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.ingest.uid_link_index import build_uid_link_index
 
 EVENT_SCHEMA = "chronovisor.librarian-event.v1"
 WORKER_VERSION = "1"
@@ -127,7 +127,7 @@ def capture_baseline(
         from chronovisor.raw.raw_store import RawStore
 
         raw_count = sum(1 for _unit in RawStore(root / "raw").iter_units())
-    except Exception:  # noqa: BLE001 - RawStore failure has a safe file fallback
+    except Exception:
         raw_count = sum(1 for _path in (root / "raw").rglob("*.md"))
     aliases_path = root / "runtime" / "page-aliases.json"
     alias_count = 0
@@ -253,7 +253,7 @@ def run_legacy_udc_shadow(
             }
             notation_counts[record.primary.notation] += 1
             disposition_counts[record.status] += 1
-        except Exception as exc:  # noqa: BLE001 - isolate one bad page
+        except Exception as exc:
             failures.append({"uid": uid, "error": f"{type(exc).__name__}: {exc}"})
 
     apply_result = (

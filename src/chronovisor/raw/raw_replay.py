@@ -9,10 +9,6 @@ unprovable crash windows are never blindly replayed.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_file as _sha256_path
-
-from chronovisor.core.timeutil import iso_seconds as _iso
-
 import argparse
 import fcntl
 import hashlib
@@ -20,13 +16,18 @@ import inspect
 import json
 import os
 import re
-from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from chronovisor.ops.convergence import is_human_required_result
+from chronovisor.core.durable_state import sidecar_exclusive_lock as _queue_lock
+from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.hashutil import sha256_file as _sha256_path
+from chronovisor.core.jobs import JobStatus, job_store
+from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR
+from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -34,10 +35,8 @@ from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_error,
 )
-from chronovisor.core.durable_state import sidecar_exclusive_lock as _queue_lock
-from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.jobs import JobStatus, job_store
 from chronovisor.ingest.page_mutation import decision_authority_lock
+from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.raw.raw_store import RawStore
 from chronovisor.search.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
@@ -48,7 +47,6 @@ from chronovisor.search.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.core.store import RAW_DIR, CHRONOVISOR_ROOT
 
 RAW_DATE_RE = re.compile(r"(20\d{6})")
 QUEUE_FILE = CHRONOVISOR_ROOT / "review" / "raw-replay-queue.jsonl"
@@ -430,10 +428,8 @@ def _atomic_write_queue(path: Path, rows: list[dict[str, Any]]) -> None:
             finally:
                 os.close(directory_fd)
     finally:
-        try:
+        with suppress(OSError):
             tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _append_history(row: dict[str, Any], path: Path | None = None) -> None:
@@ -543,9 +539,9 @@ def _replay_ingest_content(
     the replay lifecycle keeps its existing one-job/one-completion contract.
     """
 
+    from chronovisor.core.runtime_config import load_ingest_config
     from chronovisor.raw.raw_semantic_projection import project_native_transcript
     from chronovisor.raw.raw_store import RawStore
-    from chronovisor.core.runtime_config import load_ingest_config
 
     store = RawStore(RAW_DIR)
     unit = store.resolve_reference(path) or store.resolve(raw_name)
@@ -2079,9 +2075,7 @@ def _build_queue_unlocked(
                 row.get("status") == "pending"
                 and set(row.get("sources", [])) == {"explicit_migration"}
                 and key not in auto_signal_keys
-            ):
-                _mark_not_needed(row, now=now)
-            elif (
+            ) or (
                 row.get("status") in RETRYABLE_STATUSES
                 and "ingest_failure" in set(row.get("sources", []))
                 and row.get("reasons")
@@ -2387,8 +2381,8 @@ def _publish_semantic_no_quorum_defer(
     """
 
     from chronovisor.decision.failure_supervisor import (
-        SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         SEMANTIC_NO_QUORUM_DEFER_REASON,
+        SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         _current_adopted_authority_sha256,
         classify_failure,
         record_semantic_no_quorum_defer_unless_operational_hold,
@@ -2455,8 +2449,8 @@ def _preview_semantic_no_quorum_defer(
     """Prove that a legacy error is publishable without writing its packet."""
 
     from chronovisor.decision.failure_supervisor import (
-        SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         SEMANTIC_NO_QUORUM_DEFER_REASON,
+        SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         _current_adopted_authority_sha256,
         classify_failure,
     )
@@ -2506,8 +2500,8 @@ def _cheap_semantic_no_quorum_candidate(
     """
 
     from chronovisor.decision.failure_supervisor import (
-        SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         SEMANTIC_NO_QUORUM_DEFER_REASON,
+        SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         _current_adopted_authority_sha256,
         classify_failure,
     )

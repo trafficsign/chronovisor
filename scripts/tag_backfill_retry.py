@@ -24,16 +24,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 # Reuse the apply pipeline so behaviour stays identical to the main sweep.
-from tag_backfill_apply import (  # noqa: E402
+from tag_backfill_apply import (
     PROGRESS_FILE,
     _append_progress,
     _flatten_master,
     _process_one,
 )
-from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
+
+from chronovisor.raw.legacy_semantic_write import (
     block_legacy_semantic_mutation,
 )
-
 
 SCHEMA_FAIL_REASON = "llm response failed schema validation"
 

@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import unicodedata
 from collections import defaultdict
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import PurePosixPath
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 
 def canonical_triage_path(filename: str) -> str:

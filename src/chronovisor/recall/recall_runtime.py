@@ -23,19 +23,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.search.index_store import get_store
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.runtime_config import active_config_file
+from chronovisor.core.store import SYSTEM_DIR, find_page, init_chronovisor
 from chronovisor.decision.local_structured import LocalStructuredSession
+from chronovisor.ops.state_register import format_state_context, should_inject_state
 from chronovisor.recall.recall_prompt import (
     CODEX_INTERNAL_SUGGESTION_RE,
     SYSTEM_ENVELOPE_RE,
     normalize_recall_prompt,
 )
 from chronovisor.recall.recall_runtime_paths import RECALL_DIR
-from chronovisor.core.runtime_config import active_config_file
+from chronovisor.search.index_store import get_store
 from chronovisor.search.search import search as run_search
-from chronovisor.ops.state_register import format_state_context, should_inject_state
-from chronovisor.core.store import SYSTEM_DIR, find_page, init_chronovisor
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
@@ -570,10 +570,13 @@ def evaluate_heuristic(
         score -= 0.35
         reasons.append("simple chitchat")
 
-    if policy.avoid_heavy_personal_context_in_chitchat:
-        if matched["chitchat"] and not matched["past_reference"]:
-            score = min(score, policy.search_threshold - 0.05)
-            reasons.append("personal-context guard")
+    if (
+        policy.avoid_heavy_personal_context_in_chitchat
+        and matched["chitchat"]
+        and not matched["past_reference"]
+    ):
+        score = min(score, policy.search_threshold - 0.05)
+        reasons.append("personal-context guard")
 
     return max(0.0, min(1.0, score)), reasons, matched
 
@@ -1379,8 +1382,8 @@ def page_uid_for_id(page_id: str) -> str:
     """Resolve the durable UID without changing the legacy page-id API."""
 
     try:
-        from chronovisor.ingest.page_registry import PageRegistry
         from chronovisor.core.store import CHRONOVISOR_ROOT
+        from chronovisor.ingest.page_registry import PageRegistry
 
         row = PageRegistry(CHRONOVISOR_ROOT).resolve(page_id)
     except Exception:
@@ -1898,7 +1901,6 @@ def _run_recall_impl(
                 cleanup_sessions,
                 load_session_state,
                 session_summary,
-                update_session_after_recall,
             )
 
             cleanup_sessions(policy.session_ttl_seconds)

@@ -9,8 +9,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-import tag_backfill_apply as tba  # noqa: E402
-from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
+import tag_backfill_apply as tba
+
+from chronovisor.raw.legacy_semantic_write import (
     LegacySemanticMutationDisabled,
 )
 

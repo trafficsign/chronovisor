@@ -7,28 +7,24 @@ providers.
 
 from __future__ import annotations
 
-from chronovisor.core.jsonl_write import atomic_replace_bytes as _atomic_write
-
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import hashlib
 import io
 import json
 import os
-import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from chronovisor.classification.classification import ClassificationError
-from chronovisor.lab.classification_fixture_set import sha256_bytes, sha256_file
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.jsonl_write import atomic_replace_bytes as _atomic_write
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.lab.classification_fixture_set import sha256_bytes, sha256_file
 
 EXTERNAL_PACKAGE_SCHEMA = "chronovisor.external-library-package.v1"
 EXTERNAL_RECORD_SCHEMA = "chronovisor.external-library-record.v1"
@@ -227,7 +223,7 @@ def stable_sample(
             continue
         key = tuple(str(row.get(field) or "unknown") for field in strata)
         buckets.setdefault(key, []).append(row)
-    for key, values in buckets.items():
+    for _key, values in buckets.items():
         values.sort(
             key=lambda row: (
                 _stable_bucket(str(row["source_record_id"]), 2**31 - 1),

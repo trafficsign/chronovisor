@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from chronovisor.search.semantic_jobs import (
@@ -50,7 +50,7 @@ def test_failure_retries_then_can_be_terminal(tmp_path: Path) -> None:
         connection.execute(
             "UPDATE jobs SET next_attempt_at = ? WHERE job_id = ?",
             (
-                (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
                 job_id,
             ),
         )

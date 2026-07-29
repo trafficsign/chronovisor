@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from chronovisor.recall import recall_breaker
 
 
 def test_breaker_opens_after_threshold_and_closes_after_cooldown(tmp_path) -> None:
     path = tmp_path / "breaker.json"
-    now = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 17, tzinfo=UTC)
 
     first = recall_breaker.record_failure(
         "timeout",
@@ -32,7 +32,7 @@ def test_breaker_opens_after_threshold_and_closes_after_cooldown(tmp_path) -> No
 
 def test_breaker_success_resets_failure_state(tmp_path) -> None:
     path = tmp_path / "breaker.json"
-    now = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 17, tzinfo=UTC)
     recall_breaker.record_failure(
         "timeout",
         threshold=1,

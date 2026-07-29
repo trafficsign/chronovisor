@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
-from chronovisor.research.evidence_bundle import EvidenceBundle
 from chronovisor.core.jsonl_write import append_jsonl_durable
-from chronovisor.research.research_store import ResearchStore
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.research.evidence_bundle import EvidenceBundle
+from chronovisor.research.research_store import ResearchStore
 
 AUDIT_LOG = CHRONOVISOR_ROOT / "review" / "research-audit.jsonl"
 
@@ -79,7 +80,7 @@ def audit_research_run(
     )
     record = {
         "schema_version": 1,
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "research_run_id": bundle.research_run_id,
         "bundle_id": bundle.bundle_id,
         "missing_evidence": unknown,

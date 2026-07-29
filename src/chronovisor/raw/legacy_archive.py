@@ -2,27 +2,24 @@
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256
-
-from chronovisor.core.hashutil import sha256_file as _sha256_path
-
-import hashlib
 import io
 import json
 import os
 import re
 import tarfile
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import zstandard as zstd
 
+from chronovisor.core.hashutil import sha256_bytes as _sha256
+from chronovisor.core.hashutil import sha256_file as _sha256_path
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.raw.raw_segment import CAPTURE_TIMEZONE, RawSegmentCorrupt
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-
+from chronovisor.raw.raw_segment import CAPTURE_TIMEZONE, RawSegmentCorrupt
 
 LEGACY_ARCHIVE_SCHEMA = "chronovisor.raw-legacy-archive.v1"
 DEFAULT_ARCHIVE_BYTES = 128 * 1024 * 1024
@@ -244,14 +241,13 @@ def write_legacy_archive(
         with temporary.open("xb") as target:
             with zstd.ZstdCompressor(level=compression_level).stream_writer(
                 target, closefd=False
-            ) as compressor:
-                with tarfile.open(fileobj=compressor, mode="w|") as archive:
-                    for path, value, _row in source_rows:
-                        info = tarfile.TarInfo(path.name)
-                        info.size = len(value)
-                        info.mode = 0o600
-                        info.mtime = 0
-                        archive.addfile(info, io.BytesIO(value))
+            ) as compressor, tarfile.open(fileobj=compressor, mode="w|") as archive:
+                for path, value, _row in source_rows:
+                    info = tarfile.TarInfo(path.name)
+                    info.size = len(value)
+                    info.mode = 0o600
+                    info.mtime = 0
+                    archive.addfile(info, io.BytesIO(value))
             target.flush()
             os.fsync(target.fileno())
         os.replace(temporary, archive_path)

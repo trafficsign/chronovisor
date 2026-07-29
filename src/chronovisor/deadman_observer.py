@@ -9,6 +9,7 @@ bad deployment, or dead main watchdog cannot also remove its observer.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -16,10 +17,9 @@ import os
 import subprocess
 import tempfile
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-
 
 SCHEMA = "chronovisor.ops.deadman-heartbeat.v1"
 THRESHOLD_POLICY = {
@@ -102,7 +102,7 @@ def inspect(
         observed = datetime.fromisoformat(wall_time.replace("Z", "+00:00"))
     except ValueError:
         return {"status": "invalid", "error": "heartbeat wall time is invalid"}
-    age = (_utc(now) - observed.astimezone(timezone.utc)).total_seconds()
+    age = (_utc(now) - observed.astimezone(UTC)).total_seconds()
     if age < -300:
         status = "clock_regression"
     elif age > max_age_seconds:
@@ -142,10 +142,8 @@ def atomic_write(path: Path, payload: dict[str, Any]) -> None:
             os.close(directory_fd)
     finally:
         if temporary is not None:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 temporary.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def append_incident(path: Path, payload: dict[str, Any]) -> None:
@@ -161,10 +159,10 @@ def append_incident(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _utc(value: datetime | None = None) -> datetime:
-    current = value or datetime.now(timezone.utc)
+    current = value or datetime.now(UTC)
     if current.tzinfo is None:
-        return current.replace(tzinfo=timezone.utc)
-    return current.astimezone(timezone.utc)
+        return current.replace(tzinfo=UTC)
+    return current.astimezone(UTC)
 
 
 def _threshold_transition(
@@ -213,12 +211,10 @@ def _threshold_transition(
     last_time_raw = previous.get("last_incident_at")
     last_time: datetime | None = None
     if isinstance(last_time_raw, str):
-        try:
+        with contextlib.suppress(ValueError):
             last_time = _utc(
                 datetime.fromisoformat(last_time_raw.replace("Z", "+00:00"))
             )
-        except ValueError:
-            pass
     cooldown_elapsed = (
         last_key != dedupe_key
         or last_time is None

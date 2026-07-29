@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from chronovisor.ops.system_incident_supervisor import SystemIncidentSupervisor
 
-
-BASE = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
+BASE = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
 
 
 class FakeClock:
@@ -290,8 +289,7 @@ def test_self_heal_enqueue_helper_uses_durable_ledger_without_popen(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import background_jobs
-    from chronovisor.ops import self_heal
+    from chronovisor.ops import background_jobs, self_heal
 
     captured: list[dict[str, object]] = []
     monkeypatch.setattr(

@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from chronovisor.core.durable_state import (
     DurableStateError,
@@ -27,7 +28,6 @@ from chronovisor.core.durable_state import (
     write_sealed_json,
 )
 from chronovisor.core.sealed_artifact_decoder import canonical_schema
-
 
 QUALITY_POLICY_VERSION = 1
 CORPUS_SCHEMA_VERSION = 1
@@ -421,7 +421,7 @@ def _metrics_by_lane(
                 "actual_signature_sha256"
             ):
                 metrics["behavior_flips"] += 1
-    artifact_cases = current.get("cases", [])
+    current.get("cases", [])
     actual_signatures: dict[str, Mapping[str, Any]] = {}
     # The slim behavior snapshot intentionally stores no semantic payload.  The
     # caller attaches signatures only for in-memory metamorphic checks.
@@ -443,7 +443,7 @@ def _metrics_by_lane(
             metrics["metamorphic_passes"] = int(
                 metrics.get("metamorphic_passes") or 0
             ) + 1
-    for lane, metrics in lanes.items():
+    for _lane, metrics in lanes.items():
         anchor_total = int(metrics.get("anchor_comparable") or 0)
         metamorphic_total = int(metrics.get("metamorphic_comparable") or 0)
         behavior_total = int(metrics.get("behavior_comparable") or 0)
@@ -466,10 +466,10 @@ def _metrics_by_lane(
 
 
 def _utc(value: datetime | None = None) -> datetime:
-    current = value or datetime.now(timezone.utc)
+    current = value or datetime.now(UTC)
     if current.tzinfo is None:
-        return current.replace(tzinfo=timezone.utc)
-    return current.astimezone(timezone.utc)
+        return current.replace(tzinfo=UTC)
+    return current.astimezone(UTC)
 
 
 def lane_state_path(root: Path, lane: str) -> Path:
@@ -530,7 +530,7 @@ def _parse_incident_time(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value).astimezone(timezone.utc)
+        return datetime.fromisoformat(value).astimezone(UTC)
     except (TypeError, ValueError):
         return None
 
@@ -578,14 +578,14 @@ def evaluate_quality(
             row
             for row in incidents
             if isinstance(row, dict)
-            and (_parse_incident_time(row.get("ts")) or datetime.min.replace(tzinfo=timezone.utc))
+            and (_parse_incident_time(row.get("ts")) or datetime.min.replace(tzinfo=UTC))
             >= recent_cutoff
         ]
         cooldown_until = state.get("cooldown_until")
         try:
             cooldown_active = bool(
                 isinstance(cooldown_until, str)
-                and datetime.fromisoformat(cooldown_until).astimezone(timezone.utc)
+                and datetime.fromisoformat(cooldown_until).astimezone(UTC)
                 > current_time
             )
         except ValueError:

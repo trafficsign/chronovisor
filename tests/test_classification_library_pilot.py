@@ -4,9 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.lab import classification_library_pilot
-from chronovisor.classification.classification import ClassificationError, default_udc_package
+from chronovisor.classification.classification import (
+    ClassificationError,
+    default_udc_package,
+)
 from chronovisor.classification.classification_engine import record_from_consensus
+from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.lab import classification_library_pilot
 from chronovisor.lab.classification_fixture_set import _write_jsonl, fixture_set_paths
 from chronovisor.lab.classification_library_pilot import (
     FIXTURE_EPOCH,
@@ -18,7 +22,6 @@ from chronovisor.lab.classification_library_pilot import (
     run_once,
     save_state,
 )
-from chronovisor.core.durable_state import write_sealed_json
 
 
 def test_new_state_and_terminal_status_are_idempotent(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from chronovisor.classification.classification import ClassificationError
+from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.lab.classification_fixture_set import (
     DISABLED_BASELINE_SCHEMA,
     FIXTURE_SET_SCHEMA,
@@ -16,7 +17,6 @@ from chronovisor.lab.classification_fixture_set import (
     load_fixture_set,
     lock_fixture_set,
 )
-from chronovisor.core.durable_state import write_sealed_json
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:

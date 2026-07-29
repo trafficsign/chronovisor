@@ -14,9 +14,9 @@ import json
 import subprocess
 import tomllib
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 TEXT_SUFFIXES = {".json", ".md", ".plist", ".py", ".sh", ".toml", ".yaml", ".yml"}
 IGNORED_PARTS = {".git", ".mypy_cache", ".pytest_cache", ".venv", "__pycache__", "logs"}
@@ -161,9 +161,12 @@ def _ingest_references(tree: ast.AST) -> tuple[Counter[str], Counter[str]]:
     attributes: Counter[str] = Counter()
     patches: Counter[str] = Counter()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id in aliases:
-                attributes[node.attr] += 1
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in aliases
+        ):
+            attributes[node.attr] += 1
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         if node.func.attr != "setattr" or len(node.args) < 2:

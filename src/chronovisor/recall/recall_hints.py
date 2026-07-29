@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -12,7 +13,6 @@ from typing import Any
 
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.durable_state import sidecar_exclusive_lock as _hint_lock
-
 
 QUERY_HINTS_FILE = chronovisor_store.CHRONOVISOR_ROOT / "recall" / "query-hints.json"
 GENERIC_HINT_TOKENS = {
@@ -111,10 +111,8 @@ def _save_query_hints_unlocked(hints: list[dict[str, Any]], path: Path) -> None:
         os.replace(tmp, path)
     finally:
         if tmp is not None:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 tmp.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def save_query_hints(hints: list[dict[str, Any]], path: Path | None = None) -> None:

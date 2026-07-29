@@ -15,18 +15,20 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR, init_chronovisor
+from chronovisor.decision.decision_policy import resolve_decision_policy
 from chronovisor.hosts.agent_save_base import (
     content_has_capture_payload as _content_has_capture_payload,
+)
+from chronovisor.hosts.agent_save_base import (
     extract_json_object,
     iter_jsonl,
-    last_saved_at,
     load_state,
-    publish_transcript_capture,
     publish_oversized_shadow,
+    publish_transcript_capture,
     read_hook_payload,
     sanitize_keywords,
     save_raw,
@@ -34,14 +36,10 @@ from chronovisor.hosts.agent_save_base import (
     should_process,
     trim_middle,
     update_state,
-    validate_raw_keyword,
     write_state,
 )
-from chronovisor.decision.decision_policy import resolve_decision_policy
-from chronovisor.research.evidence_grounding import (
-    ProtectedLiteralGroundingError,
-    validate_protected_literals,
-)
+from chronovisor.raw.raw_segment import copy_source_interval
+from chronovisor.raw.raw_store import raw_layout_mode
 from chronovisor.raw.save_transaction import (
     SaveTransaction,
     attach_save_transaction_marker,
@@ -50,9 +48,10 @@ from chronovisor.raw.save_transaction import (
     save_transaction_lock,
     validate_published_save_receipt,
 )
-from chronovisor.raw.raw_segment import copy_source_interval
-from chronovisor.raw.raw_store import raw_layout_mode
-from chronovisor.core.store import RAW_DIR, CHRONOVISOR_ROOT, init_chronovisor
+from chronovisor.research.evidence_grounding import (
+    ProtectedLiteralGroundingError,
+    validate_protected_literals,
+)
 
 # Kept as parser/API compatibility values for the legacy manual writer helpers.
 # The normal save path is deterministic and never resolves or starts a model.
@@ -203,9 +202,7 @@ def _matches_hint(value: str, uuid_like: bool, suffix: str | None) -> bool:
         return False
     if suffix and not text.endswith(suffix):
         return False
-    if uuid_like and not _looks_like_uuid(text):
-        return False
-    return True
+    return not (uuid_like and not _looks_like_uuid(text))
 
 
 def _looks_like_uuid(value: str) -> bool:

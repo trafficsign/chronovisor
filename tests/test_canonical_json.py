@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core.canonical_json import (
-    canonical_json_bytes_stringifying,
     canonical_json_bytes_strict,
+    canonical_json_bytes_stringifying,
     canonical_json_line_bytes_strict,
     canonical_json_permissive,
     canonical_json_sha256_strict,

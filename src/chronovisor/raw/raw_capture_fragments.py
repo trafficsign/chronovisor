@@ -12,12 +12,11 @@ import base64
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-
 
 FRAGMENT_SCHEMA = "chronovisor.raw-capture-fragment.v1"
 _FRAGMENT_TITLE_RE = re.compile(

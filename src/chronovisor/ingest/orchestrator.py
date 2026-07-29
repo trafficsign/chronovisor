@@ -4,10 +4,10 @@ NOT an LLM. Pure code logic. Local Ollama models handle content structuring;
 this module handles when to trigger them.
 """
 
-import json
-import os
 import fcntl
 import hashlib
+import json
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -18,11 +18,11 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.store import RAW_DIR, CHRONOVISOR_ROOT, LOG_FILE
-from chronovisor.core.ollama import is_available
-from chronovisor.ops import runtime_status
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.ollama import is_available
+from chronovisor.core.store import CHRONOVISOR_ROOT, LOG_FILE, RAW_DIR
+from chronovisor.ops import runtime_status
 
 # Config
 INGEST_THRESHOLD = 5  # Trigger ingest after N raw files
@@ -293,9 +293,8 @@ def get_pending_raw_files() -> list[Path]:
     A raw with ``raw_status: retracted`` remains on disk as audit evidence,
     but is never offered to normal ingest.
     """
-    from chronovisor.raw.raw_replay import is_raw_retracted
-
     from chronovisor.decision.failure_supervisor import operational_deferred_raw_files
+    from chronovisor.raw.raw_replay import is_raw_retracted
 
     state = _load_state()
     processed = set(state.get("processed_raw_files", []))
@@ -985,7 +984,6 @@ def run_pending_ingest(
     frontier_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict:
     """Run ingest on all pending raw files if threshold is met.
-
     Per-raw synchronous serial execution. Each pending raw is parsed for
     ``raw_keywords`` (with legacy ``keywords`` fallback), then ingested
     individually via :func:`run_ingest` with that metadata propagated as
@@ -1134,20 +1132,9 @@ def run_pending_ingest(
         # patches that swap these out.  Resolve every fallible prerequisite
         # before publishing the durable in-flight reservation; otherwise a
         # long-lived MCP process can leave a false-live ``__pending__`` slot.
-        from chronovisor.ingest.ingest import run_ingest
         from chronovisor.core.jobs import JobStatus, job_store
-        from chronovisor.core.frontmatter import parse as _frontmatter_parse
-        from chronovisor.raw.raw_semantic_projection import (
-            ProjectionCapacityError,
-            ProjectionConflictError,
-            RawSemanticProjectionError,
-            project_parent_raw,
-            project_native_transcript,
-            project_reassembled_raws,
-            verify_projection_bundle,
-        )
         from chronovisor.core.runtime_config import load_ingest_config
-        from chronovisor.raw.raw_store import raw_layout_mode
+        from chronovisor.ingest.ingest import run_ingest
         from chronovisor.raw.raw_completion_ack import (
             RawCompletionAckError,
             RawCompletionStatePending,
@@ -1156,6 +1143,16 @@ def run_pending_ingest(
             receipt_path,
             receipt_summary,
         )
+        from chronovisor.raw.raw_semantic_projection import (
+            ProjectionCapacityError,
+            ProjectionConflictError,
+            RawSemanticProjectionError,
+            project_native_transcript,
+            project_parent_raw,
+            project_reassembled_raws,
+            verify_projection_bundle,
+        )
+        from chronovisor.raw.raw_store import raw_layout_mode
 
         initial_ollama_status = get_ollama_status()
         authority_preflight = ingest_authority_preflight(
@@ -1555,7 +1552,9 @@ def run_pending_ingest(
                     succeeded_filenames.extend(source_filenames)
                     succeeded_units += 1
                     try:
-                        from chronovisor.decision.failure_supervisor import reset_raw_failure
+                        from chronovisor.decision.failure_supervisor import (
+                            reset_raw_failure,
+                        )
 
                         for source_filename in source_filenames:
                             reset_raw_failure(source_filename)

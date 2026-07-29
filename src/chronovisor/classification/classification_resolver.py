@@ -12,12 +12,12 @@ from chronovisor.classification.classification_bundle import (
     resolve_authority,
 )
 from chronovisor.classification.classification_engine import CandidateIndex
+from chronovisor.core.durable_state import read_sealed_json
 from chronovisor.lab.classification_fixture_set import inference_dto
 from chronovisor.lab.classification_library_evidence import (
     LibraryEvidenceIndex,
     LibraryEvidenceProvider,
 )
-from chronovisor.core.durable_state import read_sealed_json
 
 
 class ResolvedCandidateIndex:

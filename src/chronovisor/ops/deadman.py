@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,6 @@ from chronovisor.core.durable_state import (
     write_sealed_json,
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-
 
 HEARTBEAT_SCHEMA = "chronovisor.ops.deadman-heartbeat.v1"
 THRESHOLD_SCHEMA_VERSION = 1
@@ -44,10 +43,10 @@ def boot_id() -> str:
 
 
 def _as_utc(value: datetime | None) -> datetime:
-    current = value or datetime.now(timezone.utc)
+    current = value or datetime.now(UTC)
     if current.tzinfo is None:
-        return current.replace(tzinfo=timezone.utc)
-    return current.astimezone(timezone.utc)
+        return current.replace(tzinfo=UTC)
+    return current.astimezone(UTC)
 
 
 def inspect_heartbeat(

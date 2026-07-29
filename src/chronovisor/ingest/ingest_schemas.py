@@ -6,7 +6,6 @@ from typing import Any
 
 from chronovisor.decision.decision_lane_prompts import INGEST_PROPOSAL_SCHEMA_VERSION
 
-
 TRIAGE_CATALOG_TOP_N = 100
 TRIAGE_MAX_OPERATIONS = 8
 TRIAGE_MAX_OUTPUT_BYTES = 8_000

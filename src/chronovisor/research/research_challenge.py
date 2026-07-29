@@ -5,14 +5,19 @@ from __future__ import annotations
 import json
 import sys
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.research.evidence_bundle import EvidenceBundle
 from chronovisor.research.research_config import ResearchConfig
-from chronovisor.research.research_scheduler import ResearchLease, research_lane, run_cancellable_command
+from chronovisor.research.research_scheduler import (
+    ResearchLease,
+    research_lane,
+    run_cancellable_command,
+)
 from chronovisor.research.research_store import ResearchStore
 from chronovisor.research.research_types import BudgetUsage
-from chronovisor.core.runtime_config import load_decision_router_config
 
 CHALLENGE_SCHEMA: dict[str, Any] = {
     "type": "object",

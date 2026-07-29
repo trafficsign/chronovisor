@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from chronovisor.ops import lint
 from chronovisor.hosts import server
+from chronovisor.ops import lint
 
 
 def test_chronovisor_check_returns_compact_limited_issues(monkeypatch) -> None:

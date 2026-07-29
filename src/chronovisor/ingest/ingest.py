@@ -2,132 +2,237 @@
 
 import ast
 import base64
-import copy
 import hashlib
 import json
 import re
 import threading
-import time
-from contextlib import nullcontext
+from collections.abc import Callable
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from chronovisor.core import ollama as ollama_runtime
+from chronovisor.core.jobs import JobStatus, job_store
+from chronovisor.core.ollama import (
+    GENERATE_SYSTEM_PROMPT as GENERATE_SYSTEM_PROMPT,
+)
+from chronovisor.core.ollama import (
+    TRIAGE_SYSTEM_PROMPT as TRIAGE_SYSTEM_PROMPT,
+)
+from chronovisor.core.ollama import (
+    UPDATE_SYSTEM_PROMPT as UPDATE_SYSTEM_PROMPT,
+)
+from chronovisor.core.ollama import (
+    generate,
+    is_available,
+)
+from chronovisor.core.runtime_config import load_ingest_config
 from chronovisor.core.store import (
-    PAGES_DIR,
     INDEX_FILE,
     LOG_FILE,
+    PAGES_DIR,
     all_pages,
     find_page,
     page_id_from_path,
 )
-from chronovisor.core.jobs import job_store, JobStatus
-from chronovisor.core.ollama import (
-    generate,
-    is_available,
-    TRIAGE_SYSTEM_PROMPT,
-    GENERATE_SYSTEM_PROMPT,
-    UPDATE_SYSTEM_PROMPT,
+from chronovisor.decision import decision_authority
+from chronovisor.decision.local_structured import (
+    ChatRequest as ChatRequest,
 )
 from chronovisor.decision.local_structured import (
-    ChatRequest,
     ChatTransport,
     LocalStructuredSession,
     ValidationIssue,
     required_structured_context_tokens,
     validate_json,
 )
-from chronovisor.core.runtime_config import load_ingest_config
-from chronovisor.decision import decision_authority
-from chronovisor.core import ollama as ollama_runtime
-from chronovisor.ops import runtime_status
-from chronovisor.ingest.ingest_schemas import (
-    INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
-    INGEST_FRONTIER_DECISION_SCHEMA,
-    INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION as _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION,
-    INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION,
-    INGEST_REVIEW_LIMIT_FIELDS as _INGEST_REVIEW_LIMIT_FIELDS,
-    INGEST_REVIEW_SHARD_POLICY_VERSION,
-    INGEST_REVIEW_SHARD_ROW_FIELDS as _INGEST_REVIEW_SHARD_ROW_FIELDS,
-    INGEST_REVIEW_SHARD_SCHEMA_VERSION,
-    MAX_INGEST_REVIEW_SHARDS as _MAX_INGEST_REVIEW_SHARDS,
-    RECALL_METADATA_SCHEMA,
-    TRIAGE_CATALOG_TOP_N as _TRIAGE_CATALOG_TOP_N,
-    TRIAGE_MAX_FEEDBACK_BYTES as _TRIAGE_MAX_FEEDBACK_BYTES,
-    TRIAGE_MAX_OPERATIONS as _TRIAGE_MAX_OPERATIONS,
-    TRIAGE_MAX_OUTPUT_BYTES as _TRIAGE_MAX_OUTPUT_BYTES,
-    TRIAGE_NUM_PREDICT as _TRIAGE_NUM_PREDICT,
-    TRIAGE_PLAN_SCHEMA,
-    TRIAGE_PLAN_VALIDATION_SCHEMA as _TRIAGE_PLAN_VALIDATION_SCHEMA,
-)
-from chronovisor.ingest.ingest_transport import (
-    generate_with_progress as _generate_with_progress_core,
-    llm_progress_callback as _llm_progress_callback_core,
-    structured_chat_transport as _structured_chat_transport_core,
-    structured_generate_transport as _structured_generate_transport_core,
-    supports_keyword as _supports_keyword,
-)
-from chronovisor.ingest.ingest_review_plan import (
-    IngestReviewBudgetExhausted,
-    IngestReviewShard as _IngestReviewShard,
-    IngestReviewShardCapacityError,
-    IngestReviewShardPlan as _IngestReviewShardPlan,
-    IngestReviewShardPlanState as _IngestReviewShardPlanState,
-    build_ingest_review_shard_plan as _build_ingest_review_shard_plan_core,
-    build_ingest_review_shard_proposal as _build_ingest_review_shard_proposal_core,
-    measure_ingest_review_request as _measure_ingest_review_request_core,
-    validate_ingest_shard_source_rows as _validate_ingest_shard_source_rows_core,
-)
 from chronovisor.ingest.ingest_review import (
     normalize_ingest_frontier_review as _normalize_ingest_frontier_review_core,
+)
+from chronovisor.ingest.ingest_review import (
     run_ingest_frontier_review as _run_ingest_frontier_review_core,
 )
 from chronovisor.ingest.ingest_review_authority import (
     current_ingest_review_authority as _current_ingest_review_authority_core,
+)
+from chronovisor.ingest.ingest_review_authority import (
     ingest_review_authority_error as _ingest_review_authority_error_core,
+)
+from chronovisor.ingest.ingest_review_authority import (
     ingest_review_authority_shape_error as _ingest_review_authority_shape_error_core,
+)
+from chronovisor.ingest.ingest_review_authority import (
     ingest_review_shard_proof_error as _ingest_review_shard_proof_error_core,
-)
-from chronovisor.ingest.ingest_review_store import (
-    continuation_marker_path as _continuation_marker_path_core,
-    ingest_artifact_paths as _ingest_artifact_paths_core,
-    load_ingest_proposal as _load_ingest_proposal_core,
-    load_ingest_review as _load_ingest_review_core,
-    load_ingest_review_artifact as _load_ingest_review_artifact_core,
-    repair_transition_path as _repair_transition_path_core,
-    review_stall_path as _review_stall_path_core,
-    sealed_ingest_review_artifact as _sealed_ingest_review_artifact_core,
-    write_and_readback_ingest_review_artifact as _write_and_readback_ingest_review_artifact_core,
-    write_ingest_artifact as _write_ingest_artifact_core,
-)
-from chronovisor.ingest.ingest_review_recovery import (
-    consume_ingest_review_continuation_marker as _consume_ingest_review_continuation_marker_core,
-    load_ingest_review_continuation_marker as _load_ingest_review_continuation_marker_core,
-    matching_ingest_review_stall_error as _matching_ingest_review_stall_error_core,
-    persist_ingest_review_continuation_marker as _persist_ingest_review_continuation_marker_core,
-    persist_ingest_review_stall as _persist_ingest_review_stall_core,
-    seal_ingest_review_repair_transition as _seal_ingest_review_repair_transition_core,
 )
 from chronovisor.ingest.ingest_review_execution import (
     IngestShardedReviewDeps,
+)
+from chronovisor.ingest.ingest_review_execution import (
     ingest_review_shard_aggregate as _ingest_review_shard_aggregate_core,
+)
+from chronovisor.ingest.ingest_review_execution import (
     ingest_review_shard_failure as _ingest_review_shard_failure_core,
+)
+from chronovisor.ingest.ingest_review_execution import (
     ingest_review_shard_manifest_artifact_payload as _ingest_review_shard_manifest_artifact_payload_core,
+)
+from chronovisor.ingest.ingest_review_execution import (
     ingest_review_shard_manifest_path as _ingest_review_shard_manifest_path_core,
+)
+from chronovisor.ingest.ingest_review_execution import (
     ingest_review_shard_review_identity as _ingest_review_shard_review_identity_core,
+)
+from chronovisor.ingest.ingest_review_execution import (
     persist_ingest_review_shard_manifest as _persist_ingest_review_shard_manifest_core,
+)
+from chronovisor.ingest.ingest_review_execution import (
     run_ingest_sharded_review as _run_ingest_sharded_review_core,
+)
+from chronovisor.ingest.ingest_review_execution import (
     stored_ingest_review_shard_manifest_error as _stored_ingest_review_shard_manifest_error_core,
 )
-from chronovisor.ops.entities import patch_entities_frontmatter
+from chronovisor.ingest.ingest_review_plan import (
+    IngestReviewBudgetExhausted as IngestReviewBudgetExhausted,
+)
+from chronovisor.ingest.ingest_review_plan import (
+    IngestReviewShard as _IngestReviewShard,
+)
+from chronovisor.ingest.ingest_review_plan import (
+    IngestReviewShardCapacityError,
+)
+from chronovisor.ingest.ingest_review_plan import (
+    IngestReviewShardPlan as _IngestReviewShardPlan,
+)
+from chronovisor.ingest.ingest_review_plan import (
+    IngestReviewShardPlanState as _IngestReviewShardPlanState,
+)
+from chronovisor.ingest.ingest_review_plan import (
+    build_ingest_review_shard_plan as _build_ingest_review_shard_plan_core,
+)
+from chronovisor.ingest.ingest_review_plan import (
+    build_ingest_review_shard_proposal as _build_ingest_review_shard_proposal_core,
+)
+from chronovisor.ingest.ingest_review_plan import (
+    measure_ingest_review_request as _measure_ingest_review_request_core,
+)
+from chronovisor.ingest.ingest_review_plan import (
+    validate_ingest_shard_source_rows as _validate_ingest_shard_source_rows_core,
+)
+from chronovisor.ingest.ingest_review_recovery import (
+    consume_ingest_review_continuation_marker as _consume_ingest_review_continuation_marker_core,
+)
+from chronovisor.ingest.ingest_review_recovery import (
+    load_ingest_review_continuation_marker as _load_ingest_review_continuation_marker_core,
+)
+from chronovisor.ingest.ingest_review_recovery import (
+    matching_ingest_review_stall_error as _matching_ingest_review_stall_error_core,
+)
+from chronovisor.ingest.ingest_review_recovery import (
+    persist_ingest_review_continuation_marker as _persist_ingest_review_continuation_marker_core,
+)
+from chronovisor.ingest.ingest_review_recovery import (
+    persist_ingest_review_stall as _persist_ingest_review_stall_core,
+)
+from chronovisor.ingest.ingest_review_recovery import (
+    seal_ingest_review_repair_transition as _seal_ingest_review_repair_transition_core,
+)
+from chronovisor.ingest.ingest_review_store import (
+    continuation_marker_path as _continuation_marker_path_core,
+)
+from chronovisor.ingest.ingest_review_store import (
+    ingest_artifact_paths as _ingest_artifact_paths_core,
+)
+from chronovisor.ingest.ingest_review_store import (
+    load_ingest_proposal as _load_ingest_proposal_core,
+)
+from chronovisor.ingest.ingest_review_store import (
+    load_ingest_review as _load_ingest_review_core,
+)
+from chronovisor.ingest.ingest_review_store import (
+    load_ingest_review_artifact as _load_ingest_review_artifact_core,
+)
+from chronovisor.ingest.ingest_review_store import (
+    repair_transition_path as _repair_transition_path_core,
+)
+from chronovisor.ingest.ingest_review_store import (
+    review_stall_path as _review_stall_path_core,
+)
+from chronovisor.ingest.ingest_review_store import (
+    sealed_ingest_review_artifact as _sealed_ingest_review_artifact_core,
+)
+from chronovisor.ingest.ingest_review_store import (
+    write_ingest_artifact as _write_ingest_artifact_core,
+)
+from chronovisor.ingest.ingest_schemas import (
+    INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+    INGEST_FRONTIER_DECISION_SCHEMA,
+    INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+    RECALL_METADATA_SCHEMA,
+)
+from chronovisor.ingest.ingest_schemas import (
+    INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION as _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION,
+)
+from chronovisor.ingest.ingest_schemas import (
+    INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION as INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION,
+)
+from chronovisor.ingest.ingest_schemas import (
+    INGEST_REVIEW_LIMIT_FIELDS as _INGEST_REVIEW_LIMIT_FIELDS,
+)
+from chronovisor.ingest.ingest_schemas import (
+    INGEST_REVIEW_SHARD_POLICY_VERSION as INGEST_REVIEW_SHARD_POLICY_VERSION,
+)
+from chronovisor.ingest.ingest_schemas import (  # noqa: F401
+    INGEST_REVIEW_SHARD_ROW_FIELDS as _INGEST_REVIEW_SHARD_ROW_FIELDS,
+)
+from chronovisor.ingest.ingest_schemas import (  # noqa: F401
+    MAX_INGEST_REVIEW_SHARDS as _MAX_INGEST_REVIEW_SHARDS,
+)
+from chronovisor.ingest.ingest_schemas import (  # noqa: F401
+    TRIAGE_CATALOG_TOP_N as _TRIAGE_CATALOG_TOP_N,
+)
+from chronovisor.ingest.ingest_schemas import (  # noqa: F401
+    TRIAGE_MAX_FEEDBACK_BYTES as _TRIAGE_MAX_FEEDBACK_BYTES,
+)
+from chronovisor.ingest.ingest_schemas import (  # noqa: F401
+    TRIAGE_MAX_OPERATIONS as _TRIAGE_MAX_OPERATIONS,
+)
+from chronovisor.ingest.ingest_schemas import (
+    TRIAGE_MAX_OUTPUT_BYTES as _TRIAGE_MAX_OUTPUT_BYTES,
+)
+from chronovisor.ingest.ingest_schemas import (  # noqa: F401
+    TRIAGE_NUM_PREDICT as _TRIAGE_NUM_PREDICT,
+)
+from chronovisor.ingest.ingest_schemas import (
+    TRIAGE_PLAN_SCHEMA as TRIAGE_PLAN_SCHEMA,
+)
+from chronovisor.ingest.ingest_schemas import (
+    TRIAGE_PLAN_VALIDATION_SCHEMA as _TRIAGE_PLAN_VALIDATION_SCHEMA,
+)
+from chronovisor.ingest.ingest_transport import (
+    generate_with_progress as _generate_with_progress_core,
+)
+from chronovisor.ingest.ingest_transport import (
+    llm_progress_callback as _llm_progress_callback_core,
+)
+from chronovisor.ingest.ingest_transport import (
+    structured_chat_transport as _structured_chat_transport_core,
+)
+from chronovisor.ingest.ingest_transport import (
+    structured_generate_transport as _structured_generate_transport_core,
+)
+from chronovisor.ingest.ingest_transport import (
+    supports_keyword as _supports_keyword,
+)
 from chronovisor.ingest.triage_plan import (
     collapse_exact_duplicate_operations,
     distinct_target_collisions,
 )
+from chronovisor.ops import runtime_status
+from chronovisor.ops.entities import patch_entities_frontmatter
 from chronovisor.search.search_types import tokenize
-
 
 # ---------------------------------------------------------------------------
 # Stage 1: Triage — analyze raw content and produce a structured plan
@@ -449,9 +554,12 @@ def _admit_ingest_context(config: Any, requested_num_ctx: int) -> int:
     # residents and re-plan from fresh measured memory before deferring. This
     # avoids a permanent low-context stall without evicting healthy models on
     # every request.
-    if plan.max_resident_models < 1 and requested_num_ctx < 262_144:
-        if evict_unrelated_residents() > 0:
-            plan = residency_plan()
+    if (
+        plan.max_resident_models < 1
+        and requested_num_ctx < 262_144
+        and evict_unrelated_residents() > 0
+    ):
+        plan = residency_plan()
     if plan.max_resident_models < 1:
         raise IngestTriageFailure(
             "capacity_unavailable",
@@ -835,9 +943,8 @@ def _validate_triage_plan(
         # triage failure (LLM produced garbage), not an apply failure.
         if ".." in fn.split("/"):
             return None
-        if op_type == "create":
-            if not _FILENAME_PATTERN.fullmatch(fn):
-                return None
+        if op_type == "create" and not _FILENAME_PATTERN.fullmatch(fn):
+            return None
         # For update we don't enforce kebab — apply will look the page up
         # via find_page() (case-insensitive on macOS APFS) and reject if
         # the target doesn't exist. That way legacy corpus stays updatable.
@@ -2670,8 +2777,8 @@ class _IngestReviewShardContinuation:
 def _ingest_review_router_config() -> Any:
     """Resolve the same adopted router configuration used by live review."""
 
-    from chronovisor.decision.decision_router import resolve_router_policy
     from chronovisor.core.runtime_config import load_decision_router_config
+    from chronovisor.decision.decision_router import resolve_router_policy
 
     config = load_decision_router_config()
     if not config.adoption_artifact.strip():
@@ -3901,10 +4008,8 @@ def _safe_log(
     successfully-set ``COMPLETED`` status with ``FAILED`` and skip
     ``on_complete``. So we wrap, swallow, and move on.
     """
-    try:
+    with suppress(Exception):
         _append_log(message)
-    except Exception:
-        pass
     runtime_status.safe_append_event(
         level or runtime_status.classify_log_message(message),
         message,

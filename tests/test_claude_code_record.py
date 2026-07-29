@@ -6,7 +6,7 @@ import base64
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1170,7 +1170,7 @@ def test_recent_save_does_not_strand_new_tail(tmp_path: Path, monkeypatch) -> No
     session_with_edits(session, user_turns=2, include_edit=True)
 
     from datetime import timedelta
-    recent = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+    recent = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
     state = {
         "version": 1,
         "files": {

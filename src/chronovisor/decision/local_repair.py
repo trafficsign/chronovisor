@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
@@ -21,7 +22,6 @@ from chronovisor.search.semantic_hold import (
     canonical_sha256,
     is_local_semantic_no_quorum,
 )
-
 
 ALLOWED_ACTIONS = {
     "resolve_update_target",

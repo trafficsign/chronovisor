@@ -13,19 +13,19 @@ import signal
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.recall import recall_runtime
 from chronovisor.core.runtime_config import (
     active_config_file,
     env_flag,
     load_hook_policy,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT, init_chronovisor
+from chronovisor.recall import recall_runtime
 
 LOG_DIR = CHRONOVISOR_ROOT / "logs"
 RECALL_HOST_HEADROOM_MS = 250
@@ -297,7 +297,7 @@ def _record_recall_fail_open(
 ) -> None:
     if not policy.log_decisions:
         return
-    try:
+    with suppress(Exception):
         recall_runtime.append_recall_log(
             request,
             recall_runtime.RecallResult(
@@ -311,8 +311,6 @@ def _record_recall_fail_open(
                 error=error,
             ),
         )
-    except Exception:
-        pass
 
 
 def log_file(prefix: str) -> Path:

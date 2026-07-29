@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import importlib
 import hashlib
+import importlib
 import inspect
 import json
 from collections import Counter
 
 import pytest
 
+from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision.decision_lane_contract_cases import (
     CASES_PER_MODEL_BACKED_LANE,
     decision_lane_contract_case_manifest,
@@ -33,26 +34,25 @@ from chronovisor.decision.decision_lane_prompts import (
     INGEST_REVIEW_MODEL_BLOCK,
     _exact_text_change_projection,
     _frontmatter_identity_fields,
-    build_ingest_review_projection,
     build_ingest_reconciliation_prompt,
+    build_ingest_review_projection,
     build_raw_replay_reconciliation_prompt,
     canonical_json_sha256,
     validate_ingest_review_projection,
 )
+from chronovisor.decision.decision_policy import DECISION_POLICIES
 from chronovisor.decision.decision_router import (
     _strip_ingest_repair_host_block,
-    decision_system_with_policy,
     decision_context_buckets,
     decision_request_context,
     decision_request_fingerprint_sha256,
+    decision_system_with_policy,
 )
+from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from chronovisor.decision.local_structured import (
     StructuredRequestPreflight,
     preflight_structured_request,
 )
-from chronovisor.decision.decision_policy import DECISION_POLICIES
-from chronovisor.decision.decision_schema_manifest import production_decision_schemas
-from chronovisor.core.runtime_config import DecisionRouterConfig
 
 
 def _json_prompt_block(prompt: str, marker: str) -> dict[str, object]:
@@ -1075,9 +1075,9 @@ def test_ingest_review_projection_keeps_full_page_identity_for_distant_hunk() ->
             frontmatter.encode("utf-8")
         ).hexdigest(),
         "identity_fields": "title: Alice account state\n",
-        "identity_fields_utf8_bytes": len("title: Alice account state\n".encode()),
+        "identity_fields_utf8_bytes": len(b"title: Alice account state\n"),
         "identity_fields_sha256": hashlib.sha256(
-            "title: Alice account state\n".encode()
+            b"title: Alice account state\n"
         ).hexdigest(),
     }
     assert "Alice account state" not in json.dumps(

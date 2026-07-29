@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from chronovisor.ingest import ingest_review_authority
-from chronovisor.ingest import orchestrator
+from chronovisor.ingest import ingest_review_authority, orchestrator
 
 
 def test_authority_preflight_validates_the_adopted_batch_epoch(

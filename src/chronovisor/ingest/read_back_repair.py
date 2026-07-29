@@ -11,19 +11,27 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable, Mapping
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
-from chronovisor.recall import recall_hints
 from chronovisor.core import store as chronovisor_store
-from chronovisor.ops.convergence import HUMAN_REQUIRED_FAILURE_CLASSES
-from chronovisor.decision import decision_authority
 from chronovisor.core.durable_state import atomic_write_bytes, canonical_bytes
 from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.ingest.page_mutation import decision_authority_lock, chronovisor_mutation_lock
 from chronovisor.core.runtime_config import runtime_repo_root
+from chronovisor.decision import decision_authority
+from chronovisor.ingest.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
+from chronovisor.ingest.read_back_integrity import (
+    scan_jsonl_prefix,
+    verify_prior_prefix,
+)
+from chronovisor.ops.convergence import HUMAN_REQUIRED_FAILURE_CLASSES
+from chronovisor.recall import recall_hints
 from chronovisor.search.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -33,11 +41,6 @@ from chronovisor.search.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.ingest.read_back_integrity import (
-    scan_jsonl_prefix,
-    verify_prior_prefix,
-)
-
 
 FAILURE_FILE = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-failures.jsonl"
 LEDGER_FILE = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-repair.json"
@@ -197,10 +200,10 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _as_utc(value: datetime | None) -> datetime:
-    value = value or datetime.now(timezone.utc)
+    value = value or datetime.now(UTC)
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -261,7 +264,7 @@ def _merge_entries(
                 existing["attempts"] = 0
                 existing["reopen_count"] = int(existing.get("reopen_count") or 0) + 1
                 existing["reopened_at"] = aggregate.get("last_seen") or datetime.now(
-                    timezone.utc
+                    UTC
                 ).isoformat(timespec="seconds")
                 existing.pop("next_attempt_at", None)
                 if terminal_status == "rejected":
@@ -694,7 +697,9 @@ def _review_query_hint(
 ) -> dict[str, Any]:
     if reviewer is not None:
         return _normalize_frontier_review(reviewer(proposal))
-    from chronovisor.decision.decision_lane_prompts import build_read_back_repair_request
+    from chronovisor.decision.decision_lane_prompts import (
+        build_read_back_repair_request,
+    )
     from chronovisor.decision.frontier_review import run_structured_review
 
     prompt, system = build_read_back_repair_request(
@@ -778,7 +783,6 @@ def run_read_back_repair(
     frontier_confidence_threshold: float | None = None,
 ) -> dict[str, Any]:
     """Process a bounded batch of read-back failures.
-
     Dry runs read the source, ledger, and hint store but never create or modify
     any file. Human-required entries remain terminal; non-human quarantine
     resets its attempt budget after a bounded cooldown. The exact hint lookup
@@ -833,7 +837,6 @@ def run_read_back_repair(
         }
     entries = _merge_entries(original_ledger, observed)
     last_persisted_sha256: str | None = None
-
     def persist_ledger() -> None:
         nonlocal last_persisted_sha256
         if not verify_prior_prefix(failure_file, source_cursor):
@@ -1387,7 +1390,9 @@ def run_read_back_repair(
             and not entry.get("self_heal_packet_path")
             and _should_queue_operational_self_heal(failure, entry)
         ):
-            from chronovisor.decision.failure_supervisor import queue_operational_failure
+            from chronovisor.decision.failure_supervisor import (
+                queue_operational_failure,
+            )
 
             packet_path = queue_operational_failure(
                 failure_class="read_back.repeated_miss",

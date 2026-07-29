@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from chronovisor.research.research_store import ResearchStore, compact_event_context, reduce_events
+from chronovisor.research.research_store import (
+    ResearchStore,
+    compact_event_context,
+    reduce_events,
+)
 
 
 def test_evidence_cas_round_trip_and_checksum(tmp_path) -> None:
@@ -24,7 +28,7 @@ def test_checkpoint_gc_protects_active_and_unreceipted_sessions(tmp_path) -> Non
     active = store.checkpoint("active", {"x": "a" * 100}, active=True, durable_receipt=False)
     pending = store.checkpoint("pending", {"x": "b" * 100}, active=False, durable_receipt=False)
     eligible = store.checkpoint("done", {"x": "c" * 100}, active=False, durable_receipt=True)
-    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=10)).isoformat()
     import json
 
     payload = json.loads(eligible.read_text())

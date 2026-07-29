@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from contextlib import nullcontext
-from typing import Any, Callable
+from typing import Any
 
 from chronovisor.core import ollama as ollama_runtime
 from chronovisor.decision.local_structured import ChatTransport
@@ -39,15 +40,15 @@ required_structured_context_tokens = _runtime_call("required_structured_context_
 LocalStructuredSession = _runtime_call("LocalStructuredSession")
 
 from chronovisor.ingest.ingest import (  # noqa: E402
-    IngestContextCapacityError,
-    IngestTriageFailure,
-    TRIAGE_PLAN_SCHEMA,
-    TRIAGE_SYSTEM_PROMPT,
     _DEFAULT_GENERATE_WITH_PROGRESS,
     _TRIAGE_CATALOG_TOP_N,
     _TRIAGE_MAX_FEEDBACK_BYTES,
     _TRIAGE_MAX_OUTPUT_BYTES,
     _TRIAGE_NUM_PREDICT,
+    TRIAGE_PLAN_SCHEMA,
+    TRIAGE_SYSTEM_PROMPT,
+    IngestContextCapacityError,
+    IngestTriageFailure,
 )
 
 

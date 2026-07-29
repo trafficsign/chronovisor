@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
+from chronovisor.raw.legacy_semantic_write import (
     block_legacy_semantic_mutation,
 )
 

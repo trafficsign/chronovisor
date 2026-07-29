@@ -7,9 +7,9 @@ end-to-end at runtime, not in CI.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -18,16 +18,15 @@ from chronovisor.ops import orphan_link as ol_mod
 from chronovisor.ops.orphan_link import (
     OrphanReport,
     Suggestion,
+    apply_suggestion,
     format_report,
     gather_candidates,
     parse_llm_response,
+    run_autonomous,
     run_dry_run,
     score_candidate,
-    apply_suggestion,
-    run_autonomous,
 )
 from tests.semantic_hold_support import semantic_authority, semantic_review
-
 
 # ---------------------------------------------------------------------------
 # Fakes

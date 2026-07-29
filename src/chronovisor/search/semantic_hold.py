@@ -21,12 +21,14 @@ import re
 import tempfile
 from collections import Counter
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as canonical_sha256,
+)
+from chronovisor.core.canonical_json import (
     canonical_json_strict as _canonical_json,
 )
 from chronovisor.decision.decision_authority import (
@@ -36,9 +38,13 @@ from chronovisor.decision.decision_authority import (
 from chronovisor.search.semantic_epoch import (
     STRUCTURED_REVIEW_HOLD_EPOCH_VERSION,
     build_structured_review_epoch,
-    is_sha256 as _is_sha256,
-    opaque_text_sha256 as _opaque_text_sha256,
     structured_review_epoch_error,
+)
+from chronovisor.search.semantic_epoch import (
+    is_sha256 as _is_sha256,
+)
+from chronovisor.search.semantic_epoch import (
+    opaque_text_sha256 as _opaque_text_sha256,
 )
 
 LOCAL_SEMANTIC_NO_QUORUM = "local_semantic_no_quorum"
@@ -160,13 +166,13 @@ def structured_review_authority_observation_sha256(
     models = router.get("models")
     assert isinstance(models, list)
 
-    from chronovisor.lab.local_model_eval import (
-        _safe_model_metadata,
-        fetch_local_model_metadata,
-    )
     from chronovisor.core.runtime_config import (
         CONFIG_FILE,
         load_decision_router_config,
+    )
+    from chronovisor.lab.local_model_eval import (
+        _safe_model_metadata,
+        fetch_local_model_metadata,
     )
 
     live_metadata = _safe_model_metadata(fetch_local_model_metadata(models), models)
@@ -972,14 +978,10 @@ class StructuredReviewSemanticHoldCache:
                 authority=authority,
             )
         finally:
-            try:
+            with suppress(OSError):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
-            try:
+            with suppress(OSError):
                 handle.close()
-            except OSError:
-                pass
 
 
 __all__ = [

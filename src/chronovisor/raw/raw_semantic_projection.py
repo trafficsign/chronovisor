@@ -12,30 +12,28 @@ would have written or fails closed with :class:`ProjectionConflictError`.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256
-
-import hashlib
+import contextlib
 import json
 import os
 import re
 import uuid
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from chronovisor.core.canonical_json import (
     canonical_json_line_bytes_strict as _canonical_bytes,
 )
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
-from chronovisor.raw.raw_segment import RawSegmentCommit
+from chronovisor.core.hashutil import sha256_bytes as _sha256
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-
+from chronovisor.raw.raw_segment import RawSegmentCommit
 from chronovisor.raw.save_transaction import (
     SaveTransactionReceipt,
     parse_save_transaction_receipt,
 )
-
 
 PROJECTION_POLICY_VERSION = 2
 PROJECTION_MANIFEST_SCHEMA = "chronovisor.raw-semantic-projection-manifest.v1"
@@ -614,18 +612,16 @@ def _atomic_create_or_verify(path: Path, payload: bytes) -> bool:
             os.fsync(stream.fileno())
         try:
             os.link(temporary, path)
-        except FileExistsError:
+        except FileExistsError as exc:
             observed = path.read_bytes()
             if observed != payload:
                 raise ProjectionConflictError(
                     f"projection artifact conflict at {path.name}"
-                )
+                ) from exc
         _fsync_directory(path.parent)
     finally:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
-        except FileNotFoundError:
-            pass
 
     if path.read_bytes() != payload:
         raise ProjectionConflictError(
@@ -1203,11 +1199,11 @@ def _projected_child_passthrough(
     filename_match = _CHILD_FILENAME_RE.fullmatch(raw_path.name)
     try:
         decoded = json.loads(source_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         if filename_match is not None:
             raise RawSemanticProjectionError(
                 "projection child filename points to invalid canonical JSON"
-            )
+            ) from exc
         return None
     claims_child = isinstance(decoded, dict) and (
         schema_matches(decoded.get("schema"), PROJECTION_CHILD_SCHEMA)

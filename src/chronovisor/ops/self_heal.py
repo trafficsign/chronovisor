@@ -13,20 +13,15 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from chronovisor.ops import runtime_status
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.alias_store import add_alias
-from chronovisor.ops.convergence import (
-    is_human_required_failure,
-    is_human_required_result,
-)
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -43,12 +38,16 @@ from chronovisor.decision.local_repair import (
     semantic_hold_epoch,
 )
 from chronovisor.ingest.page_mutation import decision_authority_lock
+from chronovisor.ops import runtime_status
+from chronovisor.ops.convergence import (
+    is_human_required_failure,
+    is_human_required_result,
+)
 from chronovisor.search.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-
 
 SELF_HEAL_STATUSES = {
     "pending_local_repair",
@@ -223,10 +222,8 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     except Exception:
-        try:
+        with suppress(OSError):
             tmp.unlink()
-        except OSError:
-            pass
         raise
 
 
@@ -2189,16 +2186,15 @@ def _trusted_repair_packet_job_id(
         return None
     if packet.get("failure_class") != evidence_payload.get("failure_class"):
         return None
-    if contract[0] == "trusted_operational_failure_supervisor":
-        if (
-            packet.get("source_failure_class") != notes.get("source_failure_class")
-            or packet.get("source_fingerprint") != notes.get("source_fingerprint")
-            or not isinstance(packet.get("source_packet_paths"), list)
-            or not packet.get("source_packet_paths")
-            or not isinstance(packet.get("raw_files"), list)
-            or not packet.get("raw_files")
-        ):
-            return None
+    if contract[0] == "trusted_operational_failure_supervisor" and (
+        packet.get("source_failure_class") != notes.get("source_failure_class")
+        or packet.get("source_fingerprint") != notes.get("source_fingerprint")
+        or not isinstance(packet.get("source_packet_paths"), list)
+        or not packet.get("source_packet_paths")
+        or not isinstance(packet.get("raw_files"), list)
+        or not packet.get("raw_files")
+    ):
+        return None
     return expected_job_id
 
 
@@ -3943,8 +3939,7 @@ def _patch_chronovisor_paths(chronovisor_root: Path) -> dict[str, Any]:
     for path in (pages, raw, system, runtime):
         path.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.ingest import ingest
-    from chronovisor.ingest import orchestrator
+    from chronovisor.ingest import ingest, orchestrator
 
     snapshot = {
         "chronovisor": {
@@ -3999,8 +3994,7 @@ def _patch_chronovisor_paths(chronovisor_root: Path) -> dict[str, Any]:
 def _restore_chronovisor_paths(snapshot: dict[str, Any]) -> None:
     """Restore path globals after a sandbox drill."""
 
-    from chronovisor.ingest import ingest
-    from chronovisor.ingest import orchestrator
+    from chronovisor.ingest import ingest, orchestrator
 
     for name, value in snapshot["chronovisor"].items():
         setattr(chronovisor_store, name, value)
@@ -4034,10 +4028,10 @@ def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
     old_autorun = os.environ.get("CHRONOVISOR_SELF_HEAL_AUTORUN")
     os.environ["CHRONOVISOR_SELF_HEAL_AUTORUN"] = "0"
 
-    from chronovisor.ingest import ingest as ingest_mod
-    from chronovisor.ingest import orchestrator
     from chronovisor.core.alias_store import load_aliases
     from chronovisor.core.jobs import JobStatus, job_store
+    from chronovisor.ingest import ingest as ingest_mod
+    from chronovisor.ingest import orchestrator
 
     original_run_ingest = ingest_mod.run_ingest
     original_run_frontier = globals()["_run_frontier"]

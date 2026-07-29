@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import ast
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 from chronovisor.decision import failure_supervisor
 from chronovisor.raw import raw_replay
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,10 +39,21 @@ def test_quality_tools_are_scoped_to_the_staged_baseline() -> None:
 
     assert project["tool"]["ruff"]["target-version"] == "py311"
     assert project["tool"]["ruff"]["lint"]["select"] == [
+        "E4",
+        "E7",
         "E9",
-        "F63",
-        "F7",
-        "F82",
+        "F",
+        "I",
+        "UP",
+        "B",
+        "SIM",
+        "RUF100",
+    ]
+    assert project["tool"]["ruff"]["lint"]["ignore"] == [
+        "UP042",
+        "SIM105",
+        "SIM115",
+        "SIM117",
     ]
     assert project["tool"]["mypy"]["files"] == ["src/chronovisor/core"]
     assert project["tool"]["mypy"]["strict"] is True

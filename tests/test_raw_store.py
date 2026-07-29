@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from chronovisor.raw.raw_segment import RawSegmentCorrupt, append_capture, seal_segment
-from chronovisor.raw.raw_store import RawStore, raw_layout_mode
 from chronovisor.raw.raw_semantic_projection import project_native_transcript
+from chronovisor.raw.raw_store import RawStore, raw_layout_mode
 
 
 def _append(raw_dir: Path, source: Path, payload: bytes):

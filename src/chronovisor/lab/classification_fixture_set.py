@@ -8,26 +8,14 @@ inference boundary.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_prefixed_bytes as sha256_bytes
-
-from chronovisor.core.jsonl_write import atomic_replace_bytes as _atomic_write
-
-from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
-
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import hashlib
 import json
-import os
 import re
-import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import frontmatter
 from chronovisor.classification.classification import (
     ClassificationError,
     classification_authority_status,
@@ -39,7 +27,11 @@ from chronovisor.classification.classification_engine import (
     CandidateIndex,
     _page_payload,
 )
+from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.hashutil import sha256_prefixed_bytes as sha256_bytes
+from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.ingest.page_registry import PageRegistry
 
 FIXTURE_SET_SCHEMA = "chronovisor.classification-fixture-set.v1"

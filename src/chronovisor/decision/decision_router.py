@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import inspect
 import json
@@ -14,12 +15,27 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import ollama
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as _sha256_json,
+)
+from chronovisor.core.canonical_json import (
     canonical_json_strict as _canonical_json,
 )
-
-from chronovisor.core import ollama
+from chronovisor.core.runtime_config import (
+    DecisionRouterConfig,
+    load_decision_router_config,
+    load_ingest_config,
+)
+from chronovisor.decision.decision_artifact import (
+    DecisionArtifactError,
+    DecisionArtifactStore,
+    default_store_root,
+    execution_fingerprint,
+)
+from chronovisor.decision.decision_lane_contract_cases import (
+    decision_lane_contract_case_manifest_sha256,
+)
 from chronovisor.decision.decision_lane_contracts import (
     LANE_CONTRACT_POLICY_VERSION,
     LANE_CONTRACT_SOURCE,
@@ -29,9 +45,6 @@ from chronovisor.decision.decision_lane_contracts import (
     lane_contract_manifest_sha256,
     lane_contract_sha256,
     model_backed_lane_names,
-)
-from chronovisor.decision.decision_lane_contract_cases import (
-    decision_lane_contract_case_manifest_sha256,
 )
 from chronovisor.decision.decision_lane_prompts import (
     INGEST_REPAIR_HOST_BLOCK,
@@ -49,18 +62,12 @@ from chronovisor.decision.decision_schema_manifest import (
     default_decision_value,
     production_decision_schemas,
 )
-from chronovisor.decision.decision_artifact import (
-    DecisionArtifactError,
-    DecisionArtifactStore,
-    default_store_root,
-    execution_fingerprint,
-)
 from chronovisor.decision.local_structured import (
+    STRUCTURED_GENERATION_POLICY_VERSION,
     ChatTransport,
     LocalConsensusAuditStore,
     LocalStructuredResult,
     LocalStructuredSession,
-    STRUCTURED_GENERATION_POLICY_VERSION,
     ValidationIssue,
     preflight_structured_request,
     required_structured_context_tokens,
@@ -68,11 +75,6 @@ from chronovisor.decision.local_structured import (
     structured_generation_policy_sha256,
     structured_request_sha256,
     validate_json,
-)
-from chronovisor.core.runtime_config import (
-    DecisionRouterConfig,
-    load_decision_router_config,
-    load_ingest_config,
 )
 
 AgreementKey = Callable[[Any], Any]
@@ -3614,7 +3616,7 @@ class DecisionRouter:
                         schema=schema,
                         context_tier=context_tier,
                     )
-                    try:
+                    with contextlib.suppress(Exception):
                         self.audit_store.append(
                             {
                                 "kind": "decision_artifact_replay",
@@ -3630,8 +3632,6 @@ class DecisionRouter:
                                 "status": "agreed",
                             }
                         )
-                    except Exception:
-                        pass
                     return replayed
         except DecisionArtifactError as exc:
             return self._quarantined(
@@ -3728,7 +3728,6 @@ class DecisionRouter:
                 selected_num_ctx,
                 source="request_preflight_failed_no_probe",
             )
-
         def finalize(result: DecisionRouterResult) -> DecisionRouterResult:
             if result.ok:
                 try:
@@ -3866,7 +3865,6 @@ class DecisionRouter:
                     from chronovisor.core import store
                     from chronovisor.lab.local_model_eval import replay_semantic_effect
                     from chronovisor.lab.model_lab import record_local_replay_case
-
                     replay_path = self.replay_path
                     if replay_path is None:
                         if self.audit_root is not None:
@@ -4000,9 +3998,11 @@ class DecisionRouter:
                 )
                 if model in resident
             )
-        elif residency_plan.max_resident_models == 2:
-            if self.config.tie_break_model in resident:
-                initial_eviction_set.add(self.config.tie_break_model)
+        elif (
+            residency_plan.max_resident_models == 2
+            and self.config.tie_break_model in resident
+        ):
+            initial_eviction_set.add(self.config.tie_break_model)
         initial_evictions = [
             model
             for model in (

@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.jsonl import count_jsonl, read_jsonl
+from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR
 from chronovisor.decision.decision_authority import semantic_authority_shape_error
 from chronovisor.search.index_store import get_store
-from chronovisor.core.jsonl import count_jsonl, read_jsonl
 from chronovisor.search.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     canonical_sha256,
     persisted_semantic_no_quorum_hold,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR
 
 
 def _jsonl_count(path: Path) -> int:
@@ -94,7 +95,7 @@ def semantic_index_kpi() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         service = {}
     service_age = max(
-        0.0, datetime.now(timezone.utc).timestamp()
+        0.0, datetime.now(UTC).timestamp()
         - float(service.get("observed_at_epoch") or 0.0)
     )
     service_fresh = bool(service) and service_age <= 30
@@ -335,11 +336,11 @@ def read_back_kpi() -> dict[str, Any]:
 
 
 def autonomy_hardening_kpi() -> dict[str, Any]:
-    from chronovisor.ops.deadman import inspect_heartbeat
     from chronovisor.core.durable_state import DurableStateError, read_sealed_json
-    from chronovisor.librarian.managed_hold import ManagedHoldStore
-    from chronovisor.recall.provisional_recall import snapshot as provisional_snapshot
     from chronovisor.decision.quality_guard import quality_snapshot
+    from chronovisor.librarian.managed_hold import ManagedHoldStore
+    from chronovisor.ops.deadman import inspect_heartbeat
+    from chronovisor.recall.provisional_recall import snapshot as provisional_snapshot
 
     runtime = CHRONOVISOR_ROOT / "runtime"
     autonomy = CHRONOVISOR_ROOT / "autonomy"
@@ -548,7 +549,7 @@ def convergence_kpi() -> dict[str, Any]:
         }
     by_status: dict[str, int] = {}
     by_lane: dict[str, dict[str, int]] = {}
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     actionable_dates: list[datetime] = []
     expired_running = 0
     for item in items.values():
@@ -571,19 +572,17 @@ def convergence_kpi() -> dict[str, Any]:
             "local_running",
             "frontier_running",
         }:
-            try:
+            with contextlib.suppress(ValueError):
                 actionable_dates.append(
                     datetime.fromisoformat(
                         str(item.get("created_at") or "")
-                    ).astimezone(timezone.utc)
+                    ).astimezone(UTC)
                 )
-            except ValueError:
-                pass
         if status in {"local_running", "frontier_running"}:
             try:
                 expires = datetime.fromisoformat(
                     str(item.get("lease_expires_at") or "")
-                ).astimezone(timezone.utc)
+                ).astimezone(UTC)
                 expired_running += int(expires <= now)
             except ValueError:
                 expired_running += 1
@@ -593,7 +592,7 @@ def convergence_kpi() -> dict[str, Any]:
     for event in events:
         try:
             ts = datetime.fromisoformat(str(event.get("ts") or "")).astimezone(
-                timezone.utc
+                UTC
             )
         except ValueError:
             continue

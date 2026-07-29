@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import argparse
 import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import ollama
 from chronovisor.classification.classification import ClassificationError
 from chronovisor.classification.classification_anchor import (
     UNRESOLVED_ANCHOR_ID,
@@ -22,6 +18,14 @@ from chronovisor.classification.classification_anchor import (
     default_anchor_set_path,
     load_anchor_set,
 )
+from chronovisor.classification.classification_anchor_worker import (
+    PROMPT_SHA256 as CORE_PROMPT_SHA256,
+)
+from chronovisor.core import ollama
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.lab.classification_anchor_dev import run_case
 from chronovisor.lab.classification_anchor_second_auditor import (
     AUDIT_SCHEMA,
@@ -38,18 +42,12 @@ from chronovisor.lab.classification_anchor_set_dev import (
     score_anchor_set,
     summarize_metrics,
 )
+from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_file
 from chronovisor.lab.harness import (
     LabHarness,
     require_contract,
     require_file_hashes,
 )
-from chronovisor.classification.classification_anchor_worker import (
-    PROMPT_SHA256 as CORE_PROMPT_SHA256,
-)
-from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_file
-from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 SELECTION_SCHEMA = "chronovisor.classification-anchor-set-unseen-selection.v1"
 GOLD_SCHEMA = "chronovisor.classification-anchor-set-unseen-gold.v1"

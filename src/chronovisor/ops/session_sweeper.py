@@ -6,8 +6,7 @@ import argparse
 import json
 import time
 from argparse import Namespace
-from datetime import datetime, timezone
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -35,9 +34,7 @@ def _is_user_codex_session(path: Path) -> bool:
         return False
     if source == "mcp":
         return False
-    if originator == "codex_exec" and thread_source != "user":
-        return False
-    return True
+    return not (originator == "codex_exec" and thread_source != "user")
 
 
 def _is_user_claude_session(path: Path) -> bool:
@@ -61,8 +58,7 @@ def _pending_claude(path: Path) -> bool:
 
 
 def discover_pending(*, idle_seconds: int = 300) -> list[tuple[str, Path]]:
-    from chronovisor.hosts import claude_code_record
-    from chronovisor.hosts import codex_record
+    from chronovisor.hosts import claude_code_record, codex_record
 
     cutoff = time.time() - max(0, idle_seconds)
     candidates: list[tuple[str, Path]] = []
@@ -120,7 +116,7 @@ def run_sweeper(*, limit: int = 4, idle_seconds: int = 300, write: bool = True) 
         failures = {}
         state["failures"] = failures
     results: list[dict[str, Any]] = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for host, path in pending:
         if len(results) >= max(0, limit):
             break
@@ -153,7 +149,7 @@ def run_sweeper(*, limit: int = 4, idle_seconds: int = 300, write: bool = True) 
             })
     payload = {
         "status": "ok" if not any(r.get("status") == "error" for r in results) else "attention",
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "pending": len(pending),
         "processed": len(results),
         "results": results,

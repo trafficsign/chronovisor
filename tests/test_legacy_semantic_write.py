@@ -9,7 +9,6 @@ from chronovisor.raw.legacy_semantic_write import (
     block_legacy_semantic_mutation,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 

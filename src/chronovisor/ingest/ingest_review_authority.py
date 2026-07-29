@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from chronovisor.decision import decision_authority
 from chronovisor.core.canonical_json import canonical_json_sha256_stringifying_strict
+from chronovisor.decision import decision_authority
 from chronovisor.ingest.ingest_schemas import (
     INGEST_REVIEW_LIMIT_FIELDS,
     INGEST_REVIEW_SHARD_POLICY_VERSION,

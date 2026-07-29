@@ -29,18 +29,25 @@ The pipeline is:
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
-
-import json
+import contextlib
 import hashlib
+import json
 import os
 import re
 import tempfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
+from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
+from chronovisor.core.link_fix import atomic_write, protected_spans
+from chronovisor.core.runtime_config import (
+    load_decision_router_config,
+    runtime_repo_root,
+)
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -48,17 +55,12 @@ from chronovisor.decision.decision_authority import (
     semantic_verdict_authority_error,
     semantic_verdict_authority_provenance_error,
 )
-from chronovisor.core.store import find_page
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.core.link_fix import atomic_write, protected_spans
-from chronovisor.ingest.page_mutation import decision_authority_lock, chronovisor_mutation_lock
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
-from chronovisor.core.runtime_config import (
-    load_decision_router_config,
-    runtime_repo_root,
+from chronovisor.ingest.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
 )
 from chronovisor.search.semantic_hold import is_local_semantic_no_quorum
-
 
 DECISIONS_FILE = CHRONOVISOR_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
 PROJECT_ROOT = runtime_repo_root()
@@ -248,11 +250,12 @@ def gather_candidates(
         # search layer's normal fail-open ``[]``. Strict mode preserves that
         # distinction so legitimate no-candidate pages terminate as no-link,
         # while an unavailable semantic service remains retryable.
-        semantic_search_fn = lambda query, top_n: semantic_search(
-            query,
-            top_n,
-            strict=True,
-        )
+        def semantic_search_fn(query, top_n):
+            return semantic_search(
+                    query,
+                    top_n,
+                    strict=True,
+                )
 
     query = _build_query(orphan_id, store)
     if not query.strip():
@@ -676,10 +679,8 @@ def _persist_effect_artifact(path: Path, payload: Mapping[str, Any]) -> str:
             os.close(directory_fd)
     finally:
         if tmp is not None:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 tmp.unlink()
-            except FileNotFoundError:
-                pass
     return _canonical_payload_sha256(payload)
 
 
@@ -1037,7 +1038,9 @@ def _review_orphan_proposal(
         )
     if reviewer is not None:
         return reviewer(candidate)
-    from chronovisor.decision.decision_lane_prompts import build_orphan_link_review_prompt
+    from chronovisor.decision.decision_lane_prompts import (
+        build_orphan_link_review_prompt,
+    )
     from chronovisor.decision.frontier_review import run_structured_review
 
     prompt = build_orphan_link_review_prompt(candidate)
@@ -1066,9 +1069,9 @@ def run_autonomous(
 ) -> dict[str, Any]:
     """Boundedly drain orphan proposals through local + frontier review."""
     from chronovisor.ops.convergence import (
+        TERMINAL_STATUSES,
         ConvergenceStore,
         CycleBudget,
-        TERMINAL_STATUSES,
         stable_item_key,
     )
 

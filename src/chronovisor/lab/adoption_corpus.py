@@ -19,6 +19,7 @@ upgrade around an old answer.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -32,20 +33,19 @@ from typing import Any
 
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as _sha256_json,
+)
+from chronovisor.core.canonical_json import (
     canonical_json_strict as _canonical_json,
 )
-
-from chronovisor.decision.decision_schema_manifest import (
-    decision_signature_value,
-    production_decision_schemas,
-    production_schema_manifest,
-    schema_sha256,
+from chronovisor.core.runtime_config import (
+    DecisionRouterConfig,
+    load_candidate_decision_router_config,
+    load_decision_router_config,
 )
-from chronovisor.decision.decision_router import (
-    DECISION_REQUEST_FINGERPRINT_VERSION,
-    decision_context_buckets,
-    decision_request_fingerprint_sha256,
-    decision_request_context,
+from chronovisor.decision.decision_lane_contract_cases import (
+    decision_lane_contract_case_manifest,
+    decision_lane_contract_case_manifest_sha256,
+    decision_lane_contract_case_specs,
 )
 from chronovisor.decision.decision_lane_contracts import (
     LANE_CONTRACT_CASE_VERSION,
@@ -57,15 +57,21 @@ from chronovisor.decision.decision_lane_contracts import (
     lane_contract_sha256,
     model_backed_lane_names,
 )
-from chronovisor.decision.decision_lane_contract_cases import (
-    decision_lane_contract_case_manifest,
-    decision_lane_contract_case_manifest_sha256,
-    decision_lane_contract_case_specs,
+from chronovisor.decision.decision_router import (
+    DECISION_REQUEST_FINGERPRINT_VERSION,
+    decision_context_buckets,
+    decision_request_context,
+    decision_request_fingerprint_sha256,
 )
-from chronovisor.recall.content_correction import (
-    LEGACY_UNFILTERED_SIGNAL,
-    correction_signal,
-    is_non_user_transport_envelope,
+from chronovisor.decision.decision_schema_manifest import (
+    decision_signature_value,
+    production_decision_schemas,
+    production_schema_manifest,
+    schema_sha256,
+)
+from chronovisor.ingest.read_back_repair import (
+    READ_BACK_EVIDENCE_POLICY_MARKER,
+    READ_BACK_FRONTIER_SCHEMA,
 )
 from chronovisor.lab.local_model_eval import (
     MIN_ADOPTION_USABLE_CASES,
@@ -76,14 +82,10 @@ from chronovisor.lab.local_model_eval import (
     replay_semantic_effect,
 )
 from chronovisor.lab.model_lab import REPLAY_FILE
-from chronovisor.ingest.read_back_repair import (
-    READ_BACK_EVIDENCE_POLICY_MARKER,
-    READ_BACK_FRONTIER_SCHEMA,
-)
-from chronovisor.core.runtime_config import (
-    DecisionRouterConfig,
-    load_candidate_decision_router_config,
-    load_decision_router_config,
+from chronovisor.recall.content_correction import (
+    LEGACY_UNFILTERED_SIGNAL,
+    correction_signal,
+    is_non_user_transport_envelope,
 )
 
 DEFAULT_OUTPUT = REPLAY_FILE.with_name("adoption-corpus.jsonl")
@@ -1684,10 +1686,8 @@ def compile_adoption_corpus(
         }
     finally:
         if temporary:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(temporary)
-            except OSError:
-                pass
 
 
 def _parser() -> argparse.ArgumentParser:

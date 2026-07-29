@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import httpx
 import gzip
+
+import httpx
 
 from chronovisor.research.research_config import WebConfig
 from chronovisor.research.web_fetch import fetch_web

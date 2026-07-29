@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.raw import raw_replay
-from chronovisor.ops.convergence import CycleBudget
 from chronovisor.core.jobs import JobStatus
+from chronovisor.ops.convergence import CycleBudget
+from chronovisor.raw import raw_replay
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -191,7 +191,7 @@ def test_operational_hold_blocks_existing_queue_selection_until_release(
         completions_file=paths["completions"],
         max_runs=1,
         max_bytes=100,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert held["count"] == 0
@@ -213,7 +213,7 @@ def test_operational_hold_blocks_existing_queue_selection_until_release(
         max_runs=1,
         max_bytes=100,
         dry_run=True,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert released["count"] == 1
@@ -286,7 +286,7 @@ def test_operational_hold_published_after_running_marker_cancels_launch_and_resu
         completions_file=paths["completions"],
         max_runs=1,
         max_bytes=100,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert held["count"] == 0
@@ -314,7 +314,7 @@ def test_operational_hold_published_after_running_marker_cancels_launch_and_resu
         completions_file=paths["completions"],
         max_runs=1,
         max_bytes=100,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert resumed["count"] == 1
@@ -870,7 +870,7 @@ def test_failed_history_restores_attempts_and_backoff_after_queue_loss(
         claims_file=paths["claims"],
         max_runs=1,
         max_bytes=100,
-        now=datetime(2026, 7, 10, 11, 59, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 10, 11, 59, tzinfo=UTC),
         dry_run=True,
     )
     assert preview["count"] == 0
@@ -1025,7 +1025,7 @@ def test_partial_replay_is_terminal_and_does_not_repeat_successful_operations(
             )
 
     monkeypatch.setattr('chronovisor.ingest.ingest.run_ingest', fake_ingest)
-    started = datetime(2026, 7, 10, 10, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 7, 10, 10, 0, tzinfo=UTC)
 
     partial = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -1208,7 +1208,7 @@ def test_safe_replay_decision_is_not_blocked_by_confidence_metadata(
         [row],
         claims_file=tmp_path / "claims.jsonl",
         history_file=tmp_path / "history.jsonl",
-        now=datetime(2026, 7, 11, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 11, tzinfo=UTC),
         budget=None,
         retry_delay_seconds=60,
         reviewer=reviewer,
@@ -1309,7 +1309,7 @@ def test_persisted_injected_safe_replay_cannot_run_without_explicit_boundary(
         "priority": 300,
     }
     normalized = raw_replay._normalize_queue_row(
-        row, now=datetime(2026, 7, 11, tzinfo=timezone.utc)
+        row, now=datetime(2026, 7, 11, tzinfo=UTC)
     )
     assert normalized is not None
     row = normalized
@@ -1317,7 +1317,7 @@ def test_persisted_injected_safe_replay_cannot_run_without_explicit_boundary(
         [row],
         claims_file=paths["claims"],
         history_file=paths["history"],
-        now=datetime(2026, 7, 11, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 11, tzinfo=UTC),
         budget=None,
         retry_delay_seconds=60,
         reviewer=lambda *_args, **_kwargs: {
@@ -1396,7 +1396,7 @@ def test_authority_race_after_review_cannot_change_queue_state(
         [row],
         claims_file=paths["claims"],
         history_file=paths["history"],
-        now=datetime(2026, 7, 11, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 11, tzinfo=UTC),
         budget=None,
         retry_delay_seconds=60,
         reviewer=lambda *_args, **_kwargs: {
@@ -1513,7 +1513,7 @@ def test_run_pending_queue_respects_priority_run_and_byte_bounds(
     paths = _isolate_paths(tmp_path, monkeypatch)
     rows = []
     sources = ("ingest_failure", "memory_integrity_miss", "explicit_migration")
-    for index, (priority, source) in enumerate(zip((300, 200, 100), sources), start=1):
+    for index, (priority, source) in enumerate(zip((300, 200, 100), sources, strict=False), start=1):
         raw = paths["raw"] / f"2026070{index}-{priority}.md"
         raw.write_text("xx", encoding="utf-8")
         rows.append(
@@ -1561,10 +1561,9 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor.search import index_store
-    from chronovisor.ingest import ingest
-    from chronovisor.ingest import page_mutation
     from chronovisor.core import store
+    from chronovisor.ingest import ingest, page_mutation
+    from chronovisor.search import index_store
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     pages = tmp_path / "pages"
@@ -1738,7 +1737,7 @@ def test_raw_larger_than_byte_budget_retries_then_quarantines(
     raw_replay.build_queue(path=paths["queue"], include_auto_signals=False)
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
-    started = datetime(2026, 7, 10, 10, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 7, 10, 10, 0, tzinfo=UTC)
 
     preview = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -1799,7 +1798,7 @@ def test_three_failed_attempts_end_in_quarantine(tmp_path: Path, monkeypatch) ->
         'chronovisor.ingest.ingest.run_ingest',
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
-    started = datetime(2026, 7, 10, 10, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 7, 10, 10, 0, tzinfo=UTC)
 
     first = raw_replay.run_pending_queue(
         path=paths["queue"],

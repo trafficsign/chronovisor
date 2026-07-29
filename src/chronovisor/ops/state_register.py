@@ -51,9 +51,7 @@ def _looks_like_placeholder_state_candidate(meta: dict[str, Any]) -> bool:
         return True
     if title in _PLACEHOLDER_IDS and summary in _PLACEHOLDER_VALUES:
         return True
-    if summary == "body" and title in _PLACEHOLDER_IDS:
-        return True
-    return False
+    return bool(summary == "body" and title in _PLACEHOLDER_IDS)
 
 
 def _is_state_candidate(meta: dict[str, Any]) -> bool:

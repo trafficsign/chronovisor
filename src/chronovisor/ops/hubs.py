@@ -11,9 +11,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.search.index_store import get_store
 from chronovisor.core.store import PAGES_DIR
 from chronovisor.ingest.page_write import apply_page_writes, prepare_page_write
+from chronovisor.search.index_store import get_store
 
 HUBS_DIR = PAGES_DIR / "hubs"
 

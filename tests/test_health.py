@@ -5,9 +5,8 @@ import os
 import time
 from pathlib import Path
 
-from chronovisor.ops import autonomy
-from chronovisor.ops import health
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
+from chronovisor.ops import autonomy, health
 
 
 def test_semantic_index_kpi_is_inactive_when_rollout_is_off(

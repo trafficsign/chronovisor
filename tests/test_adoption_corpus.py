@@ -5,8 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.lab import adoption_corpus
+from chronovisor.core.runtime_config import DecisionRouterConfig
+from chronovisor.decision.decision_router import decision_context_buckets
+from chronovisor.decision.decision_schema_manifest import (
+    production_decision_schemas,
+    production_schema_manifest,
+)
 from chronovisor.ingest import read_back_repair
+from chronovisor.lab import adoption_corpus
 from chronovisor.lab.adoption_corpus import (
     CONTRACT_SOURCE,
     HISTORICAL_SOURCE,
@@ -15,8 +21,8 @@ from chronovisor.lab.adoption_corpus import (
     LEGACY_UNFILTERED_EXCLUSION,
     LOCAL_CONSENSUS_SELF_LABEL_EXCLUSION,
     MIN_CURRENT_READ_BACK_POLICY_CASES,
-    NONPRODUCTION_SCHEMA_EXCLUSION,
     NON_USER_TRANSPORT_EXCLUSION,
+    NONPRODUCTION_SCHEMA_EXCLUSION,
     READ_BACK_EVIDENCE_POLICY_MARKER,
     RETIRED_CORRECTION_SIGNAL_EXCLUSION,
     STALE_ENTITY_PROPOSAL_EXCLUSION,
@@ -27,18 +33,12 @@ from chronovisor.lab.adoption_corpus import (
     compile_adoption_corpus,
     contract_candidates,
 )
-from chronovisor.decision.decision_router import decision_context_buckets
-from chronovisor.decision.decision_schema_manifest import (
-    production_decision_schemas,
-    production_schema_manifest,
-)
 from chronovisor.lab.local_model_eval import (
-    ReplayInputError,
     STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION,
+    ReplayInputError,
     inspect_replays,
     load_replay_corpus,
 )
-from chronovisor.core.runtime_config import DecisionRouterConfig
 
 
 def _expected(schema: dict[str, object]) -> dict[str, object]:

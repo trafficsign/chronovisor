@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -90,7 +90,7 @@ def test_orchestrator_result_builders_preserve_public_envelopes(tmp_path: Path) 
 
 
 def test_frontier_attempt_outcome_is_deterministic() -> None:
-    now = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 
     retry = self_heal._frontier_attempt_outcome(
         {"decision": "needs_retry"},

@@ -50,8 +50,8 @@ def apply_prepared_operations(
     updated: list[str] = []
     from chronovisor.ingest.page_mutation import (
         PageMutationError,
-        enforce_correction_constraints,
         chronovisor_mutation_lock,
+        enforce_correction_constraints,
     )
 
     # The same lock is used by the autonomous correction lane. This prevents

@@ -2,24 +2,22 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from chronovisor.classification.classification import ClassificationError
-from chronovisor.lab.classification_fixture_set import (
-    DISABLED_BASELINE_SCHEMA,
-    sha256_bytes,
-    sha256_file,
-)
 from chronovisor.core.durable_state import (
     DurableStateError,
     read_sealed_json,
     write_sealed_json,
+)
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.lab.classification_fixture_set import (
+    DISABLED_BASELINE_SCHEMA,
+    sha256_bytes,
+    sha256_file,
 )
 
 CANDIDATE_BUNDLE_SCHEMA = "chronovisor.classification-candidate-bundle.v1"

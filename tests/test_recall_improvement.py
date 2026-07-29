@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.recall import recall_improvement
-from chronovisor.ops.convergence import CycleBudget
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.ops.convergence import CycleBudget
+from chronovisor.recall import recall_improvement
 from chronovisor.recall.recall_improvement import PolicyProposal
 from chronovisor.recall.recall_runtime import RecallPolicy
 

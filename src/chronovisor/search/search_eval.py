@@ -8,6 +8,7 @@ ranking quality of search candidates.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -15,20 +16,27 @@ import os
 import statistics
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from chronovisor.decision import decision_authority
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
+from chronovisor.core.runtime_config import (
+    load_negative_feedback_config,
+    load_reranker_config,
+    load_search_embedding_config,
+    runtime_repo_root,
+)
+from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
+from chronovisor.decision import decision_authority
+from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.recall.feedback_ledger import active_feedback_rows
 from chronovisor.recall.negative_feedback import apply_penalties, penalties_for_query
-from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.search.pipeline import (
     PipelineConfig,
     PipelineDependencies,
@@ -38,15 +46,8 @@ from chronovisor.search.pipeline import (
     run_search_pipeline,
 )
 from chronovisor.search.reranker import rerank_results
-from chronovisor.core.runtime_config import (
-    load_negative_feedback_config,
-    load_reranker_config,
-    load_search_embedding_config,
-    runtime_repo_root,
-)
 from chronovisor.search.search import (
     ACTIVE_SEARCH_POLICY_FILE,
-    DEFAULT_FUSION_WEIGHTS as DEFAULT_FUSION_WEIGHTS,
     apply_filters,
     context_seed_results,
     fuse_results,
@@ -57,6 +58,9 @@ from chronovisor.search.search import (
     semantic_verify,
     usage_prior_results,
 )
+from chronovisor.search.search import (
+    DEFAULT_FUSION_WEIGHTS as DEFAULT_FUSION_WEIGHTS,
+)
 from chronovisor.search.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -66,7 +70,6 @@ from chronovisor.search.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 
 REPO_ROOT = runtime_repo_root()
 RECALL_DIR = CHRONOVISOR_ROOT / "recall"
@@ -203,10 +206,8 @@ def _atomic_write_text(path: Path, payload: str) -> None:
             pass
     finally:
         if tmp is not None:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 tmp.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -527,9 +528,7 @@ def build_candidates(
 
         expected: tuple[str, ...] = ()
         negative: tuple[str, ...] = ()
-        if kind in {"missed", "missed_candidate"}:
-            expected = raw_expected or raw_injected
-        elif kind == "injection_used":
+        if kind in {"missed", "missed_candidate"} or kind == "injection_used":
             expected = raw_expected or raw_injected
         elif kind == "page_ignored":
             # Page-scoped feedback must never turn every injected page into a

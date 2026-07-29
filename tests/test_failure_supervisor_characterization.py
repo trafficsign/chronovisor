@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.decision import failure_supervisor
 from chronovisor.core import store
+from chronovisor.decision import failure_supervisor
 
 
 def test_corrupt_failure_state_fails_closed_to_empty_snapshot(

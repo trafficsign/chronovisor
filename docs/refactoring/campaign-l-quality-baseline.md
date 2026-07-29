@@ -11,12 +11,21 @@ Ruff 0.16 is a locked development dependency. The repository-wide command is:
 uv run ruff check src scripts tests
 ```
 
-The first enforced rules are `E9`, `F63`, `F7`, and `F82`: syntax errors,
-invalid control-flow constructs, and undefined names. The broader default rule
-set currently reports 1,797 findings, so enabling it wholesale would either
-mix a large formatting campaign into this refactor or require opaque global
-ignores. Additional rule families should be enabled only with their debt fixed
-in the same change.
+The enforced profile is `E4`, `E7`, `E9`, `F`, `I`, `UP`, `B`, `SIM`, and
+`RUF100`. All findings in that profile were repaired across `src`, `scripts`,
+and `tests`; no existing violation is grandfathered.
+
+Four semantic-style rules remain explicitly excluded:
+
+- `UP042`: converting `(str, Enum)` classes to `StrEnum` can change serialized
+  and string representations;
+- `SIM105`: explicit exception suppression often documents operational intent;
+- `SIM115`: atomic temporary-file lifetimes intentionally outlive a lexical
+  context manager;
+- `SIM117`: nested resource acquisition makes lock and release order explicit.
+
+The ignores are exact rule codes rather than file-wide or category-wide
+waivers, and `RUF100` rejects stale suppressions.
 
 The fatal baseline immediately found and fixed two real defects:
 
@@ -55,5 +64,6 @@ from silently regressing.
 
 - Ruff: all configured checks passed.
 - Mypy: no issues in 17 source files.
-- Quality, Ollama identity, raw replay, and module-layout tests: 48 passed.
+- The configured Ruff profile covers 319 Python files with zero findings.
+- Public module imports and durable legacy-path migrations remain executable.
 - Compileall and whitespace checks: passed.

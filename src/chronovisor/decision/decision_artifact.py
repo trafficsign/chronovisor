@@ -8,12 +8,14 @@ all subsequent executions replay that artifact without loading a model.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from chronovisor.core.durable_state import (
     DEFAULT_MIN_FREE_BYTES,
@@ -24,7 +26,6 @@ from chronovisor.core.durable_state import (
     verify_sealed_object,
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-
 
 EXECUTION_FINGERPRINT_VERSION = 1
 DECISION_ARTIFACT_SCHEMA = "chronovisor.canonical-decision-artifact.v1"
@@ -179,10 +180,8 @@ class DecisionArtifactStore:
                     stream.write(encoded)
                     stream.flush()
                     os.fsync(stream.fileno())
-                try:
+                with contextlib.suppress(FileExistsError):
                     os.link(temporary, path)
-                except FileExistsError:
-                    pass
                 directory_fd = os.open(path.parent, os.O_RDONLY)
                 try:
                     os.fsync(directory_fd)
@@ -190,10 +189,8 @@ class DecisionArtifactStore:
                     os.close(directory_fd)
             finally:
                 if temporary is not None:
-                    try:
+                    with contextlib.suppress(FileNotFoundError):
                         temporary.unlink()
-                    except FileNotFoundError:
-                        pass
             published = self.load(fingerprint)
             if published is None or canonical_bytes(published) != encoded:
                 raise DecisionArtifactError("decision artifact read-back mismatch")

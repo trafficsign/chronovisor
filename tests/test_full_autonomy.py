@@ -4,24 +4,13 @@ import hashlib
 import importlib.util
 import json
 from collections import namedtuple
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.ops import burn_monitor
-from chronovisor.decision import decision_authority
-from chronovisor.decision import decision_router
 from chronovisor.core import durable_state
-from chronovisor.decision import failure_supervisor
-from chronovisor.ops import health
-from chronovisor.raw import raw_replay
-from chronovisor.ingest import read_back_repair
-from chronovisor.ops import repair_runbook
-from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
-from chronovisor.decision.decision_artifact import DecisionArtifactStore, execution_fingerprint
-from chronovisor.decision.decision_router import DecisionRouter
 from chronovisor.core.durable_state import (
     DiskPressureError,
     StateSealError,
@@ -29,10 +18,18 @@ from chronovisor.core.durable_state import (
     read_sealed_json,
     write_sealed_json,
 )
-from chronovisor.decision.frontier_guard import EvidenceValidationError, RepairIncidentEvidence
+from chronovisor.core.runtime_config import DecisionRouterConfig
+from chronovisor.decision import decision_authority, decision_router, failure_supervisor
+from chronovisor.decision.decision_artifact import (
+    DecisionArtifactStore,
+    execution_fingerprint,
+)
+from chronovisor.decision.decision_router import DecisionRouter
+from chronovisor.decision.frontier_guard import (
+    EvidenceValidationError,
+    RepairIncidentEvidence,
+)
 from chronovisor.decision.local_structured import ChatRequest
-from chronovisor.librarian.managed_hold import ManagedHoldStore
-from chronovisor.recall.provisional_recall import search_provisional
 from chronovisor.decision.quality_guard import (
     QualityThresholds,
     append_immutable_anchor,
@@ -41,13 +38,20 @@ from chronovisor.decision.quality_guard import (
     register_last_known_good,
     run_quality_probe,
 )
+from chronovisor.ingest import read_back_repair
+from chronovisor.ingest.read_back_integrity import (
+    scan_jsonl_prefix,
+    verify_prior_prefix,
+)
+from chronovisor.librarian.managed_hold import ManagedHoldStore
+from chronovisor.ops import burn_monitor, health, repair_runbook
+from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
+from chronovisor.raw import raw_replay
 from chronovisor.raw.raw_semantic_projection import (
     PROJECTION_CHILD_SCHEMA,
     PROJECTION_POLICY_VERSION,
 )
-from chronovisor.ingest.read_back_integrity import scan_jsonl_prefix, verify_prior_prefix
-from chronovisor.core.runtime_config import DecisionRouterConfig
-
+from chronovisor.recall.provisional_recall import search_provisional
 
 SCHEMA = {
     "type": "object",
@@ -291,7 +295,7 @@ def test_router_does_not_replay_unfingerprintable_custom_agreement_callable(
 
 def test_deadman_heartbeat_detects_stale_and_bad_seal(tmp_path: Path) -> None:
     path = tmp_path / "heartbeat.json"
-    base = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 15, tzinfo=UTC)
     write_heartbeat(
         path,
         role="main_watchdog",
@@ -379,7 +383,7 @@ def test_observer_threshold_debounces_dedupes_and_honors_cooldown(
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    base = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 15, tzinfo=UTC)
     main_path = tmp_path / "autonomy" / "watchdog-heartbeat.json"
     write_heartbeat(
         main_path,
@@ -592,7 +596,7 @@ def test_last_known_good_publication_is_bound_to_measured_authority(
 
 def test_managed_hold_exact_lease_crash_recovery_and_aba(tmp_path: Path) -> None:
     store = ManagedHoldStore(tmp_path / "state.json")
-    base = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 15, tzinfo=UTC)
     entry = store.register(
         hold_sha256="a" * 64,
         authority_epoch="b" * 64,
@@ -631,7 +635,7 @@ def test_managed_hold_exact_lease_crash_recovery_and_aba(tmp_path: Path) -> None
 
 def test_managed_hold_reheld_uses_backoff_and_lane_rate_limit(tmp_path: Path) -> None:
     store = ManagedHoldStore(tmp_path / "state.json")
-    base = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 15, tzinfo=UTC)
     first = store.register(
         hold_sha256="a" * 64,
         authority_epoch="b" * 64,

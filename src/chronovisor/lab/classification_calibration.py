@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from chronovisor.core.jsonl import write_jsonl as _write_jsonl
-
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import argparse
 import hashlib
 import json
@@ -13,11 +9,13 @@ import math
 import shutil
 from collections import Counter
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import CALIBRATION_SCHEMA, load_udc_package
+from chronovisor.classification.classification import (
+    CALIBRATION_SCHEMA,
+    load_udc_package,
+)
 from chronovisor.classification.classification_engine import (
     ENGINE_VERSION,
     adopt_calibration,
@@ -27,10 +25,12 @@ from chronovisor.classification.classification_engine import (
     lock_fixtures,
     run_consensus_batches,
 )
-from chronovisor.lab.classification_fixture_set import load_fixture_set
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.jsonl import write_jsonl as _write_jsonl
 from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.lab.classification_fixture_set import load_fixture_set
 
 DISTRIBUTION_SCHEMA = "chronovisor.classification-distribution.v1"
 DEV_AUDIT_SCHEMA = "chronovisor.classification-dev-audit.v1"

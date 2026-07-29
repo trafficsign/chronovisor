@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
-from datetime import datetime, timezone
+import json
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from chronovisor.core.link_fix import atomic_write
-
 
 _RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")
 
@@ -169,7 +169,7 @@ def update_state(
     transcript_slice: TranscriptSliceProtocol,
     status: str,
 ) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     files = state.setdefault("files", {})
     entry: dict[str, Any] = {
         "last_saved_line": transcript_slice.scanned_until_line,

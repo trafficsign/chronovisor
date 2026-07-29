@@ -19,29 +19,28 @@ import time
 import tomllib
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
-from chronovisor.recall.recall_runtime import (
-    RECALL_CONFIG_FILE,
-    RECALL_DIR,
-    RECALL_PULL_LOG_FILE,
-    RECALL_LOG_FILE,
-    append_feedback,
-    find_recall_log,
-    recall_log_snapshot,
-    stable_prompt_hash,
-)
 from chronovisor.core.runtime_config import (
     DEFAULT_HEAVY_KEEP_ALIVE,
     DEFAULT_HEAVY_NUM_CTX,
     active_config_file,
     normalize_audit_config,
 )
+from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
+from chronovisor.recall.recall_runtime import (
+    RECALL_CONFIG_FILE,
+    RECALL_DIR,
+    RECALL_LOG_FILE,
+    RECALL_PULL_LOG_FILE,
+    append_feedback,
+    find_recall_log,
+    recall_log_snapshot,
+    stable_prompt_hash,
+)
 from chronovisor.search.search import search as run_search
-
 
 DEFAULT_STATE_FILE = RECALL_DIR / "audit-state.json"
 DEFAULT_LOCK_FILE = RECALL_DIR / "audit.lock"
@@ -447,7 +446,7 @@ def acquire_audit_lock(path: Path) -> Any | None:
         json.dumps(
             {
                 "pid": os.getpid(),
-                "started_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": datetime.now(UTC).isoformat(),
             },
             ensure_ascii=False,
         )
@@ -669,7 +668,7 @@ def update_state(state: dict[str, Any], *, session_file: Path, scanned_until_lin
     files[str(session_file)] = {
         "last_audited_line": scanned_until_line,
         "status": status,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -782,7 +781,7 @@ def _normalized_time(value: object) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _next_recall_time(session_id: str, after: datetime | None) -> datetime | None:

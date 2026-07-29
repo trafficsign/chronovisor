@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 def normalize_ingest_frontier_review(
@@ -19,7 +20,9 @@ def normalize_ingest_frontier_review(
             "summary": "local consensus reviewer returned a non-object payload",
             "failed_operations_disposition": "retry_required",
         }
-    from chronovisor.decision.decision_schema_manifest import canonical_ingest_repair_arrays
+    from chronovisor.decision.decision_schema_manifest import (
+        canonical_ingest_repair_arrays,
+    )
 
     value = canonical_ingest_repair_arrays(value)
     raw_decision = value.get("decision")
@@ -87,17 +90,20 @@ def normalize_ingest_frontier_review(
             ),
             "failed_operations_disposition": "retry_required",
         }
-    if has_failed_operations and decision in {"apply_available", "confirmed_noop"}:
-        if disposition != "confirmed_unnecessary":
-            return {
-                **value,
-                "decision": "retry",
-                "summary": (
-                    "partial local generation remains replayable until local consensus "
-                    "explicitly confirms failed operations are unnecessary"
-                ),
-                "failed_operations_disposition": "retry_required",
-            }
+    if (
+        has_failed_operations
+        and decision in {"apply_available", "confirmed_noop"}
+        and disposition != "confirmed_unnecessary"
+    ):
+        return {
+            **value,
+            "decision": "retry",
+            "summary": (
+                "partial local generation remains replayable until local consensus "
+                "explicitly confirms failed operations are unnecessary"
+            ),
+            "failed_operations_disposition": "retry_required",
+        }
     if not has_failed_operations and not repair_requested:
         disposition = "none"
     if decision == "apply_available" and not has_available_operations:

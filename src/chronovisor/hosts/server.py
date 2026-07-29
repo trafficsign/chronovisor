@@ -1,5 +1,6 @@
 """Chronovisor MCP Server."""
 
+import contextlib
 import json
 import os
 import re
@@ -15,10 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
 from chronovisor.core.frontmatter import patch as _frontmatter_patch
-from chronovisor.search.index_store import get_store
 from chronovisor.core.link_fix import extract_targets as _extract_targets
-from chronovisor.raw.save_transaction import parse_save_transaction_receipt
-from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     LOG_FILE,
@@ -27,6 +25,9 @@ from chronovisor.core.store import (
     find_page,
     init_chronovisor,
 )
+from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
+from chronovisor.raw.save_transaction import parse_save_transaction_receipt
+from chronovisor.search.index_store import get_store
 
 mcp = FastMCP(
     "chronovisor",
@@ -240,7 +241,7 @@ def chronovisor_log(limit: int = 20) -> str:
 
     lines = LOG_FILE.read_text().splitlines()
     # Skip frontmatter and header
-    log_lines = [l for l in lines if l.startswith("- ")]
+    log_lines = [line for line in lines if line.startswith("- ")]
     recent = log_lines[-limit:] if len(log_lines) > limit else log_lines
 
     return json.dumps({"entries": recent}, ensure_ascii=False)
@@ -295,10 +296,7 @@ def chronovisor_status() -> str:
         from chronovisor.core.ollama import _client
 
         resp = _client().get("/api/tags", timeout=3)
-        if resp.status_code == 200:
-            ollama_status = "running"
-        else:
-            ollama_status = "error"
+        ollama_status = "running" if resp.status_code == 200 else "error"
     except Exception:
         ollama_status = "stopped"
 
@@ -648,9 +646,7 @@ def chronovisor_search(
     decision_id: str | None = None,
 ) -> str:
     """Search wiki pages with BM25 + semantic search and link expansion.
-
     Returns direct_hits (pages matching query) and expanded_hits (linked pages).
-
     Args:
         query: Search query string
         depth: How many link-hops to follow (0=direct only, 1=one hop, default 1)
@@ -672,9 +668,9 @@ def chronovisor_search(
         session_id: Optional session id for recall pull feedback.
         decision_id: Optional automatic-Recall decision id for turn tracing.
     """
+    from chronovisor.core.runtime_config import load_reranker_config
     from chronovisor.search.pipeline import apply_rerank_stage
     from chronovisor.search.reranker import rerank_results
-    from chronovisor.core.runtime_config import load_reranker_config
     from chronovisor.search.search import last_search_trace
     from chronovisor.search.search import search as run_search
 
@@ -700,7 +696,9 @@ def chronovisor_search(
     except PageRegistryError:
         registry_state = PageRegistry.empty()
     try:
-        from chronovisor.classification.classification import classification_authority_status
+        from chronovisor.classification.classification import (
+            classification_authority_status,
+        )
 
         classification_authority = classification_authority_status(
             CHRONOVISOR_ROOT
@@ -1158,10 +1156,8 @@ def _publish_raw(content: str, *, prefix: str = "", topic_slug: str = "") -> Pat
             )
         return published
     finally:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             staging.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def _publish_raw_idempotent(
@@ -1191,7 +1187,7 @@ def _publish_raw_idempotent(
             os.fsync(handle.fileno())
         try:
             _link_raw_no_replace(staging, target)
-        except FileExistsError:
+        except FileExistsError as exc:
             try:
                 existing = target.read_text(encoding="utf-8")
             except (OSError, UnicodeError) as exc:
@@ -1209,15 +1205,13 @@ def _publish_raw_idempotent(
                 ):
                     raise RuntimeError(
                         "idempotency key collision with different or corrupt raw content"
-                    )
+                    ) from exc
             return target, True
         _fsync_directory(RAW_DIR)
         return target, False
     finally:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             staging.unlink()
-        except FileNotFoundError:
-            pass
 
 
 @mcp.tool()
@@ -1739,10 +1733,8 @@ def main():
     # Warm both the page index and the BM25 cache on startup so the first
     # tool call doesn't pay the full-scan cost. Failures are non-fatal —
     # lazy refresh inside each tool will catch up on the next call.
-    try:
+    with contextlib.suppress(Exception):
         get_store().refresh()
-    except Exception:
-        pass
     try:
         from chronovisor.search.search import get_bm25
 

@@ -18,8 +18,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.search.search_types import ScoredPage, tokenize
 from chronovisor.core.store import PAGES_DIR, page_id_from_path
+from chronovisor.search.search_types import ScoredPage, tokenize
 
 SCHEMA_VERSION = 5
 ACTIVE_STATUS = "active"

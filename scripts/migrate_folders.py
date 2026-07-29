@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Diagnose legacy folder assignments; semantic moves are disabled."""
 
-import re
 import json
+import re
 import shutil
-from pathlib import Path
 
 # Add src to path
 import sys
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from chronovisor.core.store import PAGES_DIR, all_pages
 from chronovisor.core.ollama import generate
+from chronovisor.core.store import PAGES_DIR, all_pages
 from chronovisor.raw.legacy_semantic_write import block_legacy_semantic_mutation
 
 BATCH_SIZE = 100
@@ -62,7 +63,7 @@ def classify_batch(batch: list[dict]) -> list[dict]:
     # Extract JSON from output
     json_match = re.search(r"\[.*\]", output, re.DOTALL)
     if not json_match:
-        print(f"  WARNING: Could not parse JSON from output")
+        print("  WARNING: Could not parse JSON from output")
         print(f"  Raw output: {output[:500]}")
         return []
 
@@ -125,7 +126,7 @@ def main():
         folder = a.get("folder", "misc")
         folders[folder] = folders.get(folder, 0) + 1
 
-    print(f"\n=== Classification Summary ===")
+    print("\n=== Classification Summary ===")
     for folder, count in sorted(folders.items(), key=lambda x: -x[1]):
         print(f"  {folder}/: {count} pages")
     print(f"  Total: {sum(folders.values())} pages")
@@ -146,9 +147,8 @@ def main():
             page_id = a.get("page_id", "")
             folder = a.get("folder", "misc")
             path = path_lookup.get(page_id)
-            if path and path.exists():
-                if move_page(path, folder):
-                    moved += 1
+            if path and path.exists() and move_page(path, folder):
+                moved += 1
         print(f"Moved {moved} pages.")
 
 

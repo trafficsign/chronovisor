@@ -9,10 +9,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from chronovisor.ops import dashboard
-from chronovisor.ingest import orchestrator
-from chronovisor.ops import runtime_status
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
+from chronovisor.ingest import orchestrator
+from chronovisor.ops import dashboard, runtime_status
 
 
 def test_mark_batch_activity_requires_a_running_batch_job() -> None:
@@ -825,8 +824,8 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
 
-    from chronovisor.ingest import orchestrator
     from chronovisor.core import store
+    from chronovisor.ingest import orchestrator
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "RAW_DIR", raw_dir)
@@ -1585,8 +1584,8 @@ def test_build_snapshot_surfaces_frontier_human_required(
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
 
-    from chronovisor.ingest import orchestrator
     from chronovisor.core import store
+    from chronovisor.ingest import orchestrator
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "RAW_DIR", raw_dir)

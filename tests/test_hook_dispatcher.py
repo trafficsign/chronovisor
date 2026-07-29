@@ -6,10 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.ops import background_jobs
 from chronovisor.hosts import hook_dispatcher
-from chronovisor.recall import recall_breaker
-from chronovisor.recall import recall_runtime
+from chronovisor.ops import background_jobs
+from chronovisor.recall import recall_breaker, recall_runtime
 
 
 @pytest.fixture(autouse=True)

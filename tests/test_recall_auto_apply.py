@@ -9,15 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.ingest import page_mutation
-from chronovisor.recall import recall_auto_apply
-from chronovisor.recall import recall_hints
 from chronovisor.core import store
-from chronovisor.ops.convergence import CycleBudget
-from chronovisor.decision.decision_router import canonical_agreement_signature
-from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.decision.decision_router import canonical_agreement_signature
+from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.ingest import page_mutation
+from chronovisor.ops.convergence import CycleBudget
+from chronovisor.recall import recall_auto_apply, recall_hints
 from chronovisor.recall.recall_runtime import RecallPolicy, collect_context
 
 
@@ -1293,8 +1292,7 @@ def test_query_hint_accepts_system_pages(tmp_path, monkeypatch) -> None:
 
 
 def test_auditor_recording_invokes_auto_apply(tmp_path, monkeypatch, capsys) -> None:
-    from chronovisor.recall import recall_auditor
-    from chronovisor.recall import recall_runtime
+    from chronovisor.recall import recall_auditor, recall_runtime
 
     pages_root = tmp_path / "wiki"
     _page(pages_root, "claude-code-recall-hook-implementation")

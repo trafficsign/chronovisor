@@ -21,7 +21,6 @@ from chronovisor.core.ollama import embed as _ollama_embed
 from chronovisor.core.runtime_config import load_embedding_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
-
 # Cache layout: ~/.chronovisor/.index/embeddings/<first-2-hex>/<hash>.json
 # Sharding by the first byte keeps any single directory below ~few-hundred
 # files even after thousands of unique texts, which matters because some
@@ -31,7 +30,7 @@ _CACHE_DIR = CHRONOVISOR_ROOT / ".index" / "embeddings"
 
 def _cache_path(text: str, model: str | None = None) -> Path:
     model_id = model or load_embedding_config().model
-    h = hashlib.sha256(f"{model_id}|{text}".encode("utf-8")).hexdigest()
+    h = hashlib.sha256(f"{model_id}|{text}".encode()).hexdigest()
     return _CACHE_DIR / h[:2] / f"{h}.json"
 
 
@@ -97,7 +96,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         # trivial. Ollama batches efficiently enough that a few duplicates
         # in one call are cheaper than the bookkeeping to dedupe-then-fanout.
         vecs = _ollama_embed([t for _, t in pending])
-        for (i, t), v in zip(pending, vecs):
+        for (i, t), v in zip(pending, vecs, strict=False):
             cached[i] = v
             _write_cached(_cache_path(t), v)
 
@@ -112,7 +111,7 @@ def cosine(a: list[float], b: list[float]) -> float:
     dot = 0.0
     na = 0.0
     nb = 0.0
-    for x, y in zip(a, b):
+    for x, y in zip(a, b, strict=False):
         dot += x * y
         na += x * x
         nb += y * y
@@ -139,7 +138,7 @@ def most_similar(
     qv = embed_text(query)
     cvs = embed_texts(candidates)
     best: tuple[str, float] | None = None
-    for cand, cv in zip(candidates, cvs):
+    for cand, cv in zip(candidates, cvs, strict=False):
         sim = cosine(qv, cv)
         if best is None or sim > best[1]:
             best = (cand, sim)

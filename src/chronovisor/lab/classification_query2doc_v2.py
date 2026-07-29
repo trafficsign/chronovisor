@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import argparse
 import hashlib
 import json
@@ -11,19 +9,14 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import ollama
-from chronovisor.classification.classification import ClassificationError, default_udc_package
-from chronovisor.classification.classification_engine import CandidateIndex
-from chronovisor.lab.classification_fixture_set import sha256_file
-from chronovisor.lab.classification_profile_pilot import (
-    notation_matches,
-    query_profile_index,
+from chronovisor.classification.classification import (
+    ClassificationError,
+    default_udc_package,
 )
-from chronovisor.lab.classification_query2doc_pilot import candidate_blind_page
+from chronovisor.classification.classification_engine import CandidateIndex
 from chronovisor.classification.classification_query_worker_v2 import (
     HEADING_ROLES,
     QUERY_POLICY,
@@ -31,14 +24,22 @@ from chronovisor.classification.classification_query_worker_v2 import (
     QUERY_SCHEMA,
     WORKER_SCHEMA,
 )
+from chronovisor.core import ollama
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.lab.classification_fixture_set import sha256_file
+from chronovisor.lab.classification_profile_pilot import (
+    notation_matches,
+    query_profile_index,
+)
+from chronovisor.lab.classification_query2doc_pilot import candidate_blind_page
 from chronovisor.research.research_scheduler import (
     research_lane,
     run_cancellable_command,
     sync_pending,
 )
-from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 ARTIFACT_SCHEMA = "chronovisor.classification-query2doc-artifact.v2"
 DEV_EVALUATION_SCHEMA = "chronovisor.classification-query2doc-v2-dev-evaluation.v1"

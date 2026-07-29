@@ -6,8 +6,9 @@ import argparse
 import json
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
@@ -93,7 +94,8 @@ def run_verification() -> dict[str, Any]:
         checks.append(_check("provider-outage-fallback", "uv run pytest -q tests/test_web_provider.py", outage))
 
         def redirect_and_oversize() -> None:
-            resolver = lambda _host, _port: ["93.184.216.34"]
+            def resolver(_host, _port):
+                return ["93.184.216.34"]
 
             def redirect_handler(request: httpx.Request) -> httpx.Response:
                 return httpx.Response(302, headers={"location": "/loop"}, request=request)

@@ -9,8 +9,6 @@ never a per-page prediction.
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import hashlib
 import json
 import sys
@@ -18,7 +16,6 @@ import uuid
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
-from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -32,13 +29,14 @@ from chronovisor.core.durable_state import (
     write_sealed_json,
 )
 from chronovisor.core.page_identity import new_page_uid, normalize_page_uid
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.ingest.page_registry import PageRegistry
+from chronovisor.ingest.uid_link_index import build_uid_link_index
 from chronovisor.research.research_scheduler import (
     research_lane,
     run_cancellable_command,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.ingest.uid_link_index import build_uid_link_index
 
 COLLECTION_REGISTRY_SCHEMA = "chronovisor.collection-registry.v1"
 COLLECTION_RECEIPT_SCHEMA = "chronovisor.collection-lifecycle-receipt.v1"
@@ -1407,8 +1405,7 @@ def review_collection_queue(
 ) -> dict[str, Any]:
     """Review queued anomalies locally without assignment mutation."""
 
-    from chronovisor.core import frontmatter
-    from chronovisor.core import ollama
+    from chronovisor.core import frontmatter, ollama
     from chronovisor.librarian.collection_anomaly_worker import (
         PROMPT_SHA256,
         WORKER_SCHEMA,
@@ -2182,8 +2179,8 @@ def ensure_autonomous_crosswalk(
 ) -> dict[str, Any]:
     """Create sealed runtime crosswalks for newly discovered collections."""
 
-    from chronovisor.core import ollama
     from chronovisor.classification.classification_anchor import UNRESOLVED_ANCHOR_ID
+    from chronovisor.core import ollama
 
     registry_state = dict(state or CollectionRegistry(root).load())
     base = load_crosswalk()

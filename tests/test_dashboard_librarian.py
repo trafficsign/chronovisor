@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.ops import dashboard
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.librarian.librarian import run_legacy_udc_shadow, run_shadow
 from chronovisor.librarian.librarian_status import (
@@ -14,6 +13,7 @@ from chronovisor.librarian.librarian_status import (
     _library_evidence_status,
     _soak_status,
 )
+from chronovisor.ops import dashboard
 
 
 def test_dashboard_static_contract_exposes_librarian_progress() -> None:

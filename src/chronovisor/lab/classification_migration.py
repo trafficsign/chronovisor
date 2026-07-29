@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
-
 import argparse
-import hashlib
 import json
 import tempfile
 import time
@@ -15,7 +12,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import frontmatter
 from chronovisor.classification.classification import (
     classification_authority_status,
     classification_frontmatter,
@@ -29,18 +25,22 @@ from chronovisor.classification.classification_engine import (
     record_from_consensus,
     run_consensus_batches,
 )
-from chronovisor.classification.classification_resolver import production_candidate_index
+from chronovisor.classification.classification_resolver import (
+    production_candidate_index,
+)
+from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.librarian.librarian import _append_event, _now_iso
+from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
+from chronovisor.ingest.page_registry import PageRegistry
+from chronovisor.librarian.librarian import _append_event, _now_iso
 from chronovisor.ops.migration_snapshot import (
     create_incremental_restore_point,
     create_restore_point,
     restore_drill,
 )
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
-from chronovisor.ingest.page_registry import PageRegistry
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 CLASSIFICATION_INDEX_SCHEMA = "chronovisor.classification-index.v1"
 MIGRATION_RECEIPT_SCHEMA = "chronovisor.classification-migration-receipt.v1"
@@ -485,7 +485,7 @@ def migrate_active_metadata(
         from chronovisor.search.semantic_jobs import enqueue_rebuild
 
         semantic_rebuild_job_id = enqueue_rebuild()
-    except Exception as exc:  # noqa: BLE001 - async rebuild failure is receipted
+    except Exception as exc:
         semantic_rebuild_job_id = None
         semantic_rebuild_error = f"{type(exc).__name__}: {exc}"
     else:

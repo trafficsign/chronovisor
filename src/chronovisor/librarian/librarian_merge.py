@@ -13,27 +13,27 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import frontmatter
 from chronovisor.classification.classification import strongest_sensitivity
-from chronovisor.recall.duplicate_review import build_duplicate_review_queue
+from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.librarian.librarian import _append_event, _now_iso
 from chronovisor.core.link_fix import (
     WIKI_LINK_RE,
     normalize_link_target,
     position_in_spans,
     protected_spans,
 )
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
+from chronovisor.ingest.uid_link_index import build_uid_link_index
+from chronovisor.librarian.librarian import _append_event, _now_iso
 from chronovisor.librarian.merge_ledger import build_source_inventory
 from chronovisor.librarian.merge_transaction import apply_merge_plan, prepare_merge_plan
 from chronovisor.ops.migration_snapshot import (
     create_incremental_restore_point,
     restore_drill,
 )
-from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.raw.raw_store import RawStore
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.ingest.uid_link_index import build_uid_link_index
+from chronovisor.recall.duplicate_review import build_duplicate_review_queue
 
 DISPOSITION_SCHEMA = "chronovisor.librarian-dispositions.v1"
 PILOT_SCHEMA = "chronovisor.librarian-pilot.v1"

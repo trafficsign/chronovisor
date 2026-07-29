@@ -17,10 +17,6 @@ from chronovisor.classification.classification import (
     classification_authority_status,
     load_udc_package,
 )
-from chronovisor.lab.classification_artifact_runner import (
-    run_artifact_only_sweep,
-    storage_manifest,
-)
 from chronovisor.classification.classification_bundle import (
     activate_decision_only,
     create_adopted_manifest,
@@ -38,6 +34,40 @@ from chronovisor.classification.classification_engine import (
 from chronovisor.classification.classification_evidence_judgment import (
     ARMS,
     paired_rows,
+)
+from chronovisor.classification.classification_library_sources import (
+    _atomic_write,
+    czech_authority_contract,
+    czech_bibliography_contract,
+    download_file,
+    fetch_oai_window,
+    ndl_bibliography_contract,
+    ndlsh_contract,
+    normalize_ndl_oai_records,
+    normalize_ndlsh_rdf,
+    parse_marcxml_records,
+    stable_sample,
+    validate_ndl_provider,
+    write_external_package,
+)
+from chronovisor.classification.classification_resource_burn import run_resource_burn
+from chronovisor.classification.classification_retention import (
+    build_audit_retention_manifest,
+    required_update_validation,
+)
+from chronovisor.core.durable_state import (
+    DurableStateError,
+    read_sealed_json,
+    write_sealed_json,
+)
+from chronovisor.core.runtime_config import (
+    load_decision_router_config,
+    load_embedding_config,
+)
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.lab.classification_artifact_runner import (
+    run_artifact_only_sweep,
+    storage_manifest,
 )
 from chronovisor.lab.classification_fixture_set import (
     _write_jsonl,
@@ -72,37 +102,7 @@ from chronovisor.lab.classification_library_evidence import (
     embed_texts_cancellable,
     external_test_cases,
 )
-from chronovisor.classification.classification_library_sources import (
-    _atomic_write,
-    czech_authority_contract,
-    czech_bibliography_contract,
-    download_file,
-    fetch_oai_window,
-    ndl_bibliography_contract,
-    ndlsh_contract,
-    normalize_ndl_oai_records,
-    normalize_ndlsh_rdf,
-    parse_marcxml_records,
-    stable_sample,
-    validate_ndl_provider,
-    write_external_package,
-)
 from chronovisor.lab.classification_pilot import AuthoritativeCandidateIndex
-from chronovisor.classification.classification_resource_burn import run_resource_burn
-from chronovisor.classification.classification_retention import (
-    build_audit_retention_manifest,
-    required_update_validation,
-)
-from chronovisor.core.durable_state import (
-    DurableStateError,
-    read_sealed_json,
-    write_sealed_json,
-)
-from chronovisor.core.runtime_config import (
-    load_decision_router_config,
-    load_embedding_config,
-)
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 PILOT_STATE_SCHEMA = "chronovisor.classification-library-pilot-state.v1"
 FIXTURE_EPOCH = "epoch-3-library-evidence-v1"

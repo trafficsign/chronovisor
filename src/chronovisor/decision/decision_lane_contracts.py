@@ -15,15 +15,13 @@ cycle.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as _sha256_json,
-    canonical_json_strict as _canonical_json,
 )
-
 
 # Registry/artifact identity.  This is deliberately not rendered into every
 # model request: a change in one lane must not perturb sampling in 18 unrelated

@@ -14,7 +14,6 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-
 AUTHORITY_VERSION = 1
 INJECTED_REVIEWER_SOURCE = "injected_reviewer_boundary"
 ADOPTED_LOCAL_SOURCE = "adopted_local_consensus"
@@ -44,6 +43,7 @@ def current_semantic_authority(
         }, None
 
     try:
+        from chronovisor.core.runtime_config import load_decision_router_config
         from chronovisor.decision.decision_lane_contract_cases import (
             decision_lane_contract_case_manifest_sha256,
         )
@@ -56,7 +56,6 @@ def current_semantic_authority(
             QUORUM_SAFETY_POLICY_VERSION,
             resolve_router_policy,
         )
-        from chronovisor.core.runtime_config import load_decision_router_config
 
         policy, mode, policy_error = resolve_decision_policy(lane)
         if policy is None or policy_error is not None or mode != "enabled":
@@ -239,7 +238,9 @@ def _canonical_action_proof_error(
         return "decision verdict canonical schema is missing"
     try:
         from chronovisor.decision.decision_router import canonical_agreement_signature
-        from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+        from chronovisor.decision.decision_schema_manifest import (
+            production_decision_schemas,
+        )
 
         schema = production_decision_schemas().get(schema_name)
     except Exception as exc:

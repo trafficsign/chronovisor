@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_iso_seconds as _now
-
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -12,17 +11,17 @@ import os
 import re
 import tempfile
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.durable_state import exclusive_text_file_lock
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_seconds as _now
 from chronovisor.decision.decision_schema_manifest import (
     decision_signature_value,
     default_decision_value,
 )
-from chronovisor.core.durable_state import exclusive_text_file_lock
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 LAB_DIR = CHRONOVISOR_ROOT / "runtime" / "model-lab"
 POLICY_FILE = LAB_DIR / "active-policy.json"
@@ -68,10 +67,8 @@ def _atomic_json(path: Path, value: Any) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
 
 
 def _append_jsonl(path: Path, value: dict[str, Any]) -> None:

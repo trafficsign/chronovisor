@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from chronovisor.decision import decision_authority
 from chronovisor.core.jobs import JobStatus
+from chronovisor.decision import decision_authority
 
 
 def _runtime():
@@ -56,17 +57,21 @@ _now = _runtime_call("_now")
 _refresh_ingest_derived_artifacts = _runtime_call("_refresh_ingest_derived_artifacts")
 
 from chronovisor.ingest.ingest import (  # noqa: E402
+    _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION,
     IngestApplyError,
     PreparedIngestOperation,
-    _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION,
     _IngestReviewShardContinuation,
 )
-from chronovisor.ingest.ingest_review_plan import (
+from chronovisor.ingest.ingest_review_plan import (  # noqa: E402
     IngestReviewShardCapacityError,
+)
+from chronovisor.ingest.ingest_review_plan import (  # noqa: E402
     IngestReviewShardPlan as _IngestReviewShardPlan,
+)
+from chronovisor.ingest.ingest_review_plan import (  # noqa: E402
     IngestReviewShardPlanState as _IngestReviewShardPlanState,
 )
-from chronovisor.ingest.ingest_schemas import (
+from chronovisor.ingest.ingest_schemas import (  # noqa: E402
     INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
     INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION,
 )
@@ -728,15 +733,16 @@ def load_pretriage_ingest_shard_continuation(
                 )
         if marker is None:
             return None
-        if marker.get("state") == "available":
-            if consume_error := _consume_ingest_review_continuation_marker(
+        if marker.get("state") == "available" and (
+            consume_error := _consume_ingest_review_continuation_marker(
                 source_key,
                 marker,
-            ):
-                raise IngestApplyError(
-                    "pre-triage zero-approval continuation marker was not claimed: "
-                    + consume_error
-                )
+            )
+        ):
+            raise IngestApplyError(
+                "pre-triage zero-approval continuation marker was not claimed: "
+                + consume_error
+            )
     return _IngestReviewShardContinuation(
         proposal=proposal,
         planned=tuple(planned),
@@ -767,8 +773,8 @@ def complete_pretriage_terminal_recovery(
     )
 
     from chronovisor.ingest.page_mutation import (
-        decision_authority_lock,
         chronovisor_mutation_lock,
+        decision_authority_lock,
     )
 
     # Match the normal effect lock order.  The authority lease prevents a

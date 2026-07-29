@@ -16,7 +16,6 @@ lint が検出した broken_link について、以下を試行:
 
 import argparse
 import difflib
-import json
 import os
 import re
 import sys
@@ -24,9 +23,11 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from chronovisor.core.store import PAGES_DIR, CHRONOVISOR_ROOT  # noqa: E402
-from chronovisor.ops.lint import check  # noqa: E402
-from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
+import contextlib
+
+from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR
+from chronovisor.ops.lint import check
+from chronovisor.raw.legacy_semantic_write import (
     block_legacy_semantic_mutation,
 )
 
@@ -103,10 +104,8 @@ def atomic_write(path: Path, content: str) -> None:
         tmp.close()
         os.replace(tmp_path, path)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 

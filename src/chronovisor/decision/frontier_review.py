@@ -15,22 +15,25 @@ import tempfile
 import time
 import uuid
 from collections import Counter
-from contextlib import ExitStack, contextmanager
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager, suppress
+from dataclasses import dataclass, replace
 from datetime import datetime
 from html import unescape
-from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import urlparse
 
-from chronovisor.ops.convergence import (
-    HUMAN_REQUIRED_FAILURE_CLASSES as CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES,
-    is_human_required_failure,
-)
-from chronovisor.ops import runtime_status
-from chronovisor.search import semantic_hold
 from chronovisor.core.runtime_config import uvx_runtime_command
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.ops import runtime_status
+from chronovisor.ops.convergence import (
+    HUMAN_REQUIRED_FAILURE_CLASSES as CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES,
+)
+from chronovisor.ops.convergence import (
+    is_human_required_failure,
+)
+from chronovisor.search import semantic_hold
 
 FRONTIER_ACTIVITY_DIR = CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active"
 STRUCTURED_REVIEW_HOLD_CACHE_ROOT: Path | None = None
@@ -1333,10 +1336,8 @@ def _frontier_activity(
         elapsed = round(max(0.0, time.monotonic() - started), 3)
         outcome = str(record.get("outcome") or "completed")
         if path is not None:
-            try:
+            with suppress(Exception):
                 path.unlink(missing_ok=True)
-            except Exception:
-                pass
         event_level = (
             "error"
             if outcome == "error"
@@ -1410,10 +1411,15 @@ def _spawn_guarded_process(
         raise
     try:
         stdout, stderr = process.communicate(input=input_text, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         process.kill()
         stdout, stderr = process.communicate()
-        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
+        raise subprocess.TimeoutExpired(
+            cmd,
+            timeout,
+            output=stdout,
+            stderr=stderr,
+        ) from exc
     return subprocess.CompletedProcess(
         cmd,
         process.returncode,
@@ -1870,10 +1876,8 @@ def run_structured_review(
                 )
                 is None
             ):
-                try:
+                with suppress(OSError, TypeError, ValueError):
                     lease.store(result)
-                except (OSError, TypeError, ValueError):
-                    pass
                 post_store_error = authority_guard_error("during")
                 if post_store_error is not None:
                     return authority_failure(post_store_error)
@@ -2521,6 +2525,7 @@ def run_frontier_review(
     :class:`RepairIncidentEvidence` capability.  Admission, single-flight,
     cooldown and the daily budget are durable across processes.
     """
+    from chronovisor.decision.decision_policy import resolve_decision_policy
     from chronovisor.decision.frontier_guard import (
         EvidenceValidationError,
         FrontierGuard,
@@ -2528,7 +2533,6 @@ def run_frontier_review(
         PermitDenied,
         RepairIncidentEvidence,
     )
-    from chronovisor.decision.decision_policy import resolve_decision_policy
 
     repair_policy, repair_mode, repair_policy_error = resolve_decision_policy(
         "system_code_repair"

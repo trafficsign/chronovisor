@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from chronovisor.decision import decision_authority
 from chronovisor.core.canonical_json import canonical_json_sha256_stringifying_strict
+from chronovisor.decision import decision_authority
 from chronovisor.ingest.ingest_review_plan import (
     IngestReviewBudgetExhausted,
     IngestReviewShard,

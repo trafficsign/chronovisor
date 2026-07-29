@@ -6,12 +6,13 @@ import math
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any, Callable
+from typing import Any
 
 from chronovisor.core.runtime_config import RerankerConfig, load_reranker_config
-from chronovisor.search.search_types import ScoredPage
 from chronovisor.core.store import find_page
+from chronovisor.search.search_types import ScoredPage
 
 _FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n?", re.DOTALL)
 _MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
@@ -269,7 +270,7 @@ def rerank_results(
 
     original_rank = {page.page_id: rank for rank, page in enumerate(head, start=1)}
     reranked = sorted(
-        zip(head, scores),
+        zip(head, scores, strict=False),
         key=lambda item: (-float(item[1]), original_rank[item[0].page_id]),
     )
     rerank_rank = {

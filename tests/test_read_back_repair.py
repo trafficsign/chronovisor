@@ -6,18 +6,16 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from chronovisor.ingest import page_mutation
-from chronovisor.ingest import read_back_repair
-from chronovisor.recall import recall_hints
+from chronovisor.ingest import page_mutation, read_back_repair
 from chronovisor.ops.convergence import CycleBudget
+from chronovisor.recall import recall_hints
 
-
-NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -89,7 +87,9 @@ def _local_consensus_proof(agreement: str) -> dict:
 
 def _authority_bound_review(authority: dict, *, decision: str = "approved") -> dict:
     from chronovisor.decision.decision_router import canonical_agreement_signature
-    from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+    from chronovisor.decision.decision_schema_manifest import (
+        production_decision_schemas,
+    )
 
     review = {
         "decision": decision,

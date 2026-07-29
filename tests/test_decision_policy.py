@@ -6,9 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.decision import decision_policy
-from chronovisor.decision import decision_router
-from chronovisor.decision import frontier_review
+from chronovisor.decision import decision_policy, decision_router, frontier_review
 from chronovisor.decision.decision_policy import (
     DECISION_POLICIES,
     decision_policy_snapshot,
@@ -17,7 +15,6 @@ from chronovisor.decision.decision_policy import (
 from chronovisor.decision.decision_router import DecisionRouterResult
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from tests.semantic_hold_support import semantic_authority
-
 
 SCHEMA = frontier_review.FRONTIER_DECISION_SCHEMA
 
@@ -189,7 +186,7 @@ def test_enabled_lane_can_return_only_adopted_consensus(
     assert result["decision"] == "approved"
     assert result["decision_policy"]["router_policy"]["source"] == "adopted_artifact"
     cache_root = isolate_structured_review_runtime.cache_root
-    assert frontier_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT == cache_root
+    assert cache_root == frontier_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT
     assert isolate_structured_review_runtime.cache_roots == [cache_root.resolve()]
     assert list((cache_root / "locks").glob("*.lock"))
 

@@ -7,9 +7,9 @@ adds direct coverage for the tag taxonomy rules introduced in plan-4.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -50,9 +50,9 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     from chronovisor.core import store
     from chronovisor.ingest import ingest
-    from chronovisor.search import index_store
-    from chronovisor.ops import lint
     from chronovisor.librarian import tags as tags_mod
+    from chronovisor.ops import lint
+    from chronovisor.search import index_store
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
@@ -1219,8 +1219,8 @@ class TestPageNormalizeIdentityReceipt:
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor.ops import page_normalize
         from chronovisor.core.frontmatter import parse
+        from chronovisor.ops import page_normalize
 
         page = _seed(
             isolated_wiki,
@@ -1252,10 +1252,10 @@ class TestPageNormalizeIdentityReceipt:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor.ops import page_normalize
         from chronovisor.decision.decision_lane_prompts import (
             validate_identity_preflight_receipt,
         )
+        from chronovisor.ops import page_normalize
 
         page = _seed(
             isolated_wiki,

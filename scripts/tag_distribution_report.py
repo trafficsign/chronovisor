@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from chronovisor.librarian.tag_distribution import run_dry_run  # noqa: E402
-from chronovisor.core.store import SYSTEM_DIR  # noqa: E402
+from chronovisor.core.store import SYSTEM_DIR
+from chronovisor.librarian.tag_distribution import run_dry_run
 
 
 def main() -> int:

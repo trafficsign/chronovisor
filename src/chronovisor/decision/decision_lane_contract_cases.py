@@ -15,19 +15,19 @@ and invalidates stale adoption evidence before another model call is allowed.
 from __future__ import annotations
 
 import hashlib
-import json
 from collections import Counter
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from collections.abc import Callable, Mapping
 from typing import Any
 
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as _sha256_json,
+)
+from chronovisor.core.canonical_json import (
     canonical_json_strict as _canonical_json,
 )
-
 from chronovisor.decision.decision_lane_prompts import (
     INGEST_PROPOSAL_SCHEMA_VERSION,
     build_autonomy_duplicate_review_prompt,
@@ -42,7 +42,6 @@ from chronovisor.decision.decision_lane_prompts import (
     build_search_self_tune_prompt,
     validate_identity_preflight_receipt,
 )
-
 
 CASES_PER_MODEL_BACKED_LANE = 5
 LANE_CONTRACT_CASE_ID_VERSION = 26
@@ -122,8 +121,8 @@ def _make_case(
         decision_signature_value,
         production_decision_schemas,
     )
-    from chronovisor.lab.local_model_eval import replay_semantic_effect
     from chronovisor.decision.local_structured import validate_json
+    from chronovisor.lab.local_model_eval import replay_semantic_effect
 
     schema = production_decision_schemas()[schema_name]
     issues = validate_json(expected, schema)
@@ -493,8 +492,8 @@ def _classification_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _content_review_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.recall.content_correction import _frontier_prompt
     from chronovisor.ingest.page_mutation import ExactReplacement, PreparedPageMutation
+    from chronovisor.recall.content_correction import _frontier_prompt
 
     check_names = (
         "user_correction_supported",
@@ -1363,7 +1362,10 @@ def _tag_repair_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _local_repair_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.decision.local_repair import LOCAL_REPAIR_SYSTEM_PROMPT, build_prompt
+    from chronovisor.decision.local_repair import (
+        LOCAL_REPAIR_SYSTEM_PROMPT,
+        build_prompt,
+    )
 
     definitions = [
         (
@@ -2551,7 +2553,9 @@ def decision_lane_contract_case_manifest() -> dict[str, Any]:
         DECISION_REQUEST_FINGERPRINT_VERSION,
         decision_request_fingerprint_sha256,
     )
-    from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+    from chronovisor.decision.decision_schema_manifest import (
+        production_decision_schemas,
+    )
 
     if LANE_CONTRACT_CASE_ID_VERSION != LANE_CONTRACT_CASE_VERSION:
         raise ValueError("lane contract case id version drifted from case policy")

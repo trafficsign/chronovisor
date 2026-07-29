@@ -7,17 +7,16 @@ import heapq
 import json
 import re
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.search.index_store import get_store
 from chronovisor.search.search import _iter_all_embeddings
-from chronovisor.core.store import CHRONOVISOR_ROOT
-
 
 REVIEW_QUEUE = CHRONOVISOR_ROOT / "review" / "duplicate-candidates.jsonl"
 

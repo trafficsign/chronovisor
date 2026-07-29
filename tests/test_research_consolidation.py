@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 from chronovisor.research.research_config import ResearchConfig
-from chronovisor.research.research_consolidation import ALLOWED_OPERATIONS, run_consolidation
+from chronovisor.research.research_consolidation import (
+    ALLOWED_OPERATIONS,
+    run_consolidation,
+)
 from chronovisor.research.research_store import ResearchStore
 
 
@@ -63,8 +66,7 @@ def test_receipt_gated_proposal_only_and_latest_wins(tmp_path: Path, monkeypatch
 
 
 def test_failure_does_not_advance_cursor(tmp_path: Path, monkeypatch) -> None:
-    from chronovisor.research import research_consolidation
-    from chronovisor.research import research_store
+    from chronovisor.research import research_consolidation, research_store
 
     monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runs")

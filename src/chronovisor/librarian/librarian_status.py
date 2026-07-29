@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import iso_seconds as _iso
-
 import hashlib
 import json
 from collections import Counter
@@ -13,8 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
-from chronovisor.librarian.merge_ledger import MergeLedger
+from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
+from chronovisor.librarian.merge_ledger import MergeLedger
 
 SNAPSHOT_SCHEMA = "chronovisor.librarian-status.v1"
 STATE_SCHEMA = "chronovisor.librarian-state.v1"

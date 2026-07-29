@@ -15,12 +15,12 @@ import json
 import os
 import shutil
 import tempfile
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, suppress
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 
 from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
-
 
 SEAL_FIELD = "seal_sha256"
 DEFAULT_MIN_FREE_BYTES = 16 * 1024 * 1024
@@ -157,10 +157,8 @@ def atomic_write_bytes(
             raise DurableStateError(f"durable read-back mismatch: {path}")
     finally:
         if temporary is not None:
-            try:
+            with suppress(FileNotFoundError):
                 temporary.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def write_sealed_json(

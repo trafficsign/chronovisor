@@ -12,11 +12,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.search.index_store import get_store
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.recall.recall_log_schema import canonicalize_page_ids, page_ids_from_record
-from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.recall.recall_log_schema import (
+    canonicalize_page_ids,
+    page_ids_from_record,
+)
+from chronovisor.recall.recall_runtime_paths import RECALL_DIR
+from chronovisor.search.index_store import get_store
 
 RETENTION_FILE = RECALL_DIR / "retention.json"
 RETENTION_SCORE_CACHE_FILE = (
@@ -255,7 +258,7 @@ def _retention_scores(path: Path) -> dict[str, float]:
         return {}
     key = (str(path), stat.st_mtime_ns, stat.st_size)
     with _RETENTION_CACHE_LOCK:
-        if _RETENTION_CACHE_KEY == key:
+        if key == _RETENTION_CACHE_KEY:
             return _RETENTION_CACHE_SCORES
         persisted = _read_retention_score_cache(key, path=path)
         if persisted is not None:

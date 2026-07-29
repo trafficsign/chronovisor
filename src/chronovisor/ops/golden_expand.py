@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.search.index_store import get_store
 from chronovisor.recall.recall_runtime_paths import RECALL_DIR
+from chronovisor.search.index_store import get_store
 from chronovisor.search.search_eval import assign_split, language_bucket, query_kind
 
 GOLDEN_FILE = RECALL_DIR / "search-golden.jsonl"

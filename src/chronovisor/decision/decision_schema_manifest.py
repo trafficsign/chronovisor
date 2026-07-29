@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
@@ -222,22 +221,22 @@ def production_decision_schemas() -> dict[str, Mapping[str, Any]]:
     schema here before a replacement model fleet can pass the adoption gate.
     """
 
+    from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
+    from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
+    from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+    from chronovisor.ingest.read_back_repair import READ_BACK_FRONTIER_SCHEMA
     from chronovisor.ops.autonomy import (
         DUPLICATE_FRONTIER_SCHEMA,
         RETENTION_FRONTIER_SCHEMA,
     )
+    from chronovisor.ops.lint import SAFE_FIX_REVIEW_SCHEMA
+    from chronovisor.ops.lint_repair import TAG_REPAIR_SCHEMA
+    from chronovisor.ops.orphan_link import ORPHAN_FRONTIER_SCHEMA
+    from chronovisor.raw.raw_replay import RAW_REPLAY_RECONCILIATION_SCHEMA
     from chronovisor.recall.content_correction import (
         FRONTIER_CLASSIFICATION_SCHEMA,
         FRONTIER_REVIEW_SCHEMA,
     )
-    from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
-    from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
-    from chronovisor.ops.lint import SAFE_FIX_REVIEW_SCHEMA
-    from chronovisor.ops.lint_repair import TAG_REPAIR_SCHEMA
-    from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
-    from chronovisor.ops.orphan_link import ORPHAN_FRONTIER_SCHEMA
-    from chronovisor.raw.raw_replay import RAW_REPLAY_RECONCILIATION_SCHEMA
-    from chronovisor.ingest.read_back_repair import READ_BACK_FRONTIER_SCHEMA
     from chronovisor.search.search_eval import FRONTIER_LABEL_SCHEMA
 
     return {

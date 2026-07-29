@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import threading
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field
 from queue import Empty, Queue
 from typing import Any, Protocol
 
+from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.research.research_config import ResearchConfig, load_research_config
 from chronovisor.research.research_scheduler import (
     ResearchLease,
@@ -31,7 +33,6 @@ from chronovisor.research.research_types import (
     StopReason,
     parse_action,
 )
-from chronovisor.core.runtime_config import load_decision_router_config
 
 
 @dataclass
@@ -371,13 +372,11 @@ def run_research(
             )
             prefetch_queue.put(execute_tool(action, tool_context), block=False)
         except Exception as exc:
-            try:
+            with contextlib.suppress(Exception):
                 prefetch_queue.put(
                     {"status": "error", "error": f"{exc.__class__.__name__}: {exc}"},
                     block=False,
                 )
-            except Exception:
-                pass
 
     prefetch_consumed = False
 

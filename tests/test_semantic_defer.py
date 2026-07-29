@@ -14,10 +14,9 @@ def semantic_defer_wiki(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, Path]:
+    from chronovisor.core import runtime_config, store
     from chronovisor.decision import decision_router
-    from chronovisor.core import runtime_config
     from chronovisor.ops import runtime_status
-    from chronovisor.core import store
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
@@ -364,8 +363,7 @@ def test_authority_change_releases_only_a_valid_adopted_artifact(
     error: str | None,
     artifact_sha256: str | None,
 ) -> None:
-    from chronovisor.decision import decision_router
-    from chronovisor.decision import failure_supervisor
+    from chronovisor.decision import decision_router, failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "validated-authority.md"
@@ -614,8 +612,8 @@ def test_in_flight_operational_worker_observes_semantic_defer_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.decision import failure_supervisor
-    from chronovisor.ops import self_heal
     from chronovisor.decision.local_repair import LocalRepairDecision
+    from chronovisor.ops import self_heal
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "in-flight-upgrade.md"

@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_text as _sha256_text
-
 import fcntl
-import hashlib
 import json
 import os
 import re
-from datetime import datetime, timezone
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from chronovisor.classification.classification import strongest_sensitivity
+from chronovisor.core.hashutil import sha256_text as _sha256_text
 
 LEDGER_SCHEMA = "chronovisor.merge-ledger.v1"
 RECEIPT_SCHEMA = "chronovisor.merge-receipt.v1"
@@ -32,7 +31,7 @@ class MergeCoverageError(ValueError):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 
@@ -46,9 +45,7 @@ def split_source_spans(text: str) -> list[dict[str, Any]]:
         if not value:
             continue
         stripped = value.strip()
-        if not stripped:
-            kind = "boilerplate"
-        elif stripped == "---" or stripped.startswith(("title:", "updated:", "uid:")):
+        if not stripped or stripped == "---" or stripped.startswith(("title:", "updated:", "uid:")):
             kind = "boilerplate"
         else:
             kind = "claim"

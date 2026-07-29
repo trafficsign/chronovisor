@@ -178,11 +178,9 @@ def prepare_operations(
     read_only: bool = False,
 ) -> tuple[list[PreparedIngestOperation], dict[str, int]]:
     """Resolve local proposals into exact page preimages and postimages.
-
     This stage is read-only with respect to Wiki pages.  Ollama triage and
     generation are proposals only; the returned byte-exact plan is what the
     frontier model reviews before :func:`_apply_prepared_operations` may run.
-
     Fail-closed: any unrecoverable problem raises :class:`IngestApplyError`.
     The caller marks the job FAILED without invoking ``on_complete``.
 
@@ -202,6 +200,8 @@ def prepare_operations(
     """
     from chronovisor.core.frontmatter import (
         parse as _frontmatter_parse,
+    )
+    from chronovisor.core.frontmatter import (
         patch as _frontmatter_patch,
     )
 

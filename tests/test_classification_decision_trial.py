@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from chronovisor.lab.classification_decision_trial import (
-    MINIMUM_CORRECT,
-    decision_gate_passed,
-    score_decision,
-)
 from chronovisor.classification.classification_decision_worker import (
     DECISION_SCHEMA,
     HOLD,
     validate_decision,
+)
+from chronovisor.lab.classification_decision_trial import (
+    MINIMUM_CORRECT,
+    decision_gate_passed,
+    score_decision,
 )
 
 

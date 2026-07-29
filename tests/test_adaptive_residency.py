@@ -9,14 +9,16 @@ from typing import Any
 import pytest
 
 from chronovisor.core import ollama
-from chronovisor.decision.decision_router import DecisionRouter, decision_context_buckets
+from chronovisor.core.runtime_config import DecisionRouterConfig, IngestConfig
+from chronovisor.decision.decision_router import (
+    DecisionRouter,
+    decision_context_buckets,
+)
 from chronovisor.decision.local_structured import (
     MAX_REPAIR_TURNS,
     ChatRequest,
     required_structured_context_tokens,
 )
-from chronovisor.core.runtime_config import DecisionRouterConfig, IngestConfig
-
 
 PRIMARY = "primary:test"
 CHALLENGER = "challenger:test"
@@ -658,7 +660,7 @@ def test_required_context_counts_japanese_and_full_repair_budget() -> None:
         system=system,
         **limits,
     )
-    assert with_system - with_prompt == len(f"{system}\n\n".encode("utf-8"))
+    assert with_system - with_prompt == len(f"{system}\n\n".encode())
 
     with_schema = required_structured_context_tokens(
         japanese_prompt,

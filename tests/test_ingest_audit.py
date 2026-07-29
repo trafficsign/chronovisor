@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from chronovisor.core.runtime_config import IngestAuditConfig
 from chronovisor.ingest.ingest_audit import (
     decide_ingest_audit,
     record_frontier_audit_outcome,
 )
-from chronovisor.core.runtime_config import IngestAuditConfig
 
 
 def _decision(

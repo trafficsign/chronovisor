@@ -9,25 +9,23 @@ as the durable identity.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256
-
-from chronovisor.core.hashutil import sha256_file as _sha256_path
-
 import fcntl
 import hashlib
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import zstandard as zstd
 
+from chronovisor.core.hashutil import sha256_bytes as _sha256
+from chronovisor.core.hashutil import sha256_file as _sha256_path
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-
 
 COMMIT_SCHEMA = "chronovisor.raw-segment-commit.v1"
 MANIFEST_SCHEMA = "chronovisor.raw-segment-manifest.v1"
@@ -72,7 +70,7 @@ class RawSegmentCommit:
     part: int
 
     @classmethod
-    def from_dict(cls, value: object) -> "RawSegmentCommit":
+    def from_dict(cls, value: object) -> RawSegmentCommit:
         if not isinstance(value, dict):
             raise RawSegmentCorrupt("segment commit is not an object")
         try:

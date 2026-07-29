@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from chronovisor.decision import decision_authority
-from chronovisor.ops import runtime_status
 from chronovisor.ingest.ingest_review_plan import (
     IngestReviewBudgetExhausted,
     IngestReviewShardCapacityError,
+)
+from chronovisor.ingest.ingest_review_plan import (
     IngestReviewShardPlan as _IngestReviewShardPlan,
+)
+from chronovisor.ingest.ingest_review_plan import (
     IngestReviewShardPlanState as _IngestReviewShardPlanState,
 )
 from chronovisor.ingest.ingest_schemas import (
     INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
     INGEST_REVIEW_SHARD_SCHEMA_VERSION,
 )
+from chronovisor.ops import runtime_status
 
 
 def _runtime():
@@ -245,7 +250,7 @@ def review_and_apply_ingest_operations(
     local_disposition: str = "operations_available",
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     force_frontier_review: bool = False,
-    frontier_budget: "_FrontierCallBudget | None" = None,
+    frontier_budget: _FrontierCallBudget | None = None,
     shard_continuation: _IngestReviewShardContinuation | None = None,
     allow_empty_shard_continuation: bool = False,
     continuation_reseed_from_sha256: str | None = None,

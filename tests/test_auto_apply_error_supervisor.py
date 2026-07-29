@@ -17,8 +17,8 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for path in (pages, raw, system, runtime, recall):
         path.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.ops import runtime_status
     from chronovisor.core import store
+    from chronovisor.ops import runtime_status
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)

@@ -10,10 +10,13 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.durable_state import atomic_write_bytes, canonical_bytes, read_sealed_json
+from chronovisor.core.durable_state import (
+    atomic_write_bytes,
+    canonical_bytes,
+    read_sealed_json,
+)
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.core.store import CHRONOVISOR_ROOT
-
 
 RUNBOOK_VERSION = 1
 SERVICE_LABELS = {

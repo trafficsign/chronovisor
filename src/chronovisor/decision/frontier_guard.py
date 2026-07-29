@@ -9,8 +9,6 @@ inspecting or reserving an incident never spends frontier budget.
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import ensure_utc as _utc_now
-
 import copy
 import fcntl
 import hashlib
@@ -22,15 +20,16 @@ import secrets
 import socket
 import subprocess
 import tempfile
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any
 from uuid import uuid4
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
-
+from chronovisor.core.timeutil import ensure_utc as _utc_now
 
 SCHEMA_VERSION = 1
 DEFAULT_GUARD_ROOT = CHRONOVISOR_ROOT / "runtime" / "frontier-repair"
@@ -527,7 +526,7 @@ class GuardInspection:
 
 def _timestamp(value: datetime) -> str:
     return (
-        value.astimezone(timezone.utc)
+        value.astimezone(UTC)
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
@@ -574,7 +573,7 @@ def _process_started_at(pid: object) -> str | None:
         if not value:
             return None
         started = datetime.strptime(value, "%a %b %d %H:%M:%S %Y")
-        return _timestamp(started.astimezone(timezone.utc))
+        return _timestamp(started.astimezone(UTC))
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
 
@@ -610,7 +609,7 @@ def _default_state() -> dict[str, Any]:
 class RepairPermit:
     """Capability returned by :meth:`FrontierGuard.reserve` or ``permit``."""
 
-    guard: "FrontierGuard" = field(repr=False)
+    guard: FrontierGuard = field(repr=False)
     incident_id: str
     owner: str
     evidence: RepairIncidentEvidence

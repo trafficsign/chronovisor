@@ -32,13 +32,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
+from chronovisor.raw.legacy_semantic_write import (
     block_legacy_semantic_mutation,
 )
 
 # chronovisor パッケージから既存定数を import
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from chronovisor.core.store import PAGES_DIR  # noqa: E402
+import contextlib
+
+from chronovisor.core.store import PAGES_DIR
 
 CHRONOVISOR_ROOT = Path.home() / ".chronovisor"
 BACKUPS_DIR = CHRONOVISOR_ROOT / "backups"
@@ -430,16 +432,14 @@ def atomic_write(path: Path, content: str) -> None:
         tmp.close()
         os.replace(tmp_path, path)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 
 def get_sample_pages(meta: dict, decisions: dict, n: int = 14) -> list[str]:
     """サイズ別 + decisions ありから代表サンプルを選ぶ。"""
-    with_decisions = [pid for pid in decisions.keys()]
+    with_decisions = [pid for pid in decisions]
     if not with_decisions:
         return []
 
@@ -451,7 +451,7 @@ def get_sample_pages(meta: dict, decisions: dict, n: int = 14) -> list[str]:
 
     # 小・中小・中・中大・大 から各 n_each
     L = len(sorted_by_size)
-    if L <= n:
+    if n >= L:
         return sorted_by_size
 
     indices = [

@@ -8,9 +8,9 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from chronovisor.core import ollama
 from chronovisor.classification.classification import ClassificationError
 from chronovisor.classification.classification_anchor import UNRESOLVED_ANCHOR_ID
+from chronovisor.core import ollama
 
 WORKER_SCHEMA = "chronovisor.classification-anchor-worker.v1"
 SUBJECT_SCHEMA = "chronovisor.classification-anchor-subject.v1"

@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.classification.classification import ClassificationError, UDCPackage
-from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_bytes
 from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_bytes
 
 CANDIDATE_EVAL_SCHEMA = "chronovisor.classification-candidate-eval.v1"
 PAIRED_EVAL_SCHEMA = "chronovisor.classification-paired-eval.v1"

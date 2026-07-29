@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from chronovisor.ops import background_jobs
-from chronovisor.ops import converge_worker
-from chronovisor.ops import self_heal
-from chronovisor.ops import session_sweeper
-from chronovisor.ops import sleep_cycle
+from chronovisor.ops import (
+    background_jobs,
+    converge_worker,
+    self_heal,
+    session_sweeper,
+    sleep_cycle,
+)
 
 
 def test_converge_default_is_lightweight_and_never_runs_sleep(monkeypatch) -> None:

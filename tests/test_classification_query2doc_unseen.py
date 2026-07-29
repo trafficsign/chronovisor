@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from chronovisor.classification.classification import ClassificationError
+from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.lab.classification_query2doc_unseen import (
     MANUAL_GOLD_SCHEMA,
     SAMPLE_SIZE,
@@ -14,7 +15,6 @@ from chronovisor.lab.classification_query2doc_unseen import (
     select_unseen_rows,
     unseen_gate_passed,
 )
-from chronovisor.core.durable_state import write_sealed_json
 
 
 def _write_sources(root: Path) -> None:

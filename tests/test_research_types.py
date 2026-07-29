@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from chronovisor.research.research_types import BudgetUsage, ResearchBudget, parse_action
+from chronovisor.research.research_types import (
+    BudgetUsage,
+    ResearchBudget,
+    parse_action,
+)
 
 
 def test_action_schema_rejects_unknown_fields_and_types() -> None:

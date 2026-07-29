@@ -7,8 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.librarian import collection_anomaly_worker
-from chronovisor.librarian import collection_authority
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.page_identity import new_page_uid
+from chronovisor.ingest.page_registry import PageRegistry
+from chronovisor.librarian import collection_anomaly_worker, collection_authority
 from chronovisor.librarian.collection_authority import (
     CollectionAuthorityError,
     CollectionRegistry,
@@ -21,9 +23,6 @@ from chronovisor.librarian.collection_authority import (
     load_contract,
     load_crosswalk,
 )
-from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.core.page_identity import new_page_uid
-from chronovisor.ingest.page_registry import PageRegistry
 
 
 def _page(path: Path, uid: str, *, links: tuple[str, ...] = ()) -> None:

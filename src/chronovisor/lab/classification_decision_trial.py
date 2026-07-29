@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import argparse
 import hashlib
 import json
@@ -11,11 +9,9 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import ollama
 from chronovisor.classification.classification import ClassificationError
 from chronovisor.classification.classification_decision_worker import (
     DECISION_PROMPT_SHA256,
@@ -23,17 +19,19 @@ from chronovisor.classification.classification_decision_worker import (
     HOLD,
     WORKER_SCHEMA,
 )
+from chronovisor.core import ollama
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.lab.classification_fixture_set import sha256_file
 from chronovisor.lab.classification_profile_pilot import notation_matches
 from chronovisor.lab.classification_query2doc_pilot import candidate_blind_page
-from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.research.research_scheduler import (
     research_lane,
     run_cancellable_command,
     sync_pending,
 )
-from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 PREREGISTRATION_SCHEMA = (
     "chronovisor.classification-query2doc-v2-2-decision-preregistration.v1"

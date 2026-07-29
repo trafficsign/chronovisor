@@ -8,6 +8,7 @@ after a holdout check passes and records the old artifact for rollback.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -19,8 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.decision import decision_authority
+from chronovisor.ingest.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
 from chronovisor.ops.convergence import is_human_required_result
-from chronovisor.ingest.page_mutation import decision_authority_lock, chronovisor_mutation_lock
 from chronovisor.recall.recall_eval import read_jsonl
 from chronovisor.recall.recall_runtime import (
     RECALL_FEEDBACK_FILE,
@@ -40,7 +44,6 @@ from chronovisor.search.semantic_hold import (
     is_local_semantic_no_quorum,
     persisted_semantic_no_quorum_hold,
 )
-
 
 CALIBRATION_FILE = RECALL_DIR / "calibration.json"
 CALIBRATION_HISTORY_FILE = RECALL_DIR / "calibration-history.jsonl"
@@ -84,10 +87,8 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             os.close(directory_fd)
     finally:
         if tmp is not None:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 tmp.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def _atomic_unlink(path: Path) -> None:
@@ -298,6 +299,9 @@ class CalibrationPolicy:
     read_threshold: float = 0.65
 
 
+DEFAULT_CALIBRATION_POLICY = CalibrationPolicy()
+
+
 def load_calibration(path: Path = CALIBRATION_FILE) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -330,7 +334,7 @@ def sigmoid(value: float) -> float:
 
 
 def predict(weights: list[float], bias: float, xs: list[float]) -> float:
-    return sigmoid(sum(w * x for w, x in zip(weights, xs)) + bias)
+    return sigmoid(sum(w * x for w, x in zip(weights, xs, strict=False)) + bias)
 
 
 def train_logistic(
@@ -494,7 +498,7 @@ def split_holdout(
 
 def calibrate(
     *,
-    policy: CalibrationPolicy = CalibrationPolicy(),
+    policy: CalibrationPolicy = DEFAULT_CALIBRATION_POLICY,
     log_file: Path = RECALL_LOG_FILE,
     feedback_file: Path = RECALL_FEEDBACK_FILE,
     dry_run: bool = False,
@@ -948,7 +952,9 @@ def review_calibration_with_frontier(
     timeout: int | None = None,
 ) -> dict[str, Any]:
     from chronovisor.decision import frontier_review
-    from chronovisor.decision.decision_lane_prompts import build_recall_calibration_prompt
+    from chronovisor.decision.decision_lane_prompts import (
+        build_recall_calibration_prompt,
+    )
 
     prompt = build_recall_calibration_prompt(artifact)
     repo_root = Path(__file__).resolve().parents[3]
@@ -1149,43 +1155,42 @@ def rollback_last() -> dict[str, Any]:
     # adoption/config writers first, then with other wiki artifact mutations.
     # Select history and perform the preimage CAS inside both leases so a
     # calibration applied while rollback was waiting can never be overwritten.
-    with decision_authority_lock():
-        with chronovisor_mutation_lock():
-            history = read_jsonl(CALIBRATION_HISTORY_FILE)
-            for record in reversed(history):
-                if record.get("action") != "apply":
-                    continue
-                old = record.get("old")
-                applied = record.get("new")
-                if not isinstance(old, dict) or not isinstance(applied, dict):
-                    continue
-                current = load_calibration(CALIBRATION_FILE) or {}
-                if _canonical_hash(current) != _canonical_hash(applied):
-                    return {
-                        "status": "conflict",
-                        "reason": "active calibration changed before rollback",
-                        "restored_from": record.get("ts", ""),
-                    }
-                CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
-                if old:
-                    _atomic_write_json(CALIBRATION_FILE, old)
-                else:
-                    _atomic_unlink(CALIBRATION_FILE)
-                append_jsonl(
-                    CALIBRATION_HISTORY_FILE,
-                    {
-                        "ts": datetime.now().isoformat(timespec="seconds"),
-                        "action": "rollback",
-                        "restored_from": record.get("ts", ""),
-                        "restored": old,
-                        "rolled_back_preimage_sha256": _canonical_hash(applied),
-                    },
-                )
+    with decision_authority_lock(), chronovisor_mutation_lock():
+        history = read_jsonl(CALIBRATION_HISTORY_FILE)
+        for record in reversed(history):
+            if record.get("action") != "apply":
+                continue
+            old = record.get("old")
+            applied = record.get("new")
+            if not isinstance(old, dict) or not isinstance(applied, dict):
+                continue
+            current = load_calibration(CALIBRATION_FILE) or {}
+            if _canonical_hash(current) != _canonical_hash(applied):
                 return {
-                    "status": "rolled_back",
+                    "status": "conflict",
+                    "reason": "active calibration changed before rollback",
+                    "restored_from": record.get("ts", ""),
+                }
+            CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+            if old:
+                _atomic_write_json(CALIBRATION_FILE, old)
+            else:
+                _atomic_unlink(CALIBRATION_FILE)
+            append_jsonl(
+                CALIBRATION_HISTORY_FILE,
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "action": "rollback",
                     "restored_from": record.get("ts", ""),
                     "restored": old,
-                }
+                    "rolled_back_preimage_sha256": _canonical_hash(applied),
+                },
+            )
+            return {
+                "status": "rolled_back",
+                "restored_from": record.get("ts", ""),
+                "restored": old,
+            }
     return {"status": "skipped", "reason": "no applied calibration history"}
 
 

@@ -7,8 +7,8 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-from chronovisor.core import ollama
 from chronovisor.classification.classification import ClassificationError
+from chronovisor.core import ollama
 
 SCHEMA = "chronovisor.classification-embedding-worker.v1"
 

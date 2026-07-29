@@ -1,29 +1,20 @@
 """Lint engine - detect and fix wiki quality issues."""
 
-from chronovisor.core.hashutil import sha256_text as _sha256_text
-
 import difflib
 import fcntl
 import hashlib
 import json
 import re
 import threading
-from collections.abc import Callable, Mapping
 from collections import Counter
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from chronovisor.core.canonical_json import canonical_json_permissive as _canonical_json
-from chronovisor.decision.decision_authority import (
-    compare_semantic_authority,
-    current_semantic_authority,
-    seal_semantic_artifact,
-    semantic_verdict_authority_error,
-)
-from chronovisor.core.store import SYSTEM_DIR, CHRONOVISOR_ROOT, find_page
-from chronovisor.search.index_store import get_store
+from chronovisor.core.hashutil import sha256_text as _sha256_text
 from chronovisor.core.link_fix import (
     WIKI_LINK_RE,
     atomic_write,
@@ -32,20 +23,32 @@ from chronovisor.core.link_fix import (
     position_in_spans,
     protected_spans,
 )
-from chronovisor.ingest.page_mutation import decision_authority_lock, chronovisor_mutation_lock
 from chronovisor.core.runtime_config import runtime_repo_root
-from chronovisor.search.semantic_hold import (
-    build_semantic_no_quorum_hold,
-    canonical_sha256 as semantic_hold_sha256,
-    is_local_semantic_no_quorum,
-    persisted_semantic_no_quorum_hold,
+from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
+from chronovisor.decision.decision_authority import (
+    compare_semantic_authority,
+    current_semantic_authority,
+    seal_semantic_artifact,
+    semantic_verdict_authority_error,
+)
+from chronovisor.ingest.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
 )
 from chronovisor.librarian.tags import (
     parse_tags,
     validate_axis_counts,
     validate_tag,
 )
-
+from chronovisor.search.index_store import get_store
+from chronovisor.search.semantic_hold import (
+    build_semantic_no_quorum_hold,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+)
+from chronovisor.search.semantic_hold import (
+    canonical_sha256 as semantic_hold_sha256,
+)
 
 STALE_DAYS = 90  # Pages not updated in this many days are flagged
 REPO_ROOT = runtime_repo_root()
@@ -118,7 +121,7 @@ def check() -> list[dict]:
     version = f"{store.corpus_version()}:{date.today().isoformat()}"
 
     with _CHECK_CACHE_LOCK:
-        if _CHECK_CACHE_VERSION == version and _CHECK_CACHE_RESULT is not None:
+        if version == _CHECK_CACHE_VERSION and _CHECK_CACHE_RESULT is not None:
             # Defensive copy so callers that mutate the list (e.g. filter
             # auto-fixable issues) don't poison the cache for the next call.
             return [dict(i) for i in _CHECK_CACHE_RESULT]
@@ -2179,10 +2182,11 @@ def apply_safe_fixes(
                             new_content,
                             evidence_guards=replacement_guards,
                             pre_write_validator=(
-                                lambda: _target_lookup_receipt_is_current(
+                                lambda current_target=target,
+                                expected_receipt=target_lookup_receipt: _target_lookup_receipt_is_current(
                                     store=store,
-                                    target=target,
-                                    expected_receipt=target_lookup_receipt,
+                                    target=current_target,
+                                    expected_receipt=expected_receipt,
                                 )
                             ),
                         ):
@@ -2221,6 +2225,8 @@ def apply_safe_fixes(
 
             from chronovisor.core.frontmatter import (
                 parse as _frontmatter_parse,
+            )
+            from chronovisor.core.frontmatter import (
                 patch as _frontmatter_patch,
             )
 

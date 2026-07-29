@@ -32,10 +32,7 @@ _FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
 
 
 def _is_cjk(ch: str) -> bool:
-    for lo, hi in _CJK_RANGES:
-        if lo <= ch <= hi:
-            return True
-    return False
+    return any(lo <= ch <= hi for lo, hi in _CJK_RANGES)
 
 
 def tokenize(text: str) -> list[str]:

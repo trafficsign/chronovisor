@@ -4,20 +4,21 @@ import hashlib
 import json
 import threading
 from collections import deque
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterator
+from typing import Any
 
 import httpx
 import pytest
 
 from chronovisor.core import ollama
 from chronovisor.decision.local_structured import (
+    STRUCTURED_GENERATION_POLICY_VERSION,
     ChatRequest,
     LocalConsensusAuditStore,
     LocalStructuredSession,
-    STRUCTURED_GENERATION_POLICY_VERSION,
     ValidationIssue,
     normalize_json_output,
     structured_generation_policy,
@@ -25,7 +26,6 @@ from chronovisor.decision.local_structured import (
     structured_think_mode,
     validate_json,
 )
-
 
 SCHEMA = {
     "type": "object",

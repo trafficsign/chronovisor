@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_now as _now
-
 import json
 import os
 import sqlite3
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_now as _now
 
 SEMANTIC_JOBS_DB = CHRONOVISOR_ROOT / "runtime" / "semantic-jobs.sqlite"
 

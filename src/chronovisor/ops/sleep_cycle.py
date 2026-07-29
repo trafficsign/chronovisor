@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -263,10 +263,8 @@ def _atomic_write_history(path: Path, rows: list[dict[str, Any]]) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     finally:
-        try:
+        with suppress(OSError):
             tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _append_history(row: dict[str, Any], *, max_lines: int = HISTORY_MAX_LINES) -> None:
@@ -445,10 +443,8 @@ def run_sleep_cycle(
     previous_deadline = os.environ.get("CHRONOVISOR_CYCLE_DEADLINE_MONOTONIC")
     deadline = time.monotonic() + 30 * 60
     if previous_deadline:
-        try:
+        with suppress(ValueError):
             deadline = min(deadline, float(previous_deadline))
-        except ValueError:
-            pass
     os.environ["CHRONOVISOR_CYCLE_DEADLINE_MONOTONIC"] = str(deadline)
     if dry_run:
         os.environ["CHRONOVISOR_READ_ONLY"] = "1"
@@ -483,30 +479,30 @@ def _run_sleep_cycle(
     duplicate_limit: int = 200,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    from chronovisor.search.cofire import build_cofire_graph
-    from chronovisor.recall.claims import rebuild_claim_index
+    from chronovisor.ops.autonomy import run_autonomy_cycle
+    from chronovisor.ops.convergence import ConvergenceStore, CycleBudget
     from chronovisor.ops.distill import export_distill_dataset
-    from chronovisor.recall.duplicate_review import (
-        build_duplicate_review_queue,
-        write_review_queue,
-    )
-    from chronovisor.ops.health import health_snapshot
     from chronovisor.ops.golden_expand import expand_golden_from_recall_questions
+    from chronovisor.ops.health import health_snapshot
     from chronovisor.ops.hubs import build_hub_pages
     from chronovisor.ops.memory_integrity import run_eval
-    from chronovisor.search.prefetch import build_prefetch_cache
+    from chronovisor.ops.reflection import write_reflection_page
+    from chronovisor.ops.retention import build_retention_scores
+    from chronovisor.ops.snapshot import snapshot_chronovisor
+    from chronovisor.ops.state_register import refresh_state_register
     from chronovisor.raw.raw_replay import (
         AUTO_SIGNAL_SOURCES,
         build_queue,
         run_pending_queue,
     )
-    from chronovisor.ops.reflection import write_reflection_page
-    from chronovisor.ops.retention import build_retention_scores
     from chronovisor.recall import recall_improvement
-    from chronovisor.ops.state_register import refresh_state_register
-    from chronovisor.ops.autonomy import run_autonomy_cycle
-    from chronovisor.ops.convergence import ConvergenceStore, CycleBudget
-    from chronovisor.ops.snapshot import snapshot_chronovisor
+    from chronovisor.recall.claims import rebuild_claim_index
+    from chronovisor.recall.duplicate_review import (
+        build_duplicate_review_queue,
+        write_review_queue,
+    )
+    from chronovisor.search.cofire import build_cofire_graph
+    from chronovisor.search.prefetch import build_prefetch_cache
 
     try:
         per_lane_frontier = max(

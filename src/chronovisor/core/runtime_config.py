@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import subprocess
 import tomllib
-from importlib import metadata
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 

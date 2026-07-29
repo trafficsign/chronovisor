@@ -19,16 +19,21 @@ import re
 import tempfile
 import uuid
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
 from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.librarian.tags import AXIS_LIMITS, SEED_TAGS, parse_tags, validate_axis_counts
 from chronovisor.core.store import find_page
-
+from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
+from chronovisor.librarian.tags import (
+    AXIS_LIMITS,
+    SEED_TAGS,
+    parse_tags,
+    validate_axis_counts,
+)
 
 # ---------------------------------------------------------------------------
 # Types

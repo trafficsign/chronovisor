@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_now as _now
-
+import contextlib
 import hashlib
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import zstandard
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
-from chronovisor.research.research_types import EvidenceArtifact
 from chronovisor.core.store import CHRONOVISOR_ROOT
-
-
+from chronovisor.core.timeutil import utc_now as _now
+from chronovisor.research.research_types import EvidenceArtifact
 
 
 def _iso(value: datetime | None = None) -> str:
@@ -35,10 +34,8 @@ def _atomic_bytes(path: Path, content: bytes) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(temporary)
-        except OSError:
-            pass
 
 
 class ResearchStore:
@@ -231,7 +228,7 @@ class ResearchStore:
                 size = path.stat().st_size
                 updated = datetime.fromisoformat(str(payload.get("updated_at") or ""))
                 if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
+                    updated = updated.replace(tzinfo=UTC)
             except (OSError, json.JSONDecodeError, ValueError, AttributeError):
                 continue
             records.append((path, payload, size, updated))

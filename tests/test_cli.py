@@ -6,10 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core import runtime_config, store
 from chronovisor.hosts import cli
-from chronovisor.core import runtime_config
 from chronovisor.ops import runtime_status
-from chronovisor.core import store
 from chronovisor.recall import recall_runtime
 
 

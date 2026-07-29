@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.store import CHRONOVISOR_ROOT
@@ -51,7 +52,7 @@ def enqueue_from_operations(
         page_id = str(getattr(operation, "page_id", "") or "")
         content = str(getattr(operation, "new_body", "") or "")
         for claim in _sentences(content):
-            digest = hashlib.sha256(f"{page_id}\0{claim}".encode("utf-8")).hexdigest()
+            digest = hashlib.sha256(f"{page_id}\0{claim}".encode()).hexdigest()
             candidate_id = f"freshness:{digest}"
             if candidate_id in existing:
                 continue
@@ -59,7 +60,7 @@ def enqueue_from_operations(
                 {
                     "schema_version": 1,
                     "candidate_id": candidate_id,
-                    "queued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "queued_at": datetime.now(UTC).isoformat(timespec="seconds"),
                     "page_id": page_id,
                     "claim": claim,
                     "claim_kind": "freshness-sensitive",

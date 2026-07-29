@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import date
-from typing import Any, Callable
+from typing import Any
 
 from chronovisor.core import ollama as ollama_runtime
 
@@ -41,15 +42,15 @@ _validate_generated_page_output = _runtime_call("_validate_generated_page_output
 load_ingest_config = _runtime_call("load_ingest_config")
 
 from chronovisor.ingest.ingest import (  # noqa: E402
+    _DEFAULT_GENERATE_WITH_PROGRESS,
+    _MAX_PAGE_GENERATION_REPAIR_TURNS,
+    _MAX_PAGE_GENERATION_RESPONSES,
+    _PAGE_GENERATION_CONTEXT_SAFETY_TOKENS,
     GENERATE_SYSTEM_PROMPT,
     UPDATE_SYSTEM_PROMPT,
     IngestContextCapacityError,
     IngestTriageFailure,
     _CompactUpdateContext,
-    _DEFAULT_GENERATE_WITH_PROGRESS,
-    _MAX_PAGE_GENERATION_REPAIR_TURNS,
-    _MAX_PAGE_GENERATION_RESPONSES,
-    _PAGE_GENERATION_CONTEXT_SAFETY_TOKENS,
     _PageGenerationBudget,
 )
 

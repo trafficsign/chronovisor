@@ -1,7 +1,7 @@
 """Job tracking for async operations."""
 
-import uuid
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum

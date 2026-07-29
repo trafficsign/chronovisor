@@ -8,13 +8,12 @@ explicit and recoverable across authority epochs.
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import iso_seconds as _iso
-
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from chronovisor.core.durable_state import (
     DurableStateError,
@@ -23,7 +22,7 @@ from chronovisor.core.durable_state import (
     read_sealed_json,
     write_sealed_json,
 )
-
+from chronovisor.core.timeutil import iso_seconds as _iso
 
 MANAGED_HOLD_SCHEMA_VERSION = 1
 STATES = frozenset({"active", "scheduled", "leased", "resolved", "reheld"})
@@ -37,10 +36,10 @@ class ManagedHoldError(RuntimeError):
 
 
 def _utc(value: datetime | None = None) -> datetime:
-    current = value or datetime.now(timezone.utc)
+    current = value or datetime.now(UTC)
     if current.tzinfo is None:
-        return current.replace(tzinfo=timezone.utc)
-    return current.astimezone(timezone.utc)
+        return current.replace(tzinfo=UTC)
+    return current.astimezone(UTC)
 
 
 
@@ -553,7 +552,9 @@ def sync_ingest_semantic_holds(
 ) -> dict[str, Any]:
     inventory = ingest_semantic_hold_inventory(chronovisor_root)
     try:
-        from chronovisor.decision.failure_supervisor import _current_adopted_authority_epoch
+        from chronovisor.decision.failure_supervisor import (
+            _current_adopted_authority_epoch,
+        )
 
         current_authority = _current_adopted_authority_epoch()
     except Exception:

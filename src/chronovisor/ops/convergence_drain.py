@@ -7,8 +7,6 @@ manifest.  Every later transition is constrained to that exact allowlist.
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_now as _now
-
 import fcntl
 import hashlib
 import json
@@ -19,17 +17,18 @@ import time
 import uuid
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field as dataclass_field
-from datetime import datetime, timezone
+from contextlib import contextmanager, suppress
+from dataclasses import asdict, dataclass
+from dataclasses import field as dataclass_field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import store as chronovisor_store
 from chronovisor.core.canonical_json import (
     canonical_json_bytes_stringifying as _canonical_bytes,
 )
-
-from chronovisor.core import store as chronovisor_store
+from chronovisor.core.timeutil import utc_now as _now
 from chronovisor.ops.convergence import (
     FRONTIER_STATUSES,
     LOCAL_STATUSES,
@@ -39,7 +38,6 @@ from chronovisor.ops.convergence import (
     input_fingerprint,
     stable_item_key,
 )
-
 
 SCHEMA_VERSION = 1
 ACTIVE_STATUSES = LOCAL_STATUSES | FRONTIER_STATUSES
@@ -104,7 +102,7 @@ class Inventory:
 
 
 def _iso(value: datetime | None = None) -> str:
-    return (value or _now()).astimezone(timezone.utc).isoformat(timespec="seconds")
+    return (value or _now()).astimezone(UTC).isoformat(timespec="seconds")
 
 
 def _sha256_value(value: Any) -> str:
@@ -323,8 +321,11 @@ def _decision_policy_fingerprint() -> dict[str, Any]:
 def _adoption_artifact_fingerprint() -> dict[str, Any]:
     """Bind config, lane policy, artifact bytes, and live router resolution."""
 
-    from chronovisor.decision.decision_router import _config_error, resolve_router_policy
     from chronovisor.core.runtime_config import load_decision_router_config
+    from chronovisor.decision.decision_router import (
+        _config_error,
+        resolve_router_policy,
+    )
 
     policies = _decision_policy_fingerprint()
     try:
@@ -559,10 +560,8 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         finally:
             os.close(directory_fd)
     except Exception:
-        try:
+        with suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
         raise
 
 
@@ -797,8 +796,8 @@ def _lint_inventory(
 def _orphan_inventory(
     sources: set[str],
 ) -> tuple[dict[str, set[str]], set[tuple[str, str]]]:
-    from chronovisor.ops import orphan_link
     from chronovisor.decision.decision_authority import current_semantic_authority
+    from chronovisor.ops import orphan_link
     from chronovisor.search.index_store import get_store
     from chronovisor.search.search import semantic_search
 
@@ -1384,7 +1383,7 @@ def _merge_derived_items(
     results = batch.get("results")
     if not isinstance(results, list) or len(results) != len(prepared):
         raise DrainError("atomic derived merge result count mismatch")
-    for (row, _baseline_source_keys), merged in zip(prepared, results):
+    for (row, _baseline_source_keys), merged in zip(prepared, results, strict=False):
         item = merged.get("item") if isinstance(merged, Mapping) else None
         if not isinstance(item, Mapping) or item.get("key") != row["key"]:
             raise DrainError("derived convergence merge readback mismatch")
@@ -1456,10 +1455,8 @@ def _run_lanes(
     inventory: Inventory,
     max_elapsed_seconds: float,
 ) -> dict[str, Any]:
-    from chronovisor.ops import autonomy
+    from chronovisor.ops import autonomy, lint_repair, orphan_link
     from chronovisor.recall import content_correction
-    from chronovisor.ops import lint_repair
-    from chronovisor.ops import orphan_link
 
     budget = CycleBudget(
         max_local_calls=30,

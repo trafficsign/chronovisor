@@ -8,6 +8,7 @@ uses one immutable base generation plus its generation-scoped delta.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import fcntl
 import json
@@ -18,9 +19,10 @@ import socketserver
 import threading
 import time
 from collections import OrderedDict, deque
+from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -29,6 +31,7 @@ from chronovisor.core.runtime_config import (
     SearchEmbeddingConfig,
     load_search_embedding_config,
 )
+from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 from chronovisor.search.semantic_index import (
     SEMANTIC_ROOT,
     SemanticIndexError,
@@ -59,7 +62,6 @@ from chronovisor.search.semantic_model import (
     NemotronEncoder,
     semantic_runtime_versions,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json"
 QUERY_CACHE_TTL_SECONDS = 600.0
@@ -136,7 +138,7 @@ class QueryBatcher:
                 continue
             try:
                 vectors = self._encode([item[0] for item in batch], self._max_batch)
-                for vector, (_query, top_n, future) in zip(vectors, batch):
+                for vector, (_query, top_n, future) in zip(vectors, batch, strict=False):
                     future.set_result(self._search(vector, top_n))
             except BaseException as exc:
                 for _query, _top_n, future in batch:
@@ -358,7 +360,7 @@ class SemanticServiceState:
             vectors = self._foreground.encode_queries(queries, batch_size)
         now = time.monotonic()
         with self._query_cache_lock:
-            for query, vector in zip(queries, vectors):
+            for query, vector in zip(queries, vectors, strict=False):
                 self._query_vector_cache[query] = (
                     now,
                     np.ascontiguousarray(vector, dtype=np.float32),
@@ -481,12 +483,7 @@ class SemanticServiceState:
                 or research_scheduler.ACTIVE_FILE.exists()
             ):
                 return True
-        if (
-            self.config.incremental_pause_during_ingest_generation
-            and _ingest_is_active()
-        ):
-            return True
-        return False
+        return bool(self.config.incremental_pause_during_ingest_generation and _ingest_is_active())
 
     def _cpu(self) -> NemotronEncoder:
         if self._cpu_encoder is None:
@@ -691,13 +688,11 @@ class _Handler(socketserver.StreamRequestHandler):
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        try:
+        with contextlib.suppress(OSError):
             self.wfile.write(
                 json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode()
                 + b"\n"
             )
-        except OSError:
-            pass
 
 
 class _Server(socketserver.ThreadingUnixStreamServer):

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import ast
 import importlib
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 from chronovisor.core.module_paths import LEGACY_MODULE_PATHS
 

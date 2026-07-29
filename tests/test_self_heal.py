@@ -20,17 +20,11 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, runtime):
         d.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.ops import background_jobs
+    from chronovisor.core import ollama, store
+    from chronovisor.ingest import ingest, orchestrator, page_mutation
+    from chronovisor.ops import background_jobs, runtime_status, state_register
     from chronovisor.recall import claims
-    from chronovisor.search import index_store
-    from chronovisor.ingest import ingest
-    from chronovisor.core import ollama
-    from chronovisor.ingest import orchestrator
-    from chronovisor.ingest import page_mutation
-    from chronovisor.ops import runtime_status
-    from chronovisor.search import search
-    from chronovisor.ops import state_register
-    from chronovisor.core import store
+    from chronovisor.search import index_store, search
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
@@ -211,10 +205,12 @@ def _install_local_no_quorum_router(
     cache_root: Path,
     artifact_digit: str = "d",
 ) -> tuple[dict, list[str]]:
-    from chronovisor.decision import decision_policy
-    from chronovisor.decision import decision_router
-    from chronovisor.decision import frontier_review
-    from chronovisor.decision import local_repair
+    from chronovisor.decision import (
+        decision_policy,
+        decision_router,
+        frontier_review,
+        local_repair,
+    )
     from chronovisor.search import semantic_hold
 
     models = ["primary-model", "challenger-model", "tie-model"]
@@ -475,8 +471,8 @@ def _mark_system_code_repair(
 def test_operational_source_rejects_direct_raw_action(
     isolated_wiki: Path,
 ) -> None:
-    from chronovisor.ops import self_heal
     from chronovisor.decision.local_repair import LocalRepairDecision
+    from chronovisor.ops import self_heal
 
     packet = {
         "failure_class": "ingest.generation_transport_error",
@@ -498,8 +494,8 @@ def test_operational_source_routes_resolved_raw_action_to_system_incident(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import self_heal
     from chronovisor.decision.local_repair import LocalRepairDecision
+    from chronovisor.ops import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -558,8 +554,8 @@ def test_operational_source_routes_resolved_raw_action_to_system_incident(
 def test_deterministic_single_alias_repair_applies_locally_without_frontier(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor.ops import self_heal
     from chronovisor.core.alias_store import load_aliases
+    from chronovisor.ops import self_heal
 
     _seed_page(isolated_wiki, "ai/canonical-target.md")
     packet_path = _write_packet(isolated_wiki)
@@ -630,13 +626,15 @@ def test_local_consensus_repair_carries_authority_seal(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import decision_policy
-    from chronovisor.decision import decision_router
-    from chronovisor.decision import frontier_review
-    from chronovisor.decision import local_repair
-    from chronovisor.search import semantic_hold
+    from chronovisor.decision import (
+        decision_policy,
+        decision_router,
+        frontier_review,
+        local_repair,
+    )
     from chronovisor.decision.decision_router import canonical_agreement_signature
     from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
+    from chronovisor.search import semantic_hold
 
     models = ["primary-model", "challenger-model", "tie-model"]
     router_audit = {
@@ -840,8 +838,7 @@ def test_local_repair_recovers_model_return_crash_from_common_cache_after_aba(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import frontier_review
-    from chronovisor.decision import local_repair
+    from chronovisor.decision import frontier_review, local_repair
 
     authority_a, calls = _install_local_no_quorum_router(
         monkeypatch,
@@ -1125,8 +1122,8 @@ def test_local_consensus_repair_fails_closed_when_authority_changes_before_effec
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import self_heal
     from chronovisor.decision.local_repair import LocalRepairDecision
+    from chronovisor.ops import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     decision = LocalRepairDecision(
@@ -1180,8 +1177,8 @@ def test_routine_packets_stay_local_even_when_frontier_switch_is_enabled(
     monkeypatch: pytest.MonkeyPatch,
     failure_class: str,
 ) -> None:
-    from chronovisor.ops import self_heal
     from chronovisor.decision.local_repair import LocalRepairDecision
+    from chronovisor.ops import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -1222,8 +1219,8 @@ def test_valid_system_code_evidence_is_forwarded_to_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import self_heal
     from chronovisor.decision.frontier_guard import RepairIncidentEvidence
+    from chronovisor.ops import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     _mark_system_code_repair(packet_path)
@@ -1690,8 +1687,8 @@ def test_sandbox_drill_keeps_semantic_repair_out_of_frontier(
 def test_frontier_human_required_sends_notification(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor.ops import self_heal
     from chronovisor.decision.local_repair import LocalRepairDecision
+    from chronovisor.ops import self_heal
 
     packet = {
         "failure_id": "auth1",
@@ -1772,8 +1769,8 @@ def test_frontier_human_required_sends_notification(
 def test_frontier_pending_review_writes_artifact(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor.ops import self_heal
     from chronovisor.decision.local_repair import LocalRepairDecision
+    from chronovisor.ops import self_heal
 
     packet = {
         "failure_id": "schema1",
@@ -2216,8 +2213,8 @@ def test_deterministic_quarantine_completes_locally_without_frontier(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import self_heal
     from chronovisor.decision.local_repair import LocalRepairDecision
+    from chronovisor.ops import self_heal
 
     packet_path = _write_packet(isolated_wiki)
     budget = _RecordingBudget(local=True, mutation=True)
@@ -3110,8 +3107,7 @@ def test_verified_local_repair_releases_operational_local_quarantine(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import failure_supervisor
-    from chronovisor.decision import local_repair
+    from chronovisor.decision import failure_supervisor, local_repair
     from chronovisor.ops import self_heal
 
     packet_path, kwargs = operational_release_case
@@ -3165,9 +3161,7 @@ def test_verified_local_repair_supersedes_unstarted_linked_incident_and_job(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import background_jobs
-    from chronovisor.ops import self_heal
-    from chronovisor.ops import system_incident_supervisor
+    from chronovisor.ops import background_jobs, self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     source = json.loads(packet_path.read_text(encoding="utf-8"))
@@ -3289,8 +3283,7 @@ def test_verified_local_repair_linked_incident_dry_run_is_read_only(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import self_heal
-    from chronovisor.ops import system_incident_supervisor
+    from chronovisor.ops import self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
@@ -3324,8 +3317,7 @@ def test_verified_local_repair_resumes_after_linked_incident_cancel_commit(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import self_heal
-    from chronovisor.ops import system_incident_supervisor
+    from chronovisor.ops import self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
@@ -3364,9 +3356,7 @@ def test_verified_local_repair_retries_after_background_cancel_failure(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import background_jobs
-    from chronovisor.ops import self_heal
-    from chronovisor.ops import system_incident_supervisor
+    from chronovisor.ops import background_jobs, self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
@@ -3516,8 +3506,7 @@ def test_verified_local_repair_refuses_started_or_terminal_linked_incident(
     execution_started: bool,
     reason: str,
 ) -> None:
-    from chronovisor.ops import self_heal
-    from chronovisor.ops import system_incident_supervisor
+    from chronovisor.ops import self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(
@@ -3551,8 +3540,7 @@ def test_verified_local_repair_refuses_busy_linked_incident(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import self_heal
-    from chronovisor.ops import system_incident_supervisor
+    from chronovisor.ops import self_heal, system_incident_supervisor
 
     packet_path, kwargs = operational_release_case
     incident_path = _link_operational_system_incident(isolated_wiki, packet_path)
@@ -4469,8 +4457,7 @@ def test_start_background_uses_durable_queue_without_popen(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import background_jobs
-    from chronovisor.ops import self_heal
+    from chronovisor.ops import background_jobs, self_heal
 
     packet = tmp_path / "packet.json"
     packet.write_text("{}", encoding="utf-8")
@@ -4499,8 +4486,7 @@ def test_start_background_uses_durable_queue_without_popen(
 
 
 def test_background_exit_code_preserves_retry_and_terminal_states() -> None:
-    from chronovisor.ops import background_jobs
-    from chronovisor.ops import self_heal
+    from chronovisor.ops import background_jobs, self_heal
 
     assert self_heal._background_exit_code({"status": "local_repair_applied"}) == 0
     assert self_heal._background_exit_code({"status": "pending_local_repair"}) == (

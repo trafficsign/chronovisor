@@ -8,9 +8,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.ops.health import health_snapshot
 from chronovisor.core.store import PAGES_DIR, find_page
 from chronovisor.ingest.page_write import apply_page_writes, prepare_page_write
+from chronovisor.ops.health import health_snapshot
 
 INSIGHTS_DIR = PAGES_DIR / "insights"
 

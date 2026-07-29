@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 

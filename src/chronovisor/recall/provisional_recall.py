@@ -21,14 +21,13 @@ from chronovisor.core.durable_state import (
     read_sealed_json,
     write_sealed_json,
 )
+from chronovisor.core.sealed_artifact_decoder import schema_matches
 from chronovisor.raw.raw_semantic_projection import (
     PROJECTION_CHILD_SCHEMA,
     PROJECTION_POLICY_VERSION,
     verify_projection_child,
 )
-from chronovisor.core.sealed_artifact_decoder import schema_matches
 from chronovisor.search.search_types import tokenize
-
 
 PROVISIONAL_SCHEMA_VERSION = 1
 MAX_HITS = 3

@@ -17,8 +17,7 @@ def _git(args: list[str], *, cwd: Path = CHRONOVISOR_ROOT, check: bool = False) 
         ["git", *args],
         cwd=cwd,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=check,
     )
 

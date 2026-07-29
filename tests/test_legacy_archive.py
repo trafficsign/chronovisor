@@ -13,8 +13,8 @@ from chronovisor.raw.legacy_archive import (
     read_legacy_member,
     verify_legacy_manifest,
 )
-from chronovisor.raw.raw_segment import RawSegmentCorrupt
 from chronovisor.raw.raw_archive import archive_status
+from chronovisor.raw.raw_segment import RawSegmentCorrupt
 from chronovisor.raw.raw_store import RawStore
 
 

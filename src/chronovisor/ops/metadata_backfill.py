@@ -5,20 +5,21 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from chronovisor.core.frontmatter import parse, patch
-from chronovisor.ingest.ingest import _ensure_recall_metadata_frontmatter
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.runtime_config import runtime_repo_root
+from chronovisor.core.store import CHRONOVISOR_ROOT, all_pages, page_id_from_path
+from chronovisor.ingest.ingest import _ensure_recall_metadata_frontmatter
+from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 from chronovisor.ops.lint import (
     build_semantic_mutation_proposal,
     review_semantic_mutation,
     semantic_review_effect_lock,
 )
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
-from chronovisor.core.runtime_config import runtime_repo_root
-from chronovisor.core.store import CHRONOVISOR_ROOT, all_pages, page_id_from_path
 
 REVIEW_DIR = CHRONOVISOR_ROOT / "runtime" / "metadata-backfill"
 PROPOSAL_VERSION = 2
@@ -53,7 +54,7 @@ def _stable_local_proposal(original: str, page_id: str) -> str:
     """Reuse one local proposal for an exact preimage across retries/rejections."""
     expected_sha = hashlib.sha256(original.encode("utf-8")).hexdigest()
     key = hashlib.sha256(
-        f"{PROPOSAL_VERSION}:{page_id}:{expected_sha}".encode("utf-8")
+        f"{PROPOSAL_VERSION}:{page_id}:{expected_sha}".encode()
     ).hexdigest()
     artifact = REVIEW_DIR / "local-proposals" / f"{key}.json"
     try:

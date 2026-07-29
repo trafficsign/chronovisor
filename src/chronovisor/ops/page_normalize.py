@@ -14,8 +14,8 @@ from chronovisor.core.frontmatter import (
     propose_nested_resolution,
 )
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, page_id_from_path
 from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
-from chronovisor.core.store import PAGES_DIR, page_id_from_path, CHRONOVISOR_ROOT
 
 
 def _sha256_identity(value: str) -> str:
@@ -47,7 +47,9 @@ def _identity_preflight_for_nested_conflict(
         or outer == inner
     ):
         return None
-    from chronovisor.decision.decision_lane_prompts import build_identity_preflight_receipt
+    from chronovisor.decision.decision_lane_prompts import (
+        build_identity_preflight_receipt,
+    )
 
     return build_identity_preflight_receipt(
         page_id=page_id,
@@ -89,12 +91,12 @@ def normalize_pages(
         if result.get("reason") == "conflicting_nested_frontmatter":
             conflicts.append({"path": str(path), **result})
             if write:
+                from chronovisor.core.runtime_config import runtime_repo_root
                 from chronovisor.ops.lint import (
                     build_semantic_mutation_proposal,
                     review_semantic_mutation,
                     semantic_review_effect_lock,
                 )
-                from chronovisor.core.runtime_config import runtime_repo_root
 
                 proposed, details = propose_nested_resolution(original)
                 page_id = page_id_from_path(path)
@@ -112,7 +114,9 @@ def normalize_pages(
                     details=details,
                 )
                 if reviewer is None:
-                    from chronovisor.decision.frontier_review import run_structured_review
+                    from chronovisor.decision.frontier_review import (
+                        run_structured_review,
+                    )
 
                     def actual_frontier(prompt, schema):
                         return run_structured_review(
@@ -126,7 +130,12 @@ def normalize_pages(
                 else:
                     actual_frontier = reviewer
 
-                def budgeted_frontier(prompt, schema):
+                def budgeted_frontier(
+                    prompt,
+                    schema,
+                    *,
+                    frontier=actual_frontier,
+                ):
                     nonlocal frontier_calls
                     if frontier_calls >= max_frontier_calls:
                         return {
@@ -141,7 +150,7 @@ def normalize_pages(
                             "frontier_failure": {"failure_class": "budget_deferred"},
                         }
                     frontier_calls += 1
-                    return actual_frontier(prompt, schema)
+                    return frontier(prompt, schema)
 
                 review = review_semantic_mutation(
                     proposal,

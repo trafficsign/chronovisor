@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import tempfile
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 import zstandard
 
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.research.research_config import WebConfig
 from chronovisor.research.research_security import (
     Resolver,
@@ -25,7 +27,6 @@ from chronovisor.research.research_security import (
     resolve_host,
 )
 from chronovisor.research.research_store import ResearchStore
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 CACHE_DIR = CHRONOVISOR_ROOT / "runtime" / "research" / "web-cache"
 ALLOWED_MIME = (
@@ -94,10 +95,8 @@ def _atomic(path: Path, content: bytes) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(temporary)
-        except OSError:
-            pass
 
 
 def _cached(url: str, *, cache_dir: Path, ttl_seconds: int) -> FetchResponse | None:
@@ -106,8 +105,8 @@ def _cached(url: str, *, cache_dir: Path, ttl_seconds: int) -> FetchResponse | N
         metadata = json.loads(meta_path.read_text(encoding="utf-8"))
         stored = datetime.fromisoformat(str(metadata["cached_at"]))
         if stored.tzinfo is None:
-            stored = stored.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) - stored > timedelta(seconds=max(0, ttl_seconds)):
+            stored = stored.replace(tzinfo=UTC)
+        if datetime.now(UTC) - stored > timedelta(seconds=max(0, ttl_seconds)):
             return None
         text = zstandard.ZstdDecompressor().decompress(body_path.read_bytes()).decode("utf-8")
         payload = dict(metadata["response"])
@@ -128,7 +127,7 @@ def _save_cache(response: FetchResponse, *, cache_dir: Path) -> None:
         meta_path,
         (
             json.dumps(
-                {"cached_at": datetime.now(timezone.utc).isoformat(), "response": payload},
+                {"cached_at": datetime.now(UTC).isoformat(), "response": payload},
                 ensure_ascii=False,
                 sort_keys=True,
             )

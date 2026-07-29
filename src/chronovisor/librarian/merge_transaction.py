@@ -2,29 +2,27 @@
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
-
-from chronovisor.core.timeutil import utc_now as _now
-
-import hashlib
 import json
 import os
 import shutil
 import uuid
-from datetime import datetime, timedelta, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from chronovisor.core.durable_state import atomic_write_bytes, write_sealed_json
+from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.timeutil import utc_now as _now
+from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
+from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.librarian.merge_ledger import (
     MergeCoverageError,
     MergeLedger,
     build_source_inventory,
     verify_merge_coverage,
 )
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
-from chronovisor.ingest.page_registry import PageRegistry
 
 PLAN_SCHEMA = "chronovisor.merge-plan.v1"
 PREIMAGE_SCHEMA = "chronovisor.merge-preimage.v1"
@@ -403,7 +401,7 @@ def cleanup_expired_preimages(
 
     current = now or _now()
     if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
+        current = current.replace(tzinfo=UTC)
     base = root / "runtime" / "librarian" / "transaction-preimages"
     deleted: list[str] = []
     retained: list[str] = []

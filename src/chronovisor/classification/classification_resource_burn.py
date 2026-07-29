@@ -14,19 +14,24 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import ollama
-from chronovisor.research import research_scheduler
 from chronovisor.classification.classification import ClassificationError
-from chronovisor.classification.classification_evidence_judgment import current_resident_models
-from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
+from chronovisor.classification.classification_evidence_judgment import (
+    current_resident_models,
+)
+from chronovisor.core import ollama
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.recall.recall_runtime import RecallPolicy, RecallRequest, run_recall
-from chronovisor.research.research_scheduler import research_lane, run_cancellable_command
 from chronovisor.core.runtime_config import (
     load_decision_router_config,
     load_embedding_config,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
+from chronovisor.recall.recall_runtime import RecallPolicy, RecallRequest, run_recall
+from chronovisor.research import research_scheduler
+from chronovisor.research.research_scheduler import (
+    research_lane,
+    run_cancellable_command,
+)
 
 SCHEMA = "chronovisor.classification-resource-overlap-burn.v1"
 

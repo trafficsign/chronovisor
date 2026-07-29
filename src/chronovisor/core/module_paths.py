@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 LEGACY_MODULE_PATHS: dict[str, str] = {
     "chronovisor.adoption_corpus": "chronovisor.lab.adoption_corpus",
     "chronovisor.agent_save_base": "chronovisor.hosts.agent_save_base",

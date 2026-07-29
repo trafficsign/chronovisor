@@ -1,5 +1,6 @@
 """Search engine — BM25 + semantic search with RRF fusion."""
 
+import contextlib
 import heapq
 import json
 import math
@@ -12,19 +13,12 @@ from collections import Counter, deque
 from pathlib import Path
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.recall.negative_feedback import apply_penalties, penalties_for_query
-from chronovisor.search.pipeline import (
-    PipelineDependencies,
-    production_pipeline_config,
-    run_search_pipeline,
-)
 from chronovisor.core.runtime_config import (
     DEFAULT_EMBEDDING_MODEL,
     load_embedding_config,
     load_negative_feedback_config,
     load_search_embedding_config,
 )
-from chronovisor.search.search_types import _FRONTMATTER_RE, ScoredPage
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
@@ -32,6 +26,14 @@ from chronovisor.core.store import (
     all_pages,
     page_id_from_path,
 )
+from chronovisor.recall.negative_feedback import apply_penalties, penalties_for_query
+from chronovisor.search.lexical_index import LexicalIndex
+from chronovisor.search.pipeline import (
+    PipelineDependencies,
+    production_pipeline_config,
+    run_search_pipeline,
+)
+from chronovisor.search.search_types import _FRONTMATTER_RE, ScoredPage
 
 
 def searchable_pages() -> list[Path]:
@@ -126,15 +128,13 @@ def _refresh_store_for_search(store: object) -> None:
     if callable(refresh_if_stale):
         refresh_if_stale()
         return
-    refresh = getattr(store, "refresh")
+    refresh = store.refresh
     refresh()
 
 
 # ---------------------------------------------------------------------------
 # BM25 singleton — shared across `search()` and `ingest._search_related_pages`
 # ---------------------------------------------------------------------------
-
-from chronovisor.search.lexical_index import LexicalIndex
 
 
 class BM25Index(LexicalIndex):
@@ -773,7 +773,7 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
     """Public-style helper kept for test/debug use; semantic_search uses
     a faster path with precomputed norms.
     """
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     na = _vec_norm(a)
     nb = _vec_norm(b)
     if na == 0 or nb == 0:
@@ -889,15 +889,14 @@ def _legacy_update_embeddings(
                 if strict:
                     raise RuntimeError("embedding batch failed") from exc
                 continue
-            if len(vectors) != len(batch):
-                if strict:
-                    raise RuntimeError(
-                        f"embedding batch was truncated: {len(vectors)} != {len(batch)}"
-                    )
+            if len(vectors) != len(batch) and strict:
+                raise RuntimeError(
+                    f"embedding batch was truncated: {len(vectors)} != {len(batch)}"
+                )
             rows: list[tuple[str, list[float], float]] = []
             question_rows: list[tuple[str, int, str, list[float], float]] = []
             chunk_rows: list[tuple[str, int, str, list[float], float]] = []
-            for (kind, pid, idx, text, mtime), vec in zip(batch, vectors):
+            for (kind, pid, idx, text, mtime), vec in zip(batch, vectors, strict=False):
                 if kind == "question":
                     question_rows.append((pid, idx, text, vec, mtime))
                 elif kind == "chunk":
@@ -934,8 +933,8 @@ def _legacy_semantic_search(
     each stored vector carries a precomputed `norm`, and the query norm
     is computed once. Inner loop is therefore one dot product per page.
     """
-    from chronovisor.search.index_store import get_store
     from chronovisor.core.ollama import embed, is_available
+    from chronovisor.search.index_store import get_store
 
     if not is_available():
         if strict:
@@ -987,7 +986,7 @@ def _legacy_semantic_search(
             continue
 
         dot = 0.0
-        for x, y in zip(q_vec, vec):
+        for x, y in zip(q_vec, vec, strict=False):
             dot += x * y
         sim = dot / (q_norm * norm)
         by_page[pid] = ScoredPage(
@@ -1016,7 +1015,7 @@ def _legacy_semantic_search(
         if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
             continue
         dot = 0.0
-        for x, y in zip(q_vec, vec):
+        for x, y in zip(q_vec, vec, strict=False):
             dot += x * y
         sim = dot / (q_norm * norm)
         existing = by_page.get(pid)
@@ -1048,7 +1047,7 @@ def _legacy_semantic_search(
             if not include_reference and page_type == _REFERENCE_PAGE_TYPE:
                 continue
             dot = 0.0
-            for x, y in zip(q_vec, vec):
+            for x, y in zip(q_vec, vec, strict=False):
                 dot += x * y
             sim = (dot / (q_norm * norm)) * CHUNK_SCORE_WEIGHT
             existing = by_page.get(pid)
@@ -1098,8 +1097,8 @@ def update_embeddings(
         response = index_pages(unique, config, wait=True)
         return int(response.get("pages_updated") or 0)
 
-    from chronovisor.search.semantic_index import extract_page_documents
     from chronovisor.core.store import SYSTEM_DIR, find_page
+    from chronovisor.search.semantic_index import extract_page_documents
 
     hashes: dict[str, str] = {}
     for page_id in unique:
@@ -1137,7 +1136,7 @@ def semantic_search(
 
     use_new = semantic_client.selected_for_rollout(query, config)
     if config.rollout_mode == "shadow":
-        try:
+        with contextlib.suppress(Exception):
             semantic_client.search(
                 query,
                 top_n,
@@ -1145,8 +1144,6 @@ def semantic_search(
                 config=config,
                 timeout_ms=timeout_ms,
             )
-        except Exception:
-            pass
         return _legacy_semantic_search(
             query,
             top_n,
@@ -1457,7 +1454,7 @@ def graph_expand_results(
         result.page_id: 1.0 / (1.0 + (rank * 0.25)) for rank, result in enumerate(seeds)
     }
     frontier: list[tuple[float, int, str, tuple[str, ...], str]] = []
-    for rank, result in enumerate(seeds):
+    for _rank, result in enumerate(seeds):
         activation = best_activation[result.page_id]
         heapq.heappush(
             frontier,

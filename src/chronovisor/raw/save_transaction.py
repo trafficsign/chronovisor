@@ -12,13 +12,12 @@ import fcntl
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from chronovisor.raw.raw_store import RawStore
-
 
 _MARKER_PREFIX = "<!-- chronovisor-save-transaction:"
 _MARKER_SUFFIX = "-->"
@@ -64,7 +63,7 @@ def save_session_key(*, host: str, session_file: Path, session_id: str | None) -
     """Return a stable, non-sensitive identity for a host transcript."""
     normalized_host = _normalized_host(host)
     resolved = session_file.expanduser().resolve(strict=False)
-    material = f"{normalized_host}\0{resolved}\0{session_id or ''}".encode("utf-8")
+    material = f"{normalized_host}\0{resolved}\0{session_id or ''}".encode()
     return hashlib.sha256(material).hexdigest()[:24]
 
 

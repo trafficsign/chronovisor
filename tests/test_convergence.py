@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from chronovisor.ops.convergence import (
-    CycleBudget,
     ConvergenceStateError,
     ConvergenceStore,
+    CycleBudget,
     InvalidTransition,
     RetryPolicy,
     exponential_backoff_seconds,
@@ -20,8 +20,7 @@ from chronovisor.ops.convergence import (
 from chronovisor.search.semantic_hold import persisted_semantic_no_quorum_hold
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
-
-NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 
 
 def _store(tmp_path: Path, *, policy: RetryPolicy | None = None) -> ConvergenceStore:

@@ -53,9 +53,8 @@ def test_file_locks_reuse_same_thread_outer_lease(
     )
     lock = getattr(page_mutation, lock_name)
 
-    with lock(tmp_path / path_name):
-        with lock(tmp_path / path_name):
-            pass
+    with lock(tmp_path / path_name), lock(tmp_path / path_name):
+        pass
 
     assert calls == [page_mutation.fcntl.LOCK_EX, page_mutation.fcntl.LOCK_UN]
 

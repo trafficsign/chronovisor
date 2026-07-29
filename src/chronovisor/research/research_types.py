@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from enum import Enum
-from typing import Any, Mapping
+from enum import StrEnum
+from typing import Any
 
 
-class ActionType(str, Enum):
+class ActionType(StrEnum):
     WIKI_SEARCH = "chronovisor_search"
     WIKI_READ = "chronovisor_read"
     WIKI_NEIGHBORS = "wiki_neighbors"
@@ -18,7 +19,7 @@ class ActionType(str, Enum):
     FINISH = "finish"
 
 
-class StopReason(str, Enum):
+class StopReason(StrEnum):
     COMPLETED = "completed"
     ADMISSION_DENIED = "admission_denied"
     BUDGET_EXHAUSTED = "budget_exhausted"
@@ -31,13 +32,13 @@ class StopReason(str, Enum):
     INTERRUPTED = "interrupted"
 
 
-class ClaimKind(str, Enum):
+class ClaimKind(StrEnum):
     STABLE = "stable"
     FRESHNESS_SENSITIVE = "freshness-sensitive"
     USER_REPORTED = "user-reported"
 
 
-class ClaimStatus(str, Enum):
+class ClaimStatus(StrEnum):
     SUPPORTED = "supported"
     CONTRADICTED = "contradicted"
     UNKNOWN = "unknown"

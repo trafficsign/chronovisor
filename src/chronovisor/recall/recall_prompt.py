@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 
-
 SYSTEM_ENVELOPE_RE = re.compile(
     r"^\s*<(task-notification|system-reminder|system-notification)\b",
     re.IGNORECASE,

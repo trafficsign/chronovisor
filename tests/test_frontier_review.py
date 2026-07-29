@@ -8,14 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.decision import decision_router
-from chronovisor.decision import frontier_review
 from chronovisor.core import ollama
-from chronovisor.search import semantic_hold
-from chronovisor.decision.decision_router import DecisionRouterResult
 from chronovisor.core.runtime_config import DecisionRouterConfig
+from chronovisor.decision import decision_router, frontier_review
+from chronovisor.decision.decision_router import DecisionRouterResult
+from chronovisor.search import semantic_hold
 from tests.semantic_hold_support import semantic_authority, semantic_review
-
 
 CODEX_EXEC_HELP = """
 Options:

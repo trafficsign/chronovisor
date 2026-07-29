@@ -19,23 +19,20 @@ import re
 import sys
 import tempfile
 from collections import deque
-from contextlib import nullcontext
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
-
-from chronovisor.recall.claims import rebuild_claim_index
-from chronovisor.ops.convergence import (
-    ConvergenceStore,
-    CycleBudget,
-    is_human_required_failure,
-    stable_item_key,
-)
+from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.runtime_config import load_ingest_config, runtime_repo_root
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, init_chronovisor
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -44,29 +41,30 @@ from chronovisor.decision.decision_authority import (
     semantic_verdict_authority_error,
     semantic_verdict_authority_provenance_error,
 )
-from chronovisor.research.evidence_grounding import (
-    ProtectedLiteralGroundingError,
-    validate_protected_literals,
-)
-from chronovisor.recall.feedback_ledger import (
-    PAGE_IGNORED_RETRACTION_KIND,
-    feedback_row_sha256,
-    read_jsonl_rows,
-    retracted_page_ignored_targets,
-)
-from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
 from chronovisor.ingest.page_mutation import (
     ExactReplacement,
     PageMutationError,
     PreparedPageMutation,
     apply_prepared_mutations,
+    chronovisor_mutation_lock,
     decision_authority_lock,
     find_mutation_page,
     prepare_page_mutation,
     rollback_prepared_mutations,
-    chronovisor_mutation_lock,
+)
+from chronovisor.ops.convergence import (
+    ConvergenceStore,
+    CycleBudget,
+    is_human_required_failure,
+    stable_item_key,
+)
+from chronovisor.recall.claims import rebuild_claim_index
+from chronovisor.recall.feedback_ledger import (
+    PAGE_IGNORED_RETRACTION_KIND,
+    feedback_row_sha256,
+    read_jsonl_rows,
+    retracted_page_ignored_targets,
 )
 from chronovisor.recall.recall_auditor import (
     TurnContext,
@@ -82,9 +80,10 @@ from chronovisor.recall.recall_runtime import (
     append_feedback,
     recall_log_snapshot,
 )
-from chronovisor.core.runtime_config import load_ingest_config, runtime_repo_root
-from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, init_chronovisor
-
+from chronovisor.research.evidence_grounding import (
+    ProtectedLiteralGroundingError,
+    validate_protected_literals,
+)
 
 PROJECT_ROOT = runtime_repo_root()
 LANE = "content_correction"
@@ -671,7 +670,7 @@ def _normalized_time(value: object) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _source_pull_pages(
@@ -1093,7 +1092,7 @@ def capture_session_corrections(
     # filters every already-seen adjacent pair below.
     turns = all_turns
     merged: list[dict[str, Any]] = []
-    for source_turn, correction_turn in zip(turns, turns[1:]):
+    for source_turn, correction_turn in zip(turns, turns[1:], strict=False):
         if correction_turn.assistant_line <= cursor_line:
             continue
         # Stop capture must remain a sparse scheduling boundary. Enqueuing
@@ -1365,10 +1364,8 @@ def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     finally:
-        try:
+        with suppress(OSError):
             tmp.unlink()
-        except OSError:
-            pass
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -1709,7 +1706,7 @@ def _archive_invalid_correction_artifacts(key: str) -> list[str]:
 
     archived: list[str] = []
     destination = PROPOSALS_DIR.parent / "invalid-artifacts"
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     for kind, path in (
         ("triage", _triage_path(key)),
         ("review", _review_path(key)),
@@ -1733,7 +1730,7 @@ def _resume_due_quarantined_corrections(
 ) -> list[dict[str, Any]]:
     """Periodically reopen autonomous failures instead of accumulating them."""
 
-    current_time = now or datetime.now(timezone.utc)
+    current_time = now or datetime.now(UTC)
     cooldown = _quarantine_retry_seconds()
     resumed: list[dict[str, Any]] = []
     local_failure_classes = {"proposal_missing", "schema_invalid", "content_changed"}
@@ -2062,7 +2059,7 @@ def _legacy_page_ignored_retraction_plan(
     planned: list[dict[str, Any]] = []
     matched = 0
     already = 0
-    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    timestamp = datetime.now(UTC).isoformat(timespec="seconds")
     for row in rows:
         key = row.get("content_correction_key")
         if (
@@ -2267,7 +2264,7 @@ def _prepare_mutations(
     proposal: dict[str, Any],
 ) -> list[PreparedPageMutation]:
     correction_id = hashlib.sha256(
-        f"{key}:{RESOLVER_VERSION}".encode("utf-8")
+        f"{key}:{RESOLVER_VERSION}".encode()
     ).hexdigest()[:24]
     prepared: list[PreparedPageMutation] = []
     for item in proposal.get("proposals", []):
@@ -2857,7 +2854,7 @@ def _review_artifact_error(
     if not isinstance(rows, list) or len(rows) != len(mutations):
         return "frontier review artifact mutation count mismatch"
     expected_review_hashes: set[tuple[str, str, str]] = set()
-    for mutation, row in zip(mutations, rows):
+    for mutation, row in zip(mutations, rows, strict=False):
         if not isinstance(row, dict):
             return "frontier review artifact mutation is invalid"
         if (
@@ -2962,7 +2959,7 @@ def _exact_reviewed_postimage_error(
     rows = artifact.get("mutations")
     if not isinstance(rows, list) or len(rows) != len(mutations):
         return "frontier review artifact mutation count mismatch"
-    for mutation, row in zip(mutations, rows):
+    for mutation, row in zip(mutations, rows, strict=False):
         if not isinstance(row, dict):
             return "frontier review artifact mutation is invalid"
         expected_sha256 = str(row.get("updated_sha256") or "")
@@ -3561,7 +3558,7 @@ def _parse_exact_user_replacement(prompt: str) -> ExactReplacement | None:
 
 def _exact_correction_id(key: str) -> str:
     return hashlib.sha256(
-        f"{key}:{RESOLVER_VERSION}:exact-user-correction".encode("utf-8")
+        f"{key}:{RESOLVER_VERSION}:exact-user-correction".encode()
     ).hexdigest()[:24]
 
 
@@ -3751,7 +3748,7 @@ def _process_exact_user_correction(
         "policy": exact.policy_audit,
     }
     audit_row = {
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "kind": "content_correction",
         "key": key,
         "correction_id": mutation.correction_id,
@@ -4095,7 +4092,7 @@ def _commit_nonmutation_classification(
                 failure_class="budget_deferred",
             )
     audit_row = {
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "kind": "content_correction",
         "key": key,
         "correction_id": "",
@@ -4195,142 +4192,141 @@ def _recover_exact_applied_correction(
         # Authority is the outer lock by policy. The nested Wiki lock keeps the
         # exact byte proof stable through readback, audit append, and the final
         # convergence transition.
-        with decision_authority_lock():
-            with chronovisor_mutation_lock():
-                locked_mutations = _prepare_mutations(key, proposal)
-                locked_artifact = _load_json(_review_path(key))
-                if locked_artifact is None:
-                    error = "frontier review artifact is missing during recovery"
-                else:
-                    error = _review_artifact_error(
-                        locked_artifact,
-                        key=key,
-                        proposal=proposal,
-                        mutations=locked_mutations,
-                    )
-                locked_review = (
-                    locked_artifact.get("review")
-                    if isinstance(locked_artifact, dict)
-                    else None
+        with decision_authority_lock(), chronovisor_mutation_lock():
+            locked_mutations = _prepare_mutations(key, proposal)
+            locked_artifact = _load_json(_review_path(key))
+            if locked_artifact is None:
+                error = "frontier review artifact is missing during recovery"
+            else:
+                error = _review_artifact_error(
+                    locked_artifact,
+                    key=key,
+                    proposal=proposal,
+                    mutations=locked_mutations,
                 )
-                locked_authority = (
-                    locked_artifact.get("authority")
-                    if isinstance(locked_artifact, dict)
-                    else None
+            locked_review = (
+                locked_artifact.get("review")
+                if isinstance(locked_artifact, dict)
+                else None
+            )
+            locked_authority = (
+                locked_artifact.get("authority")
+                if isinstance(locked_artifact, dict)
+                else None
+            )
+            if error is None and (
+                not isinstance(locked_review, dict)
+                or locked_review.get("decision") != "approved"
+            ):
+                error = "exact correction recovery requires an approved review"
+            if error is None and not isinstance(locked_authority, dict):
+                error = "exact correction recovery authority is missing"
+            if error is None:
+                current_authority, current_authority_error = (
+                    _current_content_review_authority(reviewer=reviewer)
                 )
-                if error is None and (
-                    not isinstance(locked_review, dict)
-                    or locked_review.get("decision") != "approved"
-                ):
-                    error = "exact correction recovery requires an approved review"
-                if error is None and not isinstance(locked_authority, dict):
-                    error = "exact correction recovery authority is missing"
-                if error is None:
-                    current_authority, current_authority_error = (
-                        _current_content_review_authority(reviewer=reviewer)
+                assert isinstance(locked_authority, dict)
+                assert isinstance(locked_review, dict)
+                error = (
+                    current_authority_error
+                    or compare_semantic_authority(
+                        locked_authority,
+                        current_authority,
+                        lane=REVIEW_LANE,
                     )
-                    assert isinstance(locked_authority, dict)
-                    assert isinstance(locked_review, dict)
-                    error = (
-                        current_authority_error
-                        or compare_semantic_authority(
-                            locked_authority,
-                            current_authority,
-                            lane=REVIEW_LANE,
-                        )
-                        or _review_authority_error(locked_review, locked_authority)
+                    or _review_authority_error(locked_review, locked_authority)
+                )
+            if error is None:
+                current_triage_authority, current_triage_authority_error = (
+                    _current_content_classification_authority(reviewer=reviewer)
+                )
+                error = (
+                    current_triage_authority_error
+                    or compare_semantic_authority(
+                        triage_authority,
+                        current_triage_authority,
+                        lane=CLASSIFICATION_LANE,
                     )
-                if error is None:
-                    current_triage_authority, current_triage_authority_error = (
-                        _current_content_classification_authority(reviewer=reviewer)
+                    or _classification_authority_error(
+                        triage_review,
+                        triage_authority,
                     )
-                    error = (
-                        current_triage_authority_error
-                        or compare_semantic_authority(
-                            triage_authority,
-                            current_triage_authority,
-                            lane=CLASSIFICATION_LANE,
-                        )
-                        or _classification_authority_error(
-                            triage_review,
-                            triage_authority,
-                        )
-                    )
-                if error is None:
-                    assert isinstance(locked_artifact, dict)
-                    error = _exact_reviewed_postimage_error(
-                        locked_artifact,
-                        locked_mutations,
-                    )
+                )
+            if error is None:
+                assert isinstance(locked_artifact, dict)
+                error = _exact_reviewed_postimage_error(
+                    locked_artifact,
+                    locked_mutations,
+                )
 
-                expected_pages = [mutation.page_id for mutation in locked_mutations]
-                existing_audit = _jsonl_row_for_key(CONTENT_FEEDBACK_FILE, key)
-                if error is None and existing_audit is not None:
-                    if (
-                        existing_audit.get("classification") != proposal.get("decision")
-                        or existing_audit.get("pages") != expected_pages
-                    ):
-                        error = "exact correction recovery audit does not match"
-                    else:
-                        recovered_from_audit = True
-                if error is None:
-                    verification = _refresh_and_verify(locked_mutations)
-                    if verification.get("status") != "ok":
-                        error = (
-                            "derived index refresh or semantic readback failed: "
-                            + json.dumps(
-                                verification,
-                                ensure_ascii=False,
-                                default=str,
-                            )
+            expected_pages = [mutation.page_id for mutation in locked_mutations]
+            existing_audit = _jsonl_row_for_key(CONTENT_FEEDBACK_FILE, key)
+            if error is None and existing_audit is not None:
+                if (
+                    existing_audit.get("classification") != proposal.get("decision")
+                    or existing_audit.get("pages") != expected_pages
+                ):
+                    error = "exact correction recovery audit does not match"
+                else:
+                    recovered_from_audit = True
+            if error is None:
+                verification = _refresh_and_verify(locked_mutations)
+                if verification.get("status") != "ok":
+                    error = (
+                        "derived index refresh or semantic readback failed: "
+                        + json.dumps(
+                            verification,
+                            ensure_ascii=False,
+                            default=str,
                         )
-                        failure_class = "index_refresh_error"
-                if error is None:
-                    assert isinstance(locked_review, dict)
-                    apply_result = {
-                        "status": "already_applied",
-                        "pages": expected_pages,
-                    }
-                    if existing_audit is None:
-                        _append_content_feedback(
-                            {
-                                "ts": datetime.now(timezone.utc).isoformat(
-                                    timespec="seconds"
-                                ),
-                                "kind": "content_correction",
-                                "key": key,
-                                "correction_id": (
-                                    locked_mutations[0].correction_id
-                                    if locked_mutations
-                                    else ""
-                                ),
-                                "source_decision_id": event.get(
-                                    "source_decision_id", ""
-                                ),
-                                "source_turn_ref": event.get("source_turn_ref", {}),
-                                "correction_turn_ref": event.get(
-                                    "correction_turn_ref", {}
-                                ),
-                                "classification": proposal.get("decision"),
-                                "pages": expected_pages,
-                                "patches": proposal.get("proposals", []),
-                                "frontier": locked_review,
-                                "apply": apply_result,
-                                "verification": verification,
-                            }
-                        )
-                    store.complete(
-                        key,
-                        "applied",
-                        result={
+                    )
+                    failure_class = "index_refresh_error"
+            if error is None:
+                assert isinstance(locked_review, dict)
+                apply_result = {
+                    "status": "already_applied",
+                    "pages": expected_pages,
+                }
+                if existing_audit is None:
+                    _append_content_feedback(
+                        {
+                            "ts": datetime.now(UTC).isoformat(
+                                timespec="seconds"
+                            ),
+                            "kind": "content_correction",
+                            "key": key,
+                            "correction_id": (
+                                locked_mutations[0].correction_id
+                                if locked_mutations
+                                else ""
+                            ),
+                            "source_decision_id": event.get(
+                                "source_decision_id", ""
+                            ),
+                            "source_turn_ref": event.get("source_turn_ref", {}),
+                            "correction_turn_ref": event.get(
+                                "correction_turn_ref", {}
+                            ),
+                            "classification": proposal.get("decision"),
+                            "pages": expected_pages,
+                            "patches": proposal.get("proposals", []),
                             "frontier": locked_review,
                             "apply": apply_result,
                             "verification": verification,
-                            "recovered_from_audit": recovered_from_audit,
-                            "recovered_from_exact_receipt": True,
-                        },
-                        owner=owner,
+                        }
                     )
+                store.complete(
+                    key,
+                    "applied",
+                    result={
+                        "frontier": locked_review,
+                        "apply": apply_result,
+                        "verification": verification,
+                        "recovered_from_audit": recovered_from_audit,
+                        "recovered_from_exact_receipt": True,
+                    },
+                    owner=owner,
+                )
     except (KeyError, OSError, PageMutationError, TypeError, ValueError) as exc:
         error = f"exact correction recovery proof failed: {exc}"
     except Exception as exc:
@@ -4449,7 +4445,7 @@ def _commit_content_correction(
         verification=verification,
         mutations=mutations,
         page_ids=page_ids,
-        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
     )
     try:
         if not dry_run:

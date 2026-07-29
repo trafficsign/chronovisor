@@ -21,8 +21,7 @@ def test_snapshot_chronovisor_commits_changes_in_target_path(tmp_path: Path) -> 
         ["git", "rev-parse", "--short", "HEAD"],
         cwd=tmp_path,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     assert head.returncode == 0

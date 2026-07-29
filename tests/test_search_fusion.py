@@ -5,10 +5,10 @@ import sqlite3
 
 import pytest
 
-from chronovisor.search import index_store as index_store_mod
 from chronovisor.core import ollama
-from chronovisor.search import search
 from chronovisor.core.runtime_config import EmbeddingConfig, SearchEmbeddingConfig
+from chronovisor.search import index_store as index_store_mod
+from chronovisor.search import search
 from chronovisor.search.search import (
     ScoredPage,
     apply_filters,

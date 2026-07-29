@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import contextlib
 import getpass
 import hashlib
 import hmac
@@ -28,15 +29,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 import httpx
 
-from chronovisor.ingest import orchestrator
-from chronovisor.recall import recall_runtime
-from chronovisor.ops import runtime_status
-from chronovisor.ops.convergence import is_human_required_result
-from chronovisor.decision.decision_router import resolve_router_policy
-from chronovisor.ops.health import health_snapshot
 from chronovisor.core.ollama import OLLAMA_URL, embedding_model, ingest_model
-from chronovisor.recall.recall_auditor import load_audit_policy
-from chronovisor.recall.recall_improvement import configured_models
 from chronovisor.core.runtime_config import (
     load_decision_router_config,
     load_reranker_config,
@@ -44,7 +37,15 @@ from chronovisor.core.runtime_config import (
     runtime_identity,
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-from chronovisor.core.store import LOG_FILE, CHRONOVISOR_ROOT, init_chronovisor
+from chronovisor.core.store import CHRONOVISOR_ROOT, LOG_FILE, init_chronovisor
+from chronovisor.decision.decision_router import resolve_router_policy
+from chronovisor.ingest import orchestrator
+from chronovisor.ops import runtime_status
+from chronovisor.ops.convergence import is_human_required_result
+from chronovisor.ops.health import health_snapshot
+from chronovisor.recall import recall_runtime
+from chronovisor.recall.recall_auditor import load_audit_policy
+from chronovisor.recall.recall_improvement import configured_models
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "dashboard_static"
 DASHBOARD_ACCESS_COOKIE = "chronovisor_dashboard_access"
@@ -216,10 +217,8 @@ def _write_materialized_component(
         "value": value,
     }
     atomic_write(path, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-    try:
+    with contextlib.suppress(OSError):
         path.chmod(0o600)
-    except OSError:
-        pass
     return payload
 
 
@@ -514,10 +513,8 @@ def _configured_model_roles() -> dict[str, set[str]]:
     except Exception:
         pass
 
-    try:
+    with contextlib.suppress(Exception):
         _add_model_role(roles, embedding_model(), "embed")
-    except Exception:
-        pass
 
     try:
         search_embedding = load_search_embedding_config()
@@ -570,14 +567,7 @@ def _resolve_model_name(
 
 
 def _external_configured_model(name: str, roles: set[str]) -> bool:
-    if (
-        roles <= {"rerank", "search-embed"}
-        and roles
-        and "/" in name
-        and not name.startswith("hf.co/")
-    ):
-        return True
-    return False
+    return bool(roles <= {"rerank", "search-embed"} and roles and "/" in name and not name.startswith("hf.co/"))
 
 
 def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -710,6 +700,13 @@ def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, An
     }
 
 
+def _result_count(result: dict[str, Any], key: str, fallback: Any = None) -> Any:
+    value = result.get(key, fallback)
+    if isinstance(value, list):
+        return len(value)
+    return value
+
+
 def _drain_history(limit: int = 200) -> list[dict[str, Any]]:
     logs_dir = CHRONOVISOR_ROOT / "logs"
     records: list[dict[str, Any]] = []
@@ -729,12 +726,6 @@ def _drain_history(limit: int = 200) -> list[dict[str, Any]]:
             if not isinstance(result, dict):
                 result = {}
 
-            def result_count(key: str, fallback: Any = None) -> Any:
-                value = result.get(key, fallback)
-                if isinstance(value, list):
-                    return len(value)
-                return value
-
             records.append(
                 {
                     "timestamp": data.get("timestamp"),
@@ -742,10 +733,10 @@ def _drain_history(limit: int = 200) -> list[dict[str, Any]]:
                     "pending_before": data.get("pending_before"),
                     "pending_after": data.get("pending_after"),
                     "files_processed": data.get("files_processed"),
-                    "files_attempted": result_count("files_attempted"),
-                    "files_deferred": result_count("files_deferred", 0),
-                    "files_continued": result_count("files_continued", 0),
-                    "files_failed": result_count("files_failed"),
+                    "files_attempted": _result_count(result, "files_attempted"),
+                    "files_deferred": _result_count(result, "files_deferred", 0),
+                    "files_continued": _result_count(result, "files_continued", 0),
+                    "files_failed": _result_count(result, "files_failed"),
                     "elapsed_seconds": result.get("elapsed_seconds"),
                     "batch": data.get("batch"),
                 }
@@ -1778,10 +1769,8 @@ def _frontier_activity_snapshot() -> dict[str, Any]:
                 and age_seconds > FRONTIER_ACTIVITY_STALE_SECONDS
             )
             if stale:
-                try:
+                with contextlib.suppress(OSError):
                     path.unlink(missing_ok=True)
-                except OSError:
-                    pass
                 continue
             records.append({**record, "elapsed_seconds": age_seconds})
     records.sort(key=lambda row: str(row.get("started_at") or ""))
@@ -2401,10 +2390,8 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
                 or age_seconds > LOCAL_CONSENSUS_ACTIVITY_STALE_SECONDS
             )
             if stale:
-                try:
+                with contextlib.suppress(OSError):
                     path.unlink(missing_ok=True)
-                except OSError:
-                    pass
                 continue
             safe = {
                 "request_sha256": row.get("request_sha256"),
@@ -3999,10 +3986,12 @@ def _load_or_create_dashboard_token(path: Path) -> str:
     token = secrets.token_urlsafe(32)
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
+    except FileExistsError as exc:
         existing = path.read_text(encoding="utf-8").strip()
         if DASHBOARD_TOKEN_RE.fullmatch(existing) is None:
-            raise RuntimeError(f"dashboard access token is malformed: {path}")
+            raise RuntimeError(
+                f"dashboard access token is malformed: {path}"
+            ) from exc
         os.chmod(path, 0o600)
         return existing
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -4025,10 +4014,8 @@ def _rotate_dashboard_token(path: Path) -> str:
         os.replace(temporary, path)
         os.chmod(path, 0o600)
     finally:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
-        except FileNotFoundError:
-            pass
     return token
 
 
@@ -4079,10 +4066,8 @@ def _write_dashboard_credentials(path: Path, username: str, password: str) -> No
         os.replace(temporary, path)
         os.chmod(path, 0o600)
     finally:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def _load_dashboard_credentials(path: Path) -> dict[str, Any] | None:
@@ -4320,7 +4305,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         body = (
             "<!doctype html><meta charset='utf-8'><title>Dashboard access</title>"
             f"<p>{message}</p>"
-        ).encode("utf-8")
+        ).encode()
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -4414,7 +4399,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+    def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
         if not self._authorize(parsed):

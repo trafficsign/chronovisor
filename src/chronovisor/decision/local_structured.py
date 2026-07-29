@@ -15,12 +15,12 @@ import math
 import os
 import re
 import tempfile
-from contextlib import ExitStack, contextmanager
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 import httpx
@@ -337,7 +337,7 @@ class LocalStructuredResult:
 
 def _utc_timestamp() -> str:
     return (
-        datetime.now(timezone.utc)
+        datetime.now(UTC)
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
@@ -877,9 +877,7 @@ class LocalConsensusAuditStore:
         if kind not in {"session", "decision", "decision_artifact_replay"}:
             return None
         status = "done"
-        if kind == "session" and not bool(row.get("ok")):
-            status = "error"
-        elif kind == "decision" and row.get("status") != "agreed":
+        if kind == "session" and not bool(row.get("ok")) or kind == "decision" and row.get("status") != "agreed":
             status = "error"
         repair_turns = row.get("repair_turns")
         return {
@@ -1108,10 +1106,8 @@ class LocalConsensusAuditStore:
             yield update
         finally:
             if path is not None:
-                try:
+                with suppress(OSError):
                     path.unlink(missing_ok=True)
-                except OSError:
-                    pass
 
     def record_session(
         self,
@@ -1329,15 +1325,14 @@ def validate_schema_definition(schema: Mapping[str, Any], *, pointer: str = "") 
             )
 
     required = schema.get("required")
-    if required is not None:
-        if (
-            not isinstance(required, list)
-            or any(not isinstance(item, str) for item in required)
-            or len(required) != len(set(required))
-        ):
-            raise SchemaDefinitionError(
-                _pointer_join(pointer, "required"), "must be an array of unique strings"
-            )
+    if required is not None and (
+        not isinstance(required, list)
+        or any(not isinstance(item, str) for item in required)
+        or len(required) != len(set(required))
+    ):
+        raise SchemaDefinitionError(
+            _pointer_join(pointer, "required"), "must be an array of unique strings"
+        )
 
     additional = schema.get("additionalProperties")
     if additional is not None and not isinstance(additional, (bool, Mapping)):

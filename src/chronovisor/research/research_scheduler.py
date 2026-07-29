@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,13 +33,11 @@ def _iso() -> str:
 
 
 def _event(kind: str, **payload: Any) -> None:
-    try:
+    with suppress(OSError):
         append_jsonl_durable(
             SCHEDULER_LOG,
             [{"ts": _iso(), "kind": kind, "pid": os.getpid(), **payload}],
         )
-    except OSError:
-        pass
 
 
 def _atomic_ephemeral_json(path: Path, payload: dict[str, Any]) -> None:
@@ -54,10 +52,8 @@ def _atomic_ephemeral_json(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
         os.replace(temporary, path)
     finally:
-        try:
+        with suppress(OSError):
             os.unlink(temporary)
-        except OSError:
-            pass
 
 
 def _active_research() -> dict[str, Any] | None:
@@ -186,10 +182,8 @@ def foreground_lane(*, preempt_grace_ms: int = 250) -> Iterator[ForegroundReceip
     try:
         yield receipt
     finally:
-        try:
+        with suppress(OSError):
             marker.unlink()
-        except OSError:
-            pass
         _event("sync_exit", marker_id=marker_id)
 
 
@@ -357,10 +351,8 @@ def run_cancellable_command(
         except (BrokenPipeError, OSError):
             pass
         finally:
-            try:
+            with suppress(OSError):
                 os.close(input_fd)
-            except OSError:
-                pass
 
     # Import-heavy model workers may not read stdin immediately.  Feeding in a
     # daemon thread keeps the scheduler polling the foreground marker instead
@@ -441,7 +433,7 @@ def run_cancellable_command(
             else:
                 status = "error"
                 error = (stderr or stdout or f"research worker exited {process.returncode}")[-2000:]
-    except Exception as exc:  # noqa: BLE001 - subprocess boundary must seal errors
+    except Exception as exc:
         if process.poll() is None:
             process.kill()
         status = "error"

@@ -16,13 +16,12 @@ from pathlib import Path
 
 import chronovisor.ingest.ingest as ingest
 from chronovisor.ingest.ingest import (
-    _triage,
-    _generate_one,
     _extract_json_array,
-    _validate_triage_plan,
     _extract_page_body,
+    _generate_one,
+    _triage,
+    _validate_triage_plan,
 )
-
 
 WIKI_RAW = Path.home() / ".chronovisor" / "raw"
 DEBUG_OUT = Path("/tmp/wiki-debug")

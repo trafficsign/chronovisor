@@ -9,9 +9,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import ollama
 from chronovisor.classification.classification import load_udc_package
 from chronovisor.classification.classification_engine import CONSENSUS_SCHEMA
+from chronovisor.core import ollama
 from chronovisor.core.durable_state import (
     DurableStateError,
     verify_sealed_object,

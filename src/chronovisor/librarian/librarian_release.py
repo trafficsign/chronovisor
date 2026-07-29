@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import iso_seconds as _iso
-
 import argparse
 import hashlib
 import json
@@ -22,17 +20,18 @@ from chronovisor.classification.classification import (
 )
 from chronovisor.classification.classification_engine import librarian_convergence_store
 from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.core.link_fix import extract_wiki_links
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import iso_seconds as _iso
+from chronovisor.ingest.page_registry import PageRegistry
+from chronovisor.ingest.uid_link_index import build_uid_link_index
 from chronovisor.librarian.librarian import capture_baseline
 from chronovisor.librarian.librarian_status import STATE_SCHEMA, load_librarian_state
-from chronovisor.core.link_fix import extract_wiki_links
 from chronovisor.librarian.merge_transaction import cleanup_expired_preimages
 from chronovisor.ops.migration_snapshot import (
     cleanup_expired_restore_points,
     restore_drill,
 )
-from chronovisor.ingest.page_registry import PageRegistry
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.ingest.uid_link_index import build_uid_link_index
 
 ADR_SCHEMA = "chronovisor.librarian-adr.v1"
 SOAK_SCHEMA = "chronovisor.librarian-soak.v2"
@@ -338,7 +337,7 @@ def reconcile_librarian_state(
         from chronovisor.raw.raw_store import RawStore
 
         raw_units = sum(1 for _unit in RawStore(root / "raw").iter_units())
-    except Exception:  # noqa: BLE001 - raw logical count has a safe file fallback
+    except Exception:
         raw_units = sum(1 for path in (root / "raw").rglob("*.md") if path.is_file())
     try:
         baseline_time = datetime.fromisoformat(str(baseline["captured_at"]))

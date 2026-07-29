@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 from chronovisor.research.research_store import ResearchStore
 from chronovisor.research.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
@@ -208,7 +209,7 @@ def build_bundle(
     bundle = EvidenceBundle(
         bundle_id="bundle:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         research_run_id=run_id,
-        created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        created_at=datetime.now(UTC).isoformat(timespec="seconds"),
         claims=claim_rows,
         artifacts=artifact_rows,
         trace=tuple(dict(row) for row in trace),

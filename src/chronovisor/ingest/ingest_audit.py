@@ -11,7 +11,6 @@ from typing import Any
 
 from chronovisor.core.runtime_config import IngestAuditConfig, load_ingest_audit_config
 
-
 _CORRECTION_RE = re.compile(
     r"(?:それ|その記憶|この記憶).{0,12}(?:違う|間違|誤り)|"
     r"(?:訂正|撤回|記憶を消|忘れて)|"

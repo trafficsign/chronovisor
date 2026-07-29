@@ -8,10 +8,7 @@ compacts those updates into a new immutable generation.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
-
-from chronovisor.core.hashutil import sha256_file as _sha256_file
-
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -23,14 +20,17 @@ import sqlite3
 import tempfile
 import time
 import uuid
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 import numpy as np
 
 from chronovisor.core import frontmatter
+from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
+from chronovisor.core.hashutil import sha256_file as _sha256_file
 from chronovisor.core.page_identity import normalize_page_uid
 from chronovisor.core.store import CHRONOVISOR_ROOT, page_id_from_path
 
@@ -91,7 +91,7 @@ class GenerationManifest:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 
@@ -123,10 +123,8 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
         os.replace(temporary, path)
         _fsync_directory(path.parent)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(temporary)
-        except OSError:
-            pass
 
 
 def _repo_commit() -> str:
@@ -384,7 +382,7 @@ def build_generation(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     generation_id = (
         f"{timestamp}-{_sha256_bytes(profile_seed)[:12]}-{uuid.uuid4().hex[:6]}"
     )
@@ -463,7 +461,7 @@ def upgrade_generation_with_ann(
     if source.ann_kind:
         return source
     source_dir = generation_dir(generation_id, root=root)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     upgraded_id = f"{timestamp}-ann-{uuid.uuid4().hex[:8]}"
     generations = root / "generations"
     staging = generations / f".staging-{upgraded_id}"
@@ -564,9 +562,10 @@ def validate_generation(
             raise SemanticIndexError("semantic metadata checksum mismatch")
         if _sha256_file(vectors) != manifest.vectors_sha256:
             raise SemanticIndexError("semantic vectors checksum mismatch")
-        if manifest.ann_sha256:
-            if not ann.is_file() or _sha256_file(ann) != manifest.ann_sha256:
-                raise SemanticIndexError("semantic ANN checksum mismatch")
+        if manifest.ann_sha256 and (
+            not ann.is_file() or _sha256_file(ann) != manifest.ann_sha256
+        ):
+            raise SemanticIndexError("semantic ANN checksum mismatch")
     if bool(manifest.ann_kind) != bool(manifest.ann_sha256):
         raise SemanticIndexError("semantic ANN manifest is incomplete")
     if manifest.ann_kind and not (1 <= manifest.ann_dimensions <= manifest.dimensions):
@@ -1148,7 +1147,7 @@ def archive_legacy_search_index(
     import zstandard
 
     _secure_directory(archive_dir)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     archive = archive_dir / f"embeddings-bge-{stamp}.sqlite.zst"
     temporary = archive.with_suffix(archive.suffix + ".tmp")
     source_sha256 = _sha256_file(source)
@@ -1182,7 +1181,7 @@ def archive_legacy_search_index(
         "archived_at": _utc_now(),
         "expires_after_days": max(1, retain_days),
         "expires_at": (
-            datetime.now(timezone.utc) + timedelta(days=max(1, retain_days))
+            datetime.now(UTC) + timedelta(days=max(1, retain_days))
         ).isoformat(timespec="milliseconds"),
         "active_generation_id": status["generation_id"],
         "active_model": status["model"],
@@ -1198,7 +1197,7 @@ def prune_expired_legacy_archives(
     *, archive_dir: Path = LEGACY_ARCHIVE_DIR
 ) -> list[str]:
     removed: list[str] = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     archive_root = archive_dir.resolve()
     for manifest_path in archive_dir.glob("*.sqlite.zst.manifest.json"):
         try:

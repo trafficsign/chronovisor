@@ -10,7 +10,6 @@ from typing import Any
 from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.decision.decision_authority import semantic_authority_shape_error
 
-
 STRUCTURED_REVIEW_HOLD_EPOCH_VERSION = 2
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _EPOCH_FIELDS = frozenset(

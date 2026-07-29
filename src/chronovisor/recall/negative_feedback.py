@@ -21,18 +21,18 @@ import json
 import os
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from chronovisor.recall.feedback_ledger import active_feedback_rows
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.ingest.page_mutation import find_mutation_page
 from chronovisor.core.runtime_config import (
     NegativeFeedbackConfig,
     load_negative_feedback_config,
 )
-from chronovisor.search.search_types import ScoredPage, tokenize
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.ingest.page_mutation import find_mutation_page
+from chronovisor.recall.feedback_ledger import active_feedback_rows
+from chronovisor.search.search_types import ScoredPage, tokenize
 
 # Test seams: when set, bypass the recall_runtime/golden default paths.
 FEEDBACK_FILE_OVERRIDE: Path | None = None
@@ -92,8 +92,8 @@ def _parse_ts(value: object) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _ts_rank(value: datetime | None) -> float:
@@ -117,7 +117,7 @@ def _persistent_key(
         "max_age_days": config.max_age_days,
         "max_entries": config.max_entries,
         "utc_date": (
-            datetime.now(timezone.utc).date().isoformat()
+            datetime.now(UTC).date().isoformat()
             if config.max_age_days > 0
             else ""
         ),
@@ -225,7 +225,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         config.max_age_days,
         config.max_entries,
         (
-            datetime.now(timezone.utc).date().isoformat()
+            datetime.now(UTC).date().isoformat()
             if config.max_age_days > 0
             else ""
         ),
@@ -247,7 +247,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         return persisted
 
     cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=config.max_age_days)
+        datetime.now(UTC) - timedelta(days=config.max_age_days)
         if config.max_age_days > 0
         else None
     )

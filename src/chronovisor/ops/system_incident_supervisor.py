@@ -9,8 +9,6 @@ only after independent recurrence plus two deterministic local rechecks.
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import ensure_utc as _utc_now
-
 import copy
 import fcntl
 import hashlib
@@ -19,15 +17,19 @@ import json
 import os
 import re
 import tempfile
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 from chronovisor.core import store as chronovisor_store
-from chronovisor.decision.frontier_guard import RepairIncidentEvidence, repair_fingerprint
-
+from chronovisor.core.timeutil import ensure_utc as _utc_now
+from chronovisor.decision.frontier_guard import (
+    RepairIncidentEvidence,
+    repair_fingerprint,
+)
 
 SCHEMA_VERSION = 1
 TRUSTED_HEALTH_COMPONENT = "watchdog.health_snapshot"
@@ -240,10 +242,8 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     finally:
-        try:
+        with suppress(OSError):
             tmp.unlink()
-        except OSError:
-            pass
 
 
 @contextmanager
@@ -455,13 +455,12 @@ def _verified_deterministic_reproduction(
     # into the frontier repair postcondition.
     command = ["uv", "run", "pytest", "-q", failing_test]
     supplied_command = raw.get("command")
-    if supplied_command is not None:
-        if (
-            not isinstance(supplied_command, Sequence)
-            or isinstance(supplied_command, (str, bytes))
-            or [str(value) for value in supplied_command] != command
-        ):
-            return None
+    if supplied_command is not None and (
+        not isinstance(supplied_command, Sequence)
+        or isinstance(supplied_command, (str, bytes))
+        or [str(value) for value in supplied_command] != command
+    ):
+        return None
     return {
         "evidence_sha256": actual_sha,
         "command": command,
@@ -493,8 +492,7 @@ def _repair_evidence_digest(
 
 
 def _reset_derived_index_singletons() -> None:
-    from chronovisor.search import index_store
-    from chronovisor.search import search
+    from chronovisor.search import index_store, search
 
     with index_store._store_lock:
         index_store._store = None
@@ -527,8 +525,7 @@ def _default_health_repair(attempt: int, *, dry_run: bool) -> Mapping[str, Any]:
     if attempt != 2:
         raise ValueError("unsupported health repair attempt")
 
-    from chronovisor.search import index_store
-    from chronovisor.search import search
+    from chronovisor.search import index_store, search
 
     cache_paths = (
         index_store.PAGES_INDEX_FILE,
@@ -542,7 +539,7 @@ def _default_health_repair(attempt: int, *, dry_run: bool) -> Mapping[str, Any]:
             / "runtime"
             / "system-incidents"
             / "cache-quarantine"
-            / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{os.getpid()}"
+            / f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}-{os.getpid()}"
         )
         quarantine.mkdir(parents=True, exist_ok=False)
         for path in existing:
@@ -679,7 +676,7 @@ class SystemIncidentSupervisor:
         self.failure_state_file = failure_state_file or (
             chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "failures" / "state.json"
         )
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self._enqueue = enqueue
 
     def _enqueue_packet(self, packet_path: Path) -> Mapping[str, Any]:

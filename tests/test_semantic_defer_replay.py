@@ -3,15 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.raw import raw_replay
-from chronovisor.ops.convergence import CycleBudget
 from chronovisor.core.jobs import JobStatus
+from chronovisor.ops.convergence import CycleBudget
+from chronovisor.raw import raw_replay
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -60,11 +60,9 @@ def test_auto_signals_skip_semantic_defer_until_authority_artifact_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import decision_router
-    from chronovisor.decision import failure_supervisor
-    from chronovisor.core import runtime_config
+    from chronovisor.core import runtime_config, store
+    from chronovisor.decision import decision_router, failure_supervisor
     from chronovisor.ops import runtime_status
-    from chronovisor.core import store
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
@@ -229,7 +227,7 @@ def test_existing_queue_row_does_not_cooldown_reopen_or_launch_while_deferred(
         completions_file=paths["completions"],
         max_runs=1,
         max_bytes=100,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert held["count"] == 0
@@ -249,7 +247,7 @@ def test_existing_queue_row_does_not_cooldown_reopen_or_launch_while_deferred(
         max_runs=1,
         max_bytes=100,
         dry_run=True,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert released["count"] == 1
@@ -366,7 +364,7 @@ def test_semantic_defer_published_during_budget_preflight_blocks_launch(
         max_runs=1,
         max_bytes=100,
         budget=PublishingBudget(),
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 0
@@ -510,7 +508,7 @@ def test_no_quorum_from_replay_publishes_one_terminal_defer_without_retry(
         max_bytes=100,
         retry_delay_seconds=0,
         frontier_reviewer=forbid_frontier,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
     second = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -521,7 +519,7 @@ def test_no_quorum_from_replay_publishes_one_terminal_defer_without_retry(
         max_bytes=100,
         retry_delay_seconds=0,
         frontier_reviewer=forbid_frontier,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert ingest_calls == [f"replay:{raw.name}"]
@@ -570,7 +568,7 @@ def test_no_quorum_from_replay_publishes_one_terminal_defer_without_retry(
         max_bytes=100,
         retry_delay_seconds=0,
         frontier_reviewer=forbid_frontier,
-        now=datetime(2026, 7, 14, 0, 0, 1, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, 0, 0, 1, tzinfo=UTC),
     )
 
     assert third["count"] == 1
@@ -741,7 +739,7 @@ def test_legacy_no_quorum_reconcile_is_model_free_bounded_and_scope_exact(
         frontier_reviewer=lambda *_args, **_kwargs: pytest.fail(
             "reconcile must not invoke frontier"
         ),
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert publications == [raws[0].name]
@@ -871,7 +869,7 @@ def test_active_semantic_packet_recovers_running_marker_after_publish_crash(
         frontier_reviewer=lambda *_args, **_kwargs: pytest.fail(
             "crash recovery must not invoke frontier"
         ),
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 0
@@ -954,7 +952,7 @@ def test_newer_operational_hold_outranks_legacy_no_quorum_history(
         frontier_reviewer=lambda *_args, **_kwargs: pytest.fail(
             "operational hold must not invoke frontier"
         ),
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 0
@@ -1070,7 +1068,7 @@ def test_legacy_semantic_reconcile_obeys_shared_cycle_budget_before_writes(
         frontier_reviewer=lambda *_args, **_kwargs: pytest.fail(
             "budget denial must not invoke frontier"
         ),
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 0
@@ -1174,7 +1172,7 @@ def test_dry_run_previews_future_and_cooldown_legacy_semantic_reconcile(
         dry_run=True,
         eligible_keys={str(row["key"]) for row in rows},
         eligible_sources=None,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 2
@@ -1269,7 +1267,7 @@ def test_oversized_legacy_semantic_reconcile_is_read_only_and_fully_uncharged(
         eligible_keys={key},
         eligible_sources=None,
         budget=budget,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 0
@@ -1359,7 +1357,7 @@ def test_dry_run_verifies_only_bounded_semantic_candidates(
         dry_run=True,
         eligible_keys={str(row["key"]) for row in rows},
         eligible_sources=None,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 1
@@ -1428,7 +1426,7 @@ def test_active_packet_authority_change_between_plan_and_apply_is_not_deferred(
         max_bytes=100,
         eligible_keys={key},
         eligible_sources=None,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["semantic_defer_reconciled"] == []
@@ -1507,7 +1505,7 @@ def test_dry_run_reports_shared_budget_denial_without_source_verification(
         eligible_keys={key},
         eligible_sources=None,
         budget=budget,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 0
@@ -1609,7 +1607,7 @@ def test_successful_replay_releases_failure_supervisor_for_actual_raw(
         frontier_reviewer=lambda *_args, **_kwargs: pytest.fail(
             "successful replay must not invoke frontier"
         ),
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 1
@@ -1700,7 +1698,7 @@ def test_completion_survives_reset_failure_and_retries_cleanup_without_replay(
         on_complete()
 
     monkeypatch.setattr('chronovisor.ingest.ingest.run_ingest', succeed)
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     first = raw_replay.run_pending_queue(
         path=paths["queue"],
         history_file=paths["history"],
@@ -1824,7 +1822,7 @@ def test_pending_failure_reset_obeys_mutation_budget_without_queue_rewrite(
         eligible_keys={key},
         eligible_sources=None,
         budget=budget,
-        now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 14, tzinfo=UTC),
     )
 
     assert result["count"] == 0

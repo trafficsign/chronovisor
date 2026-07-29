@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -16,8 +16,7 @@ from chronovisor.decision.frontier_guard import (
     repair_fingerprint,
 )
 
-
-BASE = datetime(2026, 7, 11, 8, 0, tzinfo=timezone.utc)
+BASE = datetime(2026, 7, 11, 8, 0, tzinfo=UTC)
 
 
 def evidence(
@@ -192,7 +191,7 @@ def test_different_fingerprint_is_still_global_single_flight(tmp_path: Path) -> 
     guard_root = tmp_path / "guard"
     first_guard = FrontierGuard(guard_root)
     second_guard = FrontierGuard(guard_root)
-    current = datetime.now(timezone.utc)
+    current = datetime.now(UTC)
 
     with first_guard.permit(evidence("first"), now=current):
         with pytest.raises(PermitDenied) as denied:
@@ -461,7 +460,7 @@ def test_dry_inspect_projects_recovery_without_any_filesystem_write(
 
 def test_context_manager_abandons_unfinished_started_incident(tmp_path: Path) -> None:
     guard = FrontierGuard(tmp_path / "guard")
-    current = datetime.now(timezone.utc)
+    current = datetime.now(UTC)
     with guard.permit(evidence(), now=current) as permit:
         permit.start(pid=os.getpid(), now=current)
 

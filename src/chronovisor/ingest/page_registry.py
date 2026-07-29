@@ -7,10 +7,7 @@ redirect following never rewrites or compresses the registry.
 
 from __future__ import annotations
 
-from chronovisor.core.hashutil import sha256_bytes as _sha256
-
 import fcntl
-import hashlib
 import json
 import os
 import tempfile
@@ -21,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core import frontmatter
+from chronovisor.core.hashutil import sha256_bytes as _sha256
 from chronovisor.core.page_identity import new_page_uid, normalize_page_uid
 
 REGISTRY_SCHEMA = "chronovisor.page-registry.v1"

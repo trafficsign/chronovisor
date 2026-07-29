@@ -205,7 +205,7 @@ class PageEntry:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "PageEntry":
+    def from_dict(cls, d: dict) -> PageEntry:
         # Defensively coerce list-of-string fields: a manually edited
         # cache file or a future-format mismatch shouldn't crash the
         # singleton at startup.
@@ -409,7 +409,7 @@ class IndexStore:
             old_ids = set(self._entries.keys())
             new_ids = set(seen_ids.keys())
             removed = old_ids - new_ids
-            added = new_ids - old_ids
+            new_ids - old_ids
 
             changed = False
             for pid in removed:

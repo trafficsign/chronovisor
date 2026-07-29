@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-
 import argparse
 import hashlib
 import json
@@ -12,11 +10,9 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import ollama
 from chronovisor.classification.classification import ClassificationError
 from chronovisor.classification.classification_anchor import (
     UNRESOLVED_ANCHOR_ID,
@@ -32,15 +28,17 @@ from chronovisor.classification.classification_anchor_worker import (
     SUBJECT_SCHEMA,
     WORKER_SCHEMA,
 )
-from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_file
+from chronovisor.core import ollama
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_file
 from chronovisor.research.research_scheduler import (
     research_lane,
     run_cancellable_command,
     sync_pending,
 )
-from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 EVALUATION_SCHEMA = "chronovisor.classification-anchor-dev.v1"
 CASE_SCHEMA = "chronovisor.classification-anchor-case.v1"

@@ -8,9 +8,8 @@ identifiers, and concrete numeric facts.  It is not a general fact checker.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
-
 
 _ASCII_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])"
@@ -290,9 +289,10 @@ def _token_is_protected(
         char.isupper() for char in letters
     ):
         return True
-    if any(char in token for char in "-+/"):
-        if any(char.isupper() for char in token) or known_part:
-            return True
+    if any(char in token for char in "-+/") and (
+        any(char.isupper() for char in token) or known_part
+    ):
+        return True
     if any(char.islower() for char in letters) and any(
         char.isupper() for char in token[1:]
     ):

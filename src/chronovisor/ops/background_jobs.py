@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from chronovisor.core.timeutil import utc_now as _now
-
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -12,15 +11,16 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
 from chronovisor.core.module_paths import canonical_module_path
-from chronovisor.decision.frontier_review import redact_sensitive_text
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_now as _now
+from chronovisor.decision.frontier_review import redact_sensitive_text
 
 JOB_DIR = CHRONOVISOR_ROOT / "runtime" / "background-jobs"
 STATE_FILE = JOB_DIR / "state.json"
@@ -78,10 +78,8 @@ def _save(state: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, STATE_FILE)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -707,7 +705,7 @@ def snapshot() -> dict[str, Any]:
                 quarantined_at = None
             if quarantined_at is not None:
                 if quarantined_at.tzinfo is None:
-                    quarantined_at = quarantined_at.replace(tzinfo=timezone.utc)
+                    quarantined_at = quarantined_at.replace(tzinfo=UTC)
                 if quarantined_at >= quarantine_cutoff:
                     quarantined_24h += 1
     return {

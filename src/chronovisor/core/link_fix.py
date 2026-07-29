@@ -3,12 +3,12 @@
 server.py / lint.py / scripts/fix_broken_links.py から共通で利用される。
 """
 
+import contextlib
 import difflib
 import os
 import re
 import tempfile
 from pathlib import Path
-
 
 # [[target]] / [[target|label]] / [[target#section]] にマッチ。
 # 改行・ネスト・空リンクは除外。
@@ -168,8 +168,6 @@ def atomic_write(path: Path, content: str) -> None:
         finally:
             os.close(dir_fd)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise

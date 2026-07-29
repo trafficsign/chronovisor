@@ -9,18 +9,18 @@ import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from html import unescape
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from html import unescape
 from typing import Any, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.research.research_config import WebConfig
 from chronovisor.research.research_security import guard_egress_query, guard_url
-from chronovisor.core.store import CHRONOVISOR_ROOT
 
 WEB_TRACE = CHRONOVISOR_ROOT / "runtime" / "research" / "web-egress.jsonl"
 USER_AGENT = "Chronovisor/0.1 (+https://github.com/trafficsign/chronovisor)"
@@ -865,7 +865,7 @@ def search_web(
         WEB_TRACE,
         [
             {
-                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "ts": datetime.now(UTC).isoformat(timespec="seconds"),
                 "kind": "web_search",
                 "provider": provider_name,
                 "query": response.query,
