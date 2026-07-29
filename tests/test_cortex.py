@@ -237,6 +237,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "function ambient(" not in script
     assert "function autoTick(" not in script
     assert 'setTimeout(() => stimulate("recall")' not in script
+    assert "if (performance.now() <= tickerHold) return;" in script
     assert "/static/cortex_graph.json" not in script
     assert "3d-force-graph" not in html
     assert '<a class="cortex-link" href="/cortex">Synaptic Cortex</a>' in observatory

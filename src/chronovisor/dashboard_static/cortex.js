@@ -1360,6 +1360,7 @@
     window.clearTimeout(tickerTransition);
     tickerText.style.opacity = 0;
     tickerTransition = window.setTimeout(() => {
+      if (performance.now() <= tickerHold) return;
       tickerText.textContent = facts[factIndex % facts.length];
       factIndex += 1;
       tickerText.style.opacity = 1;
