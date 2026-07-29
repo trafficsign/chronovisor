@@ -3,14 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from chronovisor.evidence_bundle import (
+from chronovisor.research.evidence_bundle import (
     build_bundle,
     classify_claim,
     deterministic_citations,
     simple_assess_claims,
 )
-from chronovisor.research_store import ResearchStore
-from chronovisor.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
+from chronovisor.research.research_store import ResearchStore
+from chronovisor.research.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
 
 
 def _artifact(
@@ -73,7 +73,7 @@ def test_unrelated_negation_does_not_contradict_identifier_claim() -> None:
 
 
 def test_bundle_is_durable_and_rebuildable(tmp_path: Path, monkeypatch) -> None:
-    from chronovisor import research_store
+    from chronovisor.research import research_store
 
     monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runtime")

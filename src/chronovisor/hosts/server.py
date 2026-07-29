@@ -494,7 +494,7 @@ def chronovisor_search(
     from chronovisor.search.reranker import rerank_results
     from chronovisor.core.runtime_config import load_reranker_config
     from chronovisor.search.search import last_search_trace
-    from chronovisor.search import search as run_search
+    from chronovisor.search.search import search as run_search
 
     store = get_store()
     store.refresh()

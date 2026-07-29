@@ -1055,7 +1055,7 @@ def _prepare_linked_incident_for_verified_release(
 
             background = cancel_matching_jobs(
                 name="system-code-repair",
-                module="chronovisor.self_heal",
+                module="chronovisor.ops.self_heal",
                 args=["--packet", str(incident_path), "--enable-frontier-repair"],
                 reason="verified local repair superseded system incident",
             )
@@ -1822,7 +1822,7 @@ def _restore_quarantined_raw(
 def _retry_ingest(*, dry_run: bool) -> dict[str, Any]:
     if dry_run:
         return {"triggered": False, "dry_run": True}
-    from chronovisor import orchestrator
+    from chronovisor.ingest import orchestrator
 
     return orchestrator.run_pending_ingest(force=True)
 
@@ -3764,7 +3764,7 @@ def start_background(packet_path: Path) -> dict[str, Any] | None:
     resolved = packet_path.expanduser().resolve(strict=False)
     return enqueue_job(
         name="self-heal",
-        module="chronovisor.self_heal",
+        module="chronovisor.ops.self_heal",
         args=["--packet", str(resolved)],
         env={},
         stdin_text="",
@@ -3814,7 +3814,7 @@ def enqueue_system_code_repair(packet_path: Path) -> dict[str, Any]:
         validate_operational_incident_packet(resolved)
     return enqueue_job(
         name="system-code-repair",
-        module="chronovisor.self_heal",
+        module="chronovisor.ops.self_heal",
         args=["--packet", str(resolved), "--enable-frontier-repair"],
         env={},
         stdin_text="",
@@ -3943,7 +3943,8 @@ def _patch_chronovisor_paths(chronovisor_root: Path) -> dict[str, Any]:
     for path in (pages, raw, system, runtime):
         path.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor import ingest, orchestrator
+    from chronovisor.ingest import ingest
+    from chronovisor.ingest import orchestrator
 
     snapshot = {
         "chronovisor": {
@@ -3998,7 +3999,8 @@ def _patch_chronovisor_paths(chronovisor_root: Path) -> dict[str, Any]:
 def _restore_chronovisor_paths(snapshot: dict[str, Any]) -> None:
     """Restore path globals after a sandbox drill."""
 
-    from chronovisor import ingest, orchestrator
+    from chronovisor.ingest import ingest
+    from chronovisor.ingest import orchestrator
 
     for name, value in snapshot["chronovisor"].items():
         setattr(chronovisor_store, name, value)
@@ -4032,7 +4034,8 @@ def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
     old_autorun = os.environ.get("CHRONOVISOR_SELF_HEAL_AUTORUN")
     os.environ["CHRONOVISOR_SELF_HEAL_AUTORUN"] = "0"
 
-    from chronovisor import ingest as ingest_mod, orchestrator
+    from chronovisor.ingest import ingest as ingest_mod
+    from chronovisor.ingest import orchestrator
     from chronovisor.core.alias_store import load_aliases
     from chronovisor.core.jobs import JobStatus, job_store
 

@@ -1322,7 +1322,7 @@ def run_frontier_policy_audit(
     reviewer: Any | None = None,
     authority: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from chronovisor import frontier_review
+    from chronovisor.decision import frontier_review
 
     if authority is None:
         authority, authority_error = decision_authority.current_semantic_authority(

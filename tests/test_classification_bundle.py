@@ -3,16 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.classification_bundle import (
+from chronovisor.classification.classification_bundle import (
     activate_decision_only,
     probe_decision_only_authority,
     resolve_authority,
     rollback_authority,
 )
-from chronovisor.classification_fixture_set import (
+from chronovisor.lab.classification_fixture_set import (
     create_disabled_baseline_manifest,
 )
-from chronovisor.durable_state import write_sealed_json
+from chronovisor.core.durable_state import write_sealed_json
 
 
 def test_disabled_baseline_is_distinct_from_missing_and_corrupt(

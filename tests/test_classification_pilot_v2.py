@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.classification_pilot_v2 import (
+from chronovisor.lab.classification_pilot_v2 import (
     V2PilotRunner,
     reciprocal_rank_fusion,
     summarize_v2,

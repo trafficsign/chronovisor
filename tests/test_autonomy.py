@@ -10,11 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import autonomy
-from chronovisor.convergence import ConvergenceStore, CycleBudget, RetryPolicy
-from chronovisor.decision_router import canonical_agreement_signature
-from chronovisor.decision_schema_manifest import production_decision_schemas
-from chronovisor.frontmatter import parse as parse_frontmatter
+from chronovisor.ops import autonomy
+from chronovisor.ops.convergence import ConvergenceStore, CycleBudget, RetryPolicy
+from chronovisor.decision.decision_router import canonical_agreement_signature
+from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.core.frontmatter import parse as parse_frontmatter
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
@@ -26,7 +26,7 @@ def isolate_decision_authority_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import page_mutation
+    from chronovisor.ingest import page_mutation
 
     monkeypatch.setattr(
         page_mutation,
@@ -237,7 +237,7 @@ def test_duplicate_resolution_routes_exact_high_confidence_pair_without_mutation
     monkeypatch.setattr(
         autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
     )
-    monkeypatch.setattr("chronovisor.index_store.get_store", lambda: None)
+    monkeypatch.setattr("chronovisor.search.index_store.get_store", lambda: None)
     monkeypatch.setattr(
         autonomy,
         "_page_quality",
@@ -2122,7 +2122,7 @@ def test_page_status_patch_rejects_stale_snapshot(monkeypatch, tmp_path: Path) -
 def test_watchdog_alerts_when_sleep_never_ran(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(autonomy, "WATCHDOG_FILE", tmp_path / "watchdog.json")
     monkeypatch.setattr(
-        "chronovisor.health.health_snapshot",
+        "chronovisor.ops.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2130,7 +2130,7 @@ def test_watchdog_alerts_when_sleep_never_ran(monkeypatch, tmp_path: Path) -> No
     )
     monkeypatch.setattr(autonomy, "_latest_jsonl", lambda path: {})
     monkeypatch.setattr(
-        "chronovisor.runtime_config.load_decision_router_config",
+        "chronovisor.core.runtime_config.load_decision_router_config",
         lambda: SimpleNamespace(adoption_artifact=""),
     )
     writes: list[tuple[Path, dict]] = []
@@ -2153,7 +2153,7 @@ def test_watchdog_alerts_when_sleep_never_ran(monkeypatch, tmp_path: Path) -> No
 def test_watchdog_does_not_alert_on_convergence_semantic_defer(monkeypatch) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "chronovisor.health.health_snapshot",
+        "chronovisor.ops.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2187,7 +2187,7 @@ def test_watchdog_does_not_alert_on_convergence_semantic_defer(monkeypatch) -> N
 def test_watchdog_does_not_alert_on_managed_lint_catch_up(monkeypatch) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "chronovisor.health.health_snapshot",
+        "chronovisor.ops.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {
@@ -2223,7 +2223,7 @@ def test_watchdog_does_not_alert_on_managed_lint_catch_up(monkeypatch) -> None:
 def test_watchdog_alerts_on_unmanaged_lint_backlog(monkeypatch) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "chronovisor.health.health_snapshot",
+        "chronovisor.ops.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {
@@ -2266,7 +2266,7 @@ def test_watchdog_alerts_on_unmanaged_lint_backlog(monkeypatch) -> None:
 def test_watchdog_alerts_on_operational_convergence_quarantine(monkeypatch) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "chronovisor.health.health_snapshot",
+        "chronovisor.ops.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2300,7 +2300,7 @@ def test_watchdog_still_alerts_on_operational_background_quarantine(
 ) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "chronovisor.health.health_snapshot",
+        "chronovisor.ops.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2332,7 +2332,7 @@ def test_watchdog_still_alerts_on_operational_background_quarantine(
 def test_watchdog_ignores_retained_old_background_quarantine(monkeypatch) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(
-        "chronovisor.health.health_snapshot",
+        "chronovisor.ops.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2420,7 +2420,7 @@ def test_watchdog_notification_sends_once_and_reports_recovery(monkeypatch) -> N
 
 def test_watchdog_read_only_never_sends_notification(monkeypatch) -> None:
     monkeypatch.setattr(
-        "chronovisor.health.health_snapshot",
+        "chronovisor.ops.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.95},
             "queues": {"duplicate_candidates": 0, "lint_repair": 0},
@@ -2464,7 +2464,7 @@ def test_watchdog_history_is_compact_and_bounded_to_1000_lines(
     monkeypatch.setattr(autonomy, "WATCHDOG_HISTORY", history_file)
     monkeypatch.setattr(autonomy, "WATCHDOG_FILE", tmp_path / "watchdog-latest.json")
     monkeypatch.setattr(
-        "chronovisor.health.health_snapshot",
+        "chronovisor.ops.health.health_snapshot",
         lambda: {
             "memory_integrity": {"capture_rate": 0.96},
             "queues": {"duplicate_candidates": 7, "lint_repair": 9},

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from chronovisor.semantic_jobs import (
+from chronovisor.search.semantic_jobs import (
     claim_next,
     complete,
     enqueue_page,

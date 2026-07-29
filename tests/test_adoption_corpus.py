@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import adoption_corpus, read_back_repair
-from chronovisor.adoption_corpus import (
+from chronovisor.lab import adoption_corpus
+from chronovisor.ingest import read_back_repair
+from chronovisor.lab.adoption_corpus import (
     CONTRACT_SOURCE,
     HISTORICAL_SOURCE,
     INDEPENDENT_LABEL_EVIDENCE_KINDS,
@@ -26,18 +27,18 @@ from chronovisor.adoption_corpus import (
     compile_adoption_corpus,
     contract_candidates,
 )
-from chronovisor.decision_router import decision_context_buckets
-from chronovisor.decision_schema_manifest import (
+from chronovisor.decision.decision_router import decision_context_buckets
+from chronovisor.decision.decision_schema_manifest import (
     production_decision_schemas,
     production_schema_manifest,
 )
-from chronovisor.local_model_eval import (
+from chronovisor.lab.local_model_eval import (
     ReplayInputError,
     STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION,
     inspect_replays,
     load_replay_corpus,
 )
-from chronovisor.runtime_config import DecisionRouterConfig
+from chronovisor.core.runtime_config import DecisionRouterConfig
 
 
 def _expected(schema: dict[str, object]) -> dict[str, object]:
@@ -464,7 +465,7 @@ def test_read_back_contracts_exactly_match_the_production_request_builder(
         }
 
     monkeypatch.setattr(
-        "chronovisor.frontier_review.run_structured_review",
+        "chronovisor.decision.frontier_review.run_structured_review",
         fake_review,
     )
     first = rows[0]

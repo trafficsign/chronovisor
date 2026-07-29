@@ -8,7 +8,7 @@ from typing import Any
 
 
 def _runtime():
-    from chronovisor import ingest
+    from chronovisor.ingest import ingest
 
     return ingest
 
@@ -31,7 +31,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         return {"checked": 0, "passed": 0, "failed": []}
     try:
         from chronovisor.search.index_store import get_store
-        from chronovisor.search import search
+        from chronovisor.search.search import search
 
         store = get_store()
         store.refresh()

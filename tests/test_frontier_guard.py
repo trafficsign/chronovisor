@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import frontier_guard
-from chronovisor.frontier_guard import (
+from chronovisor.decision import frontier_guard
+from chronovisor.decision.frontier_guard import (
     EvidenceValidationError,
     FrontierGuard,
     PermitDenied,

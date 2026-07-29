@@ -6,14 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import (
-    raw_replay,
-    read_back_repair,
-    recall_auto_apply,
-    recall_calibration,
-    recall_hints,
-    search_eval,
-)
+from chronovisor.raw import raw_replay
+from chronovisor.ingest import read_back_repair
+from chronovisor.recall import recall_auto_apply
+from chronovisor.recall import recall_calibration
+from chronovisor.recall import recall_hints
+from chronovisor.search import search_eval
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
@@ -22,7 +20,7 @@ def isolate_decision_authority_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import page_mutation
+    from chronovisor.ingest import page_mutation
 
     monkeypatch.setattr(
         page_mutation,

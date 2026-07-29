@@ -11,7 +11,7 @@ from chronovisor.core import ollama as ollama_runtime
 
 
 def _runtime():
-    from chronovisor import ingest
+    from chronovisor.ingest import ingest
 
     return ingest
 

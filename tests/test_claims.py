@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import claims
+from chronovisor.recall import claims
 
 
 def test_page_claims_extracts_summary_entities_and_lead(tmp_path: Path, monkeypatch) -> None:

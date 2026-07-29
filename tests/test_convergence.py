@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.convergence import (
+from chronovisor.ops.convergence import (
     CycleBudget,
     ConvergenceStateError,
     ConvergenceStore,
@@ -17,7 +17,7 @@ from chronovisor.convergence import (
     is_human_required_result,
     stable_item_key,
 )
-from chronovisor.semantic_hold import persisted_semantic_no_quorum_hold
+from chronovisor.search.semantic_hold import persisted_semantic_no_quorum_hold
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 

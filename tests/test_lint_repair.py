@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import lint_repair
-from chronovisor.convergence import CycleBudget, ConvergenceStore, RetryPolicy
-from chronovisor.decision_router import canonical_agreement_signature
-from chronovisor.decision_schema_manifest import production_decision_schemas
-from chronovisor.frontmatter import parse as parse_frontmatter
+from chronovisor.ops import lint_repair
+from chronovisor.ops.convergence import CycleBudget, ConvergenceStore, RetryPolicy
+from chronovisor.decision.decision_router import canonical_agreement_signature
+from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.core.frontmatter import parse as parse_frontmatter
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
@@ -25,7 +25,7 @@ def isolate_decision_authority_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import page_mutation
+    from chronovisor.ingest import page_mutation
 
     monkeypatch.setattr(
         page_mutation,

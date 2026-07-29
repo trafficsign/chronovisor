@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from chronovisor.research_config import WebConfig
-from chronovisor.web_provider import (
+from chronovisor.research.research_config import WebConfig
+from chronovisor.research.web_provider import (
     FederatedSearchProvider,
     FixtureSearchProvider,
     HttpSearchProvider,
@@ -15,7 +15,7 @@ from chronovisor.web_provider import (
 def test_fixture_search_runs_before_live_egress_is_enabled(
     tmp_path, monkeypatch
 ) -> None:
-    from chronovisor import web_provider
+    from chronovisor.research import web_provider
 
     monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
     provider = FixtureSearchProvider(
@@ -37,7 +37,7 @@ def test_fixture_search_runs_before_live_egress_is_enabled(
 
 
 def test_sensitive_query_is_blocked_before_provider_call(tmp_path, monkeypatch) -> None:
-    from chronovisor import web_provider
+    from chronovisor.research import web_provider
 
     monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
 
@@ -59,8 +59,8 @@ def test_sensitive_query_is_blocked_before_provider_call(tmp_path, monkeypatch) 
 
 def test_searxng_adapter_normalizes_mocked_live_results(tmp_path, monkeypatch) -> None:
     import httpx
-    from chronovisor import web_provider
-    from chronovisor.web_provider import HttpSearchProvider
+    from chronovisor.research import web_provider
+    from chronovisor.research.web_provider import HttpSearchProvider
 
     monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
     client = httpx.Client(
@@ -100,8 +100,8 @@ def test_searxng_partial_engine_failure_is_visible_without_losing_results(
     tmp_path, monkeypatch
 ) -> None:
     import httpx
-    from chronovisor import web_provider
-    from chronovisor.web_provider import HttpSearchProvider
+    from chronovisor.research import web_provider
+    from chronovisor.research.web_provider import HttpSearchProvider
 
     monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
     client = httpx.Client(
@@ -151,7 +151,7 @@ def test_searxng_partial_engine_failure_is_visible_without_losing_results(
 
 def test_mediawiki_adapter_is_a_keyless_bounded_fallback() -> None:
     import httpx
-    from chronovisor.web_provider import HttpSearchProvider
+    from chronovisor.research.web_provider import HttpSearchProvider
 
     client = httpx.Client(
         transport=httpx.MockTransport(
@@ -370,7 +370,7 @@ def test_loopback_exception_is_limited_to_local_searxng_search(
 ) -> None:
     import httpx
 
-    from chronovisor import web_provider
+    from chronovisor.research import web_provider
 
     monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
     client = httpx.Client(

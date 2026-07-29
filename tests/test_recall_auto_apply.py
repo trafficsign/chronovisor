@@ -9,13 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import page_mutation, recall_auto_apply, recall_hints, store
-from chronovisor.convergence import CycleBudget
-from chronovisor.decision_router import canonical_agreement_signature
-from chronovisor.decision_schema_manifest import production_decision_schemas
-from chronovisor.frontmatter import parse as parse_frontmatter
-from chronovisor.link_fix import atomic_write
-from chronovisor.recall_runtime import RecallPolicy, collect_context
+from chronovisor.ingest import page_mutation
+from chronovisor.recall import recall_auto_apply
+from chronovisor.recall import recall_hints
+from chronovisor.core import store
+from chronovisor.ops.convergence import CycleBudget
+from chronovisor.decision.decision_router import canonical_agreement_signature
+from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.link_fix import atomic_write
+from chronovisor.recall.recall_runtime import RecallPolicy, collect_context
 
 
 @pytest.fixture(autouse=True)
@@ -268,7 +271,7 @@ def test_frontier_rejection_blocks_every_auto_mutation_and_is_durable(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from chronovisor import alias_store
+    from chronovisor.core import alias_store
 
     pages_root = tmp_path / "wiki"
     page = _page(pages_root, "target-page")
@@ -895,7 +898,7 @@ def test_query_hint_without_target_is_skipped_not_error(tmp_path, monkeypatch) -
 
 
 def test_alias_auto_apply_uses_existing_alias_store(tmp_path, monkeypatch) -> None:
-    from chronovisor import alias_store
+    from chronovisor.core import alias_store
 
     pages_root = tmp_path / "wiki"
     _page(pages_root, "canonical-recall-page")
@@ -1290,7 +1293,8 @@ def test_query_hint_accepts_system_pages(tmp_path, monkeypatch) -> None:
 
 
 def test_auditor_recording_invokes_auto_apply(tmp_path, monkeypatch, capsys) -> None:
-    from chronovisor import recall_auditor, recall_runtime
+    from chronovisor.recall import recall_auditor
+    from chronovisor.recall import recall_runtime
 
     pages_root = tmp_path / "wiki"
     _page(pages_root, "claude-code-recall-hook-implementation")

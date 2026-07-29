@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from chronovisor import model_lab
+from chronovisor.lab import model_lab
 
 
 def _isolate(monkeypatch, tmp_path: Path) -> None:

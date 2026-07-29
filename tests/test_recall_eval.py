@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from chronovisor import recall_eval
-from chronovisor.feedback_ledger import feedback_row_sha256
-from chronovisor.recall_runtime import ContextItem, RecallPolicy, RecallResult
+from chronovisor.recall import recall_eval
+from chronovisor.recall.feedback_ledger import feedback_row_sha256
+from chronovisor.recall.recall_runtime import ContextItem, RecallPolicy, RecallResult
 
 
 def test_build_dataset_uses_feedback_and_snapshot(tmp_path) -> None:

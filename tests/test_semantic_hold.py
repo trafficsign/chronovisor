@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import semantic_hold
+from chronovisor.search import semantic_hold
 from tests.semantic_hold_support import (
     semantic_authority as _authority,
     semantic_review as _semantic_review,
@@ -72,7 +72,8 @@ def test_authority_observation_detects_a_b_a_file_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import local_model_eval, runtime_config
+    from chronovisor.lab import local_model_eval
+    from chronovisor.core import runtime_config
 
     config_path = tmp_path / "config.toml"
     artifact_path = tmp_path / "adoption.json"

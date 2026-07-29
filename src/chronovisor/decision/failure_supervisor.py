@@ -743,7 +743,7 @@ def _current_adopted_authority_sha256() -> str | None:
     """
 
     try:
-        from chronovisor import runtime_config
+        from chronovisor.core import runtime_config
         from chronovisor.decision.decision_router import resolve_router_policy
 
         loader = runtime_config.load_decision_router_config

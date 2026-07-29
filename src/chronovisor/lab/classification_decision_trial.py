@@ -274,7 +274,7 @@ def _generate_decision(
                 [
                     sys.executable,
                     "-m",
-                    "chronovisor.classification_decision_worker",
+                    "chronovisor.classification.classification_decision_worker",
                 ],
                 json.dumps(payload, ensure_ascii=False, sort_keys=True),
                 lease,

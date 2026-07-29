@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor import deep_retrieval, server
-from chronovisor.runtime_config import DecisionRouterConfig
-from chronovisor.research_config import ResearchConfig
-from chronovisor.research_store import ResearchStore
-from chronovisor.search import ScoredPage
+from chronovisor.research import deep_retrieval
+from chronovisor.hosts import server
+from chronovisor.core.runtime_config import DecisionRouterConfig
+from chronovisor.research.research_config import ResearchConfig
+from chronovisor.research.research_store import ResearchStore
+from chronovisor.search.search import ScoredPage
 
 
 def _tool(function):
@@ -77,7 +78,7 @@ def test_run_deep_dive_searches_reads_links_and_requeries(tmp_path, monkeypatch)
 
 
 def test_start_deep_dive_enqueues_durable_worker(monkeypatch) -> None:
-    from chronovisor import background_jobs
+    from chronovisor.ops import background_jobs
 
     recorded = []
 
@@ -90,12 +91,12 @@ def test_start_deep_dive_enqueues_durable_worker(monkeypatch) -> None:
     job_id = deep_retrieval.start_deep_dive("q", max_iterations=1)
 
     assert job_id == "durable-job"
-    assert recorded[0]["module"] == "chronovisor.deep_retrieval_worker"
+    assert recorded[0]["module"] == "chronovisor.research.deep_retrieval_worker"
     assert json.loads(recorded[0]["stdin_text"])["query"] == "q"
 
 
 def test_chronovisor_deep_dive_sync_returns_payload(monkeypatch) -> None:
-    from chronovisor import deep_retrieval as deep_retrieval_mod
+    from chronovisor.research import deep_retrieval as deep_retrieval_mod
 
     monkeypatch.setattr(
         deep_retrieval_mod,
@@ -110,7 +111,7 @@ def test_chronovisor_deep_dive_sync_returns_payload(monkeypatch) -> None:
 
 
 def test_chronovisor_jobs_reads_durable_deep_retrieval_job(monkeypatch) -> None:
-    from chronovisor import background_jobs
+    from chronovisor.ops import background_jobs
 
     monkeypatch.setattr(
         background_jobs,
@@ -133,7 +134,9 @@ def test_chronovisor_jobs_reads_durable_deep_retrieval_job(monkeypatch) -> None:
 
 
 def test_v2_deep_dive_uses_bounded_wiki_only_kernel(tmp_path, monkeypatch) -> None:
-    from chronovisor import research_orchestrator, research_scheduler, research_store
+    from chronovisor.research import research_orchestrator
+    from chronovisor.research import research_scheduler
+    from chronovisor.research import research_store
 
     scheduler_root = tmp_path / "scheduler"
     monkeypatch.setattr(research_scheduler, "SYNC_DIR", scheduler_root / "sync")
@@ -188,7 +191,7 @@ def _router_config() -> DecisionRouterConfig:
 
 
 def test_llm_requeries_repairs_invalid_json_in_same_session(monkeypatch) -> None:
-    from chronovisor import ollama
+    from chronovisor.core import ollama
 
     responses = iter(
         [
@@ -219,7 +222,7 @@ def test_llm_requeries_repairs_invalid_json_in_same_session(monkeypatch) -> None
 
 
 def test_llm_requeries_fails_closed_after_repeated_invalid_json(monkeypatch) -> None:
-    from chronovisor import ollama
+    from chronovisor.core import ollama
 
     calls = 0
 
@@ -247,7 +250,8 @@ def test_injected_requery_transport_does_not_pollute_production_audit(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor import ollama, store
+    from chronovisor.core import ollama
+    from chronovisor.core import store
 
     chronovisor_root = tmp_path / "wiki"
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)

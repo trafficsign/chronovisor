@@ -14,7 +14,7 @@ from chronovisor.raw.raw_store import RawStore
 from chronovisor.research.research_config import ResearchConfig
 from chronovisor.research.research_store import ResearchStore
 from chronovisor.research.research_types import Action, ActionType
-from chronovisor.search import search as run_search
+from chronovisor.search.search import search as run_search
 from chronovisor.core.store import RAW_DIR, CHRONOVISOR_ROOT, find_page
 
 

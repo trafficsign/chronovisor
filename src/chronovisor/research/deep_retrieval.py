@@ -356,7 +356,7 @@ def start_deep_dive(
     run_id = uuid.uuid4().hex
     job = enqueue_job(
         name="deep-retrieval",
-        module="chronovisor.deep_retrieval_worker",
+        module="chronovisor.research.deep_retrieval_worker",
         args=["--run-id", run_id, "--engine", "v2" if engine == "v2" else "v1"],
         env={},
         stdin_text=json.dumps(

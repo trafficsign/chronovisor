@@ -3,8 +3,8 @@ from __future__ import annotations
 import httpx
 import gzip
 
-from chronovisor.research_config import WebConfig
-from chronovisor.web_fetch import fetch_web
+from chronovisor.research.research_config import WebConfig
+from chronovisor.research.web_fetch import fetch_web
 
 
 def PUBLIC(_host, _port):

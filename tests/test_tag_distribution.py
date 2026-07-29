@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import tag_distribution as td
-from chronovisor.tag_distribution import (
+from chronovisor.librarian import tag_distribution as td
+from chronovisor.librarian.tag_distribution import (
     PageAnalysis,
     SamplingPlan,
     aggregate,
@@ -61,7 +61,7 @@ def isolated_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     pages_dir.mkdir()
 
     # Patch store.PAGES_DIR so the folder-extraction helper resolves paths.
-    from chronovisor import store as wiki_mod
+    from chronovisor.core import store as wiki_mod
     monkeypatch.setattr(wiki_mod, "PAGES_DIR", pages_dir)
 
     def fake_find_page(page_id: str):

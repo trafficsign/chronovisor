@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 
-from chronovisor.classification_anchor import (
+from chronovisor.classification.classification_anchor import (
     UNRESOLVED_ANCHOR_ID,
     default_anchor_gold_path,
     load_anchor_set,
     validate_anchor_gold,
 )
-from chronovisor.classification_anchor_worker import (
+from chronovisor.classification.classification_anchor_worker import (
     SELECTION_SCHEMA,
     validate_selection,
 )

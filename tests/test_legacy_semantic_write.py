@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.legacy_semantic_write import (
+from chronovisor.raw.legacy_semantic_write import (
     LegacySemanticMutationDisabled,
     block_legacy_semantic_mutation,
 )

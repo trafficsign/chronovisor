@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.classification import UDCPackage
-from chronovisor.classification_pilot import (
+from chronovisor.classification.classification import UDCPackage
+from chronovisor.lab.classification_pilot import (
     AuthoritativeCandidateIndex,
     PilotRunner,
     prepare_diagnostic_set,
@@ -221,7 +221,7 @@ def test_model_stage_retries_transient_empty_json(
 ) -> None:
     responses = iter(["", '{"decision":{"ok":true}}'])
     monkeypatch.setattr(
-        "chronovisor.classification_pilot.ollama.chat",
+        "chronovisor.lab.classification_pilot.ollama.chat",
         lambda *args, **kwargs: next(responses),
     )
     runner = PilotRunner(package=_package(), cache_dir=tmp_path)
@@ -248,7 +248,7 @@ def test_gpt_oss_model_stage_uses_low_reasoning(
         return '{"decision":{"ok":true}}'
 
     monkeypatch.setattr(
-        "chronovisor.classification_pilot.ollama.chat",
+        "chronovisor.lab.classification_pilot.ollama.chat",
         fake_chat,
     )
     runner = PilotRunner(package=_package(), cache_dir=tmp_path)

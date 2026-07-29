@@ -8,9 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import background_jobs, codex_record, recall_hints, session_sweeper
-from chronovisor.frontmatter import normalize_nested, parse
-from chronovisor.jsonl import read_jsonl
+from chronovisor.ops import background_jobs
+from chronovisor.hosts import codex_record
+from chronovisor.recall import recall_hints
+from chronovisor.ops import session_sweeper
+from chronovisor.core.frontmatter import normalize_nested, parse
+from chronovisor.core.jsonl import read_jsonl
 
 
 def test_jsonl_reader_preserves_unicode_line_separator(tmp_path: Path) -> None:
@@ -191,6 +194,38 @@ def test_background_job_failure_is_durable_and_retryable(tmp_path: Path, monkeyp
     assert "temporary failure" in stored["output_tail"]
 
 
+def test_background_job_load_canonicalizes_durable_legacy_module(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(background_jobs, "STATE_FILE", state_file)
+    state_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "jobs": {
+                    "job-1": {
+                        "job_id": "job-1",
+                        "name": "self-heal",
+                        "module": "chronovisor.self_heal",
+                        "args": ["--packet", "/tmp/packet.json"],
+                        "stdin": "",
+                        "dedupe_key": "legacy",
+                        "status": "queued",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = background_jobs._load()
+
+    job = loaded["jobs"]["job-1"]
+    assert job["module"] == "chronovisor.ops.self_heal"
+    assert job["dedupe_key"] != "legacy"
+
+
 def test_successful_save_enqueues_audit_after_receipt_in_same_commit(
     tmp_path: Path,
     monkeypatch,
@@ -201,14 +236,14 @@ def test_successful_save_enqueues_audit_after_receipt_in_same_commit(
     stdin_text = '{"session_id":"session-1","turn":2}'
     save = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=stdin_text,
         on_success=[
             {
                 "name": "recall-audit-candidate",
-                "module": "chronovisor.recall_auditor",
+                "module": "chronovisor.recall.recall_auditor",
                 "args": ["--host", "codex", "--hook"],
                 "env": {},
                 "when_output_status": "saved",
@@ -243,14 +278,14 @@ def test_failed_save_does_not_enqueue_audit_candidate(tmp_path: Path, monkeypatc
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
     save = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text='{"session_id":"session-1"}',
         on_success=[
             {
                 "name": "recall-audit-candidate",
-                "module": "chronovisor.recall_auditor",
+                "module": "chronovisor.recall.recall_auditor",
                 "args": ["--host", "codex", "--hook"],
                 "env": {},
                 "when_output_status": "saved",
@@ -275,14 +310,14 @@ def test_successful_save_without_new_receipt_does_not_enqueue_audit(
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
     save = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text='{"session_id":"session-1"}',
         on_success=[
             {
                 "name": "recall-audit-candidate",
-                "module": "chronovisor.recall_auditor",
+                "module": "chronovisor.recall.recall_auditor",
                 "args": ["--host", "codex", "--hook"],
                 "env": {},
                 "when_output_status": "saved",
@@ -315,7 +350,7 @@ def test_coalesced_save_carries_receipt_until_latest_pass_finishes(
     followup = [
         {
             "name": "recall-audit-candidate",
-            "module": "chronovisor.recall_auditor",
+            "module": "chronovisor.recall.recall_auditor",
             "args": ["--host", "codex", "--hook"],
             "env": {},
             "when_output_status": "saved",
@@ -323,7 +358,7 @@ def test_coalesced_save_carries_receipt_until_latest_pass_finishes(
     ]
     save = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=first_payload,
@@ -332,7 +367,7 @@ def test_coalesced_save_carries_receipt_until_latest_pass_finishes(
     background_jobs._claim(save["job_id"])
     coalesced = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=latest_payload,
@@ -398,7 +433,7 @@ def test_background_job_exact_cancellation_is_terminal(
     args = ["--packet", "/tmp/system-operational-one.json", "--enable-frontier-repair"]
     job = background_jobs.enqueue_job(
         name="system-code-repair",
-        module="chronovisor.self_heal",
+        module="chronovisor.ops.self_heal",
         args=args,
         env={},
         stdin_text="sensitive payload",
@@ -408,7 +443,7 @@ def test_background_job_exact_cancellation_is_terminal(
 
     cancelled = background_jobs.cancel_matching_jobs(
         name="system-code-repair",
-        module="chronovisor.self_heal",
+        module="chronovisor.ops.self_heal",
         args=args,
         reason="verified repair",
         stdin_text="sensitive payload",
@@ -425,7 +460,7 @@ def test_background_job_exact_cancellation_is_terminal(
         assert finished["status"] == "cancelled"
     stale_enqueue = background_jobs.enqueue_job(
         name="system-code-repair",
-        module="chronovisor.self_heal",
+        module="chronovisor.ops.self_heal",
         args=args,
         env={},
         stdin_text="sensitive payload",
@@ -446,13 +481,13 @@ def test_background_job_cancellation_tombstone_blocks_cancel_before_enqueue(
 
     cancelled = background_jobs.cancel_matching_jobs(
         name="system-code-repair",
-        module="chronovisor.self_heal",
+        module="chronovisor.ops.self_heal",
         args=args,
         reason="verified repair",
     )
     stale_enqueue = background_jobs.enqueue_job(
         name="system-code-repair",
-        module="chronovisor.self_heal",
+        module="chronovisor.ops.self_heal",
         args=args,
         env={},
         stdin_text="",
@@ -481,14 +516,14 @@ def test_capture_jobs_coalesce_by_session_and_keep_latest_payload(
 
     first = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=first_payload,
     )
     second = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=latest_payload,
@@ -512,14 +547,14 @@ def test_capture_jobs_without_session_identity_do_not_cross_coalesce(
 
     first = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text="{}",
     )
     second = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text="{}",
@@ -539,7 +574,7 @@ def test_running_capture_coalesce_requests_one_tail_rerun(
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
     first = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=json.dumps({"session_id": "session-1", "turn": 1}),
@@ -549,7 +584,7 @@ def test_running_capture_coalesce_requests_one_tail_rerun(
 
     coalesced = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=latest_payload,
@@ -572,14 +607,14 @@ def test_background_job_lane_is_single_flight(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
     first = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=json.dumps({"session_id": "session-1"}),
     )
     second = background_jobs.enqueue_job(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={},
         stdin_text=json.dumps({"session_id": "session-2"}),

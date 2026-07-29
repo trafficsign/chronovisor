@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor import orchestrator
+from chronovisor.ingest import orchestrator
 
 
 def _state(**overrides) -> dict:

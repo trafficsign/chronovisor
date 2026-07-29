@@ -6,14 +6,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import decision_policy, decision_router, frontier_review
-from chronovisor.decision_policy import (
+from chronovisor.decision import decision_policy
+from chronovisor.decision import decision_router
+from chronovisor.decision import frontier_review
+from chronovisor.decision.decision_policy import (
     DECISION_POLICIES,
     decision_policy_snapshot,
     resolve_decision_policy,
 )
-from chronovisor.decision_router import DecisionRouterResult
-from chronovisor.decision_schema_manifest import production_decision_schemas
+from chronovisor.decision.decision_router import DecisionRouterResult
+from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from tests.semantic_hold_support import semantic_authority
 
 

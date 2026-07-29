@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.cofire import build_cofire_graph, neighbors
+from chronovisor.search.cofire import build_cofire_graph, neighbors
 
 
 def test_build_cofire_graph_counts_repeated_context_pairs(tmp_path: Path) -> None:

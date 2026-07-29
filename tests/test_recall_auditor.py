@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import recall_auditor
-from chronovisor.recall_runtime import stable_prompt_hash
+from chronovisor.recall import recall_auditor
+from chronovisor.recall.recall_runtime import stable_prompt_hash
 
 
 def _valid_auditor_payload() -> dict[str, object]:
@@ -200,7 +200,7 @@ def test_matching_recall_log_prefers_prompt_hash_and_session(tmp_path, monkeypat
 
 
 def test_cli_records_missed_candidate_with_snapshot(tmp_path, monkeypatch, capsys) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     prompt = "昨日の recall hook の続き"
     decision_id = "20260602T210000-auditme"
@@ -305,7 +305,7 @@ def test_cli_records_missed_candidate_with_snapshot(tmp_path, monkeypatch, capsy
 
 
 def test_run_skips_read_decisions_by_default(tmp_path, monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     prompt = "昨日の recall hook の続き"
     decision_id = "20260602T210000-readok"
@@ -506,7 +506,7 @@ def test_feedback_commit_suppresses_pull_duplicate_and_heals_consumed_index(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     pull_log = tmp_path / "pull-log.jsonl"
     feedback_file = tmp_path / "feedback.jsonl"

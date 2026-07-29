@@ -5,10 +5,11 @@ import sqlite3
 
 import pytest
 
-from chronovisor import index_store as index_store_mod
-from chronovisor import ollama, search
-from chronovisor.runtime_config import EmbeddingConfig, SearchEmbeddingConfig
-from chronovisor.search import (
+from chronovisor.search import index_store as index_store_mod
+from chronovisor.core import ollama
+from chronovisor.search import search
+from chronovisor.core.runtime_config import EmbeddingConfig, SearchEmbeddingConfig
+from chronovisor.search.search import (
     ScoredPage,
     apply_filters,
     fuse_results,
@@ -166,11 +167,11 @@ def test_associative_graph_reaches_two_hops_with_path_trace(monkeypatch) -> None
                 "entities": [],
             }
 
-    from chronovisor import index_store
+    from chronovisor.search import index_store
 
     monkeypatch.setattr(index_store, "get_store", lambda: FakeStore())
     monkeypatch.setattr(
-        "chronovisor.cofire.neighbors",
+        "chronovisor.search.cofire.neighbors",
         lambda *_args, **_kwargs: [],
     )
 

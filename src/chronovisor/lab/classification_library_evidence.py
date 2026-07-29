@@ -147,7 +147,7 @@ def embed_texts_cancellable(
                 [
                     sys.executable,
                     "-m",
-                    "chronovisor.classification_embedding_worker",
+                    "chronovisor.classification.classification_embedding_worker",
                 ],
                 json.dumps(payload, ensure_ascii=False),
                 lease,

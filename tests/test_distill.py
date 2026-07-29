@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor import distill
+from chronovisor.ops import distill
 
 
 class FakeStore:

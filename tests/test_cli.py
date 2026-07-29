@@ -6,8 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import cli, runtime_config, runtime_status, store
-from chronovisor import recall_runtime
+from chronovisor.hosts import cli
+from chronovisor.core import runtime_config
+from chronovisor.ops import runtime_status
+from chronovisor.core import store
+from chronovisor.recall import recall_runtime
 
 
 def _registered_command_paths(
@@ -175,7 +178,7 @@ def test_hooks_inspect_reports_canonical_hook_as_current(
 
 def test_recall_improve_run_due_cli_forwards_scheduler_args(tmp_path, monkeypatch, capsys) -> None:
     patch_wiki(tmp_path, monkeypatch)
-    from chronovisor import recall_improvement
+    from chronovisor.recall import recall_improvement
 
     seen: dict[str, object] = {}
 
@@ -194,7 +197,7 @@ def test_recall_improve_run_due_cli_forwards_scheduler_args(tmp_path, monkeypatc
 
 
 def test_sleep_cli_non_json_handles_partial_cycle(monkeypatch, capsys) -> None:
-    from chronovisor import sleep_cycle
+    from chronovisor.ops import sleep_cycle
 
     monkeypatch.setattr(
         sleep_cycle,
@@ -215,7 +218,7 @@ def test_sleep_cli_non_json_handles_partial_cycle(monkeypatch, capsys) -> None:
 
 
 def test_sleep_cli_non_json_handles_locked_cycle(monkeypatch, capsys) -> None:
-    from chronovisor import sleep_cycle
+    from chronovisor.ops import sleep_cycle
 
     monkeypatch.setattr(
         sleep_cycle,

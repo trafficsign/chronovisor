@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import tags as tags_mod
-from chronovisor.tags import (
+from chronovisor.librarian import tags as tags_mod
+from chronovisor.librarian.tags import (
     AXIS_LIMITS,
     SEED_TAGS,
     VALID_PREFIXES,
@@ -159,7 +159,7 @@ class TestDedupeWithExisting:
     def test_returns_existing_when_above_threshold(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor import embedding as emb_mod
+        from chronovisor.search import embedding as emb_mod
 
         # Force ``most_similar`` to claim an existing tag is super close.
         def fake_most_similar(query, candidates, threshold):
@@ -173,7 +173,7 @@ class TestDedupeWithExisting:
     def test_returns_new_when_below_threshold(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor import embedding as emb_mod
+        from chronovisor.search import embedding as emb_mod
 
         monkeypatch.setattr(emb_mod, "most_similar", lambda *_a, **_k: None)
         result = dedupe_with_existing("d/blockchain", ["d/finance"])
@@ -184,7 +184,7 @@ class TestDedupeWithExisting:
     ) -> None:
         """A new ``d/`` tag must not collapse into a ``t/`` tag even if
         the bodies are textually close."""
-        from chronovisor import embedding as emb_mod
+        from chronovisor.search import embedding as emb_mod
 
         captured: dict = {}
 
@@ -204,7 +204,7 @@ class TestDedupeWithExisting:
     ) -> None:
         """If the candidate is malformed, dedup is a no-op so the form
         validator can flag it later."""
-        from chronovisor import embedding as emb_mod
+        from chronovisor.search import embedding as emb_mod
 
         def boom(*_a, **_k):
             raise AssertionError("must not call")
@@ -215,7 +215,7 @@ class TestDedupeWithExisting:
     def test_embedding_failure_falls_back_to_new(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor import embedding as emb_mod
+        from chronovisor.search import embedding as emb_mod
 
         def boom(*_a, **_k):
             raise RuntimeError("ollama down")
@@ -226,7 +226,7 @@ class TestDedupeWithExisting:
     def test_no_same_axis_candidates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor import embedding as emb_mod
+        from chronovisor.search import embedding as emb_mod
 
         def boom(*_a, **_k):
             raise AssertionError("must not call when no candidates")

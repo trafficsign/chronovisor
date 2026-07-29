@@ -186,7 +186,7 @@ def generate_query_artifact(
                 [
                     sys.executable,
                     "-m",
-                    "chronovisor.classification_query_worker",
+                    "chronovisor.classification.classification_query_worker",
                 ],
                 json.dumps(payload, ensure_ascii=False, sort_keys=True),
                 lease,

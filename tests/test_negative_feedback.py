@@ -5,13 +5,13 @@ import json
 
 import pytest
 
-from chronovisor import negative_feedback
-from chronovisor.feedback_ledger import feedback_row_sha256
-from chronovisor.runtime_config import (
+from chronovisor.recall import negative_feedback
+from chronovisor.recall.feedback_ledger import feedback_row_sha256
+from chronovisor.core.runtime_config import (
     NegativeFeedbackConfig,
     load_negative_feedback_config,
 )
-from chronovisor.search import ScoredPage
+from chronovisor.search.search import ScoredPage
 
 
 def page(page_id: str, score: float) -> ScoredPage:

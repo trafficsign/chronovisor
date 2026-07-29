@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import index_store as index_store_mod
-from chronovisor.index_store import IndexStore, PageEntry
+from chronovisor.search import index_store as index_store_mod
+from chronovisor.search.index_store import IndexStore, PageEntry
 
 
 @pytest.fixture()

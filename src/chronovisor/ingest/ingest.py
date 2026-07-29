@@ -1049,7 +1049,7 @@ def _search_candidate_metas(op: dict) -> list[dict]:
 
     try:
         from chronovisor.search.index_store import get_store
-        from chronovisor.search import search
+        from chronovisor.search.search import search
 
         results, _mode = search(query, top_n=5, semantic=True)
         store = get_store()
@@ -2270,7 +2270,7 @@ def _reserved_system_page_collision_keys() -> frozenset[str]:
     replace it after this module is imported.
     """
 
-    from chronovisor import store as _wiki
+    from chronovisor.core import store as _wiki
     from chronovisor.ingest.page_mutation import CORRECTABLE_SYSTEM_PAGE_IDS
 
     page_ids = set(CORRECTABLE_SYSTEM_PAGE_IDS)

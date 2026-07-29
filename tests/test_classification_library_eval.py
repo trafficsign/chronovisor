@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from chronovisor.classification import default_udc_package
-from chronovisor.classification_library_eval import (
+from chronovisor.classification.classification import default_udc_package
+from chronovisor.lab.classification_library_eval import (
     evaluate_candidate_results,
     evaluate_external_test_results,
     evaluate_paired_decisions,

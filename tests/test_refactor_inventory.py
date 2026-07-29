@@ -51,7 +51,7 @@ def atomic_write(path, tmp):
     )
     (tmp_path / "tests" / "test_sample.py").write_text(
         """
-from chronovisor import ingest as ingest_mod
+from chronovisor.ingest import ingest as ingest_mod
 
 def test_patch(monkeypatch):
     monkeypatch.setattr(ingest_mod, "PAGES_DIR", object())

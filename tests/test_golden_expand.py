@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor import golden_expand
+from chronovisor.ops import golden_expand
 
 
 class FakeStore:

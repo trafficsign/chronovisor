@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronovisor import provisional_recall
+from chronovisor.recall import provisional_recall
 
 
 def _entry(provisional_id: str, text: str, record_index: int) -> dict:

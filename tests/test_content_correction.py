@@ -9,9 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import content_correction, page_mutation
-from chronovisor.convergence import ConvergenceStore, CycleBudget, RetryPolicy
-from chronovisor.feedback_ledger import active_feedback_rows
+from chronovisor.recall import content_correction
+from chronovisor.ingest import page_mutation
+from chronovisor.ops.convergence import ConvergenceStore, CycleBudget, RetryPolicy
+from chronovisor.recall.feedback_ledger import active_feedback_rows
 
 
 ALL_CHECKS = {
@@ -105,7 +106,7 @@ def test_injected_local_proposer_does_not_pollute_production_audit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import store
+    from chronovisor.core import store
 
     chronovisor_root = tmp_path / "wiki"
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
@@ -971,7 +972,7 @@ def test_source_recall_provenance_uses_exact_turn_time_for_repeated_prompt(
 def test_capture_cursor_processes_delayed_corrections_exactly_once(
     monkeypatch, tmp_path: Path
 ) -> None:
-    from chronovisor import codex_record
+    from chronovisor.hosts import codex_record
 
     records = [
         SimpleNamespace(role="user", line=1, text="same source prompt"),
@@ -1031,7 +1032,7 @@ def test_capture_skips_normal_turns_but_advances_cursor_idempotently(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from chronovisor import codex_record
+    from chronovisor.hosts import codex_record
 
     session_file = tmp_path / "session.jsonl"
     transcript = SimpleNamespace(
@@ -1094,7 +1095,7 @@ def test_capture_bare_denial_requires_real_recall_candidate(
     has_recall_candidate: bool,
     expected: int,
 ) -> None:
-    from chronovisor import codex_record
+    from chronovisor.hosts import codex_record
 
     session_file = tmp_path / "session.jsonl"
     page = tmp_path / "memory.md"
@@ -1610,7 +1611,7 @@ def test_capture_hook_only_enqueues_negative_feedback_without_draining_models(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from chronovisor import codex_record
+    from chronovisor.hosts import codex_record
 
     session_file = tmp_path / "session.jsonl"
     transcript = SimpleNamespace(
@@ -2012,7 +2013,7 @@ def test_wrong_retrieval_requires_frontier_and_records_only_page_scoped_feedback
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     pages = tmp_path / "pages"
     pages.mkdir()
@@ -2079,7 +2080,7 @@ def test_classification_side_effects_recover_without_frontier_redecision(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     pages = tmp_path / "pages"
     pages.mkdir()
@@ -2483,7 +2484,7 @@ def test_nonmutation_triage_artifact_is_revised_when_page_evidence_changes(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     pages = tmp_path / "pages"
     pages.mkdir()
@@ -2655,7 +2656,10 @@ def test_backoff_item_does_not_starve_newer_correction(
 def test_refresh_fails_closed_when_target_embedding_was_not_updated(
     monkeypatch,
 ) -> None:
-    from chronovisor import index_store, ingest, ollama, search
+    from chronovisor.search import index_store
+    from chronovisor.ingest import ingest
+    from chronovisor.core import ollama
+    from chronovisor.search import search
 
     monkeypatch.setattr(
         index_store, "get_store", lambda: SimpleNamespace(refresh=lambda: None)
@@ -4342,7 +4346,7 @@ def test_nonmutation_effect_revalidates_classification_authority_inside_lock(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     pages = tmp_path / "pages"
     pages.mkdir()

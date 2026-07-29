@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from chronovisor.migration_snapshot import (
+from chronovisor.ops.migration_snapshot import (
     cleanup_expired_restore_points,
     create_restore_point,
     restore_drill,

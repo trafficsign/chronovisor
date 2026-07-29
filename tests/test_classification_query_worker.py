@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from chronovisor import classification_query_worker
-from chronovisor.classification_query_worker import (
+from chronovisor.classification import classification_query_worker
+from chronovisor.classification.classification_query_worker import (
     QUERY_PROMPT_SHA256,
     WORKER_SCHEMA,
 )

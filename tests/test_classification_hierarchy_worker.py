@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.classification_hierarchy_worker import (
+from chronovisor.classification.classification_hierarchy_worker import (
     AUDIT_SCHEMA,
     HOLD,
     STEP_STOP,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from chronovisor.runtime_config import SearchEmbeddingConfig
+from chronovisor.core.runtime_config import SearchEmbeddingConfig
 
 
 @pytest.fixture(autouse=True)
@@ -16,7 +16,7 @@ def isolate_operator_raw_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 def isolate_operator_search_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests from enqueueing work against the live semantic service."""
 
-    from chronovisor import search
+    from chronovisor.search import search
 
     monkeypatch.setattr(
         search,

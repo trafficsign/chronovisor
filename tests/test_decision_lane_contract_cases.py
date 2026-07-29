@@ -8,13 +8,13 @@ from collections import Counter
 
 import pytest
 
-from chronovisor.decision_lane_contract_cases import (
+from chronovisor.decision.decision_lane_contract_cases import (
     CASES_PER_MODEL_BACKED_LANE,
     decision_lane_contract_case_manifest,
     decision_lane_contract_case_manifest_sha256,
     decision_lane_contract_case_specs,
 )
-from chronovisor.decision_lane_contracts import (
+from chronovisor.decision.decision_lane_contracts import (
     LANE_CONTRACT_CASE_VERSION,
     LANE_CONTRACT_POLICY_VERSION,
     LANE_CONTRACT_SOURCE,
@@ -24,7 +24,7 @@ from chronovisor.decision_lane_contracts import (
     lane_contract_manifest_sha256,
     model_backed_lane_names,
 )
-from chronovisor.decision_lane_prompts import (
+from chronovisor.decision.decision_lane_prompts import (
     INGEST_PROPOSAL_SCHEMA_VERSION,
     INGEST_REPAIR_HOST_BLOCK,
     INGEST_REPAIR_MODEL_BLOCK,
@@ -39,20 +39,20 @@ from chronovisor.decision_lane_prompts import (
     canonical_json_sha256,
     validate_ingest_review_projection,
 )
-from chronovisor.decision_router import (
+from chronovisor.decision.decision_router import (
     _strip_ingest_repair_host_block,
     decision_system_with_policy,
     decision_context_buckets,
     decision_request_context,
     decision_request_fingerprint_sha256,
 )
-from chronovisor.local_structured import (
+from chronovisor.decision.local_structured import (
     StructuredRequestPreflight,
     preflight_structured_request,
 )
-from chronovisor.decision_policy import DECISION_POLICIES
-from chronovisor.decision_schema_manifest import production_decision_schemas
-from chronovisor.runtime_config import DecisionRouterConfig
+from chronovisor.decision.decision_policy import DECISION_POLICIES
+from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.core.runtime_config import DecisionRouterConfig
 
 
 def _json_prompt_block(prompt: str, marker: str) -> dict[str, object]:
@@ -446,7 +446,8 @@ def test_entity_contract_model_coverage_contains_only_reachable_terminals() -> N
 def test_entity_contract_builder_fails_if_production_preflight_rejects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import decision_lane_contract_cases, entities
+    from chronovisor.decision import decision_lane_contract_cases
+    from chronovisor.ops import entities
 
     monkeypatch.setattr(
         entities,
@@ -459,7 +460,7 @@ def test_entity_contract_builder_fails_if_production_preflight_rejects(
 
 
 def test_entity_preflight_rejects_alias_incomplete_fixture_before_model() -> None:
-    from chronovisor.entities import validate_entity_backfill_proposal
+    from chronovisor.ops.entities import validate_entity_backfill_proposal
 
     case = next(
         case
@@ -529,7 +530,7 @@ def test_shared_page_mutation_contracts_use_reachable_evidence_states() -> None:
 
 
 def test_insufficient_semantic_packet_stops_before_model_contract() -> None:
-    from chronovisor.lint import build_semantic_review_packet
+    from chronovisor.ops.lint import build_semantic_review_packet
 
     packet, receipt = build_semantic_review_packet(
         page_id="too-large-for-review",
@@ -548,7 +549,7 @@ def test_insufficient_semantic_packet_stops_before_model_contract() -> None:
 
 
 def test_identity_preflight_receipt_is_hash_bound_before_quarantine() -> None:
-    from chronovisor.decision_lane_prompts import (
+    from chronovisor.decision.decision_lane_prompts import (
         validate_identity_preflight_receipt,
     )
 
@@ -612,7 +613,7 @@ def test_tag_repair_contract_distinguishes_retry_ambiguity_and_rejection() -> No
 
 
 def test_local_repair_contract_outcomes_pass_the_production_packet_validator() -> None:
-    from chronovisor.local_repair import _validate_decision
+    from chronovisor.decision.local_repair import _validate_decision
 
     cases = [
         case
@@ -753,7 +754,7 @@ def test_recall_improvement_contracts_are_post_gate_production_candidates() -> N
 
 
 def test_recall_improvement_regression_is_stopped_before_model_audit() -> None:
-    from chronovisor.recall_improvement import _gate_candidate
+    from chronovisor.recall.recall_improvement import _gate_candidate
 
     accepted, checks = _gate_candidate(
         baseline_dev={"score": 0.70, "metrics": {}},
@@ -1968,35 +1969,47 @@ def test_large_complete_repacket_covers_the_112k_gate_bucket() -> None:
     ("module_name", "function_name", "builder_name"),
     [
         (
-            "autonomy",
+            "chronovisor.ops.autonomy",
             "_review_deferred_duplicate",
             "build_autonomy_duplicate_review_prompt",
         ),
         (
-            "autonomy",
+            "chronovisor.ops.autonomy",
             "_review_retention_candidate",
             "build_autonomy_retention_review_prompt",
         ),
-        ("ingest", "_run_ingest_frontier_review", "build_ingest_reconciliation_prompt"),
-        ("orphan_link", "_review_orphan_proposal", "build_orphan_link_review_prompt"),
         (
-            "raw_replay",
+            "chronovisor.ingest.ingest",
+            "_run_ingest_frontier_review",
+            "build_ingest_reconciliation_prompt",
+        ),
+        (
+            "chronovisor.ops.orphan_link",
+            "_review_orphan_proposal",
+            "build_orphan_link_review_prompt",
+        ),
+        (
+            "chronovisor.raw.raw_replay",
             "_review_indeterminate_rows",
             "build_raw_replay_reconciliation_prompt",
         ),
-        ("read_back_repair", "_review_query_hint", "build_read_back_repair_request"),
         (
-            "recall_auto_apply",
+            "chronovisor.ingest.read_back_repair",
+            "_review_query_hint",
+            "build_read_back_repair_request",
+        ),
+        (
+            "chronovisor.recall.recall_auto_apply",
             "review_auto_apply_with_frontier",
             "build_recall_auto_apply_prompt",
         ),
         (
-            "recall_calibration",
+            "chronovisor.recall.recall_calibration",
             "review_calibration_with_frontier",
             "build_recall_calibration_prompt",
         ),
         (
-            "search_eval",
+            "chronovisor.search.search_eval",
             "review_search_policy_with_frontier",
             "build_search_self_tune_prompt",
         ),
@@ -2007,7 +2020,7 @@ def test_inline_production_lanes_use_the_shared_canonical_prompt_builder(
     function_name: str,
     builder_name: str,
 ) -> None:
-    module = importlib.import_module(f"chronovisor.{module_name}")
+    module = importlib.import_module(module_name)
     production_source = inspect.getsource(getattr(module, function_name))
 
     assert builder_name in production_source

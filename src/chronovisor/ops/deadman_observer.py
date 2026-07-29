@@ -1,6 +1,7 @@
-"""Domain alias for the package-independent deadman observer."""
+"""Expose the package-independent observer under the operations namespace."""
+
+import sys
 
 from chronovisor import deadman_observer as _implementation
-from chronovisor.core.compat import alias_legacy_module
 
-alias_legacy_module(__name__, _implementation)
+sys.modules[__name__] = _implementation

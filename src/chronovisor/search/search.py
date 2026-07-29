@@ -1133,7 +1133,7 @@ def semantic_search(
             timeout_ms=timeout_ms,
         )
 
-    from chronovisor import semantic_client
+    from chronovisor.search import semantic_client
 
     use_new = semantic_client.selected_for_rollout(query, config)
     if config.rollout_mode == "shadow":
@@ -1188,7 +1188,7 @@ def semantic_verify(
     config = load_search_embedding_config()
     if not page_ids or not config.enabled or config.backend != "nemotron_service":
         return []
-    from chronovisor import semantic_client
+    from chronovisor.search import semantic_client
 
     if not semantic_client.selected_for_rollout(query, config):
         return []

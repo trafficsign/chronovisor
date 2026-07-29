@@ -11,21 +11,21 @@ import pytest
 
 
 INGEST_MODULES = (
-    "chronovisor.ingest_schemas",
-    "chronovisor.ingest_transport",
-    "chronovisor.ingest_review_plan",
-    "chronovisor.ingest_review",
-    "chronovisor.ingest_review_authority",
-    "chronovisor.ingest_review_store",
-    "chronovisor.ingest_review_recovery",
-    "chronovisor.ingest_review_execution",
-    "chronovisor.ingest_triage",
-    "chronovisor.ingest_generation",
-    "chronovisor.ingest_prepare",
-    "chronovisor.ingest_apply",
-    "chronovisor.ingest_readback",
-    "chronovisor.ingest_recovery_runtime",
-    "chronovisor.ingest_review_apply",
+    "chronovisor.ingest.ingest_schemas",
+    "chronovisor.ingest.ingest_transport",
+    "chronovisor.ingest.ingest_review_plan",
+    "chronovisor.ingest.ingest_review",
+    "chronovisor.ingest.ingest_review_authority",
+    "chronovisor.ingest.ingest_review_store",
+    "chronovisor.ingest.ingest_review_recovery",
+    "chronovisor.ingest.ingest_review_execution",
+    "chronovisor.ingest.ingest_triage",
+    "chronovisor.ingest.ingest_generation",
+    "chronovisor.ingest.ingest_prepare",
+    "chronovisor.ingest.ingest_apply",
+    "chronovisor.ingest.ingest_readback",
+    "chronovisor.ingest.ingest_recovery_runtime",
+    "chronovisor.ingest.ingest_review_apply",
 )
 
 
@@ -50,7 +50,7 @@ def test_artifact_paths_resolve_patched_pages_dir_at_call_time(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import ingest
+    from chronovisor.ingest import ingest
 
     pages = tmp_path / "isolated-wiki" / "pages"
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)

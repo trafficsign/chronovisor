@@ -8,14 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import (
-    decision_router,
-    frontier_review,
-    ollama,
-    semantic_hold,
-)
-from chronovisor.decision_router import DecisionRouterResult
-from chronovisor.runtime_config import DecisionRouterConfig
+from chronovisor.decision import decision_router
+from chronovisor.decision import frontier_review
+from chronovisor.core import ollama
+from chronovisor.search import semantic_hold
+from chronovisor.decision.decision_router import DecisionRouterResult
+from chronovisor.core.runtime_config import DecisionRouterConfig
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
@@ -699,7 +697,7 @@ def test_missing_reproduction_command_is_rejected_before_baseline_or_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.frontier_guard import (
+    from chronovisor.decision.frontier_guard import (
         RepairIncidentEvidence,
         repair_fingerprint,
     )
@@ -743,7 +741,7 @@ def test_validated_repair_incident_gets_exactly_one_guarded_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.frontier_guard import (
+    from chronovisor.decision.frontier_guard import (
         FrontierGuard,
         RepairIncidentEvidence,
         repair_fingerprint,
@@ -2111,7 +2109,7 @@ def test_structured_review_rejects_incomplete_approved_json(
 
 
 def test_local_structured_result_preserves_optional_schema_properties() -> None:
-    from chronovisor.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+    from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
 
     schema = INGEST_FRONTIER_DECISION_SCHEMA
 
@@ -2144,7 +2142,7 @@ def test_local_structured_result_preserves_optional_schema_properties() -> None:
 
 
 def test_ingest_structured_failure_envelope_uses_retry_decision() -> None:
-    from chronovisor.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+    from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
 
     result = frontier_review._validated_structured_result(
         None,

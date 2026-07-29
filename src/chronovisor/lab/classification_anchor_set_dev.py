@@ -162,7 +162,7 @@ def _call_worker(
                 [
                     sys.executable,
                     "-m",
-                    "chronovisor.classification_anchor_set_worker",
+                    "chronovisor.classification.classification_anchor_set_worker",
                 ],
                 json.dumps(dict(payload), ensure_ascii=False, sort_keys=True),
                 lease,

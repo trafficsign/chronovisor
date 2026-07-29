@@ -2144,7 +2144,7 @@ class DecisionRouter:
             else transport is None and require_adopted
         )
         if decision_artifact_root is None:
-            from chronovisor import store
+            from chronovisor.core import store
 
             chronovisor_root = store.CHRONOVISOR_ROOT.expanduser().resolve(strict=False)
             # A caller that explicitly places its audit stream outside the
@@ -3583,7 +3583,7 @@ class DecisionRouter:
                 replay_prompt=replay_prompt,
             )
         if self.artifact_replay and effective_lane is not None:
-            from chronovisor import store
+            from chronovisor.core import store
             from chronovisor.decision.quality_guard import lane_is_frozen
 
             if lane_is_frozen(
@@ -3863,7 +3863,7 @@ class DecisionRouter:
                 pass
             if self.record_replay and result.ok and isinstance(result.value, Mapping):
                 try:
-                    from chronovisor import store
+                    from chronovisor.core import store
                     from chronovisor.lab.local_model_eval import replay_semantic_effect
                     from chronovisor.lab.model_lab import record_local_replay_case
 

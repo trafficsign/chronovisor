@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.classification_library_calibration import (
+from chronovisor.lab.classification_library_calibration import (
     clopper_pearson_zero_upper,
     evaluate_holdout_gates,
     optional_ablation_decision,

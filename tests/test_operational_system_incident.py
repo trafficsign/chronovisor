@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.frontier_guard import EvidenceValidationError
-from chronovisor.system_incident_supervisor import (
+from chronovisor.decision.frontier_guard import EvidenceValidationError
+from chronovisor.ops.system_incident_supervisor import (
     IncidentStateError,
     SystemIncidentSupervisor,
 )
@@ -258,7 +258,7 @@ def test_incident_sync_rereads_status_after_source_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import system_incident_supervisor as incident_module
+    from chronovisor.ops import system_incident_supervisor as incident_module
 
     supervisor, source_path, _state_path, _enqueued = _fixture(
         tmp_path,
@@ -337,7 +337,7 @@ def test_legacy_incident_without_epoch_remains_valid_but_partial_epoch_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import system_incident_supervisor as incident_module
+    from chronovisor.ops import system_incident_supervisor as incident_module
 
     supervisor, source_path, _state_path, enqueued = _fixture(
         tmp_path,
@@ -690,8 +690,9 @@ def test_operational_incident_enqueue_contract_accepts_only_bound_producer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import background_jobs, self_heal
-    from chronovisor import system_incident_supervisor as incident_module
+    from chronovisor.ops import background_jobs
+    from chronovisor.ops import self_heal
+    from chronovisor.ops import system_incident_supervisor as incident_module
 
     supervisor, source_path, _state_path, _enqueued = _fixture(
         tmp_path,
@@ -746,8 +747,11 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import background_jobs, runtime_status, self_heal, store
-    from chronovisor.local_repair import LocalRepairDecision
+    from chronovisor.ops import background_jobs
+    from chronovisor.ops import runtime_status
+    from chronovisor.ops import self_heal
+    from chronovisor.core import store
+    from chronovisor.decision.local_repair import LocalRepairDecision
 
     chronovisor_root = tmp_path / "wiki"
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
@@ -824,7 +828,7 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
     assert jobs == [
         {
             "name": "system-code-repair",
-            "module": "chronovisor.self_heal",
+            "module": "chronovisor.ops.self_heal",
             "args": [
                 "--packet",
                 str(incident_path.resolve()),

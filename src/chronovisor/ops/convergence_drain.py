@@ -683,7 +683,7 @@ def _duplicate_inventory(
     list[dict[str, Any]],
     set[tuple[str, str]],
 ]:
-    from chronovisor import autonomy
+    from chronovisor.ops import autonomy
     from chronovisor.recall.duplicate_review import build_duplicate_review_queue
 
     try:
@@ -746,7 +746,7 @@ def _duplicate_inventory(
 def _lint_inventory(
     sources: set[str],
 ) -> tuple[dict[str, set[str]], Path, set[tuple[str, str]]]:
-    from chronovisor import lint_repair
+    from chronovisor.ops import lint_repair
 
     path = chronovisor_store.CHRONOVISOR_ROOT / "review" / "lint-repair-queue.jsonl"
     try:
@@ -797,7 +797,7 @@ def _lint_inventory(
 def _orphan_inventory(
     sources: set[str],
 ) -> tuple[dict[str, set[str]], set[tuple[str, str]]]:
-    from chronovisor import orphan_link
+    from chronovisor.ops import orphan_link
     from chronovisor.decision.decision_authority import current_semantic_authority
     from chronovisor.search.index_store import get_store
     from chronovisor.search.search import semantic_search
@@ -873,7 +873,7 @@ def _retention_inventory(
     list[dict[str, Any]],
     set[tuple[str, str]],
 ]:
-    from chronovisor import autonomy
+    from chronovisor.ops import autonomy
     from chronovisor.ops.retention import build_retention_scores
 
     all_sources = current_sources | legacy_sources
@@ -968,7 +968,7 @@ def _retention_inventory(
 
 
 def _build_inventory(items: Iterable[Mapping[str, Any]]) -> Inventory:
-    from chronovisor import content_correction
+    from chronovisor.recall import content_correction
 
     sources: dict[str, set[str]] = defaultdict(set)
     keys_by_source: dict[str, dict[str, set[str]]] = defaultdict(
@@ -1456,7 +1456,10 @@ def _run_lanes(
     inventory: Inventory,
     max_elapsed_seconds: float,
 ) -> dict[str, Any]:
-    from chronovisor import autonomy, content_correction, lint_repair, orphan_link
+    from chronovisor.ops import autonomy
+    from chronovisor.recall import content_correction
+    from chronovisor.ops import lint_repair
+    from chronovisor.ops import orphan_link
 
     budget = CycleBudget(
         max_local_calls=30,
@@ -1745,7 +1748,7 @@ def resume(
         }
         try:
             if content_keys:
-                from chronovisor import content_correction
+                from chronovisor.recall import content_correction
 
                 content_migration = (
                     content_correction.retire_non_actionable_corrections(

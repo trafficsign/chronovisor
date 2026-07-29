@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import dashboard
-from chronovisor.durable_state import write_sealed_json
-from chronovisor.librarian import run_legacy_udc_shadow, run_shadow
-from chronovisor.librarian_status import (
+from chronovisor.ops import dashboard
+from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.librarian.librarian import run_legacy_udc_shadow, run_shadow
+from chronovisor.librarian.librarian_status import (
     _derive_code,
     _library_evidence_status,
     _soak_status,
@@ -90,7 +90,7 @@ def test_collection_first_status_exposes_registry_quality(
 
     result = run_shadow(root=tmp_path, full_sweep=True)
 
-    from chronovisor.librarian_status import build_librarian_status
+    from chronovisor.librarian.librarian_status import build_librarian_status
 
     status = build_librarian_status(tmp_path)
     assert result["observed"] == 3
@@ -151,7 +151,7 @@ def test_collection_review_queue_is_visible_but_not_catch_up_work(
         },
     )
 
-    from chronovisor.librarian_status import build_librarian_status
+    from chronovisor.librarian.librarian_status import build_librarian_status
 
     status = build_librarian_status(tmp_path)
 
@@ -207,7 +207,7 @@ def test_collection_review_required_is_terminal_with_visible_hold(
     )
     run_shadow(root=tmp_path, full_sweep=True)
 
-    from chronovisor.librarian_status import build_librarian_status
+    from chronovisor.librarian.librarian_status import build_librarian_status
 
     status = build_librarian_status(tmp_path)
 
@@ -251,7 +251,7 @@ def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> N
         },
     )
 
-    from chronovisor.librarian_status import build_librarian_status
+    from chronovisor.librarian.librarian_status import build_librarian_status
 
     status = build_librarian_status(tmp_path)
     assert status["state"] == "NOT_READY"
@@ -577,7 +577,7 @@ def test_status_overlays_latest_locked_calibration_quality(tmp_path: Path) -> No
         },
     )
 
-    from chronovisor.librarian_status import build_librarian_status
+    from chronovisor.librarian.librarian_status import build_librarian_status
 
     status = build_librarian_status(tmp_path)
 
@@ -617,7 +617,7 @@ def test_dashboard_reports_migration_observation_elapsed_time(
 def test_valid_transaction_preimage_is_retained_insurance_not_quarantine(
     tmp_path: Path,
 ) -> None:
-    from chronovisor.librarian_status import _transaction_preimages
+    from chronovisor.librarian.librarian_status import _transaction_preimages
 
     manifest = (
         tmp_path

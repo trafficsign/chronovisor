@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor import memory_integrity
+from chronovisor.ops import memory_integrity
 
 
 class _Result:

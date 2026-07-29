@@ -4,8 +4,8 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 
-from chronovisor import entities
-from chronovisor.entities import extract_entities, patch_entities_frontmatter
+from chronovisor.ops import entities
+from chronovisor.ops.entities import extract_entities, patch_entities_frontmatter
 
 
 def _frontier_decision(
@@ -368,7 +368,7 @@ def test_budget_defer_persists_proposal_and_resumes_next_run(
 
 
 def test_both_cli_entrypoints_forward_frontier_budget(monkeypatch, capsys) -> None:
-    from chronovisor import cli
+    from chronovisor.hosts import cli
 
     seen: list[int] = []
 

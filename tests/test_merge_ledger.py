@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.merge_ledger import (
+from chronovisor.librarian.merge_ledger import (
     MergeCoverageError,
     MergeLedger,
     build_source_inventory,
     verify_merge_coverage,
 )
-from chronovisor.merge_transaction import apply_merge_plan, prepare_merge_plan
-from chronovisor.page_registry import PageRegistry
+from chronovisor.librarian.merge_transaction import apply_merge_plan, prepare_merge_plan
+from chronovisor.ingest.page_registry import PageRegistry
 
 
 def _mappings(inventory: dict) -> list[dict[str, str]]:

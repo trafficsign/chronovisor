@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 import tag_backfill_apply as tba  # noqa: E402
-from chronovisor.legacy_semantic_write import (  # noqa: E402
+from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
     LegacySemanticMutationDisabled,
 )
 
@@ -30,7 +30,7 @@ def page_with_fm(tmp_path: Path, monkeypatch) -> Path:
     )
     # Both tag_backfill_apply and the underlying wiki helper resolve
     # pages relative to PAGES_DIR. Patch both so find_page() looks here.
-    import chronovisor.store as wiki_mod
+    import chronovisor.core.store as wiki_mod
 
     monkeypatch.setattr(wiki_mod, "PAGES_DIR", pages_dir)
     return page
@@ -54,7 +54,7 @@ def test_mark_unfit_is_disabled_and_preserves_page(
 
 def test_is_marked_unfit_detects_status(page_with_fm: Path) -> None:
     assert tba._is_marked_unfit("example") is False
-    from chronovisor.frontmatter import patch as fm_patch
+    from chronovisor.core.frontmatter import patch as fm_patch
 
     page_with_fm.write_text(
         fm_patch(page_with_fm.read_text(), {"tag_status": tba.TAG_STATUS_NO_FIT})

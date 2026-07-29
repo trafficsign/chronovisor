@@ -134,7 +134,7 @@ def _default_frontier_reviewer(
     prompt: str,
     schema: dict[str, Any],
 ) -> Mapping[str, Any] | str:
-    from chronovisor import frontier_review
+    from chronovisor.decision import frontier_review
 
     return frontier_review.run_structured_review(
         prompt,

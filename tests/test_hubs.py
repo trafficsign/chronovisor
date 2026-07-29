@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronovisor import hubs
+from chronovisor.ops import hubs
 
 
 class FakeStore:

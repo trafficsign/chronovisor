@@ -142,7 +142,10 @@ class _FunctionInventory(ast.NodeVisitor):
 def _ingest_aliases(tree: ast.AST) -> set[str]:
     aliases = {"ingest"}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "chronovisor":
+        if isinstance(node, ast.ImportFrom) and node.module in {
+            "chronovisor",
+            "chronovisor.ingest",
+        }:
             for name in node.names:
                 if name.name == "ingest":
                     aliases.add(name.asname or name.name)

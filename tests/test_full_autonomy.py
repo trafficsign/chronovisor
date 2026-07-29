@@ -10,32 +10,30 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import (
-    burn_monitor,
-    decision_authority,
-    decision_router,
-    durable_state,
-    failure_supervisor,
-    health,
-    raw_replay,
-    read_back_repair,
-    repair_runbook,
-)
-from chronovisor.deadman import inspect_heartbeat, write_heartbeat
-from chronovisor.decision_artifact import DecisionArtifactStore, execution_fingerprint
-from chronovisor.decision_router import DecisionRouter
-from chronovisor.durable_state import (
+from chronovisor.ops import burn_monitor
+from chronovisor.decision import decision_authority
+from chronovisor.decision import decision_router
+from chronovisor.core import durable_state
+from chronovisor.decision import failure_supervisor
+from chronovisor.ops import health
+from chronovisor.raw import raw_replay
+from chronovisor.ingest import read_back_repair
+from chronovisor.ops import repair_runbook
+from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
+from chronovisor.decision.decision_artifact import DecisionArtifactStore, execution_fingerprint
+from chronovisor.decision.decision_router import DecisionRouter
+from chronovisor.core.durable_state import (
     DiskPressureError,
     StateSealError,
     atomic_write_bytes,
     read_sealed_json,
     write_sealed_json,
 )
-from chronovisor.frontier_guard import EvidenceValidationError, RepairIncidentEvidence
-from chronovisor.local_structured import ChatRequest
-from chronovisor.managed_hold import ManagedHoldStore
-from chronovisor.provisional_recall import search_provisional
-from chronovisor.quality_guard import (
+from chronovisor.decision.frontier_guard import EvidenceValidationError, RepairIncidentEvidence
+from chronovisor.decision.local_structured import ChatRequest
+from chronovisor.librarian.managed_hold import ManagedHoldStore
+from chronovisor.recall.provisional_recall import search_provisional
+from chronovisor.decision.quality_guard import (
     QualityThresholds,
     append_immutable_anchor,
     evaluate_quality,
@@ -43,12 +41,12 @@ from chronovisor.quality_guard import (
     register_last_known_good,
     run_quality_probe,
 )
-from chronovisor.raw_semantic_projection import (
+from chronovisor.raw.raw_semantic_projection import (
     PROJECTION_CHILD_SCHEMA,
     PROJECTION_POLICY_VERSION,
 )
-from chronovisor.read_back_integrity import scan_jsonl_prefix, verify_prior_prefix
-from chronovisor.runtime_config import DecisionRouterConfig
+from chronovisor.ingest.read_back_integrity import scan_jsonl_prefix, verify_prior_prefix
+from chronovisor.core.runtime_config import DecisionRouterConfig
 
 
 SCHEMA = {
@@ -215,7 +213,7 @@ def test_router_replays_same_execution_without_model_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import store
+    from chronovisor.core import store
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(
@@ -254,7 +252,7 @@ def test_router_does_not_replay_unfingerprintable_custom_agreement_callable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import store
+    from chronovisor.core import store
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(
@@ -473,7 +471,7 @@ def test_quality_drift_freezes_locally_without_frontier(tmp_path: Path) -> None:
 
 
 def _quality_artifact(*, wrong: bool = False) -> dict:
-    from chronovisor.local_model_eval import adoption_evidence_sha256
+    from chronovisor.lab.local_model_eval import adoption_evidence_sha256
 
     cases = []
     for index in range(5):
@@ -726,7 +724,7 @@ def test_provisional_recall_accepts_projection_only_and_caps_rank(
     )
     monkeypatch.setattr(raw_replay, "is_raw_retracted", lambda _path: False)
     monkeypatch.setattr(
-        "chronovisor.provisional_recall.verify_projection_child",
+        "chronovisor.recall.provisional_recall.verify_projection_child",
         lambda path: SimpleNamespace(
             file_sha256=hashlib.sha256(path.read_bytes()).hexdigest()
         ),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from chronovisor.server import _validate_raw_keyword
+from chronovisor.hosts.server import _validate_raw_keyword
 
 
 def test_accepts_basic_keywords():

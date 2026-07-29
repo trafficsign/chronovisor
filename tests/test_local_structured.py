@@ -12,8 +12,8 @@ from typing import Any, Iterator
 import httpx
 import pytest
 
-from chronovisor import ollama
-from chronovisor.local_structured import (
+from chronovisor.core import ollama
+from chronovisor.decision.local_structured import (
     ChatRequest,
     LocalConsensusAuditStore,
     LocalStructuredSession,
@@ -115,7 +115,7 @@ def test_transport_format_schema_does_not_weaken_client_validation() -> None:
 def _isolate_default_audit_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor import store
+    from chronovisor.core import store
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
 

@@ -40,7 +40,7 @@ from chronovisor.core.runtime_config import (
     active_config_file,
     normalize_audit_config,
 )
-from chronovisor.search import search as run_search
+from chronovisor.search.search import search as run_search
 
 
 DEFAULT_STATE_FILE = RECALL_DIR / "audit-state.json"
@@ -754,7 +754,7 @@ def _feedback_pull_keys(path: Path | None = None) -> set[str]:
     scan prevents duplicate feedback and lets the ledger heal on demand.
     """
     if path is None:
-        from chronovisor import recall_runtime
+        from chronovisor.recall import recall_runtime
 
         path = recall_runtime.RECALL_FEEDBACK_FILE
     keys: set[str] = set()

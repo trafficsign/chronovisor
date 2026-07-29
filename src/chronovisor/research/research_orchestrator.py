@@ -185,7 +185,7 @@ class LocalPlanner:
                 max(0.001, state.deadline_monotonic - time.monotonic()),
             )
         outcome = run_cancellable_command(
-            [sys.executable, "-m", "chronovisor.research_model_worker"],
+            [sys.executable, "-m", "chronovisor.research.research_model_worker"],
             json.dumps(worker_request, ensure_ascii=False),
             lease,
             timeout_seconds=session_timeout,

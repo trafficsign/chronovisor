@@ -8,16 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.autonomy import DUPLICATE_FRONTIER_SCHEMA
-from chronovisor.adoption_corpus import contract_candidates
-from chronovisor.decision_lane_contract_cases import (
+from chronovisor.ops.autonomy import DUPLICATE_FRONTIER_SCHEMA
+from chronovisor.lab.adoption_corpus import contract_candidates
+from chronovisor.decision.decision_lane_contract_cases import (
     decision_lane_contract_case_manifest_sha256,
 )
-from chronovisor.decision_lane_contracts import (
+from chronovisor.decision.decision_lane_contracts import (
     LANE_CONTRACT_POLICY_VERSION,
     lane_contract_manifest_sha256,
 )
-from chronovisor.decision_router import (
+from chronovisor.decision.decision_router import (
     DECISION_SEMANTICS_POLICY_VERSION,
     QUORUM_SAFETY_POLICY_VERSION,
     DecisionRouter,
@@ -35,17 +35,17 @@ from chronovisor.decision_router import (
     _paths_resolve_to_same_file,
     _prompt_json_block,
 )
-from chronovisor.decision_schema_manifest import (
+from chronovisor.decision.decision_schema_manifest import (
     decision_signature_value,
     production_decision_schemas,
 )
-from chronovisor.decision_lane_prompts import (
+from chronovisor.decision.decision_lane_prompts import (
     INGEST_PROPOSAL_SCHEMA_VERSION,
     INGEST_REPAIR_HOST_BLOCK,
     build_ingest_reconciliation_prompt,
     ingest_repair_option_id,
 )
-from chronovisor.local_structured import (
+from chronovisor.decision.local_structured import (
     ChatRequest,
     STRUCTURED_GENERATION_POLICY_VERSION,
     required_structured_context_tokens,
@@ -53,7 +53,7 @@ from chronovisor.local_structured import (
     structured_generation_policy_sha256,
     structured_request_sha256,
 )
-from chronovisor.local_model_eval import (
+from chronovisor.lab.local_model_eval import (
     ARTIFACT_SCHEMA_VERSION,
     EVALUATOR_POLICY_VERSION,
     AdoptionThresholds,
@@ -67,13 +67,13 @@ from chronovisor.local_model_eval import (
     replay_semantic_effect,
     _safe_model_metadata,
 )
-from chronovisor.local_repair import LOCAL_REPAIR_SCHEMA
-from chronovisor.lint_repair import TAG_REPAIR_SCHEMA
-from chronovisor.search_eval import FRONTIER_LABEL_SCHEMA
-from chronovisor.frontier_review import FRONTIER_DECISION_SCHEMA
-from chronovisor.ingest import INGEST_FRONTIER_DECISION_SCHEMA
-from chronovisor.runtime_config import DecisionRouterConfig
-from chronovisor.content_correction import (
+from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
+from chronovisor.ops.lint_repair import TAG_REPAIR_SCHEMA
+from chronovisor.search.search_eval import FRONTIER_LABEL_SCHEMA
+from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
+from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+from chronovisor.core.runtime_config import DecisionRouterConfig
+from chronovisor.recall.content_correction import (
     FRONTIER_CLASSIFICATION_SCHEMA,
     FRONTIER_REVIEW_SCHEMA,
 )
@@ -83,7 +83,7 @@ from chronovisor.content_correction import (
 def _isolate_default_audit_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor import store
+    from chronovisor.core import store
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
 

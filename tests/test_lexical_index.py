@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronovisor.lexical_index import LexicalIndex
+from chronovisor.search.lexical_index import LexicalIndex
 
 
 def test_inverted_bm25_and_anchor_channels_find_japanese_and_metadata(

@@ -10,7 +10,7 @@ from typing import Any
 
 
 def _runtime():
-    from chronovisor import ingest
+    from chronovisor.ingest import ingest
 
     return ingest
 
@@ -80,7 +80,7 @@ def prepare_operations(
             # ``IndexStore.refresh`` may persist derived cache files.  A dry
             # run must leave even runtime/index artifacts untouched, so scan
             # and parse the small corpus directly instead.
-            from chronovisor import store as _wiki
+            from chronovisor.core import store as _wiki
 
             page_paths = list(_runtime().PAGES_DIR.rglob("*.md"))
             system_paths = list(_wiki.SYSTEM_DIR.rglob("*.md"))

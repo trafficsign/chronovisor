@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.recall_runtime import (
+from chronovisor.recall.recall_runtime import (
     ContextItem,
     RecallBudgetExhausted,
     RecallPolicy,
@@ -32,7 +32,7 @@ from chronovisor.recall_runtime import (
     strip_non_user_blocks,
     warm_recall_model,
 )
-from chronovisor.search import ScoredPage
+from chronovisor.search.search import ScoredPage
 
 
 @pytest.fixture(autouse=True)
@@ -112,7 +112,7 @@ def test_build_queries_adds_alphanumeric_boundary_alias() -> None:
 
 
 def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     def fake_search(
         *,
@@ -133,7 +133,7 @@ def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
 
 
 def test_search_candidates_runs_query_entrances_concurrently(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     barrier = threading.Barrier(3, timeout=1)
 
@@ -159,7 +159,7 @@ def test_search_candidates_runs_query_entrances_concurrently(monkeypatch) -> Non
 def test_collect_context_does_not_let_prefetch_displace_direct_search(
     monkeypatch,
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     monkeypatch.setattr(recall_runtime, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
@@ -207,7 +207,7 @@ def test_collect_context_does_not_let_prefetch_displace_direct_search(
 
 
 def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     def fake_search(
         *,
@@ -243,7 +243,7 @@ def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) 
 def test_search_candidates_allows_sensitive_pages_when_prompt_requests_it(
     monkeypatch,
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     def fake_search(
         *,
@@ -320,7 +320,7 @@ def test_run_recall_without_search_returns_queries_for_gate_hit() -> None:
 
 
 def test_judge_timeout_fails_silent_in_search_zone(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     def timeout_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
         return None, [], "judge unavailable: ReadTimeout"
@@ -345,7 +345,7 @@ def test_judge_timeout_fails_silent_in_search_zone(monkeypatch) -> None:
 
 
 def test_judge_timeout_can_fall_back_when_fail_silent_disabled(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     def timeout_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
         return None, [], "judge unavailable: ReadTimeout"
@@ -371,7 +371,7 @@ def test_judge_timeout_can_fall_back_when_fail_silent_disabled(monkeypatch) -> N
 
 
 def test_judge_resource_contention_uses_deterministic_evidence(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     def busy_judge(*_args: object, **_kwargs: object) -> tuple[None, list[str], str]:
         return None, [], "judge unavailable: capacity_unavailable"
@@ -400,7 +400,7 @@ def test_judge_resource_contention_uses_deterministic_evidence(monkeypatch) -> N
 
 
 def test_judge_can_lower_search_zone_to_none(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     def no_recall_judge(
         *_args: object, **_kwargs: object
@@ -425,7 +425,7 @@ def test_judge_can_lower_search_zone_to_none(monkeypatch) -> None:
 
 
 def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     def unexpected_judge(
         *_args: object, **_kwargs: object
@@ -667,7 +667,7 @@ sync_recall = false
 
 
 def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     captured: dict[str, object] = {}
 
@@ -727,7 +727,7 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
 
 
 def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     class FakeSession:
         def __init__(self, **_kwargs: object) -> None:
@@ -756,7 +756,7 @@ def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
 
 
 def test_query_rewriter_timeout_falls_back_with_reason(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     captured: dict[str, object] = {}
 
@@ -788,7 +788,7 @@ def test_query_rewriter_timeout_falls_back_with_reason(monkeypatch) -> None:
 
 
 def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     captured: list[dict[str, object]] = []
     real_session = recall_runtime.LocalStructuredSession
@@ -828,7 +828,7 @@ def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
 
 
 def test_run_recall_records_rewrite_fallback_metrics(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     def fake_search(**_kwargs: object) -> tuple[list[ScoredPage], str]:
         return [], "bm25"
@@ -1072,7 +1072,7 @@ def test_user_discussing_in_app_context_tag_is_not_filtered() -> None:
 
 
 def test_feedback_exact_false_positive_suppresses_repeat(tmp_path, monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -1094,7 +1094,7 @@ def test_feedback_exact_false_positive_suppresses_repeat(tmp_path, monkeypatch) 
 
 
 def test_feedback_machine_tag_suppresses_same_tag(tmp_path, monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -1229,7 +1229,7 @@ def test_context_layers_are_kept_as_whole_blocks() -> None:
 
 
 def test_recall_budget_exhaustion_uses_deterministic_fallback(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     monkeypatch.setattr(
         recall_runtime,
@@ -1269,7 +1269,7 @@ def test_recall_budget_exhaustion_uses_deterministic_fallback(monkeypatch) -> No
 
 
 def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     seen: dict[str, object] = {}
 
@@ -1308,7 +1308,7 @@ def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> 
 
 
 def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     log_file = tmp_path / "recall-log.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
@@ -1335,7 +1335,7 @@ def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None
 
 
 def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     chronovisor_root = tmp_path / "wiki"
     log_file = chronovisor_root / "recall" / "recall-log.jsonl"
@@ -1377,7 +1377,7 @@ def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> 
 
 
 def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -1392,7 +1392,7 @@ def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
 def test_missed_feedback_prompt_only_records_without_expected(
     tmp_path, monkeypatch
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -1411,7 +1411,7 @@ def test_missed_feedback_prompt_only_records_without_expected(
 def test_page_ignored_feedback_records_explicit_negative_pages(
     tmp_path, monkeypatch
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -1430,7 +1430,7 @@ def test_page_ignored_feedback_records_explicit_negative_pages(
 def test_recent_cli_lists_latest_recall_decisions(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     log_file = tmp_path / "recall-log.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
@@ -1478,7 +1478,7 @@ def test_recent_cli_lists_latest_recall_decisions(
 
 
 def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     log_file = tmp_path / "recall-log.jsonl"
     feedback_file = tmp_path / "feedback.jsonl"
@@ -1543,7 +1543,7 @@ def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> N
 def test_missed_candidate_feedback_does_not_suppress_runtime(
     tmp_path, monkeypatch
 ) -> None:
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)

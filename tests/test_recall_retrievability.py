@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from chronovisor import ingest
-from chronovisor.frontmatter import parse, patch
+from chronovisor.ingest import ingest
+from chronovisor.core.frontmatter import parse, patch
 
 
 def test_ensure_recall_metadata_frontmatter_adds_summary_and_questions(monkeypatch) -> None:

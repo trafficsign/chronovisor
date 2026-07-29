@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import page_mutation
+from chronovisor.ingest import page_mutation
 
 
 def _page(path: Path, *, title: str, body: str) -> None:

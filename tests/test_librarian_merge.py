@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.legacy_archive import migrate_processed_legacy
-from chronovisor.librarian_merge import prepare_cluster_plan
-from chronovisor.merge_transaction import (
+from chronovisor.raw.legacy_archive import migrate_processed_legacy
+from chronovisor.librarian.librarian_merge import prepare_cluster_plan
+from chronovisor.librarian.merge_transaction import (
     apply_merge_plan,
     cleanup_expired_preimages,
 )
-from chronovisor.page_registry import PageRegistry
+from chronovisor.ingest.page_registry import PageRegistry
 
 
 def _page(

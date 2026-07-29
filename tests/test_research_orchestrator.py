@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-from chronovisor import research_orchestrator, research_scheduler
-from chronovisor.research_config import CompactionConfig, ResearchConfig
-from chronovisor.research_orchestrator import (
+from chronovisor.research import research_orchestrator
+from chronovisor.research import research_scheduler
+from chronovisor.research.research_config import CompactionConfig, ResearchConfig
+from chronovisor.research.research_orchestrator import (
     DeterministicPlanner,
     LocalPlanner,
     PlannerResponse,
     ResearchState,
 )
-from chronovisor.research_scheduler import (
+from chronovisor.research.research_scheduler import (
     CancellableResult,
     ResearchAdmission,
     ResearchLease,
 )
-from chronovisor.research_types import ResearchBudget
-from chronovisor.research_store import ResearchStore
+from chronovisor.research.research_types import ResearchBudget
+from chronovisor.research.research_store import ResearchStore
 
 
 def _isolate_scheduler(tmp_path, monkeypatch) -> None:

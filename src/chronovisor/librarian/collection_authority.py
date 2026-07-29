@@ -1407,7 +1407,8 @@ def review_collection_queue(
 ) -> dict[str, Any]:
     """Review queued anomalies locally without assignment mutation."""
 
-    from chronovisor import frontmatter, ollama
+    from chronovisor.core import frontmatter
+    from chronovisor.core import ollama
     from chronovisor.librarian.collection_anomaly_worker import (
         PROMPT_SHA256,
         WORKER_SCHEMA,
@@ -1531,7 +1532,7 @@ def review_collection_queue(
                 [
                     sys.executable,
                     "-m",
-                    "chronovisor.collection_anomaly_worker",
+                    "chronovisor.librarian.collection_anomaly_worker",
                 ],
                 json.dumps(payload, ensure_ascii=False, sort_keys=True),
                 lease,
@@ -2019,7 +2020,7 @@ def _collection_crosswalk_capsule(
     state: Mapping[str, Any],
     collection_uid: str,
 ) -> dict[str, str]:
-    from chronovisor import frontmatter
+    from chronovisor.core import frontmatter
 
     collection = state["collections"][collection_uid]
     page_state = PageRegistry(root).load()
@@ -2077,7 +2078,7 @@ def _call_crosswalk_anchor_worker(
             [
                 sys.executable,
                 "-m",
-                "chronovisor.classification_anchor_worker",
+                "chronovisor.classification.classification_anchor_worker",
             ],
             json.dumps(dict(payload), ensure_ascii=False, sort_keys=True),
             lease,
@@ -2181,7 +2182,7 @@ def ensure_autonomous_crosswalk(
 ) -> dict[str, Any]:
     """Create sealed runtime crosswalks for newly discovered collections."""
 
-    from chronovisor import ollama
+    from chronovisor.core import ollama
     from chronovisor.classification.classification_anchor import UNRESOLVED_ANCHOR_ID
 
     registry_state = dict(state or CollectionRegistry(root).load())

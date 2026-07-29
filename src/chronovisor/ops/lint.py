@@ -894,7 +894,7 @@ def _safe_fix_artifact_dir(path: Path | None = None) -> Path:
         return path
     # Resolve this dynamically: isolated tests and embedded runtimes patch the
     # index-store Wiki root after this module has already been imported.
-    from chronovisor import index_store
+    from chronovisor.search import index_store
 
     return Path(index_store.CHRONOVISOR_ROOT) / "runtime" / "lint-safe-fixes"
 
@@ -1393,7 +1393,7 @@ def _default_safe_fix_reviewer(
     prompt: str,
     schema: dict[str, Any],
 ) -> Mapping[str, Any] | str:
-    from chronovisor import frontier_review
+    from chronovisor.decision import frontier_review
 
     return frontier_review.run_structured_review(
         prompt,

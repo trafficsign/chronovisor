@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.classification_query2doc_v2 import (
+from chronovisor.lab.classification_query2doc_v2 import (
     _matching_rank,
     coverage_first_fusion,
     heading_query_pages,

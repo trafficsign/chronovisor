@@ -13,7 +13,7 @@ from chronovisor.core.jobs import JobStatus
 
 
 def _runtime():
-    from chronovisor import ingest
+    from chronovisor.ingest import ingest
 
     return ingest
 

@@ -20,7 +20,8 @@ from typing import Any, Self
 
 import httpx
 
-from chronovisor import recall_breaker, semantic_client
+from chronovisor.recall import recall_breaker
+from chronovisor.search import semantic_client
 from chronovisor.core.runtime_config import load_search_embedding_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 

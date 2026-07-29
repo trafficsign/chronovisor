@@ -6,12 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import (
-    background_jobs,
-    hook_dispatcher,
-    recall_breaker,
-    recall_runtime,
-)
+from chronovisor.ops import background_jobs
+from chronovisor.hosts import hook_dispatcher
+from chronovisor.recall import recall_breaker
+from chronovisor.recall import recall_runtime
 
 
 @pytest.fixture(autouse=True)
@@ -308,13 +306,13 @@ def test_stop_dispatch_enqueues_save_and_receipt_audit(
 
     assert [task["name"] for task in output["tasks"]] == ["codex-save"]
     save = output["tasks"][0]
-    assert save["module"] == "chronovisor.codex_record"
+    assert save["module"] == "chronovisor.hosts.codex_record"
     assert save["args"] == ["--hook", "--save"]
     assert "--trigger-ingest" not in save["args"]
     assert save["on_success"] == [
         {
             "name": "recall-audit-candidate",
-            "module": "chronovisor.recall_auditor",
+            "module": "chronovisor.recall.recall_auditor",
             "args": ["--host", "codex", "--hook"],
             "env": {},
             "when_output_status": "saved",
@@ -367,7 +365,7 @@ def test_stop_dispatch_full_entrypoint_enqueues_only_capture_work(
     ]
     assert output["tasks"][0]["args"] == ["--hook", "--save"]
     correction = output["tasks"][1]
-    assert correction["module"] == "chronovisor.content_correction"
+    assert correction["module"] == "chronovisor.recall.content_correction"
     assert correction["args"] == [
         "--host",
         "claude-code",
@@ -411,7 +409,7 @@ def test_stop_dispatch_content_correction_uses_capture_only_worker(
     assert output["tasks"] == [
         {
             "name": "content-correction-capture",
-            "module": "chronovisor.content_correction",
+            "module": "chronovisor.recall.content_correction",
             "args": ["--host", "codex", "--hook", "--capture-only"],
             "dry_run": True,
         }
@@ -518,7 +516,7 @@ def test_stop_capture_enqueue_coalesces_and_never_starts_a_subprocess(
     assert len(state["jobs"]) == 1
     stored = state["jobs"][first["job_id"]]
     assert stored["lane_key"] == "content-correction-capture"
-    assert stored["module"] == "chronovisor.content_correction"
+    assert stored["module"] == "chronovisor.recall.content_correction"
     assert stored["args"] == ["--host", "codex", "--hook", "--capture-only"]
     assert json.loads(stored["stdin"])["turn"] == 2
 
@@ -538,7 +536,7 @@ def test_spawn_task_only_enqueues_without_process(monkeypatch) -> None:
     monkeypatch.setattr(background_jobs, "enqueue_job", fake_enqueue_job)
     task = hook_dispatcher.BackgroundTask(
         name="codex-save",
-        module="chronovisor.codex_record",
+        module="chronovisor.hosts.codex_record",
         args=["--hook", "--save"],
         env={"CODEX_CHRONOVISOR_RECORD_ENABLED": "1"},
     )

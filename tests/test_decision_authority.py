@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 
-from chronovisor.decision_authority import (
+from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     seal_semantic_artifact,
     semantic_authority_shape_error,
@@ -34,8 +34,8 @@ def _production_authority(*, artifact_sha256: str = "a" * 64) -> dict:
 
 
 def _review(authority: dict) -> dict:
-    from chronovisor.decision_router import canonical_agreement_signature
-    from chronovisor.decision_schema_manifest import production_decision_schemas
+    from chronovisor.decision.decision_router import canonical_agreement_signature
+    from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 
     review = {
         "decision": "approved",
@@ -164,8 +164,8 @@ def test_semantic_authority_requires_a_real_local_quorum_proof() -> None:
 
 
 def test_semantic_authority_rejects_one_vote_conservative_synthetic_agreement() -> None:
-    from chronovisor.decision_router import canonical_agreement_signature
-    from chronovisor.decision_schema_manifest import production_decision_schemas
+    from chronovisor.decision.decision_router import canonical_agreement_signature
+    from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 
     authority = _production_authority()
     review = _review(authority)

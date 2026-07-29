@@ -680,7 +680,7 @@ def run_consensus_batches(
                     [
                         sys.executable,
                         "-m",
-                        "chronovisor.classification_model_worker",
+                        "chronovisor.classification.classification_model_worker",
                     ],
                     worker_input,
                     lease,

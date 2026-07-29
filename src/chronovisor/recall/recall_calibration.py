@@ -947,7 +947,7 @@ def review_calibration_with_frontier(
     *,
     timeout: int | None = None,
 ) -> dict[str, Any]:
-    from chronovisor import frontier_review
+    from chronovisor.decision import frontier_review
     from chronovisor.decision.decision_lane_prompts import build_recall_calibration_prompt
 
     prompt = build_recall_calibration_prompt(artifact)

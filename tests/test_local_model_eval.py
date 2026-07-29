@@ -8,36 +8,37 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import local_model_eval, ollama
-from chronovisor.autonomy import DUPLICATE_FRONTIER_SCHEMA
-from chronovisor.decision_router import (
+from chronovisor.lab import local_model_eval
+from chronovisor.core import ollama
+from chronovisor.ops.autonomy import DUPLICATE_FRONTIER_SCHEMA
+from chronovisor.decision.decision_router import (
     DECISION_REQUEST_FINGERPRINT_VERSION,
     DECISION_SEMANTICS_POLICY_VERSION,
     QUORUM_SAFETY_POLICY_VERSION,
 )
-from chronovisor.local_model_eval import (
+from chronovisor.lab.local_model_eval import (
     ReplayInputError,
     ResumeMismatchError,
     evaluate_replays,
     inspect_replays,
     main,
 )
-from chronovisor.decision_schema_manifest import schema_sha256
-from chronovisor.local_structured import ChatRequest
-from chronovisor.runtime_config import DecisionRouterConfig
-from chronovisor.content_correction import (
+from chronovisor.decision.decision_schema_manifest import schema_sha256
+from chronovisor.decision.local_structured import ChatRequest
+from chronovisor.core.runtime_config import DecisionRouterConfig
+from chronovisor.recall.content_correction import (
     FRONTIER_CLASSIFICATION_SCHEMA,
     FRONTIER_REVIEW_SCHEMA,
 )
-from chronovisor.ingest import INGEST_FRONTIER_DECISION_SCHEMA
-from chronovisor.frontier_review import FRONTIER_DECISION_SCHEMA
-from chronovisor.local_repair import LOCAL_REPAIR_SCHEMA
-from chronovisor.orphan_link import ORPHAN_FRONTIER_SCHEMA
+from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
+from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
+from chronovisor.ops.orphan_link import ORPHAN_FRONTIER_SCHEMA
 
 
 @pytest.fixture(autouse=True)
 def _isolate_consensus_audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from chronovisor import store
+    from chronovisor.core import store
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
 
@@ -796,11 +797,11 @@ def test_full_minimum_representative_corpus_can_adopt(tmp_path: Path) -> None:
 def _canonical_lane_metric_rows() -> tuple[
     list[dict[str, object]], list[dict[str, object]]
 ]:
-    from chronovisor.decision_lane_contract_cases import (
+    from chronovisor.decision.decision_lane_contract_cases import (
         decision_lane_contract_case_manifest,
         decision_lane_contract_case_manifest_sha256,
     )
-    from chronovisor.decision_lane_contracts import LANE_CONTRACT_SOURCE
+    from chronovisor.decision.decision_lane_contracts import LANE_CONTRACT_SOURCE
 
     manifest = decision_lane_contract_case_manifest()
     manifest_sha256 = decision_lane_contract_case_manifest_sha256()
@@ -2449,7 +2450,7 @@ def test_atomic_adoption_artifact_publish_uses_authority_epoch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import page_mutation
+    from chronovisor.ingest import page_mutation
 
     held = False
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from chronovisor import semantic_hold
+from chronovisor.search import semantic_hold
 
 
 def semantic_authority(

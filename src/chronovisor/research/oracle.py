@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.recall.claims import CLAIM_INDEX_FILE, rebuild_claim_index, search_claims
-from chronovisor.search import search
+from chronovisor.search.search import search
 
 
 def oracle_bundle(

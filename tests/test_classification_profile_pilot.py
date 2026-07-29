@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronovisor import classification_profile_pilot
-from chronovisor.classification import UDCPackage
-from chronovisor.classification_profile_pilot import (
+from chronovisor.lab import classification_profile_pilot
+from chronovisor.classification.classification import UDCPackage
+from chronovisor.lab.classification_profile_pilot import (
     build_profile_index,
     build_profile_rows,
     notation_matches,
     query_profile_index,
 )
-from chronovisor.runtime_config import EmbeddingConfig
+from chronovisor.core.runtime_config import EmbeddingConfig
 
 
 def _package() -> UDCPackage:

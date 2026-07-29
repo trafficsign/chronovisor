@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.classification_evidence_judgment import (
+from chronovisor.classification.classification_evidence_judgment import (
     latin_square_order,
     paired_rows,
     resource_ready_gate,

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import runtime_config
+from chronovisor.core import runtime_config
 
 
 def test_uvx_runtime_command_uses_pushed_github_source(monkeypatch) -> None:

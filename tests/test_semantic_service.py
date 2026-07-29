@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from chronovisor.semantic_service import (
+from chronovisor.search.semantic_service import (
     QueryBatcher,
     SemanticServiceState,
     ServiceBusy,

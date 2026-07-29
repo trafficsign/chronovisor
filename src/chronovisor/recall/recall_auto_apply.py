@@ -105,7 +105,7 @@ def load_auto_apply_policy(path: Path = RECALL_CONFIG_FILE) -> AutoApplyPolicy:
 def _feedback_file(path: Path | None = None) -> Path:
     if path is not None:
         return path
-    from chronovisor import recall_runtime
+    from chronovisor.recall import recall_runtime
 
     return recall_runtime.RECALL_FEEDBACK_FILE
 
@@ -467,7 +467,7 @@ def review_auto_apply_with_frontier(
     timeout: int | None = None,
 ) -> dict[str, Any]:
     """Ask the frontier model for the authoritative action verdict."""
-    from chronovisor import frontier_review
+    from chronovisor.decision import frontier_review
     from chronovisor.decision.decision_lane_prompts import build_recall_auto_apply_prompt
 
     prompt = build_recall_auto_apply_prompt(proposal)

@@ -4,7 +4,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from chronovisor import retention
+from chronovisor.ops import retention
 
 
 class FakeStore:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.research_eval import DEFAULT_FIXTURE, run_eval
+from chronovisor.lab.research_eval import DEFAULT_FIXTURE, run_eval
 
 
 def test_locked_research_holdout_passes_adoption_gate() -> None:

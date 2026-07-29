@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 def test_ingest_review_artifact_projection_is_structural_and_fail_closed() -> None:
-    from chronovisor.ingest_review_apply import inspect_ingest_review_artifact
+    from chronovisor.ingest.ingest_review_apply import inspect_ingest_review_artifact
 
     authority = {"lane": "ingest_reconciliation"}
     state = inspect_ingest_review_artifact(
@@ -30,7 +30,7 @@ def test_ingest_review_artifact_projection_is_structural_and_fail_closed() -> No
 
 
 def test_run_ingest_metadata_normalization_accepts_only_exact_side_channels() -> None:
-    from chronovisor.ingest import _normalize_ingest_source_metadata
+    from chronovisor.ingest.ingest import _normalize_ingest_source_metadata
 
     keywords = ["qwen", "recall"]
     normalized, source = _normalize_ingest_source_metadata(
@@ -46,7 +46,7 @@ def test_run_ingest_metadata_normalization_accepts_only_exact_side_channels() ->
 
 
 def test_orchestrator_unit_keyword_and_event_decisions_are_deterministic() -> None:
-    from chronovisor.orchestrator import _raw_unit_event, _raw_unit_keywords
+    from chronovisor.ingest.orchestrator import _raw_unit_event, _raw_unit_keywords
 
     raw = "---\nraw_keywords: [current]\nkeywords: [legacy]\n---\nbody\n"
     assert _raw_unit_keywords(None, raw) == ["current"]
@@ -72,7 +72,7 @@ def test_orchestrator_unit_keyword_and_event_decisions_are_deterministic() -> No
 def test_self_heal_read_back_retirement_classification_is_ordered() -> None:
     import json
 
-    from chronovisor.self_heal import _read_back_packet_retirement_kind
+    from chronovisor.ops.self_heal import _read_back_packet_retirement_kind
 
     transient = {
         "failure_class": "read_back.repeated_miss",
@@ -89,7 +89,7 @@ def test_self_heal_read_back_retirement_classification_is_ordered() -> None:
 
 
 def test_content_correction_frontier_evidence_projection_is_strict() -> None:
-    from chronovisor.content_correction import (
+    from chronovisor.recall.content_correction import (
         _frontier_item_evidence_inputs,
         _page_evidence_hashes,
     )

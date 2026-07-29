@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor import health
+from chronovisor.ops import health
 
 
 def test_research_kpi_surfaces_trace_claims_and_kill_switches(tmp_path: Path, monkeypatch) -> None:

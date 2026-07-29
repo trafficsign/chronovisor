@@ -75,7 +75,7 @@ def run_verification() -> dict[str, Any]:
         checks.append(_check("secret-unicode-ssrf", "uv run pytest -q tests/test_research_security.py", security))
 
         def outage() -> None:
-            from chronovisor import web_provider
+            from chronovisor.research import web_provider
 
             web_provider.WEB_TRACE = root / "web-trace.jsonl"
             provider = HttpSearchProvider(
@@ -128,7 +128,7 @@ def run_verification() -> dict[str, Any]:
         checks.append(_check("redirect-loop-and-oversized-content", "uv run pytest -q tests/test_web_fetch.py", redirect_and_oversize))
 
         def outage_terminal_and_sync_overlap() -> None:
-            from chronovisor import research_scheduler
+            from chronovisor.research import research_scheduler
 
             scheduler_root = root / "scheduler"
             research_scheduler.RUNTIME_DIR = scheduler_root

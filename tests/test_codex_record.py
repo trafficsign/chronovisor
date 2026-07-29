@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import codex_record
-from chronovisor.raw_semantic_projection import project_parent_raw
-from chronovisor.save_transaction import make_save_transaction
+from chronovisor.hosts import codex_record
+from chronovisor.raw.raw_semantic_projection import project_parent_raw
+from chronovisor.raw.save_transaction import make_save_transaction
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:

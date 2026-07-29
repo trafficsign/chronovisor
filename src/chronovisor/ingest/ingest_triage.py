@@ -11,7 +11,7 @@ from chronovisor.decision.local_structured import ChatTransport
 
 
 def _runtime():
-    from chronovisor import ingest
+    from chronovisor.ingest import ingest
 
     return ingest
 
@@ -84,7 +84,7 @@ def triage(
 
     catalog_lines.append("Existing wiki pages (page_id — title):")
     try:
-        from chronovisor.search import search as chronovisor_search
+        from chronovisor.search.search import search as chronovisor_search
 
         query_text = content[:2000]
         results, _ = chronovisor_search(query_text, top_n=_TRIAGE_CATALOG_TOP_N, semantic=True)

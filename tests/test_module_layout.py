@@ -6,6 +6,8 @@ from pathlib import Path
 
 import tomllib
 
+from chronovisor.core.module_paths import LEGACY_MODULE_PATHS
+
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "chronovisor"
 DOMAIN_NAMES = {
     "classification",
@@ -21,12 +23,6 @@ DOMAIN_NAMES = {
     "research",
     "search",
 }
-LEGACY_PACKAGE_MODULES = {
-    "classification": "ClassificationError",
-    "ingest": "run_ingest",
-    "librarian": "run_shadow",
-    "search": "ScoredPage",
-}
 TOP_LEVEL_IMPLEMENTATION_EXCEPTIONS = {
     # Installed outside the package archive so it remains available when the
     # main Chronovisor package cannot import.
@@ -34,16 +30,14 @@ TOP_LEVEL_IMPLEMENTATION_EXCEPTIONS = {
 }
 
 
-def test_top_level_python_files_are_compatibility_shims() -> None:
-    unexpected: list[str] = []
-    for path in PACKAGE_ROOT.glob("*.py"):
-        if path.name == "__init__.py" or path.name in TOP_LEVEL_IMPLEMENTATION_EXCEPTIONS:
-            continue
-        text = path.read_text(encoding="utf-8")
-        if "alias_legacy_module(__name__, _implementation)" not in text:
-            unexpected.append(path.name)
+def test_top_level_python_files_have_no_legacy_shims() -> None:
+    top_level = {
+        path.name
+        for path in PACKAGE_ROOT.glob("*.py")
+        if path.name != "__init__.py"
+    }
 
-    assert unexpected == []
+    assert top_level == TOP_LEVEL_IMPLEMENTATION_EXCEPTIONS
 
 
 def test_domain_implementations_do_not_import_legacy_module_paths() -> None:
@@ -76,18 +70,10 @@ def test_domain_implementations_do_not_import_legacy_module_paths() -> None:
     assert violations == []
 
 
-def test_legacy_package_modules_forward_reads_and_writes() -> None:
-    for package_name, marker in LEGACY_PACKAGE_MODULES.items():
-        package = importlib.import_module(f"chronovisor.{package_name}")
-        implementation = importlib.import_module(
-            f"chronovisor.{package_name}.{package_name}"
-        )
-        assert getattr(package, marker) is getattr(implementation, marker)
-
-        sentinel = object()
-        setattr(package, "_module_layout_test_sentinel", sentinel)
-        assert getattr(package, "_module_layout_test_sentinel") is sentinel
-        delattr(package, "_module_layout_test_sentinel")
+def test_legacy_module_map_targets_are_importable_without_top_level_shims() -> None:
+    for legacy, target in LEGACY_MODULE_PATHS.items():
+        assert legacy != target
+        assert importlib.import_module(target) is not None
 
 
 def test_console_scripts_target_domain_modules() -> None:

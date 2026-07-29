@@ -13,8 +13,8 @@ from contextlib import contextmanager
 import httpx
 import pytest
 
-from chronovisor import ollama
-from chronovisor.runtime_config import IngestConfig
+from chronovisor.core import ollama
+from chronovisor.core.runtime_config import IngestConfig
 
 
 class _StreamResponse:
@@ -641,7 +641,7 @@ def test_resource_lease_blocks_another_process(tmp_path, monkeypatch) -> None:
     script = """
 import os
 from pathlib import Path
-from chronovisor import ollama
+from chronovisor.core import ollama
 
 Path(os.environ["LEASE_READY_PATH"]).write_text("ready", encoding="utf-8")
 with ollama.model_resource_lease(exclusive=False):
@@ -684,7 +684,7 @@ def test_resource_lease_timeout_does_not_wait_for_another_process(
     script = """
 import os
 from pathlib import Path
-from chronovisor import ollama
+from chronovisor.core import ollama
 
 Path(os.environ["LEASE_READY_PATH"]).write_text("ready", encoding="utf-8")
 try:
@@ -1125,7 +1125,7 @@ def test_persisted_footprint_is_readable_from_a_fresh_process(
     )
     script = """
 import json
-from chronovisor import ollama
+from chronovisor.core import ollama
 
 rows = ollama._matching_persisted_calibrations(
     installed={"ornith:test": 10},

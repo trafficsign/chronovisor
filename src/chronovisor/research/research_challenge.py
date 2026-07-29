@@ -67,7 +67,7 @@ def _default_runner(
         ),
     }
     outcome = run_cancellable_command(
-        [sys.executable, "-m", "chronovisor.research_model_worker"],
+        [sys.executable, "-m", "chronovisor.research.research_model_worker"],
         json.dumps(request, ensure_ascii=False),
         lease,
         timeout_seconds=config.budgets.max_single_generation_seconds,

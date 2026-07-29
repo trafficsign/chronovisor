@@ -5,15 +5,16 @@ import os
 import time
 from pathlib import Path
 
-from chronovisor import autonomy, health
-from chronovisor.runtime_config import SearchEmbeddingConfig
+from chronovisor.ops import autonomy
+from chronovisor.ops import health
+from chronovisor.core.runtime_config import SearchEmbeddingConfig
 
 
 def test_semantic_index_kpi_is_inactive_when_rollout_is_off(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "chronovisor.runtime_config.load_search_embedding_config",
+        "chronovisor.core.runtime_config.load_search_embedding_config",
         lambda: SearchEmbeddingConfig(
             backend="nemotron_service",
             rollout_mode="off",
@@ -48,7 +49,7 @@ def test_semantic_index_kpi_requires_matching_live_service(
         lambda path: path == socket_path,
     )
     monkeypatch.setattr(
-        "chronovisor.runtime_config.load_search_embedding_config",
+        "chronovisor.core.runtime_config.load_search_embedding_config",
         lambda: SearchEmbeddingConfig(
             backend="nemotron_service",
             rollout_mode="on",
@@ -56,7 +57,7 @@ def test_semantic_index_kpi_requires_matching_live_service(
         ),
     )
     monkeypatch.setattr(
-        "chronovisor.semantic_index.semantic_index_status",
+        "chronovisor.search.semantic_index.semantic_index_status",
         lambda: {
             "status": "ok",
             "coverage": 1.0,
@@ -64,7 +65,7 @@ def test_semantic_index_kpi_requires_matching_live_service(
         },
     )
     monkeypatch.setattr(
-        "chronovisor.semantic_jobs.job_status",
+        "chronovisor.search.semantic_jobs.job_status",
         lambda: {"status": "ok", "counts": {}},
     )
     payload = health.semantic_index_kpi()

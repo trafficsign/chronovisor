@@ -949,7 +949,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print("\t".join(f"{key}={value}" for key, value in data.items()))
         return 0 if data.get("status") in {"clean", "committed"} else 1
     if args.command == "entities":
-        from chronovisor import entities
+        from chronovisor.ops import entities
 
         if args.entities_command == "init":
             path = entities.write_default_registry()
@@ -971,7 +971,7 @@ def dispatch(args: argparse.Namespace) -> int:
             )
         return 0
     if args.command == "raw-replay":
-        from chronovisor import raw_replay
+        from chronovisor.raw import raw_replay
 
         data = (
             raw_replay.run_replay(since=args.since, limit=max(1, args.limit or 1))
@@ -988,7 +988,7 @@ def dispatch(args: argparse.Namespace) -> int:
             )
         return 0
     if args.command == "raw":
-        from chronovisor import raw_archive
+        from chronovisor.raw import raw_archive
 
         if args.raw_command == "status":
             data = raw_archive.archive_status(chronovisor_store.RAW_DIR)
@@ -1031,7 +1031,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print("\t".join(f"{key}={value}" for key, value in data.items() if key != "results"))
         return 1 if data.get("status") == "error" else 0
     if args.command == "convergence-drain":
-        from chronovisor import convergence_drain
+        from chronovisor.ops import convergence_drain
 
         if args.convergence_drain_command == "plan":
             data = convergence_drain.plan()
@@ -1196,7 +1196,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"hubs\t{data['hubs']}")
         return 0
     if args.command == "autonomy":
-        from chronovisor import autonomy
+        from chronovisor.ops import autonomy
 
         if args.autonomy_command == "status":
             data = autonomy.status()
@@ -1271,7 +1271,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"latency_p95_ms\t{metrics['latency_ms']['p95']:.1f}")
         return 0
     if args.command == "recall-improve":
-        from chronovisor import recall_improvement
+        from chronovisor.recall import recall_improvement
 
         if args.recall_improve_command == "run":
             data = recall_improvement.run_improvement(

@@ -14,7 +14,10 @@ def semantic_defer_wiki(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, Path]:
-    from chronovisor import decision_router, runtime_config, runtime_status, store
+    from chronovisor.decision import decision_router
+    from chronovisor.core import runtime_config
+    from chronovisor.ops import runtime_status
+    from chronovisor.core import store
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
@@ -73,7 +76,7 @@ def _no_quorum_error(authority_sha256: str) -> str:
 
 
 def test_classifies_only_explicit_authority_bound_semantic_no_quorum() -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     authority_sha256 = "a" * 64
     semantic = failure_supervisor.classify_failure(_no_quorum_error(authority_sha256))
@@ -103,7 +106,8 @@ def test_terminal_semantic_defer_preserves_raw_and_never_starts_self_heal(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor, self_heal
+    from chronovisor.decision import failure_supervisor
+    from chronovisor.ops import self_heal
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "semantic.md"
@@ -157,7 +161,7 @@ def test_terminal_semantic_defer_preserves_raw_and_never_starts_self_heal(
 def test_related_raws_share_one_idempotent_terminal_packet_and_reset_together(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     first = chronovisor_root / "raw" / "fragment-1.md"
@@ -209,7 +213,8 @@ def test_defer_reconciliation_shares_one_raw_snapshot_across_packets(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor, raw_store
+    from chronovisor.decision import failure_supervisor
+    from chronovisor.raw import raw_store
 
     chronovisor_root, artifact = semantic_defer_wiki
     error = _no_quorum_error(_sha256(artifact))
@@ -249,7 +254,7 @@ def test_guarded_semantic_publish_keeps_newer_operational_hold_atomic(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "operational-wins.md"
@@ -309,7 +314,7 @@ def test_guarded_semantic_publish_keeps_newer_operational_hold_atomic(
 def test_authority_artifact_change_reopens_and_unreadable_artifact_fails_closed(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "epoch.md"
@@ -359,7 +364,8 @@ def test_authority_change_releases_only_a_valid_adopted_artifact(
     error: str | None,
     artifact_sha256: str | None,
 ) -> None:
-    from chronovisor import decision_router, failure_supervisor
+    from chronovisor.decision import decision_router
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "validated-authority.md"
@@ -409,7 +415,7 @@ def test_packet_reconstructs_semantic_hold_after_state_publish_crash(
     semantic_defer_wiki: tuple[Path, Path],
     state_loss: str,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / f"crash-{state_loss}.md"
@@ -444,7 +450,7 @@ def test_packet_reconstructs_semantic_hold_after_state_publish_crash(
 def test_packet_reconstruction_requires_matching_raw_evidence_and_active_status(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "evidence.md"
@@ -475,7 +481,7 @@ def test_packet_reconstruction_requires_matching_raw_evidence_and_active_status(
 def test_reset_releases_orphan_semantic_packet_before_state_cleanup(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "orphan-reset.md"
@@ -506,7 +512,7 @@ def test_released_packet_overrides_stale_terminal_state_entry(
     semantic_defer_wiki: tuple[Path, Path],
     packet_status: str,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / f"stale-state-{packet_status}.md"
@@ -529,7 +535,7 @@ def test_semantic_defer_supersedes_unshared_operational_packet(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "upgrade.md"
@@ -567,7 +573,7 @@ def test_semantic_defer_preserves_replaced_terminal_packet(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "terminal-upgrade.md"
@@ -607,8 +613,9 @@ def test_in_flight_operational_worker_observes_semantic_defer_cancellation(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor, self_heal
-    from chronovisor.local_repair import LocalRepairDecision
+    from chronovisor.decision import failure_supervisor
+    from chronovisor.ops import self_heal
+    from chronovisor.decision.local_repair import LocalRepairDecision
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "in-flight-upgrade.md"
@@ -709,7 +716,8 @@ def test_cancellation_dry_run_is_byte_for_byte_read_only(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor, self_heal
+    from chronovisor.decision import failure_supervisor
+    from chronovisor.ops import self_heal
 
     chronovisor_root, _artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "dry-run-cancel.md"
@@ -744,7 +752,8 @@ def test_semantic_defer_survives_unreadable_packet_during_cancellation_publish(
     monkeypatch: pytest.MonkeyPatch,
     reader_mode: str,
 ) -> None:
-    from chronovisor import failure_supervisor, self_heal
+    from chronovisor.decision import failure_supervisor
+    from chronovisor.ops import self_heal
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / f"cancel-{reader_mode}.md"
@@ -782,7 +791,7 @@ def test_semantic_defer_keeps_operational_packet_shared_by_another_raw(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     first = chronovisor_root / "raw" / "shared-first.md"
@@ -828,7 +837,7 @@ def test_semantic_defer_cancels_legacy_packet_when_every_shared_raw_is_replaced(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     first = chronovisor_root / "raw" / "legacy-bundle-first.md"
@@ -874,7 +883,7 @@ def test_semantic_defer_does_not_trust_mismatched_legacy_registry_binding(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / "legacy-registry-mismatch.md"
@@ -909,7 +918,7 @@ def test_semantic_defer_preserves_direct_packet_reference_with_mismatched_finger
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     first = chronovisor_root / "raw" / "mismatch-shared-first.md"

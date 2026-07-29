@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from chronovisor.research_store import ResearchStore, compact_event_context, reduce_events
+from chronovisor.research.research_store import ResearchStore, compact_event_context, reduce_events
 
 
 def test_evidence_cas_round_trip_and_checksum(tmp_path) -> None:

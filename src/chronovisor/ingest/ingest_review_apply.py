@@ -21,7 +21,7 @@ from chronovisor.ingest.ingest_schemas import (
 
 def _runtime():
     # Imported lazily by ingest after its compatibility facade is initialized.
-    from chronovisor import ingest
+    from chronovisor.ingest import ingest
 
     return ingest
 

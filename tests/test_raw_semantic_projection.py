@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.raw_semantic_projection import (
+from chronovisor.raw.raw_semantic_projection import (
     PROJECTION_BUNDLE_RECEIPT_SCHEMA,
     PROJECTION_CHILD_SCHEMA,
     ProjectionConflictError,
@@ -17,7 +17,7 @@ from chronovisor.raw_semantic_projection import (
     projection_bundle_state_for_parent,
     verify_projection_bundle,
 )
-from chronovisor.save_transaction import (
+from chronovisor.raw.save_transaction import (
     attach_save_transaction_marker,
     make_save_transaction,
 )
@@ -427,7 +427,7 @@ def test_partial_child_fault_resumes_existing_intent_under_new_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import raw_semantic_projection as projection_mod
+    from chronovisor.raw import raw_semantic_projection as projection_mod
 
     path = _transcript_raw(
         tmp_path,
@@ -483,7 +483,7 @@ def test_directory_fsync_failure_propagates_and_retry_resyncs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import raw_semantic_projection as projection_mod
+    from chronovisor.raw import raw_semantic_projection as projection_mod
 
     path = _transcript_raw(
         tmp_path,

@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor import collection_authority, librarian_rollout
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.librarian import collection_authority
+from chronovisor.librarian import librarian_rollout
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 
 
 def _write(path: Path, payload: dict) -> None:

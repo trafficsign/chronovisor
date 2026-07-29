@@ -4,11 +4,11 @@ import hashlib
 import json
 from contextlib import nullcontext
 
-from chronovisor import recall_calibration
-from chronovisor.convergence import CycleBudget
-from chronovisor.decision_router import canonical_agreement_signature
-from chronovisor.decision_schema_manifest import production_decision_schemas
-from chronovisor.recall_runtime import RecallPolicy
+from chronovisor.recall import recall_calibration
+from chronovisor.ops.convergence import CycleBudget
+from chronovisor.decision.decision_router import canonical_agreement_signature
+from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.recall.recall_runtime import RecallPolicy
 
 
 def _calibration_authority(epoch: str) -> dict:

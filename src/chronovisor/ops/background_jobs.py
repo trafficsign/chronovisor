@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
+from chronovisor.core.module_paths import canonical_module_path
 from chronovisor.decision.frontier_review import redact_sensitive_text
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
@@ -62,6 +63,7 @@ def _load() -> dict[str, Any]:
         value = {}
     if not isinstance(value, dict) or not isinstance(value.get("jobs"), dict):
         return {"schema_version": 1, "jobs": {}}
+    _canonicalize_state_module_paths(value)
     return value
 
 
@@ -194,7 +196,7 @@ def _dedupe_key(name: str, module: str, args: list[str], stdin_text: str) -> str
     payload = json.dumps(
         {
             "name": name,
-            "module": module,
+            "module": canonical_module_path(module),
             "args": args,
             "session": session_identity,
             "stdin": "" if session_identity else stdin_text,
@@ -203,6 +205,55 @@ def _dedupe_key(name: str, module: str, args: list[str], stdin_text: str) -> str
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _canonicalize_state_module_paths(state: dict[str, Any]) -> None:
+    """Upgrade durable job references without retaining importable shims."""
+
+    jobs = state.get("jobs")
+    if isinstance(jobs, dict):
+        for job in jobs.values():
+            if not isinstance(job, dict):
+                continue
+            module = canonical_module_path(str(job.get("module") or ""))
+            job["module"] = module
+            args = [str(value) for value in job.get("args", [])]
+            job["dedupe_key"] = _dedupe_key(
+                str(job.get("name") or ""),
+                module,
+                args,
+                str(job.get("stdin") or ""),
+            )
+            followups = job.get("on_success")
+            if isinstance(followups, list):
+                for followup in followups:
+                    if isinstance(followup, dict):
+                        followup["module"] = canonical_module_path(
+                            str(followup.get("module") or "")
+                        )
+
+    tombstones = state.get("cancellation_tombstones")
+    if not isinstance(tombstones, dict):
+        return
+    canonical_tombstones: dict[str, Any] = {}
+    for old_key, value in tombstones.items():
+        if not isinstance(value, dict):
+            continue
+        module = canonical_module_path(str(value.get("module") or ""))
+        value["module"] = module
+        canonical_tombstones[str(old_key)] = value
+        name = str(value.get("name") or "")
+        if _is_capture_job(name) and "stdin" not in value:
+            continue
+        args = [str(item) for item in value.get("args", [])]
+        key = _dedupe_key(
+            name,
+            module,
+            args,
+            str(value.get("stdin") or ""),
+        )
+        canonical_tombstones[key] = value
+    state["cancellation_tombstones"] = canonical_tombstones
 
 
 def enqueue_job(
@@ -214,6 +265,7 @@ def enqueue_job(
     stdin_text: str,
     on_success: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    module = canonical_module_path(module)
     session_identity = (
         _capture_session_identity(stdin_text) if _is_capture_job(name) else None
     )
@@ -301,6 +353,7 @@ def cancel_matching_jobs(
     cached/no-op worker from resurrecting the queue entry.
     """
 
+    module = canonical_module_path(module)
     normalized_args = [str(value) for value in args]
     normalized_reason = str(reason).strip() or "superseded"
     dedupe = _dedupe_key(name, module, normalized_args, stdin_text)
@@ -427,6 +480,7 @@ def _enqueue_followups_locked(
             continue
         name = str(spec.get("name") or "").strip()
         module = str(spec.get("module") or "").strip()
+        module = canonical_module_path(module)
         args = [str(value) for value in spec.get("args", [])]
         env_value = spec.get("env")
         env = (
@@ -571,7 +625,12 @@ def run_job(job_id: str) -> dict[str, Any]:
         return {"status": "not_due", "job_id": job_id}
     env = os.environ.copy()
     env.update({str(k): str(v) for k, v in job.get("env", {}).items()})
-    cmd = [sys.executable, "-m", str(job["module"]), *[str(v) for v in job.get("args", [])]]
+    cmd = [
+        sys.executable,
+        "-m",
+        canonical_module_path(str(job["module"])),
+        *[str(v) for v in job.get("args", [])],
+    ]
     try:
         completed = subprocess.run(
             cmd,

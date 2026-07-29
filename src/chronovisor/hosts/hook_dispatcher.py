@@ -218,7 +218,7 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         request.session_id = args.session_id
 
     policy = recall_runtime.load_policy(active_config_file(args.config))
-    from chronovisor import recall_breaker
+    from chronovisor.recall import recall_breaker
 
     breaker_was_open = recall_breaker.is_open()
     effective_policy = replace(
@@ -349,14 +349,14 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
             tasks.append(
                 BackgroundTask(
                     name="codex-save",
-                    module="chronovisor.codex_record",
+                    module="chronovisor.hosts.codex_record",
                     args=["--hook", "--save"],
                     env={"CODEX_CHRONOVISOR_RECORD_ENABLED": "1"},
                     log_prefix="codex-save",
                     on_success=[
                         {
                             "name": "recall-audit-candidate",
-                            "module": "chronovisor.recall_auditor",
+                            "module": "chronovisor.recall.recall_auditor",
                             "args": ["--host", "codex", "--hook"],
                             "env": {},
                             "when_output_status": "saved",
@@ -368,14 +368,14 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
             tasks.append(
                 BackgroundTask(
                     name="claude-code-save",
-                    module="chronovisor.claude_code_record",
+                    module="chronovisor.hosts.claude_code_record",
                     args=["--hook", "--save"],
                     env={"CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED": "1"},
                     log_prefix="claude-code-save",
                     on_success=[
                         {
                             "name": "recall-audit-candidate",
-                            "module": "chronovisor.recall_auditor",
+                            "module": "chronovisor.recall.recall_auditor",
                             "args": ["--host", "claude-code", "--hook"],
                             "env": {},
                             "when_output_status": "saved",
@@ -393,7 +393,7 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                 # across hosts. Session identity remains part of the durable
                 # dedupe key, so unrelated sessions never coalesce.
                 name="content-correction-capture",
-                module="chronovisor.content_correction",
+                module="chronovisor.recall.content_correction",
                 args=["--host", host, "--hook", "--capture-only"],
                 env={"CHRONOVISOR_CONTENT_CORRECTION_ENABLED": "1"},
                 log_prefix="content-correction-capture",

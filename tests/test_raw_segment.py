@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from chronovisor.raw_segment import (
+from chronovisor.raw.raw_segment import (
     RawSegmentCorrupt,
     append_capture,
     copy_source_interval,

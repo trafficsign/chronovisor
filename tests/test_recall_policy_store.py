@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from chronovisor.recall_policy_store import append_live_episode, apply_policy_overrides, normalize_policy_overrides
-from chronovisor.recall_runtime import RecallPolicy
+from chronovisor.recall.recall_policy_store import append_live_episode, apply_policy_overrides, normalize_policy_overrides
+from chronovisor.recall.recall_runtime import RecallPolicy
 
 
 def test_normalize_policy_overrides_keeps_allowed_fields_only() -> None:

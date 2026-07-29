@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import chronovisor.semantic_index as semantic_index
-from chronovisor.semantic_index import (
+import chronovisor.search.semantic_index as semantic_index
+from chronovisor.search.semantic_index import (
     SemanticDocument,
     SemanticIndexError,
     activate_generation,

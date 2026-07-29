@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from chronovisor import recall_session
+from chronovisor.recall import recall_session
 
 
 def test_session_path_sanitizes_host_input_and_bounds_filename(

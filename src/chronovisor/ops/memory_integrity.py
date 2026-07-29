@@ -18,7 +18,7 @@ from typing import Any
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.raw.raw_replay import raw_date, select_raws
 from chronovisor.raw.raw_store import RawStore
-from chronovisor.search import search as run_search
+from chronovisor.search.search import search as run_search
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
 EVAL_DIR = CHRONOVISOR_ROOT / "eval"

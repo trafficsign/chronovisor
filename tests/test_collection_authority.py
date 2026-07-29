@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import collection_anomaly_worker, collection_authority
-from chronovisor.collection_authority import (
+from chronovisor.librarian import collection_anomaly_worker
+from chronovisor.librarian import collection_authority
+from chronovisor.librarian.collection_authority import (
     CollectionAuthorityError,
     CollectionRegistry,
     adjudicate_collection_review_queue,
@@ -20,9 +21,9 @@ from chronovisor.collection_authority import (
     load_contract,
     load_crosswalk,
 )
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.page_identity import new_page_uid
-from chronovisor.page_registry import PageRegistry
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.page_identity import new_page_uid
+from chronovisor.ingest.page_registry import PageRegistry
 
 
 def _page(path: Path, uid: str, *, links: tuple[str, ...] = ()) -> None:
@@ -102,7 +103,7 @@ def test_new_collection_crosswalk_is_local_consensus_and_runtime_sealed(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor import ollama
+    from chronovisor.core import ollama
 
     page_uid = _uids(1, start=115)[0]
     _page(tmp_path / "pages" / "new-topic" / "note.md", page_uid)
@@ -186,7 +187,7 @@ def test_collection_no_issue_review_is_checkpointed_and_dismissed(
     CollectionRegistry(tmp_path).sync_from_pages()
     collection_authority.refresh_review_queue(tmp_path)
     monkeypatch.setattr(
-        "chronovisor.ollama.model_digests",
+        "chronovisor.core.ollama.model_digests",
         lambda _models: {"gemma4:26b": "digest"},
     )
     monkeypatch.setattr(
@@ -245,7 +246,7 @@ def test_existing_no_issue_review_is_reconciled_without_another_call(
     queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     write_sealed_json(queue_path, queue, backup=True)
     monkeypatch.setattr(
-        "chronovisor.ollama.model_digests",
+        "chronovisor.core.ollama.model_digests",
         lambda _models: {"gemma4:26b": "digest"},
     )
 
@@ -290,7 +291,7 @@ def test_collection_challenger_rejects_move_and_preserves_original_order(
     queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     write_sealed_json(queue_path, queue, backup=True)
     monkeypatch.setattr(
-        "chronovisor.ollama.model_digests",
+        "chronovisor.core.ollama.model_digests",
         lambda _models: {"gpt-oss:20b": "challenger-digest"},
     )
     monkeypatch.setattr(
@@ -353,7 +354,7 @@ def test_collection_challenger_records_consensus_without_mutation(
     queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     write_sealed_json(queue_path, queue, backup=True)
     monkeypatch.setattr(
-        "chronovisor.ollama.model_digests",
+        "chronovisor.core.ollama.model_digests",
         lambda _models: {"gpt-oss:20b": "challenger-digest"},
     )
     monkeypatch.setattr(
@@ -398,7 +399,7 @@ def test_collection_review_checkpoint_survives_later_worker_failure(
     CollectionRegistry(tmp_path).sync_from_pages()
     collection_authority.refresh_review_queue(tmp_path)
     monkeypatch.setattr(
-        "chronovisor.ollama.model_digests",
+        "chronovisor.core.ollama.model_digests",
         lambda _models: {"gemma4:26b": "digest"},
     )
     monkeypatch.setattr(
@@ -448,7 +449,7 @@ def test_collection_review_stops_batch_when_model_lane_is_deferred(
     CollectionRegistry(tmp_path).sync_from_pages()
     collection_authority.refresh_review_queue(tmp_path)
     monkeypatch.setattr(
-        "chronovisor.ollama.model_digests",
+        "chronovisor.core.ollama.model_digests",
         lambda _models: {"gemma4:26b": "digest"},
     )
     monkeypatch.setattr(

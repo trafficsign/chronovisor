@@ -18,7 +18,7 @@ from chronovisor.core.durable_state import (
 from chronovisor.core.sealed_artifact_decoder import schema_matches
 
 
-HEARTBEAT_SCHEMA = "chronovisor.deadman-heartbeat.v1"
+HEARTBEAT_SCHEMA = "chronovisor.ops.deadman-heartbeat.v1"
 THRESHOLD_SCHEMA_VERSION = 1
 THRESHOLD_POLICY = {
     "version": THRESHOLD_SCHEMA_VERSION,

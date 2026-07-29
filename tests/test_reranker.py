@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import threading
 
-from chronovisor import reranker, server
-from chronovisor.reranker import RerankOutcome, rerank_results
-from chronovisor.runtime_config import RerankerConfig
-from chronovisor.search import ScoredPage
+from chronovisor.search import reranker
+from chronovisor.hosts import server
+from chronovisor.search.reranker import RerankOutcome, rerank_results
+from chronovisor.core.runtime_config import RerankerConfig
+from chronovisor.search.search import ScoredPage
 
 
 def page(page_id: str, score: float = 1.0) -> ScoredPage:
@@ -191,8 +192,8 @@ def test_chronovisor_search_uses_reranker_only_when_enabled(monkeypatch) -> None
             },
         )
 
-    from chronovisor import search as search_mod
-    from chronovisor import runtime_config
+    from chronovisor.search import search as search_mod
+    from chronovisor.core import runtime_config
 
     monkeypatch.setattr(search_mod, "search", fake_search)
     monkeypatch.setattr(
@@ -245,8 +246,8 @@ def test_chronovisor_search_reranks_after_tag_filter(monkeypatch) -> None:
             },
         )
 
-    from chronovisor import search as search_mod
-    from chronovisor import runtime_config
+    from chronovisor.search import search as search_mod
+    from chronovisor.core import runtime_config
 
     monkeypatch.setattr(search_mod, "search", fake_search)
     monkeypatch.setattr(

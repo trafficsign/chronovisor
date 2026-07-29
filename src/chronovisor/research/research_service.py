@@ -223,7 +223,7 @@ def enqueue_evidence_research(
     run_id = uuid.uuid4().hex
     return enqueue_job(
         name="research",
-        module="chronovisor.research_worker",
+        module="chronovisor.research.research_worker",
         args=["--run-id", run_id, "--purpose", purpose],
         env={
             "CHRONOVISOR_RESEARCH_RUN_ID": run_id,

@@ -33,7 +33,7 @@ from chronovisor.recall.recall_prompt import (
 )
 from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.runtime_config import active_config_file
-from chronovisor.search import search as run_search
+from chronovisor.search.search import search as run_search
 from chronovisor.ops.state_register import format_state_context, should_inject_state
 from chronovisor.core.store import SYSTEM_DIR, find_page, init_chronovisor
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import ingest_drain
+from chronovisor.ingest import ingest_drain
 
 
 @pytest.fixture(autouse=True)

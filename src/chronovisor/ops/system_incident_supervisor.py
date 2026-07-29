@@ -48,9 +48,9 @@ HEALTH_REPRODUCTION_COMMAND = (
     "run",
     "python",
     "-c",
-    "from chronovisor.health import health_snapshot; health_snapshot()",
+    "from chronovisor.ops.health import health_snapshot; health_snapshot()",
 )
-HEALTH_FAILING_TEST = "runtime:chronovisor.health.health_snapshot"
+HEALTH_FAILING_TEST = "runtime:chronovisor.ops.health.health_snapshot"
 
 _HUMAN_BOUNDARY_MARKERS = (
     "auth",
@@ -493,7 +493,8 @@ def _repair_evidence_digest(
 
 
 def _reset_derived_index_singletons() -> None:
-    from chronovisor import index_store, search
+    from chronovisor.search import index_store
+    from chronovisor.search import search
 
     with index_store._store_lock:
         index_store._store = None
@@ -526,7 +527,8 @@ def _default_health_repair(attempt: int, *, dry_run: bool) -> Mapping[str, Any]:
     if attempt != 2:
         raise ValueError("unsupported health repair attempt")
 
-    from chronovisor import index_store, search
+    from chronovisor.search import index_store
+    from chronovisor.search import search
 
     cache_paths = (
         index_store.PAGES_INDEX_FILE,

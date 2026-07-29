@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "chronovisor.deadman-heartbeat.v1"
+SCHEMA = "chronovisor.ops.deadman-heartbeat.v1"
 THRESHOLD_POLICY = {
     "version": 1,
     "minimum_failure_samples": 2,
@@ -237,7 +237,7 @@ def _threshold_transition(
         last_key = dedupe_key
         last_time_raw = now_text
     state = {
-        "schema": "chronovisor.deadman-threshold-state.v1",
+        "schema": "chronovisor.ops.deadman-threshold-state.v1",
         "threshold_policy": THRESHOLD_POLICY,
         "status": status,
         "consecutive_failures": failures,
@@ -322,7 +322,7 @@ def run_once(
             append_incident(
                 incident_path,
                 {
-                    "schema": "chronovisor.deadman-incident.v1",
+                    "schema": "chronovisor.ops.deadman-incident.v1",
                     "ts": now_text,
                     "dedupe_key": threshold["last_incident_dedupe_key"],
                     "observer_sequence": sequence,

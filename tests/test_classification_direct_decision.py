@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.classification_direct_decision_worker import (
+from chronovisor.classification.classification_direct_decision_worker import (
     DECISION_SCHEMA,
     HOLD,
     validate_direct_decision,

@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor import raw_replay
-from chronovisor.convergence import CycleBudget
-from chronovisor.jobs import JobStatus
+from chronovisor.raw import raw_replay
+from chronovisor.ops.convergence import CycleBudget
+from chronovisor.core.jobs import JobStatus
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -27,7 +27,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _isolate_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = {
         "raw": tmp_path / "raw",
@@ -60,13 +60,11 @@ def test_auto_signals_skip_semantic_defer_until_authority_artifact_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import (
-        decision_router,
-        failure_supervisor,
-        runtime_config,
-        runtime_status,
-        store,
-    )
+    from chronovisor.decision import decision_router
+    from chronovisor.decision import failure_supervisor
+    from chronovisor.core import runtime_config
+    from chronovisor.ops import runtime_status
+    from chronovisor.core import store
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
@@ -220,7 +218,7 @@ def test_existing_queue_row_does_not_cooldown_reopen_or_launch_while_deferred(
     )
     monkeypatch.setenv("CHRONOVISOR_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "0")
     monkeypatch.setattr(
-        "chronovisor.ingest.run_ingest",
+        'chronovisor.ingest.ingest.run_ingest',
         lambda *_args, **_kwargs: pytest.fail("semantic defer must not launch ingest"),
     )
 
@@ -389,7 +387,7 @@ def test_no_quorum_from_replay_publishes_one_terminal_defer_without_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-replay-semantic-split.md"
@@ -496,7 +494,7 @@ def test_no_quorum_from_replay_publishes_one_terminal_defer_without_retry(
         store.update(job_id, status=JobStatus.FAILED, error=ingest_error[0])
 
     monkeypatch.setattr(
-        "chronovisor.ingest.run_ingest",
+        'chronovisor.ingest.ingest.run_ingest',
         fail_with_semantic_split,
     )
 
@@ -593,7 +591,7 @@ def test_legacy_no_quorum_reconcile_is_model_free_bounded_and_scope_exact(
     monkeypatch: pytest.MonkeyPatch,
     limit_axis: str,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     authority_sha256 = "b" * 64
@@ -724,7 +722,7 @@ def test_legacy_no_quorum_reconcile_is_model_free_bounded_and_scope_exact(
         ),
     )
     monkeypatch.setattr(
-        "chronovisor.ingest.run_ingest",
+        'chronovisor.ingest.ingest.run_ingest',
         lambda *_args, **_kwargs: pytest.fail("reconcile must not ingest"),
     )
 
@@ -895,7 +893,7 @@ def test_newer_operational_hold_outranks_legacy_no_quorum_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-operational-hold-wins.md"
@@ -942,7 +940,7 @@ def test_newer_operational_hold_outranks_legacy_no_quorum_history(
         ),
     )
     monkeypatch.setattr(
-        "chronovisor.ingest.run_ingest",
+        'chronovisor.ingest.ingest.run_ingest',
         lambda *_args, **_kwargs: pytest.fail("operational hold must not ingest"),
     )
 
@@ -981,7 +979,7 @@ def test_legacy_semantic_reconcile_obeys_shared_cycle_budget_before_writes(
     monkeypatch: pytest.MonkeyPatch,
     exhausted: str,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / f"20260714-budget-{exhausted}.md"
@@ -1048,7 +1046,7 @@ def test_legacy_semantic_reconcile_obeys_shared_cycle_budget_before_writes(
         ),
     )
     monkeypatch.setattr(
-        "chronovisor.ingest.run_ingest",
+        'chronovisor.ingest.ingest.run_ingest',
         lambda *_args, **_kwargs: pytest.fail("budget denial must not ingest"),
     )
     budget = CycleBudget(
@@ -1110,7 +1108,7 @@ def test_dry_run_previews_future_and_cooldown_legacy_semantic_reconcile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     authority_sha256 = "9" * 64
@@ -1195,7 +1193,7 @@ def test_oversized_legacy_semantic_reconcile_is_read_only_and_fully_uncharged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-oversized-semantic.md"
@@ -1298,7 +1296,7 @@ def test_dry_run_verifies_only_bounded_semantic_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     authority_sha256 = "7" * 64
@@ -1417,7 +1415,7 @@ def test_active_packet_authority_change_between_plan_and_apply_is_not_deferred(
     )
     monkeypatch.setenv("CHRONOVISOR_CONVERGENCE_QUARANTINE_RETRY_SECONDS", "86400")
     monkeypatch.setattr(
-        "chronovisor.ingest.run_ingest",
+        'chronovisor.ingest.ingest.run_ingest',
         lambda *_args, **_kwargs: pytest.fail("cooldown row must not ingest"),
     )
 
@@ -1443,7 +1441,7 @@ def test_dry_run_reports_shared_budget_denial_without_source_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-dry-budget-denied.md"
@@ -1529,7 +1527,7 @@ def test_successful_replay_releases_failure_supervisor_for_actual_raw(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-authority-released-success.md"
@@ -1597,7 +1595,7 @@ def test_successful_replay_releases_failure_supervisor_for_actual_raw(
         store.update(job_id, status=JobStatus.COMPLETED, result={})
         on_complete()
 
-    monkeypatch.setattr("chronovisor.ingest.run_ingest", succeed)
+    monkeypatch.setattr('chronovisor.ingest.ingest.run_ingest', succeed)
 
     result = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -1630,7 +1628,7 @@ def test_completion_survives_reset_failure_and_retries_cleanup_without_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-reset-retry.md"
@@ -1701,7 +1699,7 @@ def test_completion_survives_reset_failure_and_retries_cleanup_without_replay(
         store.update(job_id, status=JobStatus.COMPLETED, result={})
         on_complete()
 
-    monkeypatch.setattr("chronovisor.ingest.run_ingest", succeed)
+    monkeypatch.setattr('chronovisor.ingest.ingest.run_ingest', succeed)
     now = datetime(2026, 7, 14, tzinfo=timezone.utc)
     first = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -1749,7 +1747,7 @@ def test_pending_failure_reset_obeys_mutation_budget_without_queue_rewrite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import failure_supervisor
+    from chronovisor.decision import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-reset-budget.md"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronovisor import page_write
+from chronovisor.ingest import page_write
 
 
 def test_stale_preimage_never_overwrites_foreign_change(tmp_path: Path) -> None:

@@ -9,8 +9,10 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from chronovisor import dashboard, orchestrator, runtime_status
-from chronovisor.runtime_config import SearchEmbeddingConfig
+from chronovisor.ops import dashboard
+from chronovisor.ingest import orchestrator
+from chronovisor.ops import runtime_status
+from chronovisor.core.runtime_config import SearchEmbeddingConfig
 
 
 def test_mark_batch_activity_requires_a_running_batch_job() -> None:
@@ -124,7 +126,7 @@ def test_reused_orchestrator_pid_clears_stale_live_status(monkeypatch) -> None:
 
 
 def test_original_orchestrator_process_keeps_live_status(monkeypatch) -> None:
-    from chronovisor import orchestrator
+    from chronovisor.ingest import orchestrator
 
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(
@@ -148,7 +150,7 @@ def test_original_orchestrator_process_keeps_live_status(monkeypatch) -> None:
 
 
 def test_live_long_lived_process_without_ingest_lease_is_idle(monkeypatch) -> None:
-    from chronovisor import orchestrator
+    from chronovisor.ingest import orchestrator
 
     monkeypatch.setattr(runtime_status, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(
@@ -823,7 +825,8 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
 
-    from chronovisor import orchestrator, store
+    from chronovisor.ingest import orchestrator
+    from chronovisor.core import store
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "RAW_DIR", raw_dir)
@@ -1582,7 +1585,8 @@ def test_build_snapshot_surfaces_frontier_human_required(
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
 
-    from chronovisor import orchestrator, store
+    from chronovisor.ingest import orchestrator
+    from chronovisor.core import store
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "RAW_DIR", raw_dir)
@@ -2046,7 +2050,7 @@ def test_frontier_dashboard_snapshot_never_runs_codex_preflight(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor import frontier_review
+    from chronovisor.decision import frontier_review
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(

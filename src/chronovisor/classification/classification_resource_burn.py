@@ -228,7 +228,7 @@ def _overlap_one(
                     [
                         sys.executable,
                         "-m",
-                        "chronovisor.classification_resource_probe",
+                        "chronovisor.classification.classification_resource_probe",
                         kind,
                         "--model",
                         model,

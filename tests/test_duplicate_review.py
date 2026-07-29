@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from chronovisor.duplicate_review import (
+from chronovisor.recall.duplicate_review import (
     DuplicateCandidate,
     embedding_duplicate_candidates,
     title_duplicate_candidates,
@@ -65,7 +65,7 @@ def test_embedding_duplicate_candidates_keeps_highest_bounded_results(
         {"page_id": "c", "title": "C"},
     ]
     monkeypatch.setattr(
-        "chronovisor.duplicate_review._iter_all_embeddings",
+        "chronovisor.recall.duplicate_review._iter_all_embeddings",
         lambda: [
             ("a", [1.0, 0.0], 0.0, 1.0),
             ("b", [0.99, 0.1], 0.0, math.sqrt(0.9901)),

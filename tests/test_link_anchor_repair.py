@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from chronovisor.link_anchor_repair import repair_known_anchors
+from chronovisor.librarian.link_anchor_repair import repair_known_anchors
 
 
 def _page(path: Path, title: str, body: str) -> None:

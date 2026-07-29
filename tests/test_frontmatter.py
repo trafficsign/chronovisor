@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from chronovisor.frontmatter import canonicalize, parse, patch
+from chronovisor.core.frontmatter import canonicalize, parse, patch
 
 
 # ---------------------------------------------------------------------------

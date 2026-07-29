@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import convergence_drain, store as chronovisor_store
-from chronovisor.convergence import ConvergenceStore
+from chronovisor.ops import convergence_drain
+from chronovisor.core import store as chronovisor_store
+from chronovisor.ops.convergence import ConvergenceStore
 
 
 def _store(tmp_path: Path) -> ConvergenceStore:
@@ -528,7 +529,8 @@ def test_policy_mode_only_drift_stops_before_claim(
 
 
 def test_adoption_fingerprint_binds_resolved_policy_mode(monkeypatch) -> None:
-    from chronovisor import decision_policy, runtime_config
+    from chronovisor.decision import decision_policy
+    from chronovisor.core import runtime_config
 
     monkeypatch.setattr(
         runtime_config,
@@ -939,7 +941,7 @@ def test_duplicate_inventory_failure_marks_current_and_legacy_indeterminate(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "chronovisor.duplicate_review.build_duplicate_review_queue",
+        "chronovisor.recall.duplicate_review.build_duplicate_review_queue",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("embedding unavailable")),
     )
 
@@ -961,7 +963,7 @@ def test_truncated_retention_inventory_never_rejects_unlisted_target(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "chronovisor.retention.build_retention_scores",
+        "chronovisor.ops.retention.build_retention_scores",
         lambda **_kwargs: {
             "status": "ok",
             "pages": {},
@@ -987,7 +989,7 @@ def test_malformed_retention_inventory_marks_every_target_indeterminate(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "chronovisor.retention.build_retention_scores",
+        "chronovisor.ops.retention.build_retention_scores",
         lambda **_kwargs: {
             "status": "ok",
             "pages": {},
@@ -1011,7 +1013,8 @@ def test_malformed_retention_inventory_marks_every_target_indeterminate(
 
 
 def test_unreadable_orphan_page_is_indeterminate(monkeypatch) -> None:
-    from chronovisor import index_store, orphan_link
+    from chronovisor.search import index_store
+    from chronovisor.ops import orphan_link
 
     class Index:
         def refresh(self) -> None:
@@ -1025,7 +1028,7 @@ def test_unreadable_orphan_page_is_indeterminate(monkeypatch) -> None:
     monkeypatch.setattr(orphan_link, "gather_candidates", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(orphan_link, "_content_hash", lambda _page: "unreadable")
     monkeypatch.setattr(
-        "chronovisor.decision_authority.current_semantic_authority",
+        "chronovisor.decision.decision_authority.current_semantic_authority",
         lambda _lane: ({"version": "test"}, None),
     )
 
@@ -1038,7 +1041,9 @@ def test_unreadable_orphan_page_is_indeterminate(monkeypatch) -> None:
 def test_orphan_semantic_outage_is_indeterminate_not_empty_inventory(
     monkeypatch,
 ) -> None:
-    from chronovisor import index_store, orphan_link, search
+    from chronovisor.search import index_store
+    from chronovisor.ops import orphan_link
+    from chronovisor.search import search
 
     class Index:
         def refresh(self) -> None:
@@ -1081,7 +1086,7 @@ def test_content_inventory_classifies_actionable_stale_and_indeterminate(
         }[item["source_id"]]
 
     monkeypatch.setattr(
-        "chronovisor.content_correction.correction_item_actionability",
+        "chronovisor.recall.content_correction.correction_item_actionability",
         tri_state,
     )
 
@@ -1099,7 +1104,7 @@ def test_content_inventory_classifies_actionable_stale_and_indeterminate(
 def test_content_false_positive_uses_dedicated_migration_without_model_call(
     tmp_path, monkeypatch, isolated_drain
 ) -> None:
-    from chronovisor import content_correction
+    from chronovisor.recall import content_correction
 
     store = _store(tmp_path)
     event = {
@@ -1141,7 +1146,7 @@ def test_content_predicate_exception_is_indeterminate(tmp_path, monkeypatch) -> 
     store = _store(tmp_path)
     item = _add(store, source="malformed")
     monkeypatch.setattr(
-        "chronovisor.content_correction.correction_item_actionability",
+        "chronovisor.recall.content_correction.correction_item_actionability",
         lambda _item: (_ for _ in ()).throw(ValueError("bad metadata")),
     )
 
@@ -1776,7 +1781,10 @@ def test_local_only_environment_is_restored(monkeypatch) -> None:
 
 
 def test_lane_dispatch_passes_exact_per_lane_allowlists(tmp_path, monkeypatch) -> None:
-    from chronovisor import autonomy, content_correction, lint_repair, orphan_link
+    from chronovisor.ops import autonomy
+    from chronovisor.recall import content_correction
+    from chronovisor.ops import lint_repair
+    from chronovisor.ops import orphan_link
 
     store = _store(tmp_path)
     items = {
@@ -1833,7 +1841,7 @@ def test_lane_dispatch_passes_exact_per_lane_allowlists(tmp_path, monkeypatch) -
 
 
 def test_cli_exposes_plan_start_resume_and_status(monkeypatch, capsys) -> None:
-    from chronovisor import cli
+    from chronovisor.hosts import cli
 
     calls: list[tuple[str, dict]] = []
 

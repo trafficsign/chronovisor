@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from chronovisor.semantic_model import SemanticModelError, _normalized
+from chronovisor.search.semantic_model import SemanticModelError, _normalized
 
 
 def test_normalized_returns_contiguous_float32_unit_vectors() -> None:

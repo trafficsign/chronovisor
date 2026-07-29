@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from chronovisor import reflection
+from chronovisor.ops import reflection
 
 
 def test_build_reflection_markdown_includes_health_signals() -> None:

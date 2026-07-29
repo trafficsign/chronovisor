@@ -1,6 +1,8 @@
-from chronovisor import search, semantic_client, semantic_jobs
-from chronovisor.runtime_config import SearchEmbeddingConfig
-from chronovisor.search_types import ScoredPage
+from chronovisor.search import search
+from chronovisor.search import semantic_client
+from chronovisor.search import semantic_jobs
+from chronovisor.core.runtime_config import SearchEmbeddingConfig
+from chronovisor.search.search_types import ScoredPage
 
 
 def _config(*, mode: str = "on") -> SearchEmbeddingConfig:
@@ -39,7 +41,7 @@ def test_nemotron_failure_returns_empty_for_bm25_fallback(monkeypatch) -> None:
 
 def test_nemotron_updates_are_durable_jobs(monkeypatch) -> None:
     monkeypatch.setattr(search, "load_search_embedding_config", lambda: _config())
-    monkeypatch.setattr("chronovisor.store.find_page", lambda _page_id: None)
+    monkeypatch.setattr("chronovisor.core.store.find_page", lambda _page_id: None)
     captured: dict[str, object] = {}
 
     def fake_enqueue(page_ids, *, source_hashes):

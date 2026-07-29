@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.classification_query2doc_pilot import (
+from chronovisor.lab.classification_query2doc_pilot import (
     candidate_blind_page,
     query_text,
     reciprocal_rank_fusion,

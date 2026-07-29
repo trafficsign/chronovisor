@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor import sealed_artifact_decoder, store
+from chronovisor.core import sealed_artifact_decoder
+from chronovisor.core import store
 
 
 def test_resolve_root_uses_only_canonical_root(
@@ -46,7 +47,7 @@ def test_schema_decoder_rejects_noncanonical_current_contract() -> None:
 
 
 def test_public_mcp_surface_contains_only_chronovisor_tools() -> None:
-    from chronovisor.server import mcp
+    from chronovisor.hosts.server import mcp
 
     names = set(mcp._tool_manager._tools)
     assert names == {
@@ -74,7 +75,8 @@ def test_public_mcp_surface_contains_only_chronovisor_tools() -> None:
 def test_server_read_path_resolves_durable_page_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor import alias_store, server
+    from chronovisor.core import alias_store
+    from chronovisor.hosts import server
 
     target = tmp_path / "pages" / "chronovisor" / "chronovisor-system.md"
     target.parent.mkdir(parents=True)
@@ -88,7 +90,8 @@ def test_server_read_path_resolves_durable_page_alias(
 def test_server_alias_read_returns_and_traces_only_canonical_page_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor import alias_store, server
+    from chronovisor.core import alias_store
+    from chronovisor.hosts import server
 
     target = tmp_path / "pages" / "chronovisor" / "chronovisor-system.md"
     target.parent.mkdir(parents=True)

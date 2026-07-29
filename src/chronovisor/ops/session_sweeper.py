@@ -45,7 +45,7 @@ def _is_user_claude_session(path: Path) -> bool:
 
 
 def _pending_codex(path: Path) -> bool:
-    from chronovisor import codex_record
+    from chronovisor.hosts import codex_record
 
     state = codex_record.load_state(codex_record.DEFAULT_STATE_FILE)
     after = codex_record.saved_line_for(state, path)
@@ -53,7 +53,7 @@ def _pending_codex(path: Path) -> bool:
 
 
 def _pending_claude(path: Path) -> bool:
-    from chronovisor import claude_code_record
+    from chronovisor.hosts import claude_code_record
 
     state = claude_code_record.load_state(claude_code_record.DEFAULT_STATE_FILE)
     after = claude_code_record.saved_line_for(state, path)
@@ -61,7 +61,8 @@ def _pending_claude(path: Path) -> bool:
 
 
 def discover_pending(*, idle_seconds: int = 300) -> list[tuple[str, Path]]:
-    from chronovisor import claude_code_record, codex_record
+    from chronovisor.hosts import claude_code_record
+    from chronovisor.hosts import codex_record
 
     cutoff = time.time() - max(0, idle_seconds)
     candidates: list[tuple[str, Path]] = []
@@ -85,7 +86,7 @@ def discover_pending(*, idle_seconds: int = 300) -> list[tuple[str, Path]]:
 
 def _run_one(host: str, path: Path) -> dict[str, Any]:
     if host == "codex":
-        from chronovisor import codex_record as saver
+        from chronovisor.hosts import codex_record as saver
 
         args = Namespace(
             session_id=None, cwd=None, session_file=str(path), sessions_root=None,
@@ -96,7 +97,7 @@ def _run_one(host: str, path: Path) -> dict[str, Any]:
             hook=False, trigger_ingest=True,
         )
     else:
-        from chronovisor import claude_code_record as saver
+        from chronovisor.hosts import claude_code_record as saver
 
         args = Namespace(
             session_id=None, session_file=str(path), state_file=str(saver.DEFAULT_STATE_FILE),

@@ -474,7 +474,7 @@ class SemanticServiceState:
 
     def _pause_background_work(self) -> bool:
         if self.config.incremental_pause_during_research:
-            from chronovisor import research_scheduler
+            from chronovisor.research import research_scheduler
 
             if (
                 research_scheduler.sync_pending()
@@ -751,7 +751,7 @@ def main() -> None:
     if args.command == "serve":
         serve(config)
         return
-    from chronovisor import semantic_client
+    from chronovisor.search import semantic_client
 
     if args.command == "archive-legacy":
         result = archive_legacy_search_index()

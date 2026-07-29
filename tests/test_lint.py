@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.decision_router import canonical_agreement_signature
-from chronovisor.decision_schema_manifest import (
+from chronovisor.decision.decision_router import canonical_agreement_signature
+from chronovisor.decision.decision_schema_manifest import (
     production_decision_schemas,
     schema_sha256,
 )
@@ -26,7 +26,7 @@ def isolate_decision_authority_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import page_mutation
+    from chronovisor.ingest import page_mutation
 
     monkeypatch.setattr(
         page_mutation,
@@ -48,7 +48,11 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor import store, ingest, index_store, lint, tags as tags_mod
+    from chronovisor.core import store
+    from chronovisor.ingest import ingest
+    from chronovisor.search import index_store
+    from chronovisor.ops import lint
+    from chronovisor.librarian import tags as tags_mod
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
@@ -72,7 +76,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(tags_mod, "SYSTEM_DIR", system)
     # Reset the lint check cache between tests; without this a
     # per-corpus-version cache hit could replay a previous test's issues.
-    import chronovisor.lint as lint_mod
+    import chronovisor.ops.lint as lint_mod
 
     monkeypatch.setattr(lint_mod, "_CHECK_CACHE_VERSION", None)
     monkeypatch.setattr(lint_mod, "_CHECK_CACHE_RESULT", None)
@@ -257,7 +261,7 @@ def test_shared_semantic_review_preserves_local_consensus_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import lint as lint_mod
+    from chronovisor.ops import lint as lint_mod
 
     authority = _semantic_authority(lane, "a" * 64)
     monkeypatch.setattr(
@@ -315,7 +319,7 @@ def test_shared_semantic_no_quorum_is_exact_epoch_hold_with_aba_reuse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import lint as lint_mod
+    from chronovisor.ops import lint as lint_mod
 
     authority_a = _semantic_authority(lane, "a" * 64)
     authority_b = _semantic_authority(lane, "b" * 64)
@@ -369,7 +373,7 @@ def test_shared_semantic_no_quorum_hold_changes_with_exact_proposal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import lint as lint_mod
+    from chronovisor.ops import lint as lint_mod
 
     lane = "lint_safe_semantic_mutation"
     authority = _semantic_authority(lane, "a" * 64)
@@ -407,7 +411,7 @@ def test_shared_semantic_no_quorum_hold_changes_with_exact_proposal(
 def test_shared_operational_review_failure_is_not_a_semantic_hold(
     tmp_path: Path,
 ) -> None:
-    from chronovisor import lint as lint_mod
+    from chronovisor.ops import lint as lint_mod
 
     proposal = lint_mod.build_semantic_mutation_proposal(
         page_id="p",
@@ -449,7 +453,7 @@ def test_shared_operational_review_failure_is_not_a_semantic_hold(
 
 class TestTagMissing:
     def test_no_tags_field_flagged(self, isolated_wiki: Path) -> None:
-        from chronovisor.lint import check
+        from chronovisor.ops.lint import check
 
         _seed(
             isolated_wiki,
@@ -463,7 +467,7 @@ class TestTagMissing:
         assert flagged[0]["auto_fixable"] is False
 
     def test_empty_tags_list_also_flagged(self, isolated_wiki: Path) -> None:
-        from chronovisor.lint import check
+        from chronovisor.ops.lint import check
 
         _seed(
             isolated_wiki,
@@ -474,7 +478,7 @@ class TestTagMissing:
         assert _by_type(issues, "tag_missing", "q")
 
     def test_reference_pages_are_not_linted(self, isolated_wiki: Path) -> None:
-        from chronovisor.lint import check
+        from chronovisor.ops.lint import check
 
         _seed(
             isolated_wiki,
@@ -485,7 +489,7 @@ class TestTagMissing:
         assert [issue for issue in issues if issue["page"] == "123"] == []
 
     def test_complete_tag_set_not_flagged(self, isolated_wiki: Path) -> None:
-        from chronovisor.lint import check
+        from chronovisor.ops.lint import check
 
         _seed(
             isolated_wiki,
@@ -507,7 +511,7 @@ class TestTagMissing:
 
 class TestTagInvalid:
     def test_invalid_tag_flagged(self, isolated_wiki: Path) -> None:
-        from chronovisor.lint import check
+        from chronovisor.ops.lint import check
 
         _seed(
             isolated_wiki,
@@ -523,7 +527,7 @@ class TestTagInvalid:
         assert "no-prefix" in flagged[0]["detail"]
 
     def test_apply_safe_fixes_drops_invalid(self, isolated_wiki: Path) -> None:
-        from chronovisor.lint import apply_safe_fixes, check
+        from chronovisor.ops.lint import apply_safe_fixes, check
 
         path = _seed(
             isolated_wiki,
@@ -550,7 +554,7 @@ class TestTagInvalid:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         path = _seed(
             isolated_wiki,
@@ -580,7 +584,7 @@ class TestTagInvalid:
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor.lint import apply_safe_fixes, check
+        from chronovisor.ops.lint import apply_safe_fixes, check
 
         path = _seed(
             isolated_wiki,
@@ -600,7 +604,7 @@ class TestTagInvalid:
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor.lint import apply_safe_fixes, check
+        from chronovisor.ops.lint import apply_safe_fixes, check
 
         path = _seed(
             isolated_wiki,
@@ -645,7 +649,7 @@ class TestTagInvalid:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         lane = "lint_safe_semantic_mutation"
         first_authority = _semantic_authority(lane, "a" * 64)
@@ -714,7 +718,7 @@ class TestTagInvalid:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         lane = "lint_safe_semantic_mutation"
         first_authority = _semantic_authority(lane, "a" * 64)
@@ -754,7 +758,7 @@ class TestTagInvalid:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         path = _seed(
             isolated_wiki,
@@ -787,7 +791,7 @@ class TestTagInvalid:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         path = _seed(
             isolated_wiki,
@@ -816,7 +820,7 @@ class TestTagInvalid:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         path = _seed(
             isolated_wiki,
@@ -850,7 +854,7 @@ class TestTagInvalid:
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor.lint import apply_safe_fixes, check
+        from chronovisor.ops.lint import apply_safe_fixes, check
 
         path = _seed(
             isolated_wiki,
@@ -876,7 +880,7 @@ class TestBrokenLinkFrontierGate:
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor.lint import apply_safe_fixes, check
+        from chronovisor.ops.lint import apply_safe_fixes, check
 
         source = _seed(
             isolated_wiki,
@@ -906,7 +910,7 @@ class TestBrokenLinkFrontierGate:
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         source = _seed(
             isolated_wiki,
@@ -944,7 +948,7 @@ class TestBrokenLinkFrontierGate:
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         source = _seed(
             isolated_wiki,
@@ -984,7 +988,7 @@ class TestSafeFixReviewPackets:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         proposal = lint_mod.build_semantic_mutation_proposal(
             page_id="p",
@@ -1041,7 +1045,7 @@ class TestSafeFixReviewPackets:
     def test_new_review_packet_invalidates_needs_retry_hold(
         self, tmp_path: Path
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         calls = 0
 
@@ -1090,7 +1094,7 @@ class TestSafeFixReviewPackets:
         self,
         tmp_path: Path,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         before_lines = [f"unchanged line {index:05d}\n" for index in range(8_000)]
         after_lines = list(before_lines)
@@ -1132,7 +1136,7 @@ class TestSafeFixReviewPackets:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         monkeypatch.setattr(lint_mod, "SAFE_FIX_REVIEW_PACKET_MAX_CHARS", 400)
         before = "source " * 2_000
@@ -1178,7 +1182,7 @@ class TestSafeFixReviewPackets:
         self,
         tmp_path: Path,
     ) -> None:
-        from chronovisor import lint as lint_mod
+        from chronovisor.ops import lint as lint_mod
 
         proposal = lint_mod.build_semantic_mutation_proposal(
             page_id="p",
@@ -1215,8 +1219,8 @@ class TestPageNormalizeIdentityReceipt:
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor import page_normalize
-        from chronovisor.frontmatter import parse
+        from chronovisor.ops import page_normalize
+        from chronovisor.core.frontmatter import parse
 
         page = _seed(
             isolated_wiki,
@@ -1248,8 +1252,8 @@ class TestPageNormalizeIdentityReceipt:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import page_normalize
-        from chronovisor.decision_lane_prompts import (
+        from chronovisor.ops import page_normalize
+        from chronovisor.decision.decision_lane_prompts import (
             validate_identity_preflight_receipt,
         )
 
@@ -1304,7 +1308,7 @@ class TestPageNormalizeIdentityReceipt:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from chronovisor import page_normalize
+        from chronovisor.ops import page_normalize
 
         for name in ("a", "b", "c", "d"):
             _seed(
@@ -1351,7 +1355,7 @@ class TestPageNormalizeIdentityReceipt:
 
 class TestTagCountViolation:
     def test_too_few_d_tags_flagged(self, isolated_wiki: Path) -> None:
-        from chronovisor.lint import check
+        from chronovisor.ops.lint import check
 
         _seed(
             isolated_wiki,
@@ -1367,7 +1371,7 @@ class TestTagCountViolation:
         assert "d/" in flagged[0]["detail"]
 
     def test_too_many_d_tags_flagged(self, isolated_wiki: Path) -> None:
-        from chronovisor.lint import check
+        from chronovisor.ops.lint import check
 
         _seed(
             isolated_wiki,
@@ -1381,7 +1385,7 @@ class TestTagCountViolation:
         assert len(flagged) == 1
 
     def test_too_many_t_tags_flagged(self, isolated_wiki: Path) -> None:
-        from chronovisor.lint import check
+        from chronovisor.ops.lint import check
 
         _seed(
             isolated_wiki,

@@ -7,9 +7,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from chronovisor.raw_segment import RawSegmentCorrupt, append_capture, seal_segment
-from chronovisor.raw_store import RawStore, raw_layout_mode
-from chronovisor.raw_semantic_projection import project_native_transcript
+from chronovisor.raw.raw_segment import RawSegmentCorrupt, append_capture, seal_segment
+from chronovisor.raw.raw_store import RawStore, raw_layout_mode
+from chronovisor.raw.raw_semantic_projection import project_native_transcript
 
 
 def _append(raw_dir: Path, source: Path, payload: bytes):
@@ -203,7 +203,8 @@ def test_materialized_reference_projects_native_transcript_without_copying_it(
 def test_v2_parent_and_semantic_child_use_separate_physical_stores(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor import failure_supervisor, orchestrator
+    from chronovisor.decision import failure_supervisor
+    from chronovisor.ingest import orchestrator
 
     raw_dir = tmp_path / "raw"
     source = tmp_path / "session.jsonl"
@@ -248,7 +249,8 @@ def test_v2_parent_and_semantic_child_use_separate_physical_stores(
 def test_processed_segment_is_not_materialized_into_pending_cache(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor import failure_supervisor, orchestrator
+    from chronovisor.decision import failure_supervisor
+    from chronovisor.ingest import orchestrator
 
     raw_dir = tmp_path / "raw"
     source = tmp_path / "session.jsonl"
@@ -277,7 +279,7 @@ def test_processed_segment_is_not_materialized_into_pending_cache(
 def test_raw_replay_projects_v2_transport_before_ingest(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor import raw_replay
+    from chronovisor.raw import raw_replay
 
     raw_dir = tmp_path / "raw"
     source = tmp_path / "session.jsonl"

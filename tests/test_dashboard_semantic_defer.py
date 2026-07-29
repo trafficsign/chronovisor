@@ -14,7 +14,7 @@ def test_save_load_segments_semantic_defer_returns_to_pending_after_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import dashboard
+    from chronovisor.ops import dashboard
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
@@ -115,7 +115,7 @@ def test_save_load_shard_continuation_is_pending_not_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import dashboard
+    from chronovisor.ops import dashboard
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
@@ -174,7 +174,7 @@ def test_save_load_shard_continuation_is_pending_not_failed(
 
 
 def test_metric_history_deduplicates_runtime_and_drain_records_for_same_batch() -> None:
-    from chronovisor import dashboard
+    from chronovisor.ops import dashboard
 
     result = {
         "pending_before": 113,
@@ -208,7 +208,8 @@ def test_save_load_attributes_held_projection_child_to_saved_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import dashboard, raw_semantic_projection
+    from chronovisor.ops import dashboard
+    from chronovisor.raw import raw_semantic_projection
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
@@ -316,7 +317,7 @@ def test_save_load_attributes_held_projection_child_to_saved_parent(
 def test_projection_parent_resolution_rejects_unbound_receipt_and_symlink(
     tmp_path: Path,
 ) -> None:
-    from chronovisor import dashboard
+    from chronovisor.ops import dashboard
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -349,7 +350,9 @@ def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import dashboard, raw_semantic_projection, raw_store
+    from chronovisor.ops import dashboard
+    from chronovisor.raw import raw_semantic_projection
+    from chronovisor.raw import raw_store
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -408,7 +411,8 @@ def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
 def test_projection_parent_resolution_verifies_archive_once_without_member_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor import dashboard, legacy_archive
+    from chronovisor.ops import dashboard
+    from chronovisor.raw import legacy_archive
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -478,8 +482,11 @@ def test_snapshot_separates_semantic_and_operational_holds_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import dashboard, orchestrator, runtime_status
-    from chronovisor import decision_policy, runtime_config
+    from chronovisor.ops import dashboard
+    from chronovisor.ingest import orchestrator
+    from chronovisor.ops import runtime_status
+    from chronovisor.decision import decision_policy
+    from chronovisor.core import runtime_config
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
@@ -564,7 +571,7 @@ def test_semantic_defer_packets_are_absent_from_self_heal_history_and_watch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import dashboard
+    from chronovisor.ops import dashboard
 
     failures = tmp_path / "runtime" / "failures"
     packets = failures / "packets"
@@ -637,15 +644,13 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import (
-        failure_supervisor,
-        ingest,
-        jobs,
-        orchestrator,
-        raw_semantic_projection,
-        runtime_config,
-        runtime_status,
-    )
+    from chronovisor.decision import failure_supervisor
+    from chronovisor.ingest import ingest
+    from chronovisor.core import jobs
+    from chronovisor.ingest import orchestrator
+    from chronovisor.raw import raw_semantic_projection
+    from chronovisor.core import runtime_config
+    from chronovisor.ops import runtime_status
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from chronovisor.classification_anchor import (
+from chronovisor.classification.classification_anchor import (
     UNRESOLVED_ANCHOR_ID,
     load_anchor_set,
 )
-from chronovisor.classification_anchor_dev import score_anchor_selection
+from chronovisor.lab.classification_anchor_dev import score_anchor_selection
 
 
 def test_anchor_score_distinguishes_exact_hold_related_and_catastrophic() -> None:

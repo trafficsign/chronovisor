@@ -209,7 +209,7 @@ def extract_all_documents(
     paths: Iterable[Path] | None = None,
 ) -> list[SemanticDocument]:
     if paths is None:
-        from chronovisor.search import searchable_pages
+        from chronovisor.search.search import searchable_pages
 
         paths = searchable_pages()
     documents: list[SemanticDocument] = []
@@ -1033,7 +1033,7 @@ def semantic_index_status(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
                         indexed_mtimes[str(page_id)] = int(source_mtime_ns)
             finally:
                 connection.close()
-        from chronovisor.search import searchable_pages
+        from chronovisor.search.search import searchable_pages
 
         current_mtimes: dict[str, int] = {}
         for path in searchable_pages():

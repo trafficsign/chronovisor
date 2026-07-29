@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.prefetch import build_prefetch_cache, prefetch_page_ids
+from chronovisor.search.prefetch import build_prefetch_cache, prefetch_page_ids
 
 
 def test_prefetch_cache_matches_project_bucket_and_tokens(tmp_path: Path) -> None:

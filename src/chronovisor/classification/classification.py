@@ -11,7 +11,7 @@ from typing import Any
 
 from chronovisor.core import frontmatter
 
-CLASSIFICATION_SCHEMA = "chronovisor.classification.v1"
+CLASSIFICATION_SCHEMA = 'chronovisor.classification.classification.v1'
 PACKAGE_SCHEMA = "chronovisor.udcs-package.v1"
 VALID_FORMS = {
     "decision",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from chronovisor.evidence_grounding import (
+from chronovisor.research.evidence_grounding import (
     ProtectedLiteralGroundingError,
     protected_literals,
     validate_protected_literals,

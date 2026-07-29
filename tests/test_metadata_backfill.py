@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronovisor import metadata_backfill
+from chronovisor.ops import metadata_backfill
 
 
 def _decision(value: str) -> dict:

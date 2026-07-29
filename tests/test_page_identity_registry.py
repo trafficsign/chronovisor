@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.page_identity import (
+from chronovisor.core.page_identity import (
     new_page_uid,
     normalize_page_uid,
     page_uid_timestamp_ms,
 )
-from chronovisor.page_registry import PageRegistry, PageRegistryError
-from chronovisor.uid_link_index import build_uid_link_index
+from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
+from chronovisor.ingest.uid_link_index import build_uid_link_index
 
 
 def _page(path: Path, title: str) -> None:
@@ -135,7 +135,7 @@ def test_server_does_not_bypass_ambiguous_registry_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor import server
+    from chronovisor.hosts import server
 
     first = tmp_path / "pages" / "one" / "same.md"
     second = tmp_path / "pages" / "two" / "same.md"
