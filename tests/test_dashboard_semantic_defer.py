@@ -784,8 +784,14 @@ def test_dashboard_static_contract_exposes_deferred_without_pending_dashes() -> 
     assert 'dashed: segment.status === "deferred"' not in js
     assert "row.files_deferred" in js
     assert "row.files_continued" in js
-    assert "countParts.push(`${row.deferred} defer`)" in js
-    assert "countParts.push(`${row.continued} continue`)" in js
+    assert "function batchCountLabel(row)" in js
+    assert "parts.push(`${row.deferred} defer`)" in js
+    assert "parts.push(`${row.continued} continue`)" in js
+    assert "function fitCanvasText(ctx, text, maxWidth)" in js
+    assert "function drawBatchLegend(ctx, width, left, y)" in js
+    assert "ctx.measureText(batchCountLabel(row)).width" in js
+    assert "Math.ceil(ctx.measureText(label).width) + textGap" in js
+    assert "Math.max(40, pad.right - 16)" in js
     assert "let refreshInFlight = null" in js
     assert "if (refreshInFlight !== null) return refreshInFlight" in js
     assert "window.setTimeout(refreshLoop, nextRefreshDelayMs)" in js

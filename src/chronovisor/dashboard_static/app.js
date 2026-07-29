@@ -1300,6 +1300,53 @@ function drawLineChart(canvas, saveHistory, status = {}) {
   ctx.restore();
 }
 
+function batchCountLabel(row) {
+  const parts = [`${row.processed} ok`];
+  if (row.deferred) parts.push(`${row.deferred} defer`);
+  if (row.continued) parts.push(`${row.continued} continue`);
+  if (row.failed) parts.push(`${row.failed} fail`);
+  return parts.join(" ");
+}
+
+function fitCanvasText(ctx, text, maxWidth) {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  const suffix = "…";
+  let fitted = text;
+  while (fitted && ctx.measureText(`${fitted}${suffix}`).width > maxWidth) {
+    fitted = fitted.slice(0, -1);
+  }
+  return fitted ? `${fitted}${suffix}` : suffix;
+}
+
+function drawBatchLegend(ctx, width, left, y) {
+  const compact = width < 380;
+  const items = [
+    { label: "ok", compactLabel: "ok", color: "#3dd68c" },
+    { label: "deferred", compactLabel: "def", color: "#b490f5" },
+    { label: "continued", compactLabel: "cont", color: "#828fff" },
+    { label: "failed", compactLabel: "fail", color: "#e8b04b" },
+  ];
+  const swatchWidth = compact ? 10 : 16;
+  const swatchHeight = compact ? 6 : 8;
+  const textGap = compact ? 4 : 7;
+  const itemGap = compact ? 4 : 12;
+  let cursor = compact ? 8 : left;
+
+  ctx.font = `${compact ? 8 : 11}px 'Geist Mono', ui-monospace, monospace`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  items.forEach((item, index) => {
+    const label = compact ? item.compactLabel : item.label;
+    ctx.fillStyle = "rgba(138,143,152,0.88)";
+    ctx.fillText(label, cursor, y);
+    cursor += Math.ceil(ctx.measureText(label).width) + textGap;
+    ctx.fillStyle = item.color;
+    roundRect(ctx, cursor, y - swatchHeight / 2, swatchWidth, swatchHeight, swatchHeight / 2);
+    ctx.fill();
+    cursor += swatchWidth + (index === items.length - 1 ? 0 : itemGap);
+  });
+}
+
 function drawBatchChart(canvas, rows, status) {
   const ctx = canvas.getContext("2d");
   const width = canvas.clientWidth || 420;
@@ -1370,7 +1417,20 @@ function drawBatchChart(canvas, rows, status) {
     return;
   }
 
-  const pad = { top: 30, right: 78, bottom: 20, left: 74 };
+  ctx.font = "700 12px 'Geist Mono', ui-monospace, monospace";
+  const maxCountWidth = Math.max(
+    0,
+    ...data.map((row) => ctx.measureText(batchCountLabel(row)).width),
+  );
+  const leftPad = 74;
+  const minimumBarWidth = 80;
+  const maximumRightPad = Math.max(78, width - leftPad - minimumBarWidth);
+  const pad = {
+    top: 30,
+    right: Math.min(maximumRightPad, Math.max(78, Math.ceil(maxCountWidth) + 20)),
+    bottom: 20,
+    left: leftPad,
+  };
   const rowGap = 10;
   const rowHeight = Math.max(22, (height - pad.top - pad.bottom - rowGap * (data.length - 1)) / data.length);
   const barHeight = Math.min(18, rowHeight * 0.56);
@@ -1378,29 +1438,7 @@ function drawBatchChart(canvas, rows, status) {
   const maxTotal = Math.max(1, ...data.map((row) => row.attempted || row.processed + row.deferred + row.continued + row.failed));
 
   ctx.save();
-  ctx.font = "11px 'Geist Mono', ui-monospace, monospace";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = "rgba(138,143,152,0.88)";
-  ctx.textAlign = "left";
-  ctx.fillText("ok", pad.left, 14);
-  ctx.fillStyle = "#3dd68c";
-  roundRect(ctx, pad.left + 18, 8, 16, 8, 4);
-  ctx.fill();
-  ctx.fillStyle = "rgba(138,143,152,0.88)";
-  ctx.fillText("deferred", pad.left + 44, 14);
-  ctx.fillStyle = "#b490f5";
-  roundRect(ctx, pad.left + 94, 8, 16, 8, 4);
-  ctx.fill();
-  ctx.fillStyle = "rgba(138,143,152,0.88)";
-  ctx.fillText("continued", pad.left + 120, 14);
-  ctx.fillStyle = "#828fff";
-  roundRect(ctx, pad.left + 176, 8, 16, 8, 4);
-  ctx.fill();
-  ctx.fillStyle = "rgba(138,143,152,0.88)";
-  ctx.fillText("failed", pad.left + 202, 14);
-  ctx.fillStyle = "#e8b04b";
-  roundRect(ctx, pad.left + 246, 8, 16, 8, 4);
-  ctx.fill();
+  drawBatchLegend(ctx, width, pad.left, 14);
 
   for (let i = 0; i <= 2; i += 1) {
     const x = pad.left + (barWidth * i) / 2;
@@ -1461,15 +1499,15 @@ function drawBatchChart(canvas, rows, status) {
     ctx.font = "10px 'Geist Mono', ui-monospace, monospace";
     ctx.fillText(row.sub, pad.left - 12, y + rowHeight * 0.74);
 
-    const countParts = [`${row.processed} ok`];
-    if (row.deferred) countParts.push(`${row.deferred} defer`);
-    if (row.continued) countParts.push(`${row.continued} continue`);
-    if (row.failed) countParts.push(`${row.failed} fail`);
-    const count = countParts.join(" ");
+    const count = batchCountLabel(row);
     ctx.fillStyle = row.failed ? "#e8b04b" : row.deferred ? "#b490f5" : row.continued ? "#828fff" : "rgba(247,248,248,0.9)";
     ctx.font = "700 12px 'Geist Mono', ui-monospace, monospace";
     ctx.textAlign = "left";
-    ctx.fillText(count, pad.left + barWidth + 10, barY + barHeight / 2);
+    ctx.fillText(
+      fitCanvasText(ctx, count, Math.max(40, pad.right - 16)),
+      pad.left + barWidth + 10,
+      barY + barHeight / 2,
+    );
   });
   ctx.restore();
 }
