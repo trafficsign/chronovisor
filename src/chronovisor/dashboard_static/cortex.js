@@ -31,7 +31,7 @@
   let stateDirty = true;
   const packageOff = new Set();
   let mode = "organic";
-  let autoStimulate = true;
+  let liveEventsEnabled = true;
   let autoRotate = true;
   let soundOn = false;
   let edgeVisibility = 1.6;
@@ -486,65 +486,31 @@
   function stimulate(name, label = "") {
     const budget = { remaining: 150 };
     scenarioNodes(name).forEach((node) => fire(node.index, 0, budget));
+    document.getElementById("stSp").textContent = spikes.toLocaleString();
     flashTicker(label || `⚡ ${name.toUpperCase()} stimulus → cascade`);
   }
 
   function firePageIds(pageIds, kind, label) {
-    const budget = { remaining: 180 };
+    const profile = {
+      auto_recall: { depth: 7, budget: 48, micro: false },
+      search: { depth: 8, budget: 0, micro: true },
+      read: { depth: 7, budget: 24, micro: false },
+      used: { depth: 7, budget: 48, micro: false },
+      ingest: { depth: 7, budget: 24, micro: false },
+    }[kind] || { depth: 8, budget: 0, micro: true };
+    const budget = { remaining: profile.budget };
     let fired = 0;
     pageIds.forEach((pageId) => {
       const node = byId.get(pageId);
       if (!node || nodeState[node.index] === 0) return;
-      fire(node.index, 0, budget);
+      fire(node.index, profile.depth, budget, profile.micro);
       fired += 1;
     });
+    document.getElementById("stSp").textContent = spikes.toLocaleString();
     if (!fired) {
-      stimulate(kind, label);
+      flashTicker(`◇ ${label} · no mapped page`);
     } else {
       flashTicker(`⚡ ${label} · ${fired} neuron${fired === 1 ? "" : "s"}`);
-    }
-  }
-
-  let ambientAccumulator = 0;
-  function ambient(delta) {
-    ambientAccumulator += delta;
-    const interval = nodeCount > 1200 ? 230 : 150;
-    while (ambientAccumulator > interval) {
-      ambientAccumulator -= interval;
-      const attempts = nodeCount > 1200 ? 1 : 2;
-      for (let attempt = 0; attempt < attempts; attempt += 1) {
-        if (Math.random() > 0.75) continue;
-        const index = (Math.random() * nodeCount) | 0;
-        if (nodeState[index] === 0) continue;
-        const node = nodes[index];
-        const now = performance.now();
-        if (now < node.refractoryUntil) continue;
-        if (Math.random() < 0.16) {
-          fire(index, 6, { remaining: 6 });
-        } else {
-          node.refractoryUntil = now + 300;
-          node.potential = Math.max(node.potential, 0.5 + Math.random() * 0.25);
-          node.firedAt = now;
-          spikes += 1;
-          if (!(spikes & 7)) {
-            document.getElementById("stSp").textContent = spikes.toLocaleString();
-          }
-          crackle(0.022);
-        }
-      }
-    }
-  }
-
-  let autoAccumulator = 0;
-  let autoIndex = 0;
-  const autoSequence = ["recall", "save", "recall", "ingest"];
-  function autoTick(delta) {
-    if (!autoStimulate) return;
-    autoAccumulator += delta;
-    if (autoAccumulator > 6400) {
-      autoAccumulator = 0;
-      stimulate(autoSequence[autoIndex % autoSequence.length]);
-      autoIndex += 1;
     }
   }
 
@@ -892,8 +858,6 @@
       }
     }
     if (stateDirty) recomputeState();
-    ambient(delta);
-    autoTick(delta);
     const decay = Math.exp(-delta / 430);
     nodes.forEach((node) => {
       if (node.potential > 0.003) node.potential *= decay;
@@ -1337,10 +1301,10 @@
     document.querySelectorAll(".stim").forEach((button) => {
       button.addEventListener("click", () => stimulate(button.dataset.s));
     });
-    const autoToggle = document.getElementById("tAuto");
-    autoToggle.addEventListener("click", () => {
-      autoStimulate = !autoStimulate;
-      autoToggle.classList.toggle("on", autoStimulate);
+    const liveToggle = document.getElementById("tLive");
+    liveToggle.addEventListener("click", () => {
+      liveEventsEnabled = !liveEventsEnabled;
+      liveToggle.classList.toggle("on", liveEventsEnabled);
     });
     const rotateToggle = document.getElementById("tRot");
     rotateToggle.addEventListener("click", () => {
@@ -1389,11 +1353,13 @@
 
   let factIndex = 0;
   let tickerHold = 0;
+  let tickerTransition = 0;
   let facts = [];
   const tickerText = document.getElementById("tickerTx");
   function nextFact() {
+    window.clearTimeout(tickerTransition);
     tickerText.style.opacity = 0;
-    window.setTimeout(() => {
+    tickerTransition = window.setTimeout(() => {
       tickerText.textContent = facts[factIndex % facts.length];
       factIndex += 1;
       tickerText.style.opacity = 1;
@@ -1401,8 +1367,9 @@
   }
 
   function flashTicker(message) {
+    window.clearTimeout(tickerTransition);
     tickerText.style.opacity = 0;
-    window.setTimeout(() => {
+    tickerTransition = window.setTimeout(() => {
       tickerText.textContent = message;
       tickerText.style.opacity = 1;
     }, 200);
@@ -1458,10 +1425,18 @@
         return;
       }
       if (payload.type !== "events" || !Array.isArray(payload.events)) return;
+      if (!liveEventsEnabled) return;
       payload.events.forEach((event) => {
-        const kind = ["recall", "save", "ingest"].includes(event.kind)
+        const kind = [
+          "auto_recall",
+          "search",
+          "read",
+          "used",
+          "save",
+          "ingest",
+        ].includes(event.kind)
           ? event.kind
-          : "recall";
+          : "read";
         firePageIds(
           Array.isArray(event.page_ids) ? event.page_ids : [],
           kind,
@@ -1516,7 +1491,6 @@
       previousTime = performance.now();
       requestAnimationFrame(frame);
       connectEvents();
-      window.setTimeout(() => stimulate("recall"), 1400);
     } catch (error) {
       showBootError(error);
     }

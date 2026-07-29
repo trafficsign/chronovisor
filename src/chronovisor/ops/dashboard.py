@@ -4442,6 +4442,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         cursor = CortexEventCursor(
             CHRONOVISOR_ROOT,
+            recall_log=recall_runtime.RECALL_LOG_FILE,
             pull_log=recall_runtime.RECALL_PULL_LOG_FILE,
             activity_log=LOG_FILE,
         )

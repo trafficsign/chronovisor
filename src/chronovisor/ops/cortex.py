@@ -281,14 +281,17 @@ class CortexEventCursor:
         self,
         root: Path,
         *,
+        recall_log: Path | None = None,
         pull_log: Path | None = None,
         activity_log: Path | None = None,
     ) -> None:
         self.root = root.expanduser().resolve()
-        self.pull_log = pull_log or self.root / "runtime" / "recall" / "pull-log.jsonl"
+        self.recall_log = recall_log or self.root / "recall" / "recall-log.jsonl"
+        self.pull_log = pull_log or self.root / "recall" / "pull-log.jsonl"
         self.activity_log = activity_log or self.root / "log.md"
         self.raw_dir = self.root / "raw"
         self._offsets = {
+            self.recall_log: self._file_size(self.recall_log),
             self.pull_log: self._file_size(self.pull_log),
             self.activity_log: self._file_size(self.activity_log),
         }
@@ -339,6 +342,35 @@ class CortexEventCursor:
             "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
         }
 
+    def _automatic_recall_events(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for line in self._tail_lines(self.recall_log):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            page_ids = [
+                str(page_id)
+                for page_id in row.get("pages") or []
+                if isinstance(page_id, str) and page_id
+            ]
+            if (
+                row.get("stage") != "injected"
+                or row.get("status") != "ok"
+                or row.get("decision") != "read"
+                or not page_ids
+            ):
+                continue
+            events.append(
+                self._event(
+                    "auto_recall",
+                    page_ids,
+                    f"AUTO RECALL · {len(page_ids)} page"
+                    f"{'' if len(page_ids) == 1 else 's'}",
+                )
+            )
+        return events
+
     def _pull_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         for line in self._tail_lines(self.pull_log):
@@ -349,18 +381,26 @@ class CortexEventCursor:
             event_type = row.get("type")
             if event_type == "read" and row.get("page_id"):
                 events.append(
-                    self._event("recall", [str(row["page_id"])], "RECALL read")
+                    self._event("read", [str(row["page_id"])], "MCP READ")
                 )
             elif event_type == "search":
                 page_ids = [
                     str(page_id)
-                    for page_id in [
-                        *(row.get("direct_pages") or []),
-                        *(row.get("expanded_pages") or []),
-                    ]
+                    for page_id in row.get("direct_pages") or []
                     if page_id
                 ]
-                events.append(self._event("recall", page_ids, "RECALL search"))
+                if page_ids:
+                    events.append(self._event("search", page_ids, "MCP SEARCH"))
+            elif event_type == "used":
+                page_ids = [
+                    str(page_id)
+                    for page_id in row.get("page_ids") or []
+                    if page_id
+                ]
+                if page_ids:
+                    events.append(
+                        self._event("used", page_ids, "RECALL USED")
+                    )
         return events
 
     def _save_events(self) -> list[dict[str, Any]]:
@@ -382,6 +422,7 @@ class CortexEventCursor:
 
     def poll(self) -> list[dict[str, Any]]:
         return [
+            *self._automatic_recall_events(),
             *self._pull_events(),
             *self._save_events(),
             *self._ingest_events(),

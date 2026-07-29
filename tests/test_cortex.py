@@ -124,20 +124,37 @@ def test_cortex_event_cursor_maps_durable_activity_to_firing_events(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "chronovisor"
-    pull_log = root / "runtime" / "recall" / "pull-log.jsonl"
+    recall_log = root / "recall" / "recall-log.jsonl"
+    pull_log = root / "recall" / "pull-log.jsonl"
     activity_log = root / "log.md"
     raw_dir = root / "raw"
     pull_log.parent.mkdir(parents=True)
     raw_dir.mkdir(parents=True)
+    recall_log.write_text("", encoding="utf-8")
     pull_log.write_text("", encoding="utf-8")
     activity_log.write_text("", encoding="utf-8")
     cursor = cortex.CortexEventCursor(
         root,
+        recall_log=recall_log,
         pull_log=pull_log,
         activity_log=activity_log,
     )
+    assert cursor.poll() == []
     raw_mtime = raw_dir.stat().st_mtime_ns
 
+    recall_log.write_text(
+        json.dumps(
+            {
+                "event": "UserPromptSubmit",
+                "stage": "injected",
+                "status": "ok",
+                "decision": "read",
+                "pages": ["current-state", "page-a"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     pull_log.write_text(
         "\n".join(
             [
@@ -156,6 +173,13 @@ def test_cortex_event_cursor_maps_durable_activity_to_firing_events(
                         "expanded_pages": ["page-b"],
                     }
                 ),
+                json.dumps(
+                    {
+                        "type": "used",
+                        "stage": "used",
+                        "page_ids": ["page-b"],
+                    }
+                ),
             ]
         )
         + "\n",
@@ -171,15 +195,19 @@ def test_cortex_event_cursor_maps_durable_activity_to_firing_events(
     events = cursor.poll()
 
     assert [event["kind"] for event in events] == [
-        "recall",
-        "recall",
+        "auto_recall",
+        "read",
+        "search",
+        "used",
         "save",
         "ingest",
     ]
-    assert events[0]["page_ids"] == ["current-state"]
-    assert events[1]["page_ids"] == ["page-a", "page-b"]
-    assert events[2]["page_ids"] == []
-    assert events[3]["page_ids"] == ["page-c"]
+    assert events[0]["page_ids"] == ["current-state", "page-a"]
+    assert events[1]["page_ids"] == ["current-state"]
+    assert events[2]["page_ids"] == ["page-a"]
+    assert events[3]["page_ids"] == ["page-b"]
+    assert events[4]["page_ids"] == []
+    assert events[5]["page_ids"] == ["page-c"]
 
 
 def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
@@ -195,6 +223,8 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'id="hud"' in html
     assert 'id="mOrganic"' in html
     assert 'id="mCluster"' in html
+    assert 'id="tLive"' in html
+    assert 'id="tAuto"' not in html
     assert 'id="tSnd"' in html
     assert "grid-template-columns: 242px 1fr 296px;" in style
     assert "--amber: #ffb454;" in style
@@ -203,6 +233,10 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'new WebSocket(`${protocol}//${window.location.host}/api/cortex/events`)' in script
     assert "function firePageIds(pageIds, kind, label)" in script
     assert "function drawEdges()" in script
+    assert "liveEventsEnabled = true" in script
+    assert "function ambient(" not in script
+    assert "function autoTick(" not in script
+    assert 'setTimeout(() => stimulate("recall")' not in script
     assert "/static/cortex_graph.json" not in script
     assert "3d-force-graph" not in html
     assert '<a class="cortex-link" href="/cortex">Synaptic Cortex</a>' in observatory
