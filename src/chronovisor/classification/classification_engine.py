@@ -544,6 +544,54 @@ def librarian_convergence_store(root: Path) -> ConvergenceStore:
     )
 
 
+def _classification_batch_input(
+    batch: Sequence[Mapping[str, Any]],
+    *,
+    package_checksum: str,
+    adjudication_mode: str,
+    stage_cache_epoch: str,
+) -> dict[str, Any]:
+    """Build the stable convergence identity for one classification batch."""
+
+    return {
+        "engine_version": ENGINE_VERSION,
+        "adjudication_mode": adjudication_mode,
+        "stage_cache_epoch": stage_cache_epoch,
+        "package_checksum": package_checksum,
+        "pages": [
+            {
+                "uid": row["uid"],
+                "source_sha256": row["source_sha256"],
+                "candidates": [
+                    candidate["notation"] for candidate in row["candidates"]
+                ],
+                "evidence_card_sha256": _sha256_text(
+                    json.dumps(
+                        row.get("evidence_card") or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                ),
+            }
+            for row in batch
+        ],
+    }
+
+
+def _cached_classification_decisions(item: Mapping[str, Any]) -> list[dict] | None:
+    """Return a complete cached decision list only for an applied item."""
+
+    cached = item.get("result")
+    if (
+        item.get("status") == "applied"
+        and isinstance(cached, Mapping)
+        and isinstance(cached.get("decisions"), list)
+    ):
+        return [dict(value) for value in cached["decisions"]]
+    return None
+
+
 def run_consensus_batches(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -567,30 +615,12 @@ def run_consensus_batches(
     outputs: list[dict[str, Any]] = []
     for offset in range(0, len(rows), max(1, batch_size)):
         batch = [dict(row) for row in rows[offset : offset + batch_size]]
-        input_data = {
-            "engine_version": ENGINE_VERSION,
-            "adjudication_mode": adjudication_mode,
-            "stage_cache_epoch": stage_cache_epoch,
-            "package_checksum": load_udc_package(root).checksum,
-            "pages": [
-                {
-                    "uid": row["uid"],
-                    "source_sha256": row["source_sha256"],
-                    "candidates": [
-                        candidate["notation"] for candidate in row["candidates"]
-                    ],
-                    "evidence_card_sha256": _sha256_text(
-                        json.dumps(
-                            row.get("evidence_card") or {},
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        )
-                    ),
-                }
-                for row in batch
-            ],
-        }
+        input_data = _classification_batch_input(
+            batch,
+            package_checksum=load_udc_package(root).checksum,
+            adjudication_mode=adjudication_mode,
+            stage_cache_epoch=stage_cache_epoch,
+        )
         namespace = run_namespace.strip() or "classification"
         source_id = (
             f"batch:{offset // max(1, batch_size):06d}"
@@ -611,13 +641,10 @@ def run_consensus_batches(
         item = merged["item"]
         if not isinstance(item, Mapping):
             raise ClassificationError("classification queue merge failed")
-        if item.get("status") == "applied":
-            cached = item.get("result")
-            if isinstance(cached, Mapping) and isinstance(
-                cached.get("decisions"), list
-            ):
-                outputs.extend(dict(value) for value in cached["decisions"])
-                continue
+        cached_decisions = _cached_classification_decisions(item)
+        if cached_decisions is not None:
+            outputs.extend(cached_decisions)
+            continue
         key = str(item["key"])
         while True:
             owner = f"librarian:{os.getpid()}:{uuid.uuid4().hex}"

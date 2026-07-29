@@ -4569,6 +4569,179 @@ def _normalize_ingest_source_metadata(
     return raw_keywords, source_raw
 
 
+def _build_ingest_job_result(
+    frontier_result: dict[str, Any],
+    failed_op_specs: list[dict],
+    read_back_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the body-safe terminal job result from reviewed ingest metadata."""
+
+    consensus_result = {
+        "status": str(frontier_result.get("status") or "needs_retry"),
+        "proposal_sha256": frontier_result.get("proposal_sha256"),
+        "source_key": frontier_result.get("source_key"),
+        "review": frontier_result.get("review"),
+        "recovered_artifact": bool(frontier_result.get("recovered_artifact")),
+        "reused_review": bool(frontier_result.get("reused_review")),
+    }
+    result: dict[str, Any] = {
+        "local_consensus": consensus_result,
+        "frontier": dict(consensus_result),
+        "audit": frontier_result.get("audit"),
+    }
+    if failed_op_specs:
+        result.update({"partial": True, "failed_ops": failed_op_specs})
+    if read_back_result["failed"]:
+        result["read_back"] = read_back_result
+    return result
+
+
+def _complete_ingest_run(
+    *,
+    job_id: str,
+    source_raw: str | None,
+    frontier_result: dict[str, Any],
+    failed_op_specs: list[dict],
+    failed_ops: list[str],
+    on_complete: "callable | None",
+    frontier_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+) -> None:
+    """Persist one authorized terminal result and publish derived status."""
+
+    frontier_status = str(frontier_result.get("status") or "needs_retry")
+    created = list(frontier_result.get("created") or [])
+    updated = list(frontier_result.get("updated") or [])
+
+    # Pages are already durable. Derived-artifact failures must not undo the
+    # apply or suppress the raw-completion callback.
+    read_back_result = _refresh_ingest_derived_artifacts(
+        created + updated,
+        source_raw=source_raw,
+    )
+    job_result = _build_ingest_job_result(
+        frontier_result,
+        failed_op_specs,
+        read_back_result,
+    )
+
+    noop_callback_completed = False
+    if frontier_status == "confirmed_noop":
+        # A no-op has no page CAS receipt. Keep the semantic authority epoch
+        # fixed through the terminal job transition and raw retirement.
+        from chronovisor.ingest.page_mutation import decision_authority_lock
+
+        confirmed_authority = frontier_result.get("authority")
+        confirmed_review = frontier_result.get("review")
+        with decision_authority_lock():
+            current_authority, current_authority_error = (
+                _current_ingest_review_authority(reviewer=frontier_reviewer)
+            )
+            authority_compare_error = (
+                decision_authority.compare_semantic_authority(
+                    confirmed_authority,
+                    current_authority,
+                    lane="ingest_reconciliation",
+                )
+                if current_authority_error is None
+                else current_authority_error
+            )
+            if authority_compare_error is not None:
+                raise IngestApplyError(
+                    "ingest confirmed-noop authority changed before raw retirement: "
+                    f"{authority_compare_error}"
+                )
+            if not isinstance(confirmed_review, dict) or not isinstance(
+                confirmed_authority, dict
+            ):
+                raise IngestApplyError(
+                    "ingest confirmed-noop proof missing before raw retirement"
+                )
+            if proof_error := _ingest_review_authority_error(
+                confirmed_review,
+                confirmed_authority,
+            ):
+                raise IngestApplyError(
+                    "ingest confirmed-noop proof invalid before raw retirement: "
+                    f"{proof_error}"
+                )
+            _proposal_path, confirmed_review_path = _ingest_artifact_paths(
+                str(frontier_result.get("source_key") or "")
+            )
+            durable_review = _load_ingest_review_artifact(
+                confirmed_review_path,
+                source_key=str(frontier_result.get("source_key") or ""),
+                proposal_sha256=str(frontier_result.get("proposal_sha256") or ""),
+            )
+            if (
+                durable_review is None
+                or durable_review.get("authority") != confirmed_authority
+                or durable_review.get("review") != confirmed_review
+            ):
+                raise IngestApplyError(
+                    "ingest confirmed-noop durable proof changed before raw retirement"
+                )
+            job_store.update(
+                job_id,
+                status=JobStatus.COMPLETED,
+                completed_at=_now(),
+                pages_created=created,
+                pages_updated=updated,
+                result=job_result,
+            )
+            if on_complete:
+                on_complete()
+            noop_callback_completed = True
+    else:
+        job_store.update(
+            job_id,
+            status=JobStatus.COMPLETED,
+            completed_at=_now(),
+            pages_created=created,
+            pages_updated=updated,
+            result=job_result,
+        )
+
+    if failed_op_specs:
+        _safe_log(
+            f"ingest | local-consensus-final: {len(created)} created, "
+            f"{len(updated)} updated, "
+            f"{len(failed_op_specs)} local generation failures confirmed unnecessary "
+            f"({', '.join(failed_ops[:3])}"
+            + ("..." if len(failed_ops) > 3 else "")
+            + ")"
+        )
+    else:
+        _safe_log(f"ingest | completed: {len(created)} created, {len(updated)} updated")
+    runtime_status.safe_write_status(
+        state="running",
+        stage="complete",
+        current_job_id=job_id,
+        current_raw=source_raw,
+        current_op=None,
+        llm=None,
+        last_success={
+            "job_id": job_id,
+            "raw": source_raw,
+            "created": created,
+            "updated": updated,
+            "failed_ops": failed_op_specs,
+            "local_consensus_status": frontier_status,
+            "frontier_status": frontier_status,
+            "audit": frontier_result.get("audit"),
+            "failed_operations_disposition": (
+                (frontier_result.get("review") or {}).get(
+                    "failed_operations_disposition"
+                )
+                if isinstance(frontier_result.get("review"), dict)
+                else None
+            ),
+            "read_back": read_back_result,
+        },
+    )
+    if on_complete and not noop_callback_completed:
+        on_complete()
+
+
 def run_ingest(
     content: str,
     job_id: str,
@@ -5049,177 +5222,15 @@ def run_ingest(
             )
 
         assert frontier_result is not None
-        frontier_status = str(frontier_result.get("status") or "needs_retry")
-        created = list(frontier_result.get("created") or [])
-        updated = list(frontier_result.get("updated") or [])
-
-        # Side effects (rebuild_index, IndexStore refresh, embeddings) are
-        # derived artifacts. Pages are already on disk; failures here must
-        # NOT undo the apply or block on_complete — that would leave raws
-        # pending forever and re-create the same pages on retry. Use
-        # _safe_log so a logging error in a side-effect handler doesn't
-        # promote a derived-artifact failure into a hard ingest failure.
-        changed_pages = created + updated
-        read_back_result = _refresh_ingest_derived_artifacts(
-            changed_pages,
+        _complete_ingest_run(
+            job_id=job_id,
             source_raw=source_raw,
+            frontier_result=frontier_result,
+            failed_op_specs=failed_op_specs,
+            failed_ops=failed_ops,
+            on_complete=on_complete,
+            frontier_reviewer=frontier_reviewer,
         )
-
-        # Build the user-facing local-consensus result.  The legacy
-        # ``frontier`` alias is retained for old job readers, but both views
-        # deliberately exclude raw/page bodies; exact bytes stay in artifacts.
-        consensus_result = {
-            "status": frontier_status,
-            "proposal_sha256": frontier_result.get("proposal_sha256"),
-            "source_key": frontier_result.get("source_key"),
-            "review": frontier_result.get("review"),
-            "recovered_artifact": bool(frontier_result.get("recovered_artifact")),
-            "reused_review": bool(frontier_result.get("reused_review")),
-        }
-        job_result: dict | None = {
-            "local_consensus": consensus_result,
-            "frontier": dict(consensus_result),
-            "audit": frontier_result.get("audit"),
-        }
-        if failed_op_specs:
-            job_result.update(
-                {
-                    "partial": True,
-                    "failed_ops": failed_op_specs,
-                }
-            )
-        if read_back_result["failed"]:
-            job_result = job_result or {}
-            job_result["read_back"] = read_back_result
-
-        noop_callback_completed = False
-        if frontier_status == "confirmed_noop":
-            # Unlike apply_available there is no page CAS receipt that makes
-            # later raw retirement an exact-postimage recovery.  Keep the
-            # semantic authority epoch stable through both the terminal job
-            # transition and the callback that retires the source raw.
-            from chronovisor.ingest.page_mutation import decision_authority_lock
-
-            confirmed_authority = frontier_result.get("authority")
-            confirmed_review = frontier_result.get("review")
-            with decision_authority_lock():
-                current_authority, current_authority_error = (
-                    _current_ingest_review_authority(reviewer=frontier_reviewer)
-                )
-                authority_compare_error = (
-                    decision_authority.compare_semantic_authority(
-                        confirmed_authority,
-                        current_authority,
-                        lane="ingest_reconciliation",
-                    )
-                    if current_authority_error is None
-                    else current_authority_error
-                )
-                if authority_compare_error is not None:
-                    raise IngestApplyError(
-                        "ingest confirmed-noop authority changed before raw retirement: "
-                        f"{authority_compare_error}"
-                    )
-                if not isinstance(confirmed_review, dict) or not isinstance(
-                    confirmed_authority, dict
-                ):
-                    raise IngestApplyError(
-                        "ingest confirmed-noop proof missing before raw retirement"
-                    )
-                if proof_error := _ingest_review_authority_error(
-                    confirmed_review,
-                    confirmed_authority,
-                ):
-                    raise IngestApplyError(
-                        "ingest confirmed-noop proof invalid before raw retirement: "
-                        f"{proof_error}"
-                    )
-                _proposal_path, confirmed_review_path = _ingest_artifact_paths(
-                    str(frontier_result.get("source_key") or "")
-                )
-                durable_review = _load_ingest_review_artifact(
-                    confirmed_review_path,
-                    source_key=str(frontier_result.get("source_key") or ""),
-                    proposal_sha256=str(frontier_result.get("proposal_sha256") or ""),
-                )
-                if (
-                    durable_review is None
-                    or durable_review.get("authority") != confirmed_authority
-                    or durable_review.get("review") != confirmed_review
-                ):
-                    raise IngestApplyError(
-                        "ingest confirmed-noop durable proof changed before raw retirement"
-                    )
-                job_store.update(
-                    job_id,
-                    status=JobStatus.COMPLETED,
-                    completed_at=_now(),
-                    pages_created=created,
-                    pages_updated=updated,
-                    result=job_result,
-                )
-                if on_complete:
-                    # Raw retirement is the second half of the durable apply
-                    # transaction.  Its callback publishes the completion ACK
-                    # and then marks the source processed.  Swallowing an ACK
-                    # failure here reports a false success and replays the
-                    # already-applied mutation on the next tick.
-                    on_complete()
-                noop_callback_completed = True
-        else:
-            job_store.update(
-                job_id,
-                status=JobStatus.COMPLETED,
-                completed_at=_now(),
-                pages_created=created,
-                pages_updated=updated,
-                result=job_result,
-            )
-        # _safe_log so a log failure here can't fall through to the outer
-        # except, override COMPLETED with FAILED, and skip on_complete.
-        # That was the R5-Critical regression path.
-        if failed_op_specs:
-            _safe_log(
-                f"ingest | local-consensus-final: {len(created)} created, "
-                f"{len(updated)} updated, "
-                f"{len(failed_op_specs)} local generation failures confirmed unnecessary "
-                f"({', '.join(failed_ops[:3])}"
-                + ("..." if len(failed_ops) > 3 else "")
-                + ")"
-            )
-        else:
-            _safe_log(
-                f"ingest | completed: {len(created)} created, {len(updated)} updated"
-            )
-        runtime_status.safe_write_status(
-            state="running",
-            stage="complete",
-            current_job_id=job_id,
-            current_raw=source_raw,
-            current_op=None,
-            llm=None,
-            last_success={
-                "job_id": job_id,
-                "raw": source_raw,
-                "created": created,
-                "updated": updated,
-                "failed_ops": failed_op_specs,
-                "local_consensus_status": frontier_status,
-                "frontier_status": frontier_status,
-                "audit": frontier_result.get("audit"),
-                "failed_operations_disposition": (
-                    (frontier_result.get("review") or {}).get(
-                        "failed_operations_disposition"
-                    )
-                    if isinstance(frontier_result.get("review"), dict)
-                    else None
-                ),
-                "read_back": read_back_result,
-            },
-        )
-
-        if on_complete and not noop_callback_completed:
-            on_complete()
         failed = False
 
     except Exception as e:

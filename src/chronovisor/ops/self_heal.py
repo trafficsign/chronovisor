@@ -2570,6 +2570,189 @@ def _read_back_packet_retirement_kind(packet: dict[str, Any]) -> str | None:
     return None
 
 
+def _frontier_attempt_outcome(
+    frontier_result: dict[str, Any],
+    *,
+    attempt: int,
+    max_attempts: int,
+    backoff_base_seconds: int,
+    now: datetime | None = None,
+) -> tuple[str, str | None]:
+    """Derive terminal status and retry time without mutating packet state."""
+
+    final_status = _frontier_final_status(frontier_result)
+    if frontier_result.get("execution_started") is True and final_status not in {
+        "frontier_approved",
+        "human_required",
+    }:
+        final_status = "frontier_quarantined"
+    next_attempt_at = None
+    if final_status in {"frontier_retry", *PENDING_REVIEW_STATUSES}:
+        if attempt >= max(1, max_attempts):
+            final_status = "frontier_quarantined"
+        else:
+            delay = max(0, backoff_base_seconds) * (2 ** max(0, attempt - 1))
+            next_attempt_at = ((now or datetime.now()) + timedelta(seconds=delay)).isoformat(
+                timespec="seconds"
+            )
+    return final_status, next_attempt_at
+
+
+def _finalize_frontier_attempt(
+    *,
+    packet_path: Path,
+    packet: dict[str, Any],
+    frontier_result: dict[str, Any],
+    attempt: int,
+    max_attempts: int,
+    backoff_base_seconds: int,
+    requires_frontier_action: bool,
+    decision: LocalRepairDecision | None,
+    local_decision: dict[str, Any],
+    dry_run: bool,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist the terminal effect and operator record of one frontier attempt."""
+
+    final_status, next_attempt_at = _frontier_attempt_outcome(
+        frontier_result,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        backoff_base_seconds=backoff_base_seconds,
+    )
+
+    approved_action: dict[str, Any] | None = None
+    action_error: str | None = None
+    if final_status == "frontier_approved" and requires_frontier_action:
+        approved_decision = decision or _local_decision_from_payload(local_decision)
+        if approved_decision is None:
+            action_error = "frontier-approved local action artifact is invalid"
+        else:
+            try:
+                with _local_decision_effect(approved_decision):
+                    _raise_if_packet_cancelled(packet_path, packet)
+                    approved_action = apply_local_decision(
+                        packet,
+                        approved_decision,
+                        dry_run=False,
+                    )
+                    action_path = _save_action(
+                        packet_path, approved_action, applied=True
+                    )
+                    result["action"] = approved_action
+                    result["applied_action_path"] = str(action_path)
+                    _append_registry(
+                        {
+                            "timestamp": datetime.now().isoformat(),
+                            "failure_id": packet.get("failure_id"),
+                            "raw_file": packet.get("raw_file"),
+                            "failure_class": packet.get("failure_class"),
+                            "fingerprint": packet.get("fingerprint"),
+                            "resolution": "frontier_approved_local_action",
+                            "decision": local_decision,
+                            "frontier": frontier_result,
+                            "action": approved_action,
+                        }
+                    )
+            except _PacketCancellationRequested:
+                raise
+            except Exception as exc:
+                action_error = f"frontier-approved local action failed: {exc}"
+                _save_action(
+                    packet_path,
+                    {
+                        "action": approved_decision.action,
+                        "error": action_error,
+                        "decision": local_decision,
+                        "frontier": frontier_result,
+                    },
+                    applied=False,
+                )
+        if action_error is not None:
+            final_status = "frontier_quarantined"
+            next_attempt_at = None
+            result["action_error"] = action_error
+
+    human_notification = None
+    pending_review_path = None
+    if final_status == "human_required" and not dry_run:
+        human_notification = maybe_notify_human_required(packet, frontier_result)
+    if final_status in PENDING_REVIEW_STATUSES:
+        pending_review_path = _save_pending_frontier_review(
+            packet_path,
+            packet,
+            local_decision,
+            frontier_result,
+            status=final_status,
+        )
+    _update_packet(
+        packet_path,
+        packet,
+        status=final_status,
+        frontier_result=frontier_result,
+        human_notification=human_notification,
+        pending_frontier_review_path=str(pending_review_path)
+        if pending_review_path
+        else None,
+        next_attempt_at=next_attempt_at,
+        approved_action=approved_action,
+        action_error=action_error,
+        human_required_at=(
+            datetime.now().isoformat(timespec="seconds")
+            if final_status == "human_required"
+            else packet.get("human_required_at")
+        ),
+        quarantined_at=(
+            datetime.now().isoformat(timespec="seconds")
+            if final_status == "frontier_quarantined"
+            else packet.get("quarantined_at")
+        ),
+    )
+    _append_registry(
+        {
+            "timestamp": datetime.now().isoformat(),
+            "failure_id": packet.get("failure_id"),
+            "raw_file": packet.get("raw_file"),
+            "failure_class": packet.get("failure_class"),
+            "fingerprint": packet.get("fingerprint"),
+            "resolution": "frontier",
+            "decision": local_decision,
+            "frontier": frontier_result,
+            "human_notification": human_notification,
+            "pending_frontier_review_path": str(pending_review_path)
+            if pending_review_path
+            else None,
+        }
+    )
+    event_level = (
+        "success"
+        if final_status == "frontier_approved"
+        else "error"
+        if final_status in HUMAN_REQUIRED_STATUSES
+        else "warn"
+    )
+    event_message = (
+        f"self-heal | human required for {packet.get('raw_file')}"
+        if final_status == "human_required"
+        else f"self-heal | frontier {frontier_result.get('decision')} for {packet.get('raw_file')}"
+    )
+    runtime_status.safe_append_event(
+        event_level,
+        event_message,
+        source="self-heal",
+        packet=str(packet_path),
+        frontier_status=final_status,
+        human_required=final_status == "human_required",
+    )
+    result["status"] = final_status
+    result["frontier_result"] = frontier_result
+    result["human_notification"] = human_notification
+    result["pending_frontier_review_path"] = (
+        str(pending_review_path) if pending_review_path else None
+    )
+    return result
+
+
 def _handle_packet_unlocked(
     packet_path: Path,
     *,
@@ -3323,150 +3506,19 @@ def _handle_packet_unlocked(
         result["next_attempt_at"] = deferred_next_attempt
         result["reason"] = guard_reason or failure.get("failure_class")
         return result
-    final_status = _frontier_final_status(frontier_result)
-    if frontier_result.get("execution_started") is True and final_status not in {
-        "frontier_approved",
-        "human_required",
-    }:
-        final_status = "frontier_quarantined"
-    next_attempt_at = None
-    if final_status in {"frontier_retry", *PENDING_REVIEW_STATUSES}:
-        if attempt >= max(1, max_attempts):
-            final_status = "frontier_quarantined"
-        else:
-            delay = max(0, backoff_base_seconds) * (2 ** max(0, attempt - 1))
-            next_attempt_at = (datetime.now() + timedelta(seconds=delay)).isoformat(
-                timespec="seconds"
-            )
-    approved_action: dict[str, Any] | None = None
-    action_error: str | None = None
-    if final_status == "frontier_approved" and requires_frontier_action:
-        approved_decision = decision or _local_decision_from_payload(local_decision)
-        if approved_decision is None:
-            action_error = "frontier-approved local action artifact is invalid"
-        else:
-            try:
-                with _local_decision_effect(approved_decision):
-                    _raise_if_packet_cancelled(packet_path, packet)
-                    approved_action = apply_local_decision(
-                        packet,
-                        approved_decision,
-                        dry_run=False,
-                    )
-                    action_path = _save_action(
-                        packet_path, approved_action, applied=True
-                    )
-                    result["action"] = approved_action
-                    result["applied_action_path"] = str(action_path)
-                    _append_registry(
-                        {
-                            "timestamp": datetime.now().isoformat(),
-                            "failure_id": packet.get("failure_id"),
-                            "raw_file": packet.get("raw_file"),
-                            "failure_class": packet.get("failure_class"),
-                            "fingerprint": packet.get("fingerprint"),
-                            "resolution": "frontier_approved_local_action",
-                            "decision": local_decision,
-                            "frontier": frontier_result,
-                            "action": approved_action,
-                        }
-                    )
-            except _PacketCancellationRequested:
-                raise
-            except Exception as exc:
-                action_error = f"frontier-approved local action failed: {exc}"
-                _save_action(
-                    packet_path,
-                    {
-                        "action": approved_decision.action,
-                        "error": action_error,
-                        "decision": local_decision,
-                        "frontier": frontier_result,
-                    },
-                    applied=False,
-                )
-        if action_error is not None:
-            final_status = "frontier_quarantined"
-            next_attempt_at = None
-            result["action_error"] = action_error
-    human_notification = None
-    pending_review_path = None
-    if final_status == "human_required" and not dry_run:
-        human_notification = maybe_notify_human_required(packet, frontier_result)
-    if final_status in PENDING_REVIEW_STATUSES:
-        pending_review_path = _save_pending_frontier_review(
-            packet_path,
-            packet,
-            local_decision,
-            frontier_result,
-            status=final_status,
-        )
-    _update_packet(
-        packet_path,
-        packet,
-        status=final_status,
+    return _finalize_frontier_attempt(
+        packet_path=packet_path,
+        packet=packet,
         frontier_result=frontier_result,
-        human_notification=human_notification,
-        pending_frontier_review_path=str(pending_review_path)
-        if pending_review_path
-        else None,
-        next_attempt_at=next_attempt_at,
-        approved_action=approved_action,
-        action_error=action_error,
-        human_required_at=(
-            datetime.now().isoformat(timespec="seconds")
-            if final_status == "human_required"
-            else packet.get("human_required_at")
-        ),
-        quarantined_at=(
-            datetime.now().isoformat(timespec="seconds")
-            if final_status == "frontier_quarantined"
-            else packet.get("quarantined_at")
-        ),
+        attempt=attempt,
+        max_attempts=max_attempts,
+        backoff_base_seconds=backoff_base_seconds,
+        requires_frontier_action=requires_frontier_action,
+        decision=decision,
+        local_decision=local_decision,
+        dry_run=dry_run,
+        result=result,
     )
-    _append_registry(
-        {
-            "timestamp": datetime.now().isoformat(),
-            "failure_id": packet.get("failure_id"),
-            "raw_file": packet.get("raw_file"),
-            "failure_class": packet.get("failure_class"),
-            "fingerprint": packet.get("fingerprint"),
-            "resolution": "frontier",
-            "decision": local_decision,
-            "frontier": frontier_result,
-            "human_notification": human_notification,
-            "pending_frontier_review_path": str(pending_review_path)
-            if pending_review_path
-            else None,
-        }
-    )
-    event_level = (
-        "success"
-        if final_status == "frontier_approved"
-        else "error"
-        if final_status in HUMAN_REQUIRED_STATUSES
-        else "warn"
-    )
-    event_message = (
-        f"self-heal | human required for {packet.get('raw_file')}"
-        if final_status == "human_required"
-        else f"self-heal | frontier {frontier_result.get('decision')} for {packet.get('raw_file')}"
-    )
-    runtime_status.safe_append_event(
-        event_level,
-        event_message,
-        source="self-heal",
-        packet=str(packet_path),
-        frontier_status=final_status,
-        human_required=final_status == "human_required",
-    )
-    result["status"] = final_status
-    result["frontier_result"] = frontier_result
-    result["human_notification"] = human_notification
-    result["pending_frontier_review_path"] = (
-        str(pending_review_path) if pending_review_path else None
-    )
-    return result
 
 
 def handle_packet(

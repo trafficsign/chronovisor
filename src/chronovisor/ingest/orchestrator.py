@@ -875,6 +875,108 @@ def _raw_unit_event(
     return "warn", "not processed"
 
 
+def _projection_result_summary(projection: Any) -> dict[str, Any]:
+    """Return the durable, body-free projection summary exposed to operators."""
+
+    return {
+        "kind": projection.kind,
+        "manifest_path": (
+            str(projection.manifest_path)
+            if projection.manifest_path is not None
+            else None
+        ),
+        "projection_paths": [str(path) for path in projection.projection_paths],
+        "child_paths": [str(path) for path in projection.child_paths],
+        "noop_receipt_path": (
+            str(projection.noop_receipt_path)
+            if projection.noop_receipt_path is not None
+            else None
+        ),
+        "parent_sha256": projection.parent_sha256,
+        "projection_sha256": projection.projection_sha256,
+        "record_count": projection.record_count,
+        "selected_record_count": projection.selected_record_count,
+        "child_count": projection.child_count,
+        "role_counts": dict(projection.role_counts),
+    }
+
+
+def _raw_unit_result(
+    *,
+    filename: str,
+    source_files: list[str],
+    job_id: str,
+    succeeded: bool,
+    deferred: bool,
+    continued: bool,
+    continuation: object,
+    fragment_record_sha256: str | None,
+    projection: dict[str, Any] | None,
+    supervision: dict[str, Any] | None,
+    completion_ack: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build one raw unit's stable public batch-result row."""
+
+    result: dict[str, Any] = {
+        "filename": filename,
+        "source_files": source_files,
+        "job_id": job_id,
+        "succeeded": succeeded,
+        "deferred": deferred,
+        "continued": continued,
+    }
+    if continued:
+        result["continuation"] = continuation
+    if fragment_record_sha256 is not None:
+        result["reassembled_fragment_record_sha256"] = fragment_record_sha256
+    if projection is not None:
+        result["projection"] = projection
+    if supervision is not None:
+        result["supervision"] = supervision
+    if completion_ack is not None:
+        result["completion_ack"] = completion_ack
+    return result
+
+
+def _ingest_batch_result(
+    *,
+    reason: str,
+    job_ids: list[str],
+    filenames: list[str],
+    succeeded_filenames: list[str],
+    deferred_filenames: list[str],
+    continued_filenames: list[str],
+    failed_filenames: int,
+    fragment_quarantined: list[dict],
+    fragment_deferred: list[dict],
+    resumed_fragment_quarantines: list[dict],
+    per_raw: list[dict],
+    processor: str,
+    elapsed: float,
+) -> dict[str, Any]:
+    """Build the stable terminal envelope for a triggered ingest batch."""
+
+    return {
+        "triggered": True,
+        "reason": reason,
+        "job_ids": job_ids,
+        "files_attempted": filenames,
+        "files_processed": succeeded_filenames,
+        "files_deferred": deferred_filenames,
+        "files_continued": continued_filenames,
+        "files_failed": failed_filenames,
+        "files_quarantined": [
+            name for row in fragment_quarantined for name in row.get("files", [])
+        ],
+        "fragment_quarantined": fragment_quarantined,
+        "fragment_deferred": fragment_deferred,
+        "fragment_quarantine_transactions_resumed": resumed_fragment_quarantines,
+        "per_raw": per_raw,
+        "processor": processor,
+        "elapsed_seconds": round(elapsed, 2),
+    }
+
+
 @_serialize_ingest_across_processes
 def run_pending_ingest(
     force: bool = False,
@@ -1305,29 +1407,7 @@ def run_pending_ingest(
                             max_child_bytes=max_child_bytes,
                             raw_bytes=unit.logical_raw_bytes,
                         )
-                    projection_summary = {
-                        "kind": projection.kind,
-                        "manifest_path": (
-                            str(projection.manifest_path)
-                            if projection.manifest_path is not None
-                            else None
-                        ),
-                        "projection_paths": [
-                            str(path) for path in projection.projection_paths
-                        ],
-                        "child_paths": [str(path) for path in projection.child_paths],
-                        "noop_receipt_path": (
-                            str(projection.noop_receipt_path)
-                            if projection.noop_receipt_path is not None
-                            else None
-                        ),
-                        "parent_sha256": projection.parent_sha256,
-                        "projection_sha256": projection.projection_sha256,
-                        "record_count": projection.record_count,
-                        "selected_record_count": projection.selected_record_count,
-                        "child_count": projection.child_count,
-                        "role_counts": dict(projection.role_counts),
-                    }
+                    projection_summary = _projection_result_summary(projection)
                     if projection.kind in {"noop", "children"}:
                         if projection.manifest_path is None:
                             raise RuntimeError(
@@ -1536,26 +1616,19 @@ def run_pending_ingest(
                     deferred_filenames.extend(source_filenames)
                     deferred_units += 1
 
-                raw_result = {
-                    "filename": fname,
-                    "source_files": source_filenames,
-                    "job_id": job.job_id,
-                    "succeeded": raw_success_flag[0],
-                    "deferred": semantic_deferred,
-                    "continued": shard_continuing,
-                }
-                if shard_continuing:
-                    raw_result["continuation"] = continuation
-                if unit.fragment_record_sha256 is not None:
-                    raw_result["reassembled_fragment_record_sha256"] = (
-                        unit.fragment_record_sha256
-                    )
-                if projection_summary is not None:
-                    raw_result["projection"] = projection_summary
-                if supervision is not None:
-                    raw_result["supervision"] = supervision
-                if completion_ack_summary[0] is not None:
-                    raw_result["completion_ack"] = completion_ack_summary[0]
+                raw_result = _raw_unit_result(
+                    filename=fname,
+                    source_files=source_filenames,
+                    job_id=job.job_id,
+                    succeeded=raw_success_flag[0],
+                    deferred=semantic_deferred,
+                    continued=shard_continuing,
+                    continuation=continuation,
+                    fragment_record_sha256=unit.fragment_record_sha256,
+                    projection=projection_summary,
+                    supervision=supervision,
+                    completion_ack=completion_ack_summary[0],
+                )
                 per_raw.append(raw_result)
                 event_level, event_outcome = _raw_unit_event(
                     succeeded=raw_success_flag[0],
@@ -1627,25 +1700,21 @@ def run_pending_ingest(
             llm=None,
         )
 
-        return {
-            "triggered": True,
-            "reason": reason,
-            "job_ids": job_ids,
-            "files_attempted": filenames,
-            "files_processed": succeeded_filenames,
-            "files_deferred": deferred_filenames,
-            "files_continued": continued_filenames,
-            "files_failed": failed_filenames,
-            "files_quarantined": [
-                name for row in fragment_quarantined for name in row.get("files", [])
-            ],
-            "fragment_quarantined": fragment_quarantined,
-            "fragment_deferred": fragment_deferred,
-            "fragment_quarantine_transactions_resumed": (resumed_fragment_quarantines),
-            "per_raw": per_raw,
-            "processor": get_ollama_status()["processor"],
-            "elapsed_seconds": round(elapsed, 2),
-        }
+        return _ingest_batch_result(
+            reason=reason,
+            job_ids=job_ids,
+            filenames=filenames,
+            succeeded_filenames=succeeded_filenames,
+            deferred_filenames=deferred_filenames,
+            continued_filenames=continued_filenames,
+            failed_filenames=failed_filenames,
+            fragment_quarantined=fragment_quarantined,
+            fragment_deferred=fragment_deferred,
+            resumed_fragment_quarantines=resumed_fragment_quarantines,
+            per_raw=per_raw,
+            processor=get_ollama_status()["processor"],
+            elapsed=elapsed,
+        )
 
 
 def _coerce_str_list(value: object) -> list[str] | None:

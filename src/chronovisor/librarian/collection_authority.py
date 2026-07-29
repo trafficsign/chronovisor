@@ -1330,6 +1330,73 @@ def collection_authority_status(root: Path) -> dict[str, Any]:
     }
 
 
+def _collection_worker_contract_matches(
+    worker: Mapping[str, Any],
+    *,
+    schema: str,
+    model: str,
+    model_digest: str,
+    prompt_sha256: str,
+) -> bool:
+    """Check the non-mutating single-call anomaly worker contract."""
+
+    return (
+        worker.get("schema") == schema
+        and worker.get("model") == model
+        and worker.get("model_digest") == model_digest
+        and worker.get("prompt_sha256") == prompt_sha256
+        and int(worker.get("model_calls") or 0) == 1
+        and int(worker.get("page_mutations") or 0) == 0
+        and int(worker.get("assignment_mutations") or 0) == 0
+        and isinstance(worker.get("result"), Mapping)
+    )
+
+
+def _apply_collection_review_result(
+    row: Mapping[str, Any],
+    review: Mapping[str, Any],
+    *,
+    role: str,
+    model: str,
+    model_digest: str,
+    prompt_sha256: str,
+    reviewed_at: str,
+    resolved_at: str | None = None,
+) -> dict[str, Any]:
+    """Project one primary or challenger verdict into its durable queue row."""
+
+    updated = dict(row)
+    review_field = "model_review" if role == "primary" else "challenger_review"
+    updated[review_field] = {
+        **review,
+        "model": model,
+        "model_digest": model_digest,
+        "prompt_sha256": prompt_sha256,
+        "reviewed_at": reviewed_at,
+    }
+    if role == "primary":
+        if review.get("decision") == "review_recommended":
+            updated["status"] = "review_recommended"
+        elif review.get("decision") == "no_issue":
+            updated["status"] = "dismissed"
+            updated["resolved_at"] = resolved_at or reviewed_at
+            updated["resolution"] = "model_no_issue_preserve_original_order"
+    else:
+        primary = updated["model_review"]
+        if review.get("decision") == "no_issue":
+            updated["status"] = "dismissed"
+            updated["resolved_at"] = resolved_at or reviewed_at
+            updated["resolution"] = "challenger_no_issue_preserve_original_order"
+            updated["challenge_status"] = "rejected_recommendation"
+        elif review.get("decision") == "review_recommended" and review.get(
+            "suggested_collection_slug"
+        ) == primary.get("suggested_collection_slug"):
+            updated["challenge_status"] = "consensus_recommended"
+        else:
+            updated["challenge_status"] = "disagreement_or_insufficient"
+    return updated
+
+
 def review_collection_queue(
     root: Path = CHRONOVISOR_ROOT,
     *,
@@ -1484,15 +1551,12 @@ def review_collection_queue(
                 break
             continue
         worker = dict(outcome.value)
-        if (
-            worker.get("schema") != WORKER_SCHEMA
-            or worker.get("model") != selected_model
-            or worker.get("model_digest") != digest
-            or worker.get("prompt_sha256") != PROMPT_SHA256
-            or int(worker.get("model_calls") or 0) != 1
-            or int(worker.get("page_mutations") or 0) != 0
-            or int(worker.get("assignment_mutations") or 0) != 0
-            or not isinstance(worker.get("result"), Mapping)
+        if not _collection_worker_contract_matches(
+            worker,
+            schema=WORKER_SCHEMA,
+            model=selected_model,
+            model_digest=digest,
+            prompt_sha256=PROMPT_SHA256,
         ):
             deferred.append(
                 {
@@ -1502,38 +1566,16 @@ def review_collection_queue(
             )
             continue
         review = dict(worker["result"])
-        row = dict(queue["items"][candidate_id])
-        review_field = "model_review" if role == "primary" else "challenger_review"
-        row[review_field] = {
-            **review,
-            "model": selected_model,
-            "model_digest": digest,
-            "prompt_sha256": PROMPT_SHA256,
-            "reviewed_at": _now(),
-        }
-        if role == "primary":
-            if review.get("decision") == "review_recommended":
-                row["status"] = "review_recommended"
-            elif review.get("decision") == "no_issue":
-                # Preserving original order is the fail-safe action. The local
-                # reviewer may close the anomaly without gaining assignment
-                # authority because no collection or page mutation occurs.
-                row["status"] = "dismissed"
-                row["resolved_at"] = _now()
-                row["resolution"] = "model_no_issue_preserve_original_order"
-        else:
-            primary = row["model_review"]
-            if review.get("decision") == "no_issue":
-                row["status"] = "dismissed"
-                row["resolved_at"] = _now()
-                row["resolution"] = "challenger_no_issue_preserve_original_order"
-                row["challenge_status"] = "rejected_recommendation"
-            elif review.get("decision") == "review_recommended" and review.get(
-                "suggested_collection_slug"
-            ) == primary.get("suggested_collection_slug"):
-                row["challenge_status"] = "consensus_recommended"
-            else:
-                row["challenge_status"] = "disagreement_or_insufficient"
+        row = _apply_collection_review_result(
+            queue["items"][candidate_id],
+            review,
+            role=role,
+            model=selected_model,
+            model_digest=digest,
+            prompt_sha256=PROMPT_SHA256,
+            reviewed_at=_now(),
+            resolved_at=_now() if review.get("decision") == "no_issue" else None,
+        )
         queue["items"][candidate_id] = row
         reviewed.append(
             {

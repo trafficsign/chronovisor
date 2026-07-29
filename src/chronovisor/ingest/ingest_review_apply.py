@@ -108,6 +108,132 @@ def inspect_ingest_review_artifact(
     )
 
 
+def _apply_authorized_ingest_review(
+    *,
+    decision: str,
+    source_key: str,
+    proposal_sha256: str,
+    review: dict[str, Any],
+    review_authority: dict[str, Any],
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    review_path: Any,
+    reused_review: bool,
+    recovered_artifact: bool,
+    audit_decision: dict[str, Any],
+    planned: list[Any],
+    totals: dict[str, Any],
+    stale_review_reason: str | None,
+) -> dict[str, Any]:
+    """Bind an approved verdict to stable authority and perform its effect."""
+
+    from chronovisor.ingest.page_mutation import decision_authority_lock
+
+    with decision_authority_lock():
+        current_authority, current_authority_error = _current_ingest_review_authority(
+            reviewer=reviewer
+        )
+        authority_compare_error = (
+            decision_authority.compare_semantic_authority(
+                review_authority,
+                current_authority,
+                lane="ingest_reconciliation",
+            )
+            if current_authority_error is None
+            else current_authority_error
+        )
+        if authority_compare_error is not None:
+            return {
+                "status": "needs_retry",
+                "source_key": source_key,
+                "proposal_sha256": proposal_sha256,
+                "review": review,
+                "summary": authority_compare_error,
+                "recovered_artifact": recovered_artifact,
+                "reused_review": reused_review,
+                "created": [],
+                "updated": [],
+                "audit": audit_decision,
+            }
+        if proof_error := _ingest_review_authority_error(review, review_authority):
+            return {
+                "status": "needs_retry",
+                "source_key": source_key,
+                "proposal_sha256": proposal_sha256,
+                "review": review,
+                "summary": proof_error,
+                "recovered_artifact": recovered_artifact,
+                "reused_review": reused_review,
+                "created": [],
+                "updated": [],
+                "audit": audit_decision,
+            }
+        if reused_review:
+            durable_artifact = _load_ingest_review_artifact(
+                review_path,
+                source_key=source_key,
+                proposal_sha256=proposal_sha256,
+            )
+            if (
+                durable_artifact is None
+                or durable_artifact.get("authority") != review_authority
+                or durable_artifact.get("review") != review
+            ):
+                return {
+                    "status": "needs_retry",
+                    "source_key": source_key,
+                    "proposal_sha256": proposal_sha256,
+                    "review": review,
+                    "summary": "frontier review artifact changed before effect",
+                    "recovered_artifact": recovered_artifact,
+                    "reused_review": True,
+                    "created": [],
+                    "updated": [],
+                    "audit": audit_decision,
+                }
+        else:
+            _readback, artifact_error = _write_and_readback_ingest_review_artifact(
+                review_path,
+                source_key=source_key,
+                proposal_sha256=proposal_sha256,
+                review=review,
+                authority=review_authority,
+            )
+            if artifact_error is not None:
+                return {
+                    "status": "needs_retry",
+                    "source_key": source_key,
+                    "proposal_sha256": proposal_sha256,
+                    "review": review,
+                    "summary": artifact_error,
+                    "recovered_artifact": recovered_artifact,
+                    "reused_review": False,
+                    "created": [],
+                    "updated": [],
+                    "audit": audit_decision,
+                }
+        if decision == "confirmed_noop":
+            created, updated = [], []
+        else:
+            created, updated = _apply_prepared_operations(planned, link_totals=totals)
+    return {
+        "status": decision,
+        "source_key": source_key,
+        "proposal_sha256": proposal_sha256,
+        "review": review,
+        "authority": review_authority,
+        "recovered_artifact": recovered_artifact,
+        "reused_review": reused_review,
+        "created": created,
+        "updated": updated,
+        "audit": audit_decision,
+        **(
+            {"stale_review_replaced": stale_review_reason}
+            if stale_review_reason is not None
+            else {}
+        ),
+    }
+
+
 def review_and_apply_ingest_operations(
     operations: list[dict],
     *,
@@ -779,114 +905,18 @@ def review_and_apply_ingest_operations(
             "audit": audit_decision,
         }
 
-    # Adoption artifact writers hold this same lease.  Keep authority stable
-    # across the final semantic effect: either the exact page CAS batch or the
-    # confirmed-noop disposition that permits the caller to retire the raw.
-    from chronovisor.ingest.page_mutation import decision_authority_lock
-
-    with decision_authority_lock():
-        current_authority, current_authority_error = _current_ingest_review_authority(
-            reviewer=reviewer
-        )
-        authority_compare_error = (
-            decision_authority.compare_semantic_authority(
-                review_authority,
-                current_authority,
-                lane="ingest_reconciliation",
-            )
-            if current_authority_error is None
-            else current_authority_error
-        )
-        if authority_compare_error is not None:
-            return {
-                "status": "needs_retry",
-                "source_key": source_key,
-                "proposal_sha256": proposal_sha256,
-                "review": review,
-                "summary": authority_compare_error,
-                "recovered_artifact": recovered_artifact,
-                "reused_review": reused_review,
-                "created": [],
-                "updated": [],
-                "audit": audit_decision,
-            }
-        if proof_error := _ingest_review_authority_error(review, review_authority):
-            return {
-                "status": "needs_retry",
-                "source_key": source_key,
-                "proposal_sha256": proposal_sha256,
-                "review": review,
-                "summary": proof_error,
-                "recovered_artifact": recovered_artifact,
-                "reused_review": reused_review,
-                "created": [],
-                "updated": [],
-                "audit": audit_decision,
-            }
-        if reused_review:
-            # Re-read inside the authority lease to close the gap between the
-            # earlier reuse check and the final effect.
-            durable_artifact = _load_ingest_review_artifact(
-                review_path,
-                source_key=source_key,
-                proposal_sha256=proposal_sha256,
-            )
-            if (
-                durable_artifact is None
-                or durable_artifact.get("authority") != review_authority
-                or durable_artifact.get("review") != review
-            ):
-                return {
-                    "status": "needs_retry",
-                    "source_key": source_key,
-                    "proposal_sha256": proposal_sha256,
-                    "review": review,
-                    "summary": "frontier review artifact changed before effect",
-                    "recovered_artifact": recovered_artifact,
-                    "reused_review": True,
-                    "created": [],
-                    "updated": [],
-                    "audit": audit_decision,
-                }
-        else:
-            _readback, artifact_error = _write_and_readback_ingest_review_artifact(
-                review_path,
-                source_key=source_key,
-                proposal_sha256=proposal_sha256,
-                review=review,
-                authority=review_authority,
-            )
-            if artifact_error is not None:
-                return {
-                    "status": "needs_retry",
-                    "source_key": source_key,
-                    "proposal_sha256": proposal_sha256,
-                    "review": review,
-                    "summary": artifact_error,
-                    "recovered_artifact": recovered_artifact,
-                    "reused_review": False,
-                    "created": [],
-                    "updated": [],
-                    "audit": audit_decision,
-                }
-        if decision == "confirmed_noop":
-            created, updated = [], []
-        else:
-            created, updated = _apply_prepared_operations(planned, link_totals=totals)
-    return {
-        "status": decision,
-        "source_key": source_key,
-        "proposal_sha256": proposal_sha256,
-        "review": review,
-        "authority": review_authority,
-        "recovered_artifact": recovered_artifact,
-        "reused_review": reused_review,
-        "created": created,
-        "updated": updated,
-        "audit": audit_decision,
-        **(
-            {"stale_review_replaced": stale_review_reason}
-            if stale_review_reason is not None
-            else {}
-        ),
-    }
+    return _apply_authorized_ingest_review(
+        decision=decision,
+        source_key=source_key,
+        proposal_sha256=proposal_sha256,
+        review=review,
+        review_authority=review_authority,
+        reviewer=reviewer,
+        review_path=review_path,
+        reused_review=reused_review,
+        recovered_artifact=recovered_artifact,
+        audit_decision=audit_decision,
+        planned=planned,
+        totals=totals,
+        stale_review_reason=stale_review_reason,
+    )

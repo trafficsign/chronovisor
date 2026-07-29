@@ -4393,6 +4393,95 @@ def _page_evidence_hashes(pages: object) -> dict[str, str]:
     }
 
 
+def _content_correction_audit_row(
+    *,
+    key: str,
+    event: dict[str, Any],
+    proposal: dict[str, Any],
+    review: dict[str, Any],
+    apply_result: dict[str, Any],
+    verification: dict[str, Any],
+    mutations: list[Any],
+    page_ids: list[str],
+    timestamp: str,
+) -> dict[str, Any]:
+    """Build the byte-stable audit row for an applied content correction."""
+
+    return {
+        "ts": timestamp,
+        "kind": "content_correction",
+        "key": key,
+        "correction_id": mutations[0].correction_id if mutations else "",
+        "source_decision_id": event.get("source_decision_id", ""),
+        "source_turn_ref": event.get("source_turn_ref", {}),
+        "correction_turn_ref": event.get("correction_turn_ref", {}),
+        "classification": proposal.get("decision"),
+        "pages": page_ids,
+        "patches": proposal.get("proposals", []),
+        "frontier": review,
+        "apply": apply_result,
+        "verification": verification,
+    }
+
+
+def _commit_content_correction(
+    *,
+    key: str,
+    event: dict[str, Any],
+    proposal: dict[str, Any],
+    review: dict[str, Any],
+    apply_result: dict[str, Any],
+    verification: dict[str, Any],
+    mutations: list[Any],
+    page_ids: list[str],
+    store: ConvergenceStore,
+    owner: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Commit audit and convergence state after page and read-back success."""
+
+    audit_row = _content_correction_audit_row(
+        key=key,
+        event=event,
+        proposal=proposal,
+        review=review,
+        apply_result=apply_result,
+        verification=verification,
+        mutations=mutations,
+        page_ids=page_ids,
+        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+    try:
+        if not dry_run:
+            _append_content_feedback(audit_row)
+        store.complete(
+            key,
+            "applied",
+            result={
+                "frontier": review,
+                "apply": apply_result,
+                "verification": verification,
+            },
+            owner=owner,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        return _fail_claimed_frontier(
+            store=store,
+            key=key,
+            owner=owner,
+            error=f"correction commit failed: {exc}",
+            failure_class="audit_write_error",
+            dry_run=dry_run,
+        )
+    return {
+        "key": key,
+        "status": "applied",
+        "apply": apply_result,
+        "verification": verification,
+    }
+
+
 def _process_frontier_item(
     item: dict[str, Any],
     *,
@@ -5226,50 +5315,19 @@ def _process_frontier_item(
         result["rollback"] = rollback
         result["rollback_refresh"] = rollback_refresh
         return result
-    audit_row = {
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "kind": "content_correction",
-        "key": key,
-        "correction_id": mutations[0].correction_id if mutations else "",
-        "source_decision_id": event.get("source_decision_id", ""),
-        "source_turn_ref": event.get("source_turn_ref", {}),
-        "correction_turn_ref": event.get("correction_turn_ref", {}),
-        "classification": proposal.get("decision"),
-        "pages": page_ids,
-        "patches": proposal.get("proposals", []),
-        "frontier": review,
-        "apply": apply_result,
-        "verification": verification,
-    }
-    try:
-        if not dry_run:
-            _append_content_feedback(audit_row)
-        store.complete(
-            key,
-            "applied",
-            result={
-                "frontier": review,
-                "apply": apply_result,
-                "verification": verification,
-            },
-            owner=owner,
-            dry_run=dry_run,
-        )
-    except Exception as exc:
-        return _fail_claimed_frontier(
-            store=store,
-            key=key,
-            owner=owner,
-            error=f"correction commit failed: {exc}",
-            failure_class="audit_write_error",
-            dry_run=dry_run,
-        )
-    return {
-        "key": key,
-        "status": "applied",
-        "apply": apply_result,
-        "verification": verification,
-    }
+    return _commit_content_correction(
+        key=key,
+        event=event,
+        proposal=proposal,
+        review=review,
+        apply_result=apply_result,
+        verification=verification,
+        mutations=mutations,
+        page_ids=page_ids,
+        store=store,
+        owner=owner,
+        dry_run=dry_run,
+    )
 
 
 def run_pending_corrections(
