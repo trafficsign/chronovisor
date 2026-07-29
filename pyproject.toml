@@ -23,55 +23,55 @@ semantic = [
 ]
 
 [project.scripts]
-chronovisor = "chronovisor.cli:main"
-chronovisor-mcp = "chronovisor.server:main"
-chronovisor-hook = "chronovisor.hook_dispatcher:main"
-chronovisor-codex-record = "chronovisor.codex_record:main"
-chronovisor-claude-code-record = "chronovisor.claude_code_record:main"
-chronovisor-ingest-drain = "chronovisor.ingest_drain:main"
-chronovisor-dashboard = "chronovisor.dashboard:main"
-chronovisor-self-heal = "chronovisor.self_heal:main"
-chronovisor-recall = "chronovisor.recall_runtime:main"
-chronovisor-recall-audit = "chronovisor.recall_auditor:main"
-chronovisor-recall-auto-apply = "chronovisor.recall_auto_apply:main"
-chronovisor-recall-eval = "chronovisor.recall_eval:main"
-chronovisor-recall-calibrate = "chronovisor.recall_calibration:main"
-chronovisor-recall-improve = "chronovisor.recall_improvement:main"
-chronovisor-content-correction = "chronovisor.content_correction:main"
-chronovisor-content-correction-eval = "chronovisor.content_correction_eval:main"
-chronovisor-eval = "chronovisor.search_eval:main"
-chronovisor-duplicate-review = "chronovisor.duplicate_review:main"
-chronovisor-entities = "chronovisor.entities:main"
-chronovisor-snapshot = "chronovisor.snapshot:main"
-chronovisor-raw-replay = "chronovisor.raw_replay:main"
-chronovisor-memory-integrity = "chronovisor.memory_integrity:main"
-chronovisor-cofire = "chronovisor.cofire:main"
-chronovisor-prefetch = "chronovisor.prefetch:main"
-chronovisor-sleep = "chronovisor.sleep_cycle:main"
-chronovisor-claims = "chronovisor.claims:main"
-chronovisor-golden-expand = "chronovisor.golden_expand:main"
-chronovisor-retention = "chronovisor.retention:main"
-chronovisor-reflect = "chronovisor.reflection:main"
-chronovisor-hubs = "chronovisor.hubs:main"
-chronovisor-autonomy = "chronovisor.autonomy:main"
-chronovisor-converge = "chronovisor.converge_worker:main"
-chronovisor-session-sweeper = "chronovisor.session_sweeper:main"
-chronovisor-background-jobs = "chronovisor.background_jobs:main"
+chronovisor = "chronovisor.hosts.cli:main"
+chronovisor-mcp = "chronovisor.hosts.server:main"
+chronovisor-hook = "chronovisor.hosts.hook_dispatcher:main"
+chronovisor-codex-record = "chronovisor.hosts.codex_record:main"
+chronovisor-claude-code-record = "chronovisor.hosts.claude_code_record:main"
+chronovisor-ingest-drain = "chronovisor.ingest.ingest_drain:main"
+chronovisor-dashboard = "chronovisor.ops.dashboard:main"
+chronovisor-self-heal = "chronovisor.ops.self_heal:main"
+chronovisor-recall = "chronovisor.recall.recall_runtime:main"
+chronovisor-recall-audit = "chronovisor.recall.recall_auditor:main"
+chronovisor-recall-auto-apply = "chronovisor.recall.recall_auto_apply:main"
+chronovisor-recall-eval = "chronovisor.recall.recall_eval:main"
+chronovisor-recall-calibrate = "chronovisor.recall.recall_calibration:main"
+chronovisor-recall-improve = "chronovisor.recall.recall_improvement:main"
+chronovisor-content-correction = "chronovisor.recall.content_correction:main"
+chronovisor-content-correction-eval = "chronovisor.recall.content_correction_eval:main"
+chronovisor-eval = "chronovisor.search.search_eval:main"
+chronovisor-duplicate-review = "chronovisor.recall.duplicate_review:main"
+chronovisor-entities = "chronovisor.ops.entities:main"
+chronovisor-snapshot = "chronovisor.ops.snapshot:main"
+chronovisor-raw-replay = "chronovisor.raw.raw_replay:main"
+chronovisor-memory-integrity = "chronovisor.ops.memory_integrity:main"
+chronovisor-cofire = "chronovisor.search.cofire:main"
+chronovisor-prefetch = "chronovisor.search.prefetch:main"
+chronovisor-sleep = "chronovisor.ops.sleep_cycle:main"
+chronovisor-claims = "chronovisor.recall.claims:main"
+chronovisor-golden-expand = "chronovisor.ops.golden_expand:main"
+chronovisor-retention = "chronovisor.ops.retention:main"
+chronovisor-reflect = "chronovisor.ops.reflection:main"
+chronovisor-hubs = "chronovisor.ops.hubs:main"
+chronovisor-autonomy = "chronovisor.ops.autonomy:main"
+chronovisor-converge = "chronovisor.ops.converge_worker:main"
+chronovisor-session-sweeper = "chronovisor.ops.session_sweeper:main"
+chronovisor-background-jobs = "chronovisor.ops.background_jobs:main"
 chronovisor-lab = "chronovisor.lab.cli:main"
-chronovisor-page-normalize = "chronovisor.page_normalize:main"
-chronovisor-metadata-backfill = "chronovisor.metadata_backfill:main"
-chronovisor-distill = "chronovisor.distill:main"
-chronovisor-oracle = "chronovisor.oracle:main"
-chronovisor-burn-monitor = "chronovisor.burn_monitor:main"
-chronovisor-repair-runbook = "chronovisor.repair_runbook:main"
-chronovisor-research-verify = "chronovisor.research_verification:main"
-chronovisor-research = "chronovisor.research_service:main"
-chronovisor-semantic-service = "chronovisor.semantic_service:main"
-chronovisor-librarian = "chronovisor.librarian:main"
-chronovisor-librarian-merge = "chronovisor.librarian_merge:main"
-chronovisor-librarian-release = "chronovisor.librarian_release:main"
-chronovisor-link-anchor-repair = "chronovisor.link_anchor_repair:main"
-chronovisor-librarian-rollout = "chronovisor.librarian_rollout:main"
+chronovisor-page-normalize = "chronovisor.ops.page_normalize:main"
+chronovisor-metadata-backfill = "chronovisor.ops.metadata_backfill:main"
+chronovisor-distill = "chronovisor.ops.distill:main"
+chronovisor-oracle = "chronovisor.research.oracle:main"
+chronovisor-burn-monitor = "chronovisor.ops.burn_monitor:main"
+chronovisor-repair-runbook = "chronovisor.ops.repair_runbook:main"
+chronovisor-research-verify = "chronovisor.research.research_verification:main"
+chronovisor-research = "chronovisor.research.research_service:main"
+chronovisor-semantic-service = "chronovisor.search.semantic_service:main"
+chronovisor-librarian = "chronovisor.librarian.librarian:main"
+chronovisor-librarian-merge = "chronovisor.librarian.librarian_merge:main"
+chronovisor-librarian-release = "chronovisor.librarian.librarian_release:main"
+chronovisor-link-anchor-repair = "chronovisor.librarian.link_anchor_repair:main"
+chronovisor-librarian-rollout = "chronovisor.librarian.librarian_rollout:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -82,5 +82,27 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "import-linter>=2.9",
     "pytest>=9.0.3",
+]
+
+[tool.importlinter]
+root_package = "chronovisor"
+
+[[tool.importlinter.contracts]]
+name = "Core cannot depend on domain or outer layers"
+type = "forbidden"
+source_modules = ["chronovisor.core"]
+forbidden_modules = [
+    "chronovisor.raw",
+    "chronovisor.ingest",
+    "chronovisor.recall",
+    "chronovisor.search",
+    "chronovisor.classification",
+    "chronovisor.librarian",
+    "chronovisor.decision",
+    "chronovisor.research",
+    "chronovisor.ops",
+    "chronovisor.hosts",
+    "chronovisor.lab",
 ]

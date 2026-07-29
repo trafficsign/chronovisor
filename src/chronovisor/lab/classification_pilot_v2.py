@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification import UDCPackage, load_udc_package
+from chronovisor.classification.classification import UDCPackage, load_udc_package
 from chronovisor.lab.classification_pilot import (
     HOLD,
     NONE,
@@ -251,7 +251,7 @@ class MultiPathCandidateIndex(AuthoritativeCandidateIndex):
 
     @staticmethod
     def _cosine(left: list[float], right: list[float]) -> float:
-        from chronovisor.embedding import cosine
+        from chronovisor.search.embedding import cosine
 
         return cosine(left, right)
 

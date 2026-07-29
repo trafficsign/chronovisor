@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from chronovisor.timeutil import utc_iso_milliseconds as _now
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 
 import hashlib
 import json
@@ -20,15 +20,15 @@ from typing import Any
 
 import numpy as np
 
-from chronovisor.classification import (
+from chronovisor.classification.classification import (
     ClassificationError,
     UDCPackage,
     load_udc_package,
 )
-from chronovisor.classification_embedding_worker import (
+from chronovisor.classification.classification_embedding_worker import (
     SCHEMA as EMBEDDING_WORKER_SCHEMA,
 )
-from chronovisor.classification_engine import (
+from chronovisor.classification.classification_engine import (
     DEFAULT_CANDIDATE_LIMIT,
     CandidateIndex,
 )
@@ -38,15 +38,15 @@ from chronovisor.lab.classification_fixture_set import (
     sha256_bytes,
     sha256_file,
 )
-from chronovisor.classification_library_sources import EXTERNAL_PACKAGE_SCHEMA
+from chronovisor.classification.classification_library_sources import EXTERNAL_PACKAGE_SCHEMA
 from chronovisor.lab.classification_pilot import AuthoritativeCandidateIndex
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.research_scheduler import (
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.research.research_scheduler import (
     research_lane,
     run_cancellable_command,
     sync_pending,
 )
-from chronovisor.runtime_config import load_embedding_config
+from chronovisor.core.runtime_config import load_embedding_config
 
 INDEX_SCHEMA = "chronovisor.library-evidence-index.v1"
 EVIDENCE_SCHEMA = "chronovisor.classification-library-evidence.v1"

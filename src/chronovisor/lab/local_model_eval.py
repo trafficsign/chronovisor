@@ -8,7 +8,7 @@ and aggregate metrics -- never prompts or literal model responses.
 
 from __future__ import annotations
 
-from chronovisor.timeutil import utc_iso_seconds as _now
+from chronovisor.core.timeutil import utc_iso_seconds as _now
 
 import argparse
 import hashlib
@@ -25,15 +25,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from chronovisor.canonical_json import (
+from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as _sha256_json,
     canonical_json_strict as _canonical_json,
 )
 
 import httpx
 
-from chronovisor import ollama
-from chronovisor.decision_lane_contracts import (
+from chronovisor.core import ollama
+from chronovisor.decision.decision_lane_contracts import (
     LANE_CONTRACT_CASE_VERSION,
     LANE_CONTRACT_POLICY_VERSION,
     LANE_CONTRACT_SOURCE,
@@ -43,11 +43,11 @@ from chronovisor.decision_lane_contracts import (
     model_backed_lane_names,
     validate_declared_lane_contract,
 )
-from chronovisor.decision_lane_contract_cases import (
+from chronovisor.decision.decision_lane_contract_cases import (
     decision_lane_contract_case_manifest,
     decision_lane_contract_case_manifest_sha256,
 )
-from chronovisor.decision_router import (
+from chronovisor.decision.decision_router import (
     DECISION_REQUEST_FINGERPRINT_VERSION,
     DECISION_SEMANTICS_POLICY_VERSION,
     QUORUM_SAFETY_POLICY_VERSION,
@@ -59,7 +59,7 @@ from chronovisor.decision_router import (
     decision_request_fingerprint_sha256,
     decision_request_context,
 )
-from chronovisor.decision_schema_manifest import (
+from chronovisor.decision.decision_schema_manifest import (
     decision_signature_value,
     default_decision_value,
     production_decision_schemas,
@@ -67,7 +67,7 @@ from chronovisor.decision_schema_manifest import (
     production_signature_manifest,
     schema_sha256,
 )
-from chronovisor.local_structured import (
+from chronovisor.decision.local_structured import (
     ChatRequest,
     ChatTransport,
     STRUCTURED_GENERATION_POLICY_VERSION,
@@ -77,7 +77,7 @@ from chronovisor.local_structured import (
     validate_schema_definition,
 )
 from chronovisor.lab.model_lab import REPLAY_FILE
-from chronovisor.runtime_config import (
+from chronovisor.core.runtime_config import (
     DecisionRouterConfig,
     load_candidate_decision_router_config,
     load_decision_router_config,
@@ -2813,7 +2813,7 @@ def adoption_gate(
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    from chronovisor.page_mutation import decision_authority_lock
+    from chronovisor.ingest.page_mutation import decision_authority_lock
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(

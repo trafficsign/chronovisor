@@ -10,9 +10,9 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from chronovisor.store import PAGES_DIR, all_pages
-from chronovisor.ollama import generate
-from chronovisor.legacy_semantic_write import block_legacy_semantic_mutation
+from chronovisor.core.store import PAGES_DIR, all_pages
+from chronovisor.core.ollama import generate
+from chronovisor.raw.legacy_semantic_write import block_legacy_semantic_mutation
 
 BATCH_SIZE = 100
 

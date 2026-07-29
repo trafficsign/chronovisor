@@ -8,8 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from chronovisor.evidence_bundle import simple_assess_claims
-from chronovisor.research_types import EvidenceArtifact
+from chronovisor.research.evidence_bundle import simple_assess_claims
+from chronovisor.research.research_types import EvidenceArtifact
 
 _PACKAGED_FIXTURE = (
     Path(__file__).resolve().parents[1] / "fixtures" / "research_holdout.jsonl"

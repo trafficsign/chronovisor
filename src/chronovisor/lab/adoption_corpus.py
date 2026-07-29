@@ -30,24 +30,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chronovisor.canonical_json import (
+from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as _sha256_json,
     canonical_json_strict as _canonical_json,
 )
 
-from chronovisor.decision_schema_manifest import (
+from chronovisor.decision.decision_schema_manifest import (
     decision_signature_value,
     production_decision_schemas,
     production_schema_manifest,
     schema_sha256,
 )
-from chronovisor.decision_router import (
+from chronovisor.decision.decision_router import (
     DECISION_REQUEST_FINGERPRINT_VERSION,
     decision_context_buckets,
     decision_request_fingerprint_sha256,
     decision_request_context,
 )
-from chronovisor.decision_lane_contracts import (
+from chronovisor.decision.decision_lane_contracts import (
     LANE_CONTRACT_CASE_VERSION,
     LANE_CONTRACT_POLICY_VERSION,
     LANE_CONTRACT_SOURCE,
@@ -57,12 +57,12 @@ from chronovisor.decision_lane_contracts import (
     lane_contract_sha256,
     model_backed_lane_names,
 )
-from chronovisor.decision_lane_contract_cases import (
+from chronovisor.decision.decision_lane_contract_cases import (
     decision_lane_contract_case_manifest,
     decision_lane_contract_case_manifest_sha256,
     decision_lane_contract_case_specs,
 )
-from chronovisor.content_correction import (
+from chronovisor.recall.content_correction import (
     LEGACY_UNFILTERED_SIGNAL,
     correction_signal,
     is_non_user_transport_envelope,
@@ -76,11 +76,11 @@ from chronovisor.lab.local_model_eval import (
     replay_semantic_effect,
 )
 from chronovisor.lab.model_lab import REPLAY_FILE
-from chronovisor.read_back_repair import (
+from chronovisor.ingest.read_back_repair import (
     READ_BACK_EVIDENCE_POLICY_MARKER,
     READ_BACK_FRONTIER_SCHEMA,
 )
-from chronovisor.runtime_config import (
+from chronovisor.core.runtime_config import (
     DecisionRouterConfig,
     load_candidate_decision_router_config,
     load_decision_router_config,

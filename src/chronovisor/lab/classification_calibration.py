@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from chronovisor.jsonl import write_jsonl as _write_jsonl
+from chronovisor.core.jsonl import write_jsonl as _write_jsonl
 
-from chronovisor.timeutil import utc_iso_milliseconds as _now
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 
 import argparse
 import hashlib
@@ -17,8 +17,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification import CALIBRATION_SCHEMA, load_udc_package
-from chronovisor.classification_engine import (
+from chronovisor.classification.classification import CALIBRATION_SCHEMA, load_udc_package
+from chronovisor.classification.classification_engine import (
     ENGINE_VERSION,
     adopt_calibration,
     build_fixture_candidates,
@@ -28,9 +28,9 @@ from chronovisor.classification_engine import (
     run_consensus_batches,
 )
 from chronovisor.lab.classification_fixture_set import load_fixture_set
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.runtime_config import load_decision_router_config
-from chronovisor.store import CHRONOVISOR_ROOT
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 DISTRIBUTION_SCHEMA = "chronovisor.classification-distribution.v1"
 DEV_AUDIT_SCHEMA = "chronovisor.classification-dev-audit.v1"
@@ -611,7 +611,7 @@ def install_package(root: Path, source: Path) -> dict[str, Any]:
     package = load_udc_package(None)
     source_package = json.loads(source.read_text(encoding="utf-8"))
     if source_package.get("release") != package.release:
-        from chronovisor.classification import UDCPackage
+        from chronovisor.classification.classification import UDCPackage
 
         package = UDCPackage.load(source)
     target = root / "classification" / "udc-package.json"

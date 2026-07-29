@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from chronovisor.timeutil import utc_iso_seconds as _now
+from chronovisor.core.timeutil import utc_iso_seconds as _now
 
 import argparse
 import fcntl
@@ -17,12 +17,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from chronovisor.decision_schema_manifest import (
+from chronovisor.decision.decision_schema_manifest import (
     decision_signature_value,
     default_decision_value,
 )
-from chronovisor.durable_state import exclusive_text_file_lock
-from chronovisor.store import CHRONOVISOR_ROOT
+from chronovisor.core.durable_state import exclusive_text_file_lock
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 LAB_DIR = CHRONOVISOR_ROOT / "runtime" / "model-lab"
 POLICY_FILE = LAB_DIR / "active-policy.json"

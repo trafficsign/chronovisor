@@ -30,7 +30,7 @@ from tag_backfill_apply import (  # noqa: E402
     _flatten_master,
     _process_one,
 )
-from chronovisor.legacy_semantic_write import (  # noqa: E402
+from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
 

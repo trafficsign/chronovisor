@@ -8,13 +8,13 @@ inference boundary.
 
 from __future__ import annotations
 
-from chronovisor.hashutil import sha256_prefixed_bytes as sha256_bytes
+from chronovisor.core.hashutil import sha256_prefixed_bytes as sha256_bytes
 
-from chronovisor.jsonl_write import atomic_replace_bytes as _atomic_write
+from chronovisor.core.jsonl_write import atomic_replace_bytes as _atomic_write
 
-from chronovisor.jsonl_write import write_jsonl_atomic as _write_jsonl
+from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
 
-from chronovisor.timeutil import utc_iso_milliseconds as _now
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 
 import hashlib
 import json
@@ -27,20 +27,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor import frontmatter
-from chronovisor.classification import (
+from chronovisor.core import frontmatter
+from chronovisor.classification.classification import (
     ClassificationError,
     classification_authority_status,
     load_udc_package,
 )
-from chronovisor.classification_engine import (
+from chronovisor.classification.classification_engine import (
     DEFAULT_CANDIDATE_LIMIT,
     ENGINE_VERSION,
     CandidateIndex,
     _page_payload,
 )
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.page_registry import PageRegistry
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.ingest.page_registry import PageRegistry
 
 FIXTURE_SET_SCHEMA = "chronovisor.classification-fixture-set.v1"
 DISABLED_BASELINE_SCHEMA = "chronovisor.classification-disabled-baseline.v1"

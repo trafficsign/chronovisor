@@ -7,7 +7,7 @@ proves the protected paths remained byte-identical.
 
 from __future__ import annotations
 
-from chronovisor.timeutil import utc_iso_milliseconds as _now
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 
 import json
 import shutil
@@ -18,15 +18,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification import ClassificationError, load_udc_package
-from chronovisor.classification_bundle import (
+from chronovisor.classification.classification import ClassificationError, load_udc_package
+from chronovisor.classification.classification_bundle import (
     ADOPTED_MANIFEST_SCHEMA,
     activate_decision_only,
     pointer_paths,
     resolve_authority,
     rollback_authority,
 )
-from chronovisor.classification_engine import _page_payload
+from chronovisor.classification.classification_engine import _page_payload
 from chronovisor.lab.classification_fixture_set import (
     _write_jsonl,
     inference_dto,
@@ -37,8 +37,8 @@ from chronovisor.lab.classification_library_evidence import (
     LibraryEvidenceIndex,
     LibraryEvidenceProvider,
 )
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.page_registry import PageRegistry
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.ingest.page_registry import PageRegistry
 
 ARTIFACT_SWEEP_SCHEMA = "chronovisor.classification-artifact-sweep.v1"
 

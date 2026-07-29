@@ -13,16 +13,17 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from chronovisor import ollama, research_scheduler
-from chronovisor.durable_state import write_sealed_json
-from chronovisor.recall_runtime import (
+from chronovisor.core import ollama
+from chronovisor.research import research_scheduler
+from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.recall.recall_runtime import (
     RecallPolicy,
     RecallRequest,
     run_recall,
 )
-from chronovisor.research_scheduler import research_lane, run_cancellable_command
-from chronovisor.runtime_config import load_decision_router_config
-from chronovisor.store import CHRONOVISOR_ROOT
+from chronovisor.research.research_scheduler import research_lane, run_cancellable_command
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 SCHEMA = "chronovisor.librarian-preemption-burn.v1"
 

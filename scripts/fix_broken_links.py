@@ -24,9 +24,9 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from chronovisor.store import PAGES_DIR, CHRONOVISOR_ROOT  # noqa: E402
-from chronovisor.lint import check  # noqa: E402
-from chronovisor.legacy_semantic_write import (  # noqa: E402
+from chronovisor.core.store import PAGES_DIR, CHRONOVISOR_ROOT  # noqa: E402
+from chronovisor.ops.lint import check  # noqa: E402
+from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
 

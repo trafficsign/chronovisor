@@ -26,8 +26,8 @@ from pathlib import Path
 # Make the package importable when run from the repo root.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from chronovisor.orphan_link import run_dry_run  # noqa: E402
-from chronovisor.store import SYSTEM_DIR  # noqa: E402
+from chronovisor.ops.orphan_link import run_dry_run  # noqa: E402
+from chronovisor.core.store import SYSTEM_DIR  # noqa: E402
 
 
 def main() -> int:

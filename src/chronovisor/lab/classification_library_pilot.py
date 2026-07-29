@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification import (
+from chronovisor.classification.classification import (
     ClassificationError,
     classification_authority_status,
     load_udc_package,
@@ -21,7 +21,7 @@ from chronovisor.lab.classification_artifact_runner import (
     run_artifact_only_sweep,
     storage_manifest,
 )
-from chronovisor.classification_bundle import (
+from chronovisor.classification.classification_bundle import (
     activate_decision_only,
     create_adopted_manifest,
     create_candidate_bundle,
@@ -30,12 +30,12 @@ from chronovisor.classification_bundle import (
     probe_decision_only_authority,
     rollback_authority,
 )
-from chronovisor.classification_engine import (
+from chronovisor.classification.classification_engine import (
     DEFAULT_CANDIDATE_LIMIT,
     ENGINE_VERSION,
     run_consensus_batches,
 )
-from chronovisor.classification_evidence_judgment import (
+from chronovisor.classification.classification_evidence_judgment import (
     ARMS,
     paired_rows,
 )
@@ -72,7 +72,7 @@ from chronovisor.lab.classification_library_evidence import (
     embed_texts_cancellable,
     external_test_cases,
 )
-from chronovisor.classification_library_sources import (
+from chronovisor.classification.classification_library_sources import (
     _atomic_write,
     czech_authority_contract,
     czech_bibliography_contract,
@@ -88,21 +88,21 @@ from chronovisor.classification_library_sources import (
     write_external_package,
 )
 from chronovisor.lab.classification_pilot import AuthoritativeCandidateIndex
-from chronovisor.classification_resource_burn import run_resource_burn
-from chronovisor.classification_retention import (
+from chronovisor.classification.classification_resource_burn import run_resource_burn
+from chronovisor.classification.classification_retention import (
     build_audit_retention_manifest,
     required_update_validation,
 )
-from chronovisor.durable_state import (
+from chronovisor.core.durable_state import (
     DurableStateError,
     read_sealed_json,
     write_sealed_json,
 )
-from chronovisor.runtime_config import (
+from chronovisor.core.runtime_config import (
     load_decision_router_config,
     load_embedding_config,
 )
-from chronovisor.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 PILOT_STATE_SCHEMA = "chronovisor.classification-library-pilot-state.v1"
 FIXTURE_EPOCH = "epoch-3-library-evidence-v1"
@@ -247,7 +247,9 @@ def _model_policy() -> dict[str, Any]:
         "embedding": load_embedding_config().__dict__,
         "engine_version": ENGINE_VERSION,
         "worker_code_sha256": sha256_file(
-            Path(__file__).with_name("classification_model_worker.py")
+            Path(__file__).resolve().parents[1]
+            / "classification"
+            / "classification_model_worker.py"
         ),
         "calibration_code_sha256": sha256_file(
             Path(__file__).with_name("classification_library_calibration.py")
@@ -1707,7 +1709,9 @@ def _phase_e7a_sweep(root: Path, state: dict[str, Any]) -> dict[str, Any]:
             }
             | {
                 sha256_file(
-                    Path(__file__).with_name("classification_library_sources.py")
+                    Path(__file__).resolve().parents[1]
+                    / "classification"
+                    / "classification_library_sources.py"
                 )
             }
         ),
@@ -1732,14 +1736,22 @@ def _phase_e7a_sweep(root: Path, state: dict[str, Any]) -> dict[str, Any]:
                         Path(__file__).with_name("classification_library_evidence.py")
                     ),
                     sha256_file(
-                        Path(__file__).with_name("classification_embedding_worker.py")
+                        Path(__file__).resolve().parents[1]
+                        / "classification"
+                        / "classification_embedding_worker.py"
                     ),
-                    sha256_file(Path(__file__).with_name("classification_resolver.py")),
+                    sha256_file(
+                        Path(__file__).resolve().parents[1]
+                        / "classification"
+                        / "classification_resolver.py"
+                    ),
                 )
             ).encode("utf-8")
         ),
         evidence_template_sha256=sha256_file(
-            Path(__file__).with_name("classification_evidence_judgment.py")
+            Path(__file__).resolve().parents[1]
+            / "classification"
+            / "classification_evidence_judgment.py"
         ),
         model_policy=_model_policy(),
         run_config={
@@ -2092,7 +2104,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repo-root",
         type=Path,
-        default=Path(__file__).resolve().parents[2],
+        default=Path(__file__).resolve().parents[3],
     )
     parser.add_argument(
         "command",

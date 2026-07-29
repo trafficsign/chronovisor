@@ -21,8 +21,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from chronovisor.ollama import generate, is_available  # noqa: E402
-from chronovisor.legacy_semantic_write import (  # noqa: E402
+from chronovisor.core.ollama import generate, is_available  # noqa: E402
+from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
 from backfill_links import merge_related_section, atomic_write  # noqa: E402

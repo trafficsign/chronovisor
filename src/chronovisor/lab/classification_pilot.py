@@ -7,7 +7,7 @@ reviewed diagnostic set without mutating pages, calibration, or rollout state.
 
 from __future__ import annotations
 
-from chronovisor.hashutil import sha256_prefixed_bytes as _sha256_bytes
+from chronovisor.core.hashutil import sha256_prefixed_bytes as _sha256_bytes
 
 import argparse
 import hashlib
@@ -19,13 +19,14 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor import embedding, ollama
-from chronovisor.classification import (
+from chronovisor.search import embedding
+from chronovisor.core import ollama
+from chronovisor.classification.classification import (
     UDCPackage,
     load_udc_package,
 )
-from chronovisor.classification_engine import CandidateIndex
-from chronovisor.runtime_config import load_decision_router_config
+from chronovisor.classification.classification_engine import CandidateIndex
+from chronovisor.core.runtime_config import load_decision_router_config
 
 
 DIAGNOSTIC_SCHEMA = "chronovisor.classification-diagnostic.v1"

@@ -233,7 +233,7 @@ system code repair.
 
 ## Search Pipeline
 
-`chronovisor.pipeline` owns the shared ranking orchestration. Production
+`chronovisor.search.pipeline` owns the shared ranking orchestration. Production
 `search.search()`, search evaluation variants, and self-tune weight trials all
 enter through `run_search_pipeline()` with different `PipelineConfig` values:
 

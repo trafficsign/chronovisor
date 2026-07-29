@@ -8,9 +8,9 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from chronovisor import ollama
-from chronovisor.classification import ClassificationError
-from chronovisor.classification_anchor import UNRESOLVED_ANCHOR_ID
+from chronovisor.core import ollama
+from chronovisor.classification.classification import ClassificationError
+from chronovisor.classification.classification_anchor import UNRESOLVED_ANCHOR_ID
 
 WORKER_SCHEMA = "chronovisor.classification-anchor-complement-auditor.v1"
 AUDIT_SCHEMA = "chronovisor.classification-anchor-complement-audit.v1"

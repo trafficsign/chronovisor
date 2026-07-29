@@ -32,13 +32,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from chronovisor.legacy_semantic_write import (  # noqa: E402
+from chronovisor.raw.legacy_semantic_write import (  # noqa: E402
     block_legacy_semantic_mutation,
 )
 
 # chronovisor パッケージから既存定数を import
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from chronovisor.store import PAGES_DIR  # noqa: E402
+from chronovisor.core.store import PAGES_DIR  # noqa: E402
 
 CHRONOVISOR_ROOT = Path.home() / ".chronovisor"
 BACKUPS_DIR = CHRONOVISOR_ROOT / "backups"

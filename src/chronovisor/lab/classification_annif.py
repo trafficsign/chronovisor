@@ -8,11 +8,11 @@ larger evaluation.
 
 from __future__ import annotations
 
-from chronovisor.jsonl_write import atomic_replace_text as _atomic_write_text
+from chronovisor.core.jsonl_write import atomic_replace_text as _atomic_write_text
 
-from chronovisor.jsonl_write import write_jsonl_atomic as _write_jsonl
+from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
 
-from chronovisor.timeutil import utc_iso_milliseconds as _now
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 
 import argparse
 import csv
@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification import (
+from chronovisor.classification.classification import (
     ClassificationError,
     UDCPackage,
     load_udc_package,
@@ -37,7 +37,7 @@ from chronovisor.lab.classification_library_evidence import (
     COMPOSITE_UDC_RE,
     split_for_group,
 )
-from chronovisor.classification_library_sources import (
+from chronovisor.classification.classification_library_sources import (
     MARC_NS,
     czech_bibliography_contract,
     fetch_oai_window,
@@ -45,8 +45,8 @@ from chronovisor.classification_library_sources import (
     stable_sample,
     write_external_package,
 )
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.store import CHRONOVISOR_ROOT
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 ANNIF_VERSION = "1.4.1"
 ANNIF_DISTRIBUTION = f"annif[fasttext]=={ANNIF_VERSION}"

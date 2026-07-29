@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 
 MetricFunction = Callable[[Sequence[Mapping[str, Any]], str], Mapping[str, Any]]
 

@@ -21,17 +21,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.dry_run:
-        from chronovisor.legacy_semantic_write import block_legacy_semantic_mutation
+        from chronovisor.raw.legacy_semantic_write import block_legacy_semantic_mutation
 
         block_legacy_semantic_mutation(
             tool="backfill_recall_questions.py",
             replacement="chronovisor-sleep",
         )
 
-    from chronovisor.frontmatter import parse, patch
-    from chronovisor.ingest import _ensure_recall_metadata_frontmatter
-    from chronovisor.link_fix import atomic_write
-    from chronovisor.store import all_pages, page_id_from_path
+    from chronovisor.core.frontmatter import parse, patch
+    from chronovisor.ingest.ingest import _ensure_recall_metadata_frontmatter
+    from chronovisor.core.link_fix import atomic_write
+    from chronovisor.core.store import all_pages, page_id_from_path
 
     scanned = 0
     updated = 0

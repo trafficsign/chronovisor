@@ -148,7 +148,7 @@ def _ingest_aliases(tree: ast.AST) -> set[str]:
                     aliases.add(name.asname or name.name)
         elif isinstance(node, ast.Import):
             for name in node.names:
-                if name.name == "chronovisor.ingest":
+                if name.name == "chronovisor.ingest.ingest":
                     aliases.add(name.asname or "ingest")
     return aliases
 
@@ -174,7 +174,7 @@ def _ingest_references(tree: ast.AST) -> tuple[Counter[str], Counter[str]]:
         ):
             patches[name.value] += 1
         elif isinstance(owner, ast.Constant) and isinstance(owner.value, str):
-            prefix = "chronovisor.ingest."
+            prefix = "chronovisor.ingest.ingest."
             if owner.value.startswith(prefix):
                 patches[owner.value.removeprefix(prefix).split(".", 1)[0]] += 1
     return attributes, patches

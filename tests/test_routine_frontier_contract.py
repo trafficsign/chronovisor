@@ -8,16 +8,16 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "chronovisor"
 ROUTINE_MODULES = (
-    "codex_record.py",
-    "claude_code_record.py",
-    "ingest.py",
-    "content_correction.py",
-    "recall_improvement.py",
-    "sleep_cycle.py",
-    "converge_worker.py",
-    "convergence.py",
-    "hook_dispatcher.py",
-    "background_jobs.py",
+    "hosts/codex_record.py",
+    "hosts/claude_code_record.py",
+    "ingest/ingest.py",
+    "recall/content_correction.py",
+    "recall/recall_improvement.py",
+    "ops/sleep_cycle.py",
+    "ops/converge_worker.py",
+    "ops/convergence.py",
+    "hosts/hook_dispatcher.py",
+    "ops/background_jobs.py",
 )
 
 
@@ -51,10 +51,10 @@ def test_routine_modules_cannot_import_or_call_frontier_execution() -> None:
 
 def test_only_self_heal_can_call_guarded_frontier_repair() -> None:
     callers: dict[str, list[ast.Call]] = {}
-    for path in sorted(PACKAGE_ROOT.glob("*.py")):
+    for path in sorted(PACKAGE_ROOT.glob("*/*.py")):
         calls = [
             node
-            for node in ast.walk(_tree(path.name))
+            for node in ast.walk(_tree(str(path.relative_to(PACKAGE_ROOT))))
             if isinstance(node, ast.Call)
             and (
                 isinstance(node.func, ast.Name)
@@ -62,15 +62,15 @@ def test_only_self_heal_can_call_guarded_frontier_repair() -> None:
             )
         ]
         if calls:
-            callers[path.name] = calls
+            callers[str(path.relative_to(PACKAGE_ROOT))] = calls
 
-    assert set(callers) == {"self_heal.py"}
-    for call in callers["self_heal.py"]:
+    assert set(callers) == {"ops/self_heal.py"}
+    for call in callers["ops/self_heal.py"]:
         assert "evidence" in {keyword.arg for keyword in call.keywords}
 
 
 def test_codex_subprocess_is_reachable_only_inside_guarded_entrypoint() -> None:
-    tree = _tree("frontier_review.py")
+    tree = _tree("decision/frontier_review.py")
     calling_functions: set[str] = set()
     structured_review: ast.FunctionDef | None = None
     for node in tree.body:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from chronovisor.timeutil import utc_iso_milliseconds as _now
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 
 import argparse
 import hashlib
@@ -13,9 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor import ollama
-from chronovisor.classification import ClassificationError
-from chronovisor.classification_anchor import (
+from chronovisor.core import ollama
+from chronovisor.classification.classification import ClassificationError
+from chronovisor.classification.classification_anchor import (
     UNRESOLVED_ANCHOR_ID,
     AnchorSet,
     default_anchor_gold_path,
@@ -43,13 +43,13 @@ from chronovisor.lab.harness import (
     require_contract,
     require_file_hashes,
 )
-from chronovisor.classification_anchor_worker import (
+from chronovisor.classification.classification_anchor_worker import (
     PROMPT_SHA256 as CORE_PROMPT_SHA256,
 )
 from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_file
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.runtime_config import load_decision_router_config
-from chronovisor.store import CHRONOVISOR_ROOT
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 SELECTION_SCHEMA = "chronovisor.classification-anchor-set-unseen-selection.v1"
 GOLD_SCHEMA = "chronovisor.classification-anchor-set-unseen-gold.v1"
@@ -81,7 +81,7 @@ def unseen_root(root: Path) -> Path:
 
 def default_unseen_gold_path() -> Path:
     return (
-        Path(__file__).parent
+        Path(__file__).resolve().parents[1]
         / "data"
         / "cvo-anchor-set-unseen-gold-v1.json"
     )

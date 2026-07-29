@@ -21,8 +21,8 @@ from typing import Any, Self
 import httpx
 
 from chronovisor import recall_breaker, semantic_client
-from chronovisor.runtime_config import load_search_embedding_config
-from chronovisor.store import CHRONOVISOR_ROOT
+from chronovisor.core.runtime_config import load_search_embedding_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 PROMPTS = (
     "Chronovisorの同期RecallとNemotron検索の設計を思い出して。",
@@ -108,7 +108,7 @@ def _run_hook(config: Path, prompt: str, session_id: str) -> dict[str, Any]:
     command = [
         sys.executable,
         "-m",
-        "chronovisor.hook_dispatcher",
+        "chronovisor.hosts.hook_dispatcher",
         "--host",
         "codex",
         "--event",

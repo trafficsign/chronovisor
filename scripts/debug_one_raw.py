@@ -3,7 +3,7 @@
 Usage:
     uv run python scripts/debug_one_raw.py <raw-filename-or-path>
 
-Wraps `chronovisor.ingest.generate` so every LLM call's full prompt + output
+Wraps `chronovisor.ingest.ingest.generate` so every LLM call's full prompt + output
 is dumped to /tmp/wiki-debug/<raw-stem>/. We then call `_triage` and
 `_generate_one` directly and report which parser stage failed.
 """
@@ -14,8 +14,8 @@ import argparse
 import sys
 from pathlib import Path
 
-import chronovisor.ingest as ingest
-from chronovisor.ingest import (
+import chronovisor.ingest.ingest as ingest
+from chronovisor.ingest.ingest import (
     _triage,
     _generate_one,
     _extract_json_array,

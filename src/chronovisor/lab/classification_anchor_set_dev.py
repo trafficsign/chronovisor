@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from chronovisor.timeutil import utc_iso_milliseconds as _now
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 
 import argparse
 import hashlib
@@ -16,9 +16,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor import ollama
-from chronovisor.classification import ClassificationError
-from chronovisor.classification_anchor import (
+from chronovisor.core import ollama
+from chronovisor.classification.classification import ClassificationError
+from chronovisor.classification.classification_anchor import (
     UNRESOLVED_ANCHOR_ID,
     AnchorSet,
     default_anchor_set_path,
@@ -28,21 +28,21 @@ from chronovisor.lab.classification_anchor_dev import (
     deterministic_evidence_capsule,
     load_burned40,
 )
-from chronovisor.classification_anchor_set_worker import (
+from chronovisor.classification.classification_anchor_set_worker import (
     PROMPT_SHA256,
     SELECTION_SCHEMA,
     SUBJECT_SCHEMA,
     WORKER_SCHEMA,
 )
 from chronovisor.lab.classification_fixture_set import sha256_file
-from chronovisor.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.research_scheduler import (
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.research.research_scheduler import (
     research_lane,
     run_cancellable_command,
     sync_pending,
 )
-from chronovisor.runtime_config import load_decision_router_config
-from chronovisor.store import CHRONOVISOR_ROOT
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 EVALUATION_SCHEMA = "chronovisor.classification-anchor-set-dev.v1"
 CASE_SCHEMA = "chronovisor.classification-anchor-set-case.v1"
@@ -56,7 +56,11 @@ _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def default_dev_gold_path() -> Path:
-    return Path(__file__).parent / "data" / "cvo-anchor-set-dev-gold-v1.json"
+    return (
+        Path(__file__).resolve().parents[1]
+        / "data"
+        / "cvo-anchor-set-dev-gold-v1.json"
+    )
 
 
 def output_root(root: Path, experiment: str = EXPERIMENT) -> Path:

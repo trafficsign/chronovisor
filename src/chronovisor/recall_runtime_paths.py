@@ -1,8 +1,6 @@
-"""Small path module shared by recall components without import cycles."""
+"""Compatibility alias for :mod:`chronovisor.recall.recall_runtime_paths`."""
 
-from __future__ import annotations
+from chronovisor.recall import recall_runtime_paths as _implementation
+from chronovisor.core.compat import alias_legacy_module
 
-from chronovisor.store import CHRONOVISOR_ROOT
-
-
-RECALL_DIR = CHRONOVISOR_ROOT / "recall"
+alias_legacy_module(__name__, _implementation)
