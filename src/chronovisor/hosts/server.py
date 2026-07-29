@@ -11,7 +11,10 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
