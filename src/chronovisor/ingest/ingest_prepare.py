@@ -39,6 +39,139 @@ from chronovisor.ingest.ingest import (  # noqa: E402
 )
 
 
+def _prepare_operation(
+    source_operation_index: int,
+    op: dict[str, Any],
+    *,
+    allowed_ids: set[str],
+    existing_tags_snapshot: list[str],
+    read_only: bool,
+    frontmatter_parse: Any,
+    frontmatter_patch: Any,
+) -> tuple[PreparedIngestOperation, dict[str, int]]:
+    """Resolve one generated operation into an exact mutation proposal."""
+
+    source_operation_type = op["type"]
+    source_filename = op["filename"]
+    op_type = source_operation_type
+    full_path = _safe_resolve_page_path(source_filename)
+    page_id = full_path.stem
+    body, stats = _reconcile_links(op["content"], allowed_ids)
+
+    op_raw_keywords = op.get("raw_keywords")
+    propagate_raw_keywords = (
+        isinstance(op_raw_keywords, list)
+        and all(isinstance(value, str) for value in op_raw_keywords)
+        and bool(op_raw_keywords)
+    )
+
+    if op_type == "create":
+        existing = _find_page_resilient(page_id, emit_logs=not read_only)
+        if existing is not None:
+            if not read_only:
+                _safe_log(
+                    f"ingest | create op for existing page_id {page_id!r} "
+                    f"converted to update (existing: {existing}, target: {full_path})"
+                )
+            op_type = "update"
+            full_path = existing
+            page_id = existing.stem
+            body = _strip_all_frontmatter(body).strip()
+            if not body:
+                raise IngestApplyError(
+                    f"create collision for page_id {page_id!r} produced no update body"
+                )
+
+    if op_type == "create":
+        body = _process_tags_in_body(
+            body,
+            existing_tags_snapshot,
+            frontmatter_parse,
+            frontmatter_patch,
+            record_changes=False,
+        )
+        if propagate_raw_keywords:
+            body = frontmatter_patch(body, {"raw_keywords": op_raw_keywords})
+        body = frontmatter_patch(body, {"updated": date.today().isoformat()})
+        created_meta, _created_body = frontmatter_parse(body)
+        created_tags = created_meta.get("tags")
+        new_tags = tuple(
+            tag
+            for tag in (created_tags if isinstance(created_tags, list) else [])
+            if isinstance(tag, str) and tag not in set(existing_tags_snapshot)
+        )
+        prepared = PreparedIngestOperation(
+            op_type="create",
+            path=full_path,
+            page_id=page_id,
+            new_body=body.rstrip() + "\n",
+            previous_text=None,
+            new_tags=new_tags,
+            source_operation_index=source_operation_index,
+            source_operation_type=source_operation_type,
+            source_filename=source_filename,
+        )
+        return prepared, stats
+
+    existing_path = (
+        full_path
+        if full_path.exists()
+        else _find_page_resilient(page_id, emit_logs=not read_only)
+    )
+    if existing_path is None or not existing_path.exists():
+        raise IngestApplyError(f"update target not found for page_id {page_id!r}")
+    page_id = existing_path.stem
+    previous = _read_exact_utf8(existing_path)
+    compact_preimage_sha256 = op.get("_compact_update_preimage_sha256")
+    if compact_preimage_sha256 is not None:
+        if (
+            not isinstance(compact_preimage_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", compact_preimage_sha256) is None
+        ):
+            raise IngestApplyError(
+                f"compact update preimage binding is malformed for {page_id}"
+            )
+        observed_preimage_sha256 = hashlib.sha256(
+            previous.encode("utf-8")
+        ).hexdigest()
+        if observed_preimage_sha256 != compact_preimage_sha256:
+            raise IngestApplyError(
+                f"compact update preimage changed before prepare: {page_id}"
+            )
+    previous_text_for_rollback = previous
+    if propagate_raw_keywords:
+        existing_meta, _existing_body = frontmatter_parse(previous)
+        existing_kw_raw = existing_meta.get("raw_keywords")
+        existing_kw = (
+            existing_kw_raw
+            if isinstance(existing_kw_raw, list)
+            and all(isinstance(value, str) for value in existing_kw_raw)
+            else []
+        )
+        union_kw = list(dict.fromkeys(existing_kw + op_raw_keywords))
+        previous = frontmatter_patch(previous, {"raw_keywords": union_kw})
+
+    stamped = re.sub(
+        r"updated:\s*.+",
+        f"updated: {date.today().isoformat()}",
+        previous,
+        count=1,
+    )
+    return (
+        PreparedIngestOperation(
+            op_type="update",
+            path=existing_path,
+            page_id=page_id,
+            new_body=stamped.rstrip() + "\n\n" + body + "\n",
+            previous_text=previous_text_for_rollback,
+            source_operation_index=source_operation_index,
+            source_operation_type=source_operation_type,
+            source_filename=source_filename,
+        ),
+        stats,
+    )
+
+
 def prepare_operations(
     operations: list[dict],
     *,
@@ -170,164 +303,18 @@ def prepare_operations(
     totals = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
 
     for source_operation_index, op in enumerate(operations):
-        source_operation_type = op["type"]
-        source_filename = op["filename"]
-        op_type = source_operation_type
-        full_path = _safe_resolve_page_path(op["filename"])
-        page_id = full_path.stem
-
-        body, stats = _reconcile_links(op["content"], allowed_ids)
-        for k in totals:
-            totals[k] += stats[k]
-
-        # Phase 4: lift the raw_keywords side channel off the op. Empty
-        # lists are treated as "no propagation" — writing ``raw_keywords:
-        # []`` to a page would create a zero-information diff against the
-        # existing frontmatter. The propagate flag distinguishes "list[str]
-        # with content" from anything else.
-        op_raw_keywords = op.get("raw_keywords")
-        propagate_raw_keywords = (
-            isinstance(op_raw_keywords, list)
-            and all(isinstance(v, str) for v in op_raw_keywords)
-            and len(op_raw_keywords) > 0
+        prepared, stats = _prepare_operation(
+            source_operation_index,
+            op,
+            allowed_ids=allowed_ids,
+            existing_tags_snapshot=existing_tags_snapshot,
+            read_only=read_only,
+            frontmatter_parse=_frontmatter_parse,
+            frontmatter_patch=_frontmatter_patch,
         )
-
-        if op_type == "create":
-            existing = _find_page_resilient(page_id, emit_logs=not read_only)
-            if existing is not None:
-                if not read_only:
-                    _safe_log(
-                        f"ingest | create op for existing page_id {page_id!r} "
-                        f"converted to update (existing: {existing}, target: {full_path})"
-                    )
-                op_type = "update"
-                full_path = existing
-                page_id = existing.stem
-                body = _strip_all_frontmatter(body).strip()
-                if not body:
-                    raise IngestApplyError(
-                        f"create collision for page_id {page_id!r} produced no update body"
-                    )
-
-        if op_type == "create":
-            # Tag processing happens BEFORE raw_keywords patch so the
-            # final frontmatter goes through one consistent serialization
-            # path. Soft-fail: a missing or malformed ``tags`` list just
-            # passes the body through unchanged — chronovisor_check's autonomous
-            # lint/repair lane will surface and resolve absent tags.
-            body = _process_tags_in_body(
-                body,
-                existing_tags_snapshot,
-                _frontmatter_parse,
-                _frontmatter_patch,
-                record_changes=False,
-            )
-            if propagate_raw_keywords:
-                # generate output already carries a frontmatter block
-                # (enforced by ``_extract_page_body`` for create), so
-                # ``patch`` will splice raw_keywords into it without
-                # synthesizing a new block.
-                body = _frontmatter_patch(body, {"raw_keywords": op_raw_keywords})
-            # The model is not a clock. Even when the prompt supplies today's
-            # date, enforce it deterministically so a plausible-looking guess
-            # can never become page metadata.
-            body = _frontmatter_patch(
-                body,
-                {"updated": date.today().isoformat()},
-            )
-            created_meta, _created_body = _frontmatter_parse(body)
-            created_tags = created_meta.get("tags")
-            new_tags = tuple(
-                tag
-                for tag in (created_tags if isinstance(created_tags, list) else [])
-                if isinstance(tag, str) and tag not in set(existing_tags_snapshot)
-            )
-            planned.append(
-                PreparedIngestOperation(
-                    op_type="create",
-                    path=full_path,
-                    page_id=page_id,
-                    new_body=body.rstrip() + "\n",
-                    previous_text=None,
-                    new_tags=new_tags,
-                    source_operation_index=source_operation_index,
-                    source_operation_type=source_operation_type,
-                    source_filename=source_filename,
-                )
-            )
-
-        else:  # update
-            existing_path = (
-                full_path
-                if full_path.exists()
-                else _find_page_resilient(page_id, emit_logs=not read_only)
-            )
-            if existing_path is None or not existing_path.exists():
-                raise IngestApplyError(
-                    f"update target not found for page_id {page_id!r}"
-                )
-            page_id = existing_path.stem
-            previous = _read_exact_utf8(existing_path)
-            compact_preimage_sha256 = op.get("_compact_update_preimage_sha256")
-            if compact_preimage_sha256 is not None:
-                if (
-                    not isinstance(compact_preimage_sha256, str)
-                    or re.fullmatch(r"[0-9a-f]{64}", compact_preimage_sha256) is None
-                ):
-                    raise IngestApplyError(
-                        f"compact update preimage binding is malformed for {page_id}"
-                    )
-                observed_preimage_sha256 = hashlib.sha256(
-                    previous.encode("utf-8")
-                ).hexdigest()
-                if observed_preimage_sha256 != compact_preimage_sha256:
-                    raise IngestApplyError(
-                        f"compact update preimage changed before prepare: {page_id}"
-                    )
-            # Preserve the on-disk text for rollback BEFORE we mutate
-            # ``previous`` with a frontmatter patch — the rollback path
-            # restores the file as it was before this batch ran, not as
-            # it was after the patch.
-            previous_text_for_rollback = previous
-
-            # raw_keywords union with the existing page's value, preserving
-            # insertion order so the diff stays deterministic. If the
-            # existing field is missing or malformed (legacy data, manual
-            # edit), treat it as empty rather than raising — the apply
-            # phase shouldn't reject otherwise-valid updates because of
-            # frontmatter rot somewhere upstream.
-            if propagate_raw_keywords:
-                existing_meta, _existing_body = _frontmatter_parse(previous)
-                existing_kw_raw = existing_meta.get("raw_keywords")
-                if isinstance(existing_kw_raw, list) and all(
-                    isinstance(v, str) for v in existing_kw_raw
-                ):
-                    existing_kw = existing_kw_raw
-                else:
-                    existing_kw = []
-                union_kw = list(dict.fromkeys(existing_kw + op_raw_keywords))
-                previous = _frontmatter_patch(previous, {"raw_keywords": union_kw})
-
-            today = date.today().isoformat()
-            stamped = re.sub(
-                r"updated:\s*.+",
-                f"updated: {today}",
-                previous,
-                count=1,
-            )
-            new_body = stamped.rstrip() + "\n\n" + body + "\n"
-            planned.append(
-                PreparedIngestOperation(
-                    op_type="update",
-                    path=existing_path,
-                    page_id=page_id,
-                    new_body=new_body,
-                    previous_text=previous_text_for_rollback,
-                    source_operation_index=source_operation_index,
-                    source_operation_type=source_operation_type,
-                    source_filename=source_filename,
-                )
-            )
+        planned.append(prepared)
+        for key in totals:
+            totals[key] += stats[key]
 
     # Apply every currently active correction tombstone to the exact proposal
     # *before* frontier review, including creates under a brand-new slug.

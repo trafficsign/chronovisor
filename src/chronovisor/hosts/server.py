@@ -5,8 +5,10 @@ import os
 import re
 import secrets
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -449,6 +451,186 @@ def chronovisor_init() -> str:
     )
 
 
+def _filter_search_results(
+    results: list[Any],
+    *,
+    store: Any,
+    registry_row: Callable[[str], dict[str, Any]],
+    tags: list[str] | None,
+    tag_match: str,
+    classification_notation: str | None,
+    classification_status: str | None,
+) -> tuple[list[Any], list[str]]:
+    """Apply exact metadata filters after ranked retrieval."""
+
+    tag_filter = [tag for tag in (tags or []) if isinstance(tag, str) and tag]
+    if tag_filter:
+        target = set(tag_filter)
+        match_all = tag_match != "any"
+        results = [
+            result
+            for result in results
+            if (
+                target.issubset(set(store.tags(result.page_id)))
+                if match_all
+                else bool(target & set(store.tags(result.page_id)))
+            )
+        ]
+
+    if classification_notation or classification_status:
+        filtered = []
+        for result in results:
+            row = registry_row(result.page_id)
+            classification = row.get("classification")
+            classification = (
+                classification if isinstance(classification, dict) else {}
+            )
+            primary = classification.get("primary")
+            primary = primary if isinstance(primary, dict) else {}
+            if (
+                classification_notation
+                and str(primary.get("notation") or "")
+                != classification_notation
+            ):
+                continue
+            if (
+                classification_status
+                and str(row.get("classification_status") or "")
+                != classification_status
+            ):
+                continue
+            filtered.append(result)
+        results = filtered
+    return results, tag_filter
+
+
+def _direct_search_hits(
+    results: list[Any],
+    *,
+    query: str,
+    store: Any,
+    registry_row: Callable[[str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project ranked results into the stable MCP direct-hit shape."""
+
+    query_terms = query.lower().split()
+    direct_hits = []
+    for result in results:
+        path = find_page(result.page_id)
+        content = path.read_text() if path else None
+        snippet = (
+            _extract_snippet(content, query_terms) if content is not None else None
+        )
+        identity = registry_row(result.page_id)
+        classification = identity.get("classification")
+        direct_hits.append(
+            {
+                "page_id": result.page_id,
+                **({"uid": identity["uid"]} if identity.get("uid") else {}),
+                "title": result.title,
+                "updated": result.updated,
+                "score": round(result.score, 4),
+                "snippets": [snippet] if snippet else [],
+                "tags": store.tags(result.page_id),
+                **(
+                    {"classification": classification}
+                    if isinstance(classification, dict)
+                    else {}
+                ),
+            }
+        )
+    return direct_hits
+
+
+def _expanded_search_hits(
+    direct_hits: list[dict[str, Any]],
+    *,
+    depth: int,
+    store: Any,
+    registry_row: Callable[[str], dict[str, Any]],
+    tag_filter: list[str],
+    tag_match: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Expand direct hits through one-hop links while preserving filters."""
+
+    expanded_hits: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    if depth <= 0 or not direct_hits:
+        return expanded_hits, edges
+    seen = {hit["page_id"] for hit in direct_hits}
+    target_tags = set(tag_filter)
+    for hit in direct_hits:
+        for link in store.outlinks(hit["page_id"]):
+            if link in seen:
+                continue
+            meta = store.meta(link)
+            if meta is None:
+                continue
+            if tag_filter:
+                link_tags = set(store.tags(link))
+                matches = (
+                    bool(target_tags & link_tags)
+                    if tag_match == "any"
+                    else target_tags.issubset(link_tags)
+                )
+                if not matches:
+                    continue
+            seen.add(link)
+            identity = registry_row(link)
+            expanded_hits.append(
+                {
+                    "page_id": link,
+                    **({"uid": identity["uid"]} if identity.get("uid") else {}),
+                    "title": meta["title"],
+                    "updated": meta["updated"],
+                    "distance": 1,
+                    "via": [hit["page_id"]],
+                    "score": round(hit["score"] * 0.5, 4),
+                    "reason": "linked from direct hit",
+                    "tags": store.tags(link),
+                }
+            )
+            edges.append(
+                {
+                    "from": hit["page_id"],
+                    "to": link,
+                    "from_uid": hit.get("uid"),
+                    "to_uid": identity.get("uid"),
+                    "type": "wikilink",
+                }
+            )
+    return expanded_hits, edges
+
+
+def _search_filters_applied(
+    *,
+    folder: str | None,
+    updated_after: str | None,
+    updated_before: str | None,
+    tag_filter: list[str],
+    tag_match: str,
+    classification_notation: str | None,
+    classification_status: str | None,
+) -> dict[str, Any]:
+    """Render only filters that materially constrained this search."""
+
+    filters: dict[str, Any] = {}
+    if folder:
+        filters["folder"] = folder
+    if updated_after:
+        filters["updated_after"] = updated_after
+    if updated_before:
+        filters["updated_before"] = updated_before
+    if tag_filter:
+        filters["tags"] = tag_filter
+        filters["tag_match"] = tag_match if tag_match in {"all", "any"} else "all"
+    if classification_notation:
+        filters["classification_notation"] = classification_notation
+    if classification_status:
+        filters["classification_status"] = classification_status
+    return filters
+
+
 @mcp.tool()
 def chronovisor_search(
     query: str,
@@ -534,48 +716,15 @@ def chronovisor_search(
         row = registry_state.get("pages", {}).get(uid) if uid else None
         return dict(row) if isinstance(row, dict) else {}
 
-    # Tag filter: post-process search results so the tag axis composes
-    # with relevance / date / folder cleanly. Done in Python rather than
-    # pushed into BM25 because tag membership is exact-match, not scored.
-    tag_filter = [t for t in (tags or []) if isinstance(t, str) and t]
-    if tag_filter:
-        match_mode = "any" if tag_match == "any" else "all"
-        target = set(tag_filter)
-        kept: list = []
-        for r in results:
-            page_tags = set(store.tags(r.page_id))
-            if match_mode == "all":
-                if target.issubset(page_tags):
-                    kept.append(r)
-            else:  # any
-                if target & page_tags:
-                    kept.append(r)
-        results = kept
-
-    if classification_notation or classification_status:
-        kept = []
-        for result in results:
-            row = registry_row(result.page_id)
-            classification = row.get("classification")
-            classification = (
-                classification if isinstance(classification, dict) else {}
-            )
-            primary = classification.get("primary")
-            primary = primary if isinstance(primary, dict) else {}
-            if (
-                classification_notation
-                and str(primary.get("notation") or "")
-                != classification_notation
-            ):
-                continue
-            if (
-                classification_status
-                and str(row.get("classification_status") or "")
-                != classification_status
-            ):
-                continue
-            kept.append(result)
-        results = kept
+    results, tag_filter = _filter_search_results(
+        results,
+        store=store,
+        registry_row=registry_row,
+        tags=tags,
+        tag_match=tag_match,
+        classification_notation=classification_notation,
+        classification_status=classification_status,
+    )
 
     rerank_stage = apply_rerank_stage(
         query,
@@ -590,32 +739,12 @@ def chronovisor_search(
         search_mode = f"{search_mode}+rerank"
     results = results[:10]
 
-    query_terms = query.lower().split()
-    direct_hits = []
-    for r in results:
-        path = find_page(r.page_id)
-        content = path.read_text() if path else None
-        snippet = (
-            _extract_snippet(content, query_terms) if content is not None else None
-        )
-        identity = registry_row(r.page_id)
-        classification = identity.get("classification")
-        direct_hits.append(
-            {
-                "page_id": r.page_id,
-                **({"uid": identity["uid"]} if identity.get("uid") else {}),
-                "title": r.title,
-                "updated": r.updated,
-                "score": round(r.score, 4),
-                "snippets": [snippet] if snippet else [],
-                "tags": store.tags(r.page_id),
-                **(
-                    {"classification": classification}
-                    if isinstance(classification, dict)
-                    else {}
-                ),
-            }
-        )
+    direct_hits = _direct_search_hits(
+        results,
+        query=query,
+        store=store,
+        registry_row=registry_row,
+    )
 
     # Fail-closed semantic holds remain visible only through a separate,
     # projection-only namespace. They never compete as normal wiki pages and
@@ -637,77 +766,23 @@ def chronovisor_search(
         except Exception:
             provisional_hits = []
 
-    # Expand via links — outlinks and link metadata both come from the
-    # IndexStore, so no extra disk reads are needed in this pass.
-    # When a tag filter is active, expanded hits inherit the same tag
-    # constraint so a casual link from a matching page to a wildly
-    # off-tag page doesn't sneak past the filter.
-    expanded_hits = []
-    edges = []
-    if depth > 0 and direct_hits:
-        seen = {h["page_id"] for h in direct_hits}
-        for hit in direct_hits:
-            outlinks = store.outlinks(hit["page_id"])
-            for link in outlinks:
-                if link in seen:
-                    continue
-                meta = store.meta(link)
-                if meta is None:
-                    # Link points to a non-existent page; skip (matches
-                    # legacy behaviour, which used find_page() == None).
-                    continue
-                if tag_filter:
-                    link_tags = set(store.tags(link))
-                    if tag_match == "any":
-                        if not (set(tag_filter) & link_tags):
-                            continue
-                    else:
-                        if not set(tag_filter).issubset(link_tags):
-                            continue
-                seen.add(link)
-                expanded_hits.append(
-                    {
-                        "page_id": link,
-                        **(
-                            {"uid": registry_row(link)["uid"]}
-                            if registry_row(link).get("uid")
-                            else {}
-                        ),
-                        "title": meta["title"],
-                        "updated": meta["updated"],
-                        "distance": 1,
-                        "via": [hit["page_id"]],
-                        "score": round(hit["score"] * 0.5, 4),
-                        "reason": "linked from direct hit",
-                        "tags": store.tags(link),
-                    }
-                )
-                edges.append(
-                    {
-                        "from": hit["page_id"],
-                        "to": link,
-                        "from_uid": hit.get("uid"),
-                        "to_uid": registry_row(link).get("uid"),
-                        "type": "wikilink",
-                    }
-                )
-
-    filters_applied = {}
-    if folder:
-        filters_applied["folder"] = folder
-    if updated_after:
-        filters_applied["updated_after"] = updated_after
-    if updated_before:
-        filters_applied["updated_before"] = updated_before
-    if tag_filter:
-        filters_applied["tags"] = tag_filter
-        filters_applied["tag_match"] = (
-            tag_match if tag_match in ("all", "any") else "all"
-        )
-    if classification_notation:
-        filters_applied["classification_notation"] = classification_notation
-    if classification_status:
-        filters_applied["classification_status"] = classification_status
+    expanded_hits, edges = _expanded_search_hits(
+        direct_hits,
+        depth=depth,
+        store=store,
+        registry_row=registry_row,
+        tag_filter=tag_filter,
+        tag_match=tag_match,
+    )
+    filters_applied = _search_filters_applied(
+        folder=folder,
+        updated_after=updated_after,
+        updated_before=updated_before,
+        tag_filter=tag_filter,
+        tag_match=tag_match,
+        classification_notation=classification_notation,
+        classification_status=classification_status,
+    )
     _append_pull_log(
         {
             "type": "search",

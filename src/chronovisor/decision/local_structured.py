@@ -1914,6 +1914,31 @@ class LocalStructuredSession:
             [dict(message) for message in preflight.messages],
         )
 
+    def _initial_context_failure(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        effective_num_ctx: int,
+    ) -> LocalStructuredResult | None:
+        """Reject requests whose complete bounded repair history cannot fit."""
+
+        base_input_tokens = _estimated_message_tokens(messages)
+        worst_case_history_tokens = base_input_tokens + MAX_REPAIR_TURNS * (
+            64 + self.max_output_chars + self.max_feedback_chars
+        )
+        if (
+            worst_case_history_tokens + self.num_predict + CONTEXT_SAFETY_TOKENS
+            <= effective_num_ctx
+        ):
+            return None
+        return self._failure(
+            "context_window_exceeded",
+            "initial input plus two fixed UTF-8 byte-bounded repair histories "
+            "and output reservation exceed num_ctx "
+            f"({worst_case_history_tokens}+{self.num_predict}+"
+            f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
+        )
+
     def _run_impl(
         self,
         prompt: str,
@@ -1941,21 +1966,11 @@ class LocalStructuredSession:
                 "validated schema was not materialized",
             )
         transport_schema = schema_copy if format_schema is None else format_schema
-        base_input_tokens = _estimated_message_tokens(messages)
-        worst_case_history_tokens = base_input_tokens + MAX_REPAIR_TURNS * (
-            64 + self.max_output_chars + self.max_feedback_chars
+        context_failure = self._initial_context_failure(
+            messages, effective_num_ctx=effective_num_ctx
         )
-        if (
-            worst_case_history_tokens + self.num_predict + CONTEXT_SAFETY_TOKENS
-            > effective_num_ctx
-        ):
-            return self._failure(
-                "context_window_exceeded",
-                "initial input plus two fixed UTF-8 byte-bounded repair histories "
-                "and output reservation exceed num_ctx "
-                f"({worst_case_history_tokens}+{self.num_predict}+"
-                f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
-            )
+        if context_failure is not None:
+            return context_failure
 
         attempts: list[StructuredAttempt] = []
         seen_outputs: set[str] = set()

@@ -603,6 +603,44 @@ def _write_review_artifact(
     )
 
 
+def _frontier_proposal_preflight(
+    record: dict[str, Any],
+    *,
+    apply_key: str,
+    reviewer: Any | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve review authority and return a mutation proposal or disposition."""
+
+    authority, authority_error = _current_review_authority(reviewer=reviewer)
+    if authority is None or authority_error is not None:
+        return None, None, {
+            "status": "needs_retry",
+            "review": {
+                "decision": "needs_retry",
+                "summary": authority_error or "review authority is unavailable",
+            },
+        }
+    try:
+        proposal = _frontier_action_proposal(record, apply_key=apply_key)
+    except Exception as exc:
+        return authority, None, {
+            "status": "proposal_error",
+            "authority": authority,
+            "result": {
+                "status": "error",
+                "error": f"{exc.__class__.__name__}: {exc}",
+            },
+        }
+    if not _proposal_requires_mutation(proposal):
+        return authority, proposal, {
+            "status": "no_mutation",
+            "proposal": proposal,
+            "result": dict(proposal.get("local_validation") or {}),
+            "authority": authority,
+        }
+    return authority, proposal, None
+
+
 def _frontier_gate(
     record: dict[str, Any],
     *,
@@ -616,31 +654,14 @@ def _frontier_gate(
     prior_history: list[dict[str, Any]] | None = None,
     quarantine_cooldown_seconds: int = DEFAULT_QUARANTINE_COOLDOWN_SECONDS,
 ) -> dict[str, Any]:
-    authority, authority_error = _current_review_authority(reviewer=reviewer)
-    if authority is None or authority_error is not None:
-        return {
-            "status": "needs_retry",
-            "review": {
-                "decision": "needs_retry",
-                "summary": authority_error or "review authority is unavailable",
-            },
-        }
-    try:
-        proposal = _frontier_action_proposal(record, apply_key=apply_key)
-    except Exception as exc:
-        return {
-            "status": "proposal_error",
-            "authority": authority,
-            "result": {"status": "error", "error": f"{exc.__class__.__name__}: {exc}"},
-        }
-    if not _proposal_requires_mutation(proposal):
-        preview = dict(proposal.get("local_validation") or {})
-        return {
-            "status": "no_mutation",
-            "proposal": proposal,
-            "result": preview,
-            "authority": authority,
-        }
+    authority, proposal, disposition = _frontier_proposal_preflight(
+        record,
+        apply_key=apply_key,
+        reviewer=reviewer,
+    )
+    if disposition is not None:
+        return disposition
+    assert authority is not None and proposal is not None
 
     proposal_sha256 = _canonical_json_sha256(proposal)
     semantic_epoch = _auto_apply_semantic_epoch(

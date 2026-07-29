@@ -950,6 +950,68 @@ def _collection_control_plane(root: Path) -> dict[str, Any]:
     }
 
 
+def _librarian_status_reason(
+    *,
+    code: str,
+    blocked_reasons: list[str],
+    authority: Mapping[str, Any],
+    observed: Mapping[str, Any],
+    current_terminal: int,
+    actual_total: int,
+    collection_first: bool,
+) -> tuple[list[str], str]:
+    """Project the operator-facing reason codes and status detail."""
+
+    if blocked_reasons:
+        reason_codes = sorted(set(blocked_reasons))
+    elif code == "NOT_READY":
+        reason_codes = [
+            value
+            for value in str(authority.get("reason") or "not_ready").split(",")
+            if value
+        ]
+    elif code == "MIGRATING":
+        reason_codes = ["initial_organization_incomplete"]
+    elif code == "FALLING_BEHIND":
+        reason_codes = ["oldest_actionable_slo_exceeded"]
+    elif code == "CATCHING_UP":
+        reason_codes = ["scope_or_queue_not_current"]
+    elif code == "STEADY_WITH_HOLDS":
+        reason_codes = ["terminal_holds_or_quarantine_present"]
+    else:
+        reason_codes = ["all_release_and_current_scope_gates_passed"]
+
+    detail = str(authority.get("reason") or "librarian state available")
+    if code == "NOT_READY":
+        detail = (
+            (
+                f"Live scope has {observed['actionable']} unswept change(s); "
+                if observed["actionable"]
+                else "Shadow migration is current; "
+            )
+            + (
+                "collection authority remains fail-closed until the sealed "
+                "collection audit and current quality gates pass."
+                if collection_first
+                else "classification authority remains fail-closed until a "
+                "complete licensed UDC package and calibrated locked fixture "
+                "exist."
+            )
+        )
+    elif code == "MIGRATING":
+        detail = (
+            f"{current_terminal} of {actual_total} pages have terminal "
+            + (
+                "collection assignment; initial organization and review-queue "
+                "triage are still in progress."
+                if collection_first
+                else "classification; initial organization and concurrent "
+                "migration observation are still in progress."
+            )
+        )
+    return reason_codes, detail
+
+
 def build_librarian_status(
     root: Path,
     *,
@@ -1142,52 +1204,15 @@ def build_librarian_status(
     if code not in STATE_CODES:
         code = "BLOCKED"
     authority = dict(authority)
-    if blocked_reasons:
-        reason_codes = sorted(set(blocked_reasons))
-    elif code == "NOT_READY":
-        reason_codes = [
-            value
-            for value in str(authority.get("reason") or "not_ready").split(",")
-            if value
-        ]
-    elif code == "MIGRATING":
-        reason_codes = ["initial_organization_incomplete"]
-    elif code == "FALLING_BEHIND":
-        reason_codes = ["oldest_actionable_slo_exceeded"]
-    elif code == "CATCHING_UP":
-        reason_codes = ["scope_or_queue_not_current"]
-    elif code == "STEADY_WITH_HOLDS":
-        reason_codes = ["terminal_holds_or_quarantine_present"]
-    else:
-        reason_codes = ["all_release_and_current_scope_gates_passed"]
-    detail = str(authority.get("reason") or "librarian state available")
-    if code == "NOT_READY":
-        detail = (
-            (
-                f"Live scope has {observed['actionable']} unswept change(s); "
-                if observed["actionable"]
-                else "Shadow migration is current; "
-            )
-            + (
-                "collection authority remains fail-closed until the sealed "
-                "collection audit and current quality gates pass."
-                if collection_first
-                else "classification authority remains fail-closed until a "
-                "complete licensed UDC package and calibrated locked fixture "
-                "exist."
-            )
-        )
-    elif code == "MIGRATING":
-        detail = (
-            f"{current_terminal} of {actual_total} pages have terminal "
-            + (
-                "collection assignment; initial organization and review-queue "
-                "triage are still in progress."
-                if collection_first
-                else "classification; initial organization and concurrent "
-                "migration observation are still in progress."
-            )
-        )
+    reason_codes, detail = _librarian_status_reason(
+        code=code,
+        blocked_reasons=blocked_reasons,
+        authority=authority,
+        observed=observed,
+        current_terminal=current_terminal,
+        actual_total=actual_total,
+        collection_first=collection_first,
+    )
     dispositions = _migration_dispositions(root)
     soak = _soak_status(root, current)
     flow_24h = _flow(events, current - timedelta(hours=24))

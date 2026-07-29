@@ -1,0 +1,345 @@
+schema_version = 1
+threshold_lines = 300
+baseline_function_count = 38
+
+[[functions]]
+path = "src/chronovisor/decision/decision_router.py"
+qualname = "_validated_adoption_artifact"
+baseline_lines = 572
+disposition = "retained"
+max_lines = 572
+rationale = "Fail-closed validator for one sealed adoption envelope; the checks intentionally accumulate in wire order so no partially validated identity can escape."
+tests = ["tests/test_decision_router.py", "tests/test_decision_authority.py"]
+
+[[functions]]
+path = "src/chronovisor/decision/decision_router.py"
+qualname = "DecisionRouter._decide_locked"
+baseline_lines = 506
+disposition = "retained"
+max_lines = 506
+rationale = "One authority-locked decision transaction whose resource admission, model calls, artifact persistence, and outcome publication must retain their exact order."
+tests = ["tests/test_decision_router.py", "tests/test_decision_policy.py"]
+
+[[functions]]
+path = "src/chronovisor/decision/local_structured.py"
+qualname = "LocalStructuredSession._run_impl"
+baseline_lines = 309
+disposition = "decomposed"
+max_lines = 299
+rationale = "Extracted initial context-capacity validation while preserving the bounded repair loop as the single owner of attempt history and transport state."
+tests = ["tests/test_local_structured.py", "tests/test_adaptive_residency.py"]
+
+[[functions]]
+path = "src/chronovisor/hosts/cli.py"
+qualname = "build_parser"
+baseline_lines = 308
+disposition = "retained"
+max_lines = 308
+rationale = "Purely declarative argparse schema with zero control-flow branches; splitting it would hide the complete CLI grammar without reducing behavioral complexity."
+tests = ["tests/test_cli.py"]
+
+[[functions]]
+path = "src/chronovisor/hosts/cli.py"
+qualname = "dispatch"
+baseline_lines = 496
+disposition = "retained"
+max_lines = 496
+rationale = "Flat command router: each top-level branch is an isolated console command and returns immediately; a second dispatch registry would duplicate argparse names."
+tests = ["tests/test_cli.py"]
+
+[[functions]]
+path = "src/chronovisor/hosts/server.py"
+qualname = "chronovisor_search"
+baseline_lines = 315
+disposition = "decomposed"
+max_lines = 208
+rationale = "Extracted exact metadata filtering, direct-hit projection, link expansion, and filter reporting into independently testable pure seams."
+tests = ["tests/test_reranker.py", "tests/test_server_validation.py"]
+
+[[functions]]
+path = "src/chronovisor/ingest/ingest.py"
+qualname = "run_ingest"
+baseline_lines = 514
+disposition = "retained"
+max_lines = 514
+rationale = "Campaign K already extracted terminal projections; the remainder is one try/finally ingest transaction that owns callback, ACK, authority, and job completion ordering."
+tests = ["tests/test_ingest.py", "tests/test_campaign_k_seams.py"]
+
+[[functions]]
+path = "src/chronovisor/ingest/ingest_generation.py"
+qualname = "generate_one"
+baseline_lines = 502
+disposition = "retained"
+max_lines = 502
+rationale = "Bounded structured-generation repair session sharing response history, context admission, progress callbacks, and one exclusive model lease across attempts."
+tests = ["tests/test_ingest.py", "tests/test_local_structured.py"]
+
+[[functions]]
+path = "src/chronovisor/ingest/ingest_prepare.py"
+qualname = "prepare_operations"
+baseline_lines = 349
+disposition = "decomposed"
+max_lines = 203
+rationale = "Extracted one-operation preimage/postimage construction; the orchestrator now owns only corpus snapshot, batch collision validation, and correction enforcement."
+tests = ["tests/test_ingest.py", "tests/test_ingest_module_boundaries.py"]
+
+[[functions]]
+path = "src/chronovisor/ingest/ingest_review_apply.py"
+qualname = "review_and_apply_ingest_operations"
+baseline_lines = 686
+disposition = "retained"
+max_lines = 686
+rationale = "Campaign K extracted artifact inspection and final effect; the remaining code is one authority-bound recovery/review/apply transaction with fail-closed early exits."
+tests = ["tests/test_ingest.py", "tests/test_campaign_k_seams.py"]
+
+[[functions]]
+path = "src/chronovisor/ingest/orchestrator.py"
+qualname = "run_pending_ingest"
+baseline_lines = 737
+disposition = "retained"
+max_lines = 737
+rationale = "Single process-lock transaction coordinating raw claims, projection bundles, continuation receipts, and batch finalization; Campaign K already extracted projections."
+tests = ["tests/test_ingest.py", "tests/test_orchestrator_characterization.py"]
+
+[[functions]]
+path = "src/chronovisor/ingest/read_back_repair.py"
+qualname = "run_read_back_repair"
+baseline_lines = 723
+disposition = "retained"
+max_lines = 723
+rationale = "Per-row repair state machine keeps evidence collection, authority review, compare-and-swap mutation, readback, and durable convergence transitions in one visible order."
+tests = ["tests/test_read_back_repair.py"]
+
+[[functions]]
+path = "src/chronovisor/lab/adoption_corpus.py"
+qualname = "_select_candidates"
+baseline_lines = 330
+disposition = "retained"
+max_lines = 330
+rationale = "Deterministic preregistered cohort selection where sequential filters and counters form the auditable experiment protocol; extraction would obscure selection order."
+tests = ["tests/test_adoption_corpus.py"]
+
+[[functions]]
+path = "src/chronovisor/lab/local_model_eval.py"
+qualname = "load_replay_corpus"
+baseline_lines = 434
+disposition = "retained"
+max_lines = 434
+rationale = "Fail-closed replay corpus decoder whose sequential compatibility gates preserve exclusion reasons and historical experiment reproducibility."
+tests = ["tests/test_local_model_eval.py"]
+
+[[functions]]
+path = "src/chronovisor/lab/local_model_eval.py"
+qualname = "adoption_case_derived_evidence"
+baseline_lines = 489
+disposition = "retained"
+max_lines = 489
+rationale = "One deterministic evidence projection with coupled metrics and provenance flags used to reproduce adoption decisions byte for byte."
+tests = ["tests/test_local_model_eval.py"]
+
+[[functions]]
+path = "src/chronovisor/librarian/librarian_status.py"
+qualname = "_library_evidence_status"
+baseline_lines = 435
+disposition = "retained"
+max_lines = 435
+rationale = "Schema-shaped dashboard projection dominated by one literal return envelope; keeping all fields together makes missing evidence and precedence reviewable."
+tests = ["tests/test_dashboard_librarian.py"]
+
+[[functions]]
+path = "src/chronovisor/librarian/librarian_status.py"
+qualname = "build_librarian_status"
+baseline_lines = 314
+disposition = "decomposed"
+max_lines = 277
+rationale = "Extracted operator-facing state reason projection while retaining one snapshot assembly path for registry, authority, queue, debt, and flow observations."
+tests = ["tests/test_dashboard_librarian.py", "tests/test_collection_authority.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/autonomy.py"
+qualname = "resolve_deferred_duplicates_with_frontier"
+baseline_lines = 697
+disposition = "retained"
+max_lines = 697
+rationale = "Per-candidate convergence transaction couples local evidence, frontier verdict, budget accounting, mutation, rollback, and durable state transitions."
+tests = ["tests/test_autonomy.py", "tests/test_autonomy_hardening.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/autonomy.py"
+qualname = "apply_retention_archives"
+baseline_lines = 636
+disposition = "retained"
+max_lines = 636
+rationale = "Per-page retention transaction keeps authority proof, snapshot, archive move, rollback, and convergence outcome adjacent under one bounded loop."
+tests = ["tests/test_autonomy.py", "tests/test_retention.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/autonomy.py"
+qualname = "watchdog_snapshot"
+baseline_lines = 328
+disposition = "decomposed"
+max_lines = 264
+rationale = "Extracted quality probing and privacy-bounded health incident projection; alert derivation remains a single deterministic snapshot."
+tests = ["tests/test_autonomy.py", "tests/test_system_incident_supervisor.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/convergence_drain.py"
+qualname = "resume"
+baseline_lines = 315
+disposition = "retained"
+max_lines = 315
+rationale = "One exclusive convergence-store lease scans and transitions due records; retaining the lock scope visibly prevents work from escaping durable ownership."
+tests = ["tests/test_convergence_drain.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/dashboard.py"
+qualname = "_save_history_snapshot"
+baseline_lines = 409
+disposition = "retained"
+max_lines = 409
+rationale = "Single schema materialization boundary that samples cross-domain status, normalizes historical rows, and performs one atomic history replacement."
+tests = ["tests/test_dashboard.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/lint_repair.py"
+qualname = "run_lint_repair"
+baseline_lines = 360
+disposition = "retained"
+max_lines = 360
+rationale = "Per-finding repair state machine shares one budget and convergence lease across deterministic fixes, review, mutation, retry, and quarantine decisions."
+tests = ["tests/test_lint_repair.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/orphan_link.py"
+qualname = "run_autonomous"
+baseline_lines = 847
+disposition = "retained"
+max_lines = 847
+rationale = "Per-orphan convergence transaction couples proposal freshness, authority review, exact link mutation, rollback, readback, and ledger commit."
+tests = ["tests/test_orphan_link.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/self_heal.py"
+qualname = "_handle_packet_unlocked"
+baseline_lines = 766
+disposition = "retained"
+max_lines = 766
+rationale = "Campaign K extracted outcome projections; remaining code is the authoritative packet lifecycle from routing through retries, effects, verification, and incident persistence."
+tests = ["tests/test_self_heal.py", "tests/test_failure_supervisor_characterization.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/sleep_cycle.py"
+qualname = "_run_sleep_cycle"
+baseline_lines = 622
+disposition = "retained"
+max_lines = 622
+rationale = "Declarative maintenance-lane wiring with low branch density; one shared cycle budget and ordered lane receipts are easier to audit in a single manifest-like function."
+tests = ["tests/test_sleep_cycle.py"]
+
+[[functions]]
+path = "src/chronovisor/raw/raw_replay.py"
+qualname = "_review_indeterminate_rows"
+baseline_lines = 354
+disposition = "retained"
+max_lines = 354
+rationale = "One bounded reconciliation batch keeps proposal construction, authority identity, frontier budget, sealed artifact, and queue transitions aligned."
+tests = ["tests/test_raw_replay.py"]
+
+[[functions]]
+path = "src/chronovisor/raw/raw_replay.py"
+qualname = "run_pending_queue"
+baseline_lines = 665
+disposition = "retained"
+max_lines = 665
+rationale = "Exclusive replay-queue transaction owns crash recovery, operational holds, byte/run budgets, ingest launch, completion journal, and final queue publication."
+tests = ["tests/test_raw_replay.py", "tests/test_semantic_defer_replay.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/content_correction.py"
+qualname = "_process_frontier_item"
+baseline_lines = 846
+disposition = "retained"
+max_lines = 846
+rationale = "Campaign K extracted evidence and commit projections; remaining per-item transaction preserves classification, review, CAS mutation, rollback, readback, and audit order."
+tests = ["tests/test_content_correction.py", "tests/test_campaign_k_seams.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_auto_apply.py"
+qualname = "_frontier_gate"
+baseline_lines = 308
+disposition = "decomposed"
+max_lines = 291
+rationale = "Extracted authority and proposal preflight so the remaining function owns only semantic-hold reuse, review, and sealed-verdict persistence."
+tests = ["tests/test_recall_auto_apply.py", "tests/test_frontier_review.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_auto_apply.py"
+qualname = "apply_review_feedback_records"
+baseline_lines = 308
+disposition = "retained"
+max_lines = 308
+rationale = "Per-record convergence loop must keep gate outcome, budget use, mutation, retry timing, semantic-hold metadata, and atomic state commit together."
+tests = ["tests/test_recall_auto_apply.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_calibration.py"
+qualname = "calibrate"
+baseline_lines = 448
+disposition = "retained"
+max_lines = 448
+rationale = "Calibration is one preregistered state transition whose corpus binding, metrics, quality gates, artifact seal, and activation decision are order-sensitive."
+tests = ["tests/test_recall_calibration.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_improvement.py"
+qualname = "run_improvement"
+baseline_lines = 465
+disposition = "retained"
+max_lines = 465
+rationale = "One experiment run binds baseline, candidate generation, evaluation, gate decision, artifact publication, and rollback evidence for reproducibility."
+tests = ["tests/test_recall_improvement.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_improvement.py"
+qualname = "_run_due_locked"
+baseline_lines = 348
+disposition = "retained"
+max_lines = 348
+rationale = "Exclusive scheduler transaction evaluates due state, recovery markers, cooldowns, budgets, improvement execution, and next-run publication atomically."
+tests = ["tests/test_recall_improvement.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_runtime.py"
+qualname = "_run_recall_impl"
+baseline_lines = 346
+disposition = "decomposed"
+max_lines = 285
+rationale = "Extracted initial skip, fail-open budget fallback, and final context/session publication while preserving the central evidence and judge pipeline."
+tests = ["tests/test_recall_runtime.py", "tests/test_recall_trace.py"]
+
+[[functions]]
+path = "src/chronovisor/research/research_orchestrator.py"
+qualname = "run_research"
+baseline_lines = 501
+disposition = "retained"
+max_lines = 501
+rationale = "One research-store lease coordinates iteration budget, tool actions, evidence verification, challenge, consolidation, checkpoints, and terminal status."
+tests = ["tests/test_research_orchestrator.py"]
+
+[[functions]]
+path = "src/chronovisor/search/search_eval.py"
+qualname = "review_label_queue_with_frontier"
+baseline_lines = 728
+disposition = "retained"
+max_lines = 728
+rationale = "Batch review transaction keeps queue identity, authority, shard budgets, verdict artifacts, retries, and final label state synchronized."
+tests = ["tests/test_search_eval.py"]
+
+[[functions]]
+path = "src/chronovisor/search/search_eval.py"
+qualname = "self_tune"
+baseline_lines = 446
+disposition = "retained"
+max_lines = 446
+rationale = "One replay-gated tuning experiment owns baseline metrics, candidate weights, holdout gates, policy artifact publication, and rejection reasons."
+tests = ["tests/test_search_eval.py"]

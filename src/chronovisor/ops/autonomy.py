@@ -3491,59 +3491,56 @@ def _write_watchdog_history(
             pass
 
 
-def watchdog_snapshot(
-    *,
-    before_health: dict[str, Any] | None = None,
-    write: bool = True,
-    notify: bool = False,
-    max_sleep_age_hours: float = 30.0,
-    min_capture_rate: float = 0.80,
-) -> dict[str, Any]:
-    from chronovisor.ops.health import health_snapshot
-    from chronovisor.ops.sleep_cycle import HISTORY_FILE
-    from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
+def _run_watchdog_quality_probe(*, write: bool) -> dict[str, Any]:
+    """Run the local quality probe only for the installed watchdog writer."""
 
-    quality_probe: dict[str, Any] = {"status": "read_only_skipped"}
-    if write:
-        try:
-            from chronovisor.decision.quality_guard import run_quality_probe
-            from chronovisor.core.runtime_config import load_decision_router_config
-
-            adoption_artifact = load_decision_router_config().adoption_artifact.strip()
-            if adoption_artifact:
-                quality_probe = run_quality_probe(
-                    root=CHRONOVISOR_ROOT / "runtime" / "quality",
-                    adoption_artifact=Path(adoption_artifact).expanduser(),
-                )
-                quality_probe = {
-                    "status": "ok",
-                    "artifact_sha256": quality_probe.get("artifact_sha256"),
-                    "frozen_lanes": quality_probe.get("frozen_lanes"),
-                    "frontier_calls": 0,
-                }
-            else:
-                quality_probe = {"status": "not_configured", "frontier_calls": 0}
-        except Exception as exc:
-            quality_probe = {
-                "status": "error",
-                "error_type": exc.__class__.__name__,
-                "frontier_calls": 0,
-            }
-
-    component_alert: dict[str, Any] | None = None
+    if not write:
+        return {"status": "read_only_skipped"}
     try:
-        health = health_snapshot()
+        from chronovisor.decision.quality_guard import run_quality_probe
+        from chronovisor.core.runtime_config import load_decision_router_config
+
+        adoption_artifact = load_decision_router_config().adoption_artifact.strip()
+        if not adoption_artifact:
+            return {"status": "not_configured", "frontier_calls": 0}
+        result = run_quality_probe(
+            root=CHRONOVISOR_ROOT / "runtime" / "quality",
+            adoption_artifact=Path(adoption_artifact).expanduser(),
+        )
+        return {
+            "status": "ok",
+            "artifact_sha256": result.get("artifact_sha256"),
+            "frozen_lanes": result.get("frozen_lanes"),
+            "frontier_calls": 0,
+        }
     except Exception as exc:
-        # A watchdog failure is itself observable state.  Keep the dashboard
-        # alive, then let the one trusted producer perform two deterministic
-        # local rechecks.  Routine alerts never enter this path.
+        return {
+            "status": "error",
+            "error_type": exc.__class__.__name__,
+            "frontier_calls": 0,
+        }
+
+
+def _read_watchdog_health(
+    health_snapshot: Callable[[], dict[str, Any]],
+    *,
+    write: bool,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Read health or project a privacy-bounded component incident."""
+
+    try:
+        return health_snapshot(), None
+    except Exception as exc:
         from chronovisor.ops.system_incident_supervisor import (
             safe_exception_diagnostic,
             supervise_health_snapshot_exception,
         )
 
         diagnostic = safe_exception_diagnostic(exc)
-        incident_run_id = f"watchdog:{datetime.now().isoformat(timespec='microseconds')}:{os.getpid()}"
+        incident_run_id = (
+            f"watchdog:{datetime.now().isoformat(timespec='microseconds')}:"
+            f"{os.getpid()}"
+        )
         try:
             incident = supervise_health_snapshot_exception(
                 exc,
@@ -3556,7 +3553,7 @@ def watchdog_snapshot(
                 "status": "supervisor_error",
                 "supervisor_error_type": supervisor_exc.__class__.__name__,
             }
-        component_alert = {
+        alert = {
             "type": "component_error",
             "component": "watchdog.health_snapshot",
             "exception_type": diagnostic.exception_type,
@@ -3568,10 +3565,29 @@ def watchdog_snapshot(
             "packet_path": incident.get("packet_path"),
             "supervisor_error_type": incident.get("supervisor_error_type"),
         }
-        health = {
+        return {
             "status": "error",
             "component": "watchdog.health_snapshot",
-        }
+        }, alert
+
+
+def watchdog_snapshot(
+    *,
+    before_health: dict[str, Any] | None = None,
+    write: bool = True,
+    notify: bool = False,
+    max_sleep_age_hours: float = 30.0,
+    min_capture_rate: float = 0.80,
+) -> dict[str, Any]:
+    from chronovisor.ops.health import health_snapshot
+    from chronovisor.ops.sleep_cycle import HISTORY_FILE
+    from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
+
+    quality_probe = _run_watchdog_quality_probe(write=write)
+    health, component_alert = _read_watchdog_health(
+        health_snapshot,
+        write=write,
+    )
     latest_sleep = _latest_jsonl(HISTORY_FILE)
     alerts: list[dict[str, Any]] = []
     observer = inspect_heartbeat(

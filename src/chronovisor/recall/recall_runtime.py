@@ -1699,6 +1699,121 @@ def _require_remaining_budget(deadline_at: float | None, stage: str) -> int | No
     return remaining_ms
 
 
+def _fail_open_recall_budget(
+    reason: str,
+    matched: dict[str, list[str]] | None,
+    request: RecallRequest,
+    policy: RecallPolicy,
+    started: float,
+    final_deadline_at: float,
+    allow_timeout_fallback: bool,
+    perform_search: bool,
+) -> RecallResult:
+    """Return deterministic fallback context or an explicit fail-open timeout."""
+
+    if allow_timeout_fallback and perform_search:
+        remaining_ms = _remaining_budget_ms(final_deadline_at)
+        if remaining_ms is not None and remaining_ms >= 100:
+            fallback = run_deterministic_fallback(
+                request,
+                policy,
+                perform_search=True,
+                timeout_ms=remaining_ms,
+                reason=reason,
+            )
+            fallback.latency_ms = _elapsed_ms(started)
+            if policy.log_decisions:
+                append_recall_log(request, fallback)
+            return fallback
+    result = RecallResult(
+        status="timeout",
+        decision="none",
+        confidence=0.0,
+        queries=[],
+        reasons=[reason, "recall budget exhausted; fail-open"],
+        matched_terms=matched or {},
+        latency_ms=_elapsed_ms(started),
+        error=reason,
+    )
+    result.state_context = state_context_for_request(request, policy)
+    result.context = result.state_context
+    if result.state_context:
+        result.reasons.extend(["core memory injected", "state register injected"])
+    if policy.log_decisions:
+        append_recall_log(request, result)
+    return result
+
+
+def _finalize_recall_result(
+    result: RecallResult,
+    *,
+    request: RecallRequest,
+    active_request: RecallRequest,
+    policy: RecallPolicy,
+    session_state: Any,
+    queries: list[str],
+) -> RecallResult:
+    """Attach bounded context, advance session state, and append one decision log."""
+
+    recall_context = format_recall_context(result, policy)
+    result.state_context = state_context_for_request(active_request, policy)
+    result.context = merge_context_blocks(
+        result.state_context,
+        recall_context,
+        max_chars=policy.max_total_context_chars,
+    )
+    if result.state_context:
+        result.reasons.extend(["core memory injected", "state register injected"])
+    if session_state is not None:
+        try:
+            from chronovisor.recall.recall_session import update_session_after_recall
+
+            update_session_after_recall(
+                session_state,
+                queries=queries,
+                page_ids=[item.page_id for item in result.context_items],
+                page_updated={
+                    item.page_id: item.updated for item in result.context_items
+                },
+            )
+        except Exception:
+            pass
+    if policy.log_decisions:
+        append_recall_log(request, result)
+    return result
+
+
+def _initial_recall_skip(
+    request: RecallRequest,
+    policy: RecallPolicy,
+    *,
+    started: float,
+) -> RecallResult | None:
+    """Return the two side-effect-free preflight dispositions."""
+
+    if not policy.enabled:
+        return RecallResult(
+            status="disabled",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=["recall disabled"],
+            matched_terms={},
+            latency_ms=_elapsed_ms(started),
+        )
+    if not request.prompt.strip():
+        return RecallResult(
+            status="skipped",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=["empty prompt"],
+            matched_terms={},
+            latency_ms=_elapsed_ms(started),
+        )
+    return None
+
+
 def _run_recall_impl(
     request: RecallRequest,
     policy: RecallPolicy | None = None,
@@ -1725,61 +1840,9 @@ def _run_recall_impl(
     )
     deadline_at = final_deadline_at - (reserve_ms / 1000.0)
 
-    def fail_open_budget(
-        reason: str, matched: dict[str, list[str]] | None = None
-    ) -> RecallResult:
-        if _allow_timeout_fallback and perform_search:
-            remaining_ms = _remaining_budget_ms(final_deadline_at)
-            if remaining_ms is not None and remaining_ms >= 100:
-                fallback = run_deterministic_fallback(
-                    request,
-                    policy,
-                    perform_search=True,
-                    timeout_ms=remaining_ms,
-                    reason=reason,
-                )
-                fallback.latency_ms = _elapsed_ms(started)
-                if policy.log_decisions:
-                    append_recall_log(request, fallback)
-                return fallback
-        result = RecallResult(
-            status="timeout",
-            decision="none",
-            confidence=0.0,
-            queries=[],
-            reasons=[reason, "recall budget exhausted; fail-open"],
-            matched_terms=matched or {},
-            latency_ms=_elapsed_ms(started),
-            error=reason,
-        )
-        result.state_context = state_context_for_request(request, policy)
-        result.context = result.state_context
-        if result.state_context:
-            result.reasons.extend(["core memory injected", "state register injected"])
-        if policy.log_decisions:
-            append_recall_log(request, result)
-        return result
-
-    if not policy.enabled:
-        return RecallResult(
-            status="disabled",
-            decision="none",
-            confidence=0.0,
-            queries=[],
-            reasons=["recall disabled"],
-            matched_terms={},
-            latency_ms=_elapsed_ms(started),
-        )
-    if not request.prompt.strip():
-        return RecallResult(
-            status="skipped",
-            decision="none",
-            confidence=0.0,
-            queries=[],
-            reasons=["empty prompt"],
-            matched_terms={},
-            latency_ms=_elapsed_ms(started),
-        )
+    initial_skip = _initial_recall_skip(request, policy, started=started)
+    if initial_skip is not None:
+        return initial_skip
 
     active_request = request
     cleaned_prompt, stripped_reasons = strip_non_user_blocks(request.prompt)
@@ -1917,7 +1980,10 @@ def _run_recall_impl(
             evidence_features["evidence_score"] = score
             evidence_features["decision_pre_judge"] = decision_from_score(score, policy)
         except RecallBudgetExhausted as exc:
-            return fail_open_budget(str(exc), matched)
+            return _fail_open_recall_budget(
+                str(exc), matched, request, policy,
+                started, final_deadline_at, _allow_timeout_fallback, perform_search,
+            )
         except Exception as exc:
             reasons.append(f"evidence gate failed: {exc.__class__.__name__}")
             pre_results = []
@@ -1927,7 +1993,10 @@ def _run_recall_impl(
         try:
             judge_timeout_ms = _require_remaining_budget(deadline_at, "judge")
         except RecallBudgetExhausted as exc:
-            return fail_open_budget(str(exc), matched)
+            return _fail_open_recall_budget(
+                str(exc), matched, request, policy,
+                started, final_deadline_at, _allow_timeout_fallback, perform_search,
+            )
         judge_score, judge_queries, judge_reason = run_local_judge(
             active_request,
             score,
@@ -1994,7 +2063,10 @@ def _run_recall_impl(
             if not context_items:
                 reasons.append("no matching pages")
         except RecallBudgetExhausted as exc:
-            return fail_open_budget(str(exc), matched)
+            return _fail_open_recall_budget(
+                str(exc), matched, request, policy,
+                started, final_deadline_at, _allow_timeout_fallback, perform_search,
+            )
         except Exception as exc:
             error = f"{exc.__class__.__name__}: {exc}"
             reasons.append("search failed")
@@ -2019,32 +2091,14 @@ def _run_recall_impl(
         latency_ms=_elapsed_ms(started),
         error=error,
     )
-    recall_context = format_recall_context(result, policy)
-    result.state_context = state_context_for_request(active_request, policy)
-    result.context = merge_context_blocks(
-        result.state_context,
-        recall_context,
-        max_chars=policy.max_total_context_chars,
+    return _finalize_recall_result(
+        result,
+        request=request,
+        active_request=active_request,
+        policy=policy,
+        session_state=session_state,
+        queries=queries,
     )
-    if result.state_context:
-        result.reasons.extend(["core memory injected", "state register injected"])
-    if session_state is not None:
-        try:
-            from chronovisor.recall.recall_session import update_session_after_recall
-
-            update_session_after_recall(
-                session_state,
-                queries=queries,
-                page_ids=[item.page_id for item in result.context_items],
-                page_updated={
-                    item.page_id: item.updated for item in result.context_items
-                },
-            )
-        except Exception:
-            pass
-    if policy.log_decisions:
-        append_recall_log(request, result)
-    return result
 
 
 def run_recall(
