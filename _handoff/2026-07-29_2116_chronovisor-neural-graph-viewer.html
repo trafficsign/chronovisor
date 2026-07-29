@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Chronovisor Neural Graph Viewer 計画書</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+img{max-width:100%;border-radius:6px;margin:0.5rem 0}
+.ref-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+.ref-grid figure{margin:0}
+.ref-grid figcaption{font-size:0.85rem;color:var(--muted);margin-top:0.3rem}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_chronovisor_neural_graph_viewer","created_at":"2026-07-29T21:16:00+09:00","状態":"done","slug":"chronovisor-neural-graph-viewer"}
+</script>
+
+<header>
+  <h1>Chronovisor Neural Graph Viewer</h1>
+  <div class="meta-bar">
+    <span class="badge" data-state="done">done</span>
+    <code>2026-07-29</code>
+    <code>chronovisor-neural-graph-viewer</code>
+  </div>
+</header>
+
+<section>
+  <h2>概要</h2>
+  <p>Chronovisor Wiki の知識グラフを 3D force-directed graph で可視化するビューア。
+  AIがMCP経由でページを読み込んだ際に、ニューロンが発火するようなアニメーション効果を表示する。</p>
+</section>
+
+<section>
+  <h2>要件</h2>
+
+  <h3>コア機能</h3>
+  <ul>
+    <li><strong>3D Force-Directed Graph</strong>: FableモックアップのCanvas 3D投影・発火エンジンで Wiki ページをノード、wikilink をエッジとして描画</li>
+    <li><strong>ニューロン発火エフェクト</strong>: AIが <code>chronovisor_read</code> / <code>chronovisor_search</code> でページにアクセスした時にノードが発光し、リンク先に伝播</li>
+    <li><strong>CADライクなナビゲーション</strong>: ポインタドラッグ・ホイール・ズームボタンによるズーム、回転、フォーカス</li>
+    <li><strong>カテゴリフィルタ</strong>: 左サイドバーの Explorer でカテゴリ別にフィルタ</li>
+    <li><strong>ノードクリック</strong>: ノードをクリックするとカメラが寄って詳細情報を表示</li>
+  </ul>
+
+  <h3>UI レイアウト</h3>
+  <ul>
+    <li>Obsidian のサイドバー切り替え風のビュー構成（ファイル一覧 / グラフビュー）</li>
+    <li>左サイドバー: カテゴリ別ファイルツリー（Explorer）</li>
+    <li>中央: 3D グラフビューポート</li>
+    <li>右サイドバー: コントロール、STIMULATE ボタン、ノード詳細</li>
+    <li>ノードクリック → ツリーの該当ファイルへ自動スクロール＆ハイライト</li>
+    <li>ツリーのダブルクリック → ページのプレビュー表示</li>
+  </ul>
+
+  <h3>デザイン</h3>
+  <ul>
+    <li>既存ダッシュボード（Observatory）のデザインシステムに準拠</li>
+    <li>precision-minimal dark テーマ（Linear/Vercel 系譜）</li>
+    <li>Geist Sans / Geist Mono フォント</li>
+    <li>カラートークン: <code>--bg: #08090a</code>, <code>--accent: #828fff</code>, <code>--green: #3dd68c</code>, <code>--amber: #e8b04b</code>, <code>--red: #ff6166</code></li>
+  </ul>
+
+  <h3>レイアウトモード</h3>
+  <ul>
+    <li><strong>ORGANIC</strong>: 自然な force-directed レイアウト（デフォルト）</li>
+    <li><strong>CLUSTERS</strong>: カテゴリ別にクラスタリングしたレイアウト</li>
+  </ul>
+
+  <h3>リアルタイム連携</h3>
+  <ul>
+    <li>WebSocket で MCP イベント（<code>chronovisor_read</code>, <code>chronovisor_search</code>, <code>chronovisor_record</code>）を受信</li>
+    <li>アクセスされたページのノードが発火 → リンク先に伝播</li>
+    <li>発火色: RECALL=アクセント青, SAVE=グリーン, INGEST=アンバー</li>
+  </ul>
+</section>
+
+<section>
+  <h2>データ構造</h2>
+  <ul>
+    <li><strong>ノード</strong>: <code>~/.chronovisor/pages/</code> 配下の各 <code>.md</code> ファイル（3,266ページ、80カテゴリ）</li>
+    <li><strong>エッジ</strong>: Markdown 内の wikilink (<code>[[page-name]]</code>) を解析して生成（13,001リンク）</li>
+    <li><strong>フロントマター</strong>: YAML の <code>title</code>, <code>updated</code>, <code>tags</code>, <code>raw_keywords</code></li>
+    <li><strong>実データAPI</strong>: <code>ops/cortex.py</code> がローカルWikiから動的生成し、<code>/api/cortex/graph</code> で配信。ページ本文と固定JSONはGitへ格納しない</li>
+  </ul>
+</section>
+
+<section>
+  <h2>リファレンス</h2>
+  <div class="ref-grid">
+    <figure>
+      <img src="ref_jarvis_neural_graph.png" alt="JARVIS Command Center — ニューロン発火リファレンス">
+      <figcaption>JARVIS Command Center: 3D neural graph + 発火エフェクト参考</figcaption>
+    </figure>
+    <figure>
+      <img src="ref_gitnexus_layout.png" alt="GitNexus — レイアウトリファレンス">
+      <figcaption>GitNexus: 左ツリー + 右グラフのレイアウト参考</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <h2>技術選定</h2>
+  <table>
+    <tr><td><strong>レンダリング</strong></td><td>Fable Canvas 2D + 3D投影（外部依存なし）</td></tr>
+    <tr><td><strong>カメラ制御</strong></td><td>Fableモックアップ準拠の独自orbit / zoom / focus</td></tr>
+    <tr><td><strong>リアルタイム</strong></td><td>WebSocket + durable telemetry tail</td></tr>
+    <tr><td><strong>フォント</strong></td><td>SF Mono / system UI（Fableモックアップ準拠）</td></tr>
+    <tr><td><strong>バンドル</strong></td><td>追加vendorなし。HTML / CSS / JavaScriptを同梱</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>実行計画</h2>
+  <ol class="checklist">
+    <li><input type="checkbox" checked><span><strong>Phase 1: デザイン</strong> — Fable でモックアップ作成、色・レイアウト確定</span></li>
+    <li><input type="checkbox" checked><span><strong>Phase 2: 発火デモ</strong> — 3d-force-graph + ダミーデータで動作確認、アニメーションチューニング</span></li>
+    <li><input type="checkbox" checked><span><strong>Phase 3: 本実装</strong> — 実データ投入、ダッシュボード統合、WebSocket 連携、ツリー↔グラフ双方向ハイライト</span></li>
+  </ol>
+
+  <h3>Phase 3 成果物（実装済み）</h3>
+  <ul>
+    <li><code>ops/cortex.py</code> — Wikiグラフ動的生成、キャッシュ、durableイベント変換、WebSocketフレーム</li>
+    <li><code>tools/build_cortex_graph.py</code> — 任意rootからのデバッグ用JSONエクスポート</li>
+    <li><code>dashboard_static/cortex.html</code> — Fableモックアップ準拠のメインページ</li>
+    <li><code>dashboard_static/cortex.css</code> — 1280×720でFableと同寸法のレイアウト・スタイル</li>
+    <li><code>dashboard_static/cortex.js</code> — 実データ3D投影、発火、検索、ツリー連動、音声、WebSocketクライアント</li>
+    <li><code>ops/dashboard.py</code> — <code>/cortex</code>、graph API、WebSocketルート</li>
+    <li><code>index.html</code> — ObservatoryからSynaptic Cortexへのナビゲーション</li>
+  </ul>
+
+  <h3>Phase 3 完了項目</h3>
+  <ol class="checklist">
+    <li><input type="checkbox" checked><span>WebSocket で read / search / save / ingest のリアルタイムイベント受信</span></li>
+    <li><input type="checkbox" checked><span>ツリー↔グラフの双方向ハイライト・スクロール連動</span></li>
+    <li><input type="checkbox" checked><span>ダブルクリックで本文を送信しないメタデータプレビュー</span></li>
+    <li><input type="checkbox" checked><span>サウンドトグル</span></li>
+    <li><input type="checkbox" checked><span>ORGANIC / CLUSTERS レイアウト</span></li>
+    <li><input type="checkbox" checked><span>Dashboard Observatory との往復ナビゲーション</span></li>
+    <li><input type="checkbox" checked><span>Fableモックアップとの1280×720 DOM寸法一致</span></li>
+    <li><input type="checkbox" checked><span>1024×720で枠外脱出・横スクロールなし</span></li>
+  </ol>
+</section>
+
+<section class="rules">
+  <h2>やってはいけないこと</h2>
+  <ul>
+    <li>CDN からのスクリプト読み込み（CSP で <code>script-src 'self'</code>）</li>
+    <li>既存の <code>index.html</code> / <code>app.js</code> の変更（Phase 3 まで触らない）</li>
+    <li>ページ内容のレンダリング（Wiki のマークダウン本文は表示しない、グラフのみ）</li>
+  </ul>
+</section>
+
+<section>
+  <h2>実行ログ</h2>
+  <ol class="log">
+    <li><time>2026-07-29 21:16</time><span>計画書作成</span></li>
+    <li><time>2026-07-29 21:30</time><span>Phase 1: Fable でモックアップ「SYNAPTIC CORTEX」作成完了</span></li>
+    <li><time>2026-07-29 22:26</time><span>Phase 2: ざっくり実装完了 — cortex.html/css/js + build_cortex_graph.py + vendor bundle</span></li>
+    <li><time>2026-07-29 23:36</time><span>Phase 3: Fable版を正本として実データAPI・WebSocket・双方向連動・Observatory統合を完了</span></li>
+    <li><time>2026-07-29 23:36</time><span>検証: 1280×720 DOM寸法一致、1024×720 overflow 0、関連73件合格、全体回帰は外部Ollama待ち1件を除き失敗0</span></li>
+  </ol>
+</section>
+
+</body>
+</html>

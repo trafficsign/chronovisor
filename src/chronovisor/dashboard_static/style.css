@@ -184,7 +184,11 @@ h2 {
   gap: 8px;
 }
 
+.cortex-link,
 .lan-share-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 124px;
   min-height: 32px;
   overflow: hidden;
@@ -196,12 +200,14 @@ h2 {
   font: inherit;
   font-size: 12px;
   font-weight: 540;
+  text-decoration: none;
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
   transition: color 0.15s var(--ease), border-color 0.15s var(--ease), background 0.15s var(--ease);
 }
 
+.cortex-link:hover,
 .lan-share-button:hover {
   color: var(--text);
   border-color: var(--line-strong);
@@ -2298,6 +2304,7 @@ canvas {
 .save-cell:focus-visible,
 .segmented-control button:focus-visible,
 .save-feed-row:focus-visible,
+.cortex-link:focus-visible,
 .lan-share-button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

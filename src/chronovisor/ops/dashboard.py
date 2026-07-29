@@ -42,6 +42,12 @@ from chronovisor.decision.decision_router import resolve_router_policy
 from chronovisor.ingest import orchestrator
 from chronovisor.ops import runtime_status
 from chronovisor.ops.convergence import is_human_required_result
+from chronovisor.ops.cortex import (
+    CortexEventCursor,
+    build_cortex_graph,
+    websocket_accept,
+    websocket_text_frame,
+)
 from chronovisor.ops.health import health_snapshot
 from chronovisor.recall import recall_runtime
 from chronovisor.recall.recall_auditor import load_audit_policy
@@ -4399,6 +4405,66 @@ class DashboardHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _cortex_graph_response(self) -> None:
+        identity = runtime_identity()
+        commit = str(
+            identity.get("commit_id")
+            or identity.get("expected_commit")
+            or ""
+        )
+        _json_response(
+            self,
+            build_cortex_graph(CHRONOVISOR_ROOT, commit=commit),
+        )
+
+    def _cortex_events_response(self) -> None:
+        upgrade = self.headers.get("Upgrade", "").casefold()
+        connection = {
+            item.strip().casefold()
+            for item in self.headers.get("Connection", "").split(",")
+        }
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if upgrade != "websocket" or "upgrade" not in connection or not key:
+            self.send_error(HTTPStatus.BAD_REQUEST, "WebSocket upgrade required")
+            return
+        try:
+            accept = websocket_accept(key)
+        except ValueError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid WebSocket key")
+            return
+
+        self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        self.close_connection = True
+
+        cursor = CortexEventCursor(
+            CHRONOVISOR_ROOT,
+            pull_log=recall_runtime.RECALL_PULL_LOG_FILE,
+            activity_log=LOG_FILE,
+        )
+        last_heartbeat = 0.0
+        try:
+            while True:
+                events = cursor.poll()
+                now = time.monotonic()
+                if events:
+                    payload = {"type": "events", "events": events}
+                elif now - last_heartbeat >= 15:
+                    payload = {"type": "heartbeat"}
+                else:
+                    time.sleep(0.25)
+                    continue
+                self.wfile.write(websocket_text_frame(payload))
+                self.wfile.flush()
+                last_heartbeat = now
+                if not events:
+                    time.sleep(0.25)
+        except (BrokenPipeError, ConnectionError, OSError):
+            return
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
@@ -4407,6 +4473,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 _file_response(self, STATIC_DIR / "index.html")
+            elif path == "/cortex":
+                _file_response(self, STATIC_DIR / "cortex.html")
             elif path == "/api/lan-access":
                 self._lan_access_response()
             elif path == "/api/fast-snapshot":
@@ -4495,6 +4563,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self,
                     {"health": _cached_snapshot(allow_stale=True)["health"]},
                 )
+            elif path == "/api/cortex/graph":
+                self._cortex_graph_response()
+            elif path == "/api/cortex/events":
+                self._cortex_events_response()
             elif path == "/api/model-status":
                 snapshot = _cached_snapshot(allow_stale=True)
                 _json_response(
