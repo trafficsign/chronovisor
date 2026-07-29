@@ -1368,11 +1368,8 @@
 
   function flashTicker(message) {
     window.clearTimeout(tickerTransition);
-    tickerText.style.opacity = 0;
-    tickerTransition = window.setTimeout(() => {
-      tickerText.textContent = message;
-      tickerText.style.opacity = 1;
-    }, 200);
+    tickerText.textContent = message;
+    tickerText.style.opacity = 1;
     tickerHold = performance.now() + 3500;
   }
 
