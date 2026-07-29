@@ -238,6 +238,32 @@ def test_model_stage_retries_transient_empty_json(
     assert result["payload"] == {"decision": {"ok": True}}
 
 
+def test_gpt_oss_model_stage_uses_low_reasoning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_chat(*args, **kwargs):
+        calls.append(kwargs)
+        return '{"decision":{"ok":true}}'
+
+    monkeypatch.setattr(
+        "chronovisor.classification_pilot.ollama.chat",
+        fake_chat,
+    )
+    runner = PilotRunner(package=_package(), cache_dir=tmp_path)
+
+    runner._cached_model_call(
+        model="gpt-oss:20b",
+        keep_alive="0",
+        prompt={"page": "test"},
+        schema={"type": "object"},
+        stage="test-stage",
+    )
+
+    assert calls[0]["think"] == "low"
+
+
 def test_diagnostic_leader_is_not_declared_winner_below_quality_floor() -> None:
     cases = [
         {

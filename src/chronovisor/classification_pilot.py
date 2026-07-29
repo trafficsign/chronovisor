@@ -513,6 +513,9 @@ class PilotRunner:
         last_response = ""
         attempts = 0
         for attempts in range(1, 4):
+            think: bool | str = (
+                "low" if model.strip().lower().startswith("gpt-oss") else False
+            )
             response = ollama.chat(
                 [
                     {
@@ -539,7 +542,7 @@ class PilotRunner:
                 max_output_chars=12_000,
                 temperature=0,
                 seed=attempts - 1,
-                think=False,
+                think=think,
             )
             last_response = str(response).strip()
             try:
