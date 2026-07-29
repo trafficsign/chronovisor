@@ -5,6 +5,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 
 class JobStatus(Enum):
@@ -21,7 +22,7 @@ class Job:
     processor: str  # "ollama" or "unavailable"
     created_at: str
     completed_at: str | None = None
-    result: dict | None = None
+    result: dict[str, Any] | None = None
     error: str | None = None
     pages_created: list[str] = field(default_factory=list)
     pages_updated: list[str] = field(default_factory=list)
@@ -31,7 +32,7 @@ class Job:
 
 
 class JobStore:
-    def __init__(self):
+    def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
 
@@ -50,7 +51,7 @@ class JobStore:
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
-    def update(self, job_id: str, **kwargs) -> None:
+    def update(self, job_id: str, **kwargs: Any) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
             if job:

@@ -4222,6 +4222,7 @@ def _background_exit_code(result: dict[str, Any]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-self-heal`` command-line entry point."""
     args = build_parser().parse_args(argv)
     frontier_enabled = args.enable_frontier_repair and not args.no_frontier
     release_evidence = (

@@ -1347,6 +1347,7 @@ def dispatch(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor`` command-line entry point."""
     return dispatch(build_parser().parse_args(argv))
 
 

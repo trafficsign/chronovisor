@@ -731,6 +731,7 @@ def serve(config: SearchEmbeddingConfig | None = None) -> None:
 
 
 def main() -> None:
+    """Run the ``chronovisor-semantic-service`` command-line entry point."""
     parser = argparse.ArgumentParser(prog="chronovisor-semantic-service")
     parser.add_argument(
         "command",

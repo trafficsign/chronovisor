@@ -165,6 +165,7 @@ def run_sweeper(*, limit: int = 4, idle_seconds: int = 300, write: bool = True) 
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-session-sweeper`` command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=4)
     parser.add_argument("--idle-seconds", type=int, default=300)

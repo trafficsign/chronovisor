@@ -462,6 +462,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-hook`` command-line entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

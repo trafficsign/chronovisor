@@ -293,6 +293,7 @@ def write_review_queue(records: list[dict], path: Path = REVIEW_QUEUE) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-duplicate-review`` command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Build Chronovisor duplicate review queue."
     )

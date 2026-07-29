@@ -288,6 +288,7 @@ def retention_score(page_id: str, *, path: Path = RETENTION_FILE) -> float:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-retention`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Build FSRS-inspired retention scores.")
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--no-write", action="store_true")

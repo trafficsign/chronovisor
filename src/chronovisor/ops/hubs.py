@@ -154,6 +154,7 @@ def build_hub_pages(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-hubs`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Generate auto-maintained hub pages.")
     parser.add_argument("--min-pages", type=int, default=3)
     parser.add_argument("--max-hubs", type=int, default=20)

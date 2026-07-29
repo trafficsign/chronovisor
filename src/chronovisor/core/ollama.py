@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 import httpx
 
@@ -34,7 +34,7 @@ OLLAMA_URL = "http://localhost:11434"
 MODEL = DEFAULT_INGEST_MODEL
 
 # Health check cache
-_health_cache: dict = {"status": None, "checked_at": 0.0}
+_health_cache: dict[str, Any] = {"status": None, "checked_at": 0.0}
 HEALTH_CACHE_TTL = 900  # 15 minutes on failure
 
 # Shared httpx.Client — one per process, reused across is_available /
@@ -456,19 +456,6 @@ def _ollama_engine_identity() -> str:
 
     response = _client().get("/api/version", timeout=3)
     response.raise_for_status()
-
-
-def _post_json(
-    endpoint: str,
-    *,
-    payload: Mapping[str, Any],
-    timeout: httpx.Timeout,
-) -> Any:
-    """POST one non-streaming Ollama request with the shared error contract."""
-
-    response = _client().post(endpoint, json=dict(payload), timeout=timeout)
-    _raise_for_status_with_detail(response)
-    return response.json()
     body = response.json()
     version = body.get("version") if isinstance(body, Mapping) else None
     if not isinstance(version, str) or not version.strip():
@@ -482,6 +469,19 @@ def _post_json(
         )
     )
     return f"ollama-engine-v2:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+
+
+def _post_json(
+    endpoint: str,
+    *,
+    payload: Mapping[str, Any],
+    timeout: httpx.Timeout,
+) -> Any:
+    """POST one non-streaming Ollama request with the shared error contract."""
+
+    response = _client().post(endpoint, json=dict(payload), timeout=timeout)
+    _raise_for_status_with_detail(response)
+    return response.json()
 
 
 def _calibration_file() -> Path:
@@ -1263,7 +1263,7 @@ def _generate_unlocked(
     prompt: str,
     system: str | None = None,
     *,
-    format: dict | str | None = None,
+    format: dict[str, Any] | str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     model: str | None = None,
     num_ctx: int | None = None,
@@ -1328,7 +1328,7 @@ def _generate_unlocked(
         prompt_chars,
         selected_model,
     )
-    payload = {
+    payload: dict[str, Any] = {
         "model": selected_model,
         "prompt": prompt,
         "stream": progress_callback is not None,
@@ -1491,7 +1491,7 @@ def generate(
     prompt: str,
     system: str | None = None,
     *,
-    format: dict | str | None = None,
+    format: dict[str, Any] | str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     model: str | None = None,
     num_ctx: int | None = None,
@@ -1678,7 +1678,11 @@ def embed(
             ),
         )
         resp.raise_for_status()
-        return resp.json()["embeddings"]
+        body = resp.json()
+        embeddings = body.get("embeddings") if isinstance(body, Mapping) else None
+        if not isinstance(embeddings, list):
+            raise RuntimeError("Ollama embed response is missing embeddings")
+        return cast(list[list[float]], embeddings)
 
 
 def unload_model() -> None:

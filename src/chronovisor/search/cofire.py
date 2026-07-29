@@ -220,6 +220,7 @@ def neighbors(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-cofire`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Build recall co-fire graph.")
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--min-count", type=int, default=2)

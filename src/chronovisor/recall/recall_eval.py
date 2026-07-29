@@ -422,6 +422,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-recall-eval`` command-line entry point."""
     args = build_parser().parse_args(argv)
     payload = run_eval(
         config_file=Path(args.config).expanduser() if args.config else None,

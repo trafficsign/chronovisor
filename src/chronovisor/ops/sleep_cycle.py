@@ -1101,6 +1101,7 @@ def _run_sleep_cycle(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-sleep`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Run Chronovisor sleep consolidation.")
     parser.add_argument("--raw-limit", type=int, default=100)
     parser.add_argument("--eval-limit", type=int, default=100)

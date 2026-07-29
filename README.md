@@ -85,3 +85,18 @@ chronovisor hooks install --host all
 See `docs/architecture.md`, `docs/config.md`, `docs/hooks.md`,
 `docs/librarian.md`, `docs/research-orchestration.md`, and
 `docs/operations.md` for the operational model.
+
+## Development checks
+
+Run the staged static-quality baseline before the repository tests:
+
+```sh
+uv run ruff check src scripts tests
+uv run mypy
+uv run lint-imports
+uv run python -m compileall -q src scripts
+```
+
+Ruff currently enforces fatal syntax/name checks across source, scripts, and
+tests. Mypy is strict for `chronovisor/core` and will expand outward
+incrementally rather than hiding existing outer-layer debt with broad ignores.

@@ -4597,6 +4597,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-dashboard`` command-line entry point."""
     args = build_parser().parse_args(argv)
     token_path = (
         args.access_token_file or CHRONOVISOR_ROOT / "runtime" / "dashboard-access-token"

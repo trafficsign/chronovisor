@@ -212,6 +212,7 @@ def repair_known_anchors(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-link-anchor-repair`` command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
     args = parser.parse_args(argv)

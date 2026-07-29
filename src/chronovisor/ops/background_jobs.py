@@ -679,6 +679,7 @@ def recent_jobs(*, limit: int = 10) -> list[dict[str, Any]]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-background-jobs`` command-line entry point."""
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     run_p = sub.add_parser("run")

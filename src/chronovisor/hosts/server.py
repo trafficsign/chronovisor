@@ -1639,6 +1639,7 @@ def chronovisor_tick() -> str:
 
 
 def main():
+    """Run the ``chronovisor-mcp`` command-line entry point."""
     init_chronovisor()
     # Importing torch, resolving the Hugging Face snapshot, and compiling the
     # first MPS inference used to add ~15 s to the first interactive search.

@@ -2670,6 +2670,7 @@ def _print_run(payload: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-recall-improve`` command-line entry point."""
     args = build_parser().parse_args(argv)
     if args.command == "run":
         payload = run_improvement(

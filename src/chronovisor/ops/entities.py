@@ -575,6 +575,7 @@ def backfill_entities(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-entities`` command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Maintain Chronovisor entity frontmatter."
     )

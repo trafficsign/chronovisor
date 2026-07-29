@@ -509,6 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-ingest-drain`` command-line entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.watch:

@@ -2147,6 +2147,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-recall-auto-apply`` command-line entry point."""
     args = build_parser().parse_args(argv)
     result = apply_feedback_file(
         feedback_file=Path(args.feedback_file).expanduser(),

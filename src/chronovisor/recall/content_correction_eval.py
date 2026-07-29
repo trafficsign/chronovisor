@@ -104,6 +104,7 @@ def run_eval(path: Path = DEFAULT_CORPUS) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-content-correction-eval`` command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Evaluate deterministic correction-capture precision and recall."
     )

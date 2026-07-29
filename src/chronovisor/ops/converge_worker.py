@@ -181,6 +181,7 @@ def run_converge(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-converge`` command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--session-limit", type=int, default=4)
     parser.add_argument("--job-limit", type=int, default=8)

@@ -502,6 +502,7 @@ def sanitize_claim_ledger(*, path: Path = CLAIMS_FILE, write: bool = True) -> di
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-claims`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Build or search the Chronovisor claim index.")
     sub = parser.add_subparsers(dest="command", required=True)
     rebuild = sub.add_parser("rebuild", help="Rebuild derived claims from current pages.")

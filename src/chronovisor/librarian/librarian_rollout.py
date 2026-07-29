@@ -448,6 +448,7 @@ def run_rollout(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-librarian-rollout`` command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
     parser.add_argument("--batch-size", type=int, default=20)

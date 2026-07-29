@@ -1012,6 +1012,8 @@ def test_engine_identity_ignores_caller_env_for_same_daemon(monkeypatch) -> None
     configured_identity = ollama._ollama_engine_identity()
 
     assert default_identity == configured_identity
+    assert default_identity.startswith("ollama-engine-v2:")
+    assert len(default_identity) == len("ollama-engine-v2:") + 64
 
 
 def test_previous_calibration_schema_is_ignored(tmp_path) -> None:

@@ -79,6 +79,7 @@ def snapshot_chronovisor(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-snapshot`` command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Snapshot ~/.chronovisor into its own git history."
     )

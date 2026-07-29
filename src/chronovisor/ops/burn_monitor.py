@@ -1850,6 +1850,7 @@ def preflight_ready(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-burn-monitor`` command-line entry point."""
     args = parse_args(argv)
     if args.self_test:
         self_test()

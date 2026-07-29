@@ -4278,6 +4278,7 @@ def status() -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-autonomy`` command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Run or install Chronovisor autonomous operation."
     )

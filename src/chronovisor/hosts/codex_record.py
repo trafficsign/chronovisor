@@ -1218,6 +1218,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-codex-record`` command-line entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
     stdin_text = sys.stdin.read() if args.hook else None

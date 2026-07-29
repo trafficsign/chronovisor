@@ -63,6 +63,7 @@ def oracle_bundle(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-oracle`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Return a cited wiki oracle evidence bundle.")
     parser.add_argument("query")
     parser.add_argument("--top-n", type=int, default=8)

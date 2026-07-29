@@ -252,6 +252,7 @@ def run_eval(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-memory-integrity`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Evaluate raw capture memory integrity.")
     parser.add_argument("--since", default="")
     parser.add_argument("--limit", type=int, default=100)

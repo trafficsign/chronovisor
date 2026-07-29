@@ -3445,6 +3445,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-eval`` command-line entry point."""
     args = build_parser().parse_args(argv)
     if args.build_golden:
         payload = build_golden(

@@ -367,6 +367,7 @@ def prefetch_page_ids(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-prefetch`` command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Build speculative recall prefetch cache."
     )

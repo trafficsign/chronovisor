@@ -2668,7 +2668,7 @@ def _active_semantic_defer_packet_evidence(
             continue
         return {
             "reason": SEMANTIC_NO_QUORUM_DEFER_REASON,
-            "authority_sha256": authority_sha256,
+            "authority_sha256": authority_epoch,
             "packet_path": str(packet_path),
             "error": error,
             "job_id": packet.get("job_id"),
@@ -3982,6 +3982,7 @@ def run_replay(*, since: str = "", limit: int = 1) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-raw-replay`` command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Plan or run retroactive raw re-ingestion."
     )

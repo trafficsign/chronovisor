@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from importlib import import_module
 from types import ModuleType
+from typing import Any
 
 
 def alias_legacy_module(name: str, implementation: ModuleType) -> None:
@@ -27,14 +28,14 @@ def install_legacy_package(package_name: str, implementation_name: str) -> None:
         def _implementation(self) -> ModuleType:
             return import_module(implementation_name)
 
-        def __getattribute__(self, name: str):
+        def __getattribute__(self, name: str) -> Any:
             if name == implementation_leaf:
                 implementation = import_module(implementation_name)
                 if hasattr(implementation, name):
                     return getattr(implementation, name)
             return super().__getattribute__(name)
 
-        def __getattr__(self, name: str):
+        def __getattr__(self, name: str) -> Any:
             if name == implementation_leaf:
                 return self._implementation()
             try:
@@ -44,7 +45,7 @@ def install_legacy_package(package_name: str, implementation_name: str) -> None:
                     f"module {package_name!r} has no attribute {name!r}"
                 ) from exc
 
-        def __setattr__(self, name: str, value) -> None:
+        def __setattr__(self, name: str, value: Any) -> None:
             if (
                 name.startswith("__")
                 or (

@@ -97,6 +97,7 @@ def write_reflection_page(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-reflect`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Generate a memory reflection page.")
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")

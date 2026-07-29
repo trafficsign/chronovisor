@@ -83,11 +83,26 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "import-linter>=2.9",
+    "mypy>=2.3.0",
     "pytest>=9.0.3",
+    "ruff>=0.16.0",
 ]
 
 [tool.importlinter]
 root_package = "chronovisor"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+files = ["src/chronovisor/core"]
+strict = true
+show_error_codes = true
+warn_unused_configs = true
 
 [[tool.importlinter.contracts]]
 name = "Core cannot depend on domain or outer layers"

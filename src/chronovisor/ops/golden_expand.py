@@ -113,6 +113,7 @@ def expand_golden_from_recall_questions(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-golden-expand`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Expand search golden set from recall_questions.")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--include-reference", action="store_true")

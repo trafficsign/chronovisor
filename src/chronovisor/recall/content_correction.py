@@ -5556,6 +5556,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-content-correction`` command-line entry point."""
     args = build_parser().parse_args(argv)
     if not args.dry_run:
         init_chronovisor()

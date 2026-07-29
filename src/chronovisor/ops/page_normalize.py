@@ -190,6 +190,7 @@ def normalize_pages(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-page-normalize`` command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--limit", type=int, default=0)

@@ -15,7 +15,7 @@ import json
 import os
 import shutil
 import tempfile
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -90,7 +90,7 @@ def exclusive_text_file_lock(path: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def sidecar_exclusive_lock(path: Path):
+def sidecar_exclusive_lock(path: Path) -> AbstractContextManager[None]:
     """Lock ``<path>.lock`` with :func:`exclusive_text_file_lock`."""
 
     return exclusive_text_file_lock(path.with_suffix(path.suffix + ".lock"))

@@ -626,6 +626,7 @@ def run_shadow(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-librarian`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Chronovisor Librarian worker")
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
     parser.add_argument("--limit", type=int, default=250)

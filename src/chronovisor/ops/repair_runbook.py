@@ -243,6 +243,7 @@ def snapshot() -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-repair-runbook`` command-line entry point."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",

@@ -207,6 +207,7 @@ def backfill_metadata(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-metadata-backfill`` command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--max-frontier-calls", type=int, default=3)

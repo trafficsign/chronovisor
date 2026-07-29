@@ -85,6 +85,7 @@ def export_distill_dataset(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-distill`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Export wiki QA pairs for distillation.")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--include-reference", action="store_true")

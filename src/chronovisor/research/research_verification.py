@@ -185,6 +185,7 @@ def run_verification() -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-research-verify`` command-line entry point."""
     parser = argparse.ArgumentParser(description="Verify the research lane without mutating the Wiki")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)

@@ -650,6 +650,7 @@ def run_merge_migration(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-librarian-merge`` command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",

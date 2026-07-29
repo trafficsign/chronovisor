@@ -711,6 +711,7 @@ def _git_root() -> Path | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the ``chronovisor-librarian-release`` command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
