@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import hashlib
 import json
@@ -58,8 +60,6 @@ PASS_RATE = 0.8
 PASS_HITS = math.ceil(SAMPLE_SIZE * PASS_RATE)
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def unseen_root(root: Path) -> Path:

@@ -12,6 +12,8 @@ would have written or fails closed with :class:`ProjectionConflictError`.
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_bytes as _sha256
+
 import hashlib
 import json
 import os
@@ -126,8 +128,6 @@ class _TranscriptRecord:
     row_sha256: str
 
 
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _fixed_index(value: int) -> str:

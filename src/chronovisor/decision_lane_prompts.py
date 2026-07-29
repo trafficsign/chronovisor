@@ -7,6 +7,8 @@ previous adoption artifact instead of silently drifting away from its evidence.
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_text as _sha256_text
+
 import difflib
 import hashlib
 import json
@@ -457,8 +459,6 @@ def _deterministic_ingest_repair_preflight(
     }
 
 
-def _sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _shared_text_parts(value: str, *, raw_content: str | None) -> list[dict[str, Any]]:

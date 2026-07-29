@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import hashlib
 import json
@@ -98,8 +100,6 @@ def retrieval_contract_sha256() -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def v2_dev_root(root: Path) -> Path:

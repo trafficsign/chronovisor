@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_seconds as _now
+
 import argparse
 import fcntl
 import hashlib
@@ -43,8 +45,6 @@ MODEL_RE = re.compile(r"^gpt-(\d+)\.(\d+)(?:-(sol|terra|luna|mini))?$")
 REPLAY_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 _lock = partial(exclusive_text_file_lock, LOCK_FILE)

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from chronovisor.jsonl import write_jsonl as _write_jsonl
+
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import hashlib
 import json
@@ -34,8 +38,6 @@ DEV_AUDIT_RECEIPT_SCHEMA = "chronovisor.classification-dev-audit-receipt.v1"
 PREREGISTRATION_SCHEMA = "chronovisor.classification-preregistration.v1"
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _jsonl(path: Path) -> list[dict[str, Any]]:
@@ -46,15 +48,6 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _write_jsonl(path: Path, rows: list[Mapping[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(
-            json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
-            for row in rows
-        ),
-        encoding="utf-8",
-    )
 
 
 def candidate_path(root: Path) -> Path:

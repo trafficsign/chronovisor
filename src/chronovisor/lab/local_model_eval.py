@@ -8,6 +8,8 @@ and aggregate metrics -- never prompts or literal model responses.
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_seconds as _now
+
 import argparse
 import hashlib
 import json
@@ -458,8 +460,6 @@ def _set_coverage_rate(selected: Sequence[str], available: Sequence[str]) -> flo
     return round(len(set(selected) & expected) / len(expected), 6)
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _decision_signature(

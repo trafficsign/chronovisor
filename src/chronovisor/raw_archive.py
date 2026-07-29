@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_bytes as _sha256
+
 import hashlib
 import fcntl
 import json
@@ -30,8 +32,6 @@ _PROJECTION_MANIFEST_RE = re.compile(
 )
 
 
-def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
 
 
 def _fsync_directory(path: Path) -> None:

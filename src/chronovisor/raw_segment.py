@@ -9,6 +9,10 @@ as the durable identity.
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_bytes as _sha256
+
+from chronovisor.hashutil import sha256_file as _sha256_path
+
 import fcntl
 import hashlib
 import json
@@ -139,16 +143,8 @@ def _is_sha256(value: object) -> bool:
     )
 
 
-def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
 
 
-def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _fsync_directory(path: Path) -> None:

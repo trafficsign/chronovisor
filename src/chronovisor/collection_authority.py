@@ -9,6 +9,8 @@ never a per-page prediction.
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import hashlib
 import json
 import sys
@@ -52,8 +54,6 @@ class CollectionAuthorityError(RuntimeError):
     """Collection authority state or an attempted lifecycle mutation is unsafe."""
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _data_path(filename: str) -> Path:

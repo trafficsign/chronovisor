@@ -9,6 +9,8 @@ only after independent recurrence plus two deterministic local rechecks.
 
 from __future__ import annotations
 
+from chronovisor.timeutil import ensure_utc as _utc_now
+
 import copy
 import fcntl
 import hashlib
@@ -144,11 +146,6 @@ class SafeDiagnostic:
         }
 
 
-def _utc_now(value: datetime | None = None) -> datetime:
-    current = value or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        return current.replace(tzinfo=timezone.utc)
-    return current.astimezone(timezone.utc)
 
 
 def _timestamp(value: datetime) -> str:

@@ -7,6 +7,8 @@ redirect following never rewrites or compresses the registry.
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_bytes as _sha256
+
 import fcntl
 import hashlib
 import json
@@ -34,8 +36,6 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _normalize_key(value: object) -> str:

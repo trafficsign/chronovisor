@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import json
 from collections.abc import Callable
@@ -41,8 +43,6 @@ class RolloutBlocked(RuntimeError):
     """A hard quality gate correctly stopped the rollout."""
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -9,6 +9,10 @@ unprovable crash windows are never blindly replayed.
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_file as _sha256_path
+
+from chronovisor.timeutil import iso_seconds as _iso
+
 import argparse
 import fcntl
 import hashlib
@@ -137,8 +141,6 @@ def _now() -> datetime:
     return datetime.now().astimezone()
 
 
-def _iso(value: datetime) -> str:
-    return value.isoformat(timespec="seconds")
 
 
 def _parse_dt(value: object) -> datetime | None:
@@ -471,12 +473,6 @@ def _append_completion(row: dict[str, Any], path: Path | None = None) -> None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _raw_name(record: dict[str, Any]) -> str:

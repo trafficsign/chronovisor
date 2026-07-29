@@ -8,6 +8,12 @@ and deterministic calibration artifact pass the configured gates.
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_prefixed_text as _sha256_text
+
+from chronovisor.jsonl import write_jsonl as _write_jsonl
+
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import hashlib
 import json
 import math
@@ -150,12 +156,8 @@ _DOMAIN_HINTS: Mapping[str, tuple[str, ...]] = {
 }
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
-def _sha256_text(value: str) -> str:
-    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _tokens(value: str) -> set[str]:
@@ -468,12 +470,6 @@ def build_fixture_candidates(
     return selected
 
 
-def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = "".join(
-        json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n" for row in rows
-    )
-    path.write_text(content, encoding="utf-8")
 
 
 def lock_fixtures(

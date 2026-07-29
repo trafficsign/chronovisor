@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import json
 import sys
@@ -53,8 +55,6 @@ CHANNELS = (
 )
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def query2doc_root(root: Path) -> Path:

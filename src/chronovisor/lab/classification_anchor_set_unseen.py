@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import hashlib
 import json
@@ -71,8 +73,6 @@ MAXIMUM_HOLDS = 2
 MAXIMUM_MAJOR_ERRORS = 0
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def unseen_root(root: Path) -> Path:

@@ -8,6 +8,12 @@ larger evaluation.
 
 from __future__ import annotations
 
+from chronovisor.jsonl_write import atomic_replace_text as _atomic_write_text
+
+from chronovisor.jsonl_write import write_jsonl_atomic as _write_jsonl
+
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import csv
 import json
@@ -111,8 +117,6 @@ EARLY_CASE_EXPECTATIONS: Mapping[str, tuple[str, ...]] = {
 }
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def pilot_root(root: Path) -> Path:
@@ -156,27 +160,8 @@ def _state(root: Path, *, status: str, stage: str, **detail: Any) -> dict[str, A
     return payload
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temp = Path(raw_temp)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-        os.chmod(path, 0o600)
-    finally:
-        temp.unlink(missing_ok=True)
 
 
-def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    content = "".join(
-        json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
-        for row in rows
-    )
-    _atomic_write_text(path, content)
 
 
 def _notation_matches(actual: str, expected: Sequence[str]) -> bool:

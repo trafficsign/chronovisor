@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import iso_seconds as _iso
+
+from chronovisor.timeutil import utc_now as _now
+
 import fcntl
 import json
 import os
@@ -17,12 +21,8 @@ from chronovisor.recall_runtime_paths import RECALL_DIR
 BREAKER_FILE = RECALL_DIR / "circuit-breaker.json"
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
-def _iso(value: datetime) -> str:
-    return value.isoformat(timespec="seconds")
 
 
 def _parse_time(value: object) -> datetime | None:

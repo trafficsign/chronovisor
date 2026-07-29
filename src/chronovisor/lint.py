@@ -1,5 +1,7 @@
 """Lint engine - detect and fix wiki quality issues."""
 
+from chronovisor.hashutil import sha256_text as _sha256_text
+
 import difflib
 import fcntl
 import hashlib
@@ -401,8 +403,6 @@ def _display_text_for_unwrap(link_inside: str, target: str) -> str:
     return target
 
 
-def _sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _canonical_hash(value: Mapping[str, Any]) -> str:

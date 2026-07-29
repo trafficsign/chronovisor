@@ -8,6 +8,8 @@ explicit and recoverable across authority epochs.
 
 from __future__ import annotations
 
+from chronovisor.timeutil import iso_seconds as _iso
+
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -41,8 +43,6 @@ def _utc(value: datetime | None = None) -> datetime:
     return current.astimezone(timezone.utc)
 
 
-def _iso(value: datetime) -> str:
-    return value.isoformat(timespec="seconds")
 
 
 def _parse(value: object) -> datetime | None:

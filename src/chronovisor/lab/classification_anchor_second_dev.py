@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import hashlib
 import json
@@ -47,8 +49,6 @@ EVALUATION_SCHEMA = "chronovisor.classification-anchor-second-dev.v1"
 EXPERIMENT = "cvo-anchor-set-v1-second-audit-dev70"
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def output_root(root: Path, experiment: str = EXPERIMENT) -> Path:

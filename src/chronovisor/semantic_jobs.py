@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_now as _now
+
 import json
 import os
 import sqlite3
@@ -16,8 +18,6 @@ from chronovisor.store import CHRONOVISOR_ROOT
 SEMANTIC_JOBS_DB = CHRONOVISOR_ROOT / "runtime" / "semantic-jobs.sqlite"
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _iso(value: datetime | None = None) -> str:

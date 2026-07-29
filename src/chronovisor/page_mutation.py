@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_bytes as _sha256_bytes
+
 import difflib
 import fcntl
 import hashlib
@@ -175,8 +177,6 @@ def decision_authority_lock(path: Path | None = None) -> Iterator[None]:
         yield
 
 
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
 
 
 def _sha256_text(value: str) -> str:

@@ -9,6 +9,8 @@ process can validate the receipt and finish only the state transition.
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_bytes as _sha256
+
 import hashlib
 import json
 from pathlib import Path
@@ -41,8 +43,6 @@ class RawCompletionStatePending(RawCompletionAckError):
     """The receipt is durable, but processed-state acknowledgement is pending."""
 
 
-def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
 
 
 def _is_sha256(value: object) -> bool:

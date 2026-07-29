@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_bytes as _sha256_bytes
+
+from chronovisor.timeutil import utc_now as _now
+
 import hashlib
 import json
 import os
@@ -26,12 +30,8 @@ PLAN_SCHEMA = "chronovisor.merge-plan.v1"
 PREIMAGE_SCHEMA = "chronovisor.merge-preimage.v1"
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
 
 
 def _heading_exists(text: str, anchor: str) -> bool:

@@ -7,6 +7,8 @@ reviewed diagnostic set without mutating pages, calibration, or rollout state.
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_prefixed_bytes as _sha256_bytes
+
 import argparse
 import hashlib
 import json
@@ -41,8 +43,6 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _sha256_bytes(value: bytes) -> str:
-    return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
 def _jsonl(path: Path) -> list[dict[str, Any]]:

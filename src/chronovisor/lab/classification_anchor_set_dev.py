@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import hashlib
 import json
@@ -51,8 +53,6 @@ MAXIMUM_DUAL_RATE = 0.40
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def default_dev_gold_path() -> Path:

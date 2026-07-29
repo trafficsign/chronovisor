@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -28,8 +30,6 @@ POINTER_SCHEMA = "chronovisor.classification-pointer.v1"
 SUPERVISOR_PROBE_SCHEMA = "chronovisor.classification-authority-probe.v1"
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _digest(payload: Mapping[str, Any]) -> str:

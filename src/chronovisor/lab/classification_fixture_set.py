@@ -8,6 +8,14 @@ inference boundary.
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_prefixed_bytes as sha256_bytes
+
+from chronovisor.jsonl_write import atomic_replace_bytes as _atomic_write
+
+from chronovisor.jsonl_write import write_jsonl_atomic as _write_jsonl
+
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import hashlib
 import json
 import os
@@ -43,8 +51,6 @@ _JAPANESE_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]{3,}")
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _canonical_json(payload: Mapping[str, Any]) -> bytes:
@@ -56,37 +62,14 @@ def _canonical_json(payload: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def sha256_bytes(value: bytes) -> str:
-    return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
 def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    tmp = Path(raw_tmp)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        os.chmod(path, 0o600)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
-def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    encoded = b"".join(
-        json.dumps(dict(row), ensure_ascii=False, sort_keys=True).encode("utf-8")
-        + b"\n"
-        for row in rows
-    )
-    _atomic_write(path, encoded)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:

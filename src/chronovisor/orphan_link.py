@@ -29,6 +29,8 @@ The pipeline is:
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_bytes as _sha256_bytes
+
 import json
 import hashlib
 import os
@@ -521,8 +523,6 @@ def _sanitize_section_heading(value: object) -> str:
     return cleaned or "Related"
 
 
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
 
 
 def _render_suggestion_postimage(

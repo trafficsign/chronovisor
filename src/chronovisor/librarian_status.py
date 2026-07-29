@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import iso_seconds as _iso
+
 import hashlib
 import json
 from collections import Counter
@@ -32,8 +34,6 @@ def _now(now: datetime | None = None) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
-def _iso(value: datetime) -> str:
-    return value.isoformat(timespec="seconds")
 
 
 def _empty_state() -> dict[str, Any]:

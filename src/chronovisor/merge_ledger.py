@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_text as _sha256_text
+
 import fcntl
 import hashlib
 import json
@@ -33,8 +35,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def split_source_spans(text: str) -> list[dict[str, Any]]:

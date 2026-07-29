@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_now as _now
+
 import argparse
 import hashlib
 import json
@@ -44,8 +46,6 @@ def _is_capture_job(name: str) -> bool:
     return name.endswith("-save") or name.endswith("-capture")
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _iso(value: datetime | None = None) -> str:

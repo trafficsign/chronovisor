@@ -4,8 +4,48 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+from chronovisor.jsonl import encode_jsonl
+
+
+def atomic_replace_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> None:
+    """Replace a file through a same-directory, fsynced temporary file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp = Path(raw_temp)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        os.chmod(path, mode)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def atomic_replace_text(path: Path, content: str, *, mode: int = 0o600) -> None:
+    """Replace UTF-8 text with the same atomic and permission contract."""
+    atomic_replace_bytes(path, content.encode("utf-8"), mode=mode)
+
+
+def write_jsonl_atomic(
+    path: Path,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    sort_keys: bool = True,
+    mode: int = 0o600,
+) -> None:
+    """Encode and atomically replace a JSONL file."""
+    atomic_replace_text(
+        path,
+        encode_jsonl(rows, sort_keys=sort_keys),
+        mode=mode,
+    )
 
 
 def append_jsonl_durable(

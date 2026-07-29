@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import hashlib
 import json
 import re
@@ -63,8 +65,6 @@ DENSE_TRAINING_CORPUS_LICENSE = (
 )
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _tokens(value: str) -> list[str]:

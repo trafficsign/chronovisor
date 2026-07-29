@@ -10,7 +10,31 @@ from __future__ import annotations
 import json
 from collections import deque
 from pathlib import Path
+from collections.abc import Iterable, Mapping
 from typing import Any
+
+
+def encode_jsonl(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    sort_keys: bool = True,
+) -> str:
+    """Encode mappings as LF-delimited UTF-8 JSON text."""
+    return "".join(
+        json.dumps(dict(row), ensure_ascii=False, sort_keys=sort_keys) + "\n"
+        for row in rows
+    )
+
+
+def write_jsonl(
+    path: Path,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    sort_keys: bool = True,
+) -> None:
+    """Replace a JSONL file without an atomicity or durability guarantee."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(encode_jsonl(rows, sort_keys=sort_keys), encoding="utf-8")
 
 
 def read_jsonl(path: Path, *, limit: int | None = None) -> list[dict[str, Any]]:

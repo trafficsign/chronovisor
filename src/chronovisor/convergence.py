@@ -20,6 +20,8 @@ trail.
 
 from __future__ import annotations
 
+from chronovisor.timeutil import ensure_utc as _utc_now
+
 import copy
 import fcntl
 import hashlib
@@ -475,11 +477,6 @@ def is_human_required_result(result: object) -> bool:
     return is_human_required_failure(frontier_failure_class(result))
 
 
-def _utc_now(now: datetime | None = None) -> datetime:
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        return current.replace(tzinfo=timezone.utc)
-    return current.astimezone(timezone.utc)
 
 
 def _iso(now: datetime | None = None) -> str:

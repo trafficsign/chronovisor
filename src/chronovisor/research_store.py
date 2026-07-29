@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_now as _now
+
 import hashlib
 import json
 import os
@@ -17,8 +19,6 @@ from chronovisor.research_types import EvidenceArtifact
 from chronovisor.store import CHRONOVISOR_ROOT
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _iso(value: datetime | None = None) -> str:

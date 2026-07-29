@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import hashlib
 import json
@@ -54,8 +56,6 @@ _FRONTMATTER_FENCE = re.compile(r"^\s*---\s*$")
 DEFAULT_EXPERIMENT = "cvo-anchor-v0-dev40"
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _json_sha256(value: Mapping[str, Any]) -> str:

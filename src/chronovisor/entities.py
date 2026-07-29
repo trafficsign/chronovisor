@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_text as _sha256_text
+
 import argparse
 import difflib
 import hashlib
@@ -191,8 +193,6 @@ def _review_evidence(
     }
 
 
-def _sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def validate_entity_backfill_proposal(

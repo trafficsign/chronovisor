@@ -8,6 +8,12 @@ fixed ten-case diagnostic set.
 
 from __future__ import annotations
 
+from chronovisor.jsonl_write import atomic_replace_text as _atomic_write_text
+
+from chronovisor.jsonl_write import write_jsonl_atomic as _write_jsonl
+
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import argparse
 import json
 import os
@@ -43,8 +49,6 @@ PASS_HITS = 8
 FIXTURE_EPOCH = "epoch-3-library-evidence-v1"
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def profile_pilot_root(root: Path) -> Path:
@@ -92,19 +96,6 @@ def _review_path(root: Path) -> Path:
     )
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temp = Path(raw_temp)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-        os.chmod(path, 0o600)
-    finally:
-        temp.unlink(missing_ok=True)
 
 
 def _atomic_save_numpy(path: Path, matrix: np.ndarray) -> None:
@@ -122,14 +113,6 @@ def _atomic_save_numpy(path: Path, matrix: np.ndarray) -> None:
         temp.unlink(missing_ok=True)
 
 
-def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    _atomic_write_text(
-        path,
-        "".join(
-            json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
-            for row in rows
-        ),
-    )
 
 
 def _valid_primary_notation(notation: str, label: str) -> bool:

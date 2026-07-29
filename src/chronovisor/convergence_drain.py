@@ -7,6 +7,8 @@ manifest.  Every later transition is constrained to that exact allowlist.
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_now as _now
+
 import fcntl
 import hashlib
 import json
@@ -99,8 +101,6 @@ class Inventory:
         }
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _iso(value: datetime | None = None) -> str:

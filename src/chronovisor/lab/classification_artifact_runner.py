@@ -7,6 +7,8 @@ proves the protected paths remained byte-identical.
 
 from __future__ import annotations
 
+from chronovisor.timeutil import utc_iso_milliseconds as _now
+
 import json
 import shutil
 import tempfile
@@ -41,8 +43,6 @@ from chronovisor.page_registry import PageRegistry
 ARTIFACT_SWEEP_SCHEMA = "chronovisor.classification-artifact-sweep.v1"
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _tree_manifest(paths: Sequence[Path]) -> dict[str, dict[str, Any]]:

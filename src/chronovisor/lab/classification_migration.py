@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.hashutil import sha256_bytes as _sha256_bytes
+
 import argparse
 import hashlib
 import json
@@ -44,8 +46,6 @@ CLASSIFICATION_INDEX_SCHEMA = "chronovisor.classification-index.v1"
 MIGRATION_RECEIPT_SCHEMA = "chronovisor.classification-migration-receipt.v1"
 
 
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
 
 
 def _active_pages(root: Path, state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
