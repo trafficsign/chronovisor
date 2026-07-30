@@ -111,13 +111,13 @@ details>div{padding:0 0.8rem 0.8rem}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_3508b0284d4542af92f176b0dd67af5a","created_at":"2026-07-30T20:11:56+09:00","状態":"running","slug":"recall-processor-stateful-recall-field"}
+{"task_id":"plan_3508b0284d4542af92f176b0dd67af5a","created_at":"2026-07-30T20:11:56+09:00","状態":"done","slug":"recall-processor-stateful-recall-field"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Recall Processor + Stateful Recall Field</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_3508b0284d4542af92f176b0dd67af5a</code></span>
 <span data-bind="created_at">2026-07-30T20:11:56+09:00</span>
 <span>baseline <code>bf790e96c486</code></span>
@@ -424,9 +424,9 @@ event types:
 <ol class="checklist">
 <li><input type="checkbox" checked><span><code>docs/architecture.md</code>、<code>docs/hooks.md</code>、<code>docs/config.md</code>、<code>docs/operations.md</code>へservice topology、budget、Field state、dashboard、rollbackを反映する。</span></li>
 <li><input type="checkbox" checked><span>各Phaseを意味のある単位でcommitし、計画書checkboxと実行ログを完了直後に更新する。ユーザー既存の未追跡ファイルをcommitへ混ぜない。</span></li>
-<li><input type="checkbox"><span>push/restartの明示許可後、GitHub-backed runtimeを更新し、Dashboard、Semantic、Reranker、Hook、必要なworkerを再起動する。</span></li>
-<li><input type="checkbox"><span>runtime archiveの<code>direct_url.json</code> commit、running process/module path、service health、socket、Dashboard runtime commitをGitHub HEADと照合する。</span></li>
-<li><input type="checkbox"><span>実会話でstimulus→spread→candidate→certificate→commit/rejectを発生させ、hook出力、certificate ledger、Field event、Cortex animationが同じdecision/seqを示すことを確認する。</span></li>
+<li><input type="checkbox" checked><span>push/restartの明示許可後、GitHub-backed runtimeを更新し、Dashboard、Semantic、Reranker、Hook、必要なworkerを再起動する。</span></li>
+<li><input type="checkbox" checked><span>runtime archiveの<code>direct_url.json</code> commit、running process/module path、service health、socket、Dashboard runtime commitをGitHub HEADと照合する。</span></li>
+<li><input type="checkbox" checked><span>実会話でstimulus→spread→candidate→certificate→commit/rejectを発生させ、hook出力、certificate ledger、Field event、Cortex animationが同じdecision/seqを示すことを確認する。</span></li>
 </ol>
 <p class="gate">受入ゲート: GitHub commit、runtime archive、running process、health、live Recall、live Cortexが一致。ローカルworktreeだけを見てproduction完了と報告しない。</p>
 </div>
@@ -624,6 +624,8 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 22:24</time><span>Phase 8比較完了、採用winnerなし。production indexと分離したincremental MaxSim SQLite prototype、supporting span/fixed promptだけをdigest keyにするbounded prefix-handle LRU、teacher top50再現率99% gateを実装。現MacではColBERT dependency、coremltools/ANE student、Ollama reusable prefix handleが全て不在で、manual-94品質・MPS latency・実resourceの完全比較を成立させられないため全challengerをmissing-metricsで棄却。DSI、memory LoRA、先行注入はproduction候補から明示除外。artifact=<code>runtime/search-eval/phase8-challengers.json</code>。</span></li>
 <li><time>2026-07-30 22:26</time><span>Phase 9のローカル文書・commit項目を完了。architecture/hooks/config/operationsへservice topology、deadline、Field state、Cortex色・操作、label/rollback契約を反映。全Phaseを独立commitで封印し、巨大関数policy違反はevidence search抽出（411→263行）で修正。ユーザー所有の未追跡<code>2026-06-11_0042_recall-redesign.md</code>と<code>logs/</code>は非変更・非stageを維持。push/restart以降の3項目は明示許可待ち。</span></li>
 <li><time>2026-07-30 22:36</time><span>ローカル最終検証完了。隔離<code>CHRONOVISOR_ROOT</code>のfull suiteは<code>2886 passed, 1 skipped</code>（609.68秒）、ruffとfocused 112 testsも通過。Cortex選択HUDはdirect/spread/negative/inhibition/anti-index/hub penaltyの6成分を実DOMで確認し、1280×720はdocument横overflow 0・重なり0、680×720も横overflow 0・枠外要素0・重なり0、console error/warning 0。検証用Dashboardだけ停止し、production processは未変更。</span></li>
+<li><time>2026-07-30 23:00</time><span>Phase 9 production完了。全実装を<code>origin/main</code>へpushし、Dashboard、Semantic、Reranker、Ingest drainをGitHub-backed runtimeから再起動。デプロイ実測で判明したuvx子process PID判定、launchd bootstrap再試行、Recall warmupのmodel ID保持を修正し、Semantic/Reranker socket、self-test、warmup、archive identityを確認した。productionは品質gateに従いProcessor disabled・Field/Reranker shadowを維持する。</span></li>
+<li><time>2026-07-30 23:01</time><span>実会話live確認完了。通常Hookで関連カードを注入し、隔離した診断設定ではstimulus→spread→candidate→certificate→commit/reject→次turn commit_appliedを同一session/decision/seqで追跡。Cortexは最新sessionを選択し、active 14、candidate 30、commit 3、reject 155、teacher agreement 50%、Field p95 75ms、および選択nodeの6成分・certificate IDを表示。1280×720/680×720で横overflow・重なり・枠外脱出・console errorはいずれも0。計画書記録を含む最終GitHub HEADへ全service archiveを再同期して完了とする。</span></li>
 </ol>
 </section>
 
