@@ -7,7 +7,8 @@
 :root{
   --fg:#17191c; --muted:#666b73; --bg:#fafaf7; --panel:#fff;
   --accent:#4858d8; --accent-soft:#eef0ff; --violet:#7957d5;
-  --orange:#d97706; --green:#16845b; --red:#c63b42;
+  --orange:#d97706; --yellow:#eab308; --green:#16845b;
+  --blue:#2486c7; --red:#c63b42;
   --done:#888; --warn:#b54708; --ok:#16845b; --rule:#dedfd9;
   --code-bg:#eeeee9;
 }
@@ -87,10 +88,11 @@ th{background:#f0f0eb;font-weight:650}
   border:1px solid var(--rule);border-radius:999px;background:#f5f5f1;
   color:var(--muted);font-size:0.78rem;font-weight:600;
 }
-.legend{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0.45rem;margin:0.7rem 0}
+.legend{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:0.45rem;margin:0.7rem 0}
 .legend div{padding:0.5rem;border:1px solid var(--rule);border-radius:7px;background:var(--panel);font-size:0.82rem}
 .dot{display:inline-block;width:0.65rem;height:0.65rem;border-radius:50%;margin-right:0.3rem}
-.orange{background:#ffb454}.white{background:#fff;border:1px solid #aaa}.purple{background:#9b7cff}.green{background:#3dd68c}.red{background:#ff6166}
+.orange{background:#ffb454}.yellow{background:#ffd84d}.purple{background:#9b7cff}
+.green{background:#3dd68c}.blue{background:#55c8ff}.red{background:#ff6166}
 details{margin:0.6rem 0;border:1px solid var(--rule);border-radius:7px;background:var(--panel)}
 summary{cursor:pointer;padding:0.55rem 0.7rem;font-weight:650}
 details>div{padding:0 0.8rem 0.8rem}
@@ -125,7 +127,7 @@ details>div{padding:0 0.8rem 0.8rem}
 <section data-section="目的">
 <h2>目的</h2>
 <ul>
-<li>現行の最高品質経路 <code>BM25 + Nemotron 2048 → graph/fusion → BGE reranker</code> を同期Recallへ戻し、ページ単位で関連性を証明できる0〜2件だけを注入する。</li>
+<li>現行の最高品質経路 <code>BM25 + Nemotron 2048 → graph/fusion → BGE reranker</code> を同期Recallへ戻し、ページ単位で関連性を証明できるcertified pointerを0〜6件、うちsupporting spanを含むrich evidenceを最大2件だけ注入する。</li>
 <li><strong>Recall Processor</strong> を正確性の境界・teacher、<strong>Stateful Recall Field</strong> をセッション常駐の候補空間・高速なワーキングメモリとして統合する。</li>
 <li>投機結果は非公開で保持し、Evidence Certificateを通った記憶だけcommitする。誤った先行注入と次ターン訂正は禁止する。</li>
 <li>既存のSynaptic Cortexを、ランダムな発火演出から、実際の刺激・伝播・残留活性・抑制・棄却・commitを観測できるデバッガへ昇格する。</li>
@@ -176,7 +178,9 @@ details>div{padding:0 0.8rem 0.8rem}
         └─ ambiguous pages only → bounded 9B / 35B judge
             ↓
       Evidence Certificate
-        ├─ pass → max 0–2 cards commit
+        ├─ pass → commit
+        │    ├─ certified pointer: 0–6 cards
+        │    └─ rich evidence: max 0–2 cards within them
         └─ fail → private reject (host context is never polluted)
             ↓
       certificate / used receipt / explicit feedback
@@ -243,6 +247,8 @@ Dashboard
 <li>local durable ledger: <code>~/.chronovisor/recall/certificates.jsonl</code>。supporting span本文はDashboardへ渡さない。</li>
 <li><code>certificate pass + commit</code>はsilver。実<code>chronovisor_read</code>/<code>recall_used</code>はstrong。ユーザー明示評価またはlocked goldはgold。</li>
 <li>certificate fail、未commit、ignoredは自動的な負例にしない。</li>
+<li>注入は固定件数ではなく、intent coverage、既出カードとの差分、marginal utility、token budgetで停止する。certified pointerは最大6件、その中でsupporting spanを本文表示するrich evidenceは最大2件とする。</li>
+<li>pointerはtitle、relation/reason、page id、certificate idだけを短く出し、本文が必要ならホストLLMが<code>chronovisor_read</code>でpullする。件数上限まで無理に埋めない。</li>
 </ul>
 
 <h3>3. Stateful Recall Field artifacts</h3>
@@ -280,7 +286,7 @@ event types:
 <li><input type="checkbox"><span><code>search-golden.jsonl</code>のmanual集合（manual-curated 62 + auditor 22 + auditor_precision 10 = 94）をquery本文をGitへ入れず、ref/hash付きsealed manifestとして固定する。</span></li>
 <li><input type="checkbox"><span><code>chronovisor-eval --source-filter manual --top-n 50</code>を基準に、<code>candidate_union → fused → reranked → page_gate → committed → host_used</code>のstage traceを追加する。</span></li>
 <li><input type="checkbox"><span>94件を①candidate top50漏れ、②fusion順位落ち、③BGE順位落ち、④page selector棄却、⑤commit後未利用へ排他的に分類する。</span></li>
-<li><input type="checkbox"><span>Overall / Japanese / hard-94を分離し、Recall@5/10、MRR、negative-hit、注入Precision、関連記憶Recall、abstention、p50/p95/max、4秒超過を保存する。</span></li>
+<li><input type="checkbox"><span>Overall / Japanese / hard-94を分離し、Recall@5/10、MRR、negative-hit、pointer/rich evidence別の注入Precision、関連記憶Recall、abstention、p50/p95/max、4秒超過を保存する。</span></li>
 <li><input type="checkbox"><span>現行Auto Recallの既知不具合をfixture化する: 弱いRRF scoreの飽和、hit_count floor、過去3query混入、既出上位page除外による下位noise繰上げ。</span></li>
 <li><input type="checkbox"><span>live p95 251.6msに対して250msのNemotron timeoutを再測定し、35B稼働中を含む安全なtimeout/remaining-budget境界を決める。</span></li>
 </ol>
@@ -309,10 +315,11 @@ event types:
 <li><input type="checkbox"><span>既出pageを候補選択前に除外しない。最良pageを先に決め、その後に「再注入不要」「更新されたので再提示」を判定する。</span></li>
 <li><input type="checkbox"><span><code>claims.py</code>の<code>evidence_span/source_line</code>、検索snippet、query termを使い、候補ごとにsupporting spanを選ぶ。必要ならspan chunkをBGEで再採点する。</span></li>
 <li><input type="checkbox"><span>明確なpass/rejectは決定論的に処理し、曖昧な1〜2件だけ9B judge、さらに必要な場合だけ35Bへ昇格する。</span></li>
-<li><input type="checkbox"><span>最大2件、低信頼なら0件。commitした全カードにcertificate idとpage_idを付けるが、hostへ内部scoreや秘密情報を過剰注入しない。</span></li>
+<li><input type="checkbox"><span>certificate通過後もintent coverage、claim/entityの新規性、既出カードとの冗長性、marginal utility、token budgetで順に選び、追加価値がなくなった時点で停止する。</span></li>
+<li><input type="checkbox"><span>certified pointerは最大6件、うちsupporting spanを表示するrich evidenceは最大2件、低信頼なら両方0件。全カードにcertificate idとpage idを付けるが、hostへ内部scoreや秘密情報を過剰注入しない。</span></li>
 <li><input type="checkbox"><span>certificate ledgerとlabel quality（silver/strong/gold）を実装し、teacher biasを監査できるようpolicy/model/content digestを保存する。</span></li>
 </ol>
-<p class="gate">受入ゲート: locked評価で注入Precision目標90%以上、hard-94の関連記憶Recallと53.5% rerank Recall@5を非劣化、negative-hit ≤20%、最大2件、無関係集合では0件。lower confidence boundとabstentionを併記し「0件だけでPrecisionを稼ぐ」設定を不採用にする。</p>
+<p class="gate">受入ゲート: locked評価でpointer/rich evidence別の注入Precision目標90%以上、hard-94の関連記憶Recallと53.5% rerank Recall@5を非劣化、negative-hit ≤20%、pointer最大6件・rich evidence最大2件、無関係集合では0件。multi-intent fixtureでは必要な独立論点を落とさず、single-intent fixtureでは上限まで水増ししない。lower confidence boundとabstentionを併記し「0件だけでPrecisionを稼ぐ」設定を不採用にする。</p>
 </div>
 
 <div class="phase">
@@ -346,19 +353,22 @@ event types:
 <li><input type="checkbox"><span><code>dashboard_static/cortex-field.js</code>へsnapshot/event reducer、seq gap、reconnect、session切替を分離し、<code>cortex.js</code>を再巨大化させない。</span></li>
 <li><input type="checkbox"><span>live modeではブラウザ乱数cascadeを完全に止める。manual STIMULATEは<code>DEMO/REPLAY</code>と明示し、backend state/metricsへ絶対に書かない。</span></li>
 <li><input type="checkbox"><span>右HUDにFIELD STATE、DECISION TRACE、選択nodeのactivation内訳、certificate、reason code、LEGENDを追加する。</span></li>
-<li><input type="checkbox"><span>刺激はorange coreの二段pulse、伝播はedge上を移動する短いwhite comet、残留活性は強度連動のviolet halo、commitはgreen ring、reject/inhibitはred ring + reason glyphで描く。休止edge全体の白化は禁止する。</span></li>
+<li><input type="checkbox"><span>刺激はorange coreの二段pulse。<code>spread</code>はwhite-hot coreとyellow/gold tailを持つedge path長8〜15%のtraveling electric arcとして実edge上を120〜250ms/hopで走らせ、先端に小さなbranch discharge、到着nodeにyellow flash、その後violet haloを残す。</span></li>
+<li><input type="checkbox"><span>electric arcの太さ・輝度・速度は実<code>activation delta</code>へ単調に対応させる。jitter/branch形状はevent seq + edge idから決定的に生成し、別nodeへ接続せずReplayで同じ形にする。休止edge全体の黄/白化、実eventのない雷、別edgeへの見せかけ伝播を禁止する。</span></li>
+<li><input type="checkbox"><span>reject/inhibitはblue/cyanの内向き収縮ring + reason glyph、commitはgreen ringで描く。redはField unavailable、timeout、corrupt snapshot、seq gapなど実障害だけに予約する。</span></li>
 <li><input type="checkbox"><span>Observatoryの既存Recall panelへField mode、active/candidate/commit/reject、teacher agreement、field latency、stale/offlineを要約し、クリックでCortexへ移動する。</span></li>
 <li><input type="checkbox"><span>recent session selectorを追加し、session hashを表示する。異なるsessionの活性を暗黙に混ぜない。</span></li>
-<li><input type="checkbox"><span>reduced motion、Pause motion、keyboard Explorer、active-node table、ARIA summary、色以外のring/icon/state文字を実装する。</span></li>
+<li><input type="checkbox"><span>reduced motionでは移動雷をactual edge上の静的yellow arrow + arrival outlineへ置換する。Pause motion、keyboard Explorer、active-node table、ARIA summary、色以外のring/icon/state文字も実装する。</span></li>
 </ol>
 <div class="legend">
 <div><span class="dot orange"></span><strong>Orange</strong><br>直接刺激</div>
-<div><span class="dot white"></span><strong>White comet</strong><br>実際の伝播</div>
+<div><span class="dot yellow"></span><strong>Yellow arc</strong><br>電気的な実伝播</div>
 <div><span class="dot purple"></span><strong>Violet</strong><br>残留活性</div>
 <div><span class="dot green"></span><strong>Green</strong><br>certificate / commit</div>
-<div><span class="dot red"></span><strong>Red</strong><br>棄却・抑制</div>
+<div><span class="dot blue"></span><strong>Blue</strong><br>棄却・抑制</div>
+<div><span class="dot red"></span><strong>Red</strong><br>実障害のみ</div>
 </div>
-<p class="gate">受入ゲート: 受信eventと画面animationが1対1に追跡可能。白い線全体を「発火」に見せない。Field unavailable/stale/seq gapで偽発火なし。event-to-paint p95 ≤250ms、通常45fps以上、pulse queue ≤256。</p>
+<p class="gate">受入ゲート: 受信<code>spread</code> eventとyellow electric arcが1対1で、source→target、edge、開始/到着、deltaを追跡可能。線全体の点灯を「発火」に見せず、青い抑制と赤い障害を混同しない。Field unavailable/stale/seq gapで偽発火なし。event-to-paint p95 ≤250ms、通常45fps以上、pulse queue ≤256。</p>
 </div>
 
 <div class="phase">
@@ -464,7 +474,9 @@ canary_percent = 0
 [recall.processor]
 enabled = false
 max_candidates = 10
-max_commits = 2
+max_pointer_cards = 6
+max_rich_evidence = 2
+injection_token_budget = 1200
 certificate_required = true
 
 [recall.field]
@@ -545,7 +557,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <ul>
 <li>viewports: 1280×720（Fable正本）、1024×720、1440×900、1920×1080、920×720、680×844、DPR 1/2。</li>
 <li><code>documentElement.scrollWidth &lt;= documentElement.clientWidth + 1</code>、Activity Bar/header/main/side/stage/HUDの矩形がviewport内、隣接矩形非重複、<code>canvas.width/height = CSS size × DPR</code>をDOM実測する。</li>
-<li>固定seedのsnapshot/eventsでstimulus、spread、active、commit、reject、offline、stale、reduced-motionを再生し、スクリーンショットとevent seqを照合する。</li>
+<li>固定seedのsnapshot/eventsでstimulus、yellow electric spread、active、commit、blue reject/inhibit、red fault、offline、stale、reduced-motionを再生し、スクリーンショットとevent seqを照合する。</li>
 <li>1280×720では既存Fable mockup寸法を維持し、紫文字の見切れ、凡例重なり、sidebar/hud/canvasの枠外脱出を0にする。</li>
 </ul>
 
@@ -560,12 +572,12 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <section data-section="完了条件">
 <h2>完了条件</h2>
 <ul>
-<li>Recall Processorが常駐BGEとページ別Evidence Certificateを使い、0〜2件だけをcommitする。低信頼時は0件を返す。</li>
+<li>Recall Processorが常駐BGEとページ別Evidence Certificateを使い、0〜6件のcertified pointerをcommitし、そのうちrich evidenceは最大2件にする。件数はmarginal utilityとtoken budgetで止まり、低信頼時は0件を返す。</li>
 <li>同期E2E p95 &lt; 3.5s、4秒超過0。Reranker/Field/model unavailable時もhost promptはfail-openで継続する。</li>
 <li>locked評価の注入Precision目標90%以上、hard-94のRecall/negative-hitが基準非劣化。abstentionと関連記憶Recallを同時に満たす。</li>
 <li>Fieldは最低shadowで全turnを追跡し、昇格条件を満たした場合のみcandidate/activeになる。単独commit経路は存在しない。</li>
 <li>Cortexの表示は実Field event/stateと一致し、live modeでランダム発火を生成しない。ObservatoryにもField健康状態が出る。</li>
-<li>刺激・伝播・残留活性・commit・rejectが色、形、ラベルで区別でき、指定viewport・reduced motion・keyboard/非Canvas経路を検証済み。</li>
+<li>orange刺激、yellow electric arc伝播、violet残留活性、green commit、blue reject/inhibit、red faultが色、形、動き、ラベルで区別でき、指定viewport・reduced motion・keyboard/非Canvas経路を検証済み。</li>
 <li>certificate labelのsilver/strong/goldが分離され、サンプル不足時に学習・較正が走らない。</li>
 <li>各feature flag、last-known-good、service fallback、Field shadow rollbackが実際に動く。</li>
 <li>focused/full test、quality eval、performance、DOM、live runtime、GitHub-backed production確認の証拠が実行ログへ残る。</li>
@@ -600,6 +612,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 20:20</time><span>現行Recall、Nemotron/BGE、prefetch/co-fire、評価資産、Cortex backend/frontend、live runtime baselineを調査。</span></li>
 <li><time>2026-07-30 20:23</time><span>Recall Processorをteacher、Stateful Recall Fieldをprivate candidate layer、Cortexを実観測デバッガとする統合計画をready化。</span></li>
 <li><time>2026-07-30 20:29</time><span>HTML5構造、メタデータ、受入ゲート、ロールバック、Fable visual正本と発火animation契約を最終監査。</span></li>
+<li><time>2026-07-30 20:40</time><span>合意反映: 0〜6 certified pointer / rich evidence最大2件の動的予算へ変更。伝播をyellow electric arc、抑制をblue、redを実障害専用へ改訂。</span></li>
 </ol>
 </section>
 
