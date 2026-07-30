@@ -2001,6 +2001,205 @@ def _initial_recall_skip(
     return None
 
 
+@dataclass
+class _EvidenceSearchOutcome:
+    score: float
+    session_state: Any
+    pre_results: list[Any]
+    search_mode: str
+    evidence_features: dict[str, Any]
+    rewrite_queries: list[str]
+    reranker_metadata: dict[str, Any]
+    field_shadow_metadata: dict[str, Any]
+
+
+def _run_evidence_search(
+    *,
+    active_request: RecallRequest,
+    policy: RecallPolicy,
+    matched: dict[str, list[str]],
+    heuristic_score: float,
+    reasons: list[str],
+    deadline_at: float,
+) -> _EvidenceSearchOutcome:
+    """Run Field observation, teacher search, rewrite, rerank, and evidence score."""
+
+    from chronovisor.recall.recall_field_candidate import (
+        run_candidate_teacher_pair,
+    )
+    from chronovisor.recall.recall_session import (
+        cleanup_sessions,
+        load_session_state,
+        session_summary,
+    )
+
+    cleanup_sessions(policy.session_ttl_seconds)
+    session_state = load_session_state(active_request.session_id)
+    try:
+        from chronovisor.recall.recall_field import run_field_turn
+
+        field_metadata = run_field_turn(
+            host=active_request.host,
+            session_id=active_request.session_id,
+            prompt=active_request.prompt,
+        )
+    except Exception as exc:
+        field_metadata = {
+            "status": "error",
+            "reason": type(exc).__name__,
+        }
+    try:
+        from chronovisor.recall.recall_compiler import compile_query
+
+        field_metadata["recall_compiler"] = compile_query(active_request.prompt)
+    except Exception as exc:
+        field_metadata["recall_compiler"] = {
+            "status": "error",
+            "reason": type(exc).__name__,
+            "page_ids": [],
+        }
+
+    initial_queries = build_queries(
+        active_request,
+        matched,
+        [],
+        policy,
+        session_state=session_state,
+    )
+    pre_results, search_mode, candidate_metadata = run_candidate_teacher_pair(
+        query=active_request.prompt,
+        field_turn=field_metadata,
+        teacher_search=lambda: search_candidates(
+            initial_queries,
+            policy,
+            request=active_request,
+            deadline_at=deadline_at,
+        ),
+        timeout_ms=max(
+            25,
+            min(650, _remaining_budget_ms(deadline_at) or 650),
+        ),
+        certificate_boundary_enabled=policy.processor_enabled,
+    )
+    field_metadata["candidate_observer"] = candidate_metadata
+    evidence_features = build_evidence_features(
+        request=active_request,
+        matched=matched,
+        heuristic_score=heuristic_score,
+        results=pre_results,
+        search_mode=search_mode,
+    )
+    evidence_features["field_shadow"] = field_metadata
+    preliminary_score = evidence_score(evidence_features, policy)
+    evidence_features["evidence_score"] = preliminary_score
+    rewrite_queries: list[str] = []
+    rewrite_confidence = 0.0
+    rewrite_metrics: dict[str, Any] = {}
+    if should_rewrite_query(
+        request=active_request,
+        matched=matched,
+        policy=policy,
+        preliminary_features=evidence_features,
+    ):
+        rewrite_started = time.monotonic()
+        rewrite_timeout_ms = _require_remaining_budget(deadline_at, "rewrite")
+        rewrite_queries, rewrite_confidence, rewrite_reason = run_query_rewriter(
+            active_request,
+            matched,
+            policy,
+            session_summary(session_state),
+            timeout_ms=rewrite_timeout_ms,
+        )
+        rewrite_metrics = {
+            "rewrite_attempted": True,
+            "rewrite_latency_ms": _elapsed_ms(rewrite_started),
+            "rewrite_reason": rewrite_reason,
+            "rewrite_status": (
+                "ok"
+                if rewrite_queries
+                else "fallback"
+                if rewrite_reason.startswith("rewrite fallback:")
+                else "empty"
+            ),
+        }
+        evidence_features.update(rewrite_metrics)
+        if rewrite_reason:
+            reasons.append(rewrite_reason)
+        if rewrite_queries:
+            reasons.append("query rewritten")
+            queries_for_search = build_queries(
+                active_request,
+                matched,
+                [],
+                policy,
+                session_state=session_state,
+                rewrite_queries=rewrite_queries,
+            )
+            pre_results, search_mode, candidate_metadata = (
+                run_candidate_teacher_pair(
+                    query=" ".join(queries_for_search),
+                    field_turn=field_metadata,
+                    teacher_search=lambda: search_candidates(
+                        queries_for_search,
+                        policy,
+                        request=active_request,
+                        deadline_at=deadline_at,
+                    ),
+                    timeout_ms=max(
+                        25,
+                        min(650, _remaining_budget_ms(deadline_at) or 650),
+                    ),
+                    certificate_boundary_enabled=policy.processor_enabled,
+                )
+            )
+            field_metadata["candidate_observer"] = candidate_metadata
+            evidence_features = build_evidence_features(
+                request=active_request,
+                matched=matched,
+                heuristic_score=heuristic_score,
+                results=pre_results,
+                search_mode=search_mode,
+                rewrite_confidence=rewrite_confidence,
+            )
+            evidence_features["field_shadow"] = field_metadata
+            evidence_features.update(rewrite_metrics)
+
+    reranker_metadata: dict[str, Any] = {}
+    remaining_for_reranker = _remaining_budget_ms(deadline_at)
+    if remaining_for_reranker is not None and remaining_for_reranker >= 100:
+        from chronovisor.recall.recall_processor import rank_recall_candidates
+
+        pre_results, reranker_metadata = rank_recall_candidates(
+            active_request.prompt,
+            pre_results,
+            timeout_ms=min(1_500, remaining_for_reranker - 50),
+        )
+        evidence_features = build_evidence_features(
+            request=active_request,
+            matched=matched,
+            heuristic_score=heuristic_score,
+            results=pre_results,
+            search_mode=search_mode,
+            rewrite_confidence=rewrite_confidence,
+        )
+        evidence_features.update(rewrite_metrics)
+        evidence_features["reranker"] = reranker_metadata
+        evidence_features["field_shadow"] = field_metadata
+    score = evidence_score(evidence_features, policy)
+    evidence_features["evidence_score"] = score
+    evidence_features["decision_pre_judge"] = decision_from_score(score, policy)
+    return _EvidenceSearchOutcome(
+        score=score,
+        session_state=session_state,
+        pre_results=pre_results,
+        search_mode=search_mode,
+        evidence_features=evidence_features,
+        rewrite_queries=rewrite_queries,
+        reranker_metadata=reranker_metadata,
+        field_shadow_metadata=field_metadata,
+    )
+
+
 def _run_recall_impl(
     request: RecallRequest,
     policy: RecallPolicy | None = None,
@@ -2072,182 +2271,31 @@ def _run_recall_impl(
     judge_reason = ""
     judge_queries: list[str] = []
     rewrite_queries: list[str] = []
-    rewrite_confidence = 0.0
     search_mode = ""
     evidence_features: dict[str, Any] = {}
     session_state = None
     pre_results: list[Any] = []
-    rewrite_metrics: dict[str, Any] = {}
     reranker_metadata: dict[str, Any] = {}
     field_shadow_metadata: dict[str, Any] = {}
 
     if policy.gate_mode == "evidence" and perform_search:
         try:
-            from chronovisor.recall.recall_session import (
-                cleanup_sessions,
-                load_session_state,
-                session_summary,
-            )
-
-            cleanup_sessions(policy.session_ttl_seconds)
-            session_state = load_session_state(active_request.session_id)
-            try:
-                from chronovisor.recall.recall_field import run_field_turn
-
-                field_shadow_metadata = run_field_turn(
-                    host=active_request.host,
-                    session_id=active_request.session_id,
-                    prompt=active_request.prompt,
-                )
-            except Exception as exc:
-                field_shadow_metadata = {
-                    "status": "error",
-                    "reason": type(exc).__name__,
-                }
-            try:
-                from chronovisor.recall.recall_compiler import compile_query
-
-                field_shadow_metadata["recall_compiler"] = compile_query(
-                    active_request.prompt
-                )
-            except Exception as exc:
-                field_shadow_metadata["recall_compiler"] = {
-                    "status": "error",
-                    "reason": type(exc).__name__,
-                    "page_ids": [],
-                }
-            initial_queries = build_queries(
-                active_request, matched, [], policy, session_state=session_state
-            )
-            from chronovisor.recall.recall_field_candidate import (
-                run_candidate_teacher_pair,
-            )
-            pre_results, search_mode, field_candidate_metadata = (
-                run_candidate_teacher_pair(
-                    query=active_request.prompt,
-                    field_turn=field_shadow_metadata,
-                    teacher_search=lambda: search_candidates(
-                        initial_queries,
-                        policy,
-                        request=active_request,
-                        deadline_at=deadline_at,
-                    ),
-                    timeout_ms=max(
-                        25,
-                        min(650, _remaining_budget_ms(deadline_at) or 650),
-                    ),
-                    certificate_boundary_enabled=policy.processor_enabled,
-                )
-            )
-            field_shadow_metadata["candidate_observer"] = field_candidate_metadata
-            evidence_features = build_evidence_features(
-                request=active_request,
+            evidence_outcome = _run_evidence_search(
+                active_request=active_request,
+                policy=policy,
                 matched=matched,
                 heuristic_score=score,
-                results=pre_results,
-                search_mode=search_mode,
+                reasons=reasons,
+                deadline_at=deadline_at,
             )
-            evidence_features["field_shadow"] = field_shadow_metadata
-            preliminary_score = evidence_score(evidence_features, policy)
-            evidence_features["evidence_score"] = preliminary_score
-            if should_rewrite_query(
-                request=active_request,
-                matched=matched,
-                policy=policy,
-                preliminary_features=evidence_features,
-            ):
-                rewrite_started = time.monotonic()
-                rewrite_timeout_ms = _require_remaining_budget(deadline_at, "rewrite")
-                rewrite_queries, rewrite_confidence, rewrite_reason = (
-                    run_query_rewriter(
-                        active_request,
-                        matched,
-                        policy,
-                        session_summary(session_state),
-                        timeout_ms=rewrite_timeout_ms,
-                    )
-                )
-                rewrite_metrics = {
-                    "rewrite_attempted": True,
-                    "rewrite_latency_ms": _elapsed_ms(rewrite_started),
-                    "rewrite_reason": rewrite_reason,
-                    "rewrite_status": "ok"
-                    if rewrite_queries
-                    else "fallback"
-                    if rewrite_reason.startswith("rewrite fallback:")
-                    else "empty",
-                }
-                evidence_features.update(rewrite_metrics)
-                if rewrite_reason:
-                    reasons.append(rewrite_reason)
-                if rewrite_queries:
-                    reasons.append("query rewritten")
-                    queries_for_search = build_queries(
-                        active_request,
-                        matched,
-                        [],
-                        policy,
-                        session_state=session_state,
-                        rewrite_queries=rewrite_queries,
-                    )
-                    pre_results, search_mode, field_candidate_metadata = (
-                        run_candidate_teacher_pair(
-                            query=" ".join(queries_for_search),
-                            field_turn=field_shadow_metadata,
-                            teacher_search=lambda: search_candidates(
-                                queries_for_search,
-                                policy,
-                                request=active_request,
-                                deadline_at=deadline_at,
-                            ),
-                            timeout_ms=max(
-                                25,
-                                min(
-                                    650,
-                                    _remaining_budget_ms(deadline_at) or 650,
-                                ),
-                            ),
-                            certificate_boundary_enabled=policy.processor_enabled,
-                        )
-                    )
-                    field_shadow_metadata["candidate_observer"] = (
-                        field_candidate_metadata
-                    )
-                    evidence_features = build_evidence_features(
-                        request=active_request,
-                        matched=matched,
-                        heuristic_score=score,
-                        results=pre_results,
-                        search_mode=search_mode,
-                        rewrite_confidence=rewrite_confidence,
-                    )
-                    evidence_features["field_shadow"] = field_shadow_metadata
-                    evidence_features.update(rewrite_metrics)
-            remaining_for_reranker = _remaining_budget_ms(deadline_at)
-            if remaining_for_reranker is not None and remaining_for_reranker >= 100:
-                from chronovisor.recall.recall_processor import (
-                    rank_recall_candidates,
-                )
-
-                pre_results, reranker_metadata = rank_recall_candidates(
-                    active_request.prompt,
-                    pre_results,
-                    timeout_ms=min(1_500, remaining_for_reranker - 50),
-                )
-                evidence_features = build_evidence_features(
-                    request=active_request,
-                    matched=matched,
-                    heuristic_score=score,
-                    results=pre_results,
-                    search_mode=search_mode,
-                    rewrite_confidence=rewrite_confidence,
-                )
-                evidence_features.update(rewrite_metrics)
-                evidence_features["reranker"] = reranker_metadata
-                evidence_features["field_shadow"] = field_shadow_metadata
-            score = evidence_score(evidence_features, policy)
-            evidence_features["evidence_score"] = score
-            evidence_features["decision_pre_judge"] = decision_from_score(score, policy)
+            score = evidence_outcome.score
+            session_state = evidence_outcome.session_state
+            pre_results = evidence_outcome.pre_results
+            search_mode = evidence_outcome.search_mode
+            evidence_features = evidence_outcome.evidence_features
+            rewrite_queries = evidence_outcome.rewrite_queries
+            reranker_metadata = evidence_outcome.reranker_metadata
+            field_shadow_metadata = evidence_outcome.field_shadow_metadata
         except RecallBudgetExhausted as exc:
             return _fail_open_recall_budget(
                 str(exc), matched, request, policy,
